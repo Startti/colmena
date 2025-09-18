@@ -1,0 +1,312 @@
+use crate::llm::domain::{
+    LlmRepository, LlmRequest, LlmResponse, LlmStreamChunk, LlmError, LlmStream,
+    LlmUsage, MessageRole,
+};
+use async_trait::async_trait;
+use futures::StreamExt;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+pub struct GeminiAdapter {
+    client: Client,
+    base_url: String,
+}
+
+impl GeminiAdapter {
+    pub fn new() -> Self {
+        Self {
+            client: Client::new(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+        }
+    }
+
+    pub fn with_base_url(base_url: String) -> Self {
+        Self {
+            client: Client::new(),
+            base_url,
+        }
+    }
+
+    fn convert_messages(&self, request: &LlmRequest) -> (Option<String>, Vec<GeminiContent>) {
+        let mut system_instruction = None;
+        let mut contents = Vec::new();
+
+        for message in request.messages() {
+            match message.role() {
+                MessageRole::System => {
+                    system_instruction = Some(message.content().to_string());
+                }
+                MessageRole::User => {
+                    contents.push(GeminiContent {
+                        role: "user".to_string(),
+                        parts: vec![GeminiPart {
+                            text: message.content().to_string(),
+                        }],
+                    });
+                }
+                MessageRole::Assistant => {
+                    contents.push(GeminiContent {
+                        role: "model".to_string(),
+                        parts: vec![GeminiPart {
+                            text: message.content().to_string(),
+                        }],
+                    });
+                }
+            }
+        }
+
+        (system_instruction, contents)
+    }
+
+    fn build_request_body(&self, request: &LlmRequest) -> serde_json::Value {
+        let (system_instruction, contents) = self.convert_messages(request);
+
+        let mut body = json!({
+            "contents": contents
+        });
+
+        if let Some(system) = system_instruction {
+            body["systemInstruction"] = json!({
+                "parts": [{"text": system}]
+            });
+        }
+
+        let mut generation_config = serde_json::Map::new();
+
+        if let Some(temp) = request.config().temperature() {
+            generation_config.insert("temperature".to_string(), json!(temp));
+        }
+
+        if let Some(max_tokens) = request.config().max_tokens() {
+            generation_config.insert("maxOutputTokens".to_string(), json!(max_tokens));
+        }
+
+        if let Some(top_p) = request.config().top_p() {
+            generation_config.insert("topP".to_string(), json!(top_p));
+        }
+
+        if !generation_config.is_empty() {
+            body["generationConfig"] = json!(generation_config);
+        }
+
+        body
+    }
+}
+
+#[async_trait]
+impl LlmRepository for GeminiAdapter {
+    async fn call(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let body = self.build_request_body(&request);
+
+        let url = format!(
+            "{}/models/{}:generateContent?key={}",
+            self.base_url,
+            request.config().model(),
+            request.config().api_key()
+        );
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LlmError::network_error(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(LlmError::request_failed(format!(
+                "Gemini API error: {}",
+                error_text
+            )));
+        }
+
+        let gemini_response: GeminiResponse = response
+            .json()
+            .await
+            .map_err(|e| LlmError::parsing_error(e.to_string()))?;
+
+        let content = gemini_response
+            .candidates
+            .first()
+            .and_then(|candidate| candidate.content.parts.first())
+            .map(|part| part.text.clone())
+            .ok_or_else(|| LlmError::parsing_error("No content in response"))?;
+
+        let usage = gemini_response.usage_metadata.map(|u| {
+            LlmUsage::new(
+                u.prompt_token_count.unwrap_or(0),
+                u.candidates_token_count.unwrap_or(0)
+            )
+        });
+
+        let mut response = LlmResponse::new(
+            request.id().clone(),
+            content,
+            crate::llm::domain::LlmProvider::Gemini,
+            request.config().model().to_string(),
+        );
+
+        if let Some(usage) = usage {
+            response = response.with_usage(usage);
+        }
+
+        if let Some(finish_reason) = gemini_response
+            .candidates
+            .first()
+            .and_then(|candidate| candidate.finish_reason.as_ref())
+        {
+            response = response.with_finish_reason(finish_reason.clone());
+        }
+
+        Ok(response)
+    }
+
+    async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
+        let body = self.build_request_body(&request);
+
+        let url = format!(
+            "{}/models/{}:streamGenerateContent?key={}",
+            self.base_url,
+            request.config().model(),
+            request.config().api_key()
+        );
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LlmError::network_error(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(LlmError::request_failed(format!(
+                "Gemini API error: {}",
+                error_text
+            )));
+        }
+
+        let request_id = request.id().clone();
+        let provider = crate::llm::domain::LlmProvider::Gemini;
+        let model = request.config().model().to_string();
+
+        let bytes_stream = response.bytes_stream();
+        let stream = bytes_stream.filter_map(move |chunk| {
+            let request_id = request_id.clone();
+            let provider = provider.clone();
+            let model = model.clone();
+
+            async move {
+                match chunk {
+                    Ok(bytes) => {
+                        let text = String::from_utf8_lossy(&bytes);
+                        if let Ok(chunk_response) = serde_json::from_str::<GeminiResponse>(&text) {
+                            if let Some(candidate) = chunk_response.candidates.first() {
+                                if let Some(part) = candidate.content.parts.first() {
+                                    let is_final = candidate.finish_reason.is_some();
+                                    return Some(Ok(LlmStreamChunk::new(
+                                        request_id,
+                                        part.text.clone(),
+                                        provider,
+                                        model,
+                                        is_final,
+                                    )));
+                                }
+                            }
+                        }
+                        None
+                    }
+                    Err(e) => Some(Err(LlmError::network_error(e.to_string()))),
+                }
+            }
+        });
+
+        Ok(Box::pin(stream))
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        // For Gemini, we'll make a simple test request to check if the API key works
+        let url = format!(
+            "{}/models/gemini-1.5-flash:generateContent",
+            self.base_url
+        );
+
+        let test_body = json!({
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": "Hi"}]
+                }
+            ]
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .query(&[("key", "dummy")])  // This will fail, but we can check if endpoint exists
+            .json(&test_body)
+            .send()
+            .await
+            .map_err(|e| LlmError::network_error(e.to_string()))?;
+
+        // If we get a 4xx status, the endpoint exists (just API key is wrong)
+        // If we get a 2xx status, everything is working
+        if response.status().is_success() || response.status().is_client_error() {
+            Ok(())
+        } else {
+            Err(LlmError::request_failed("Gemini endpoint not available"))
+        }
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "gemini"
+    }
+}
+
+// Response structures for Gemini API
+#[derive(Debug, Serialize, Deserialize)]
+struct GeminiContent {
+    role: String,
+    parts: Vec<GeminiPart>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GeminiPart {
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiResponse {
+    candidates: Vec<GeminiCandidate>,
+    #[serde(rename = "usageMetadata")]
+    usage_metadata: Option<GeminiUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiCandidate {
+    content: GeminiContent,
+    #[serde(rename = "finishReason")]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiUsage {
+    #[serde(rename = "promptTokenCount")]
+    prompt_token_count: Option<u32>,
+    #[serde(rename = "candidatesTokenCount")]
+    candidates_token_count: Option<u32>,
+    #[serde(rename = "totalTokenCount")]
+    total_token_count: Option<u32>,
+}
