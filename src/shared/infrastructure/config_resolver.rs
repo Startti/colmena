@@ -1,4 +1,4 @@
-use crate::llm::domain::{LlmProvider, LlmConfig, LlmError};
+use crate::llm::domain::{LlmConfig, LlmError, LlmProvider, ProviderKind};
 use std::env;
 
 pub struct ConfigResolver;
@@ -6,7 +6,7 @@ pub struct ConfigResolver;
 impl ConfigResolver {
     /// Resolve API key from explicit value or environment variable
     pub fn resolve_api_key(
-        provider: &LlmProvider,
+        provider_kind: &ProviderKind,
         explicit_key: Option<String>,
     ) -> Result<String, LlmError> {
         if let Some(key) = explicit_key {
@@ -16,16 +16,18 @@ impl ConfigResolver {
             return Ok(key.trim().to_string());
         }
 
-        let env_var = provider.env_var_name();
-        env::var(env_var).map_err(|_| LlmError::configuration_error(format!(
-            "API key not found in environment variable '{}' and no explicit key provided",
-            env_var
-        )))
+        let env_var = provider_kind.env_var_name();
+        env::var(env_var).map_err(|_| {
+            LlmError::configuration_error(format!(
+                "API key not found in environment variable '{}' and no explicit key provided",
+                env_var
+            ))
+        })
     }
 
     /// Create LlmConfig with resolved API key
     pub fn create_config(
-        provider: LlmProvider,
+        provider_kind: ProviderKind,
         api_key: Option<String>,
         model: Option<String>,
         temperature: Option<f32>,
@@ -34,9 +36,11 @@ impl ConfigResolver {
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
     ) -> Result<LlmConfig, LlmError> {
-        let resolved_api_key = Self::resolve_api_key(&provider, api_key)?;
+        let resolved_api_key = Self::resolve_api_key(&provider_kind, api_key)?;
 
-        let mut config = LlmConfig::new(provider, resolved_api_key, model)?;
+        let provider = LlmProvider::new(provider_kind, resolved_api_key, model)?;
+
+        let mut config = LlmConfig::new(provider);
 
         if let Some(temp) = temperature {
             config = config.with_temperature(temp)?;

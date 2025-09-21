@@ -1,6 +1,6 @@
 use crate::llm::{
     application::{LlmCallUseCase, LlmStreamUseCase, LlmHealthCheckUseCase},
-    domain::LlmProvider,
+    domain::ProviderKind,
     infrastructure::LlmProviderFactory,
 };
 use std::sync::Arc;
@@ -13,7 +13,7 @@ pub struct ServiceContainer {
 }
 
 impl ServiceContainer {
-    pub fn new(provider: LlmProvider) -> Self {
+    pub fn new(provider: ProviderKind) -> Self {
         let repository = LlmProviderFactory::create(provider);
 
         Self {
@@ -38,15 +38,15 @@ impl ServiceContainer {
 pub struct ServiceContainerFactory;
 
 impl ServiceContainerFactory {
-    pub fn create_all() -> Vec<(LlmProvider, ServiceContainer)> {
+    pub fn create_all() -> Vec<(ProviderKind, ServiceContainer)> {
         vec![
-            (LlmProvider::OpenAi, ServiceContainer::new(LlmProvider::OpenAi)),
-            (LlmProvider::Gemini, ServiceContainer::new(LlmProvider::Gemini)),
-            (LlmProvider::Anthropic, ServiceContainer::new(LlmProvider::Anthropic)),
+            (ProviderKind::OpenAi, ServiceContainer::new(ProviderKind::OpenAi)),
+            (ProviderKind::Gemini, ServiceContainer::new(ProviderKind::Gemini)),
+            (ProviderKind::Anthropic, ServiceContainer::new(ProviderKind::Anthropic)),
         ]
     }
 
-    pub fn create_for_provider(provider: LlmProvider) -> ServiceContainer {
+    pub fn create_for_provider(provider: ProviderKind) -> ServiceContainer {
         ServiceContainer::new(provider)
     }
 }
