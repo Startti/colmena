@@ -9,7 +9,6 @@ pub struct LlmResponse {
     content: String,
     usage: Option<LlmUsage>,
     provider: LlmProvider,
-    model: String,
     timestamp: DateTime<Utc>,
     finish_reason: Option<String>,
 }
@@ -19,7 +18,6 @@ impl LlmResponse {
         request_id: LlmRequestId,
         content: String,
         provider: LlmProvider,
-        model: String,
     ) -> Self {
         Self {
             id: LlmResponseId::new(),
@@ -27,7 +25,6 @@ impl LlmResponse {
             content,
             usage: None,
             provider,
-            model,
             timestamp: Utc::now(),
             finish_reason: None,
         }
@@ -70,7 +67,7 @@ impl LlmResponse {
     }
 
     pub fn model(&self) -> &str {
-        &self.model
+        self.provider.model()
     }
 
     pub fn timestamp(&self) -> &DateTime<Utc> {
@@ -98,7 +95,6 @@ pub struct LlmStreamChunk {
     request_id: LlmRequestId,
     content: String,
     provider: LlmProvider,
-    model: String,
     timestamp: DateTime<Utc>,
     is_final: bool,
 }
@@ -108,7 +104,6 @@ impl LlmStreamChunk {
         request_id: LlmRequestId,
         content: String,
         provider: LlmProvider,
-        model: String,
         is_final: bool,
     ) -> Self {
         Self {
@@ -116,7 +111,6 @@ impl LlmStreamChunk {
             request_id,
             content,
             provider,
-            model,
             timestamp: Utc::now(),
             is_final,
         }
@@ -140,7 +134,7 @@ impl LlmStreamChunk {
     }
 
     pub fn model(&self) -> &str {
-        &self.model
+        self.provider.model()
     }
 
     pub fn timestamp(&self) -> &DateTime<Utc> {

@@ -1,4 +1,4 @@
-use crate::llm::domain::{LlmProvider, LlmError};
+use crate::llm::domain::{LlmError, LlmProvider};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,8 +21,6 @@ impl LlmUsage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
     provider: LlmProvider,
-    api_key: String,
-    model: String,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     top_p: Option<f32>,
@@ -31,27 +29,15 @@ pub struct LlmConfig {
 }
 
 impl LlmConfig {
-    pub fn new(
-        provider: LlmProvider,
-        api_key: String,
-        model: Option<String>,
-    ) -> Result<Self, LlmError> {
-        if api_key.trim().is_empty() {
-            return Err(LlmError::InvalidApiKey);
-        }
-
-        let model = model.unwrap_or_else(|| provider.default_model().to_string());
-
-        Ok(Self {
+    pub fn new(provider: LlmProvider) -> Self {
+        Self {
             provider,
-            api_key: api_key.trim().to_string(),
-            model,
             temperature: None,
             max_tokens: None,
             top_p: None,
             frequency_penalty: None,
             presence_penalty: None,
-        })
+        }
     }
 
     pub fn with_temperature(mut self, temperature: f32) -> Result<Self, LlmError> {
@@ -110,11 +96,11 @@ impl LlmConfig {
     }
 
     pub fn api_key(&self) -> &str {
-        &self.api_key
+        self.provider.api_key()
     }
 
     pub fn model(&self) -> &str {
-        &self.model
+        self.provider.model()
     }
 
     pub fn temperature(&self) -> Option<f32> {
