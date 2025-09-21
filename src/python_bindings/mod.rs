@@ -1,12 +1,19 @@
 use pyo3::prelude::*;
 use pyo3::{exceptions::PyException, create_exception};
-use crate::llm::domain::{ProviderKind, MessageRole};
+use crate::llm::domain::{LlmError, ProviderKind, MessageRole};
 use crate::shared::infrastructure::{ServiceContainerFactory, ConfigResolver};
 use futures::StreamExt;
 use std::collections::HashMap;
 
 // Custom Python exception for LLM errors
 create_exception!(colmena, LlmException, PyException);
+
+// Implement conversion from LlmError to PyErr
+impl From<LlmError> for PyErr {
+    fn from(err: LlmError) -> PyErr {
+        LlmException::new_err(err.to_string())
+    }
+}
 
 #[pyclass]
 pub struct ColmenaLlm {
@@ -58,8 +65,7 @@ impl ColmenaLlm {
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
     ) -> PyResult<String> {
-        let provider_kind = ProviderKind::from_str(provider)
-            .map_err(|e| LlmException::new_err(e))?;
+        let provider_kind = ProviderKind::from_str(provider)?;
 
         let container = self.containers.get(provider)
             .ok_or_else(|| LlmException::new_err(format!("Provider {} not found", provider)))?;
@@ -117,8 +123,7 @@ impl ColmenaLlm {
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
     ) -> PyResult<String> {
-        let provider_kind = ProviderKind::from_str(provider)
-            .map_err(|e| LlmException::new_err(e))?;
+        let provider_kind = ProviderKind::from_str(provider)?;
 
         let container = self.containers.get(provider)
             .ok_or_else(|| LlmException::new_err(format!("Provider {} not found", provider)))?;
@@ -175,8 +180,7 @@ impl ColmenaLlm {
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
     ) -> PyResult<String> {
-        let provider_kind = ProviderKind::from_str(provider)
-            .map_err(|e| LlmException::new_err(e))?;
+        let provider_kind = ProviderKind::from_str(provider)?;
 
         let container = self.containers.get(provider)
             .ok_or_else(|| LlmException::new_err(format!("Provider {} not found", provider)))?;
@@ -243,8 +247,7 @@ impl ColmenaLlm {
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
     ) -> PyResult<PyObject> {
-        let provider_kind = ProviderKind::from_str(provider)
-            .map_err(|e| LlmException::new_err(e))?;
+        let provider_kind = ProviderKind::from_str(provider)?;
 
         let container = self.containers.get(provider)
             .ok_or_else(|| LlmException::new_err(format!("Provider {} not found", provider)))?;

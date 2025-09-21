@@ -36,7 +36,7 @@ impl LlmStreamUseCase {
             .map(LlmMessage::user)
             .collect();
 
-        let llm_messages = llm_messages.map_err(LlmError::configuration_error)?;
+        let llm_messages = llm_messages.map_err(LlmError::internal_error)?;
 
         // 3. Create configuration
         let config = ConfigResolver::create_config(
@@ -79,12 +79,12 @@ impl LlmStreamUseCase {
         let mut llm_messages = Vec::new();
 
         if let Some(sys_msg) = system_message {
-            llm_messages.push(LlmMessage::system(sys_msg).map_err(LlmError::configuration_error)?);
+            llm_messages.push(LlmMessage::system(sys_msg).map_err(LlmError::internal_error)?);
         }
 
         // Add user messages
         for msg in messages {
-            llm_messages.push(LlmMessage::user(msg).map_err(LlmError::configuration_error)?);
+            llm_messages.push(LlmMessage::user(msg).map_err(LlmError::internal_error)?);
         }
 
         // 3. Create configuration
@@ -129,7 +129,7 @@ impl LlmStreamUseCase {
             .map(|(role, content)| LlmMessage::new(role, content))
             .collect();
 
-        let llm_messages = llm_messages.map_err(LlmError::configuration_error)?;
+        let llm_messages = llm_messages.map_err(LlmError::internal_error)?;
 
         // 3. Create configuration
         let config = ConfigResolver::create_config(
