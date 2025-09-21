@@ -1,8 +1,7 @@
 use crate::llm::domain::{
-    LlmRepository, LlmRequest, LlmResponse, LlmMessage, LlmError, MessageRole,
+    LlmRepository, LlmRequest, LlmResponse, LlmMessage, LlmError, MessageRole, ProviderKind,
 };
 use crate::shared::infrastructure::ConfigResolver;
-use crate::llm::domain::LlmProvider;
 use std::sync::Arc;
 
 pub struct LlmCallUseCase {
@@ -17,7 +16,7 @@ impl LlmCallUseCase {
     pub async fn execute(
         &self,
         messages: Vec<String>,
-        provider: LlmProvider,
+        provider: ProviderKind,
         api_key: Option<String>,
         model: Option<String>,
         temperature: Option<f32>,
@@ -62,7 +61,7 @@ impl LlmCallUseCase {
         &self,
         system_message: Option<String>,
         messages: Vec<String>,
-        provider: LlmProvider,
+        provider: ProviderKind,
         api_key: Option<String>,
         model: Option<String>,
         temperature: Option<f32>,
@@ -110,7 +109,7 @@ impl LlmCallUseCase {
     pub async fn execute_conversation(
         &self,
         conversation: Vec<(MessageRole, String)>,
-        provider: LlmProvider,
+        provider: ProviderKind,
         api_key: Option<String>,
         model: Option<String>,
         temperature: Option<f32>,
