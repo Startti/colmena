@@ -5,6 +5,11 @@ Script para demostrar que estamos usando la librería Rust compilada.
 
 import colmena
 import inspect
+import os
+from dotenv import load_dotenv
+
+# Cargar variables de entorno desde .env
+load_dotenv()
 
 print("🐝 Colmena - Verificación de Librería Rust")
 print("=" * 50)
@@ -32,15 +37,14 @@ try:
 except colmena.LlmException as e:
     print(f"✅ Excepción custom LlmException funciona: {e}")
 
-# 5. Verificar que realmente llama a la API (con API key válida)
+# 5. Verificar que realmente llama a la API (usando variable de entorno)
 print("\n🔧 Verificando llamada real a API...")
 try:
     response = llm.call(
         messages=["Hola"],
         provider="gemini",
-        api_key="gemini-api-key"
     )
-    print(f"✅ ¡Llamada exitosa con API key válida! Respuesta: '{response}'")
+    print(f"✅ ¡Llamada exitosa! Respuesta: '{response}'")
 except colmena.LlmException as e:
     print(f"❌ Error inesperado: {e}")
 
@@ -48,4 +52,4 @@ print("\n🎯 CONCLUSIÓN:")
 print("✅ Estamos usando la librería Rust compilada exitosamente!")
 print("✅ Los métodos son nativos (no Python)")
 print("✅ Las excepciones personalizadas funcionan")
-print("✅ La librería hace llamadas reales a APIs de LLM")
+print("✅ La librería hace llamadas reales a APIs de LLM (si la API key está configurada)")
