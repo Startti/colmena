@@ -130,8 +130,7 @@ impl LlmRepository for AnthropicAdapter {
         let mut response = LlmResponse::new(
             request.id().clone(),
             content,
-            crate::llm::domain::LlmProvider::Anthropic,
-            request.config().model().to_string(),
+            request.config().provider().clone(),
         );
 
         response = response.with_usage(usage);
@@ -169,13 +168,11 @@ impl LlmRepository for AnthropicAdapter {
         }
 
         let request_id = request.id().clone();
-        let provider = crate::llm::domain::LlmProvider::Anthropic;
-        let model = request.config().model().to_string();
+        let provider = request.config().provider().clone();
 
         let stream = response.bytes_stream().filter_map(move |chunk_result| {
             let request_id = request_id.clone();
             let provider = provider.clone();
-            let model = model.clone();
 
             async move {
                 match chunk_result {
@@ -196,7 +193,6 @@ impl LlmRepository for AnthropicAdapter {
                                                         request_id,
                                                         text,
                                                         provider,
-                                                        model,
                                                         false,
                                                     )));
                                                 }
@@ -207,7 +203,6 @@ impl LlmRepository for AnthropicAdapter {
                                                 request_id,
                                                 String::new(),
                                                 provider,
-                                                model,
                                                 true,
                                             )));
                                         }
