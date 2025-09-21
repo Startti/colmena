@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::{exceptions::PyException, create_exception};
-use crate::llm::domain::{LlmProvider, MessageRole};
+use crate::llm::domain::{ProviderKind, MessageRole};
 use crate::shared::infrastructure::{ServiceContainerFactory, ConfigResolver};
 use futures::StreamExt;
 use std::collections::HashMap;
@@ -58,7 +58,7 @@ impl ColmenaLlm {
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
     ) -> PyResult<String> {
-        let provider_enum = LlmProvider::from_str(provider)
+        let provider_kind = ProviderKind::from_str(provider)
             .map_err(|e| LlmException::new_err(e))?;
 
         let container = self.containers.get(provider)
@@ -71,7 +71,7 @@ impl ColmenaLlm {
             rt.block_on(async {
                 let response = container.llm_call.execute(
                     messages,
-                    provider_enum,
+                    provider_kind,
                     api_key,
                     model,
                     temperature,
@@ -117,7 +117,7 @@ impl ColmenaLlm {
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
     ) -> PyResult<String> {
-        let provider_enum = LlmProvider::from_str(provider)
+        let provider_kind = ProviderKind::from_str(provider)
             .map_err(|e| LlmException::new_err(e))?;
 
         let container = self.containers.get(provider)
@@ -131,7 +131,7 @@ impl ColmenaLlm {
                 let response = container.llm_call.execute_with_context(
                     system_message,
                     messages,
-                    provider_enum,
+                    provider_kind,
                     api_key,
                     model,
                     temperature,
@@ -175,7 +175,7 @@ impl ColmenaLlm {
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
     ) -> PyResult<String> {
-        let provider_enum = LlmProvider::from_str(provider)
+        let provider_kind = ProviderKind::from_str(provider)
             .map_err(|e| LlmException::new_err(e))?;
 
         let container = self.containers.get(provider)
@@ -199,7 +199,7 @@ impl ColmenaLlm {
             rt.block_on(async {
                 let response = container.llm_call.execute_conversation(
                     conversation_with_roles,
-                    provider_enum,
+                    provider_kind,
                     api_key,
                     model,
                     temperature,
@@ -243,7 +243,7 @@ impl ColmenaLlm {
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
     ) -> PyResult<PyObject> {
-        let provider_enum = LlmProvider::from_str(provider)
+        let provider_kind = ProviderKind::from_str(provider)
             .map_err(|e| LlmException::new_err(e))?;
 
         let container = self.containers.get(provider)
@@ -256,7 +256,7 @@ impl ColmenaLlm {
             rt.block_on(async {
                 container.llm_stream.execute(
                     messages,
-                    provider_enum,
+                    provider_kind,
                     api_key,
                     model,
                     temperature,
