@@ -20,12 +20,14 @@ impl Display for ProviderKind {
 }
 
 impl ProviderKind {
-    pub fn from_str(s: &str) -> Result<Self, String> {
+    pub fn from_str(s: &str) -> Result<Self, LlmError> {
         match s.to_lowercase().as_str() {
             "openai" => Ok(ProviderKind::OpenAi),
             "gemini" => Ok(ProviderKind::Gemini),
             "anthropic" => Ok(ProviderKind::Anthropic),
-            _ => Err(format!("Unsupported provider: {}", s)),
+            _ => Err(LlmError::UnsupportedProvider {
+                provider: s.to_string(),
+            }),
         }
     }
 
@@ -83,5 +85,79 @@ impl LlmProvider {
 
     pub fn model(&self) -> &str {
         &self.model
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_provider_creation_success() {
+        let provider = LlmProvider::new(
+            ProviderKind::OpenAi,
+            "test_key".to_string(),
+            Some("gpt-4".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(*provider.kind(), ProviderKind::OpenAi);
+        assert_eq!(provider.api_key(), "test_key");
+        assert_eq!(provider.model(), "gpt-4");
+    }
+
+    #[test]
+    fn test_provider_creation_uses_default_model() {
+        let provider =
+            LlmProvider::new(ProviderKind::Gemini, "test_key".to_string(), None).unwrap();
+
+        assert_eq!(*provider.kind(), ProviderKind::Gemini);
+        assert_eq!(provider.model(), ProviderKind::Gemini.default_model());
+    }
+
+    #[test]
+    fn test_provider_creation_trims_api_key() {
+        let provider = LlmProvider::new(
+            ProviderKind::Anthropic,
+            "  spaced_key  ".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(provider.api_key(), "spaced_key");
+    }
+
+    #[test]
+    fn test_provider_creation_fails_on_empty_api_key() {
+        let result = LlmProvider::new(ProviderKind::OpenAi, "".to_string(), None);
+        assert!(matches!(result, Err(LlmError::InvalidApiKey)));
+
+        let result_whitespace = LlmProvider::new(ProviderKind::OpenAi, "   ".to_string(), None);
+        assert!(matches!(result_whitespace, Err(LlmError::InvalidApiKey)));
+    }
+
+    #[test]
+    fn test_provider_kind_from_str() {
+        // Casos exitosos (case-insensitive)
+        assert_eq!(
+            ProviderKind::from_str("openai").unwrap(),
+            ProviderKind::OpenAi
+        );
+        assert_eq!(
+            ProviderKind::from_str("Gemini").unwrap(),
+            ProviderKind::Gemini
+        );
+        assert_eq!(
+            ProviderKind::from_str("ANTHROPIC").unwrap(),
+            ProviderKind::Anthropic
+        );
+
+        // Caso de error
+        let result = ProviderKind::from_str("unknown_provider");
+        assert!(result.is_err());
+        if let Err(LlmError::UnsupportedProvider { provider }) = result {
+            assert_eq!(provider, "unknown_provider");
+        } else {
+            panic!("Expected an UnsupportedProvider error, but got {:?}", result);
+        }
     }
 }

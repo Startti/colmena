@@ -18,7 +18,7 @@ impl ConfigResolver {
 
         let env_var = provider_kind.env_var_name();
         env::var(env_var).map_err(|_| {
-            LlmError::configuration_error(format!(
+            LlmError::internal_error(format!(
                 "API key not found in environment variable '{}' and no explicit key provided",
                 env_var
             ))
