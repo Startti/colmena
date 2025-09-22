@@ -1,4 +1,4 @@
-use crate::llm::domain::{LlmResponseId, LlmRequestId, LlmProvider, LlmUsage};
+use crate::llm::domain::{LlmProvider, LlmRequestId, LlmResponseId, LlmUsage};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -14,11 +14,7 @@ pub struct LlmResponse {
 }
 
 impl LlmResponse {
-    pub fn new(
-        request_id: LlmRequestId,
-        content: String,
-        provider: LlmProvider,
-    ) -> Self {
+    pub fn new(request_id: LlmRequestId, content: String, provider: LlmProvider) -> Self {
         Self {
             id: LlmResponseId::new(),
             request_id,

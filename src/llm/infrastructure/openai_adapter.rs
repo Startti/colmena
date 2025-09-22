@@ -1,6 +1,5 @@
 use crate::llm::domain::{
-    LlmRepository, LlmRequest, LlmResponse, LlmStreamChunk, LlmError, LlmStream,
-    LlmUsage,
+    LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk, LlmUsage,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -80,7 +79,10 @@ impl LlmRepository for OpenAiAdapter {
         let response = self
             .client
             .post(&format!("{}/chat/completions", self.base_url))
-            .header("Authorization", format!("Bearer {}", request.config().api_key()))
+            .header(
+                "Authorization",
+                format!("Bearer {}", request.config().api_key()),
+            )
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
@@ -109,7 +111,9 @@ impl LlmRepository for OpenAiAdapter {
             .and_then(|choice| choice.message.content.as_ref())
             .ok_or_else(|| LlmError::parsing_error("No content in response"))?;
 
-        let usage = openai_response.usage.map(|u| LlmUsage::new(u.prompt_tokens, u.completion_tokens));
+        let usage = openai_response
+            .usage
+            .map(|u| LlmUsage::new(u.prompt_tokens, u.completion_tokens));
 
         let mut response = LlmResponse::new(
             request.id().clone(),
@@ -138,7 +142,10 @@ impl LlmRepository for OpenAiAdapter {
         let response = self
             .client
             .post(&format!("{}/chat/completions", self.base_url))
-            .header("Authorization", format!("Bearer {}", request.config().api_key()))
+            .header(
+                "Authorization",
+                format!("Bearer {}", request.config().api_key()),
+            )
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
@@ -182,7 +189,9 @@ impl LlmRepository for OpenAiAdapter {
                                     )));
                                 }
 
-                                if let Ok(chunk_response) = serde_json::from_str::<OpenAiStreamChunk>(data) {
+                                if let Ok(chunk_response) =
+                                    serde_json::from_str::<OpenAiStreamChunk>(data)
+                                {
                                     if let Some(choice) = chunk_response.choices.first() {
                                         if let Some(content) = &choice.delta.content {
                                             return Some(Ok(LlmStreamChunk::new(

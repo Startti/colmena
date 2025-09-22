@@ -1,5 +1,5 @@
 use crate::llm::{
-    application::{LlmCallUseCase, LlmStreamUseCase, LlmHealthCheckUseCase},
+    application::{LlmCallUseCase, LlmHealthCheckUseCase, LlmStreamUseCase},
     domain::ProviderKind,
     infrastructure::LlmProviderFactory,
 };
@@ -40,9 +40,18 @@ pub struct ServiceContainerFactory;
 impl ServiceContainerFactory {
     pub fn create_all() -> Vec<(ProviderKind, ServiceContainer)> {
         vec![
-            (ProviderKind::OpenAi, ServiceContainer::new(ProviderKind::OpenAi)),
-            (ProviderKind::Gemini, ServiceContainer::new(ProviderKind::Gemini)),
-            (ProviderKind::Anthropic, ServiceContainer::new(ProviderKind::Anthropic)),
+            (
+                ProviderKind::OpenAi,
+                ServiceContainer::new(ProviderKind::OpenAi),
+            ),
+            (
+                ProviderKind::Gemini,
+                ServiceContainer::new(ProviderKind::Gemini),
+            ),
+            (
+                ProviderKind::Anthropic,
+                ServiceContainer::new(ProviderKind::Anthropic),
+            ),
         ]
     }
 
