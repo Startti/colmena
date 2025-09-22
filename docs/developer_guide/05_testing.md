@@ -50,7 +50,7 @@ async fn test_llm_call_use_case_success() {
         .times(1)
         .returning(|_| Ok(LlmResponse::new(/* ... */)));
 
-    let use_case = LlmCallUseCase::new(Box::new(mock_repo));
+    let use_case = LlmCallUseCase::new(std::sync::Arc::new(mock_repo));
     let result = use_case.execute(/* ... */).await;
 
     assert!(result.is_ok());
