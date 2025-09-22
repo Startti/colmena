@@ -5,23 +5,21 @@
 ```rust
 // src/llm/domain/llm_provider.rs
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum LlmProvider {
+pub enum ProviderKind {
     OpenAi,
     Gemini,
     Anthropic,
     Cohere,        // ← Nuevo proveedor
-    Huggingface,   // ← Otro nuevo proveedor
 }
 
-impl LlmProvider {
+impl ProviderKind {
     pub fn from_str(s: &str) -> Result<Self, LlmError> {
         match s.to_lowercase().as_str() {
             "openai" => Ok(Self::OpenAi),
             "gemini" => Ok(Self::Gemini),
             "anthropic" => Ok(Self::Anthropic),
             "cohere" => Ok(Self::Cohere),        // ← Añadir aquí
-            "huggingface" => Ok(Self::Huggingface), // ← Y aquí
-            _ => Err(LlmError::invalid_provider(s)),
+            _ => Err(LlmError::UnsupportedProvider { provider: s.to_string() }),
         }
     }
 }
