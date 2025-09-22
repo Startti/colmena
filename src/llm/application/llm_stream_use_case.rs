@@ -31,12 +31,12 @@ impl LlmStreamUseCase {
         }
 
         // 2. Convert strings to LlmMessage objects (assuming user messages for simplicity)
-        let llm_messages: Result<Vec<LlmMessage>, String> = messages
+        let llm_messages: Result<Vec<LlmMessage>, LlmError> = messages
             .into_iter()
             .map(LlmMessage::user)
             .collect();
 
-        let llm_messages = llm_messages.map_err(LlmError::internal_error)?;
+        let llm_messages = llm_messages?;
 
         // 3. Create configuration
         let config = ConfigResolver::create_config(
@@ -79,12 +79,12 @@ impl LlmStreamUseCase {
         let mut llm_messages = Vec::new();
 
         if let Some(sys_msg) = system_message {
-            llm_messages.push(LlmMessage::system(sys_msg).map_err(LlmError::internal_error)?);
+            llm_messages.push(LlmMessage::system(sys_msg)?);
         }
 
         // Add user messages
         for msg in messages {
-            llm_messages.push(LlmMessage::user(msg).map_err(LlmError::internal_error)?);
+            llm_messages.push(LlmMessage::user(msg)?);
         }
 
         // 3. Create configuration
@@ -124,12 +124,12 @@ impl LlmStreamUseCase {
         }
 
         // 2. Convert conversation to LlmMessage objects
-        let llm_messages: Result<Vec<LlmMessage>, String> = conversation
+        let llm_messages: Result<Vec<LlmMessage>, LlmError> = conversation
             .into_iter()
             .map(|(role, content)| LlmMessage::new(role, content))
             .collect();
 
-        let llm_messages = llm_messages.map_err(LlmError::internal_error)?;
+        let llm_messages = llm_messages?;
 
         // 3. Create configuration
         let config = ConfigResolver::create_config(

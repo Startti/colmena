@@ -66,3 +66,59 @@ impl LlmRequest {
         self.messages.first()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::domain::{LlmConfig, LlmProvider, MessageRole, ProviderKind};
+
+    // Helper para crear una configuración de prueba
+    fn create_test_config() -> LlmConfig {
+        let provider = LlmProvider::new(
+            ProviderKind::Gemini,
+            "test_api_key".to_string(),
+            Some("gemini-pro".to_string()),
+        )
+        .unwrap();
+        LlmConfig::new(provider)
+    }
+
+    // Helper para crear mensajes de prueba
+    fn create_test_messages() -> Vec<LlmMessage> {
+        vec![LlmMessage::new(MessageRole::User, "Hello".to_string()).unwrap()]
+    }
+
+    #[test]
+    fn test_request_creation_success() {
+        let config = create_test_config();
+        let messages = create_test_messages();
+        let request = LlmRequest::new(messages, config, true).unwrap();
+
+        assert!(!request.id().value().to_string().is_empty());
+        assert_eq!(request.message_count(), 1);
+        assert_eq!(request.config().provider().kind(), &ProviderKind::Gemini);
+        assert!(request.is_streaming());
+    }
+
+    #[test]
+    fn test_request_creation_fails_on_empty_messages() {
+        let config = create_test_config();
+        let messages: Vec<LlmMessage> = vec![];
+        let result = LlmRequest::new(messages, config, false);
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), LlmError::EmptyMessages);
+    }
+
+    #[test]
+    fn test_getters_return_correct_values() {
+        let config = create_test_config();
+        let messages = create_test_messages();
+        let request = LlmRequest::new(messages.clone(), config.clone(), false).unwrap();
+
+        assert_eq!(request.messages(), &messages[..]);
+        assert_eq!(request.config().provider().api_key(), config.provider().api_key());
+        assert!(!request.stream());
+        assert_eq!(request.last_message(), messages.last());
+    }
+}

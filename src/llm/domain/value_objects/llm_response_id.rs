@@ -37,3 +37,27 @@ impl Default for LlmResponseId {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_id_creation() {
+        let id = LlmResponseId::new();
+        assert!(!id.value().is_empty());
+    }
+
+    #[test]
+    fn test_id_from_string() {
+        let id_str = "test-id".to_string();
+        let id = LlmResponseId::from_string(id_str.clone()).unwrap();
+        assert_eq!(id.value(), id_str);
+    }
+
+    #[test]
+    fn test_id_from_empty_string_fails() {
+        let result = LlmResponseId::from_string("".to_string());
+        assert!(result.is_err());
+    }
+}
