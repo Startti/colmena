@@ -1,4 +1,4 @@
-use crate::llm::domain::{LlmRequestId, LlmMessage, LlmConfig, LlmError};
+use crate::llm::domain::{LlmConfig, LlmError, LlmMessage, LlmRequestId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,7 +117,10 @@ mod tests {
         let request = LlmRequest::new(messages.clone(), config.clone(), false).unwrap();
 
         assert_eq!(request.messages(), &messages[..]);
-        assert_eq!(request.config().provider().api_key(), config.provider().api_key());
+        assert_eq!(
+            request.config().provider().api_key(),
+            config.provider().api_key()
+        );
         assert!(!request.stream());
         assert_eq!(request.last_message(), messages.last());
     }

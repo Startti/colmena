@@ -1,6 +1,6 @@
 use crate::llm::domain::{
-    LlmRepository, LlmRequest, LlmResponse, LlmStreamChunk, LlmError, LlmStream,
-    LlmUsage, MessageRole,
+    LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk, LlmUsage,
+    MessageRole,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -141,7 +141,7 @@ impl LlmRepository for GeminiAdapter {
         let usage = gemini_response.usage_metadata.map(|u| {
             LlmUsage::new(
                 u.prompt_token_count.unwrap_or(0),
-                u.candidates_token_count.unwrap_or(0)
+                u.candidates_token_count.unwrap_or(0),
             )
         });
 
@@ -233,10 +233,7 @@ impl LlmRepository for GeminiAdapter {
 
     async fn health_check(&self) -> Result<(), LlmError> {
         // For Gemini, we'll make a simple test request to check if the API key works
-        let url = format!(
-            "{}/models/gemini-1.5-flash:generateContent",
-            self.base_url
-        );
+        let url = format!("{}/models/gemini-1.5-flash:generateContent", self.base_url);
 
         let test_body = json!({
             "contents": [
@@ -251,7 +248,7 @@ impl LlmRepository for GeminiAdapter {
             .client
             .post(&url)
             .header("Content-Type", "application/json")
-            .query(&[("key", "dummy")])  // This will fail, but we can check if endpoint exists
+            .query(&[("key", "dummy")]) // This will fail, but we can check if endpoint exists
             .json(&test_body)
             .send()
             .await

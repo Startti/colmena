@@ -1,8 +1,8 @@
 use crate::llm::domain::LlmError;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use derivative::Derivative;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageRole {
@@ -110,7 +110,10 @@ mod tests {
 
     #[test]
     fn test_message_role_from_str() {
-        assert_eq!(MessageRole::from_str("system").unwrap(), MessageRole::System);
+        assert_eq!(
+            MessageRole::from_str("system").unwrap(),
+            MessageRole::System
+        );
         assert_eq!(MessageRole::from_str("USER").unwrap(), MessageRole::User);
         assert_eq!(
             MessageRole::from_str("assistant").unwrap(),

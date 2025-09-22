@@ -117,12 +117,8 @@ mod tests {
 
     #[test]
     fn test_provider_creation_trims_api_key() {
-        let provider = LlmProvider::new(
-            ProviderKind::Anthropic,
-            "  spaced_key  ".to_string(),
-            None,
-        )
-        .unwrap();
+        let provider =
+            LlmProvider::new(ProviderKind::Anthropic, "  spaced_key  ".to_string(), None).unwrap();
         assert_eq!(provider.api_key(), "spaced_key");
     }
 
@@ -157,7 +153,10 @@ mod tests {
         if let Err(LlmError::UnsupportedProvider { provider }) = result {
             assert_eq!(provider, "unknown_provider");
         } else {
-            panic!("Expected an UnsupportedProvider error, but got {:?}", result);
+            panic!(
+                "Expected an UnsupportedProvider error, but got {:?}",
+                result
+            );
         }
     }
 }
