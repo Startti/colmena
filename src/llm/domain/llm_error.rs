@@ -37,6 +37,9 @@ pub enum LlmError {
     #[error("Empty message list")]
     EmptyMessages,
 
+    #[error("Message content cannot be empty")]
+    EmptyMessageContent,
+
     #[error("Internal error: {message}")]
     InternalError { message: String },
 }

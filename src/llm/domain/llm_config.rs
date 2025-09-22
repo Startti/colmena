@@ -1,7 +1,7 @@
 use crate::llm::domain::{LlmError, LlmProvider};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LlmUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
