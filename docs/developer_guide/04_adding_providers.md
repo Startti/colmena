@@ -108,8 +108,7 @@ impl LlmRepository for CohereAdapter {
         Ok(LlmResponse::new(
             request.id().clone(),
             content,
-            LlmProvider::Cohere,
-            request.config().model().to_string(),
+            request.config().provider().clone(),
         ))
     }
 
