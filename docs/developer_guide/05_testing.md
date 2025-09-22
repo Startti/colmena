@@ -9,6 +9,19 @@ En Colmena, seguimos la estrategia de testing idiomática de Rust:
     *   **Propósito**: Probar la lógica interna de una función o un módulo de forma aislada. Tienen acceso a funciones y tipos privados.
     *   **Ejemplo**: Testear la lógica de validación de `LlmConfig` sin depender de nada más.
 
+    ```rust
+    // src/llm/domain/llm_config.rs
+    #[test]
+    fn test_with_temperature_invalid() {
+        let provider = create_test_provider();
+        let config = LlmConfig::new(provider);
+
+        // Se comprueba que un valor inválido devuelve la variante de error correcta.
+        let result = config.with_temperature(2.5);
+        assert_eq!(result.unwrap_err(), LlmError::InvalidTemperature);
+    }
+    ```
+
 2.  **Tests de Integración (`tests/`)**:
     *   **Ubicación**: Cada fichero `.rs` en el directorio `tests/` en la raíz del proyecto es un test de integración.
     *   **Propósito**: Probar la API pública de la librería. Simulan cómo un usuario externo interactuaría con Colmena, asegurando que las diferentes partes del sistema funcionan bien juntas.

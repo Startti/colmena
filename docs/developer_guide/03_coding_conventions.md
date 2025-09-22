@@ -55,21 +55,28 @@ pub struct LlmConfig {
 **Error Handling:**
 ```rust
 // ✅ Usar Result para operaciones que pueden fallar
-pub fn call_llm() -> Result<LlmResponse, LlmError> {
+pub fn with_temperature(mut self, temperature: f32) -> Result<Self, LlmError> {
     // ...
 }
 
-// ✅ Crear errores específicos del dominio con `thiserror`
-#[derive(Debug, Error)]
+// ✅ Crear errores específicos y descriptivos del dominio con `thiserror`.
+// El mensaje de error está acoplado al tipo de error.
+#[derive(Debug, Error, PartialEq)]
 pub enum LlmError {
-    #[error("Configuration error: {message}")]
-    ConfigurationError { message: String },
+    #[error("Invalid API key")]
+    InvalidApiKey,
+
+    #[error("Provider not supported: {provider}")]
+    UnsupportedProvider { provider: String },
+
+    #[error("Temperature must be between 0.0 and 2.0")]
+    InvalidTemperature,
 
     #[error("Network error: {message}")]
     NetworkError { message: String },
 }
 
-// ✅ Usar ? operator para propagación de errores
+// ✅ Usar ? operator para propagación de errores.
 pub fn complex_operation() -> Result<String, LlmError> {
     let response = call_api()?;
     let parsed = parse_response(response)?;

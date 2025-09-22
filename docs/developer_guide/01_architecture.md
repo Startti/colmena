@@ -24,7 +24,6 @@ src/
 │   │   ├── llm_response.rs        # Entidad: Response de LLM
 │   │   ├── llm_repository.rs      # Port: Interfaz principal
 │   │   ├── llm_error.rs           # Tipos de error del dominio
-│   │   ├── error_messages.rs      # Constantes de mensajes de error
 │   │   └── value_objects/         # Value Objects del dominio
 │   │       ├── mod.rs
 │   │       ├── llm_request_id.rs  # ID único de requests
