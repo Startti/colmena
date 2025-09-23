@@ -1,4 +1,4 @@
-use crate::llm::domain::{LlmResponseId, LlmRequestId, LlmProvider, LlmUsage};
+use crate::llm::domain::{LlmProvider, LlmRequestId, LlmResponseId, LlmUsage};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -14,11 +14,7 @@ pub struct LlmResponse {
 }
 
 impl LlmResponse {
-    pub fn new(
-        request_id: LlmRequestId,
-        content: String,
-        provider: LlmProvider,
-    ) -> Self {
+    pub fn new(request_id: LlmRequestId, content: String, provider: LlmProvider) -> Self {
         Self {
             id: LlmResponseId::new(),
             request_id,
@@ -143,5 +139,76 @@ impl LlmStreamChunk {
 
     pub fn is_final(&self) -> bool {
         self.is_final
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::domain::{LlmProvider, ProviderKind};
+
+    // Helper para crear un LlmProvider de prueba
+    fn create_test_provider() -> LlmProvider {
+        LlmProvider::new(
+            ProviderKind::Gemini,
+            "test_api_key".to_string(),
+            Some("gemini-pro".to_string()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_response_creation() {
+        let request_id = LlmRequestId::new();
+        let provider = create_test_provider();
+        let response = LlmResponse::new(
+            request_id.clone(),
+            "Test content".to_string(),
+            provider.clone(),
+        );
+
+        assert_eq!(response.request_id(), &request_id);
+        assert_eq!(response.content(), "Test content");
+        assert_eq!(response.provider().kind(), provider.kind());
+        assert!(response.usage().is_none());
+        assert!(response.finish_reason().is_none());
+        assert!(!response.is_complete());
+    }
+
+    #[test]
+    fn test_response_builder_methods() {
+        let request_id = LlmRequestId::new();
+        let provider = create_test_provider();
+        let usage = LlmUsage::new(10, 20);
+
+        let response = LlmResponse::new(
+            request_id.clone(),
+            "Test content".to_string(),
+            provider.clone(),
+        )
+        .with_usage(usage.clone())
+        .with_finish_reason("stop".to_string());
+
+        assert_eq!(response.usage().unwrap(), &usage);
+        assert_eq!(response.finish_reason().unwrap(), "stop");
+        assert!(response.is_complete());
+        assert_eq!(response.token_count(), Some(30));
+    }
+
+    #[test]
+    fn test_stream_chunk_creation() {
+        let request_id = LlmRequestId::new();
+        let provider = create_test_provider();
+        let chunk = LlmStreamChunk::new(
+            request_id.clone(),
+            "chunk content".to_string(),
+            provider.clone(),
+            true,
+        );
+
+        assert_eq!(chunk.request_id(), &request_id);
+        assert_eq!(chunk.content(), "chunk content");
+        assert_eq!(chunk.provider().kind(), provider.kind());
+        assert!(chunk.is_final());
     }
 }
