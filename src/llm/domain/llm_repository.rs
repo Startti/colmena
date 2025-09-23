@@ -1,10 +1,11 @@
-use crate::llm::domain::{LlmRequest, LlmResponse, LlmStreamChunk, LlmError};
+use crate::llm::domain::{LlmError, LlmRequest, LlmResponse, LlmStreamChunk};
 use async_trait::async_trait;
 use futures::Stream;
 use std::pin::Pin;
 
 pub type LlmStream = Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, LlmError>> + Send>>;
 
+#[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait LlmRepository: Send + Sync {
     /// Make a synchronous call to the LLM

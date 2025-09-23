@@ -1,6 +1,6 @@
 use crate::llm::domain::{
-    LlmRepository, LlmRequest, LlmResponse, LlmStreamChunk, LlmError, LlmStream,
-    LlmUsage, MessageRole,
+    LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk, LlmUsage,
+    MessageRole,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -184,16 +184,15 @@ impl LlmRepository for AnthropicAdapter {
                             if line.starts_with("data: ") {
                                 let data = &line[6..];
 
-                                if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
+                                if let Ok(event) =
+                                    serde_json::from_str::<AnthropicStreamEvent>(data)
+                                {
                                     match event.event_type.as_str() {
                                         "content_block_delta" => {
                                             if let Some(delta) = event.delta {
                                                 if let Some(text) = delta.text {
                                                     return Some(Ok(LlmStreamChunk::new(
-                                                        request_id,
-                                                        text,
-                                                        provider,
-                                                        false,
+                                                        request_id, text, provider, false,
                                                     )));
                                                 }
                                             }

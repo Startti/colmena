@@ -1,7 +1,10 @@
+use crate::llm::domain::LlmError;
 use chrono::{DateTime, Utc};
+#[cfg(test)]
+use derivative::Derivative;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageRole {
     System,
     User,
@@ -28,16 +31,19 @@ impl MessageRole {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(Derivative))]
+#[cfg_attr(test, derivative(PartialEq))]
 pub struct LlmMessage {
     role: MessageRole,
     content: String,
+    #[cfg_attr(test, derivative(PartialEq = "ignore"))]
     timestamp: DateTime<Utc>,
 }
 
 impl LlmMessage {
-    pub fn new(role: MessageRole, content: String) -> Result<Self, String> {
+    pub fn new(role: MessageRole, content: String) -> Result<Self, LlmError> {
         if content.trim().is_empty() {
-            return Err("Message content cannot be empty".to_string());
+            return Err(LlmError::EmptyMessageContent);
         }
 
         Ok(Self {
@@ -47,15 +53,15 @@ impl LlmMessage {
         })
     }
 
-    pub fn system(content: String) -> Result<Self, String> {
+    pub fn system(content: String) -> Result<Self, LlmError> {
         Self::new(MessageRole::System, content)
     }
 
-    pub fn user(content: String) -> Result<Self, String> {
+    pub fn user(content: String) -> Result<Self, LlmError> {
         Self::new(MessageRole::User, content)
     }
 
-    pub fn assistant(content: String) -> Result<Self, String> {
+    pub fn assistant(content: String) -> Result<Self, LlmError> {
         Self::new(MessageRole::Assistant, content)
     }
 
@@ -74,5 +80,45 @@ impl LlmMessage {
     pub fn with_timestamp(mut self, timestamp: DateTime<Utc>) -> Self {
         self.timestamp = timestamp;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_message_creation_success() {
+        let msg = LlmMessage::new(MessageRole::User, "  Hello World  ".to_string()).unwrap();
+        assert_eq!(msg.role(), &MessageRole::User);
+        assert_eq!(msg.content(), "Hello World"); // Verifica que el contenido se ha trimeado
+    }
+
+    #[test]
+    fn test_message_creation_fails_on_empty_content() {
+        let result = LlmMessage::new(MessageRole::User, "".to_string());
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), LlmError::EmptyMessageContent);
+    }
+
+    #[test]
+    fn test_message_creation_fails_on_whitespace_content() {
+        let result = LlmMessage::new(MessageRole::User, "   ".to_string());
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), LlmError::EmptyMessageContent);
+    }
+
+    #[test]
+    fn test_message_role_from_str() {
+        assert_eq!(
+            MessageRole::from_str("system").unwrap(),
+            MessageRole::System
+        );
+        assert_eq!(MessageRole::from_str("USER").unwrap(), MessageRole::User);
+        assert_eq!(
+            MessageRole::from_str("assistant").unwrap(),
+            MessageRole::Assistant
+        );
+        assert!(MessageRole::from_str("invalid").is_err());
     }
 }

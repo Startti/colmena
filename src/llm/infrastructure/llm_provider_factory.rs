@@ -1,5 +1,5 @@
-use crate::llm::domain::{ProviderKind, LlmRepository};
-use crate::llm::infrastructure::{OpenAiAdapter, GeminiAdapter, AnthropicAdapter};
+use crate::llm::domain::{LlmRepository, ProviderKind};
+use crate::llm::infrastructure::{AnthropicAdapter, GeminiAdapter, OpenAiAdapter};
 use std::sync::Arc;
 
 pub struct LlmProviderFactory;
@@ -17,7 +17,10 @@ impl LlmProviderFactory {
         vec![
             (ProviderKind::OpenAi, Self::create(ProviderKind::OpenAi)),
             (ProviderKind::Gemini, Self::create(ProviderKind::Gemini)),
-            (ProviderKind::Anthropic, Self::create(ProviderKind::Anthropic)),
+            (
+                ProviderKind::Anthropic,
+                Self::create(ProviderKind::Anthropic),
+            ),
         ]
     }
 }
