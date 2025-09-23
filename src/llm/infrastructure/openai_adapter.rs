@@ -114,8 +114,7 @@ impl LlmRepository for OpenAiAdapter {
         let mut response = LlmResponse::new(
             request.id().clone(),
             content.clone(),
-            crate::llm::domain::LlmProvider::OpenAi,
-            request.config().model().to_string(),
+            request.config().provider().clone(),
         );
 
         if let Some(usage) = usage {
@@ -158,13 +157,11 @@ impl LlmRepository for OpenAiAdapter {
         }
 
         let request_id = request.id().clone();
-        let provider = crate::llm::domain::LlmProvider::OpenAi;
-        let model = request.config().model().to_string();
+        let provider = request.config().provider().clone();
 
         let stream = response.bytes_stream().filter_map(move |chunk_result| {
             let request_id = request_id.clone();
             let provider = provider.clone();
-            let model = model.clone();
 
             async move {
                 match chunk_result {
@@ -181,7 +178,6 @@ impl LlmRepository for OpenAiAdapter {
                                         request_id,
                                         String::new(),
                                         provider,
-                                        model,
                                         true,
                                     )));
                                 }
@@ -193,7 +189,6 @@ impl LlmRepository for OpenAiAdapter {
                                                 request_id,
                                                 content.clone(),
                                                 provider,
-                                                model,
                                                 false,
                                             )));
                                         }
