@@ -148,8 +148,7 @@ impl LlmRepository for GeminiAdapter {
         let mut response = LlmResponse::new(
             request.id().clone(),
             content,
-            crate::llm::domain::LlmProvider::Gemini,
-            request.config().model().to_string(),
+            request.config().provider().clone(),
         );
 
         if let Some(usage) = usage {
@@ -198,14 +197,12 @@ impl LlmRepository for GeminiAdapter {
         }
 
         let request_id = request.id().clone();
-        let provider = crate::llm::domain::LlmProvider::Gemini;
-        let model = request.config().model().to_string();
+        let provider = request.config().provider().clone();
 
         let bytes_stream = response.bytes_stream();
         let stream = bytes_stream.filter_map(move |chunk| {
             let request_id = request_id.clone();
             let provider = provider.clone();
-            let model = model.clone();
 
             async move {
                 match chunk {
@@ -219,7 +216,6 @@ impl LlmRepository for GeminiAdapter {
                                         request_id,
                                         part.text.clone(),
                                         provider,
-                                        model,
                                         is_final,
                                     )));
                                 }
