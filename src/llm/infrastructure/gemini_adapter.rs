@@ -67,39 +67,21 @@ impl GeminiAdapter {
             ));
         }
 
-        // Verificar si hay assistant messages en el historial (otra limitación conocida)
-        let has_assistant_history = contents.iter().any(|c| c.role == "model");
-        if has_assistant_history && system_instructions.len() > 1 {
-            return Err(LlmError::provider_limitation(
-                "Gemini",
-                "multiple system messages with assistant history"
-            ));
-        }
-
-        // Verificar si hay assistant history en general (limitación conocida)
-        if has_assistant_history {
-            return Err(LlmError::provider_limitation(
-                "Gemini",
-                "conversation history with assistant messages"
-            ));
-        }
-
-        // Verificar múltiples mensajes de usuario consecutivos
-        let has_multiple_users = contents.iter().filter(|c| c.role == "user").count() > 1;
-        if has_multiple_users && system_instructions.len() > 1 {
-            return Err(LlmError::provider_limitation(
-                "Gemini",
-                "multiple user messages with multiple system instructions"
-            ));
-        }
-
-        // Verificar contenido de system message demasiado largo (límite real de Gemini)
-        let total_system_length: usize = system_instructions.iter().map(|s| s.len()).sum();
-        if total_system_length > 32768 {
-            return Err(LlmError::provider_limitation(
-                "Gemini",
-                "system instructions too long (>32KB)"
-            ));
+        // Check for alternating roles
+        if contents.len() > 1 {
+            for i in 1..contents.len() {
+                if contents[i].role == contents[i-1].role {
+                    return Err(LlmError::provider_limitation(
+                        "Gemini",
+                        format!(
+                            "consecutive messages with the same role are not supported. Role '{}' at index {} and {}",
+                            contents[i].role,
+                            i-1,
+                            i
+                        )
+                    ));
+                }
+            }
         }
 
         let combined_system_instruction = if system_instructions.is_empty() {
