@@ -26,6 +26,7 @@ pub struct LlmConfig {
     top_p: Option<f32>,
     frequency_penalty: Option<f32>,
     presence_penalty: Option<f32>,
+    thinking_budget: Option<u32>,
 }
 
 impl LlmConfig {
@@ -37,6 +38,7 @@ impl LlmConfig {
             top_p: None,
             frequency_penalty: None,
             presence_penalty: None,
+            thinking_budget: None,
         }
     }
 
@@ -78,6 +80,11 @@ impl LlmConfig {
         }
         self.presence_penalty = Some(penalty);
         Ok(self)
+    }
+
+    pub fn with_thinking_budget(mut self, thinking_budget: u32) -> Self {
+        self.thinking_budget = Some(thinking_budget);
+        self
     }
 
     // Getters

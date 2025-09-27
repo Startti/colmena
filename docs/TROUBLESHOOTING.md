@@ -210,25 +210,23 @@ maturin develop --release
 **Síntomas:**
 ```
 error: linking with `cc` failed: exit status: 1
+...
+Undefined symbols for architecture arm64:
+  "_PyBaseObject_Type", referenced from:
 ```
 
-**Solución Linux:**
+**Causa:**
+Este error ocurre cuando se intenta compilar el proyecto con `cargo build` directamente. `cargo` no sabe dónde encontrar las librerías de Python para enlazarlas, por lo que falla.
+
+**Solución:**
+Usa `maturin` para compilar el proyecto. `maturin` se encarga de pasar las banderas correctas al compilador de Rust.
+
 ```bash
-# Instalar herramientas de desarrollo
-sudo apt install build-essential pkg-config libssl-dev
+# Para desarrollo
+maturin develop
 
-# O en CentOS/RHEL
-sudo dnf groupinstall "Development Tools"
-sudo dnf install pkg-config openssl-devel
-```
-
-**Solución macOS:**
-```bash
-# Instalar Xcode Command Line Tools
-xcode-select --install
-
-# Actualizar macOS si es necesario
-softwareupdate -l
+# Para producción
+maturin build --release
 ```
 
 ### Error: "cargo: permission denied"

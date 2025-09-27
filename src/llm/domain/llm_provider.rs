@@ -34,7 +34,7 @@ impl ProviderKind {
     pub fn default_model(&self) -> &'static str {
         match self {
             ProviderKind::OpenAi => "gpt-4o",
-            ProviderKind::Gemini => "gemini-1.5-flash",
+            ProviderKind::Gemini => "gemini-pro",
             ProviderKind::Anthropic => "claude-3-sonnet",
         }
     }
