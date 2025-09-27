@@ -2,6 +2,10 @@
 """
 Tests de casos complejos para probar los límites del sistema de roles.
 """
+from dotenv import load_dotenv
+
+# Cargar variables de entorno desde .env
+load_dotenv()
 
 try:
     import colmena
@@ -13,20 +17,18 @@ except ImportError as e:
 def test_multiple_system_messages():
     """Test múltiples system messages que deberían funcionar"""
     llm = colmena.ColmenaLlm()
-    api_key = "AIzaSyDttaCigUOn2H6-njFIzBNxWhd2J5dOUwU"
-
     # Test con dos system messages
     messages = [
-        {"role": "system", "content": "Eres un tutor de programación."},
+        {"role": "system", "content": "Siempre responde en ingles"},
         {"role": "system", "content": "Explica conceptos de forma simple."},
-        {"role": "user", "content": "¿Qué es una variable en programación?"}
+        {"role": "user", "content": "¿Qué es una variable en programación?"},
+        
     ]
 
     try:
         response = llm.call_messages(
             messages=messages,
             provider="gemini",
-            api_key=api_key,
             model="gemini-2.5-flash",
             max_tokens=1500
         )
@@ -39,7 +41,7 @@ def test_multiple_system_messages():
 def test_conversation_with_user_history():
     """Test conversación con múltiples mensajes de usuario (esperado a fallar)"""
     llm = colmena.ColmenaLlm()
-    api_key = "AIzaSyDttaCigUOn2H6-njFIzBNxWhd2J5dOUwU"
+    
 
     messages = [
         {"role": "system", "content": "Eres un asistente de matemáticas."},
@@ -51,7 +53,6 @@ def test_conversation_with_user_history():
         response = llm.call_messages(
             messages=messages,
             provider="gemini",
-            api_key=api_key,
             model="gemini-2.5-flash",
             max_tokens=1000
         )
@@ -64,7 +65,7 @@ def test_conversation_with_user_history():
 def test_specific_formatting_instructions():
     """Test instrucciones específicas de formato"""
     llm = colmena.ColmenaLlm()
-    api_key = "AIzaSyDttaCigUOn2H6-njFIzBNxWhd2J5dOUwU"
+    
 
     messages = [
         {"role": "system", "content": "Responde solo con números y puntos."},
@@ -75,7 +76,6 @@ def test_specific_formatting_instructions():
         response = llm.call_messages(
             messages=messages,
             provider="gemini",
-            api_key=api_key,
             model="gemini-2.5-flash",
             max_tokens=1500
         )
@@ -88,7 +88,7 @@ def test_specific_formatting_instructions():
 def test_long_single_conversation():
     """Test conversación larga en una sola pregunta"""
     llm = colmena.ColmenaLlm()
-    api_key = "AIzaSyDttaCigUOn2H6-njFIzBNxWhd2J5dOUwU"
+    
 
     messages = [
         {"role": "system", "content": "Eres un experto en tecnología web."},
@@ -99,7 +99,6 @@ def test_long_single_conversation():
         response = llm.call_messages(
             messages=messages,
             provider="gemini",
-            api_key=api_key,
             model="gemini-2.5-flash",
             max_tokens=400
         )
@@ -112,7 +111,7 @@ def test_long_single_conversation():
 def test_dynamic_context_change():
     """Test cambio de contexto dinámico con múltiples system messages (esperado a fallar)"""
     llm = colmena.ColmenaLlm()
-    api_key = "AIzaSyDttaCigUOn2H6-njFIzBNxWhd2J5dOUwU"
+    
 
     messages = [
         {"role": "system", "content": "Eres un profesor de ciencias."},
@@ -125,7 +124,6 @@ def test_dynamic_context_change():
         response = llm.call_messages(
             messages=messages,
             provider="gemini",
-            api_key=api_key,
             model="gemini-2.5-flash",
             max_tokens=1500
         )
@@ -138,7 +136,7 @@ def test_dynamic_context_change():
 def test_three_system_messages_edge_case():
     """Test tres system messages (caso límite esperado a fallar)"""
     llm = colmena.ColmenaLlm()
-    api_key = "AIzaSyDttaCigUOn2H6-njFIzBNxWhd2J5dOUwU"
+    
 
     messages = [
         {"role": "system", "content": "Eres útil."},
@@ -150,8 +148,7 @@ def test_three_system_messages_edge_case():
     try:
         response = llm.call_messages(
             messages=messages,
-            provider="gemini",
-            api_key=api_key,
+            provider="gemini",         
             model="gemini-2.5-flash",
             max_tokens=800
         )
@@ -164,7 +161,7 @@ def test_three_system_messages_edge_case():
 def test_conversation_with_assistant_history():
     """Test conversación con historial de assistant"""
     llm = colmena.ColmenaLlm()
-    api_key = "AIzaSyDttaCigUOn2H6-njFIzBNxWhd2J5dOUwU"
+    
 
     messages = [
         {"role": "system", "content": "Eres útil."},
@@ -177,7 +174,6 @@ def test_conversation_with_assistant_history():
         response = llm.call_messages(
             messages=messages,
             provider="gemini",
-            api_key=api_key,
             model="gemini-2.5-flash",
             max_tokens=1500
         )
@@ -190,7 +186,7 @@ def test_conversation_with_assistant_history():
 def test_very_long_system_message():
     """Test system message muy largo"""
     llm = colmena.ColmenaLlm()
-    api_key = "AIzaSyDttaCigUOn2H6-njFIzBNxWhd2J5dOUwU"
+    
 
     long_system = "Eres un asistente experto en múltiples disciplinas incluyendo programación, matemáticas, ciencias, historia, literatura, arte, música, filosofía, psicología, sociología, economía, política, tecnología, medicina, biología, química, física, astronomía, geografía, arqueología, antropología y lingüística. Debes responder de manera precisa, detallada y educativa, adaptando tu nivel de explicación al contexto de la pregunta."
 
@@ -203,7 +199,6 @@ def test_very_long_system_message():
         response = llm.call_messages(
             messages=messages,
             provider="gemini",
-            api_key=api_key,
             model="gemini-2.5-flash",
             max_tokens=1000
         )
@@ -216,7 +211,7 @@ def test_very_long_system_message():
 def test_multiple_rapid_calls():
     """Test múltiples llamadas rápidas consecutivas"""
     llm = colmena.ColmenaLlm()
-    api_key = "AIzaSyDttaCigUOn2H6-njFIzBNxWhd2J5dOUwU"
+    
 
     success_count = 0
     for i in range(3):
@@ -227,7 +222,6 @@ def test_multiple_rapid_calls():
                     {"role": "user", "content": f"Di el número {i+1}"}
                 ],
                 provider="gemini",
-                api_key=api_key,
                 model="gemini-2.5-flash",
                 max_tokens=100
             )
@@ -241,7 +235,7 @@ def test_multiple_rapid_calls():
 def test_different_temperature_settings():
     """Test diferentes configuraciones de temperatura"""
     llm = colmena.ColmenaLlm()
-    api_key = "AIzaSyDttaCigUOn2H6-njFIzBNxWhd2J5dOUwU"
+    
 
     success_count = 0
     for temp in [0.1, 0.5, 0.9]:
@@ -252,7 +246,6 @@ def test_different_temperature_settings():
                     {"role": "user", "content": "Describe un gato en 5 palabras"}
                 ],
                 provider="gemini",
-                api_key=api_key,
                 model="gemini-2.5-flash",
                 temperature=temp,
                 max_tokens=800
