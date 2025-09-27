@@ -101,12 +101,12 @@ impl ColmenaLlm {
         let conversation_with_roles: Result<Vec<(MessageRole, String)>, PyErr> = messages
             .into_iter()
             .map(|msg_dict| {
-                let role_str: String = match msg_dict.get_item("role") {
+                let role_str: String = match msg_dict.get_item("role")? {
                     Some(role_val) => role_val.extract()?,
                     None => return Err(LlmException::new_err("Missing 'role' key in message")),
                 };
 
-                let content: String = match msg_dict.get_item("content") {
+                let content: String = match msg_dict.get_item("content")? {
                     Some(content_val) => content_val.extract()?,
                     None => return Err(LlmException::new_err("Missing 'content' key in message")),
                 };
@@ -211,8 +211,9 @@ impl PyStreamGenerator {
 }
 
 #[pymodule]
+#[allow(deprecated)]
 fn colmena(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<ColmenaLlm>()?;
-    m.add("LlmException", _py.get_type::<LlmException>())?;
+    m.add("LlmException", _py.get_type_bound::<LlmException>())?;
     Ok(())
 }

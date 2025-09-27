@@ -394,6 +394,4 @@ struct GeminiUsage {
     prompt_token_count: Option<u32>,
     #[serde(rename = "candidatesTokenCount")]
     candidates_token_count: Option<u32>,
-    #[serde(rename = "totalTokenCount")]
-    total_token_count: Option<u32>,
 }
