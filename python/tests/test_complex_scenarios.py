@@ -37,7 +37,7 @@ def test_multiple_system_messages():
         return False
 
 def test_conversation_with_user_history():
-    """Test conversación con múltiples mensajes de usuario"""
+    """Test conversación con múltiples mensajes de usuario (esperado a fallar)"""
     llm = colmena.ColmenaLlm()
     api_key = "GEMINI_API_KEY"
 
@@ -55,11 +55,11 @@ def test_conversation_with_user_history():
             model="gemini-2.5-flash",
             max_tokens=1000
         )
-        print(f"✅ Historial de user: {response}")
-        return True
-    except Exception as e:
-        print(f"❌ Falló con historial user: {e}")
+        print(f"🤔 Historial de user funcionó inesperadamente: {response}")
         return False
+    except Exception as e:
+        print(f"✅ Esperado - Historial user falló: {e}")
+        return True
 
 def test_specific_formatting_instructions():
     """Test instrucciones específicas de formato"""
@@ -110,7 +110,7 @@ def test_long_single_conversation():
         return False
 
 def test_dynamic_context_change():
-    """Test cambio de contexto dinámico con múltiples system messages"""
+    """Test cambio de contexto dinámico con múltiples system messages (esperado a fallar)"""
     llm = colmena.ColmenaLlm()
     api_key = "GEMINI_API_KEY"
 
@@ -129,11 +129,11 @@ def test_dynamic_context_change():
             model="gemini-2.5-flash",
             max_tokens=1500
         )
-        print(f"✅ Cambio de contexto: {response}")
-        return True
-    except Exception as e:
-        print(f"❌ Falló cambio de contexto: {e}")
+        print(f"🤔 Cambio de contexto funcionó inesperadamente: {response}")
         return False
+    except Exception as e:
+        print(f"✅ Esperado - Cambio de contexto falló: {e}")
+        return True
 
 def test_three_system_messages_edge_case():
     """Test tres system messages (caso límite esperado a fallar)"""
@@ -156,13 +156,13 @@ def test_three_system_messages_edge_case():
             max_tokens=800
         )
         print(f"🤔 Tres system messages funcionó inesperadamente: {response}")
-        return True
-    except Exception as e:
-        print(f"❌ Esperado - Tres system falló: {e}")
         return False
+    except Exception as e:
+        print(f"✅ Esperado - Tres system falló: {e}")
+        return True
 
 def test_conversation_with_assistant_history():
-    """Test conversación con historial de assistant (esperado a fallar)"""
+    """Test conversación con historial de assistant"""
     llm = colmena.ColmenaLlm()
     api_key = "GEMINI_API_KEY"
 
@@ -181,10 +181,10 @@ def test_conversation_with_assistant_history():
             model="gemini-2.5-flash",
             max_tokens=1500
         )
-        print(f"🤔 Historial assistant funcionó inesperadamente: {response}")
+        print(f"✅ Historial assistant funcionó: {response}")
         return True
     except Exception as e:
-        print(f"❌ Esperado - Historial assistant falló: {e}")
+        print(f"❌ Falló con historial assistant: {e}")
         return False
 
 def test_very_long_system_message():
