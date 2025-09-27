@@ -107,12 +107,11 @@ mod tests {
 
         // 1. Setup mock expectation
         mock_repo.expect_call().times(1).returning(|req| {
-            let response = LlmResponse::new(
+            LlmResponse::new(
                 req.id().clone(),
                 "response".into(),
                 req.config().provider().clone(),
-            );
-            Ok(response)
+            )
         });
 
         // 2. Create use case and execute
