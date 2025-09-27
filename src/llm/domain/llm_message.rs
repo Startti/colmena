@@ -20,12 +20,12 @@ impl MessageRole {
         }
     }
 
-    pub fn from_str(s: &str) -> Result<Self, String> {
+    pub fn from_str(s: &str) -> Result<Self, LlmError> {
         match s.to_lowercase().as_str() {
             "system" => Ok(MessageRole::System),
             "user" => Ok(MessageRole::User),
             "assistant" => Ok(MessageRole::Assistant),
-            _ => Err(format!("Invalid message role: {}", s)),
+            _ => Err(LlmError::invalid_message_role(s)),
         }
     }
 }
@@ -120,5 +120,13 @@ mod tests {
             MessageRole::Assistant
         );
         assert!(MessageRole::from_str("invalid").is_err());
+
+        // Test específico del error
+        match MessageRole::from_str("invalid_role") {
+            Err(LlmError::InvalidMessageRole { role }) => {
+                assert_eq!(role, "invalid_role");
+            }
+            _ => panic!("Expected InvalidMessageRole error"),
+        }
     }
 }
