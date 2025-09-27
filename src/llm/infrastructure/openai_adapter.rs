@@ -119,7 +119,7 @@ impl LlmRepository for OpenAiAdapter {
             request.id().clone(),
             content.clone(),
             request.config().provider().clone(),
-        );
+        )?;
 
         if let Some(usage) = usage {
             response = response.with_usage(usage);
