@@ -28,39 +28,91 @@ impl GeminiAdapter {
         }
     }
 
-    fn convert_messages(&self, request: &LlmRequest) -> (Option<String>, Vec<GeminiContent>) {
-        let mut system_instruction = None;
+    fn convert_messages(&self, request: &LlmRequest) -> Result<(Option<String>, Vec<GeminiContent>), LlmError> {
+        let mut system_instructions = Vec::new();
         let mut contents = Vec::new();
 
         for message in request.messages() {
             match message.role() {
                 MessageRole::System => {
-                    system_instruction = Some(message.content().to_string());
+                    system_instructions.push(message.content().to_string());
                 }
                 MessageRole::User => {
                     contents.push(GeminiContent {
                         role: "user".to_string(),
-                        parts: vec![GeminiPart {
+                        parts: Some(vec![GeminiPart {
                             text: message.content().to_string(),
-                        }],
+                        }]),
+                        text: None,
                     });
                 }
                 MessageRole::Assistant => {
                     contents.push(GeminiContent {
                         role: "model".to_string(),
-                        parts: vec![GeminiPart {
+                        parts: Some(vec![GeminiPart {
                             text: message.content().to_string(),
-                        }],
+                        }]),
+                        text: None,
                     });
                 }
             }
         }
 
-        (system_instruction, contents)
+        // Validar limitaciones de Gemini
+        if system_instructions.len() > 2 {
+            return Err(LlmError::too_many_system_messages(
+                system_instructions.len(),
+                "Gemini",
+                2
+            ));
+        }
+
+        // Verificar si hay assistant messages en el historial (otra limitación conocida)
+        let has_assistant_history = contents.iter().any(|c| c.role == "model");
+        if has_assistant_history && system_instructions.len() > 1 {
+            return Err(LlmError::provider_limitation(
+                "Gemini",
+                "multiple system messages with assistant history"
+            ));
+        }
+
+        // Verificar si hay assistant history en general (limitación conocida)
+        if has_assistant_history {
+            return Err(LlmError::provider_limitation(
+                "Gemini",
+                "conversation history with assistant messages"
+            ));
+        }
+
+        // Verificar múltiples mensajes de usuario consecutivos
+        let has_multiple_users = contents.iter().filter(|c| c.role == "user").count() > 1;
+        if has_multiple_users && system_instructions.len() > 1 {
+            return Err(LlmError::provider_limitation(
+                "Gemini",
+                "multiple user messages with multiple system instructions"
+            ));
+        }
+
+        // Verificar contenido de system message demasiado largo (límite real de Gemini)
+        let total_system_length: usize = system_instructions.iter().map(|s| s.len()).sum();
+        if total_system_length > 32768 {
+            return Err(LlmError::provider_limitation(
+                "Gemini",
+                "system instructions too long (>32KB)"
+            ));
+        }
+
+        let combined_system_instruction = if system_instructions.is_empty() {
+            None
+        } else {
+            Some(system_instructions.join("\n\n"))
+        };
+
+        Ok((combined_system_instruction, contents))
     }
 
-    fn build_request_body(&self, request: &LlmRequest) -> serde_json::Value {
-        let (system_instruction, contents) = self.convert_messages(request);
+    fn build_request_body(&self, request: &LlmRequest) -> Result<serde_json::Value, LlmError> {
+        let (system_instruction, contents) = self.convert_messages(request)?;
 
         let mut body = json!({
             "contents": contents
@@ -86,30 +138,35 @@ impl GeminiAdapter {
             generation_config.insert("topP".to_string(), json!(top_p));
         }
 
+        // Disable thinking for Gemini 2.5-flash to reduce token usage
+        generation_config.insert("thinkingConfig".to_string(), json!({
+            "thinkingBudget": 0
+        }));
+
         if !generation_config.is_empty() {
             body["generationConfig"] = json!(generation_config);
         }
 
-        body
+        Ok(body)
     }
 }
 
 #[async_trait]
 impl LlmRepository for GeminiAdapter {
     async fn call(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
-        let body = self.build_request_body(&request);
+        let body = self.build_request_body(&request)?;
 
         let url = format!(
-            "{}/models/{}:generateContent?key={}",
+            "{}/models/{}:generateContent",
             self.base_url,
-            request.config().model(),
-            request.config().api_key()
+            request.config().model()
         );
 
         let response = self
             .client
             .post(&url)
             .header("Content-Type", "application/json")
+            .header("x-goog-api-key", request.config().api_key())
             .json(&body)
             .send()
             .await
@@ -126,17 +183,45 @@ impl LlmRepository for GeminiAdapter {
             )));
         }
 
-        let gemini_response: GeminiResponse = response
-            .json()
-            .await
-            .map_err(|e| LlmError::parsing_error(e.to_string()))?;
+        let response_text = response.text().await.map_err(|e| LlmError::parsing_error(e.to_string()))?;
+        let gemini_response: GeminiResponse = serde_json::from_str(&response_text)
+            .map_err(|e| LlmError::parsing_error(format!("JSON parse error: {} - Response: {}", e, response_text)))?;
 
         let content = gemini_response
             .candidates
             .first()
-            .and_then(|candidate| candidate.content.parts.first())
-            .map(|part| part.text.clone())
-            .ok_or_else(|| LlmError::parsing_error("No content in response"))?;
+            .and_then(|candidate| {
+                // Try direct text field first (for newer models)
+                if let Some(text) = &candidate.content.text {
+                    if !text.is_empty() {
+                        Some(text.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    // Fallback to parts structure (for older models)
+                    candidate.content.parts
+                        .as_ref()
+                        .and_then(|parts| parts.first())
+                        .map(|part| part.text.clone())
+                        .filter(|text| !text.is_empty())
+                }
+            })
+            .unwrap_or_else(|| {
+                // If no content is found, check finish reason
+                let finish_reason = gemini_response
+                    .candidates
+                    .first()
+                    .and_then(|candidate| candidate.finish_reason.as_ref())
+                    .map(|s| s.as_str())
+                    .unwrap_or("UNKNOWN");
+
+                if finish_reason == "MAX_TOKENS" {
+                    "[No content generated - Increase max_tokens as this Gemini model uses tokens for internal reasoning]".to_string()
+                } else {
+                    format!("[Empty response - finish_reason: {}]", finish_reason)
+                }
+            });
 
         let usage = gemini_response.usage_metadata.map(|u| {
             LlmUsage::new(
@@ -149,7 +234,7 @@ impl LlmRepository for GeminiAdapter {
             request.id().clone(),
             content,
             request.config().provider().clone(),
-        );
+        )?;
 
         if let Some(usage) = usage {
             response = response.with_usage(usage);
@@ -167,19 +252,19 @@ impl LlmRepository for GeminiAdapter {
     }
 
     async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
-        let body = self.build_request_body(&request);
+        let body = self.build_request_body(&request)?;
 
         let url = format!(
-            "{}/models/{}:streamGenerateContent?key={}",
+            "{}/models/{}:streamGenerateContent",
             self.base_url,
-            request.config().model(),
-            request.config().api_key()
+            request.config().model()
         );
 
         let response = self
             .client
             .post(&url)
             .header("Content-Type", "application/json")
+            .header("x-goog-api-key", request.config().api_key())
             .json(&body)
             .send()
             .await
@@ -210,11 +295,17 @@ impl LlmRepository for GeminiAdapter {
                         let text = String::from_utf8_lossy(&bytes);
                         if let Ok(chunk_response) = serde_json::from_str::<GeminiResponse>(&text) {
                             if let Some(candidate) = chunk_response.candidates.first() {
-                                if let Some(part) = candidate.content.parts.first() {
+                                let content_text = if let Some(text) = &candidate.content.text {
+                                    Some(text.clone())
+                                } else {
+                                    candidate.content.parts.as_ref().and_then(|parts| parts.first()).map(|part| part.text.clone())
+                                };
+
+                                if let Some(text) = content_text {
                                     let is_final = candidate.finish_reason.is_some();
                                     return Some(Ok(LlmStreamChunk::new(
                                         request_id,
-                                        part.text.clone(),
+                                        text,
                                         provider,
                                         is_final,
                                     )));
@@ -272,7 +363,10 @@ impl LlmRepository for GeminiAdapter {
 #[derive(Debug, Serialize, Deserialize)]
 struct GeminiContent {
     role: String,
-    parts: Vec<GeminiPart>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parts: Option<Vec<GeminiPart>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>, // For newer models like gemini-2.5-flash
 }
 
 #[derive(Debug, Serialize, Deserialize)]
