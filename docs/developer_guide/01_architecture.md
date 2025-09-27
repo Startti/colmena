@@ -56,3 +56,13 @@ Python Call → PyO3 Bindings → Use Case → Repository → Adapter → HTTP A
      ↓                                                              ↓
 Python Response ← PyO3 Bindings ← Domain Response ← Adapter ← HTTP Response
 ```
+
+### Relación entre Rust y Python
+
+Este proyecto no es una aplicación de Rust pura, sino una **librería de Python acelerada con Rust**.
+
+- **Python es el director de orquesta**: La aplicación final es de Python. Se beneficia de su ecosistema y facilidad de uso para la lógica de alto nivel.
+- **Rust es el motor de alto rendimiento**: Las operaciones computacionalmente intensivas y la lógica de negocio principal se implementan en Rust para obtener la máxima velocidad y seguridad.
+- **PyO3 es el puente**: La librería `pyo3` permite exponer las funciones de Rust a Python de una manera idiomática y eficiente.
+
+El objetivo es combinar la flexibilidad de Python con el rendimiento de Rust, delegando las tareas pesadas al código nativo compilado.
