@@ -1,4 +1,4 @@
-use crate::llm::domain::{LlmProvider, LlmRequestId, LlmResponseId, LlmUsage};
+use crate::llm::domain::{LlmMessage, LlmProvider, LlmRequestId, LlmResponseId, LlmUsage};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 pub struct LlmResponse {
     id: LlmResponseId,
     request_id: LlmRequestId,
-    content: String,
+    message: LlmMessage,
     usage: Option<LlmUsage>,
     provider: LlmProvider,
     timestamp: DateTime<Utc>,
@@ -14,11 +14,24 @@ pub struct LlmResponse {
 }
 
 impl LlmResponse {
-    pub fn new(request_id: LlmRequestId, content: String, provider: LlmProvider) -> Self {
+    pub fn new(request_id: LlmRequestId, content: String, provider: LlmProvider) -> Result<Self, crate::llm::domain::LlmError> {
+        let message = LlmMessage::assistant(content)?;
+        Ok(Self {
+            id: LlmResponseId::new(),
+            request_id,
+            message,
+            usage: None,
+            provider,
+            timestamp: Utc::now(),
+            finish_reason: None,
+        })
+    }
+
+    pub fn with_message(request_id: LlmRequestId, message: LlmMessage, provider: LlmProvider) -> Self {
         Self {
             id: LlmResponseId::new(),
             request_id,
-            content,
+            message,
             usage: None,
             provider,
             timestamp: Utc::now(),
@@ -51,7 +64,11 @@ impl LlmResponse {
     }
 
     pub fn content(&self) -> &str {
-        &self.content
+        self.message.content()
+    }
+
+    pub fn message(&self) -> &LlmMessage {
+        &self.message
     }
 
     pub fn usage(&self) -> Option<&LlmUsage> {
@@ -165,7 +182,7 @@ mod tests {
             request_id.clone(),
             "Test content".to_string(),
             provider.clone(),
-        );
+        ).unwrap();
 
         assert_eq!(response.request_id(), &request_id);
         assert_eq!(response.content(), "Test content");
@@ -185,7 +202,7 @@ mod tests {
             request_id.clone(),
             "Test content".to_string(),
             provider.clone(),
-        )
+        ).unwrap()
         .with_usage(usage.clone())
         .with_finish_reason("stop".to_string());
 
