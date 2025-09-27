@@ -131,7 +131,7 @@ impl LlmRepository for AnthropicAdapter {
             request.id().clone(),
             content,
             request.config().provider().clone(),
-        );
+        )?;
 
         response = response.with_usage(usage);
 

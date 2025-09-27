@@ -159,33 +159,41 @@ pip install --upgrade pip
 pip install maturin
 ```
 
-### 3. Compilar Código Rust
+### 3. Compilar el Proyecto (Rust + Python)
+
+Este es un proyecto híbrido de Rust y Python. **No uses `cargo build` directamente**, ya que no enlazará correctamente las librerías de Python y fallará.
+
+La herramienta correcta para compilar es `maturin`, que se encarga de orquestar la compilación de Rust y la creación de los bindings de Python.
+
+#### Opción 1: Desarrollo (Recomendado)
+
+Este comando compila el código Rust y lo instala en tu entorno virtual actual. Es la forma más rápida de tener los últimos cambios disponibles en Python.
 
 ```bash
-# Verificar que Rust compila
-cargo check
-
-# Compilar en modo debug (más rápido)
-cargo build
-
-# Compilar en modo release (optimizado)
-cargo build --release
-
-# Ejecutar tests de Rust (opcional)
-cargo test
+# Compila e instala en el venv actual
+maturin develop
 ```
 
-### 4. Generar Bindings de Python
+#### Opción 2: Producción
+
+Si quieres generar un archivo `.whl` para distribución, usa `maturin build`.
 
 ```bash
-# Desarrollo (modo debug, más rápido para desarrollo)
-maturin develop
-
-# Producción (modo release, optimizado)
-maturin develop --release
-
-# Crear wheel de distribución
+# Compilar en modo release (optimizado)
 maturin build --release
+
+# El "wheel" se encontrará en `target/wheels/`
+ls target/wheels/
+```
+
+Para verificar que el código Rust compila de forma independiente (sin los bindings de Python), puedes usar `cargo check`.
+
+```bash
+# Verificar que el código Rust es válido
+cargo check
+
+# Ejecutar los tests de Rust
+cargo test
 ```
 
 ### 5. Verificar Instalación
