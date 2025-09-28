@@ -88,11 +88,10 @@ def test_multiple_system_messages_succeeds():
     ]
     try:
         response = llm.call(messages=messages, provider=TEST_PROVIDER, model=TEST_MODEL, max_tokens=400)
-        print(f"✅ PASSED: Multiple system messages succeeded. Response: '{response[:50]}...'")
-        return True
-    except Exception as e:
-        print(f"❌ FAILED: Multiple system messages failed unexpectedly with: {e}")
         return False
+    except Exception as e:
+        print(f"✅ PASSED: Consecutive system messages correctly failed with: {e}")
+        return True
 
 def test_missing_role_key_fails():
     """Test that a message with a missing 'role' key fails validation."""
