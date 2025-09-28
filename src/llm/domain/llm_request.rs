@@ -24,13 +24,6 @@ impl LlmRequest {
             let prev_msg = &messages[i - 1];
             let current_msg = &messages[i];
 
-            // System messages can be anywhere, so we only check non-system roles
-            if matches!(prev_msg.role(), MessageRole::System)
-                || matches!(current_msg.role(), MessageRole::System)
-            {
-                continue;
-            }
-
             if prev_msg.role() == current_msg.role() {
                 return Err(LlmError::ConsecutiveRoles {
                     role: current_msg.role().to_string(),
