@@ -100,15 +100,16 @@ impl ColmenaLlm {
         // Parse messages from dictionaries
         let conversation_with_roles: Result<Vec<(MessageRole, String)>, PyErr> = messages
             .into_iter()
-            .map(|msg_dict| {
+            .enumerate()
+            .map(|(i,msg_dict)| {
                 let role_str: String = match msg_dict.get_item("role")? {
                     Some(role_val) => role_val.extract()?,
-                    None => return Err(LlmException::new_err("Missing 'role' key in message")),
+                    None => return Err(LlmException::new_err(format!("Missing 'role' key in message: {}", i+1))),
                 };
 
                 let content: String = match msg_dict.get_item("content")? {
                     Some(content_val) => content_val.extract()?,
-                    None => return Err(LlmException::new_err("Missing 'content' key in message")),
+                    None => return Err(LlmException::new_err(format!("Missing 'content' key in message {}", i+1))),
                 };
 
                 MessageRole::from_str(&role_str)
