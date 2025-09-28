@@ -1,4 +1,4 @@
-use crate::llm::domain::{LlmConfig, LlmError, LlmMessage, LlmRequestId};
+use crate::llm::domain::{LlmConfig, LlmError, LlmMessage, LlmRequestId, MessageRole};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,6 +17,25 @@ impl LlmRequest {
     ) -> Result<Self, LlmError> {
         if messages.is_empty() {
             return Err(LlmError::EmptyMessages);
+        }
+
+        // Validate consecutive roles, ignoring system messages
+        let mut last_role: Option<(&MessageRole, usize)> = None;
+        for (i, msg) in messages.iter().enumerate() {
+            if matches!(msg.role(), MessageRole::System) {
+                continue;
+            }
+
+            if let Some((last_role, last_index)) = last_role {
+                if msg.role() == last_role {
+                    return Err(LlmError::ConsecutiveRoles {
+                        role: msg.role().to_string(),
+                        index1: last_index,
+                        index2: i,
+                    });
+                }
+            }
+            last_role = Some((msg.role(), i));
         }
 
         Ok(Self {
@@ -123,5 +142,42 @@ mod tests {
         );
         assert!(!request.stream());
         assert_eq!(request.last_message(), messages.last());
+    }
+
+    #[test]
+    fn test_request_creation_fails_on_consecutive_roles() {
+        let config = create_test_config();
+        let messages = vec![
+            LlmMessage::new(MessageRole::User, "Hello".to_string()).unwrap(),
+            LlmMessage::new(MessageRole::User, "How are you?".to_string()).unwrap(),
+        ];
+        let result = LlmRequest::new(messages, config, false);
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            LlmError::ConsecutiveRoles {
+                role,
+                index1,
+                index2,
+            } => {
+                assert_eq!(role, "user");
+                assert_eq!(index1, 0);
+                assert_eq!(index2, 1);
+            }
+            e => panic!("Expected ConsecutiveRoles error, but got {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_request_creation_succeeds_with_interspersed_system_messages() {
+        let config = create_test_config();
+        let messages = vec![
+            LlmMessage::new(MessageRole::User, "Hello".to_string()).unwrap(),
+            LlmMessage::new(MessageRole::System, "You are a bot.".to_string()).unwrap(),
+            LlmMessage::new(MessageRole::User, "How are you?".to_string()).unwrap(),
+        ];
+        // This should not fail because the consecutive check ignores system messages
+        let result = LlmRequest::new(messages, config, false);
+        assert!(result.is_ok());
     }
 }
