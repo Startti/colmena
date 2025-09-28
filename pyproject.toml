@@ -35,6 +35,7 @@ dev = [
     "isort",
     "mypy",
     "python-dotenv",
+    "maturin",
 ]
 
 [project.urls]

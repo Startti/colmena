@@ -20,22 +20,24 @@ impl LlmRequest {
         }
 
         // Validate consecutive roles, ignoring system messages
-        let mut last_role: Option<(&MessageRole, usize)> = None;
-        for (i, msg) in messages.iter().enumerate() {
-            if matches!(msg.role(), MessageRole::System) {
+        for i in 1..messages.len() {
+            let prev_msg = &messages[i - 1];
+            let current_msg = &messages[i];
+
+            // System messages can be anywhere, so we only check non-system roles
+            if matches!(prev_msg.role(), MessageRole::System)
+                || matches!(current_msg.role(), MessageRole::System)
+            {
                 continue;
             }
 
-            if let Some((last_role, last_index)) = last_role {
-                if msg.role() == last_role {
-                    return Err(LlmError::ConsecutiveRoles {
-                        role: msg.role().to_string(),
-                        index1: last_index,
-                        index2: i,
-                    });
-                }
+            if prev_msg.role() == current_msg.role() {
+                return Err(LlmError::ConsecutiveRoles {
+                    role: current_msg.role().to_string(),
+                    index1: i - 1,
+                    index2: i,
+                });
             }
-            last_role = Some((msg.role(), i));
         }
 
         Ok(Self {
