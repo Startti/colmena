@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, StreamDeserializer};
 
 pub struct GeminiAdapter {
     client: Client,
@@ -266,42 +266,34 @@ impl LlmRepository for GeminiAdapter {
         let request_id = request.id().clone();
         let provider = request.config().provider().clone();
 
-        let bytes_stream = response.bytes_stream();
-        let stream = bytes_stream.filter_map(move |chunk| {
-            let request_id = request_id.clone();
-            let provider = provider.clone();
+        let bytes = response.bytes().await.map_err(|e| LlmError::network_error(e.to_string()))?;
+        let text = String::from_utf8_lossy(&bytes);
 
-            async move {
-                match chunk {
-                    Ok(bytes) => {
-                        let text = String::from_utf8_lossy(&bytes);
-                        if let Ok(chunk_response) = serde_json::from_str::<GeminiResponse>(&text) {
-                            if let Some(candidate) = chunk_response.candidates.first() {
-                                let content_text = if let Some(text) = &candidate.content.text {
-                                    Some(text.clone())
-                                } else {
-                                    candidate.content.parts.as_ref().and_then(|parts| parts.first()).map(|part| part.text.clone())
-                                };
+        let mut results = Vec::new();
+        let trimmed = text.trim().trim_start_matches('[').trim_end_matches(']');
+        for json_str in trimmed.split(",\r\n") {
+            if let Ok(chunk_response) = serde_json::from_str::<GeminiResponse>(json_str) {
+                if let Some(candidate) = chunk_response.candidates.first() {
+                    let content_text = if let Some(text) = &candidate.content.text {
+                        Some(text.clone())
+                    } else {
+                        candidate.content.parts.as_ref().and_then(|parts| parts.first()).map(|part| part.text.clone())
+                    };
 
-                                if let Some(text) = content_text {
-                                    let is_final = candidate.finish_reason.is_some();
-                                    return Some(Ok(LlmStreamChunk::new(
-                                        request_id,
-                                        text,
-                                        provider,
-                                        is_final,
-                                    )));
-                                }
-                            }
-                        }
-                        None
+                    if let Some(text) = content_text {
+                        let is_final = candidate.finish_reason.is_some();
+                        results.push(Ok(LlmStreamChunk::new(
+                            request_id.clone(),
+                            text,
+                            provider.clone(),
+                            is_final,
+                        )));
                     }
-                    Err(e) => Some(Err(LlmError::network_error(e.to_string()))),
                 }
             }
-        });
+        }
 
-        Ok(Box::pin(stream))
+        Ok(Box::pin(futures::stream::iter(results)))
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {
