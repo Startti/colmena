@@ -17,8 +17,11 @@ except ImportError as e:
 
 # --- Test Configuration ---
 # Use a fast and cheap model for testing.
-TEST_PROVIDER = "gemini"
-TEST_MODEL = "gemini-2.5-flash"
+GEMINI_PROVIDER = "gemini"
+GEMINI_MODEL = "gemini-2.5-flash"
+OPENAI_PROVIDER = "openai"
+OPENAI_MODEL = "gpt-5-nano-2025-08-07"
+
 
 # --- Streaming Scenarios ---
 
@@ -27,13 +30,13 @@ def test_valid_streaming_conversation_succeeds():
     llm = colmena.ColmenaLlm()
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "Explain what a mathematical function is"},
+        {"role": "user", "content": "Why the sky is blue?"},
     ]
     try:
         print("📄 Streaming response:")
         full_response = ""
         # We need to consume the generator to check for errors
-        for chunk in llm.stream(messages=messages, provider=TEST_PROVIDER, model=TEST_MODEL, max_tokens=400):
+        for chunk in llm.stream(messages=messages, provider=GEMINI_PROVIDER, model=GEMINI_MODEL, max_tokens=100):
             print(f"  -> Received chunk: '{chunk}'")
             full_response += chunk
         
@@ -57,7 +60,7 @@ def test_consecutive_user_messages_streaming_fails():
     ]
     try:
         # The generator must be consumed for the error to be triggered.
-        stream = llm.stream(messages=messages, provider=TEST_PROVIDER, model=TEST_MODEL, max_tokens=400)
+        stream = llm.stream(messages=messages, provider=GEMINI_PROVIDER, model=GEMINI_MODEL, max_tokens=100)
         for _ in stream:
             pass  # Consume the generator
         print("❌ FAILED: Consecutive user messages in streaming did not raise an exception.")
@@ -70,11 +73,48 @@ def test_consecutive_user_messages_streaming_fails():
         print(f"❌ FAILED: An unexpected error occurred: {e}")
         return False
 
+def test_openai_streaming_succeeds():
+    """Test a valid streaming conversation with OpenAI succeeds."""
+    if not os.getenv("OPENAI_API_KEY"):
+        print("\n⚠️ SKIPPED: OPENAI_API_KEY not set. Skipping OpenAI test.")
+        return True  # Skip test if key is not set
+
+    llm = colmena.ColmenaLlm()
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant that replies in Spanish."},
+        {"role": "user", "content": "Escribe un poema corto sobre la luna."},
+    ]
+    try:
+        print("📄 Streaming response (OpenAI):")
+        full_response = ""
+        stream = llm.stream(messages=messages, provider=OPENAI_PROVIDER, model=OPENAI_MODEL, max_tokens=1500)
+        for chunk in stream:
+            print(f"  -> Received chunk: '{chunk}'")
+            full_response += chunk
+
+        if full_response:
+            assert full_response.strip(), "Streamed response content should not be empty."
+            print(f"\n📝 Full response (OpenAI): '{full_response}'")
+            print("✅ PASSED: OpenAI streaming conversation succeeded.")
+            return True
+        else:
+            print("\n❌ FAILED: OpenAI streaming response was empty.")
+            return False
+    except Exception as e:
+        print(f"❌ FAILED: OpenAI streaming conversation failed unexpectedly with: {e}")
+        return False
+
+
 if __name__ == "__main__":
     # Check for API key to provide a better error message
     if not os.getenv("GEMINI_API_KEY"):
         print("\n‼️  WARNING: GEMINI_API_KEY environment variable not set.")
-        print("    The tests will likely fail. Please create a .env file with your key.")
+        print("    The Gemini tests will likely fail. Please create a .env file with your key.")
+        print("-" * 60)
+    
+    if not os.getenv("OPENAI_API_KEY"):
+        print("\n‼️  WARNING: OPENAI_API_KEY environment variable not set.")
+        print("    The OpenAI tests will be skipped. Please create a .env file with your key.")
         print("-" * 60)
 
     print("🧪 Streaming Scenarios Testing")
@@ -83,6 +123,7 @@ if __name__ == "__main__":
     tests = [
         test_valid_streaming_conversation_succeeds,
         test_consecutive_user_messages_streaming_fails,
+        test_openai_streaming_succeeds,
     ]
 
     passed = 0
