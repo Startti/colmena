@@ -121,8 +121,8 @@ if __name__ == "__main__":
     print("="*60)
 
     tests = [
-        test_valid_streaming_conversation_succeeds,
-        test_consecutive_user_messages_streaming_fails,
+        #test_valid_streaming_conversation_succeeds,
+        #test_consecutive_user_messages_streaming_fails,
         test_openai_streaming_succeeds,
     ]
 
