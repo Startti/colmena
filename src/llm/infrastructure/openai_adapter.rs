@@ -52,7 +52,7 @@ impl OpenAiAdapter {
         }
 
         if let Some(max_tokens) = request.config().max_tokens() {
-            body["max_tokens"] = json!(max_tokens);
+            body["max_completion_tokens"] = json!(max_tokens);
         }
 
         if let Some(top_p) = request.config().top_p() {
