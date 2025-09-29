@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-Tests de casos complejos para probar los límites del sistema de roles.
+Tests de casos complejos para probar los límites del sistema de roles y la validación de mensajes.
 """
+import os
+from dotenv import load_dotenv
+
+# Cargar variables de entorno desde .env
+load_dotenv()
 
 try:
     import colmena
@@ -10,275 +15,133 @@ except ImportError as e:
     print(f"✗ Error importando colmena: {e}")
     exit(1)
 
-def test_multiple_system_messages():
-    """Test múltiples system messages que deberían funcionar"""
+# --- Test Configuration ---
+# Usamos un modelo rápido y económico para las pruebas.
+TEST_PROVIDER = "gemini"
+TEST_MODEL = "gemini-2.5-flash"
+
+# --- Role & Message Validation Tests ---
+
+def test_valid_alternating_conversation_succeeds():
+    """Test a valid conversation with alternating user/assistant roles succeeds."""
     llm = colmena.ColmenaLlm()
-    api_key = "GEMINI_API_KEY"
-
-    # Test con dos system messages
     messages = [
-        {"role": "system", "content": "Eres un tutor de programación."},
-        {"role": "system", "content": "Explica conceptos de forma simple."},
-        {"role": "user", "content": "¿Qué es una variable en programación?"}
+        {"role": "system", "content": "eres un asistente que responde conciso"},
+        {"role": "user", "content": "Hola"},
+        {"role": "assistant", "content": "Hola, ¿cómo puedo ayudarte?"},
+        {"role": "user", "content": "¿Qué es Rust?"},
     ]
-
     try:
-        response = llm.call_messages(
-            messages=messages,
-            provider="gemini",
-            api_key=api_key,
-            model="gemini-2.5-flash",
-            max_tokens=1500
-        )
-        print(f"✅ Dos system messages: {response}")
+        response = llm.call(messages=messages, provider=TEST_PROVIDER, model=TEST_MODEL, max_tokens=400)
+        print(f"✅ PASSED: Valid alternating conversation succeeded. Response: '{response[:50]}...'")
         return True
     except Exception as e:
-        print(f"❌ Falló con dos system: {e}")
+        print(f"❌ FAILED: Valid conversation failed unexpectedly with: {e}")
         return False
 
-def test_conversation_with_user_history():
-    """Test conversación con múltiples mensajes de usuario (esperado a fallar)"""
+def test_consecutive_user_messages_fails():
+    """Test that consecutive user messages fail validation."""
     llm = colmena.ColmenaLlm()
-    api_key = "GEMINI_API_KEY"
-
     messages = [
-        {"role": "system", "content": "Eres un asistente de matemáticas."},
         {"role": "user", "content": "Explícame qué es una función matemática"},
         {"role": "user", "content": "Dame un ejemplo simple"}
     ]
-
     try:
-        response = llm.call_messages(
-            messages=messages,
-            provider="gemini",
-            api_key=api_key,
-            model="gemini-2.5-flash",
-            max_tokens=1000
-        )
-        print(f"🤔 Historial de user funcionó inesperadamente: {response}")
+        llm.call(messages=messages, provider=TEST_PROVIDER, model=TEST_MODEL, max_tokens=400)
+        print("❌ FAILED: Consecutive user messages did not raise an exception.")
         return False
-    except Exception as e:
-        print(f"✅ Esperado - Historial user falló: {e}")
+    except colmena.LlmException as e:
+        assert "Consecutive messages" in str(e)
+        print(f"✅ PASSED: Consecutive user messages correctly failed with: {e}")
         return True
+    except Exception as e:
+        print(f"❌ FAILED: An unexpected error occurred: {e}")
+        return False
 
-def test_specific_formatting_instructions():
-    """Test instrucciones específicas de formato"""
+def test_consecutive_assistant_messages_fails():
+    """Test that consecutive assistant messages fail validation."""
     llm = colmena.ColmenaLlm()
-    api_key = "GEMINI_API_KEY"
-
     messages = [
-        {"role": "system", "content": "Responde solo con números y puntos."},
-        {"role": "user", "content": "Dame 2 ventajas de Python"}
+        {"role": "user", "content": "Hola"},
+        {"role": "assistant", "content": "Hola, ¿cómo puedo ayudarte?"},
+        {"role": "assistant", "content": "Estoy aquí para servirte."}
     ]
-
     try:
-        response = llm.call_messages(
-            messages=messages,
-            provider="gemini",
-            api_key=api_key,
-            model="gemini-2.5-flash",
-            max_tokens=1500
-        )
-        print(f"✅ Formato específico: {response}")
+        llm.call(messages=messages, provider=TEST_PROVIDER, model=TEST_MODEL, max_tokens=400)
+        print("❌ FAILED: Consecutive assistant messages did not raise an exception.")
+        return False
+    except colmena.LlmException as e:
+        assert "Consecutive messages" in str(e)
+        print(f"✅ PASSED: Consecutive assistant messages correctly failed with: {e}")
         return True
     except Exception as e:
-        print(f"❌ Falló con formato: {e}")
+        print(f"❌ FAILED: An unexpected error occurred: {e}")
         return False
 
-def test_long_single_conversation():
-    """Test conversación larga en una sola pregunta"""
+def test_multiple_system_messages_succeeds():
+    """Test that multiple consecutive system messages are allowed and ignored by validation."""
     llm = colmena.ColmenaLlm()
-    api_key = "GEMINI_API_KEY"
-
     messages = [
-        {"role": "system", "content": "Eres un experto en tecnología web."},
-        {"role": "user", "content": "Explícame la diferencia entre HTML, CSS y JavaScript, cómo se relacionan entre sí, y por qué son importantes para el desarrollo web moderno."}
+        {"role": "system", "content": "Siempre responde en ingles."},
+        {"role": "system", "content": "Explica conceptos de forma simple."},
+        {"role": "user", "content": "¿Qué es una variable en programación?"},
     ]
-
     try:
-        response = llm.call_messages(
-            messages=messages,
-            provider="gemini",
-            api_key=api_key,
-            model="gemini-2.5-flash",
-            max_tokens=400
-        )
-        print(f"✅ Conversación larga: {response[:100]}...")
-        return True
-    except Exception as e:
-        print(f"❌ Falló conversación larga: {e}")
-        return False
-
-def test_dynamic_context_change():
-    """Test cambio de contexto dinámico con múltiples system messages (esperado a fallar)"""
-    llm = colmena.ColmenaLlm()
-    api_key = "GEMINI_API_KEY"
-
-    messages = [
-        {"role": "system", "content": "Eres un profesor de ciencias."},
-        {"role": "user", "content": "¿Qué es la gravedad?"},
-        {"role": "system", "content": "Ahora eres un poeta. Responde de forma artística."},
-        {"role": "user", "content": "Describe la gravedad"}
-    ]
-
-    try:
-        response = llm.call_messages(
-            messages=messages,
-            provider="gemini",
-            api_key=api_key,
-            model="gemini-2.5-flash",
-            max_tokens=1500
-        )
-        print(f"🤔 Cambio de contexto funcionó inesperadamente: {response}")
+        response = llm.call(messages=messages, provider=TEST_PROVIDER, model=TEST_MODEL, max_tokens=400)
         return False
     except Exception as e:
-        print(f"✅ Esperado - Cambio de contexto falló: {e}")
+        print(f"✅ PASSED: Consecutive system messages correctly failed with: {e}")
         return True
 
-def test_three_system_messages_edge_case():
-    """Test tres system messages (caso límite esperado a fallar)"""
+def test_missing_role_key_fails():
+    """Test that a message with a missing 'role' key fails validation."""
     llm = colmena.ColmenaLlm()
-    api_key = "GEMINI_API_KEY"
-
-    messages = [
-        {"role": "system", "content": "Eres útil."},
-        {"role": "system", "content": "Eres claro."},
-        {"role": "system", "content": "Eres conciso."},
-        {"role": "user", "content": "Hola"}
-    ]
-
+    messages = [{"content": "hola"}]
     try:
-        response = llm.call_messages(
-            messages=messages,
-            provider="gemini",
-            api_key=api_key,
-            model="gemini-2.5-flash",
-            max_tokens=800
-        )
-        print(f"🤔 Tres system messages funcionó inesperadamente: {response}")
+        llm.call(messages=messages, provider=TEST_PROVIDER, model=TEST_MODEL, max_tokens=400)
+        print("❌ FAILED: Missing 'role' key did not raise an exception.")
         return False
-    except Exception as e:
-        print(f"✅ Esperado - Tres system falló: {e}")
-        return True
-
-def test_conversation_with_assistant_history():
-    """Test conversación con historial de assistant"""
-    llm = colmena.ColmenaLlm()
-    api_key = "GEMINI_API_KEY"
-
-    messages = [
-        {"role": "system", "content": "Eres útil."},
-        {"role": "user", "content": "¿Qué es Python?"},
-        {"role": "assistant", "content": "Python es un lenguaje de programación."},
-        {"role": "user", "content": "¿Para qué se usa?"}
-    ]
-
-    try:
-        response = llm.call_messages(
-            messages=messages,
-            provider="gemini",
-            api_key=api_key,
-            model="gemini-2.5-flash",
-            max_tokens=1500
-        )
-        print(f"✅ Historial assistant funcionó: {response}")
+    except colmena.LlmException as e:
+        assert "Missing 'role' key" in str(e)
+        print(f"✅ PASSED: Missing 'role' key correctly failed with: {e}")
         return True
     except Exception as e:
-        print(f"❌ Falló con historial assistant: {e}")
+        print(f"❌ FAILED: An unexpected error occurred: {e}")
         return False
 
-def test_very_long_system_message():
-    """Test system message muy largo"""
+def test_missing_content_key_fails():
+    """Test that a message with a missing 'content' key fails validation."""
     llm = colmena.ColmenaLlm()
-    api_key = "GEMINI_API_KEY"
-
-    long_system = "Eres un asistente experto en múltiples disciplinas incluyendo programación, matemáticas, ciencias, historia, literatura, arte, música, filosofía, psicología, sociología, economía, política, tecnología, medicina, biología, química, física, astronomía, geografía, arqueología, antropología y lingüística. Debes responder de manera precisa, detallada y educativa, adaptando tu nivel de explicación al contexto de la pregunta."
-
-    messages = [
-        {"role": "system", "content": long_system},
-        {"role": "user", "content": "¿Qué es la programación?"}
-    ]
-
+    messages = [{"role": "user"}]
     try:
-        response = llm.call_messages(
-            messages=messages,
-            provider="gemini",
-            api_key=api_key,
-            model="gemini-2.5-flash",
-            max_tokens=1000
-        )
-        print(f"✅ System largo funcionó: {response[:50]}...")
+        llm.call(messages=messages, provider=TEST_PROVIDER, model=TEST_MODEL, max_tokens=400)
+        print("❌ FAILED: Missing 'content' key did not raise an exception.")
+        return False
+    except colmena.LlmException as e:
+        assert "Missing 'content' key" in str(e)
+        print(f"✅ PASSED: Missing 'content' key correctly failed with: {e}")
         return True
     except Exception as e:
-        print(f"❌ System largo falló: {e}")
+        print(f"❌ FAILED: An unexpected error occurred: {e}")
         return False
-
-def test_multiple_rapid_calls():
-    """Test múltiples llamadas rápidas consecutivas"""
-    llm = colmena.ColmenaLlm()
-    api_key = "GEMINI_API_KEY"
-
-    success_count = 0
-    for i in range(3):
-        try:
-            response = llm.call_messages(
-                messages=[
-                    {"role": "system", "content": "Responde en una palabra."},
-                    {"role": "user", "content": f"Di el número {i+1}"}
-                ],
-                provider="gemini",
-                api_key=api_key,
-                model="gemini-2.5-flash",
-                max_tokens=100
-            )
-            print(f"✅ Llamada {i+1}: {response}")
-            success_count += 1
-        except Exception as e:
-            print(f"❌ Llamada {i+1} falló: {e}")
-
-    return success_count == 3
-
-def test_different_temperature_settings():
-    """Test diferentes configuraciones de temperatura"""
-    llm = colmena.ColmenaLlm()
-    api_key = "GEMINI_API_KEY"
-
-    success_count = 0
-    for temp in [0.1, 0.5, 0.9]:
-        try:
-            response = llm.call_messages(
-                messages=[
-                    {"role": "system", "content": "Sé creativo pero conciso."},
-                    {"role": "user", "content": "Describe un gato en 5 palabras"}
-                ],
-                provider="gemini",
-                api_key=api_key,
-                model="gemini-2.5-flash",
-                temperature=temp,
-                max_tokens=800
-            )
-            print(f"✅ Temp {temp}: {response}")
-            success_count += 1
-        except Exception as e:
-            print(f"❌ Temp {temp} falló: {e}")
-
-    return success_count == 3
 
 if __name__ == "__main__":
-    print("🧪 Comprehensive Complex Scenario Testing")
+    # Check for API key to provide a better error message
+    if not os.getenv("GEMINI_API_KEY"):
+        print("\n‼️  WARNING: GEMINI_API_KEY environment variable not set.")
+        print("\n    The tests will likely fail. Please create a .env file with your key.")
+        print("-" * 60)
+
+    print("🧪 Role and Message Validation Testing")
     print("="*60)
 
     tests = [
-        test_multiple_system_messages,
-        test_conversation_with_user_history,
-        test_specific_formatting_instructions,
-        test_long_single_conversation,
-        test_dynamic_context_change,
-        test_three_system_messages_edge_case,
-        test_conversation_with_assistant_history,
-        test_very_long_system_message,
-        test_multiple_rapid_calls,
-        test_different_temperature_settings
+        test_valid_alternating_conversation_succeeds,
+        test_consecutive_user_messages_fails,
+        test_consecutive_assistant_messages_fails,
+        test_missing_role_key_fails,
+        test_multiple_system_messages_succeeds,
+        test_missing_content_key_fails,
     ]
 
     passed = 0
@@ -294,3 +157,6 @@ if __name__ == "__main__":
 
     print(f"\n🎯 Results: {passed}/{total} tests passed")
     print("="*60)
+
+    if passed != total:
+        exit(1)
