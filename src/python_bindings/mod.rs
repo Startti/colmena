@@ -51,9 +51,10 @@ impl ColmenaLlm {
                 };
 
                 let role = MessageRole::from_str(&role_str).map_err(|e| LlmException::new_err(e.to_string()))?;
+                
                 LlmMessage::new(role, content).map_err(|e| LlmException::new_err(e.to_string()))
             })
-            .collect::<PyResult<_>>()?;
+            .collect();
 
         let config = ConfigResolver::create_config(provider_kind, api_key, model, temperature, max_tokens, top_p, frequency_penalty, presence_penalty)?;
 
@@ -68,15 +69,38 @@ impl ColmenaLlm {
     }
 
     #[pyo3(signature = (messages, provider, api_key=None, model=None, temperature=None, max_tokens=None, top_p=None, frequency_penalty=None, presence_penalty=None))]
-    pub fn stream(&self, py: Python, messages: Vec<String>, provider: &str, api_key: Option<String>, model: Option<String>, temperature: Option<f32>, max_tokens: Option<u32>, top_p: Option<f32>, frequency_penalty: Option<f32>, presence_penalty: Option<f32>) -> PyResult<PyObject> {
+    pub fn stream(&self, py: Python, messages: Vec<&PyDict>, provider: &str, api_key: Option<String>, model: Option<String>, temperature: Option<f32>, max_tokens: Option<u32>, top_p: Option<f32>, frequency_penalty: Option<f32>, presence_penalty: Option<f32>) -> PyResult<PyObject> {
         let provider_kind = ProviderKind::from_str(provider)?;
         let container = self.containers.get(provider).ok_or_else(|| LlmException::new_err(format!("Provider {} not found", provider)))?;
+
+        // Parse messages from dictionaries
+        let llm_messages: Result<Vec<LlmMessage>, PyErr> = messages
+            .into_iter()
+            .enumerate()
+            .map(|(i,msg_dict)| {
+                let role_str: String = match msg_dict.get_item("role")? {
+                    Some(role_val) => role_val.extract()?,
+                    None => return Err(LlmException::new_err(format!("Missing 'role' key in message: {}", i+1))),
+                };
+
+                let content: String = match msg_dict.get_item("content")? {
+                    Some(content_val) => content_val.extract()?,
+                    None => return Err(LlmException::new_err(format!("Missing 'content' key in message {}", i+1))),
+                };
+
+                let role = MessageRole::from_str(&role_str).map_err(|e| LlmException::new_err(e.to_string()))?;
+                
+                LlmMessage::new(role, content).map_err(|e| LlmException::new_err(e.to_string()))
+            })
+            .collect();
+        let llm_messages = llm_messages?;
+
         let config = ConfigResolver::create_config(provider_kind, api_key, model, temperature, max_tokens, top_p, frequency_penalty, presence_penalty)?;
 
         let stream_result = py.allow_threads(move || {
             let rt = tokio::runtime::Runtime::new().map_err(|e| LlmException::new_err(e.to_string()))?;
             rt.block_on(async {
-                container.llm_stream.execute(messages, config).await
+                container.llm_stream.execute(llm_messages, config).await
             }).map_err(PyErr::from)
         })?;
 
@@ -98,44 +122,6 @@ impl ColmenaLlm {
 
     pub fn get_providers(&self) -> PyResult<Vec<String>> {
         Ok(self.containers.keys().cloned().collect())
-    }
-
-    #[pyo3(signature = (messages, provider, api_key=None, model=None, temperature=None, max_tokens=None, top_p=None, frequency_penalty=None, presence_penalty=None))]
-    pub fn stream_messages(&self, py: Python, messages: Vec<&PyDict>, provider: &str, api_key: Option<String>, model: Option<String>, temperature: Option<f32>, max_tokens: Option<u32>, top_p: Option<f32>, frequency_penalty: Option<f32>, presence_penalty: Option<f32>) -> PyResult<PyObject> {
-        let provider_kind = ProviderKind::from_str(provider)?;
-        let container = self.containers.get(provider).ok_or_else(|| LlmException::new_err(format!("Provider {} not found", provider)))?;
-
-        // Parse messages from dictionaries
-        let conversation_with_roles: Vec<(MessageRole, String)> = messages
-            .into_iter()
-            .map(|msg_dict| {
-                let role_str: String = match msg_dict.get_item("role")? {
-                    Some(role_val) => role_val.extract()?,
-                    None => return Err(LlmException::new_err("Missing 'role' key in message")),
-                };
-
-                let content: String = match msg_dict.get_item("content")? {
-                    Some(content_val) => content_val.extract()?,
-                    None => return Err(LlmException::new_err("Missing 'content' key in message")),
-                };
-
-                MessageRole::from_str(&role_str)
-                    .map(|role| (role, content))
-                    .map_err(|e| LlmException::new_err(e.to_string()))
-            })
-            .collect::<PyResult<_>>()?;
-
-        let config = ConfigResolver::create_config(provider_kind, api_key, model, temperature, max_tokens, top_p, frequency_penalty, presence_penalty)?;
-
-        let stream_result = py.allow_threads(move || {
-            let rt = tokio::runtime::Runtime::new().map_err(|e| LlmException::new_err(e.to_string()))?;
-            rt.block_on(async {
-                container.llm_stream.execute_conversation(conversation_with_roles, config).await
-            }).map_err(PyErr::from)
-        })?;
-
-        let generator = PyStreamGenerator::new(stream_result);
-        Ok(generator.into_py(py))
     }
 }
 
