@@ -3,10 +3,9 @@ use crate::llm::domain::{
     MessageRole,
 };
 use async_trait::async_trait;
-use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, StreamDeserializer};
+use serde_json::json;
 
 pub struct GeminiAdapter {
     client: Client,
