@@ -27,12 +27,13 @@ def test_valid_streaming_conversation_succeeds():
     llm = colmena.ColmenaLlm()
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "Why the sky is blue?"},
+        {"role": "user", "content": "Explain what a mathematical function is"},
     ]
     try:
         print("📄 Streaming response:")
         full_response = ""
-        for chunk in llm.stream(messages=messages, provider=TEST_PROVIDER, model=TEST_MODEL, max_tokens=100):
+        # We need to consume the generator to check for errors
+        for chunk in llm.stream(messages=messages, provider=TEST_PROVIDER, model=TEST_MODEL, max_tokens=400):
             print(f"  -> Received chunk: '{chunk}'")
             full_response += chunk
         
@@ -47,6 +48,28 @@ def test_valid_streaming_conversation_succeeds():
         print(f"❌ FAILED: Valid streaming conversation failed unexpectedly with: {e}")
         return False
 
+def test_consecutive_user_messages_streaming_fails():
+    """Test that consecutive user messages fail validation in streaming mode."""
+    llm = colmena.ColmenaLlm()
+    messages = [
+        {"role": "user", "content": "Explain what a mathematical function is"},
+        {"role": "user", "content": "Give me a simple example"}
+    ]
+    try:
+        # The generator must be consumed for the error to be triggered.
+        stream = llm.stream(messages=messages, provider=TEST_PROVIDER, model=TEST_MODEL, max_tokens=400)
+        for _ in stream:
+            pass  # Consume the generator
+        print("❌ FAILED: Consecutive user messages in streaming did not raise an exception.")
+        return False
+    except colmena.LlmException as e:
+        assert "Consecutive messages" in str(e)
+        print(f"✅ PASSED: Consecutive user messages in streaming correctly failed with: {e}")
+        return True
+    except Exception as e:
+        print(f"❌ FAILED: An unexpected error occurred: {e}")
+        return False
+
 if __name__ == "__main__":
     # Check for API key to provide a better error message
     if not os.getenv("GEMINI_API_KEY"):
@@ -59,6 +82,7 @@ if __name__ == "__main__":
 
     tests = [
         test_valid_streaming_conversation_succeeds,
+        test_consecutive_user_messages_streaming_fails,
     ]
 
     passed = 0
