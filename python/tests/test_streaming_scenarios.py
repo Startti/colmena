@@ -36,7 +36,7 @@ def test_valid_streaming_conversation_succeeds():
         print("📄 Streaming response:")
         full_response = ""
         # We need to consume the generator to check for errors
-        for chunk in llm.stream(messages=messages, provider=GEMINI_PROVIDER, model=GEMINI_MODEL, max_tokens=100):
+        for chunk in llm.stream(messages=messages, provider=GEMINI_PROVIDER, model=GEMINI_MODEL, max_tokens=1000):
             print(f"  -> Received chunk: '{chunk}'")
             full_response += chunk
         
@@ -121,8 +121,8 @@ if __name__ == "__main__":
     print("="*60)
 
     tests = [
-        #test_valid_streaming_conversation_succeeds,
-        #test_consecutive_user_messages_streaming_fails,
+        test_valid_streaming_conversation_succeeds,
+        test_consecutive_user_messages_streaming_fails,
         test_openai_streaming_succeeds,
     ]
 
