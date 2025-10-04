@@ -13,6 +13,12 @@ pub struct AnthropicAdapter {
     base_url: String,
 }
 
+impl Default for AnthropicAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AnthropicAdapter {
     pub fn new() -> Self {
         Self {
@@ -91,7 +97,7 @@ impl LlmRepository for AnthropicAdapter {
 
         let response = self
             .client
-            .post(&format!("{}/messages", self.base_url))
+            .post(format!("{}/messages", self.base_url))
             .header("x-api-key", request.config().api_key())
             .header("Content-Type", "application/json")
             .header("anthropic-version", "2023-06-01")
@@ -147,7 +153,7 @@ impl LlmRepository for AnthropicAdapter {
 
         let response = self
             .client
-            .post(&format!("{}/messages", self.base_url))
+            .post(format!("{}/messages", self.base_url))
             .header("x-api-key", request.config().api_key())
             .header("Content-Type", "application/json")
             .header("anthropic-version", "2023-06-01")
@@ -181,8 +187,7 @@ impl LlmRepository for AnthropicAdapter {
                         let text = String::from_utf8_lossy(&bytes);
 
                         for line in text.lines() {
-                            if line.starts_with("data: ") {
-                                let data = &line[6..];
+                            if let Some(data) = line.strip_prefix("data: ") {
 
                                 if let Ok(event) =
                                     serde_json::from_str::<AnthropicStreamEvent>(data)
@@ -231,7 +236,7 @@ impl LlmRepository for AnthropicAdapter {
 
         let response = self
             .client
-            .post(&format!("{}/messages", self.base_url))
+            .post(format!("{}/messages", self.base_url))
             .header("Content-Type", "application/json")
             .header("anthropic-version", "2023-06-01")
             .json(&minimal_body)

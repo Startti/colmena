@@ -13,6 +13,12 @@ pub struct GeminiAdapter {
     base_url: String,
 }
 
+impl Default for GeminiAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GeminiAdapter {
     pub fn new() -> Self {
         Self {

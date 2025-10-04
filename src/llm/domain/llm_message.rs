@@ -12,10 +12,24 @@ pub enum MessageRole {
 }
 
 use std::fmt;
+use std::str::FromStr;
 
 impl fmt::Display for MessageRole {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+impl FromStr for MessageRole {
+    type Err = LlmError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "system" => Ok(MessageRole::System),
+            "user" => Ok(MessageRole::User),
+            "assistant" => Ok(MessageRole::Assistant),
+            _ => Err(LlmError::invalid_message_role(s)),
+        }
     }
 }
 
@@ -25,15 +39,6 @@ impl MessageRole {
             MessageRole::System => "system",
             MessageRole::User => "user",
             MessageRole::Assistant => "assistant",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Result<Self, LlmError> {
-        match s.to_lowercase().as_str() {
-            "system" => Ok(MessageRole::System),
-            "user" => Ok(MessageRole::User),
-            "assistant" => Ok(MessageRole::Assistant),
-            _ => Err(LlmError::invalid_message_role(s)),
         }
     }
 }
