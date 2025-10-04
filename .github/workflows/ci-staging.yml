@@ -60,23 +60,27 @@ jobs:
           # Get current version from pyproject.toml
           CURRENT_VERSION=$(grep -Po '(?<=^version = ")[^"]*' pyproject.toml)
 
-          # Generate timestamp for pre-release (PEP 440 compatible)
+          # Generate timestamp for pre-release
           TIMESTAMP=$(date +%Y%m%d%H%M%S)
           COMMIT_SHORT=$(git rev-parse --short HEAD)
 
-          # Create pre-release version following PEP 440: X.Y.Z.devTIMESTAMP
-          # Using dev release format which is valid for both Python and Rust
-          PRE_VERSION="${CURRENT_VERSION}.dev${TIMESTAMP}"
+          # Create pre-release versions
+          # Python (PEP 440): X.Y.Z.devTIMESTAMP
+          PYTHON_VERSION="${CURRENT_VERSION}.dev${TIMESTAMP}"
 
-          echo "pre_version=$PRE_VERSION" >> $GITHUB_OUTPUT
-          echo "Staging pre-release version: $PRE_VERSION"
+          # Rust (SemVer): X.Y.Z-dev.TIMESTAMP
+          RUST_VERSION="${CURRENT_VERSION}-dev.${TIMESTAMP}"
+
+          echo "pre_version=$PYTHON_VERSION" >> $GITHUB_OUTPUT
+          echo "Python pre-release version: $PYTHON_VERSION"
+          echo "Rust pre-release version: $RUST_VERSION"
           echo "Commit SHA: $COMMIT_SHORT"
 
-          # Update pyproject.toml with pre-release version
-          sed -i "s/^version = \".*\"/version = \"$PRE_VERSION\"/" pyproject.toml
+          # Update pyproject.toml with Python-compatible version
+          sed -i "s/^version = \".*\"/version = \"$PYTHON_VERSION\"/" pyproject.toml
 
-          # Update Cargo.toml with pre-release version
-          sed -i "s/^version = \".*\"/version = \"$PRE_VERSION\"/" Cargo.toml
+          # Update Cargo.toml with Rust-compatible version
+          sed -i "s/^version = \".*\"/version = \"$RUST_VERSION\"/" Cargo.toml
 
       - name: Build Python wheels
         run: maturin build --release --out dist
