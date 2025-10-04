@@ -2,7 +2,6 @@ use crate::llm::domain::{
     LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk, LlmUsage,
 };
 use async_trait::async_trait;
-use futures::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
@@ -157,7 +156,7 @@ impl LlmRepository for OpenAiAdapter {
 
         let response = self
             .client
-            .post(&format!("{}/chat/completions", self.base_url))
+            .post(format!("{}/chat/completions", self.base_url))
             .header(
                 "Authorization",
                 format!("Bearer {}", request.config().api_key()),
@@ -198,8 +197,8 @@ impl LlmRepository for OpenAiAdapter {
 
         let mut results = Vec::new();
         for line in text.lines() {
-            if line.starts_with("data: ") {
-                let data = line[6..].trim();
+            if let Some(stripped) = line.strip_prefix("data: ") {
+                let data = stripped.trim();
                 if data == "[DONE]" {
                     println!("[OpenAI Adapter Stream] Received [DONE] message.");
                     break;
