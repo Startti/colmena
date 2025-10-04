@@ -55,7 +55,7 @@ pub struct LlmMessage {
 
 impl LlmMessage {
     pub fn new(role: MessageRole, content: String) -> Result<Self, LlmError> {
-        if content.trim().is_empty() {
+        if role != MessageRole::Assistant && content.trim().is_empty() {
             return Err(LlmError::EmptyMessageContent);
         }
 
