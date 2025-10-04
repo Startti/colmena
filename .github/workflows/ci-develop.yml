@@ -56,10 +56,10 @@ jobs:
         run: cargo test --verbose
 
       - name: Build Python package
-        run: maturin build --release
+        run: maturin build --release --interpreter python${{ matrix.python-version }}
 
       - name: Install Python package
-        run: pip install target/wheels/*.whl
+        run: pip install target/wheels/colmena_ai-*-cp$(echo "${{ matrix.python-version }}" | tr -d '.')-*.whl
 
       - name: Install Python dev dependencies
         run: pip install pytest pytest-asyncio python-dotenv
