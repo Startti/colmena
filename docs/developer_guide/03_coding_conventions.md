@@ -105,43 +105,45 @@ pub struct OpenAiAdapter {
 ```rust
 #[pyclass]
 pub struct ColmenaLlm {
-    container: ServiceContainer,
+    // ...
 }
 
 #[pymethods]
 impl ColmenaLlm {
     #[new]
-    pub fn new() -> Self {
-        Self {
-            container: ServiceContainer::new(),
-        }
+    pub fn new() -> PyResult<Self> {
+        // ...
     }
 
     /// Realizar llamada síncrona a LLM
     ///
     /// Args:
-    ///     messages: Lista de mensajes de conversación
-    ///     provider: Proveedor a usar ('openai', 'gemini', 'anthropic')
-    ///     api_key: API key del proveedor (opcional si está en env)
-    ///     model: Modelo específico a usar (opcional)
-    ///     temperature: Creatividad de la respuesta [0.0-1.0] (opcional)
-    ///     max_tokens: Máximo tokens de respuesta (opcional)
+    ///     messages (list[dict]): Lista de mensajes. Cada mensaje es un diccionario
+    ///         con claves "role" (str) y "content" (str).
+    ///     provider (str): Proveedor a usar ('openai', 'gemini', 'anthropic').
+    ///     api_key (str, optional): API key del proveedor.
+    ///     model (str, optional): Modelo específico a usar.
+    ///     temperature (float, optional): Creatividad de la respuesta [0.0-2.0].
+    ///     max_tokens (int, optional): Máximo de tokens en la respuesta.
+    ///     top_p (float, optional): Nucleus sampling.
     ///
     /// Returns:
     ///     str: Respuesta del LLM
     ///
     /// Raises:
-    ///     LlmException: Si hay error en la llamada
+    ///     LlmException: Si hay un error en la llamada.
     pub fn call(
         &self,
         py: Python,
-        messages: Vec<String>,
+        messages: Vec<&PyDict>,
         provider: &str,
         api_key: Option<String>,
         model: Option<String>,
         temperature: Option<f32>,
         max_tokens: Option<u32>,
         top_p: Option<f32>,
+        frequency_penalty: Option<f32>,
+        presence_penalty: Option<f32>,
     ) -> PyResult<String> {
         // Implementación...
     }
