@@ -1,18 +1,18 @@
-## Descripción
+## Description
 
-<!-- ¿Qué cambia este PR? -->
+<!-- What does this PR change? -->
 
-## Tipo de Cambio
+## Type of Change
 
-- [ ] `feat:` Nueva funcionalidad
-- [ ] `fix:` Corrección de bug
-- [ ] `refactor:` Refactorización
-- [ ] `docs:` Documentación
+- [ ] `feat:` New feature
+- [ ] `fix:` Bug fix
+- [ ] `refactor:` Code refactoring
+- [ ] `docs:` Documentation
 - [ ] `test:` Tests
-- [ ] `chore:` Otros
+- [ ] `chore:` Other
 
 ## Checklist
 
-- [ ] Tests pasan (`cargo test`)
-- [ ] Código formateado (`cargo fmt`)
-- [ ] Sin warnings de clippy (`cargo clippy`)
+- [ ] Tests pass (`cargo test`)
+- [ ] Code is formatted (`cargo fmt`)
+- [ ] No clippy warnings (`cargo clippy`)
