@@ -40,6 +40,15 @@ pub enum LlmError {
     #[error("Message content cannot be empty")]
     EmptyMessageContent,
 
+    #[error(
+        "Consecutive messages with the same role are not supported. Role '{role}' at indices {index1} and {index2}"
+    )]
+    ConsecutiveRoles {
+        role: String,
+        index1: usize,
+        index2: usize,
+    },
+
     #[error("Invalid message role: {role}")]
     InvalidMessageRole { role: String },
 
