@@ -1,4 +1,4 @@
-use crate::llm::domain::{LlmConfig, LlmError, LlmMessage, LlmRequestId, MessageRole};
+use crate::llm::domain::{LlmConfig, LlmError, LlmMessage, LlmRequestId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

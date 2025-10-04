@@ -4,6 +4,7 @@ use futures::StreamExt;
 use pyo3::prelude::*;
 use pyo3::{create_exception, exceptions::PyException, types::PyDict};
 use std::collections::HashMap;
+use std::str::FromStr;
 
 create_exception!(colmena, LlmException, PyException);
 
@@ -31,6 +32,7 @@ impl ColmenaLlm {
     }
 
     #[pyo3(signature = (messages, provider, api_key=None, model=None, temperature=None, max_tokens=None, top_p=None, frequency_penalty=None, presence_penalty=None))]
+    #[allow(clippy::too_many_arguments)]
     pub fn call(
         &self,
         py: Python,
@@ -107,6 +109,7 @@ impl ColmenaLlm {
     }
 
     #[pyo3(signature = (messages, provider, api_key=None, model=None, temperature=None, max_tokens=None, top_p=None, frequency_penalty=None, presence_penalty=None))]
+    #[allow(clippy::too_many_arguments)]
     pub fn stream(
         &self,
         py: Python,

@@ -26,6 +26,7 @@ impl ConfigResolver {
     }
 
     /// Create LlmConfig with resolved API key
+    #[allow(clippy::too_many_arguments)]
     pub fn create_config(
         provider_kind: ProviderKind,
         api_key: Option<String>,
