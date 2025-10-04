@@ -1,0 +1,119 @@
+name: Validate Conventional Commits
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - staging
+      - main
+
+jobs:
+  validate-commits:
+    name: Validate Commit Messages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate Commits
+        run: |
+          # Get commits to validate
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            # For PRs: validate all commits in the PR
+            COMMITS=$(git log --pretty=format:"%H %s" origin/${{ github.base_ref }}..HEAD)
+          else
+            # For pushes: validate the pushed commits
+            COMMITS=$(git log --pretty=format:"%H %s" ${{ github.event.before }}..${{ github.event.after }})
+          fi
+
+          # Conventional Commits pattern
+          PATTERN='^[a-f0-9]+ (feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?(!)?:.+'
+
+          # Color codes
+          RED='\033[0;31m'
+          GREEN='\033[0;32m'
+          YELLOW='\033[1;33m'
+          NC='\033[0m' # No Color
+
+          INVALID_COMMITS=""
+          VALID_COUNT=0
+          INVALID_COUNT=0
+
+          echo "----------------------------------------"
+          echo "Validating Conventional Commits..."
+          echo "----------------------------------------"
+          echo ""
+
+          # Validate each commit
+          while IFS= read -r commit; do
+            if [ -z "$commit" ]; then
+              continue
+            fi
+
+            HASH=$(echo "$commit" | cut -d' ' -f1 | cut -c1-7)
+            MSG=$(echo "$commit" | cut -d' ' -f2-)
+
+            # Skip merge commits (check multiple patterns)
+            if echo "$MSG" | grep -qE "^Merge (pull request|branch|[a-f0-9]{40})"; then
+              echo -e "${YELLOW}⊘${NC} ${HASH} - Merge commit (skipped)"
+              continue
+            fi
+
+            # Skip merge commits by checking if it's a merge commit with git
+            if git rev-parse --verify ${HASH}^2 >/dev/null 2>&1; then
+              echo -e "${YELLOW}⊘${NC} ${HASH} - Merge commit (skipped)"
+              continue
+            fi
+
+            # Skip version bump commits from CI
+            if echo "$MSG" | grep -qE "^chore: bump version to"; then
+              echo -e "${YELLOW}⊘${NC} ${HASH} - Version bump (skipped)"
+              continue
+            fi
+
+            # Validate commit message
+            if echo "$commit" | grep -qE "$PATTERN"; then
+              echo -e "${GREEN}✓${NC} ${HASH} - ${MSG}"
+              VALID_COUNT=$((VALID_COUNT + 1))
+            else
+              echo -e "${RED}✗${NC} ${HASH} - ${MSG}"
+              INVALID_COMMITS="${INVALID_COMMITS}  - ${HASH}: ${MSG}\n"
+              INVALID_COUNT=$((INVALID_COUNT + 1))
+            fi
+          done <<< "$COMMITS"
+
+          echo ""
+          echo "----------------------------------------"
+          echo "Validation Summary"
+          echo "----------------------------------------"
+          echo -e "${GREEN}Valid commits:${NC}   $VALID_COUNT"
+          echo -e "${RED}Invalid commits:${NC} $INVALID_COUNT"
+          echo ""
+
+          # If there are invalid commits, fail
+          if [ $INVALID_COUNT -gt 0 ]; then
+            echo -e "${RED}❌ Validation Failed!${NC}"
+            echo ""
+            echo "The following commits don't follow Conventional Commits format:"
+            echo ""
+            echo -e "$INVALID_COMMITS"
+            echo ""
+            echo "Expected format:"
+            echo "  <type>[optional scope][!]: <description>"
+            echo ""
+            echo "Valid types:"
+            echo "  feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+            echo ""
+            echo "Examples:"
+            echo "  feat: add new feature"
+            echo "  fix(api): resolve timeout issue"
+            echo "  feat!: breaking change"
+            echo ""
+            echo "See: https://www.conventionalcommits.org/"
+            echo ""
+            exit 1
+          fi
+
+          echo -e "${GREEN}✅ All commits are valid!${NC}"
