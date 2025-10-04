@@ -3,13 +3,15 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "colmena"
-description = "AI Agent Orchestration Library - LLM abstraction layer with multi-provider support"
+name = "colmena-ai"
+description = "High-performance Rust library for multi-provider LLM orchestration with native Python bindings"
 version = "0.1.0"
+readme = "README_PYPI.md"
+license = {text = "MIT"}
 authors = [
-    {name = "Colmena Team"}
+    {name = "Colmena Team", email = "contact@startti.co"}
 ]
-keywords = ["ai", "llm", "openai", "gemini", "anthropic", "rust", "python"]
+keywords = ["ai", "llm", "openai", "gemini", "anthropic", "rust", "python", "streaming", "async"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -39,9 +41,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-org/colmena"
-Repository = "https://github.com/your-org/colmena"
-Documentation = "https://github.com/your-org/colmena/blob/main/README.md"
+Homepage = "https://github.com/Startti/colmena"
+Repository = "https://github.com/Startti/colmena"
+Documentation = "https://github.com/Startti/colmena/tree/main/docs"
+Issues = "https://github.com/Startti/colmena/issues"
 
 [tool.maturin]
 module-name = "colmena"

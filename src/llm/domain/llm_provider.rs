@@ -1,6 +1,7 @@
 use crate::llm::domain::LlmError;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
+use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProviderKind {
@@ -19,8 +20,10 @@ impl Display for ProviderKind {
     }
 }
 
-impl ProviderKind {
-    pub fn from_str(s: &str) -> Result<Self, LlmError> {
+impl FromStr for ProviderKind {
+    type Err = LlmError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "openai" => Ok(ProviderKind::OpenAi),
             "gemini" => Ok(ProviderKind::Gemini),
@@ -30,7 +33,9 @@ impl ProviderKind {
             }),
         }
     }
+}
 
+impl ProviderKind {
     pub fn default_model(&self) -> &'static str {
         match self {
             ProviderKind::OpenAi => "gpt-4o",
