@@ -56,14 +56,11 @@ pub enum LlmError {
     TooManySystemMessages {
         count: usize,
         provider: String,
-        max_allowed: usize
+        max_allowed: usize,
     },
 
     #[error("Provider limitation: {provider} does not support {feature}")]
-    ProviderLimitation {
-        provider: String,
-        feature: String
-    },
+    ProviderLimitation { provider: String, feature: String },
 
     #[error("Internal error: {message}")]
     InternalError { message: String },
@@ -95,12 +92,14 @@ impl LlmError {
     }
 
     pub fn invalid_message_role(role: impl Into<String>) -> Self {
-        Self::InvalidMessageRole {
-            role: role.into(),
-        }
+        Self::InvalidMessageRole { role: role.into() }
     }
 
-    pub fn too_many_system_messages(count: usize, provider: impl Into<String>, max_allowed: usize) -> Self {
+    pub fn too_many_system_messages(
+        count: usize,
+        provider: impl Into<String>,
+        max_allowed: usize,
+    ) -> Self {
         Self::TooManySystemMessages {
             count,
             provider: provider.into(),

@@ -1,6 +1,4 @@
-use crate::llm::domain::{
-    LlmConfig, LlmError, LlmMessage, LlmRepository, LlmRequest, LlmResponse,
-};
+use crate::llm::domain::{LlmConfig, LlmError, LlmMessage, LlmRepository, LlmRequest, LlmResponse};
 use std::sync::Arc;
 
 pub struct LlmCallUseCase {
