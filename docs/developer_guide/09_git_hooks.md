@@ -177,7 +177,7 @@ El CI/CD lee el **último commit** del merge a `main` para determinar el bump:
 | `fix: bug fix` | 1.0.0 → **1.0.1** (PATCH) |
 | `docs: update` | Sin bump |
 
-Ver [CICD_GUIDE.md](../CICD_GUIDE.md) para más detalles.
+Ver [10_cicd_guide.md](./10_cicd_guide.md) para más detalles.
 
 ## Troubleshooting
 
