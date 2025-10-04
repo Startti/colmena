@@ -1,0 +1,137 @@
+name: CD - Main (Release & Publish)
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  test-and-release:
+    name: Test, Version, and Publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install maturin
+        run: pip install maturin[patchelf]
+
+      - name: Check Rust formatting
+        run: cargo fmt -- --check
+
+      - name: Run Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --verbose
+
+      - name: Semantic Version Bump
+        id: version
+        run: |
+          # Get the last commit message
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+
+          # Get current version from pyproject.toml
+          CURRENT_VERSION=$(grep -Po '(?<=^version = ")[^"]*' pyproject.toml)
+
+          # Parse version
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+
+          # Determine version bump based on commit message (Conventional Commits)
+          if echo "$COMMIT_MSG" | grep -qE '^(feat|feature)(\(.+\))?!:|^BREAKING CHANGE:'; then
+            # Major version bump for breaking changes
+            MAJOR=$((MAJOR + 1))
+            MINOR=0
+            PATCH=0
+          elif echo "$COMMIT_MSG" | grep -qE '^(feat|feature)(\(.+\))?:'; then
+            # Minor version bump for new features
+            MINOR=$((MINOR + 1))
+            PATCH=0
+          elif echo "$COMMIT_MSG" | grep -qE '^(fix|bugfix|perf|refactor)(\(.+\))?:'; then
+            # Patch version bump for fixes, performance, and refactoring
+            PATCH=$((PATCH + 1))
+          else
+            # Default to patch bump if no conventional commit prefix
+            PATCH=$((PATCH + 1))
+          fi
+
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "Current version: $CURRENT_VERSION"
+          echo "New version: $NEW_VERSION"
+
+          # Update pyproject.toml
+          sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" pyproject.toml
+
+          # Update Cargo.toml
+          sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" Cargo.toml
+
+      - name: Commit version bump
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add pyproject.toml Cargo.toml
+          git commit -m "chore: bump version to ${{ steps.version.outputs.new_version }}" || echo "No changes to commit"
+          git push
+
+      - name: Create Git Tag
+        run: |
+          git tag -a "v${{ steps.version.outputs.new_version }}" -m "Release v${{ steps.version.outputs.new_version }}"
+          git push origin "v${{ steps.version.outputs.new_version }}"
+
+      - name: Build Python wheels
+        run: maturin build --release --out dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.new_version }}
+          name: Release v${{ steps.version.outputs.new_version }}
+          body: |
+            ## Release v${{ steps.version.outputs.new_version }}
+
+            Automated release from main branch.
+
+            ### Installation
+            ```bash
+            pip install colmena==${{ steps.version.outputs.new_version }}
+            ```
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
