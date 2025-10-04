@@ -36,7 +36,6 @@ impl FromStr for ProviderKind {
 }
 
 impl ProviderKind {
-
     pub fn default_model(&self) -> &'static str {
         match self {
             ProviderKind::OpenAi => "gpt-4o",

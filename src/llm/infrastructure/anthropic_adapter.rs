@@ -188,7 +188,6 @@ impl LlmRepository for AnthropicAdapter {
 
                         for line in text.lines() {
                             if let Some(data) = line.strip_prefix("data: ") {
-
                                 if let Ok(event) =
                                     serde_json::from_str::<AnthropicStreamEvent>(data)
                                 {
