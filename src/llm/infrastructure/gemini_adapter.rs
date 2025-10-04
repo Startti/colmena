@@ -57,33 +57,7 @@ impl GeminiAdapter {
                 }
             }
         }
-
-        // Validar limitaciones de Gemini
-        if system_instructions.len() > 2 {
-            return Err(LlmError::too_many_system_messages(
-                system_instructions.len(),
-                "Gemini",
-                2
-            ));
-        }
-
-        // Check for alternating roles
-        if contents.len() > 1 {
-            for i in 1..contents.len() {
-                if contents[i].role == contents[i-1].role {
-                    return Err(LlmError::provider_limitation(
-                        "Gemini",
-                        format!(
-                            "consecutive messages with the same role are not supported. Role '{}' at index {} and {}",
-                            contents[i].role,
-                            i-1,
-                            i
-                        )
-                    ));
-                }
-            }
-        }
-
+        
         let combined_system_instruction = if system_instructions.is_empty() {
             None
         } else {
