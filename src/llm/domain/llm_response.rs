@@ -118,6 +118,10 @@ pub struct LlmStreamChunk {
     provider: LlmProvider,
     timestamp: DateTime<Utc>,
     is_final: bool,
+    finish_reason: Option<String>,
+    prompt_tokens: Option<u32>,
+    completion_tokens: Option<u32>,
+    total_tokens: Option<u32>,
 }
 
 impl LlmStreamChunk {
@@ -134,7 +138,23 @@ impl LlmStreamChunk {
             provider,
             timestamp: Utc::now(),
             is_final,
+            finish_reason: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
         }
+    }
+
+    pub fn with_finish_reason(mut self, reason: String) -> Self {
+        self.finish_reason = Some(reason);
+        self
+    }
+
+    pub fn with_token_counts(mut self, prompt: u32, completion: u32, total: u32) -> Self {
+        self.prompt_tokens = Some(prompt);
+        self.completion_tokens = Some(completion);
+        self.total_tokens = Some(total);
+        self
     }
 
     // Getters
@@ -164,6 +184,22 @@ impl LlmStreamChunk {
 
     pub fn is_final(&self) -> bool {
         self.is_final
+    }
+
+    pub fn finish_reason(&self) -> Option<&str> {
+        self.finish_reason.as_deref()
+    }
+
+    pub fn prompt_tokens(&self) -> Option<u32> {
+        self.prompt_tokens
+    }
+
+    pub fn completion_tokens(&self) -> Option<u32> {
+        self.completion_tokens
+    }
+
+    pub fn total_tokens(&self) -> Option<u32> {
+        self.total_tokens
     }
 }
 
@@ -231,11 +267,17 @@ mod tests {
             "chunk content".to_string(),
             provider.clone(),
             true,
-        );
+        )
+        .with_finish_reason("stop".to_string())
+        .with_token_counts(10, 20, 30);
 
         assert_eq!(chunk.request_id(), &request_id);
         assert_eq!(chunk.content(), "chunk content");
         assert_eq!(chunk.provider().kind(), provider.kind());
         assert!(chunk.is_final());
+        assert_eq!(chunk.finish_reason(), Some("stop"));
+        assert_eq!(chunk.prompt_tokens(), Some(10));
+        assert_eq!(chunk.completion_tokens(), Some(20));
+        assert_eq!(chunk.total_tokens(), Some(30));
     }
 }

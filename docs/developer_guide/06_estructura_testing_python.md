@@ -1,267 +1,136 @@
-# Estructura de Testing Python
+# 🧪 Estructura de Testing en Python
 
 ## Estructura de Directorios
 
-El proyecto sigue una separación clara entre los tests de Rust y los tests/ejemplos de Python:
+El proyecto mantiene una separación clara entre los tests de Rust y los de Python:
 
 ```
 colmena/
-├── src/                    # Código fuente Rust con tests integrados
-│   └── **/*.rs            # Contiene módulos #[cfg(test)]
-├── tests/                 # Tests de integración Rust (si son necesarios)
+├── src/                    # Código fuente Rust (con sus tests unitarios)
+├── tests/                  # Tests de integración de Rust
 ├── python/
-│   ├── tests/             # Tests Python para los bindings de Python
-│   └── examples/          # Ejemplos y demos de Python
-├── target/                # Artefactos de compilación Rust
-└── docs/                  # Documentación
+│   └── tests/              # Tests de Python para los bindings
+├── target/                 # Artefactos de compilación de Rust
+└── docs/                   # Documentación
 ```
 
-## Detalles de la Estructura Python
+## `python/tests/` - Archivos de Test
 
-### `python/tests/` - Archivos de Test
+Este directorio contiene los tests automatizados para los bindings de Python.
 
-Contiene tests automatizados para los bindings de Python. Sigue estas convenciones de nomenclatura:
+### Archivos de Test Actuales:
 
-- **Nomenclatura de archivos**: `test_<caracteristica>.py`
-- **Nomenclatura de funciones de test**: `test_<caso_especifico>()`
-- **Nomenclatura de clases de test**: `Test<Caracteristica>` (si usas clases)
-
-#### Archivos de Test Actuales:
-
-- `test_basic_roles.py` - Tests básicos de funcionalidad de roles
-- `test_dictionary_interface.py` - Tests de interfaz de mensajes basada en diccionarios
-- `test_gemini_integration.py` - Tests de integración con API real de Gemini
-- `test_mock_provider.py` - Tests usando proveedores simulados
-- `test_role_scenarios.py` - Tests de escenarios complejos de roles
-
-### `python/examples/` - Archivos de Ejemplo
-
-Contiene scripts de demostración y ejemplos de uso:
-
-- **Nomenclatura de archivos**: `<nombre_descriptivo>.py`
-- **Propósito**: Demostrar patrones de uso del mundo real
-
-#### Archivos de Ejemplo Actuales:
-
-- `complete_demo.py` - Demostración completa de todas las características
+-   `test_complex_scenarios.py`: Contiene tests de integración que validan la lógica de negocio principal. Prueba escenarios como la validación de roles de mensajes (ej. no permitir mensajes consecutivos del mismo rol) y realiza llamadas reales a los proveedores para asegurar la correcta integración.
+-   `test_streaming_scenarios.py`: Se enfoca en verificar la funcionalidad de streaming. Asegura que los clientes puedan recibir chunks de respuesta de los proveedores que soportan streaming y que el manejo de errores también funcione en este modo.
 
 ## Categorías de Tests
 
-### 1. Tests Unitarios
-- Prueban funciones y métodos individuales
-- Usan proveedores simulados cuando es posible
-- Ejecución rápida
-- Ubicación: `python/tests/test_<componente>.py`
+Los tests de Python se centran principalmente en la **integración** y los **escenarios de uso**, ya que la lógica de dominio de bajo nivel es probada exhaustivamente en Rust.
 
-### 2. Tests de Integración
-- Prueban interacción con APIs reales de LLM
-- Requieren claves API
-- Pueden ser más lentos
-- Ubicación: `python/tests/test_<proveedor>_integration.py`
+### 1. Tests de Escenarios Complejos
+-   Prueban flujos de trabajo y validaciones de la lógica de negocio.
+-   Verifican el manejo de errores para entradas inválidas (ej. formato de mensajes incorrecto).
+-   Ubicación: `python/tests/test_complex_scenarios.py`
 
-### 3. Tests de Escenarios
-- Prueban flujos de trabajo complejos de múltiples pasos
-- Prueban casos límite y condiciones de error
-- Ubicación: `python/tests/test_<escenario>_scenarios.py`
+### 2. Tests de Streaming
+-   Prueban la funcionalidad de streaming de principio a fin.
+-   Aseguran que los datos se reciben correctamente en formato de chunks.
+-   Ubicación: `python/tests/test_streaming_scenarios.py`
 
 ## Ejecutar Tests
 
 ### Prerrequisitos
 
-1. **Instalar en modo desarrollo**:
-   ```bash
-   # Desde la raíz del proyecto
-   source .venv/bin/activate
-   maturin develop
-   ```
+1.  **Instalar en modo de desarrollo**:
+    ```bash
+    # Desde la raíz del proyecto
+    source .venv/bin/activate
+    uv pip install -e ".[dev]"
+    ```
 
-2. **Configurar variables de entorno** (para tests de integración):
-   ```bash
-   export GEMINI_API_KEY="tu_clave_api_aqui"
-   export OPENAI_API_KEY="tu_clave_api_aqui"
-   # etc.
-   ```
+2.  **Configurar variables de entorno** (para tests de integración):
+    Crea un fichero `.env` en la raíz del proyecto con tus API keys:
+    ```
+    GEMINI_API_KEY="tu_clave_api_aqui"
+    OPENAI_API_KEY="tu_clave_api_aqui"
+    ANTHROPIC_API_KEY="tu_clave_api_aqui"
+    ```
 
 ### Comandos para Ejecutar Tests
 
-```bash
-# Ejecutar todos los tests de Python
-cd python && python -m pytest tests/
-
-# Ejecutar archivo de test específico
-python tests/test_basic_roles.py
-
-# Ejecutar solo tests de integración
-python -m pytest tests/test_*_integration.py
-
-# Ejecutar con salida verbose
-python -m pytest tests/ -v
-
-# Ejecutar función de test específica
-python -m pytest tests/test_basic_roles.py::test_system_role -v
-```
-
-### Ejecutar Ejemplos
+Los tests están diseñados para ser ejecutados directamente como scripts, lo que facilita el debugging.
 
 ```bash
-# Ejecutar demo completo
-python python/examples/complete_demo.py
+# Ejecutar los tests de escenarios complejos
+python python/tests/test_complex_scenarios.py
 
-# Ejecutar cualquier ejemplo
-python python/examples/<nombre_ejemplo>.py
+# Ejecutar los tests de streaming
+python python/tests/test_streaming_scenarios.py
 ```
 
 ## Escribir Nuevos Tests
 
+Sigue la estructura de los ficheros existentes. Cada fichero de test es un script ejecutable que reporta los resultados.
+
 ### Plantilla de Archivo de Test
 
 ```python
-#!/usr/bin/env python3
+#!/usr/-bin/env python3
 """
-Descripción del test aquí
+Descripción del propósito de este fichero de test.
 """
+import os
+from dotenv import load_dotenv
 
-import pytest
-try:
-    import colmena
-except ImportError as e:
-    pytest.skip(f"colmena no disponible: {e}", allow_module_level=True)
-
-class TestNombreCaracteristica:
-    def test_funcionalidad_basica(self):
-        \"\"\"Prueba funcionalidad básica\"\"\"
-        llm = colmena.ColmenaLlm()
-        # Implementación del test
-        assert True
-
-    def test_condiciones_error(self):
-        \"\"\"Prueba manejo de errores\"\"\"
-        llm = colmena.ColmenaLlm()
-        with pytest.raises(colmena.LlmException):
-            # Test de condición de error
-            pass
-
-def test_funcion_independiente():
-    \"\"\"Función de test independiente\"\"\"
-    pass
-
-if __name__ == "__main__":
-    # Permite ejecutar el archivo de test directamente
-    pytest.main([__file__])
-```
-
-### Plantilla de Archivo de Ejemplo
-
-```python
-#!/usr/bin/env python3
-\"\"\"
-Ejemplo: Descripción de lo que este ejemplo demuestra
-\"\"\"
+load_dotenv()
 
 try:
     import colmena
-    print("✓ Colmena importado exitosamente")
+    print("✓ Módulo colmena importado correctamente")
 except ImportError as e:
     print(f"✗ Error importando colmena: {e}")
     exit(1)
 
-def demostrar_caracteristica():
-    \"\"\"Demostrar uso específico de característica\"\"\"
+# --- Configuración de Test ---
+PROVIDER = "gemini"
+MODEL = "gemini-1.5-flash"
+
+# --- Definición de Tests ---
+
+def test_nombre_del_escenario():
+    """Descripción de lo que prueba este test."""
     llm = colmena.ColmenaLlm()
-
-    # Implementación del ejemplo
-    print("🐝 Demostrando característica...")
-
-    # Mostrar patrones de uso
-    print("✅ Demostración de característica completa")
+    messages = [{"role": "user", "content": "Mensaje de prueba"}]
+    
+    try:
+        response = llm.call(messages, provider=PROVIDER, model=MODEL)
+        assert "condicion" in response, "La respuesta no fue la esperada"
+        print("✅ PASSED: El escenario se completó correctamente.")
+        return True
+    except Exception as e:
+        print(f"❌ FAILED: El test falló con un error: {e}")
+        return False
 
 if __name__ == "__main__":
-    demostrar_caracteristica()
+    print("🧪 Ejecutando tests para Escenario X")
+    print("="*60)
+
+    tests = [test_nombre_del_escenario]
+    passed = sum(1 for test in tests if test())
+    total = len(tests)
+
+    print(f"\n🎯 Resultados: {passed}/{total} tests pasados")
+    print("="*60)
+
+    if passed != total:
+        exit(1)
 ```
 
 ## Mejores Prácticas
 
-### Mejores Prácticas de Testing
-
-1. **Independencia de Tests**: Cada test debe ser independiente y no depender de otros tests
-2. **Nombres Claros**: Usar nombres descriptivos que expliquen qué se está probando
-3. **Simular Dependencias Externas**: Usar mocks para APIs externas en tests unitarios
-4. **Probar Casos Límite**: Incluir tests para condiciones de error y casos límite
-5. **Retroalimentación Rápida**: Mantener tests rápidos; usar tests de integración con moderación
-
-### Mejores Prácticas de Ejemplos
-
-1. **Valor Educativo**: Los ejemplos deben enseñar a los usuarios cómo usar la biblioteca
-2. **Escenarios del Mundo Real**: Mostrar patrones de uso prácticos
-3. **Manejo de Errores**: Demostrar manejo adecuado de errores
-4. **Salida Clara**: Proporcionar retroalimentación clara sobre lo que está sucediendo
-5. **Auto-contenidos**: Los ejemplos deben funcionar independientemente
-
-## Integración CI/CD
-
-### Testing Automatizado
-
-Los tests deben ejecutarse automáticamente en:
-- Pull requests
-- Commits a la rama main
-- Ramas de release
-
-### Entornos de Test
-
-- **Tests Unitarios**: Ejecutar en todos los entornos
-- **Tests de Integración**: Ejecutar solo cuando las claves API estén disponibles
-- **Tests de Ejemplos**: Ejecutar para asegurar que los ejemplos funcionen
-
-### Reportes de Test
-
-Generar reportes de cobertura de tests y asegurar:
-- Umbrales mínimos de cobertura
-- Sin regresión en cobertura de tests
-- Reporte claro de fallas de tests
-
-## Solución de Problemas
-
-### Problemas Comunes
-
-1. **Errores de Importación**: Asegurar que `maturin develop` se ejecutó después de cambios en Rust
-2. **Problemas de Clave API**: Verificar variables de entorno para tests de integración
-3. **Problemas de Permisos**: Asegurar que el entorno virtual esté activado
-4. **Problemas de Ruta**: Ejecutar tests desde el directorio correcto
-
-### Tips de Debug
-
-1. **Salida Verbose**: Usar flag `-v` con pytest
-2. **Tests Específicos**: Ejecutar archivos de test individuales para aislar problemas
-3. **Debug con Print**: Agregar declaraciones print para debugging
-4. **Archivos de Log**: Verificar logs de error en directorios temporales
-
-## Estándar de Nomenclatura
-
-### Archivos de Test
-- `test_` + descripción en inglés
-- Usar snake_case
-- Ser específico sobre lo que se prueba
-
-### Archivos de Ejemplo
-- Nombres descriptivos en inglés
-- Sin prefijo especial
-- Usar snake_case
-
-### Funciones
-- `test_` + descripción específica para tests
-- Nombres descriptivos para ejemplos
-- Documentar propósito en docstring
-
-## Estructura Final Implementada
-
-```
-python/
-├── tests/
-│   ├── test_basic_roles.py          # Tests básicos de roles
-│   ├── test_dictionary_interface.py # Tests de interfaz de diccionarios
-│   ├── test_gemini_integration.py   # Tests de integración con Gemini
-│   ├── test_mock_provider.py        # Tests con proveedores simulados
-│   └── test_role_scenarios.py       # Tests de escenarios complejos
-└── examples/
-    └── complete_demo.py             # Demo completo del sistema
+1.  **Independencia**: Cada función de test debe ser independiente.
+2.  **Nombres Claros**: Usa nombres descriptivos que expliquen qué se está probando.
+3.  **Feedback Claro**: Imprime mensajes claros sobre el resultado de cada test (`✅ PASSED` o `❌ FAILED`).
+4.  **API Keys**: No hardcodees API keys. Usa siempre variables de entorno.
+5.  **Salida Anticipada**: Usa `exit(1)` al final del script si algún test falla, para que los sistemas de CI puedan detectar el fallo.
 ```

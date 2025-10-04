@@ -79,6 +79,7 @@ impl ColmenaLlm {
 
                 let role = MessageRole::from_str(&role_str)
                     .map_err(|e| LlmException::new_err(e.to_string()))?;
+
                 LlmMessage::new(role, content).map_err(|e| LlmException::new_err(e.to_string()))
             })
             .collect();
@@ -113,7 +114,7 @@ impl ColmenaLlm {
     pub fn stream(
         &self,
         py: Python,
-        messages: Vec<String>,
+        messages: Vec<&PyDict>,
         provider: &str,
         api_key: Option<String>,
         model: Option<String>,
@@ -128,6 +129,40 @@ impl ColmenaLlm {
             .containers
             .get(provider)
             .ok_or_else(|| LlmException::new_err(format!("Provider {} not found", provider)))?;
+
+        // Parse messages from dictionaries
+        let llm_messages: Result<Vec<LlmMessage>, PyErr> = messages
+            .into_iter()
+            .enumerate()
+            .map(|(i, msg_dict)| {
+                let role_str: String = match msg_dict.get_item("role")? {
+                    Some(role_val) => role_val.extract()?,
+                    None => {
+                        return Err(LlmException::new_err(format!(
+                            "Missing 'role' key in message: {}",
+                            i + 1
+                        )))
+                    }
+                };
+
+                let content: String = match msg_dict.get_item("content")? {
+                    Some(content_val) => content_val.extract()?,
+                    None => {
+                        return Err(LlmException::new_err(format!(
+                            "Missing 'content' key in message {}",
+                            i + 1
+                        )))
+                    }
+                };
+
+                let role = MessageRole::from_str(&role_str)
+                    .map_err(|e| LlmException::new_err(e.to_string()))?;
+
+                LlmMessage::new(role, content).map_err(|e| LlmException::new_err(e.to_string()))
+            })
+            .collect();
+        let llm_messages = llm_messages?;
+
         let config = ConfigResolver::create_config(
             provider_kind,
             api_key,
@@ -142,7 +177,7 @@ impl ColmenaLlm {
         let stream_result = py.allow_threads(move || {
             let rt =
                 tokio::runtime::Runtime::new().map_err(|e| LlmException::new_err(e.to_string()))?;
-            rt.block_on(async { container.llm_stream.execute(messages, config).await })
+            rt.block_on(async { container.llm_stream.execute(llm_messages, config).await })
                 .map_err(PyErr::from)
         })?;
 
