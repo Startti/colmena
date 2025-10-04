@@ -28,7 +28,10 @@ impl GeminiAdapter {
         }
     }
 
-    fn convert_messages(&self, request: &LlmRequest) -> Result<(Option<String>, Vec<GeminiContent>), LlmError> {
+    fn convert_messages(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<(Option<String>, Vec<GeminiContent>), LlmError> {
         let mut system_instructions = Vec::new();
         let mut contents = Vec::new();
 
@@ -57,7 +60,7 @@ impl GeminiAdapter {
                 }
             }
         }
-        
+
         let combined_system_instruction = if system_instructions.is_empty() {
             None
         } else {
@@ -95,9 +98,12 @@ impl GeminiAdapter {
         }
 
         // Disable thinking for Gemini 2.5-flash to reduce token usage
-        generation_config.insert("thinkingConfig".to_string(), json!({
-            "thinkingBudget": 0
-        }));
+        generation_config.insert(
+            "thinkingConfig".to_string(),
+            json!({
+                "thinkingBudget": 0
+            }),
+        );
 
         if !generation_config.is_empty() {
             body["generationConfig"] = json!(generation_config);
@@ -139,9 +145,17 @@ impl LlmRepository for GeminiAdapter {
             )));
         }
 
-        let response_text = response.text().await.map_err(|e| LlmError::parsing_error(e.to_string()))?;
-        let gemini_response: GeminiResponse = serde_json::from_str(&response_text)
-            .map_err(|e| LlmError::parsing_error(format!("JSON parse error: {} - Response: {}", e, response_text)))?;
+        let response_text = response
+            .text()
+            .await
+            .map_err(|e| LlmError::parsing_error(e.to_string()))?;
+        let gemini_response: GeminiResponse =
+            serde_json::from_str(&response_text).map_err(|e| {
+                LlmError::parsing_error(format!(
+                    "JSON parse error: {} - Response: {}",
+                    e, response_text
+                ))
+            })?;
 
         let content = gemini_response
             .candidates
@@ -254,16 +268,18 @@ impl LlmRepository for GeminiAdapter {
                                 let content_text = if let Some(text) = &candidate.content.text {
                                     Some(text.clone())
                                 } else {
-                                    candidate.content.parts.as_ref().and_then(|parts| parts.first()).map(|part| part.text.clone())
+                                    candidate
+                                        .content
+                                        .parts
+                                        .as_ref()
+                                        .and_then(|parts| parts.first())
+                                        .map(|part| part.text.clone())
                                 };
 
                                 if let Some(text) = content_text {
                                     let is_final = candidate.finish_reason.is_some();
                                     return Some(Ok(LlmStreamChunk::new(
-                                        request_id,
-                                        text,
-                                        provider,
-                                        is_final,
+                                        request_id, text, provider, is_final,
                                     )));
                                 }
                             }

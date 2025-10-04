@@ -14,7 +14,11 @@ pub struct LlmResponse {
 }
 
 impl LlmResponse {
-    pub fn new(request_id: LlmRequestId, content: String, provider: LlmProvider) -> Result<Self, crate::llm::domain::LlmError> {
+    pub fn new(
+        request_id: LlmRequestId,
+        content: String,
+        provider: LlmProvider,
+    ) -> Result<Self, crate::llm::domain::LlmError> {
         let message = LlmMessage::assistant(content)?;
         Ok(Self {
             id: LlmResponseId::new(),
@@ -27,7 +31,11 @@ impl LlmResponse {
         })
     }
 
-    pub fn with_message(request_id: LlmRequestId, message: LlmMessage, provider: LlmProvider) -> Self {
+    pub fn with_message(
+        request_id: LlmRequestId,
+        message: LlmMessage,
+        provider: LlmProvider,
+    ) -> Self {
         Self {
             id: LlmResponseId::new(),
             request_id,
@@ -182,7 +190,8 @@ mod tests {
             request_id.clone(),
             "Test content".to_string(),
             provider.clone(),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(response.request_id(), &request_id);
         assert_eq!(response.content(), "Test content");
@@ -202,7 +211,8 @@ mod tests {
             request_id.clone(),
             "Test content".to_string(),
             provider.clone(),
-        ).unwrap()
+        )
+        .unwrap()
         .with_usage(usage.clone())
         .with_finish_reason("stop".to_string());
 
