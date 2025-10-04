@@ -38,7 +38,7 @@ develop (desarrollo) ──────► staging (pre-producción) ───�
 2. **Pre-Release en `staging`**:
    - Merge de `develop` → `staging` para testing de integración
    - Se ejecuta CI completo
-   - Se genera versión pre-release (ej: `0.1.0-rc.20251004.a1b2c3d`)
+   - Se genera versión pre-release (ej: `0.1.0.dev20251004120000`)
    - Se publica a **TestPyPI** para validación
    - Ambiente para QA y testing final
 
@@ -91,8 +91,8 @@ develop (desarrollo) ──────► staging (pre-producción) ───�
 6. **Análisis de código**: `cargo clippy`
 7. **Tests de Rust**: `cargo test`
 8. **🏷️ Generación de versión pre-release**:
-   - Formato: `X.Y.Z-rc.TIMESTAMP.COMMIT`
-   - Ejemplo: `0.1.0-rc.20251004120000.a1b2c3d`
+   - Formato: `X.Y.Z.devTIMESTAMP` (PEP 440 compatible)
+   - Ejemplo: `0.1.0.dev20251004120000`
 9. **Build de wheels de Python**
 10. **📦 Publicación a TestPyPI** (solo en push, no en PR)
 
@@ -398,12 +398,12 @@ En GitHub:
 - Merge cuando esté aprobado
 
 **Post-merge a staging**:
-- Se genera versión pre-release automáticamente (ej: `0.1.0-rc.20251004.a1b2c3d`)
+- Se genera versión pre-release automáticamente (ej: `0.1.0.dev20251004120000`)
 - Se publica a TestPyPI
 - Equipo de QA puede instalar y testear:
   ```bash
   # Instalar desde TestPyPI
-  pip install -i https://test.pypi.org/simple/ colmena==0.1.0-rc.20251004.a1b2c3d
+  pip install -i https://test.pypi.org/simple/ colmena-ai==0.1.0.dev20251004120000
   ```
 
 ### 3. Preparar Release a Producción
