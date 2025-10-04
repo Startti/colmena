@@ -1,6 +1,4 @@
-use crate::llm::domain::{
-    LlmConfig, LlmError, LlmMessage, LlmRepository, LlmRequest, LlmResponse, MessageRole,
-};
+use crate::llm::domain::{LlmConfig, LlmError, LlmMessage, LlmRepository, LlmRequest, LlmResponse};
 use std::sync::Arc;
 
 pub struct LlmCallUseCase {
@@ -14,7 +12,7 @@ impl LlmCallUseCase {
 
     pub async fn execute(
         &self,
-        messages: Vec<String>,
+        messages: Vec<LlmMessage>,
         config: LlmConfig,
     ) -> Result<LlmResponse, LlmError> {
         // 1. Validate input
@@ -22,64 +20,10 @@ impl LlmCallUseCase {
             return Err(LlmError::EmptyMessages);
         }
 
-        // 2. Convert strings to LlmMessage objects
-        let llm_messages: Result<Vec<LlmMessage>, LlmError> =
-            messages.into_iter().map(LlmMessage::user).collect();
+        // 2. Create request
+        let request = LlmRequest::new(messages, config, false)?;
 
-        // 3. Create request
-        let request = LlmRequest::new(llm_messages?, config, false)?;
-
-        // 4. Execute call
-        self.repository.call(request).await
-    }
-
-    pub async fn execute_with_context(
-        &self,
-        system_message: Option<String>,
-        messages: Vec<String>,
-        config: LlmConfig,
-    ) -> Result<LlmResponse, LlmError> {
-        // 1. Validate input
-        if messages.is_empty() {
-            return Err(LlmError::EmptyMessages);
-        }
-
-        // 2. Build message list
-        let mut llm_messages = Vec::new();
-        if let Some(sys_msg) = system_message {
-            llm_messages.push(LlmMessage::system(sys_msg)?);
-        }
-        for msg in messages {
-            llm_messages.push(LlmMessage::user(msg)?);
-        }
-
-        // 3. Create request
-        let request = LlmRequest::new(llm_messages, config, false)?;
-
-        // 4. Execute call
-        self.repository.call(request).await
-    }
-
-    pub async fn execute_conversation(
-        &self,
-        conversation: Vec<(MessageRole, String)>,
-        config: LlmConfig,
-    ) -> Result<LlmResponse, LlmError> {
-        // 1. Validate input
-        if conversation.is_empty() {
-            return Err(LlmError::EmptyMessages);
-        }
-
-        // 2. Convert conversation to LlmMessage objects
-        let llm_messages: Result<Vec<LlmMessage>, LlmError> = conversation
-            .into_iter()
-            .map(|(role, content)| LlmMessage::new(role, content))
-            .collect();
-
-        // 3. Create request
-        let request = LlmRequest::new(llm_messages?, config, false)?;
-
-        // 4. Execute call
+        // 3. Execute call
         self.repository.call(request).await
     }
 }
@@ -104,6 +48,7 @@ mod tests {
     async fn test_execute_success() {
         let mut mock_repo = MockLlmRepository::new();
         let config = create_test_config();
+        let messages = vec![LlmMessage::user("hello".to_string()).unwrap()];
 
         // 1. Setup mock expectation
         mock_repo.expect_call().times(1).returning(|req| {
@@ -116,7 +61,7 @@ mod tests {
 
         // 2. Create use case and execute
         let use_case = LlmCallUseCase::new(Arc::new(mock_repo));
-        let result = use_case.execute(vec!["hello".to_string()], config).await;
+        let result = use_case.execute(messages, config).await;
 
         // 3. Assert success
         assert!(result.is_ok());
@@ -139,6 +84,7 @@ mod tests {
     async fn test_execute_repository_error() {
         let mut mock_repo = MockLlmRepository::new();
         let config = create_test_config();
+        let messages = vec![LlmMessage::user("hello".to_string()).unwrap()];
 
         // 1. Setup mock expectation to return an error
         mock_repo.expect_call().times(1).returning(|_| {
@@ -149,7 +95,7 @@ mod tests {
 
         // 2. Create use case and execute
         let use_case = LlmCallUseCase::new(Arc::new(mock_repo));
-        let result = use_case.execute(vec!["hello".to_string()], config).await;
+        let result = use_case.execute(messages, config).await;
 
         // 3. Assert error
         assert!(result.is_err());

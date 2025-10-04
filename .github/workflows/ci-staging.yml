@@ -1,0 +1,118 @@
+name: CI/CD - Staging
+
+on:
+  push:
+    branches:
+      - staging
+
+jobs:
+  test-and-publish-test:
+    name: Test and Publish to TestPyPI
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install maturin
+        run: pip install maturin[patchelf]
+
+      - name: Check Rust formatting
+        run: cargo fmt -- --check
+
+      - name: Run Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --verbose
+
+      - name: Generate pre-release version
+        id: version
+        run: |
+          # Get current version from pyproject.toml
+          CURRENT_VERSION=$(grep -Po '(?<=^version = ")[^"]*' pyproject.toml)
+
+          # Generate timestamp for pre-release
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          COMMIT_SHORT=$(git rev-parse --short HEAD)
+
+          # Create pre-release versions
+          # Python (PEP 440): X.Y.Z.devTIMESTAMP
+          PYTHON_VERSION="${CURRENT_VERSION}.dev${TIMESTAMP}"
+
+          # Rust (SemVer): X.Y.Z-dev.TIMESTAMP
+          RUST_VERSION="${CURRENT_VERSION}-dev.${TIMESTAMP}"
+
+          echo "pre_version=$PYTHON_VERSION" >> $GITHUB_OUTPUT
+          echo "Python pre-release version: $PYTHON_VERSION"
+          echo "Rust pre-release version: $RUST_VERSION"
+          echo "Commit SHA: $COMMIT_SHORT"
+
+          # Update pyproject.toml with Python-compatible version
+          sed -i "s/^version = \".*\"/version = \"$PYTHON_VERSION\"/" pyproject.toml
+
+          # Update Cargo.toml with Rust-compatible version
+          sed -i "s/^version = \".*\"/version = \"$RUST_VERSION\"/" Cargo.toml
+
+      - name: Build Python wheels
+        run: maturin build --release --out dist
+
+      - name: Publish to TestPyPI
+        if: github.event_name == 'push'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/
+          skip-existing: true
+
+      - name: Comment on PR with installation instructions
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ✅ Staging Build Complete
+
+              **Pre-release version**: \`${{ steps.version.outputs.pre_version }}\`
+
+              To test this version locally:
+              \`\`\`bash
+              pip install maturin
+              git checkout staging
+              maturin develop
+              \`\`\`
+
+              Or wait for TestPyPI publish after merge to staging.`
+            })

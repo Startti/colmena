@@ -3,7 +3,7 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "colmena"
+name = "colmena-ai"
 description = "AI Agent Orchestration Library - LLM abstraction layer with multi-provider support"
 version = "0.1.0"
 authors = [
@@ -35,6 +35,7 @@ dev = [
     "isort",
     "mypy",
     "python-dotenv",
+    "maturin",
 ]
 
 [project.urls]
