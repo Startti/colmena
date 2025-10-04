@@ -2,7 +2,6 @@ use crate::llm::domain::{
     LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk, LlmUsage,
 };
 use async_trait::async_trait;
-use futures::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
@@ -58,7 +57,7 @@ impl OpenAiAdapter {
         }
 
         if let Some(max_tokens) = request.config().max_tokens() {
-            body["max_tokens"] = json!(max_tokens);
+            body["max_completion_tokens"] = json!(max_tokens);
         }
 
         if let Some(top_p) = request.config().top_p() {
@@ -72,6 +71,12 @@ impl OpenAiAdapter {
         if let Some(pres_penalty) = request.config().presence_penalty() {
             body["presence_penalty"] = json!(pres_penalty);
         }
+
+        println!(
+            "[OpenAI Adapter] Request body: {}",
+            serde_json::to_string_pretty(&body)
+                .unwrap_or_else(|_| "Failed to serialize body".to_string())
+        );
 
         body
     }
@@ -93,7 +98,10 @@ impl LlmRepository for OpenAiAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|e| LlmError::network_error(e.to_string()))?;
+            .map_err(|e| {
+                println!("[OpenAI Adapter Call] Network error on send: {}", e);
+                LlmError::network_error(e.to_string())
+            })?;
 
         if !response.status().is_success() {
             let error_text = response
@@ -143,6 +151,7 @@ impl LlmRepository for OpenAiAdapter {
     }
 
     async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
+        println!("[OpenAI Adapter Stream] Entering stream method.");
         let body = self.build_request_body(&request);
 
         let response = self
@@ -156,13 +165,20 @@ impl LlmRepository for OpenAiAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|e| LlmError::network_error(e.to_string()))?;
+            .map_err(|e| {
+                println!("[OpenAI Adapter Stream] Network error on send: {}", e);
+                LlmError::network_error(e.to_string())
+            })?;
 
         if !response.status().is_success() {
             let error_text = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
+            println!(
+                "[OpenAI Adapter Stream] Error response body: {}",
+                &error_text
+            );
             return Err(LlmError::request_failed(format!(
                 "OpenAI API error: {}",
                 error_text
@@ -172,54 +188,60 @@ impl LlmRepository for OpenAiAdapter {
         let request_id = request.id().clone();
         let provider = request.config().provider().clone();
 
-        let stream = response.bytes_stream().filter_map(move |chunk_result| {
-            let request_id = request_id.clone();
-            let provider = provider.clone();
+        let bytes = response.bytes().await.map_err(|e| {
+            println!("[OpenAI Adapter Stream] Error reading bytes: {}", e);
+            LlmError::network_error(e.to_string())
+        })?;
+        let text = String::from_utf8_lossy(&bytes);
+        println!("[OpenAI Adapter Stream] Full response text: {:?}", text);
 
-            async move {
-                match chunk_result {
-                    Ok(bytes) => {
-                        // bytes is of type reqwest::Bytes
-                        let text = String::from_utf8_lossy(&bytes);
+        let mut results = Vec::new();
+        for line in text.lines() {
+            if let Some(stripped) = line.strip_prefix("data: ") {
+                let data = stripped.trim();
+                if data == "[DONE]" {
+                    println!("[OpenAI Adapter Stream] Received [DONE] message.");
+                    break;
+                }
 
-                        // Process lines from the buffer + new text
-                        for line in text.lines() {
-                            if let Some(data) = line.strip_prefix("data: ") {
-                                if data == "[DONE]" {
-                                    return Some(Ok(LlmStreamChunk::new(
-                                        request_id,
-                                        String::new(),
-                                        provider,
-                                        true,
-                                    )));
-                                }
-
-                                if let Ok(chunk_response) =
-                                    serde_json::from_str::<OpenAiStreamChunk>(data)
-                                {
-                                    if let Some(choice) = chunk_response.choices.first() {
-                                        if let Some(content) = &choice.delta.content {
-                                            return Some(Ok(LlmStreamChunk::new(
-                                                request_id,
-                                                content.clone(),
-                                                provider,
-                                                false,
-                                            )));
-                                        }
-                                    }
-                                }
+                match serde_json::from_str::<OpenAiStreamChunk>(data) {
+                    Ok(chunk_response) => {
+                        if let Some(choice) = chunk_response.choices.first() {
+                            let is_final = choice.finish_reason.is_some();
+                            if let Some(content) = &choice.delta.content {
+                                println!(
+                                    "[OpenAI Adapter Stream] Parsed content: '{}', is_final: {}",
+                                    &content, is_final
+                                );
+                                results.push(Ok(LlmStreamChunk::new(
+                                    request_id.clone(),
+                                    content.clone(),
+                                    provider.clone(),
+                                    is_final,
+                                )));
+                            } else if is_final {
+                                // Handle final chunk with no content
+                                results.push(Ok(LlmStreamChunk::new(
+                                    request_id.clone(),
+                                    String::new(),
+                                    provider.clone(),
+                                    true,
+                                )));
                             }
                         }
-                        None
                     }
-                    Err(e) => Some(Err(LlmError::network_error(e.to_string()))),
+                    Err(e) => {
+                        println!(
+                            "[OpenAI Adapter Stream] JSON parsing error for data '{}': {}",
+                            data, e
+                        );
+                    }
                 }
             }
-        });
+        }
 
-        Ok(Box::pin(stream))
+        Ok(Box::pin(futures::stream::iter(results)))
     }
-
     async fn health_check(&self) -> Result<(), LlmError> {
         let response = self
             .client
@@ -273,6 +295,7 @@ struct OpenAiStreamChunk {
 #[derive(Debug, Deserialize)]
 struct OpenAiStreamChoice {
     delta: OpenAiDelta,
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
