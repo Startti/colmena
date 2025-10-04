@@ -6,11 +6,6 @@ on:
       - develop
       - staging
       - main
-  push:
-    branches:
-      - develop
-      - staging
-      - main
 
 jobs:
   validate-commits:
