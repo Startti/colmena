@@ -55,8 +55,14 @@ jobs:
             HASH=$(echo "$commit" | cut -d' ' -f1 | cut -c1-7)
             MSG=$(echo "$commit" | cut -d' ' -f2-)
 
-            # Skip merge commits
-            if echo "$MSG" | grep -qE "^Merge (pull request|branch)"; then
+            # Skip merge commits (check multiple patterns)
+            if echo "$MSG" | grep -qE "^Merge (pull request|branch|[a-f0-9]{40})"; then
+              echo -e "${YELLOW}⊘${NC} ${HASH} - Merge commit (skipped)"
+              continue
+            fi
+
+            # Skip merge commits by checking if it's a merge commit with git
+            if git rev-parse --verify ${HASH}^2 >/dev/null 2>&1; then
               echo -e "${YELLOW}⊘${NC} ${HASH} - Merge commit (skipped)"
               continue
             fi
