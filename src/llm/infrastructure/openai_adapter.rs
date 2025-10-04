@@ -12,6 +12,12 @@ pub struct OpenAiAdapter {
     base_url: String,
 }
 
+impl Default for OpenAiAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OpenAiAdapter {
     pub fn new() -> Self {
         Self {
@@ -78,7 +84,7 @@ impl LlmRepository for OpenAiAdapter {
 
         let response = self
             .client
-            .post(&format!("{}/chat/completions", self.base_url))
+            .post(format!("{}/chat/completions", self.base_url))
             .header(
                 "Authorization",
                 format!("Bearer {}", request.config().api_key()),
@@ -141,7 +147,7 @@ impl LlmRepository for OpenAiAdapter {
 
         let response = self
             .client
-            .post(&format!("{}/chat/completions", self.base_url))
+            .post(format!("{}/chat/completions", self.base_url))
             .header(
                 "Authorization",
                 format!("Bearer {}", request.config().api_key()),
@@ -178,8 +184,7 @@ impl LlmRepository for OpenAiAdapter {
 
                         // Process lines from the buffer + new text
                         for line in text.lines() {
-                            if line.starts_with("data: ") {
-                                let data = &line[6..];
+                            if let Some(data) = line.strip_prefix("data: ") {
                                 if data == "[DONE]" {
                                     return Some(Ok(LlmStreamChunk::new(
                                         request_id,
@@ -218,7 +223,7 @@ impl LlmRepository for OpenAiAdapter {
     async fn health_check(&self) -> Result<(), LlmError> {
         let response = self
             .client
-            .get(&format!("{}/models", self.base_url))
+            .get(format!("{}/models", self.base_url))
             .send()
             .await
             .map_err(|e| LlmError::network_error(e.to_string()))?;
