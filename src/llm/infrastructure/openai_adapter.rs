@@ -73,7 +73,11 @@ impl OpenAiAdapter {
             body["presence_penalty"] = json!(pres_penalty);
         }
 
-        println!("[OpenAI Adapter] Request body: {}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| "Failed to serialize body".to_string()));
+        println!(
+            "[OpenAI Adapter] Request body: {}",
+            serde_json::to_string_pretty(&body)
+                .unwrap_or_else(|_| "Failed to serialize body".to_string())
+        );
 
         body
     }
@@ -147,89 +151,98 @@ impl LlmRepository for OpenAiAdapter {
         Ok(response)
     }
 
-        async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
-            println!("[OpenAI Adapter Stream] Entering stream method.");
-            let body = self.build_request_body(&request);
-    
-            let response = self
-                .client
-                .post(&format!("{}/chat/completions", self.base_url))
-                .header(
-                    "Authorization",
-                    format!("Bearer {}", request.config().api_key()),
-                )
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| {
-                    println!("[OpenAI Adapter Stream] Network error on send: {}", e);
-                    LlmError::network_error(e.to_string())
-                })?;
-    
-            if !response.status().is_success() {
-                let error_text = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "Unknown error".to_string());
-                println!("[OpenAI Adapter Stream] Error response body: {}", &error_text);
-                return Err(LlmError::request_failed(format!(
-                    "OpenAI API error: {}",
-                    error_text
-                )));
-            }
-    
-            let request_id = request.id().clone();
-            let provider = request.config().provider().clone();
-    
-            let bytes = response.bytes().await.map_err(|e| {
-                println!("[OpenAI Adapter Stream] Error reading bytes: {}", e);
+    async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
+        println!("[OpenAI Adapter Stream] Entering stream method.");
+        let body = self.build_request_body(&request);
+
+        let response = self
+            .client
+            .post(&format!("{}/chat/completions", self.base_url))
+            .header(
+                "Authorization",
+                format!("Bearer {}", request.config().api_key()),
+            )
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                println!("[OpenAI Adapter Stream] Network error on send: {}", e);
                 LlmError::network_error(e.to_string())
             })?;
-            let text = String::from_utf8_lossy(&bytes);
-            println!("[OpenAI Adapter Stream] Full response text: {:?}", text);
-    
-            let mut results = Vec::new();
-            for line in text.lines() {
-                if line.starts_with("data: ") {
-                    let data = line[6..].trim();
-                    if data == "[DONE]" {
-                        println!("[OpenAI Adapter Stream] Received [DONE] message.");
-                        break;
-                    }
-    
-                    match serde_json::from_str::<OpenAiStreamChunk>(data) {
-                        Ok(chunk_response) => {
-                            if let Some(choice) = chunk_response.choices.first() {
-                                let is_final = choice.finish_reason.is_some();
-                                if let Some(content) = &choice.delta.content {
-                                    println!("[OpenAI Adapter Stream] Parsed content: '{}', is_final: {}", &content, is_final);
-                                    results.push(Ok(LlmStreamChunk::new(
-                                        request_id.clone(),
-                                        content.clone(),
-                                        provider.clone(),
-                                        is_final,
-                                    )));
-                                } else if is_final {
-                                    // Handle final chunk with no content
-                                    results.push(Ok(LlmStreamChunk::new(
-                                        request_id.clone(),
-                                        String::new(),
-                                        provider.clone(),
-                                        true,
-                                    )));
-                                }
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            println!(
+                "[OpenAI Adapter Stream] Error response body: {}",
+                &error_text
+            );
+            return Err(LlmError::request_failed(format!(
+                "OpenAI API error: {}",
+                error_text
+            )));
+        }
+
+        let request_id = request.id().clone();
+        let provider = request.config().provider().clone();
+
+        let bytes = response.bytes().await.map_err(|e| {
+            println!("[OpenAI Adapter Stream] Error reading bytes: {}", e);
+            LlmError::network_error(e.to_string())
+        })?;
+        let text = String::from_utf8_lossy(&bytes);
+        println!("[OpenAI Adapter Stream] Full response text: {:?}", text);
+
+        let mut results = Vec::new();
+        for line in text.lines() {
+            if line.starts_with("data: ") {
+                let data = line[6..].trim();
+                if data == "[DONE]" {
+                    println!("[OpenAI Adapter Stream] Received [DONE] message.");
+                    break;
+                }
+
+                match serde_json::from_str::<OpenAiStreamChunk>(data) {
+                    Ok(chunk_response) => {
+                        if let Some(choice) = chunk_response.choices.first() {
+                            let is_final = choice.finish_reason.is_some();
+                            if let Some(content) = &choice.delta.content {
+                                println!(
+                                    "[OpenAI Adapter Stream] Parsed content: '{}', is_final: {}",
+                                    &content, is_final
+                                );
+                                results.push(Ok(LlmStreamChunk::new(
+                                    request_id.clone(),
+                                    content.clone(),
+                                    provider.clone(),
+                                    is_final,
+                                )));
+                            } else if is_final {
+                                // Handle final chunk with no content
+                                results.push(Ok(LlmStreamChunk::new(
+                                    request_id.clone(),
+                                    String::new(),
+                                    provider.clone(),
+                                    true,
+                                )));
                             }
                         }
-                        Err(e) => {
-                            println!("[OpenAI Adapter Stream] JSON parsing error for data '{}': {}", data, e);
-                        }
+                    }
+                    Err(e) => {
+                        println!(
+                            "[OpenAI Adapter Stream] JSON parsing error for data '{}': {}",
+                            data, e
+                        );
                     }
                 }
             }
-    
-            Ok(Box::pin(futures::stream::iter(results)))
         }
+
+        Ok(Box::pin(futures::stream::iter(results)))
+    }
     async fn health_check(&self) -> Result<(), LlmError> {
         let response = self
             .client
