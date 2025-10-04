@@ -24,10 +24,11 @@ src/
 │   │   ├── llm_response.rs        # Entidad: Response de LLM
 │   │   ├── llm_repository.rs      # Port: Interfaz principal
 │   │   ├── llm_error.rs           # Tipos de error del dominio
+│   │   ├── llm_message.rs         # Entidad: Mensaje individual
 │   │   └── value_objects/         # Value Objects del dominio
 │   │       ├── mod.rs
 │   │       ├── llm_request_id.rs  # ID único de requests
-│   │       └── llm_message.rs     # Mensaje individual
+│   │       └── llm_response_id.rs # ID único de responses
 │   ├── application/               # 🎯 CAPA DE APLICACIÓN
 │   │   ├── mod.rs                 # Exports de aplicación
 │   │   ├── llm_call_use_case.rs   # Caso de uso: llamada síncrona
