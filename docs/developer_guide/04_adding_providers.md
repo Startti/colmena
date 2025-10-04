@@ -9,7 +9,7 @@ pub enum ProviderKind {
     OpenAi,
     Gemini,
     Anthropic,
-    Cohere,        // ← Nuevo proveedor
+    Mistral,        // ← Nuevo proveedor
 }
 
 impl ProviderKind {
@@ -18,7 +18,7 @@ impl ProviderKind {
             "openai" => Ok(Self::OpenAi),
             "gemini" => Ok(Self::Gemini),
             "anthropic" => Ok(Self::Anthropic),
-            "cohere" => Ok(Self::Cohere),        // ← Añadir aquí
+            "mistral" => Ok(Self::Mistral),        // ← Añadir aquí
             _ => Err(LlmError::UnsupportedProvider { provider: s.to_string() }),
         }
     }
@@ -27,128 +27,53 @@ impl ProviderKind {
 
 ### 2. Crear Adapter
 
+Crea un nuevo fichero, por ejemplo `src/llm/infrastructure/mistral_adapter.rs`. Este adaptador debe implementar el trait `LlmRepository`.
+
 ```rust
-// src/llm/infrastructure/cohere_adapter.rs
+// src/llm/infrastructure/mistral_adapter.rs
 use crate::llm::domain::{
-    LlmRepository, LlmRequest, LlmResponse, LlmStreamChunk, LlmError, LlmStream,
-    LlmUsage, MessageRole, LlmProvider,
+    LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmError,
 };
 use async_trait::async_trait;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 
-pub struct CohereAdapter {
+pub struct MistralAdapter {
     client: Client,
     base_url: String,
 }
 
-impl CohereAdapter {
+impl MistralAdapter {
     pub fn new() -> Self {
         Self {
             client: Client::new(),
-            base_url: "https://api.cohere.ai/v1".to_string(),
+            base_url: "https://api.mistral.ai/v1".to_string(),
         }
-    }
-
-    fn convert_messages(&self, request: &LlmRequest) -> String {
-        // Cohere usa un formato diferente - implementar conversión
-        request.messages()
-            .iter()
-            .map(|msg| msg.content())
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 }
 
 #[async_trait]
-impl LlmRepository for CohereAdapter {
+impl LlmRepository for MistralAdapter {
     async fn call(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
-        let url = format!("{}/generate", self.base_url);
-
-        // Preparar request específico de Cohere
-        let body = serde_json::json!({
-            "model": request.config().model(),
-            "prompt": self.convert_messages(&request),
-            "max_tokens": request.config().max_tokens().unwrap_or(1000),
-            "temperature": request.config().temperature().unwrap_or(0.7),
-        });
-
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", request.config().api_key()))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError::network_error(e.to_string()))?;
-
-        if !response.status().is_success() {
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(LlmError::request_failed(format!(
-                "Cohere API error: {}",
-                error_text
-            )));
-        }
-
-        let cohere_response: CohereResponse = response
-            .json()
-            .await
-            .map_err(|e| LlmError::parsing_error(e.to_string()))?;
-
-        // Convertir respuesta de Cohere a formato interno
-        let content = cohere_response.generations
-            .first()
-            .map(|gen| gen.text.clone())
-            .ok_or_else(|| LlmError::parsing_error("No generation in response"))?;
-
-        Ok(LlmResponse::new(
-            request.id().clone(),
-            content,
-            request.config().provider().clone(),
-        ))
+        // 1. Construir el cuerpo de la petición (body) específico para Mistral
+        // 2. Realizar la llamada HTTP con reqwest
+        // 3. Parsear la respuesta del API
+        // 4. Convertir la respuesta a la entidad LlmResponse del dominio
+        todo!("Implementar la llamada para Mistral")
     }
 
     async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
-        // Implementar streaming si Cohere lo soporta
-        todo!("Implementar streaming para Cohere")
+        // Implementar streaming si el API de Mistral lo soporta
+        todo!("Implementar streaming para Mistral")
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {
-        // Test de conectividad simple
-        let url = format!("{}/models", self.base_url);
-        let response = self
-            .client
-            .get(&url)
-            .header("Authorization", "Bearer dummy")
-            .send()
-            .await
-            .map_err(|e| LlmError::network_error(e.to_string()))?;
-
-        if response.status().is_success() || response.status().is_client_error() {
-            Ok(())
-        } else {
-            Err(LlmError::request_failed("Cohere endpoint not available"))
-        }
+        // Implementar una comprobación simple de conectividad
+        todo!("Implementar health check para Mistral")
     }
 
     fn provider_name(&self) -> &'static str {
-        "cohere"
+        "mistral"
     }
-}
-
-// Estructuras para deserialización de respuestas de Cohere
-#[derive(Debug, Deserialize)]
-struct CohereResponse {
-    generations: Vec<CohereGeneration>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CohereGeneration {
-    text: String,
 }
 ```
 
@@ -156,14 +81,15 @@ struct CohereGeneration {
 
 ```rust
 // src/llm/infrastructure/llm_provider_factory.rs
+use crate::llm::infrastructure::MistralAdapter; // ← Importar nuevo adapter
+
 impl LlmProviderFactory {
-    pub fn create_repository(provider: LlmProvider) -> Box<dyn LlmRepository> {
+    pub fn create(provider: ProviderKind) -> Arc<dyn LlmRepository> {
         match provider {
-            LlmProvider::OpenAi => Box::new(OpenAiAdapter::new()),
-            LlmProvider::Gemini => Box::new(GeminiAdapter::new()),
-            LlmProvider::Anthropic => Box::new(AnthropicAdapter::new()),
-            LlmProvider::Cohere => Box::new(CohereAdapter::new()),        // ← Añadir
-            LlmProvider::Huggingface => Box::new(HuggingfaceAdapter::new()), // ← Y aquí
+            ProviderKind::OpenAi => Arc::new(OpenAiAdapter::new()),
+            ProviderKind::Gemini => Arc::new(GeminiAdapter::new()),
+            ProviderKind::Anthropic => Arc::new(AnthropicAdapter::new()),
+            ProviderKind::Mistral => Arc::new(MistralAdapter::new()), // ← Añadir
         }
     }
 }
@@ -173,62 +99,46 @@ impl LlmProviderFactory {
 
 ```rust
 // src/python_bindings/mod.rs
-impl ColmenaLlm {
-    pub fn call(
-        // ... parámetros existentes
-    ) -> PyResult<String> {
-        // Validar provider
-        let provider = match provider {
-            "openai" => LlmProvider::OpenAi,
-            "gemini" => LlmProvider::Gemini,
-            "anthropic" => LlmProvider::Anthropic,
-            "cohere" => LlmProvider::Cohere,           // ← Añadir
-            "huggingface" => LlmProvider::Huggingface, // ← Añadir
-            _ => return Err(LlmException::new_err(format!("Unknown provider: {}", provider))),
-        };
 
-        // Resto de la implementación...
-    }
-}
+// No es necesario modificar los bindings si se usa el ServiceContainerFactory,
+// ya que este puede registrar todos los providers disponibles dinámicamente.
+// Si la lógica es manual, se añadiría aquí:
+
+// let provider_kind = ProviderKind::from_str(provider)?;
+// match provider_kind { ... }
 ```
 
 ### 5. Crear Tests
 
+Añade tests de integración para tu nuevo adaptador en el directorio `tests/`.
+
 ```rust
-// tests/integration/cohere_adapter_test.rs
+// tests/mistral_adapter_test.rs
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::llm::domain::*;
-    use crate::llm::infrastructure::CohereAdapter;
+    use crate::llm::infrastructure::MistralAdapter;
+    use wiremock::{MockServer, Mock, ResponseTemplate};
+    use wiremock::matchers::{method, path};
 
     #[tokio::test]
-    async fn test_cohere_call() {
-        let adapter = CohereAdapter::new();
+    async fn test_mistral_adapter_call_success() {
+        // Iniciar servidor mock con wiremock
+        let server = MockServer::start().await;
 
-        let config = LlmConfig::new()
-            .with_model("command")
-            .with_api_key("test-key");
+        // Configurar una respuesta mock
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions")) // Ajustar al endpoint correcto de Mistral
+            .respond_with(ResponseTemplate::new(200).set_body_json(/* ... */))
+            .mount(&server)
+            .await;
 
-        let request = LlmRequest::new(
-            vec![LlmMessage::user("Test message")],
-            config,
-        );
+        // Crear adaptador apuntando al servidor mock
+        let adapter = MistralAdapter::with_base_url(server.uri());
 
-        // Este test requiere API key válida o mock
-        if let Ok(response) = adapter.call(request).await {
-            assert!(!response.content().is_empty());
-            assert_eq!(response.provider(), &LlmProvider::Cohere);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_cohere_health_check() {
-        let adapter = CohereAdapter::new();
-
-        // Health check no debería requerir API key válida
-        let result = adapter.health_check().await;
-        assert!(result.is_ok());
+        // Ejecutar la llamada y verificar el resultado
+        // ...
     }
 }
 ```
