@@ -22,6 +22,8 @@ GEMINI_PROVIDER = "gemini"
 GEMINI_MODEL = "gemini-2.5-flash"
 OPENAI_PROVIDER = "openai"
 OPENAI_MODEL = "gpt-4o-mini"
+ANTHROPIC_PROVIDER = "anthropic"
+ANTHROPIC_MODEL = "claude-3-haiku-20240307"
 
 
 # --- Streaming Scenarios ---
@@ -114,6 +116,39 @@ async def test_openai_streaming_succeeds():
         print(f"❌ FAILED: OpenAI streaming conversation failed unexpectedly with: {e}")
         return False
 
+async def test_anthropic_streaming_succeeds():
+    """Test a valid streaming conversation with Anthropic succeeds."""
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        print("\n⚠️ SKIPPED: ANTHROPIC_API_KEY not set. Skipping Anthropic test.")
+        return True
+
+    llm = colmena.ColmenaLlm()
+    messages = [
+        {"role": "user", "content": "Write a short haiku about a running stream."},
+    ]
+    try:
+        print("📄 Streaming response (Anthropic):")
+        full_response = ""
+        options = colmena.LlmConfigOptions()
+        options.model = ANTHROPIC_MODEL
+        options.max_tokens = 100
+        stream = await llm.stream(messages=messages, provider=ANTHROPIC_PROVIDER, options=options)
+        async for chunk in stream:
+            print(f"  -> Received chunk: '{chunk}'")
+            full_response += chunk
+
+        if full_response:
+            assert full_response.strip(), "Streamed response content should not be empty."
+            print(f"\n📝 Full response (Anthropic): '{full_response}'")
+            print("✅ PASSED: Anthropic streaming conversation succeeded.")
+            return True
+        else:
+            print("\n❌ FAILED: Anthropic streaming response was empty.")
+            return False
+    except Exception as e:
+        print(f"❌ FAILED: Anthropic streaming conversation failed unexpectedly with: {e}")
+        return False
+
 
 async def main():
     # Check for API key to provide a better error message
@@ -127,13 +162,19 @@ async def main():
         print("    The OpenAI tests will be skipped. Please create a .env file with your key.")
         print("-" * 60)
 
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        print("\n‼️  WARNING: ANTHROPIC_API_KEY environment variable not set.")
+        print("\n    The Anthropic tests will be skipped. Please create a .env file with your key.")
+        print("-" * 60)
+
     print("🧪 Streaming Scenarios Testing")
     print("="*60)
 
     tests = [
         test_valid_streaming_conversation_succeeds,
         test_consecutive_user_messages_streaming_fails,
-        #test_openai_streaming_succeeds,
+        test_openai_streaming_succeeds,
+        test_anthropic_streaming_succeeds,
     ]
 
     passed = 0

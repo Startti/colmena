@@ -82,50 +82,6 @@ pub struct ColmenaLlm {
     containers: HashMap<String, Arc<crate::shared::infrastructure::ServiceContainer>>,
 }
 
-// START ASYNC MOCK STREAMING FOR TESTING
-#[pyclass]
-struct AsyncMockStreamIterator {
-    iter: Arc<Mutex<std::vec::IntoIter<String>>>,
-}
-
-#[pymethods]
-impl AsyncMockStreamIterator {
-    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
-    }
-
-    fn __anext__<'py>(slf: PyRefMut<'_, Self>, py: Python<'py>) -> PyResult<Option<PyObject>> {
-        let iter = Arc::clone(&slf.iter);
-        let future = async move {
-            let mut iter = iter.lock().await;
-            // Simulate I/O delay
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            let next = iter.next();
-            Ok(next)
-        };
-        Ok(Some(future_into_py(py, future)?.into()))
-    }
-}
-// END ASYNC MOCK STREAMING FOR TESTING
-
-// START MOCK STREAMING FOR TESTING
-#[pyclass]
-struct MockStreamIterator {
-    iter: std::vec::IntoIter<String>,
-}
-
-#[pymethods]
-impl MockStreamIterator {
-    fn __iter__(slf: PyRef<Self>) -> PyRef<Self> {
-        slf
-    }
-
-    fn __next__(mut slf: PyRefMut<Self>) -> Option<String> {
-        slf.iter.next()
-    }
-}
-// END MOCK STREAMING FOR TESTING
-
 #[pymethods]
 impl ColmenaLlm {
     #[new]
@@ -285,38 +241,6 @@ impl ColmenaLlm {
         })
         .map(|bound| bound.into())
     }
-
-    // START MOCK STREAMING FOR TESTING
-    pub fn mock_stream(&self, py: Python) -> PyResult<PyObject> {
-        let data = vec![
-            "this".to_string(),
-            "is".to_string(),
-            "an".to_string(),
-            "stremaing".to_string(),
-            "mock".to_string(),
-        ];
-        let iterator = MockStreamIterator {
-            iter: data.into_iter(),
-        };
-        Ok(iterator.into_py(py))
-    }
-    // END MOCK STREAMING FOR TESTING
-
-    // START ASYNC MOCK STREAMING FOR TESTING
-    pub fn mock_stream_async(&self, py: Python) -> PyResult<PyObject> {
-        let data = vec![
-            "this".to_string(),
-            "is".to_string(),
-            "an".to_string(),
-            "async".to_string(),
-            "mock".to_string(),
-        ];
-        let iterator = AsyncMockStreamIterator {
-            iter: Arc::new(Mutex::new(data.into_iter())),
-        };
-        future_into_py(py, async { Ok(iterator) }).map(|bound| bound.into())
-    }
-    // END ASYNC MOCK STREAMING FOR TESTING
 
     pub fn health_check(&self, py: Python, provider: &str) -> PyResult<bool> {
         let container = self
