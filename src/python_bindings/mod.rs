@@ -2,7 +2,11 @@ use crate::llm::domain::{LlmError, LlmMessage, MessageRole, ProviderKind};
 use crate::shared::infrastructure::{ConfigResolver, ServiceContainerFactory};
 use futures::StreamExt;
 use pyo3::prelude::*;
-use pyo3::{create_exception, exceptions::{PyException, PyStopAsyncIteration}, types::PyDict};
+use pyo3::{
+    create_exception,
+    exceptions::{PyException, PyStopAsyncIteration},
+    types::PyDict,
+};
 use pyo3_asyncio_0_21::tokio::future_into_py;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -43,6 +47,33 @@ impl PyLlmStream {
         };
 
         Ok(Some(future_into_py(py, future)?.into()))
+    }
+}
+
+#[pyclass]
+#[derive(Clone, Default)]
+pub struct LlmConfigOptions {
+    #[pyo3(get, set)]
+    pub api_key: Option<String>,
+    #[pyo3(get, set)]
+    pub model: Option<String>,
+    #[pyo3(get, set)]
+    pub temperature: Option<f32>,
+    #[pyo3(get, set)]
+    pub max_tokens: Option<u32>,
+    #[pyo3(get, set)]
+    pub top_p: Option<f32>,
+    #[pyo3(get, set)]
+    pub frequency_penalty: Option<f32>,
+    #[pyo3(get, set)]
+    pub presence_penalty: Option<f32>,
+}
+
+#[pymethods]
+impl LlmConfigOptions {
+    #[new]
+    fn new() -> Self {
+        Default::default()
     }
 }
 
@@ -114,20 +145,13 @@ impl ColmenaLlm {
         Ok(Self { containers })
     }
 
-    #[pyo3(signature = (messages, provider, api_key=None, model=None, temperature=None, max_tokens=None, top_p=None, frequency_penalty=None, presence_penalty=None))]
-    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (messages, provider, options=None))]
     pub fn call(
         &self,
         py: Python,
         messages: Vec<&PyDict>,
         provider: &str,
-        api_key: Option<String>,
-        model: Option<String>,
-        temperature: Option<f32>,
-        max_tokens: Option<u32>,
-        top_p: Option<f32>,
-        frequency_penalty: Option<f32>,
-        presence_penalty: Option<f32>,
+        options: Option<LlmConfigOptions>,
     ) -> PyResult<String> {
         let provider_kind = ProviderKind::from_str(provider)?;
         let container = self
@@ -160,21 +184,23 @@ impl ColmenaLlm {
                     }
                 };
 
-                let role = MessageRole::from_str(&role_str).map_err(|e| LlmException::new_err(e.to_string()))?;
-                
+                let role = MessageRole::from_str(&role_str)
+                    .map_err(|e| LlmException::new_err(e.to_string()))?;
+
                 LlmMessage::new(role, content).map_err(|e| LlmException::new_err(e.to_string()))
             })
             .collect();
 
+        let options = options.unwrap_or_default();
         let config = ConfigResolver::create_config(
             provider_kind,
-            api_key,
-            model,
-            temperature,
-            max_tokens,
-            top_p,
-            frequency_penalty,
-            presence_penalty,
+            options.api_key,
+            options.model,
+            options.temperature,
+            options.max_tokens,
+            options.top_p,
+            options.frequency_penalty,
+            options.presence_penalty,
         )?;
 
         py.allow_threads(move || {
@@ -191,19 +217,13 @@ impl ColmenaLlm {
         })
     }
 
-    #[pyo3(signature = (messages, provider, api_key=None, model=None, temperature=None, max_tokens=None, top_p=None, frequency_penalty=None, presence_penalty=None))]
+    #[pyo3(signature = (messages, provider, options=None))]
     pub fn stream(
         &self,
         py: Python,
         messages: Vec<&PyDict>,
         provider: &str,
-        api_key: Option<String>,
-        model: Option<String>,
-        temperature: Option<f32>,
-        max_tokens: Option<u32>,
-        top_p: Option<f32>,
-        frequency_penalty: Option<f32>,
-        presence_penalty: Option<f32>,
+        options: Option<LlmConfigOptions>,
     ) -> PyResult<PyObject> {
         let provider_kind = ProviderKind::from_str(provider)?;
         let container = self
@@ -245,15 +265,16 @@ impl ColmenaLlm {
             .collect();
         let llm_messages = llm_messages?;
 
+        let options = options.unwrap_or_default();
         let config = ConfigResolver::create_config(
             provider_kind,
-            api_key,
-            model,
-            temperature,
-            max_tokens,
-            top_p,
-            frequency_penalty,
-            presence_penalty,
+            options.api_key,
+            options.model,
+            options.temperature,
+            options.max_tokens,
+            options.top_p,
+            options.frequency_penalty,
+            options.presence_penalty,
         )?;
 
         future_into_py(py, async move {
@@ -300,9 +321,7 @@ impl ColmenaLlm {
         let iterator = AsyncMockStreamIterator {
             iter: Arc::new(Mutex::new(data.into_iter())),
         };
-        future_into_py(py, async {
-            Ok(iterator)
-        }).map(|bound| bound.into())
+        future_into_py(py, async { Ok(iterator) }).map(|bound| bound.into())
     }
     // END ASYNC MOCK STREAMING FOR TESTING
 
@@ -334,6 +353,7 @@ impl ColmenaLlm {
 #[allow(deprecated)]
 fn colmena(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<ColmenaLlm>()?;
+    m.add_class::<LlmConfigOptions>()?;
     m.add("LlmException", _py.get_type_bound::<LlmException>())?;
     Ok(())
 }

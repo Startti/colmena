@@ -36,7 +36,10 @@ async def test_valid_streaming_conversation_succeeds():
     try:
         print("📄 Streaming response:")
         full_response = ""
-        stream = await llm.stream(messages=messages, provider=GEMINI_PROVIDER, model=GEMINI_MODEL, max_tokens=1000)
+        options = colmena.LlmConfigOptions()
+        options.model = GEMINI_MODEL
+        options.max_tokens = 1000
+        stream = await llm.stream(messages=messages, provider=GEMINI_PROVIDER, options=options)
         async for chunk in stream:
             print(f"  -> Received chunk: '{chunk}'")
             full_response += chunk
@@ -61,7 +64,10 @@ async def test_consecutive_user_messages_streaming_fails():
     ]
     try:
         # The generator must be consumed for the error to be triggered.
-        stream = await llm.stream(messages=messages, provider=GEMINI_PROVIDER, model=GEMINI_MODEL, max_tokens=100)
+        options = colmena.LlmConfigOptions()
+        options.model = GEMINI_MODEL
+        options.max_tokens = 100
+        stream = await llm.stream(messages=messages, provider=GEMINI_PROVIDER, options=options)
         async for _ in stream:
             pass  # Consume the generator
         print("❌ FAILED: Consecutive user messages in streaming did not raise an exception.")
@@ -88,7 +94,10 @@ async def test_openai_streaming_succeeds():
     try:
         print("📄 Streaming response (OpenAI):")
         full_response = ""
-        stream = await llm.stream(messages=messages, provider=OPENAI_PROVIDER, model=OPENAI_MODEL, max_tokens=1500)
+        options = colmena.LlmConfigOptions()
+        options.model = OPENAI_MODEL
+        options.max_tokens = 1500
+        stream = await llm.stream(messages=messages, provider=OPENAI_PROVIDER, options=options)
         async for chunk in stream:
             print(f"  -> Received chunk: '{chunk}'")
             full_response += chunk
