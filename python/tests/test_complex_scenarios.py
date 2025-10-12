@@ -20,7 +20,9 @@ except ImportError as e:
 GEMINI_PROVIDER = "gemini"
 GEMINI_MODEL = "gemini-2.5-flash"
 OPENAI_PROVIDER = "openai"
-OPENAI_MODEL = "gpt-5-nano-2025-08-07"
+OPENAI_MODEL = "gpt-4o-mini"
+ANTHROPIC_PROVIDER = "anthropic"
+ANTHROPIC_MODEL = "claude-3-haiku-20240307"
 
 
 # --- Role & Message Validation Tests ---
@@ -35,7 +37,10 @@ def test_valid_alternating_conversation_succeeds():
         {"role": "user", "content": "¿Qué es Rust?"},
     ]
     try:
-        response = llm.call(messages=messages, provider=GEMINI_PROVIDER, model=GEMINI_MODEL, max_tokens=400)
+        options = colmena.LlmConfigOptions()
+        options.model = GEMINI_MODEL
+        options.max_tokens = 400
+        response = llm.call(messages=messages, provider=GEMINI_PROVIDER, options=options)
         print(f"✅ PASSED: Valid alternating conversation succeeded. Response: '{response[:50]}...'")
         return True
     except Exception as e:
@@ -50,7 +55,10 @@ def test_consecutive_user_messages_fails():
         {"role": "user", "content": "Dame un ejemplo simple"}
     ]
     try:
-        llm.call(messages=messages, provider=GEMINI_PROVIDER, model=GEMINI_MODEL, max_tokens=400)
+        options = colmena.LlmConfigOptions()
+        options.model = GEMINI_MODEL
+        options.max_tokens = 400
+        llm.call(messages=messages, provider=GEMINI_PROVIDER, options=options)
         print("❌ FAILED: Consecutive user messages did not raise an exception.")
         return False
     except colmena.LlmException as e:
@@ -70,7 +78,10 @@ def test_consecutive_assistant_messages_fails():
         {"role": "assistant", "content": "Estoy aquí para servirte."}
     ]
     try:
-        llm.call(messages=messages, provider=GEMINI_PROVIDER, model=GEMINI_MODEL, max_tokens=400)
+        options = colmena.LlmConfigOptions()
+        options.model = GEMINI_MODEL
+        options.max_tokens = 400
+        llm.call(messages=messages, provider=GEMINI_PROVIDER, options=options)
         print("❌ FAILED: Consecutive assistant messages did not raise an exception.")
         return False
     except colmena.LlmException as e:
@@ -90,7 +101,10 @@ def test_multiple_system_messages_succeeds():
         {"role": "user", "content": "¿Qué es una variable en programación?"},
     ]
     try:
-        response = llm.call(messages=messages, provider=GEMINI_PROVIDER, model=GEMINI_MODEL, max_tokens=400)
+        options = colmena.LlmConfigOptions()
+        options.model = GEMINI_MODEL
+        options.max_tokens = 400
+        llm.call(messages=messages, provider=GEMINI_PROVIDER, options=options)
         return False
     except Exception as e:
         print(f"✅ PASSED: Consecutive system messages correctly failed with: {e}")
@@ -101,7 +115,10 @@ def test_missing_role_key_fails():
     llm = colmena.ColmenaLlm()
     messages = [{"content": "hola"}]
     try:
-        llm.call(messages=messages, provider=GEMINI_PROVIDER, model=GEMINI_MODEL, max_tokens=400)
+        options = colmena.LlmConfigOptions()
+        options.model = GEMINI_MODEL
+        options.max_tokens = 400
+        llm.call(messages=messages, provider=GEMINI_PROVIDER, options=options)
         print("❌ FAILED: Missing 'role' key did not raise an exception.")
         return False
     except colmena.LlmException as e:
@@ -117,7 +134,10 @@ def test_missing_content_key_fails():
     llm = colmena.ColmenaLlm()
     messages = [{"role": "user"}]
     try:
-        llm.call(messages=messages, provider=GEMINI_PROVIDER, model=GEMINI_MODEL, max_tokens=400)
+        options = colmena.LlmConfigOptions()
+        options.model = GEMINI_MODEL
+        options.max_tokens = 400
+        llm.call(messages=messages, provider=GEMINI_PROVIDER, options=options)
         print("❌ FAILED: Missing 'content' key did not raise an exception.")
         return False
     except colmena.LlmException as e:
@@ -140,12 +160,37 @@ def test_openai_valid_call_succeeds():
         {"role": "user", "content": "What is the capital of France?"},
     ]
     try:
-        response = llm.call(messages=messages, provider=OPENAI_PROVIDER, model=OPENAI_MODEL, max_tokens=4000)
+        options = colmena.LlmConfigOptions()
+        options.model = OPENAI_MODEL
+        options.max_tokens = 4000
+        response = llm.call(messages=messages, provider=OPENAI_PROVIDER, options=options)
         assert response.strip(), "Response content should not be empty."
         print(f"✅ PASSED: OpenAI valid call succeeded. Response: '{response}'")
         return True
     except Exception as e:
         print(f"❌ FAILED: OpenAI valid call failed unexpectedly with: {e}")
+        return False
+
+def test_anthropic_valid_call_succeeds():
+    """Test a valid call to Anthropic succeeds."""
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        print("\n⚠️ SKIPPED: ANTHROPIC_API_KEY not set. Skipping Anthropic test.")
+        return True
+
+    llm = colmena.ColmenaLlm()
+    messages = [
+        {"role": "user", "content": "What are the primary colors?"},
+    ]
+    try:
+        options = colmena.LlmConfigOptions()
+        options.model = ANTHROPIC_MODEL
+        options.max_tokens = 100
+        response = llm.call(messages=messages, provider=ANTHROPIC_PROVIDER, options=options)
+        assert response.strip(), "Response content should not be empty."
+        print(f"✅ PASSED: Anthropic valid call succeeded. Response: '{response}'")
+        return True
+    except Exception as e:
+        print(f"❌ FAILED: Anthropic valid call failed unexpectedly with: {e}")
         return False
 
 if __name__ == "__main__":
@@ -160,6 +205,11 @@ if __name__ == "__main__":
         print("\n    The OpenAI tests will be skipped. Please create a .env file with your key.")
         print("-" * 60)
 
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        print("\n‼️  WARNING: ANTHROPIC_API_KEY environment variable not set.")
+        print("\n    The Anthropic tests will be skipped. Please create a .env file with your key.")
+        print("-" * 60)
+
     print("🧪 Role and Message Validation Testing")
     print("="*60)
 
@@ -171,6 +221,7 @@ if __name__ == "__main__":
         test_multiple_system_messages_succeeds,
         test_missing_content_key_fails,
         test_openai_valid_call_succeeds,
+        test_anthropic_valid_call_succeeds,
     ]
 
     passed = 0
