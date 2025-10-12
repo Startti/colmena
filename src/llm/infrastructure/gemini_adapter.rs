@@ -259,7 +259,10 @@ impl LlmRepository for GeminiAdapter {
         let request_id = request.id().clone();
         let provider = request.config().provider().clone();
 
-        let bytes = response.bytes().await.map_err(|e| LlmError::network_error(e.to_string()))?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| LlmError::network_error(e.to_string()))?;
         let text = String::from_utf8_lossy(&bytes);
 
         let mut results = Vec::new();
@@ -270,7 +273,12 @@ impl LlmRepository for GeminiAdapter {
                     let content_text = if let Some(text) = &candidate.content.text {
                         Some(text.clone())
                     } else {
-                        candidate.content.parts.as_ref().and_then(|parts| parts.first()).map(|part| part.text.clone())
+                        candidate
+                            .content
+                            .parts
+                            .as_ref()
+                            .and_then(|parts| parts.first())
+                            .map(|part| part.text.clone())
                     };
 
                     if let Some(text) = content_text {

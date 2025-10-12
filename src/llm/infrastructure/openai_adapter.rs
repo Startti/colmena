@@ -75,7 +75,11 @@ impl OpenAiAdapter {
             body["presence_penalty"] = json!(pres_penalty);
         }
 
-        println!("[OpenAI Adapter] Request body: {}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| "Failed to serialize body".to_string()));
+        println!(
+            "[OpenAI Adapter] Request body: {}",
+            serde_json::to_string_pretty(&body)
+                .unwrap_or_else(|_| "Failed to serialize body".to_string())
+        );
 
         body
     }
@@ -155,7 +159,7 @@ impl LlmRepository for OpenAiAdapter {
 
         let response = self
             .client
-            .post(&format!("{}/chat/completions", self.base_url))
+            .post(format!("{}/chat/completions", self.base_url))
             .header(
                 "Authorization",
                 format!("Bearer {}", request.config().api_key()),
@@ -174,7 +178,10 @@ impl LlmRepository for OpenAiAdapter {
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            println!("[OpenAI Adapter Stream] Error response body: {}", &error_text);
+            println!(
+                "[OpenAI Adapter Stream] Error response body: {}",
+                &error_text
+            );
             return Err(LlmError::request_failed(format!(
                 "OpenAI API error: {}",
                 error_text
@@ -333,11 +340,10 @@ where
             if let Some(i) = self.buffer.windows(2).position(|w| w == b"\n\n") {
                 let message_bytes = self.buffer.drain(..i + 2).collect::<Vec<u8>>();
                 let msg_str = String::from_utf8_lossy(&message_bytes);
-                
+
                 for line in msg_str.lines() {
-                    if line.starts_with("data: ") {
-                        let data = line[6..].to_string();
-                        return Poll::Ready(Some(Ok(SseEvent::Message(data))));
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        return Poll::Ready(Some(Ok(SseEvent::Message(data.to_string()))));
                     }
                 }
                 // Continue loop if message was parsed but no data field found

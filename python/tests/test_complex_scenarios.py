@@ -35,7 +35,10 @@ def test_valid_alternating_conversation_succeeds():
         {"role": "user", "content": "¿Qué es Rust?"},
     ]
     try:
-        response = llm.call(messages=messages, provider=GEMINI_PROVIDER, model=GEMINI_MODEL, max_tokens=400)
+        options = colmena.LlmConfigOptions()
+        options.model = GEMINI_MODEL
+        options.max_tokens = 400
+        response = llm.call(messages=messages, provider=GEMINI_PROVIDER, options=options)
         print(f"✅ PASSED: Valid alternating conversation succeeded. Response: '{response[:50]}...'")
         return True
     except Exception as e:
@@ -50,7 +53,10 @@ def test_consecutive_user_messages_fails():
         {"role": "user", "content": "Dame un ejemplo simple"}
     ]
     try:
-        llm.call(messages=messages, provider=GEMINI_PROVIDER, model=GEMINI_MODEL, max_tokens=400)
+        options = colmena.LlmConfigOptions()
+        options.model = GEMINI_MODEL
+        options.max_tokens = 400
+        llm.call(messages=messages, provider=GEMINI_PROVIDER, options=options)
         print("❌ FAILED: Consecutive user messages did not raise an exception.")
         return False
     except colmena.LlmException as e:
@@ -70,7 +76,10 @@ def test_consecutive_assistant_messages_fails():
         {"role": "assistant", "content": "Estoy aquí para servirte."}
     ]
     try:
-        llm.call(messages=messages, provider=GEMINI_PROVIDER, model=GEMINI_MODEL, max_tokens=400)
+        options = colmena.LlmConfigOptions()
+        options.model = GEMINI_MODEL
+        options.max_tokens = 400
+        llm.call(messages=messages, provider=GEMINI_PROVIDER, options=options)
         print("❌ FAILED: Consecutive assistant messages did not raise an exception.")
         return False
     except colmena.LlmException as e:
@@ -90,7 +99,10 @@ def test_multiple_system_messages_succeeds():
         {"role": "user", "content": "¿Qué es una variable en programación?"},
     ]
     try:
-        response = llm.call(messages=messages, provider=GEMINI_PROVIDER, model=GEMINI_MODEL, max_tokens=400)
+        options = colmena.LlmConfigOptions()
+        options.model = GEMINI_MODEL
+        options.max_tokens = 400
+        llm.call(messages=messages, provider=GEMINI_PROVIDER, options=options)
         return False
     except Exception as e:
         print(f"✅ PASSED: Consecutive system messages correctly failed with: {e}")
@@ -101,7 +113,10 @@ def test_missing_role_key_fails():
     llm = colmena.ColmenaLlm()
     messages = [{"content": "hola"}]
     try:
-        llm.call(messages=messages, provider=GEMINI_PROVIDER, model=GEMINI_MODEL, max_tokens=400)
+        options = colmena.LlmConfigOptions()
+        options.model = GEMINI_MODEL
+        options.max_tokens = 400
+        llm.call(messages=messages, provider=GEMINI_PROVIDER, options=options)
         print("❌ FAILED: Missing 'role' key did not raise an exception.")
         return False
     except colmena.LlmException as e:
@@ -117,7 +132,10 @@ def test_missing_content_key_fails():
     llm = colmena.ColmenaLlm()
     messages = [{"role": "user"}]
     try:
-        llm.call(messages=messages, provider=GEMINI_PROVIDER, model=GEMINI_MODEL, max_tokens=400)
+        options = colmena.LlmConfigOptions()
+        options.model = GEMINI_MODEL
+        options.max_tokens = 400
+        llm.call(messages=messages, provider=GEMINI_PROVIDER, options=options)
         print("❌ FAILED: Missing 'content' key did not raise an exception.")
         return False
     except colmena.LlmException as e:
@@ -140,7 +158,10 @@ def test_openai_valid_call_succeeds():
         {"role": "user", "content": "What is the capital of France?"},
     ]
     try:
-        response = llm.call(messages=messages, provider=OPENAI_PROVIDER, model=OPENAI_MODEL, max_tokens=4000)
+        options = colmena.LlmConfigOptions()
+        options.model = OPENAI_MODEL
+        options.max_tokens = 4000
+        response = llm.call(messages=messages, provider=OPENAI_PROVIDER, options=options)
         assert response.strip(), "Response content should not be empty."
         print(f"✅ PASSED: OpenAI valid call succeeded. Response: '{response}'")
         return True
