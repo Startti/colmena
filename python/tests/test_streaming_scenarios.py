@@ -19,7 +19,7 @@ except ImportError as e:
 # --- Test Configuration ---
 # Use a fast and cheap model for testing.
 GEMINI_PROVIDER = "gemini"
-GEMINI_MODEL = "gemini-1.5-flash"
+GEMINI_MODEL = "gemini-2.5-flash"
 OPENAI_PROVIDER = "openai"
 OPENAI_MODEL = "gpt-4o-mini"
 
@@ -131,9 +131,9 @@ async def main():
     print("="*60)
 
     tests = [
-        #test_valid_streaming_conversation_succeeds,
-        #test_consecutive_user_messages_streaming_fails,
-        test_openai_streaming_succeeds,
+        test_valid_streaming_conversation_succeeds,
+        test_consecutive_user_messages_streaming_fails,
+        #test_openai_streaming_succeeds,
     ]
 
     passed = 0
