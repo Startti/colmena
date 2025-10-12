@@ -36,7 +36,8 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 
 # Python bindings
-pyo3 = { version = "0.21", features = ["extension-module"] }
+pyo3 = { version = "0.21.2", features = ["extension-module", "macros"] }
+pyo3-asyncio-0-21 = { version = "0.21.0", features = ["tokio-runtime"] }
 
 # Streaming
 futures = "0.3"
@@ -44,6 +45,7 @@ tokio-stream = { version = "0.1", features = ["io-util"] }
 
 # Environment variables
 dotenvy = "0.15"
+bytes = "1.0"
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }
