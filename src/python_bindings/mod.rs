@@ -5,6 +5,7 @@ use pyo3::prelude::*;
 use pyo3::{create_exception, exceptions::{PyException, PyStopAsyncIteration}, types::PyDict};
 use pyo3_asyncio_0_21::tokio::future_into_py;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
