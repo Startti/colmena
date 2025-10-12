@@ -2,9 +2,12 @@ use crate::llm::domain::{
     LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk, LlmUsage,
 };
 use async_trait::async_trait;
+use futures::{Stream, StreamExt, TryStreamExt};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 pub struct OpenAiAdapter {
     client: Client,
@@ -72,12 +75,6 @@ impl OpenAiAdapter {
             body["presence_penalty"] = json!(pres_penalty);
         }
 
-        println!(
-            "[OpenAI Adapter] Request body: {}",
-            serde_json::to_string_pretty(&body)
-                .unwrap_or_else(|_| "Failed to serialize body".to_string())
-        );
-
         body
     }
 }
@@ -98,10 +95,7 @@ impl LlmRepository for OpenAiAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|e| {
-                println!("[OpenAI Adapter Call] Network error on send: {}", e);
-                LlmError::network_error(e.to_string())
-            })?;
+            .map_err(|e| LlmError::network_error(e.to_string()))?;
 
         if !response.status().is_success() {
             let error_text = response
@@ -151,7 +145,6 @@ impl LlmRepository for OpenAiAdapter {
     }
 
     async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
-        println!("[OpenAI Adapter Stream] Entering stream method.");
         let body = self.build_request_body(&request);
 
         let response = self
@@ -165,20 +158,13 @@ impl LlmRepository for OpenAiAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|e| {
-                println!("[OpenAI Adapter Stream] Network error on send: {}", e);
-                LlmError::network_error(e.to_string())
-            })?;
+            .map_err(|e| LlmError::network_error(e.to_string()))?;
 
         if !response.status().is_success() {
             let error_text = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            println!(
-                "[OpenAI Adapter Stream] Error response body: {}",
-                &error_text
-            );
             return Err(LlmError::request_failed(format!(
                 "OpenAI API error: {}",
                 error_text
@@ -188,59 +174,54 @@ impl LlmRepository for OpenAiAdapter {
         let request_id = request.id().clone();
         let provider = request.config().provider().clone();
 
-        let bytes = response.bytes().await.map_err(|e| {
-            println!("[OpenAI Adapter Stream] Error reading bytes: {}", e);
-            LlmError::network_error(e.to_string())
-        })?;
-        let text = String::from_utf8_lossy(&bytes);
-        println!("[OpenAI Adapter Stream] Full response text: {:?}", text);
+        let byte_stream = response.bytes_stream();
 
-        let mut results = Vec::new();
-        for line in text.lines() {
-            if let Some(stripped) = line.strip_prefix("data: ") {
-                let data = stripped.trim();
-                if data == "[DONE]" {
-                    println!("[OpenAI Adapter Stream] Received [DONE] message.");
-                    break;
-                }
-
-                match serde_json::from_str::<OpenAiStreamChunk>(data) {
-                    Ok(chunk_response) => {
-                        if let Some(choice) = chunk_response.choices.first() {
-                            let is_final = choice.finish_reason.is_some();
-                            if let Some(content) = &choice.delta.content {
-                                println!(
-                                    "[OpenAI Adapter Stream] Parsed content: '{}', is_final: {}",
-                                    &content, is_final
-                                );
-                                results.push(Ok(LlmStreamChunk::new(
-                                    request_id.clone(),
-                                    content.clone(),
-                                    provider.clone(),
-                                    is_final,
-                                )));
-                            } else if is_final {
-                                // Handle final chunk with no content
-                                results.push(Ok(LlmStreamChunk::new(
-                                    request_id.clone(),
-                                    String::new(),
-                                    provider.clone(),
-                                    true,
-                                )));
+        let sse_stream = SseParser::new(byte_stream).try_filter_map(move |event| {
+            let request_id = request_id.clone();
+            let provider = provider.clone();
+            let fut = async move {
+                match event {
+                    SseEvent::Message(data) => {
+                        if data == "[DONE]" {
+                            return Ok(None);
+                        }
+                        match serde_json::from_str::<OpenAiStreamChunk>(&data) {
+                            Ok(chunk_response) => {
+                                if let Some(choice) = chunk_response.choices.first() {
+                                    let is_final = choice.finish_reason.is_some();
+                                    if let Some(content) = &choice.delta.content {
+                                        Ok(Some(LlmStreamChunk::new(
+                                            request_id,
+                                            content.clone(),
+                                            provider,
+                                            is_final,
+                                        )))
+                                    } else if is_final {
+                                        Ok(Some(LlmStreamChunk::new(
+                                            request_id,
+                                            String::new(),
+                                            provider,
+                                            true,
+                                        )))
+                                    } else {
+                                        Ok(None)
+                                    }
+                                } else {
+                                    Ok(None)
+                                }
                             }
+                            Err(e) => Err(LlmError::parsing_error(format!(
+                                "Failed to parse stream chunk: {}",
+                                e
+                            ))),
                         }
                     }
-                    Err(e) => {
-                        println!(
-                            "[OpenAI Adapter Stream] JSON parsing error for data '{}': {}",
-                            data, e
-                        );
-                    }
                 }
-            }
-        }
+            };
+            fut
+        });
 
-        Ok(Box::pin(futures::stream::iter(results)))
+        Ok(Box::pin(sse_stream))
     }
     async fn health_check(&self) -> Result<(), LlmError> {
         let response = self
@@ -301,4 +282,72 @@ struct OpenAiStreamChoice {
 #[derive(Debug, Deserialize)]
 struct OpenAiDelta {
     content: Option<String>,
+}
+
+// SSE Parser implementation
+enum SseEvent {
+    Message(String),
+}
+
+struct SseParser<S>
+where
+    S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+{
+    stream: S,
+    buffer: Vec<u8>,
+}
+
+impl<S> SseParser<S>
+where
+    S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+{
+    fn new(stream: S) -> Self {
+        Self {
+            stream,
+            buffer: Vec::new(),
+        }
+    }
+}
+
+impl<S> Stream for SseParser<S>
+where
+    S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+{
+    type Item = Result<SseEvent, LlmError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            // Check for a complete message in the buffer
+            if let Some(i) = self.buffer.windows(2).position(|w| w == b"\n\n") {
+                let message_bytes = self.buffer.drain(..i + 2).collect::<Vec<u8>>();
+                let msg_str = String::from_utf8_lossy(&message_bytes);
+
+                for line in msg_str.lines() {
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        return Poll::Ready(Some(Ok(SseEvent::Message(data.to_string()))));
+                    }
+                }
+                // Continue loop if message was parsed but no data field found
+                continue;
+            }
+
+            // Buffer not ready, poll the underlying stream
+            match self.stream.poll_next_unpin(cx) {
+                Poll::Ready(Some(Ok(chunk))) => {
+                    self.buffer.extend_from_slice(&chunk);
+                    // Loop again to check if a full message is now in the buffer
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    return Poll::Ready(Some(Err(LlmError::network_error(e.to_string()))));
+                }
+                Poll::Ready(None) => {
+                    // Stream is finished. If there's anything left in the buffer, it's an incomplete message.
+                    return Poll::Ready(None);
+                }
+                Poll::Pending => {
+                    return Poll::Pending;
+                }
+            }
+        }
+    }
 }
