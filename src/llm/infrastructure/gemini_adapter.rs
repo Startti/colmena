@@ -282,23 +282,13 @@ impl LlmRepository for GeminiAdapter {
                             .map(|part| part.text.clone())
                     };
 
-                                        if let Some(text) = content_text {
+                    if let Some(text) = content_text {
+                        let is_final = candidate.finish_reason.is_some();
 
-                                            let is_final = candidate.finish_reason.is_some();
-
-                                            return Ok(Some(LlmStreamChunk::new(
-
-                                                request_id,
-
-                                                text,
-
-                                                provider,
-
-                                                is_final,
-
-                                            )));
-
-                                        }
+                        return Ok(Some(LlmStreamChunk::new(
+                            request_id, text, provider, is_final,
+                        )));
+                    }
                 }
                 Ok(None)
             }
@@ -426,15 +416,13 @@ where
                     }
                 }
 
-                                if let Some(end) = end_index {
+                if let Some(end) = end_index {
+                    let json_bytes = self.buffer[start_index..=end].to_vec();
 
-                                    let json_bytes = self.buffer[start_index..=end].to_vec();
+                    self.buffer.drain(..=end);
 
-                                    self.buffer.drain(..=end);
-
-                                    return Poll::Ready(Some(Ok(json_bytes)));
-
-                                }
+                    return Poll::Ready(Some(Ok(json_bytes)));
+                }
             }
 
             match self.stream.poll_next_unpin(cx) {

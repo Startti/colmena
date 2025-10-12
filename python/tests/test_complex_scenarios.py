@@ -20,7 +20,9 @@ except ImportError as e:
 GEMINI_PROVIDER = "gemini"
 GEMINI_MODEL = "gemini-2.5-flash"
 OPENAI_PROVIDER = "openai"
-OPENAI_MODEL = "gpt-5-nano-2025-08-07"
+OPENAI_MODEL = "gpt-4o-mini"
+ANTHROPIC_PROVIDER = "anthropic"
+ANTHROPIC_MODEL = "claude-3-haiku-20240307"
 
 
 # --- Role & Message Validation Tests ---
@@ -169,6 +171,28 @@ def test_openai_valid_call_succeeds():
         print(f"❌ FAILED: OpenAI valid call failed unexpectedly with: {e}")
         return False
 
+def test_anthropic_valid_call_succeeds():
+    """Test a valid call to Anthropic succeeds."""
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        print("\n⚠️ SKIPPED: ANTHROPIC_API_KEY not set. Skipping Anthropic test.")
+        return True
+
+    llm = colmena.ColmenaLlm()
+    messages = [
+        {"role": "user", "content": "What are the primary colors?"},
+    ]
+    try:
+        options = colmena.LlmConfigOptions()
+        options.model = ANTHROPIC_MODEL
+        options.max_tokens = 100
+        response = llm.call(messages=messages, provider=ANTHROPIC_PROVIDER, options=options)
+        assert response.strip(), "Response content should not be empty."
+        print(f"✅ PASSED: Anthropic valid call succeeded. Response: '{response}'")
+        return True
+    except Exception as e:
+        print(f"❌ FAILED: Anthropic valid call failed unexpectedly with: {e}")
+        return False
+
 if __name__ == "__main__":
     # Check for API key to provide a better error message
     if not os.getenv("GEMINI_API_KEY"):
@@ -179,6 +203,11 @@ if __name__ == "__main__":
     if not os.getenv("OPENAI_API_KEY"):
         print("\n‼️  WARNING: OPENAI_API_KEY environment variable not set.")
         print("\n    The OpenAI tests will be skipped. Please create a .env file with your key.")
+        print("-" * 60)
+
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        print("\n‼️  WARNING: ANTHROPIC_API_KEY environment variable not set.")
+        print("\n    The Anthropic tests will be skipped. Please create a .env file with your key.")
         print("-" * 60)
 
     print("🧪 Role and Message Validation Testing")
@@ -192,6 +221,7 @@ if __name__ == "__main__":
         test_multiple_system_messages_succeeds,
         test_missing_content_key_fails,
         test_openai_valid_call_succeeds,
+        test_anthropic_valid_call_succeeds,
     ]
 
     passed = 0
