@@ -3,9 +3,12 @@ use crate::llm::domain::{
     MessageRole,
 };
 use async_trait::async_trait;
+use futures::{Stream, StreamExt, TryStreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 pub struct GeminiAdapter {
     client: Client,
@@ -259,16 +262,14 @@ impl LlmRepository for GeminiAdapter {
         let request_id = request.id().clone();
         let provider = request.config().provider().clone();
 
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| LlmError::network_error(e.to_string()))?;
-        let text = String::from_utf8_lossy(&bytes);
+        let byte_stream = response.bytes_stream();
+        let json_stream = JsonStreamParser::new(byte_stream).try_filter_map(move |json_bytes| {
+            let request_id = request_id.clone();
+            let provider = provider.clone();
+            async move {
+                let chunk_response = serde_json::from_slice::<GeminiResponse>(&json_bytes)
+                    .map_err(|e| LlmError::parsing_error(e.to_string()))?;
 
-        let mut results = Vec::new();
-        let trimmed = text.trim().trim_start_matches('[').trim_end_matches(']');
-        for json_str in trimmed.split(",\r\n") {
-            if let Ok(chunk_response) = serde_json::from_str::<GeminiResponse>(json_str) {
                 if let Some(candidate) = chunk_response.candidates.first() {
                     let content_text = if let Some(text) = &candidate.content.text {
                         Some(text.clone())
@@ -281,20 +282,29 @@ impl LlmRepository for GeminiAdapter {
                             .map(|part| part.text.clone())
                     };
 
-                    if let Some(text) = content_text {
-                        let is_final = candidate.finish_reason.is_some();
-                        results.push(Ok(LlmStreamChunk::new(
-                            request_id.clone(),
-                            text,
-                            provider.clone(),
-                            is_final,
-                        )));
-                    }
-                }
-            }
-        }
+                                        if let Some(text) = content_text {
 
-        Ok(Box::pin(futures::stream::iter(results)))
+                                            let is_final = candidate.finish_reason.is_some();
+
+                                            return Ok(Some(LlmStreamChunk::new(
+
+                                                request_id,
+
+                                                text,
+
+                                                provider,
+
+                                                is_final,
+
+                                            )));
+
+                                        }
+                }
+                Ok(None)
+            }
+        });
+
+        Ok(Box::pin(json_stream))
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {
@@ -369,4 +379,74 @@ struct GeminiUsage {
     prompt_token_count: Option<u32>,
     #[serde(rename = "candidatesTokenCount")]
     candidates_token_count: Option<u32>,
+}
+
+// Custom Stream Parser for Gemini's JSON array stream
+struct JsonStreamParser<S>
+where
+    S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+{
+    stream: S,
+    buffer: Vec<u8>,
+}
+
+impl<S> JsonStreamParser<S>
+where
+    S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+{
+    fn new(stream: S) -> Self {
+        Self {
+            stream,
+            buffer: Vec::new(),
+        }
+    }
+}
+
+impl<S> Stream for JsonStreamParser<S>
+where
+    S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+{
+    type Item = Result<Vec<u8>, LlmError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            if let Some(start_index) = self.buffer.iter().position(|&b| b == b'{') {
+                let mut brace_count = 0;
+                let mut end_index = None;
+
+                for (i, &byte) in self.buffer.iter().enumerate().skip(start_index) {
+                    if byte == b'{' {
+                        brace_count += 1;
+                    } else if byte == b'}' {
+                        brace_count -= 1;
+                        if brace_count == 0 {
+                            end_index = Some(i);
+                            break;
+                        }
+                    }
+                }
+
+                                if let Some(end) = end_index {
+
+                                    let json_bytes = self.buffer[start_index..=end].to_vec();
+
+                                    self.buffer.drain(..=end);
+
+                                    return Poll::Ready(Some(Ok(json_bytes)));
+
+                                }
+            }
+
+            match self.stream.poll_next_unpin(cx) {
+                Poll::Ready(Some(Ok(chunk))) => {
+                    self.buffer.extend_from_slice(&chunk);
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    return Poll::Ready(Some(Err(LlmError::network_error(e.to_string()))));
+                }
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
 }
