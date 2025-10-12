@@ -101,9 +101,6 @@ impl AsyncMockStreamIterator {
             // Simulate I/O delay
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             let next = iter.next();
-            if let Some(ref s) = next {
-                println!("[Rust] Yielding async: {}", s);
-            }
             Ok(next)
         };
         Ok(Some(future_into_py(py, future)?.into()))
@@ -124,11 +121,7 @@ impl MockStreamIterator {
     }
 
     fn __next__(mut slf: PyRefMut<Self>) -> Option<String> {
-        let next = slf.iter.next();
-        if let Some(ref s) = next {
-            println!("[Rust] Yielding: {}", s);
-        }
-        next
+        slf.iter.next()
     }
 }
 // END MOCK STREAMING FOR TESTING
@@ -187,9 +180,6 @@ impl ColmenaLlm {
                 let role = MessageRole::from_str(&role_str)
                     .map_err(|e| LlmException::new_err(e.to_string()))?;
 
-                let role = MessageRole::from_str(&role_str)
-                    .map_err(|e| LlmException::new_err(e.to_string()))?;
-
                 LlmMessage::new(role, content).map_err(|e| LlmException::new_err(e.to_string()))
             })
             .collect();
@@ -240,15 +230,8 @@ impl ColmenaLlm {
             .into_iter()
             .enumerate()
             .map(|(i, msg_dict)| {
-            .map(|(i, msg_dict)| {
                 let role_str: String = match msg_dict.get_item("role")? {
                     Some(role_val) => role_val.extract()?,
-                    None => {
-                        return Err(LlmException::new_err(format!(
-                            "Missing 'role' key in message: {}",
-                            i + 1
-                        )))
-                    }
                     None => {
                         return Err(LlmException::new_err(format!(
                             "Missing 'role' key in message: {}",
@@ -265,16 +248,7 @@ impl ColmenaLlm {
                             i + 1
                         )))
                     }
-                    None => {
-                        return Err(LlmException::new_err(format!(
-                            "Missing 'content' key in message {}",
-                            i + 1
-                        )))
-                    }
                 };
-
-                let role = MessageRole::from_str(&role_str)
-                    .map_err(|e| LlmException::new_err(e.to_string()))?;
 
                 let role = MessageRole::from_str(&role_str)
                     .map_err(|e| LlmException::new_err(e.to_string()))?;
