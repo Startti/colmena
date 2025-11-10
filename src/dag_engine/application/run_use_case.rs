@@ -1,7 +1,7 @@
+use crate::application::ports::NodeRegistryPort;
 use crate::domain::error::DagError;
 use crate::domain::graph::{Edge, Graph};
-use crate::domain::node::{NodeInputs};
-use crate::application::ports::NodeRegistryPort;
+use crate::domain::node::NodeInputs;
 
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -27,7 +27,7 @@ impl DagRunUseCase {
         let execution_order = self.topological_sort(&graph)?;
 
         let mut global_state = Value::Null; // Estado global (usado en M2)
-        
+
         // Almacén para todas las salidas de los nodos.
         // La clave es el "node_id" (ej. "node_a"),
         // el valor es el `Value` que ese nodo produjo.
@@ -35,34 +35,38 @@ impl DagRunUseCase {
 
         // 2. Iterar y ejecutar cada nodo en orden.
         for node_id in &execution_order {
-            let node_config = graph.nodes.get(node_id)
+            let node_config = graph
+                .nodes
+                .get(node_id)
                 // Esto no debería fallar si topo_sort es correcto, pero es buena práctica.
                 .ok_or_else(|| DagError::NodeIdNotFound(node_id.clone()))?;
 
             // 3. Obtener la implementación concreta del nodo desde el registro.
-            let node_impl = self.registry.get_node(&node_config.node_type)
+            let node_impl = self
+                .registry
+                .get_node(&node_config.node_type)
                 .ok_or_else(|| DagError::NodeTypeNotFound(node_config.node_type.clone()))?;
 
             // 4. Construir el `NodeInputs` para este nodo.
             let inputs = self.build_inputs_for(node_id, &graph.edges, &all_outputs)?;
-            
+
             // 5. ¡Ejecutar la lógica del nodo!
-            let output = node_impl.execute(
-                &inputs,
-                &node_config.config,
-                &mut global_state
-            )
-            .await
-            .map_err(|e| DagError::NodeExecution(e.to_string()))?;
+            let output = node_impl
+                .execute(&inputs, &node_config.config, &mut global_state)
+                .await
+                .map_err(|e| DagError::NodeExecution(e.to_string()))?;
 
             // 6. Almacenar la salida del nodo para que los nodos futuros la usen.
             all_outputs.insert(node_id.to_string(), output);
         }
-        
+
         // Retornar la salida del último nodo *en el orden de ejecución*.
         if let Some(last_node_id) = execution_order.last() {
             // Obtiene la salida del último nodo (ej. "log_step") del mapa
-            Ok(all_outputs.get(last_node_id).cloned().unwrap_or(Value::Null))
+            Ok(all_outputs
+                .get(last_node_id)
+                .cloned()
+                .unwrap_or(Value::Null))
         } else {
             // El grafo estaba vacío
             Ok(Value::Null)
@@ -109,7 +113,7 @@ impl DagRunUseCase {
         let mut order = Vec::new();
         while let Some(u) = queue.pop_front() {
             order.push(u.to_string());
-            
+
             if let Some(neighbors) = adj.get(u) {
                 for &v in neighbors {
                     if let Some(degree) = in_degree.get_mut(v) {
@@ -141,24 +145,30 @@ impl DagRunUseCase {
         let mut inputs: NodeInputs = HashMap::new();
 
         // Encontrar todos los bordes que apuntan A este nodo
-        let incoming_edges = all_edges.iter()
+        let incoming_edges = all_edges
+            .iter()
             .filter(|edge| edge.to.starts_with(current_node_id));
 
         for edge in incoming_edges {
             // `edge.to`   -> "current_node_id.input_name"
             // `edge.from` -> "source_node_id.output_name.field"
-            
+
             let parts_to: Vec<&str> = edge.to.splitn(2, '.').collect();
-            if parts_to.len() != 2 { continue; } // Borde mal formado
+            if parts_to.len() != 2 {
+                continue;
+            } // Borde mal formado
             let input_name = parts_to[1]; // ej. "a", "b", "prompt"
 
             let parts_from: Vec<&str> = edge.from.splitn(2, '.').collect();
-            if parts_from.len() == 0 { continue; } // Borde mal formado
-            
+            if parts_from.len() == 0 {
+                continue;
+            } // Borde mal formado
+
             let source_node_id = parts_from[0];
-            
+
             // Obtener el `Value` de salida completo del nodo fuente
-            let source_output_value = all_outputs.get(source_node_id)
+            let source_output_value = all_outputs
+                .get(source_node_id)
                 // Si el output no está listo, es un error de grafo (debería estarlo por el topo-sort)
                 .ok_or_else(|| DagError::NodeIdNotFound(source_node_id.to_string()))?;
 
@@ -170,11 +180,12 @@ impl DagRunUseCase {
                 // El `from` era "source_node_id.output_name" o "source_node_id.field_a.field_b"
                 // Usamos un puntero JSON para seleccionar el sub-campo
                 let json_pointer = parts_from[1].replace('.', "/");
-                source_output_value.pointer(&format!("/{}", json_pointer))
+                source_output_value
+                    .pointer(&format!("/{}", json_pointer))
                     .cloned()
                     .unwrap_or(Value::Null) // Si el campo no existe, pasa Null
             };
-            
+
             inputs.insert(input_name.to_string(), value_to_pass);
         }
 

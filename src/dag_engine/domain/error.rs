@@ -17,7 +17,7 @@ pub enum DagError {
     /// no existe en el mapa de `nodes` del grafo.
     #[error("Nodo con ID '{0}' no encontrado en el grafo.")]
     NodeIdNotFound(String),
-    
+
     /// Un error genérico que envuelve un error de ejecución
     /// devuelto por un `ExecutableNode`.
     #[error("Error de ejecución en el nodo: {0}")]
