@@ -82,7 +82,7 @@ impl DagRunUseCase {
         // Inicializar `in_degree` para todos los nodos
         for node_id in graph.nodes.keys() {
             in_degree.entry(node_id).or_insert(0);
-            adj.entry(node_id).or_insert_with(Vec::new);
+            adj.entry(node_id).or_default();
         }
 
         // Construir la lista de adyacencia y los grados de entrada
@@ -160,7 +160,7 @@ impl DagRunUseCase {
             let input_name = parts_to[1]; // ej. "a", "b", "prompt"
 
             let parts_from: Vec<&str> = edge.from.splitn(2, '.').collect();
-            if parts_from.len() == 0 {
+            if parts_from.is_empty() {
                 continue;
             } // Borde mal formado
 

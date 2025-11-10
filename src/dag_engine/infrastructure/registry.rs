@@ -10,6 +10,12 @@ pub struct HashMapNodeRegistry {
     nodes: HashMap<String, Arc<dyn ExecutableNode>>,
 }
 
+impl Default for HashMapNodeRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HashMapNodeRegistry {
     /// Construye un nuevo registro e inicializa todos los nodos estándar.
     pub fn new() -> Self {
