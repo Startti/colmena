@@ -1,4 +1,4 @@
-use serde_json::{Value};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::error::Error as StdError;
 
@@ -12,7 +12,6 @@ pub type NodeInputs = HashMap<String, Value>;
 /// a través de threads, especialmente con `async`.
 #[async_trait::async_trait]
 pub trait ExecutableNode: Send + Sync {
-    
     /// El método principal que ejecuta la lógica del nodo.
     ///
     /// # Argumentos
