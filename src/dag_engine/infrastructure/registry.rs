@@ -1,6 +1,6 @@
 use crate::application::ports::NodeRegistryPort;
 use crate::domain::node::ExecutableNode;
-use crate::infrastructure::nodes::{debug::*, math::*, trigger::*, http::*}; // Importa nuestros nodos
+use crate::infrastructure::nodes::{debug::*, math::*, trigger::*, http::*, llm::*}; // Importa nuestros nodos
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -38,6 +38,9 @@ impl HashMapNodeRegistry {
         
         // --- Registrar Nodos HTTP ---
         nodes.insert("http_request".to_string(), Arc::new(HttpNode));
+        
+        // --- Registrar Nodos LLM ---
+        nodes.insert("llm_call".to_string(), Arc::new(LlmNode));
 
         Self { nodes }
     }
