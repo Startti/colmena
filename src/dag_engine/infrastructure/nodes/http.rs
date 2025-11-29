@@ -14,10 +14,18 @@ impl ExecutableNode for HttpNode {
         config: &Value,
         _state: &mut Value,
     ) -> Result<Value, Box<dyn StdError>> {
-        // 1. Parse Configuration
-        let base_url = config.get("base_url").and_then(|v| v.as_str()).unwrap_or("");
-        let endpoint = config.get("endpoint").and_then(|v| v.as_str()).unwrap_or("");
-        let method_str = config.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
+        // 1. Parse Configuration (Inputs > Config)
+        let base_url = inputs.get("base_url").and_then(|v| v.as_str())
+            .or_else(|| config.get("base_url").and_then(|v| v.as_str()))
+            .unwrap_or("");
+            
+        let endpoint = inputs.get("endpoint").and_then(|v| v.as_str())
+            .or_else(|| config.get("endpoint").and_then(|v| v.as_str()))
+            .unwrap_or("");
+            
+        let method_str = inputs.get("method").and_then(|v| v.as_str())
+            .or_else(|| config.get("method").and_then(|v| v.as_str()))
+            .unwrap_or("GET");
         
         // 2. Construct URL
         // Handle trailing/leading slashes to avoid double slashes or missing slashes
@@ -33,8 +41,13 @@ impl ExecutableNode for HttpNode {
         let method = Method::from_str(method_str).map_err(|e| format!("Invalid HTTP method '{}': {}", method_str, e))?;
 
         // 3. Prepare Client and Request
-        let client = Client::new();
+        // 3. Prepare Client and Request
+        // Build client forcing HTTP/1.1 to avoid HTTP/2 issues with some APIs
+        let client = Client::builder().http1_only().build()?;
         let mut request_builder = client.request(method, url);
+        
+        // Add a default User-Agent to improve compatibility with some APIs
+        request_builder = request_builder.header("User-Agent", "colmena-http-node/0.1");
 
         // 4. Headers (Config + Inputs)
         // Config headers
@@ -99,6 +112,9 @@ impl ExecutableNode for HttpNode {
                 "query_params": "any (optional)"
             },
             "inputs": {
+                "base_url": "string (optional)",
+                "endpoint": "string (optional)",
+                "method": "string (optional)",
                 "body": "any (optional)",
                 "headers": "map<string, string> (optional)",
                 "query_params": "any (optional)"
