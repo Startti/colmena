@@ -54,6 +54,13 @@ tokio-stream = { version = "0.1", features = ["io-util"] }
 dotenvy = "0.15"
 bytes = "1.0"
 
+# --- NEW FOR MILESTONE 2 ---
+# Web Framework
+axum = "0.7"
+# Tracing/Logging (Optional but recommended for servers)
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }
 mockall = "0.11"

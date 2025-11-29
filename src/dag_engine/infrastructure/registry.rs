@@ -1,6 +1,6 @@
 use crate::application::ports::NodeRegistryPort;
 use crate::domain::node::ExecutableNode;
-use crate::infrastructure::nodes::{debug::*, math::*}; // Importa nuestros nodos
+use crate::infrastructure::nodes::{debug::*, math::*, trigger::*}; // Importa nuestros nodos
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -32,6 +32,9 @@ impl HashMapNodeRegistry {
         nodes.insert("divide".to_string(), Arc::new(DivideNode));
 
         nodes.insert("exponential".to_string(), Arc::new(ExponentialNode));
+
+        // --- Registrar Nodos de Trigger ---   
+        nodes.insert("trigger_webhook".to_string(), Arc::new(TriggerWebhookNode));
 
         Self { nodes }
     }
