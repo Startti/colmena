@@ -1,0 +1,36 @@
+{
+    "nodes": {
+        "my_webhook": {
+            "type": "trigger_webhook",
+            "config": {
+                "path": "/test-http",
+                "method": "POST"
+            }
+        },
+        "http_call": {
+            "type": "http_request",
+            "config": {
+                "base_url": "https://httpbin.org",
+                "endpoint": "/post",
+                "method": "POST",
+                "headers": {
+                    "Content-Type": "application/json",
+                    "X-Custom-Header": "FromColmena"
+                }
+            }
+        },
+        "log_step": {
+            "type": "log"
+        }
+    },
+    "edges": [
+        {
+            "from": "my_webhook.output",
+            "to": "http_call.body"
+        },
+        {
+            "from": "http_call.output",
+            "to": "log_step.input"
+        }
+    ]
+}
