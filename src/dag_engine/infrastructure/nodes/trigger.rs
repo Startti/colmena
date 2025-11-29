@@ -1,0 +1,41 @@
+use crate::domain::node::{ExecutableNode, NodeInputs};
+use serde_json::{json, Value};
+use std::error::Error as StdError;
+
+pub struct TriggerWebhookNode;
+
+#[async_trait::async_trait]
+impl ExecutableNode for TriggerWebhookNode {
+    /// The Trigger's execution logic is simple:
+    /// It takes the `inputs` (which we will inject from the HTTP request body)
+    /// and passes them to the output.
+    async fn execute(&self, inputs: &NodeInputs, config: &Value, _state: &mut Value) -> Result<Value, Box<dyn StdError>> {
+        // For a trigger, the "inputs" ARE the payload from the outside world.
+        // We wrap them in "output" to match our convention.
+        
+        // Check if the payload was injected into the config (by the serve command)
+        let payload = if let Some(p) = config.get("__payload__") {
+            p.clone()
+        } else {
+            // Fallback: use inputs if available (e.g. if not running in serve mode or testing)
+            serde_json::to_value(inputs)?
+        };
+        
+        // We'll return the whole input map as the output object
+        // so downstream nodes can access fields like `trigger.message`.
+        Ok(json!({ "output": payload }))
+    }
+
+    fn schema(&self) -> Value { 
+        json!({
+            "type": "trigger_webhook",
+            "config": {
+                "path": "string", // e.g., "/webhook/test"
+                "method": "string" // e.g., "POST"
+            },
+            "outputs": {
+                "output": "any"
+            }
+        }) 
+    }
+}
