@@ -2,3 +2,4 @@
 pub mod debug;
 pub mod math;
 pub mod trigger;
+pub mod http;
