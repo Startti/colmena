@@ -4,7 +4,6 @@ use colmena::llm::domain::{LlmConfig, LlmMessage, LlmProvider, ProviderKind};
 use colmena::llm::infrastructure::LlmProviderFactory;
 use serde_json::{json, Value};
 use std::error::Error as StdError;
-use std::str::FromStr;
 
 pub struct LlmNode;
 
