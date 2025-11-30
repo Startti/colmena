@@ -61,6 +61,9 @@ axum = "0.7"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
+# Database
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "sqlite", "uuid", "chrono", "macros"] }
+
 [features]
 default = []
 python = ["pyo3", "pyo3-asyncio-0-21"]
