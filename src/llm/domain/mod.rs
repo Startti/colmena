@@ -6,6 +6,8 @@ pub mod llm_provider;
 pub mod llm_repository;
 pub mod llm_error;
 pub mod memory;
+pub mod tools;
+pub mod tool_executor;
 
 pub mod value_objects;
 
@@ -19,3 +21,5 @@ pub use llm_error::LlmError;
 pub use memory::{Conversation, ConversationRepository, ThreadId};
 pub use llm_response::*;
 pub use value_objects::*;
+pub use tools::{ToolDefinition, ToolParameters, ParameterProperty, ToolCall, FunctionCall, ToolResult};
+pub use tool_executor::ToolExecutor;
