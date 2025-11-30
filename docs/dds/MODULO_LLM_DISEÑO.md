@@ -492,4 +492,162 @@ crate-type = ["cdylib", "rlib"]
 | Performance de PyO3 | Baja | Medio | Benchmarking y optimización |
 | Gestión de errores async | Media | Medio | Testing exhaustivo y logging |
 
+## 11. Integración con DAG Engine
+
+### 11.1 Propósito
+
+El módulo LLM se integra con el DAG Engine permitiendo orquestar llamadas a LLMs como parte de workflows complejos. Esto permite:
+- Encadenar múltiples llamadas a LLMs
+- Combinar LLMs con otras operaciones (HTTP, matemáticas, etc.)
+- Configurar LLMs dinámicamente basado en outputs de otros nodos
+- Orquestar pipelines de procesamiento de datos con IA
+
+### 11.2 LlmNode
+
+El `LlmNode` es un adaptador que implementa `ExecutableNode` y expone el módulo LLM al DAG Engine.
+
+```rust
+// src/dag_engine/infrastructure/nodes/llm.rs
+pub struct LlmNode;
+
+#[async_trait::async_trait]
+impl ExecutableNode for LlmNode {
+    async fn execute(
+        &self,
+        inputs: &NodeInputs,
+        config: &Value,
+        _state: &mut Value,
+    ) -> Result<Value, Box<dyn StdError>> {
+        // 1. Resolver configuración (inputs > config)
+        let provider_kind = resolve_provider(inputs, config)?;
+        let api_key = resolve_api_key(inputs, config)?;
+        let model = resolve_model(inputs, config);
+        
+        // 2. Crear provider y configuración LLM
+        let provider = LlmProvider::new(provider_kind, api_key, model)?;
+        let mut llm_config = LlmConfig::new(provider);
+        
+        // Aplicar parámetros opcionales
+        if let Some(temp) = resolve_temperature(inputs, config) {
+            llm_config = llm_config.with_temperature(temp)?;
+        }
+        
+        // 3. Construir mensajes
+        let mut messages = Vec::new();
+        if let Some(system) = resolve_system_message(inputs, config) {
+            messages.push(LlmMessage::system(system)?);
+        }
+        let prompt = resolve_prompt(inputs, config)?;
+        messages.push(LlmMessage::user(prompt)?);
+        
+        // 4. Ejecutar llamada LLM
+        let repository = LlmProviderFactory::create(provider_kind);
+        let use_case = LlmCallUseCase::new(repository);
+        let response = use_case.execute(messages, llm_config).await?;
+        
+        // 5. Retornar output
+        Ok(json!({
+            "output": {
+                "content": response.content(),
+                "usage": response.usage()
+            }
+        }))
+    }
+
+    fn schema(&self) -> Value {
+        json!({
+            "type": "llm_call",
+            "config": {
+                "provider": "string (openai, gemini, anthropic)",
+                "api_key": "string",
+                "model": "string (optional)",
+                "system_message": "string (optional)",
+                "prompt": "string (optional)",
+                "temperature": "number (optional)",
+                "max_tokens": "integer (optional)"
+            },
+            "inputs": {
+                "provider": "string (optional)",
+                "api_key": "string (optional)",
+                "model": "string (optional)",
+                "system_message": "string (optional)",
+                "prompt": "string (optional)",
+                "temperature": "number (optional)",
+                "max_tokens": "integer (optional)"
+            },
+            "outputs": {
+                "content": "string",
+                "usage": "object"
+            }
+        })
+    }
+}
+```
+
+### 11.3 Caso de Uso: Pipeline HTTP → LLM
+
+```json
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/analyze-article",
+        "method": "POST",
+        "test_payload": {
+          "url": "https://api.example.com/article"
+        }
+      }
+    },
+    "fetch_article": {
+      "type": "http_request",
+      "config": {
+        "method": "GET"
+      }
+    },
+    "analyze": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4",
+        "system_message": "You are an expert content analyst.",
+        "max_tokens": 500
+      }
+    },
+    "log_analysis": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger.output.url",
+      "to": "fetch_article.base_url"
+    },
+    {
+      "from": "fetch_article.output.body.content",
+      "to": "analyze.prompt"
+    },
+    {
+      "from": "analyze.output",
+      "to": "log_analysis.input"
+    }
+  ]
+}
+```
+
+### 11.4 Beneficios de la Integración
+
+1. **Composabilidad**: LLMs se combinan fácilmente con otros nodos
+2. **Configuración Dinámica**: Prompts y parámetros desde datos upstream
+3. **Reutilización**: Mismo módulo LLM en Python y DAG Engine
+4. **Testability**: Workflows completos testeables con `test_payload`
+5. **Observabilidad**: Logging unificado de todo el pipeline
+
+### 11.5 Referencias
+
+- [DAG Engine Developer Guide](../developer_guide/12_dag_engine_guide.md)
+- [DAG Engine Design](DAG_ENGINE_DISEÑO.md)
+- [Usage Examples](../examples/USAGE_EXAMPLES.md)
+
 Este diseño proporciona una base sólida para el módulo LLM de Colmena, siguiendo principios de arquitectura hexagonal y permitiendo fácil extensión para futuros proveedores y funcionalidades.

@@ -13,8 +13,13 @@ impl ExecutableNode for TriggerWebhookNode {
         // For a trigger, the "inputs" ARE the payload from the outside world.
         // We wrap them in "output" to match our convention.
         
-        // Check if the payload was injected into the config (by the serve command)
+        // Priority order:
+        // 1. __payload__ (injected by serve command)
+        // 2. test_payload (defined by user for local testing with run command)
+        // 3. inputs (fallback)
         let payload = if let Some(p) = config.get("__payload__") {
+            p.clone()
+        } else if let Some(p) = config.get("test_payload") {
             p.clone()
         } else {
             // Fallback: use inputs if available (e.g. if not running in serve mode or testing)
@@ -31,7 +36,8 @@ impl ExecutableNode for TriggerWebhookNode {
             "type": "trigger_webhook",
             "config": {
                 "path": "string", // e.g., "/webhook/test"
-                "method": "string" // e.g., "POST"
+                "method": "string", // e.g., "POST"
+                "test_payload": "any (optional, for local testing with 'run' command)"
             },
             "outputs": {
                 "output": "any"
