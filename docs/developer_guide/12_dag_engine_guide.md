@@ -85,25 +85,338 @@ Esta capa implementa todos los "Puertos" definidos en las capas `domain` y `appl
 
 ## 🧠 Memoria y Persistencia
 
-El `dag_engine` soporta persistencia de conversaciones para los nodos LLM. Esto permite mantener el contexto entre ejecuciones o pasos.
+El `dag_engine` soporta **persistencia de conversaciones** para los nodos LLM mediante selección dinámica de backend de base de datos. Esto permite mantener el contexto entre múltiples ejecuciones y crear agentes con memoria a largo plazo.
 
-### Configuración
-Para habilitar la memoria, debes configurar la variable de entorno `DATABASE_URL` en tu archivo `.env`.
-- **PostgreSQL**: `postgres://user:pass@localhost/db`
-- **SQLite**: `sqlite://colmena.db`
+### 🎯 Características
 
-### Uso en `llm_call`
-Simplemente añade el campo `thread_id` en la configuración o inputs del nodo.
+- **Selección Dinámica de Backend**: Elige entre SQLite y PostgreSQL por nodo
+- **Variables de Entorno**: Usa `${VAR_NAME}` para configuración segura
+- **Connection Pooling**: Reutilización automática de conexiones
+- **Migraciones Automáticas**: Las tablas se crean automáticamente
+- **Thread-Safe**: Soporte para ejecución concurrente
 
+### 🔧 Configuración
+
+#### Opción 1: SQLite (Desarrollo/Local)
+
+Ideal para desarrollo, testing y aplicaciones single-user.
+
+**Archivo `.env`:**
+```bash
+# No es necesario configurar DATABASE_URL para SQLite
+# Puedes especificar la ruta directamente en el DAG
+```
+
+**En tu DAG:**
 ```json
-"config": {
-  "provider": "openai",
-  "thread_id": "user_session_123",
-  "prompt": "Hola, ¿recuerdas mi nombre?"
+{
+  "type": "llm_call",
+  "config": {
+    "provider": "openai",
+    "api_key": "${OPENAI_API_KEY}",
+    "thread_id": "user_session_123",
+    "connection_url": "sqlite://colmena_memory.db",
+    "prompt": "Hello!"
+  }
 }
 ```
 
-Si `thread_id` está presente y hay una base de datos conectada, el nodo cargará el historial previo y guardará la nueva interacción.
+#### Opción 2: PostgreSQL (Producción)
+
+Ideal para producción, aplicaciones multi-user y escalabilidad.
+
+**Archivo `.env`:**
+```bash
+# PostgreSQL estándar
+DATABASE_URL="postgresql://user:password@localhost:5432/database_name"
+
+# O con el protocolo alternativo
+DATABASE_URL="postgres://user:password@localhost:5432/database_name"
+
+# Ejemplo con Supabase
+DATABASE_URL="postgresql://postgres:password@db.xxxxx.supabase.co:5432/postgres"
+```
+
+**En tu DAG:**
+```json
+{
+  "type": "llm_call",
+  "config": {
+    "provider": "openai",
+    "api_key": "${OPENAI_API_KEY}",
+    "thread_id": "user_session_123",
+    "connection_url": "${DATABASE_URL}",
+    "prompt": "Hello!"
+  }
+}
+```
+
+### 📝 Formatos de Connection URL Soportados
+
+| Base de Datos | Formato | Ejemplo |
+|---------------|---------|---------|
+| SQLite (relativo) | `sqlite://path/to/file.db` | `sqlite://memory.db` |
+| SQLite (absoluto) | `sqlite:///absolute/path/to/file.db` | `sqlite:///var/data/memory.db` |
+| SQLite (memoria) | `sqlite::memory:` | `sqlite::memory:` |
+| PostgreSQL | `postgresql://user:pass@host:port/db` | `postgresql://postgres:pwd@localhost:5432/mydb` |
+| PostgreSQL (alternativo) | `postgres://user:pass@host:port/db` | `postgres://postgres:pwd@localhost:5432/mydb` |
+
+### 🎯 Uso en Nodos `llm_call`
+
+Para habilitar memoria en un nodo LLM, necesitas dos campos:
+
+1. **`thread_id`**: Identificador único de la conversación
+2. **`connection_url`**: URL de conexión a la base de datos
+
+Ambos pueden estar en `config` (estático) o en `inputs` (dinámico).
+
+#### Ejemplo Básico
+
+```json
+{
+  "nodes": {
+    "chat": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-3.5-turbo",
+        "thread_id": "conversation_001",
+        "connection_url": "sqlite://chat.db",
+        "prompt": "Remember: my name is Alice"
+      }
+    }
+  }
+}
+```
+
+### 📚 Ejemplos Completos
+
+#### Ejemplo 1: Memoria con SQLite
+
+Este ejemplo demuestra cómo usar SQLite para persistencia local.
+
+**Archivo:** `tests/memory_sqlite_example.json`
+
+```json
+{
+    "nodes": {
+        "step_1": {
+            "type": "llm_call",
+            "config": {
+                "provider": "openai",
+                "api_key": "${OPENAI_API_KEY}",
+                "model": "gpt-3.5-turbo",
+                "system_message": "You are a helpful assistant with perfect memory.",
+                "thread_id": "sqlite_test_thread_001",
+                "connection_url": "sqlite://colmena_memory.db",
+                "prompt": "My name is Alice and I love programming in Rust."
+            }
+        },
+        "step_2": {
+            "type": "llm_call",
+            "config": {
+                "provider": "openai",
+                "api_key": "${OPENAI_API_KEY}",
+                "model": "gpt-3.5-turbo",
+                "thread_id": "sqlite_test_thread_001",
+                "connection_url": "sqlite://colmena_memory.db",
+                "prompt": "What is my name and what do I love?"
+            }
+        },
+        "log_result": {
+            "type": "log"
+        }
+    },
+    "edges": [
+        {
+            "from": "step_1.output",
+            "to": "step_2.dummy_input"
+        },
+        {
+            "from": "step_2.output",
+            "to": "log_result.input"
+        }
+    ]
+}
+```
+
+**Ejecutar:**
+```bash
+cargo run --bin dag_engine -- run tests/memory_sqlite_example.json
+```
+
+**Resultado esperado:**
+- `step_1` guarda "My name is Alice..." en la base de datos
+- `step_2` recupera el historial y responde correctamente con el nombre
+
+#### Ejemplo 2: Memoria con PostgreSQL
+
+Este ejemplo usa PostgreSQL para producción con variables de entorno.
+
+**Archivo `.env`:**
+```bash
+DATABASE_URL="postgresql://postgres:password@localhost:5432/colmena_memory"
+OPENAI_API_KEY="sk-..."
+```
+
+**Archivo:** `tests/memory_postgres_example.json`
+
+```json
+{
+    "nodes": {
+        "step_1": {
+            "type": "llm_call",
+            "config": {
+                "provider": "openai",
+                "api_key": "${OPENAI_API_KEY}",
+                "model": "gpt-3.5-turbo",
+                "system_message": "You are a helpful assistant with perfect memory.",
+                "thread_id": "postgres_test_thread_001",
+                "connection_url": "${DATABASE_URL}",
+                "prompt": "My favorite color is blue and I work as a software engineer."
+            }
+        },
+        "step_2": {
+            "type": "llm_call",
+            "config": {
+                "provider": "openai",
+                "api_key": "${OPENAI_API_KEY}",
+                "model": "gpt-3.5-turbo",
+                "thread_id": "postgres_test_thread_001",
+                "connection_url": "${DATABASE_URL}",
+                "prompt": "What is my favorite color and what do I do for work?"
+            }
+        },
+        "log_result": {
+            "type": "log"
+        }
+    },
+    "edges": [
+        {
+            "from": "step_1.output",
+            "to": "step_2.dummy_input"
+        },
+        {
+            "from": "step_2.output",
+            "to": "log_result.input"
+        }
+    ]
+}
+```
+
+**Ejecutar:**
+```bash
+cargo run --bin dag_engine -- run tests/memory_postgres_example.json
+```
+
+#### Ejemplo 3: Memoria Dinámica (Thread ID desde Webhook)
+
+Este ejemplo muestra cómo usar diferentes threads por usuario en un servidor.
+
+```json
+{
+  "nodes": {
+    "webhook": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/chat",
+        "method": "POST",
+        "test_payload": {
+          "user_id": "user_123",
+          "message": "What's my name?"
+        }
+      }
+    },
+    "chat": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-3.5-turbo",
+        "connection_url": "${DATABASE_URL}"
+      }
+    },
+    "log_response": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "webhook.output.user_id",
+      "to": "chat.thread_id"
+    },
+    {
+      "from": "webhook.output.message",
+      "to": "chat.prompt"
+    },
+    {
+      "from": "chat.output",
+      "to": "log_response.input"
+    }
+  ]
+}
+```
+
+**Modo Serve:**
+```bash
+cargo run --bin dag_engine -- serve tests/dynamic_memory.json
+```
+
+**Petición HTTP:**
+```bash
+curl -X POST http://localhost:3000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "alice_001", "message": "My name is Alice"}'
+
+curl -X POST http://localhost:3000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "alice_001", "message": "What is my name?"}'
+```
+
+### 🔍 Cómo Funciona Internamente
+
+1. **Primera ejecución con un `thread_id`:**
+   - Se conecta a la base de datos especificada en `connection_url`
+   - Ejecuta migraciones automáticamente (crea tablas si no existen)
+   - Crea un nuevo thread en la base de datos
+   - Guarda el mensaje del usuario y la respuesta del LLM
+
+2. **Ejecuciones subsecuentes con el mismo `thread_id`:**
+   - Reutiliza la conexión del pool (más rápido)
+   - Carga todo el historial de mensajes del thread
+   - Envía el historial completo al LLM para mantener contexto
+   - Guarda el nuevo mensaje y respuesta
+
+3. **Connection Pooling:**
+   - Las conexiones se cachean por `connection_url`
+   - Múltiples nodos pueden compartir la misma conexión
+   - PostgreSQL: hasta 5 conexiones concurrentes
+   - SQLite: 1 conexión (limitación de SQLite)
+
+### ⚠️ Consideraciones Importantes
+
+- **Thread IDs únicos**: Usa IDs únicos por conversación (ej: `user_id`, `session_id`)
+- **Seguridad**: Nunca hardcodees credenciales, usa variables de entorno
+- **SQLite Limitations**: SQLite no soporta escrituras concurrentes, usa PostgreSQL para producción
+- **Migraciones**: Se ejecutan automáticamente en la primera conexión
+- **Costos de LLM**: El historial completo se envía en cada llamada, considera el costo de tokens
+
+### 🐛 Troubleshooting
+
+**Error: "Unsupported database protocol"**
+- Verifica que uses `sqlite://`, `postgres://` o `postgresql://`
+- Revisa que la variable de entorno esté correctamente configurada
+
+**Error: "Failed to connect to Postgres: pool timed out"**
+- Verifica que la base de datos esté accesible
+- Revisa las credenciales en el connection URL
+- Asegúrate de que el firewall permita la conexión
+
+**Error: "Environment variable X not found"**
+- Verifica que el archivo `.env` exista en la raíz del proyecto
+- Asegúrate de que la variable esté definida sin espacios: `VAR=value`
+- El archivo `.env` se carga automáticamente al iniciar el DAG engine
 
 ## 🔐 Variables de Entorno en Configuración
 

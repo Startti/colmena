@@ -1,7 +1,8 @@
 use crate::llm::domain::{ConversationRepository, LlmError};
 use crate::llm::infrastructure::persistence::{PostgresConversationRepository, SqliteConversationRepository};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::sqlite::{SqlitePoolOptions, SqliteConnectOptions};
+use std::str::FromStr;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -45,19 +46,24 @@ impl ConversationRepositoryFactory {
 
             Arc::new(PostgresConversationRepository::new(pool))
         } else if connection_url.starts_with("sqlite://") {
-            let pool = SqlitePoolOptions::new()
-                .max_connections(1)
-                .connect(connection_url)
-                .await
-                .map_err(|e| LlmError::RequestFailed { message: format!("Failed to connect to SQLite: {}", e) })?;
+        
+        let options = SqliteConnectOptions::from_str(connection_url)
+            .map_err(|e| LlmError::RequestFailed { message: format!("Invalid SQLite URL: {}", e) })?
+            .create_if_missing(true);
+        
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .map_err(|e| LlmError::RequestFailed { message: format!("Failed to connect to SQLite: {}", e) })?;
 
-            // Run migrations
-            sqlx::migrate!("./migrations/sqlite")
-                .run(&pool)
-                .await
-                .map_err(|e| LlmError::RequestFailed { message: format!("Migration failed: {}", e) })?;
+        // Run migrations
+        sqlx::migrate!("./migrations/sqlite")
+            .run(&pool)
+            .await
+            .map_err(|e| LlmError::RequestFailed { message: format!("Migration failed: {}", e) })?;
 
-            Arc::new(SqliteConversationRepository::new(pool))
+        Arc::new(SqliteConversationRepository::new(pool))
         } else {
             return Err(LlmError::RequestFailed { 
                 message: format!("Unsupported database protocol in URL: {}", connection_url) 
