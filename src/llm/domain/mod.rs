@@ -17,6 +17,8 @@ pub use llm_config::{LlmConfig, LlmUsage};
 pub use llm_message::{LlmMessage, MessageRole};
 pub use llm_provider::{LlmProvider, ProviderKind};
 pub use llm_repository::{LlmRepository, LlmStream};
+#[cfg(test)]
+pub use llm_repository::MockLlmRepository;
 pub use llm_error::LlmError;
 pub use memory::{Conversation, ConversationRepository, ThreadId};
 pub use llm_response::*;

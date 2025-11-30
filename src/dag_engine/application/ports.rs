@@ -10,4 +10,7 @@ pub trait NodeRegistryPort: Send + Sync {
     /// Busca y retorna una implementación de nodo basada en su
     /// `node_type` (ej. "add", "log").
     fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>>;
+
+    /// Retorna todos los nodos registrados.
+    fn get_all_nodes(&self) -> std::collections::HashMap<String, Arc<dyn ExecutableNode>>;
 }

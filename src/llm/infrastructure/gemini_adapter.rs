@@ -54,6 +54,7 @@ impl GeminiAdapter {
                         parts: Some(vec![GeminiPart {
                             text: Some(message.content().to_string()),
                             function_call: None,
+                            function_response: None,
                         }]),
                         text: None,
                     });
@@ -64,6 +65,26 @@ impl GeminiAdapter {
                         parts: Some(vec![GeminiPart {
                             text: Some(message.content().to_string()),
                             function_call: None,
+                            function_response: None,
+                        }]),
+                        text: None,
+                    });
+                }
+                MessageRole::Tool => {
+                    // Gemini expects function responses in a specific format
+                    // For now, we'll add a placeholder implementation
+                    // TODO: Implement proper function response formatting
+                    contents.push(GeminiContent {
+                        role: "function".to_string(),
+                        parts: Some(vec![GeminiPart {
+                            text: None,
+                            function_call: None,
+                            function_response: Some(serde_json::json!({
+                                "name": "unknown", // We need to store/retrieve the function name
+                                "response": {
+                                    "content": message.content()
+                                }
+                            })),
                         }]),
                         text: None,
                     });
@@ -418,6 +439,8 @@ struct GeminiPart {
     text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "functionCall")]
     function_call: Option<GeminiFunctionCall>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "functionResponse")]
+    function_response: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

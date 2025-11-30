@@ -57,6 +57,15 @@ impl AnthropicAdapter {
                         content: message.content().to_string(),
                     });
                 }
+                MessageRole::Tool => {
+                    // Anthropic uses a specific format for tool results (user role with tool_result content block)
+                    // For now, we'll treat it as a user message with the content
+                    // TODO: Implement proper tool result formatting for Anthropic
+                    messages.push(AnthropicMessage {
+                        role: "user".to_string(),
+                        content: format!("Tool result: {}", message.content()),
+                    });
+                }
             }
         }
 

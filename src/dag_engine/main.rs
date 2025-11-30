@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize Repository Factory
     let repository_factory = Arc::new(ConversationRepositoryFactory::new());
 
-    let registry = Arc::new(HashMapNodeRegistry::new(repository_factory));
+    let registry = HashMapNodeRegistry::new(repository_factory);
     // Envolvemos en Arc para poder compartirlo entre hilos del servidor
     let run_use_case = Arc::new(DagRunUseCase::new(registry));
 

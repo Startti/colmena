@@ -3,6 +3,8 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     thread_id TEXT NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
+    tool_call_id TEXT,
+    tool_calls JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
