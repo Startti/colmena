@@ -1,4 +1,4 @@
-use crate::domain::node::{ExecutableNode, NodeInputs};
+use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use serde_json::{json, Value};
 use std::error::Error as StdError;
 
@@ -29,6 +29,10 @@ impl ExecutableNode for TriggerWebhookNode {
         // We'll return the whole input map as the output object
         // so downstream nodes can access fields like `trigger.message`.
         Ok(json!({ "output": payload }))
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some("Trigger execution with webhook payloads. Acts as an entry point for external events.")
     }
 
     fn schema(&self) -> Value { 

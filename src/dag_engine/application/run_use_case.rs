@@ -1,7 +1,7 @@
-use crate::application::ports::NodeRegistryPort;
-use crate::domain::error::DagError;
-use crate::domain::graph::{Edge, Graph};
-use crate::domain::node::NodeInputs;
+use crate::dag_engine::application::ports::NodeRegistryPort;
+use crate::dag_engine::domain::error::DagError;
+use crate::dag_engine::domain::graph::{Edge, Graph};
+use crate::dag_engine::domain::node::NodeInputs;
 
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};

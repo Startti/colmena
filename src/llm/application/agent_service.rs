@@ -1,6 +1,6 @@
 use crate::llm::domain::{
     ConversationRepository, LlmConfig, LlmError, LlmMessage, LlmRepository, LlmRequest,
-    LlmResponse, ThreadId, ToolCall, ToolDefinition, ToolExecutor, ToolResult,
+    LlmResponse, ThreadId, ToolDefinition, ToolExecutor, ToolResult,
 };
 use std::sync::Arc;
 

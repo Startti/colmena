@@ -1,4 +1,4 @@
-use crate::domain::node::ExecutableNode;
+use crate::dag_engine::domain::node::ExecutableNode;
 use std::sync::Arc;
 
 /// Define el "Puerto" que el `DagRunUseCase` utiliza para

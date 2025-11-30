@@ -1,4 +1,4 @@
-use crate::domain::node::{ExecutableNode, NodeInputs};
+use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use serde_json::{json, Value};
 use std::error::Error as StdError;
 use std::str::FromStr;
@@ -99,6 +99,10 @@ impl ExecutableNode for HttpNode {
                 "body": response_body
             }
         }))
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some("Make HTTP requests to external APIs. Supports GET, POST, PUT, DELETE methods with custom headers and query parameters.")
     }
 
     fn schema(&self) -> Value {
