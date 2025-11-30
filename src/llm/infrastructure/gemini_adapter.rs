@@ -1,6 +1,6 @@
 use crate::llm::domain::{
     LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk, LlmUsage,
-    MessageRole,
+    MessageRole, ToolCall, FunctionCall,
 };
 use async_trait::async_trait;
 use futures::{Stream, StreamExt, TryStreamExt};
@@ -52,7 +52,8 @@ impl GeminiAdapter {
                     contents.push(GeminiContent {
                         role: "user".to_string(),
                         parts: Some(vec![GeminiPart {
-                            text: message.content().to_string(),
+                            text: Some(message.content().to_string()),
+                            function_call: None,
                         }]),
                         text: None,
                     });
@@ -61,7 +62,8 @@ impl GeminiAdapter {
                     contents.push(GeminiContent {
                         role: "model".to_string(),
                         parts: Some(vec![GeminiPart {
-                            text: message.content().to_string(),
+                            text: Some(message.content().to_string()),
+                            function_call: None,
                         }]),
                         text: None,
                     });
@@ -78,6 +80,30 @@ impl GeminiAdapter {
         Ok((combined_system_instruction, contents))
     }
 
+    /// Convert ToolDefinitions to Gemini's function declaration format
+    fn convert_tools_to_gemini(&self, request: &LlmRequest) -> Option<serde_json::Value> {
+        request.tools().map(|tools| {
+            let function_declarations: Vec<serde_json::Value> = tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": {
+                            "type": tool.parameters.schema_type,
+                            "properties": tool.parameters.properties,
+                            "required": tool.parameters.required
+                        }
+                    })
+                })
+                .collect();
+
+            json!([{
+                "functionDeclarations": function_declarations
+            }])
+        })
+    }
+
     fn build_request_body(&self, request: &LlmRequest) -> Result<serde_json::Value, LlmError> {
         let (system_instruction, contents) = self.convert_messages(request)?;
 
@@ -89,6 +115,11 @@ impl GeminiAdapter {
             body["systemInstruction"] = json!({
                 "parts": [{"text": system}]
             });
+        }
+
+        // Add tools if present
+        if let Some(tools) = self.convert_tools_to_gemini(request) {
+            body["tools"] = tools;
         }
 
         let mut generation_config = serde_json::Map::new();
@@ -165,6 +196,37 @@ impl LlmRepository for GeminiAdapter {
                 ))
             })?;
 
+        // Extract function calls if present
+        let tool_calls = gemini_response
+            .candidates
+            .first()
+            .and_then(|candidate| {
+                candidate.content.parts.as_ref().and_then(|parts| {
+                    let function_calls: Vec<ToolCall> = parts
+                        .iter()
+                        .filter_map(|part| {
+                            part.function_call.as_ref().map(|fc| {
+                                // Generate a unique ID for the tool call
+                                let call_id = format!("call_{}", uuid::Uuid::new_v4());
+                                ToolCall::new(
+                                    call_id,
+                                    FunctionCall::new(
+                                        fc.name.clone(),
+                                        serde_json::to_string(&fc.args).unwrap_or_else(|_| "{}".to_string()),
+                                    ),
+                                )
+                            })
+                        })
+                        .collect();
+
+                    if function_calls.is_empty() {
+                        None
+                    } else {
+                        Some(function_calls)
+                    }
+                })
+            });
+
         let content = gemini_response
             .candidates
             .first()
@@ -180,9 +242,9 @@ impl LlmRepository for GeminiAdapter {
                     // Fallback to parts structure (for older models)
                     candidate.content.parts
                         .as_ref()
-                        .and_then(|parts| parts.first())
-                        .map(|part| part.text.clone())
-                        .filter(|text| !text.is_empty())
+                        .and_then(|parts| parts.iter().find_map(|part| {
+                            part.text.as_ref().filter(|text| !text.is_empty()).cloned()
+                        }))
                 }
             })
             .unwrap_or_else(|| {
@@ -224,6 +286,11 @@ impl LlmRepository for GeminiAdapter {
             .and_then(|candidate| candidate.finish_reason.as_ref())
         {
             response = response.with_finish_reason(finish_reason.clone());
+        }
+
+        // Add tool calls if present
+        if let Some(calls) = tool_calls {
+            response = response.with_tool_calls(calls);
         }
 
         Ok(response)
@@ -278,8 +345,9 @@ impl LlmRepository for GeminiAdapter {
                             .content
                             .parts
                             .as_ref()
-                            .and_then(|parts| parts.first())
-                            .map(|part| part.text.clone())
+                            .and_then(|parts| parts.iter().find_map(|part| {
+                                part.text.as_ref().cloned()
+                            }))
                     };
 
                     if let Some(text) = content_text {
@@ -346,7 +414,16 @@ struct GeminiContent {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct GeminiPart {
-    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "functionCall")]
+    function_call: Option<GeminiFunctionCall>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GeminiFunctionCall {
+    name: String,
+    args: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
