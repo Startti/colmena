@@ -42,10 +42,53 @@ struct AppState {
     use_case: Arc<DagRunUseCase>,     // El ejecutor
 }
 
+use sqlx::postgres::PgPoolOptions;
+use sqlx::sqlite::SqlitePoolOptions;
+use colmena::llm::domain::ConversationRepository;
+use colmena::llm::infrastructure::{PostgresConversationRepository, SqliteConversationRepository};
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load .env file
+    dotenvy::dotenv().ok();
+
     let cli = Cli::parse();
-    let registry = Arc::new(HashMapNodeRegistry::new());
+
+    // Initialize Database Pool and Repository
+    let repository: Option<Arc<dyn ConversationRepository>> = if let Ok(database_url) = std::env::var("DATABASE_URL") {
+        println!("🔌 Conectando a la base de datos...");
+        if database_url.starts_with("postgres://") {
+            println!("   └── Detectado PostgreSQL");
+            let pool = PgPoolOptions::new()
+                .max_connections(5)
+                .connect(&database_url)
+                .await?;
+            
+            // Run migrations for Postgres
+            sqlx::migrate!("./migrations/postgres").run(&pool).await?;
+            
+            Some(Arc::new(PostgresConversationRepository::new(pool)))
+        } else if database_url.starts_with("sqlite://") {
+            println!("   └── Detectado SQLite");
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect(&database_url)
+                .await?;
+                
+            // Run migrations for SQLite
+            sqlx::migrate!("./migrations/sqlite").run(&pool).await?;
+
+            Some(Arc::new(SqliteConversationRepository::new(pool)))
+        } else {
+            println!("⚠️ Protocolo de base de datos no soportado. Use postgres:// o sqlite://");
+            None
+        }
+    } else {
+        println!("⚠️ DATABASE_URL no encontrada. La persistencia de memoria estará deshabilitada.");
+        None
+    };
+
+    let registry = Arc::new(HashMapNodeRegistry::new(repository));
     // Envolvemos en Arc para poder compartirlo entre hilos del servidor
     let run_use_case = Arc::new(DagRunUseCase::new(registry));
 
