@@ -12,15 +12,15 @@ pub struct HashMapNodeRegistry {
 
 impl Default for HashMapNodeRegistry {
     fn default() -> Self {
-        Self::new(None)
+        Self::new(Arc::new(ConversationRepositoryFactory::new()))
     }
 }
 
-use colmena::llm::domain::ConversationRepository;
+use colmena::llm::infrastructure::ConversationRepositoryFactory;
 
 impl HashMapNodeRegistry {
     /// Construye un nuevo registro e inicializa todos los nodos estándar.
-    pub fn new(repository: Option<Arc<dyn ConversationRepository>>) -> Self {
+    pub fn new(repository_factory: Arc<ConversationRepositoryFactory>) -> Self {
         let mut nodes: HashMap<String, Arc<dyn ExecutableNode>> = HashMap::new();
 
         // --- Registrar Nodos de Depuración ---
@@ -42,7 +42,7 @@ impl HashMapNodeRegistry {
         nodes.insert("http_request".to_string(), Arc::new(HttpNode));
         
         // --- Registrar Nodos LLM ---
-        nodes.insert("llm_call".to_string(), Arc::new(LlmNode::new(repository)));
+        nodes.insert("llm_call".to_string(), Arc::new(LlmNode::new(repository_factory)));
 
         Self { nodes }
     }
