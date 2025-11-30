@@ -1,14 +1,16 @@
-use crate::domain::node::{ExecutableNode, NodeInputs};
-use colmena::llm::domain::{LlmConfig, LlmMessage, ThreadId, ProviderKind, LlmProvider, ToolExecutor};
-use colmena::llm::infrastructure::{ConversationRepositoryFactory, LlmProviderFactory};
+use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
+use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
+use std::collections::HashMap;
+use crate::llm::domain::{LlmConfig, LlmMessage, ThreadId, ProviderKind, LlmProvider, ToolExecutor};
+use crate::llm::infrastructure::{ConversationRepositoryFactory, LlmProviderFactory};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::error::Error;
 use std::sync::Arc;
 
-use crate::application::ports::NodeRegistryPort;
-use crate::infrastructure::dag_tool_executor::DagToolExecutor;
-use colmena::llm::application::AgentService;
+use crate::dag_engine::application::ports::NodeRegistryPort;
+use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
+use crate::llm::application::AgentService;
 use std::sync::Weak;
 
 pub struct LlmNode {
@@ -136,12 +138,19 @@ impl ExecutableNode for LlmNode {
 
     // --- 3. Execute LLM Call (via AgentService) ---
         let llm_repo = LlmProviderFactory::create(provider_kind);
-        let llm_repo_arc: Arc<dyn colmena::llm::domain::LlmRepository> = Arc::from(llm_repo); // Convert Box to Arc
+        let llm_repo_arc: Arc<dyn crate::llm::domain::LlmRepository> = Arc::from(llm_repo); // Convert Box to Arc
 
         // Create Tool Executor
         // We need to resolve the registry from Weak reference
         let registry = self.registry.upgrade().ok_or("NodeRegistry has been dropped")?;
-        let tool_executor = DagToolExecutor::new(registry);
+        
+        // Parse tool_configurations
+        let tool_configurations: HashMap<String, ToolConfiguration> = inputs.get("tool_configurations")
+            .or_else(|| config.get("tool_configurations"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let tool_executor = DagToolExecutor::new(registry, tool_configurations);
 
         // Create AgentService
         // Note: AgentService expects Arc<dyn ConversationRepository>.
@@ -177,12 +186,12 @@ impl ExecutableNode for LlmNode {
         // But AgentService is the *only* way we call LLM now (according to plan).
         // So we need a repo.
         
-        let conversation_repo: Arc<dyn colmena::llm::domain::ConversationRepository> = match repo_instance {
+        let conversation_repo: Arc<dyn crate::llm::domain::ConversationRepository> = match repo_instance {
             Some(repo) => repo,
             None => {
                 // Fallback to a lightweight in-memory repository
                 // This allows stateless LLM calls without requiring database connections
-                use colmena::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
+                use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
                 Arc::new(InMemoryConversationRepository::new())
             }
         };
@@ -250,6 +259,10 @@ impl ExecutableNode for LlmNode {
         }))
     }
 
+    fn description(&self) -> Option<&str> {
+        Some("Call language models with conversation memory and tool calling capabilities. Supports OpenAI, Gemini, and Anthropic.")
+    }
+
     fn schema(&self) -> Value {
         json!({
             "type": "llm_call",
@@ -263,7 +276,8 @@ impl ExecutableNode for LlmNode {
                 "max_tokens": "integer (optional)",
                 "thread_id": "string (optional, enables memory)",
                 "connection_url": "string (optional, database connection for memory)",
-                "enabled_tools": "array of strings or '*' (optional, enables tool calling)"
+                "enabled_tools": "array of strings or '*' (optional, enables tool calling)",
+                "tool_configurations": "map<string, ToolConfiguration> (optional, partial config for tools)"
             },
             "inputs": {
                 "provider": "string (optional)",

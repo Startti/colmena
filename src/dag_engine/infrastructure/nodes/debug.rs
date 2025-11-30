@@ -1,5 +1,5 @@
 // --- IMPORTACIONES AÑADIDAS ---
-use crate::domain::node::{ExecutableNode, NodeInputs}; // Importa nuestro trait y tipo
+use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs}; // Importa nuestro trait y tipo
 use serde_json::{json, Value}; // Importa Value y la macro json!
 use std::error::Error as StdError; // Importa el trait de error estándar
                                    // ------------------------------
@@ -21,6 +21,10 @@ impl ExecutableNode for LogNode {
         // También envuelve su salida para ser consistente
         Ok(json!({ "output": input_val }))
     }
+    fn description(&self) -> Option<&str> {
+        Some("Log data to console for debugging. Useful for inspecting intermediate values in the flow.")
+    }
+
     fn schema(&self) -> Value {
         json!({"type": "log", "inputs": {"input": "any"}, "outputs": {"output": "any"}})
     }

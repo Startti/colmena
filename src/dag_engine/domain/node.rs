@@ -32,4 +32,10 @@ pub trait ExecutableNode: Send + Sync {
     /// sus entradas esperadas y sus salidas.
     /// Esto será usado por el `frontend` en M2/M4.
     fn schema(&self) -> Value;
+
+    /// Retorna una descripción legible por humanos (y LLMs) de lo que hace el nodo.
+    /// Esto es crucial para que el LLM entienda cuándo y cómo usar este nodo como herramienta.
+    fn description(&self) -> Option<&str> {
+        None
+    }
 }

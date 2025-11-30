@@ -1,6 +1,6 @@
-use crate::application::ports::NodeRegistryPort;
-use crate::domain::node::ExecutableNode;
-use crate::infrastructure::nodes::{debug::*, math::*, trigger::*, http::*, llm::*}; // Importa nuestros nodos
+use crate::dag_engine::application::ports::NodeRegistryPort;
+use crate::dag_engine::domain::node::ExecutableNode;
+use crate::dag_engine::infrastructure::nodes::{debug::*, math::*, trigger::*, http::*, llm::*}; // Importa nuestros nodos
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
@@ -13,7 +13,7 @@ pub struct HashMapNodeRegistry {
 
 
 
-use colmena::llm::infrastructure::ConversationRepositoryFactory;
+use crate::llm::infrastructure::ConversationRepositoryFactory;
 
 impl HashMapNodeRegistry {
     /// Construye un nuevo registro e inicializa todos los nodos estándar.
