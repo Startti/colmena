@@ -10,4 +10,4 @@ pub use gemini_adapter::GeminiAdapter;
 pub use llm_provider_factory::LlmProviderFactory;
 pub use openai_adapter::OpenAiAdapter;
 pub use mock_adapter::MockAdapter;
-pub use persistence::{PostgresConversationRepository, SqliteConversationRepository};
+pub use persistence::{PostgresConversationRepository, SqliteConversationRepository, ConversationRepositoryFactory};
