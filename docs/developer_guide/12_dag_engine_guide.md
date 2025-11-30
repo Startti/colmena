@@ -81,7 +81,41 @@ Esta capa implementa todos los "Puertos" definidos en las capas `domain` y `appl
 - `http_request`: Realiza peticiones HTTP a APIs externas
 
 ### Nodos LLM
-- `llm_call`: Llama a modelos de lenguaje (OpenAI, Gemini, Anthropic)
+- `llm_call`: Llama a modelos de lenguaje (OpenAI, Gemini, Anthropic). Soporta **Memoria** y **Function Calling** (próximamente).
+
+## 🧠 Memoria y Persistencia
+
+El `dag_engine` soporta persistencia de conversaciones para los nodos LLM. Esto permite mantener el contexto entre ejecuciones o pasos.
+
+### Configuración
+Para habilitar la memoria, debes configurar la variable de entorno `DATABASE_URL` en tu archivo `.env`.
+- **PostgreSQL**: `postgres://user:pass@localhost/db`
+- **SQLite**: `sqlite://colmena.db`
+
+### Uso en `llm_call`
+Simplemente añade el campo `thread_id` en la configuración o inputs del nodo.
+
+```json
+"config": {
+  "provider": "openai",
+  "thread_id": "user_session_123",
+  "prompt": "Hola, ¿recuerdas mi nombre?"
+}
+```
+
+Si `thread_id` está presente y hay una base de datos conectada, el nodo cargará el historial previo y guardará la nueva interacción.
+
+## 🔐 Variables de Entorno en Configuración
+
+Puedes usar variables de entorno directamente en la configuración de tus nodos usando la sintaxis `${VAR_NAME}`. Esto es ideal para no hardcodear API Keys.
+
+```json
+"config": {
+  "api_key": "${OPENAI_API_KEY}",
+  "model": "gpt-4"
+}
+```
+El motor resolverá `${OPENAI_API_KEY}` buscando en las variables de entorno del sistema (o archivo `.env`).
 
 ## 🔧 Cómo Crear un Nuevo Nodo
 
