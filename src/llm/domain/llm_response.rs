@@ -69,6 +69,10 @@ impl LlmResponse {
     }
 
     pub fn with_tool_calls(mut self, tool_calls: Vec<ToolCall>) -> Self {
+        // Update the message to include tool_calls
+        let content = self.message.content().to_string();
+        self.message = LlmMessage::assistant_with_tool_calls(content, tool_calls.clone())
+            .unwrap_or(self.message); // Fallback to original if fails
         self.tool_calls = Some(tool_calls);
         self
     }

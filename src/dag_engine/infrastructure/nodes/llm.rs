@@ -1,18 +1,30 @@
 use crate::domain::node::{ExecutableNode, NodeInputs};
-use colmena::llm::domain::{LlmConfig, LlmMessage, LlmRequest, ThreadId, ProviderKind, LlmProvider};
+use colmena::llm::domain::{LlmConfig, LlmMessage, ThreadId, ProviderKind, LlmProvider, ToolExecutor};
 use colmena::llm::infrastructure::{ConversationRepositoryFactory, LlmProviderFactory};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::error::Error;
 use std::sync::Arc;
 
+use crate::application::ports::NodeRegistryPort;
+use crate::infrastructure::dag_tool_executor::DagToolExecutor;
+use colmena::llm::application::AgentService;
+use std::sync::Weak;
+
 pub struct LlmNode {
     repository_factory: Arc<ConversationRepositoryFactory>,
+    registry: Weak<dyn NodeRegistryPort>,
 }
 
 impl LlmNode {
-    pub fn new(repository_factory: Arc<ConversationRepositoryFactory>) -> Self {
-        Self { repository_factory }
+    pub fn new(
+        repository_factory: Arc<ConversationRepositoryFactory>,
+        registry: Weak<dyn NodeRegistryPort>,
+    ) -> Self {
+        Self {
+            repository_factory,
+            registry,
+        }
     }
 
     fn resolve_env_var(value: &str) -> Result<String, String> {
@@ -120,28 +132,120 @@ impl ExecutableNode for LlmNode {
         let user_message = LlmMessage::user(prompt.to_string())?;
         messages.push(user_message.clone());
 
-        let request = LlmRequest::new(messages, llm_config, false)?;
 
-        // --- 3. Execute LLM Call ---
+
+    // --- 3. Execute LLM Call (via AgentService) ---
         let llm_repo = LlmProviderFactory::create(provider_kind);
-        let response = llm_repo.call(request).await?;
+        let llm_repo_arc: Arc<dyn colmena::llm::domain::LlmRepository> = Arc::from(llm_repo); // Convert Box to Arc
 
-        // --- 4. Save to Memory (if enabled) ---
-        if let (Some(tid_str), Some(repo)) = (thread_id, repo_instance) {
-            let tid = ThreadId(tid_str.to_string());
-            
-            // Save User Message (we need to save it because it wasn't in DB yet)
-            repo.add_message(&tid, user_message).await?;
-            
-            // Save Assistant Response
-            let assistant_message = LlmMessage::assistant(response.content().to_string())?;
-            repo.add_message(&tid, assistant_message).await?;
-        }
+        // Create Tool Executor
+        // We need to resolve the registry from Weak reference
+        let registry = self.registry.upgrade().ok_or("NodeRegistry has been dropped")?;
+        let tool_executor = DagToolExecutor::new(registry);
 
+        // Create AgentService
+        // Note: AgentService expects Arc<dyn ConversationRepository>.
+        // We have repo_instance which is Arc<dyn ConversationRepository> (if memory enabled).
+        // If memory is NOT enabled, we need a dummy/mock repository or handle it.
+        // AgentService *requires* a repository to store history.
+        // If the user didn't provide thread_id, we can't persist history.
+        // However, AgentService logic depends on it.
+        // For now, if no memory is configured, we can use an in-memory repository or fail?
+        // Or we can create a temporary in-memory repository for this execution?
+        // Let's assume for now we use a temporary in-memory repo if no thread_id provided,
+        // but wait, AgentService assumes persistence.
+        // If we don't provide a repo, AgentService can't work.
+        // Actually, AgentService is designed for stateful agents.
+        // If LlmNode is used without memory, it's just a simple call.
+        // But we want to support tools even without persistent memory (single turn).
+        // So we should provide an ephemeral repository.
+        // Let's implement a simple EphemeralConversationRepository or use Mock?
+        // Better: Use Sqlite with :memory:? Or just a simple struct.
+        // For now, let's require thread_id if tools are used? No, that's restrictive.
+        
+        // Let's use a temporary SQLite in-memory repo if none provided.
+        // But creating a pool is expensive.
+        // Maybe we can use a "NoOp" repository that stores nothing?
+        // But AgentService reads history.
+        // If we use a "Memory" repository (HashMap based), it works for the duration of the request.
+        // We don't have a MemoryRepository in domain.
+        
+        // Let's use the repo_instance if available. If not, we create a temporary one?
+        // Or we modify AgentService to make repo optional? No.
+        
+        // Let's assume for this phase that we use the provided repo or fail if tools are needed but no repo?
+        // But AgentService is the *only* way we call LLM now (according to plan).
+        // So we need a repo.
+        
+        let conversation_repo: Arc<dyn colmena::llm::domain::ConversationRepository> = match repo_instance {
+            Some(repo) => repo,
+            None => {
+                // Fallback to a lightweight in-memory repository
+                // This allows stateless LLM calls without requiring database connections
+                use colmena::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
+                Arc::new(InMemoryConversationRepository::new())
+            }
+        };
+
+        let agent_service = AgentService::new(llm_repo_arc, conversation_repo);
+
+        // Define tools based on enabled_tools config
+        // enabled_tools can be:
+        // - Array of specific tool names: ["add", "multiply"]
+        // - "*" (wildcard for all tools)
+        // - Not specified (no tools)
+        let enabled_tools_config = inputs.get("enabled_tools")
+            .or_else(|| config.get("enabled_tools"));
+
+        let tools = if let Some(enabled) = enabled_tools_config {
+            // Get all available tools from the executor
+            let all_tools = tool_executor.available_tools().await;
+            if let Some(wildcard) = enabled.as_str() {
+                if wildcard == "*" {
+                    // Enable all tools
+                    all_tools
+                } else {
+                    // Single tool name as string
+                    all_tools.into_iter()
+                        .filter(|t| t.name == wildcard)
+                        .collect()
+                }
+            } else if let Some(tool_names) = enabled.as_array() {
+                // Array of tool names
+                let names: Vec<String> = tool_names
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+                
+                all_tools.into_iter()
+                    .filter(|t| names.contains(&t.name))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            // No tools enabled
+            Vec::new()
+        };
+
+        // Use provided thread_id or generate unique one for stateless calls
+        let tid = thread_id.map(|s| s.to_string()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        
+        let response = agent_service.run(
+            &ThreadId(tid),
+            prompt.to_string(),
+            llm_config,
+            tools,
+            &tool_executor,
+            Some(10), // Max iterations
+        ).await?;
+
+        // Output format
         Ok(json!({
             "output": {
                 "content": response.content(),
-                "usage": response.usage()
+                "usage": response.usage(),
+                "tool_calls": response.tool_calls()
             }
         }))
     }
@@ -157,7 +261,9 @@ impl ExecutableNode for LlmNode {
                 "prompt": "string (optional)",
                 "temperature": "number (optional)",
                 "max_tokens": "integer (optional)",
-                "thread_id": "string (optional, enables memory)"
+                "thread_id": "string (optional, enables memory)",
+                "connection_url": "string (optional, database connection for memory)",
+                "enabled_tools": "array of strings or '*' (optional, enables tool calling)"
             },
             "inputs": {
                 "provider": "string (optional)",
@@ -167,11 +273,14 @@ impl ExecutableNode for LlmNode {
                 "prompt": "string (optional)",
                 "temperature": "number (optional)",
                 "max_tokens": "integer (optional)",
-                "thread_id": "string (optional, enables memory)"
+                "thread_id": "string (optional, enables memory)",
+                "connection_url": "string (optional)",
+                "enabled_tools": "array of strings or '*' (optional)"
             },
             "outputs": {
                 "content": "string",
-                "usage": "object"
+                "usage": "object",
+                "tool_calls": "array (optional)"
             }
         })
     }

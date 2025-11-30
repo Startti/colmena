@@ -4,7 +4,10 @@
             "type": "trigger_webhook",
             "config": {
                 "path": "/test-llm",
-                "method": "POST"
+                "method": "POST",
+                "test_payload": {
+                    "message": "Say hello in Spanish!"
+                }
             }
         },
         "llm_step": {

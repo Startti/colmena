@@ -4,7 +4,10 @@
             "type": "trigger_webhook",
             "config": {
                 "path": "/dynamic-test",
-                "method": "POST"
+                "method": "POST",
+                "test_payload": {
+                    "endpoint": "/random_joke"
+                }
             }
         },
         "http_call": {

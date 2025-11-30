@@ -17,7 +17,7 @@ impl PostgresConversationRepository {
 impl ConversationRepository for PostgresConversationRepository {
     async fn get_by_id(&self, id: &ThreadId) -> Result<Conversation, LlmError> {
         let rows = sqlx::query(
-            "SELECT role, content, created_at FROM chat_messages WHERE thread_id = $1 ORDER BY created_at ASC"
+            "SELECT role, content, tool_call_id, tool_calls, created_at FROM chat_messages WHERE thread_id = $1 ORDER BY created_at ASC"
         )
         .bind(&id.0)
         .fetch_all(&self.pool)
@@ -27,31 +27,31 @@ impl ConversationRepository for PostgresConversationRepository {
         let messages = rows.into_iter().map(|row| {
             let role_str: String = row.get("role");
             let content: String = row.get("content");
+            let tool_call_id: Option<String> = row.get("tool_call_id");
+            let tool_calls_json: Option<serde_json::Value> = row.get("tool_calls");
             let _created_at: DateTime<Utc> = row.get("created_at");
 
             let role = match role_str.as_str() {
                 "system" => MessageRole::System,
                 "user" => MessageRole::User,
                 "assistant" => MessageRole::Assistant,
-                _ => MessageRole::User, // Fallback, though ideally we should handle this better
+                "tool" => MessageRole::Tool,
+                _ => MessageRole::User, // Fallback
             };
 
-            // Reconstruct LlmMessage. 
-            // Note: LlmMessage fields are private, so we might need a constructor or builder in domain.
-            // For now assuming we can construct it or add a method to LlmMessage.
-            // Let's assume we need to add a `new_with_timestamp` or similar to LlmMessage, 
-            // or just use the existing constructors and override timestamp if possible, 
-            // or just accept current time for now if strict reconstruction isn't critical.
-            // BUT, for history to be accurate, we should preserve timestamps.
-            // Let's check LlmMessage definition again.
-             
-             // Temporary workaround: use existing constructors which set timestamp to Now.
-             // Ideally we update LlmMessage to allow setting timestamp or be a struct with public fields.
-             match role {
-                 MessageRole::System => LlmMessage::system(content).unwrap(),
-                 MessageRole::User => LlmMessage::user(content).unwrap(),
-                 MessageRole::Assistant => LlmMessage::assistant(content).unwrap(),
-             }
+            match role {
+                MessageRole::System => LlmMessage::system(content).unwrap(),
+                MessageRole::User => LlmMessage::user(content).unwrap(),
+                MessageRole::Assistant => {
+                    if let Some(tc_json) = tool_calls_json {
+                        let tool_calls: Vec<crate::llm::domain::ToolCall> = serde_json::from_value(tc_json).unwrap_or_default();
+                        LlmMessage::assistant_with_tool_calls(content, tool_calls).unwrap()
+                    } else {
+                        LlmMessage::assistant(content).unwrap()
+                    }
+                },
+                MessageRole::Tool => LlmMessage::tool(tool_call_id.unwrap_or_else(|| "unknown".to_string()), content).unwrap(),
+            }
         }).collect();
 
         Ok(Conversation {
@@ -65,14 +65,20 @@ impl ConversationRepository for PostgresConversationRepository {
             MessageRole::System => "system",
             MessageRole::User => "user",
             MessageRole::Assistant => "assistant",
+            MessageRole::Tool => "tool",
         };
 
+        // Serialize tool_calls if present
+        let tool_calls_json = message.tool_calls().map(|tc| serde_json::to_value(tc).ok()).flatten();
+        
         sqlx::query(
-            "INSERT INTO chat_messages (thread_id, role, content, created_at) VALUES ($1, $2, $3, $4)"
+            "INSERT INTO chat_messages (thread_id, role, content, tool_call_id, tool_calls, created_at) VALUES ($1, $2, $3, $4, $5, $6)"
         )
         .bind(&id.0)
         .bind(role_str)
         .bind(message.content())
+        .bind(message.tool_call_id())
+        .bind(tool_calls_json)
         .bind(Utc::now()) // Use current time for insertion
         .execute(&self.pool)
         .await

@@ -41,10 +41,35 @@ impl OpenAiAdapter {
             .messages()
             .iter()
             .map(|msg| {
-                json!({
+                let mut message_json = json!({
                     "role": msg.role().as_str(),
                     "content": msg.content()
-                })
+                });
+                
+                // Add tool_calls for assistant messages
+                if let Some(tool_calls) = msg.tool_calls() {
+                    let openai_tool_calls: Vec<serde_json::Value> = tool_calls
+                        .iter()
+                        .map(|tc| {
+                            json!({
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments
+                                }
+                            })
+                        })
+                        .collect();
+                    message_json["tool_calls"] = json!(openai_tool_calls);
+                }
+                
+                // Add tool_call_id for tool messages
+                if let Some(tool_call_id) = msg.tool_call_id() {
+                    message_json["tool_call_id"] = json!(tool_call_id);
+                }
+                
+                message_json
             })
             .collect()
     }
