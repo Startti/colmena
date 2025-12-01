@@ -1,9 +1,5 @@
 // src/dag_engine/main.rs
-pub mod application;
-pub mod domain;
-pub mod infrastructure;
-pub mod api;
-
+use colmena::dag_engine::api;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
