@@ -27,8 +27,25 @@ impl ExecutableNode for PythonNode {
                 .to_string()
         };
 
+        // Clean up markdown code blocks if present (LLMs often wrap code in ```python ... ```)
+        let code = code.trim();
+        let code = if code.starts_with("```") {
+            // Find the first newline (after ```python or ```)
+            let start = code.find('\n').map(|i| i + 1).unwrap_or(0);
+            // Find the last ``` delimiter
+            let end = code.rfind("```").unwrap_or(code.len());
+            code[start..end].trim()
+        } else {
+            code
+        };
+
+        // Debug logging to help diagnose issues
+        println!("[PythonNode] Executing code:\n{}", code);
+
         // 2. Preparar Inputs: Clonar para mover al closure
         let inputs_clone = inputs.clone();
+        let code = code.to_string(); // Convert &str to String for the closure
+
 
         // 3. Ejecución Bloqueante:
         // CPython no es thread-safe con el runtime async de Tokio.
@@ -49,7 +66,10 @@ impl ExecutableNode for PythonNode {
 
                 // C. Ejecutar el código arbitrario
                 // Se ejecuta como un módulo '__main__' virtual
-                py.run_bound(&code, None, Some(&locals))
+                // IMPORTANT: We pass locals as both globals AND locals so that:
+                // 1. Function definitions are added to the namespace
+                // 2. Those functions can be called within the same script
+                py.run_bound(&code, Some(&locals), Some(&locals))
                     .map_err(|e| format!("Python execution error: {}", e))?;
 
                 // D. Extraer Resultados
