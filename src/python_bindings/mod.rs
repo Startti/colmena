@@ -266,7 +266,6 @@ impl ColmenaLlm {
     }
 }
 
-
 // ==================== DAG Engine Bindings ====================
 
 create_exception!(colmena, DagException, PyException);
@@ -275,14 +274,14 @@ create_exception!(colmena, DagException, PyException);
 #[pyo3(signature = (file_path))]
 fn run_dag(py: Python, file_path: String) -> PyResult<String> {
     py.allow_threads(move || {
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| DagException::new_err(e.to_string()))?;
-        
+        let rt =
+            tokio::runtime::Runtime::new().map_err(|e| DagException::new_err(e.to_string()))?;
+
         rt.block_on(async {
             match crate::dag_engine::api::run_dag(file_path).await {
                 Ok(result) => serde_json::to_string_pretty(&result)
                     .map_err(|e| DagException::new_err(e.to_string())),
-                Err(e) => Err(DagException::new_err(e.to_string()))
+                Err(e) => Err(DagException::new_err(e.to_string())),
             }
         })
     })
@@ -292,9 +291,9 @@ fn run_dag(py: Python, file_path: String) -> PyResult<String> {
 #[pyo3(signature = (file_path, port=3000))]
 fn serve_dag(py: Python, file_path: String, port: u16) -> PyResult<()> {
     py.allow_threads(move || {
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| DagException::new_err(e.to_string()))?;
-        
+        let rt =
+            tokio::runtime::Runtime::new().map_err(|e| DagException::new_err(e.to_string()))?;
+
         rt.block_on(async {
             crate::dag_engine::api::serve_dag(file_path, port)
                 .await
@@ -310,11 +309,11 @@ fn colmena(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<ColmenaLlm>()?;
     m.add_class::<LlmConfigOptions>()?;
     m.add("LlmException", _py.get_type_bound::<LlmException>())?;
-    
+
     // DAG Engine bindings
     m.add_function(wrap_pyfunction!(run_dag, m)?)?;
     m.add_function(wrap_pyfunction!(serve_dag, m)?)?;
     m.add("DagException", _py.get_type_bound::<DagException>())?;
-    
+
     Ok(())
 }

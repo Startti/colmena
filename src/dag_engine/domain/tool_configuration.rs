@@ -7,16 +7,16 @@ use std::collections::HashMap;
 pub struct ToolConfiguration {
     /// Name of the tool (shown to LLM)
     pub name: String,
-    
+
     /// Human-readable description for the LLM
     pub description: String,
-    
+
     /// Node type to execute
     pub node_type: String,
-    
+
     /// Fixed configuration values (not exposed to LLM)
     pub fixed_config: HashMap<String, Value>,
-    
+
     /// Which input parameters to expose to the LLM
     /// If None, expose all inputs not in fixed_config
     pub exposed_inputs: Option<Vec<String>>,

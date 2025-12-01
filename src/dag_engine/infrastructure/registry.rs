@@ -1,17 +1,16 @@
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::domain::node::ExecutableNode;
-use crate::dag_engine::infrastructure::nodes::{debug::*, math::*, trigger::*, http::*, llm::*, python_node::*}; // Importa nuestros nodos
+use crate::dag_engine::infrastructure::nodes::{
+    debug::*, http::*, llm::*, math::*, python_node::*, trigger::*,
+}; // Importa nuestros nodos
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
-
 
 /// La implementación concreta (Adaptador) del `NodeRegistryPort`.
 /// Utiliza un `HashMap` para almacenar instancias de todos los nodos disponibles.
 pub struct HashMapNodeRegistry {
     nodes: HashMap<String, Arc<dyn ExecutableNode>>,
 }
-
-
 
 use crate::llm::infrastructure::ConversationRepositoryFactory;
 
@@ -33,16 +32,19 @@ impl HashMapNodeRegistry {
 
             nodes.insert("exponential".to_string(), Arc::new(ExponentialNode));
 
-            // --- Registrar Nodos de Trigger ---   
+            // --- Registrar Nodos de Trigger ---
             nodes.insert("trigger_webhook".to_string(), Arc::new(TriggerWebhookNode));
-            
+
             // --- Registrar Nodos HTTP ---
             nodes.insert("http_request".to_string(), Arc::new(HttpNode));
-            
+
             // --- Registrar Nodos LLM ---
             // Pass the weak reference to the registry to LlmNode
             let registry_weak = weak_self.clone() as Weak<dyn NodeRegistryPort>;
-            nodes.insert("llm_call".to_string(), Arc::new(LlmNode::new(repository_factory.clone(), registry_weak)));
+            nodes.insert(
+                "llm_call".to_string(),
+                Arc::new(LlmNode::new(repository_factory.clone(), registry_weak)),
+            );
 
             // --- Registrar Nodos Python ---
             nodes.insert("python_script".to_string(), Arc::new(PythonNode));

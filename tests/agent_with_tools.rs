@@ -1,11 +1,11 @@
+use async_trait::async_trait;
 use colmena::llm::application::AgentService;
 use colmena::llm::domain::{
-    LlmConfig, LlmProvider, ProviderKind, ThreadId, ToolDefinition, ToolExecutor, ToolParameters,
-    ToolResult, ToolCall, LlmError, ParameterProperty,
+    LlmConfig, LlmError, LlmProvider, ParameterProperty, ProviderKind, ThreadId, ToolCall,
+    ToolDefinition, ToolExecutor, ToolParameters, ToolResult,
 };
 use colmena::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
 use colmena::llm::infrastructure::LlmProviderFactory;
-use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -16,10 +16,11 @@ struct CalculatorToolExecutor;
 impl ToolExecutor for CalculatorToolExecutor {
     async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, LlmError> {
         let args: HashMap<String, serde_json::Value> =
-            serde_json::from_str(&tool_call.function.arguments)
-                .map_err(|e| LlmError::InvalidToolCall {
+            serde_json::from_str(&tool_call.function.arguments).map_err(|e| {
+                LlmError::InvalidToolCall {
                     reason: format!("Failed to parse args: {}", e),
-                })?;
+                }
+            })?;
 
         let result = match tool_call.function.name.as_str() {
             "add" => {
@@ -114,9 +115,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🤖 AgentService Tool Calling Example\n");
 
     // 1. Setup LLM provider (using OpenAI)
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .expect("OPENAI_API_KEY environment variable must be set");
-    
+    let api_key =
+        std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY environment variable must be set");
+
     let provider = LlmProvider::new(
         ProviderKind::OpenAi,
         api_key,

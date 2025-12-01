@@ -1,6 +1,6 @@
 use crate::llm::domain::{
-    LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk, LlmUsage,
-    MessageRole, ToolCall, FunctionCall,
+    FunctionCall, LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk,
+    LlmUsage, MessageRole, ToolCall,
 };
 use async_trait::async_trait;
 use futures::{Stream, StreamExt, TryStreamExt};
@@ -218,35 +218,33 @@ impl LlmRepository for GeminiAdapter {
             })?;
 
         // Extract function calls if present
-        let tool_calls = gemini_response
-            .candidates
-            .first()
-            .and_then(|candidate| {
-                candidate.content.parts.as_ref().and_then(|parts| {
-                    let function_calls: Vec<ToolCall> = parts
-                        .iter()
-                        .filter_map(|part| {
-                            part.function_call.as_ref().map(|fc| {
-                                // Generate a unique ID for the tool call
-                                let call_id = format!("call_{}", uuid::Uuid::new_v4());
-                                ToolCall::new(
-                                    call_id,
-                                    FunctionCall::new(
-                                        fc.name.clone(),
-                                        serde_json::to_string(&fc.args).unwrap_or_else(|_| "{}".to_string()),
-                                    ),
-                                )
-                            })
+        let tool_calls = gemini_response.candidates.first().and_then(|candidate| {
+            candidate.content.parts.as_ref().and_then(|parts| {
+                let function_calls: Vec<ToolCall> = parts
+                    .iter()
+                    .filter_map(|part| {
+                        part.function_call.as_ref().map(|fc| {
+                            // Generate a unique ID for the tool call
+                            let call_id = format!("call_{}", uuid::Uuid::new_v4());
+                            ToolCall::new(
+                                call_id,
+                                FunctionCall::new(
+                                    fc.name.clone(),
+                                    serde_json::to_string(&fc.args)
+                                        .unwrap_or_else(|_| "{}".to_string()),
+                                ),
+                            )
                         })
-                        .collect();
+                    })
+                    .collect();
 
-                    if function_calls.is_empty() {
-                        None
-                    } else {
-                        Some(function_calls)
-                    }
-                })
-            });
+                if function_calls.is_empty() {
+                    None
+                } else {
+                    Some(function_calls)
+                }
+            })
+        });
 
         let content = gemini_response
             .candidates
@@ -362,13 +360,9 @@ impl LlmRepository for GeminiAdapter {
                     let content_text = if let Some(text) = &candidate.content.text {
                         Some(text.clone())
                     } else {
-                        candidate
-                            .content
-                            .parts
-                            .as_ref()
-                            .and_then(|parts| parts.iter().find_map(|part| {
-                                part.text.as_ref().cloned()
-                            }))
+                        candidate.content.parts.as_ref().and_then(|parts| {
+                            parts.iter().find_map(|part| part.text.as_ref().cloned())
+                        })
                     };
 
                     if let Some(text) = content_text {
