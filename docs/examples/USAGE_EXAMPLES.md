@@ -628,4 +628,453 @@ print("Estado del sistema:", status)
 
 6. **Validación**: Valida las respuestas de los LLMs antes de usarlas en aplicaciones críticas.
 
-Este documento cubre los casos de uso más comunes. Para casos más específicos, consulta la documentación técnica en `docs/dds/MODULO_LLM_DISEÑO.md`.
+---
+
+# DAG Engine - Ejemplos de Uso
+
+El DAG Engine permite orquestar workflows complejos usando grafos JSON. Soporta múltiples tipos de nodos incluyendo operaciones matemáticas, llamadas HTTP, integración con LLMs, y más.
+
+## Conceptos Básicos
+
+### Modos de Ejecución
+
+**Modo Run** (Testing Local):
+```bash
+cargo run --bin dag_engine -- run tests/my_graph.json
+```
+
+**Modo Serve** (Producción):
+```bash
+cargo run --bin dag_engine -- serve tests/my_graph.json --port 3000
+```
+
+## Ejemplos de Grafos
+
+### 1. Workflow Simple con Trigger Local
+
+Usa `test_payload` para testing local sin servidor:
+
+```json
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/process",
+        "method": "POST",
+        "test_payload": {
+          "number": 5
+        }
+      }
+    },
+    "multiply": {
+      "type": "multiply",
+      "config": {}
+    },
+    "log": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger.output.number",
+      "to": "multiply.a"
+    },
+    {
+      "from": "trigger.output.number",
+      "to": "multiply.b"
+    },
+    {
+      "from": "multiply.output",
+      "to": "log.input"
+    }
+  ]
+}
+```
+
+Ejecutar:
+```bash
+cargo run --bin dag_engine -- run examples/simple_math.json
+# Output: [LogNode]: 25
+```
+
+### 2. Llamada HTTP con Configuración Dinámica
+
+```json
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/fetch-joke",
+        "method": "POST",
+        "test_payload": {
+          "joke_endpoint": "/random_joke"
+        }
+      }
+    },
+    "fetch_joke": {
+      "type": "http_request",
+      "config": {
+        "base_url": "https://official-joke-api.appspot.com",
+        "method": "GET"
+      }
+    },
+    "log_joke": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger.output.joke_endpoint",
+      "to": "fetch_joke.endpoint"
+    },
+    {
+      "from": "fetch_joke.output.body",
+      "to": "log_joke.input"
+    }
+  ]
+}
+```
+
+Ejecutar localmente:
+```bash
+cargo run --bin dag_engine -- run examples/http_joke.json
+```
+
+En producción:
+```bash
+# Terminal 1: Iniciar servidor
+cargo run --bin dag_engine -- serve examples/http_joke.json
+
+# Terminal 2: Hacer petición
+curl -X POST http://localhost:3000/fetch-joke \
+  -H "Content-Type: application/json" \
+  -d '{"joke_endpoint": "/random_joke"}'
+```
+
+### 3. Integración con LLM (OpenAI)
+
+```json
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/ask",
+        "method": "POST",
+        "test_payload": {
+          "question": "Explain Rust ownership in simple terms"
+        }
+      }
+    },
+    "llm": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "sk-...",
+        "model": "gpt-3.5-turbo",
+        "system_message": "You are a helpful programming tutor.",
+        "max_tokens": 150,
+        "temperature": 0.7
+      }
+    },
+    "log_response": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger.output.question",
+      "to": "llm.prompt"
+    },
+    {
+      "from": "llm.output",
+      "to": "log_response.input"
+    }
+  ]
+}
+```
+
+Output del log incluye:
+```json
+{
+  "content": "Rust ownership is like...",
+  "usage": {
+    "prompt_tokens": 25,
+    "completion_tokens": 120,
+    "total_tokens": 145
+  }
+}
+```
+
+### 4. Pipeline HTTP → LLM → Log
+
+Fetch data from API, analyze with LLM, and log results:
+
+```json
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/analyze-joke",
+        "method": "POST",
+        "test_payload": {}
+      }
+    },
+    "get_joke": {
+      "type": "http_request",
+      "config": {
+        "base_url": "https://official-joke-api.appspot.com",
+        "endpoint": "/random_joke",
+        "method": "GET"
+      }
+    },
+    "analyze": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "sk-...",
+        "model": "gpt-3.5-turbo",
+        "system_message": "You are a comedy expert. Analyze jokes and explain why they're funny.",
+        "max_tokens": 200
+      }
+    },
+    "log_analysis": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "get_joke.output.body.setup",
+      "to": "analyze.prompt"
+    },
+    {
+      "from": "analyze.output",
+      "to": "log_analysis.input"
+    }
+  ]
+}
+```
+
+### 5. Multi-Provider LLM con Configuración Dinámica
+
+```json
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/multi-llm",
+        "method": "POST",
+        "test_payload": {
+          "provider": "gemini",
+          "question": "What is hexagonal architecture?",
+          "model": "gemini-2.0-flash-001"
+        }
+      }
+    },
+    "llm": {
+      "type": "llm_call",
+      "config": {
+        "api_key": "your-api-key",
+        "system_message": "You are a software architecture expert.",
+        "max_tokens": 150
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger.output.provider",
+      "to": "llm.provider"
+    },
+    {
+      "from": "trigger.output.model",
+      "to": "llm.model"
+    },
+    {
+      "from": "trigger.output.question",
+      "to": "llm.prompt"
+    },
+    {
+      "from": "llm.output",
+      "to": "log_result.input"
+    }
+  ]
+}
+```
+
+### 6. Workflow de Procesamiento de Datos
+
+Combina operaciones matemáticas con logging:
+
+```json
+{
+  "nodes": {
+    "input": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/calculate",
+        "method": "POST",
+        "test_payload": {
+          "value": 10
+        }
+      }
+    },
+    "square": {
+      "type": "exponential",
+      "config": {
+        "exponent": 2
+      }
+    },
+    "add_ten": {
+      "type": "add",
+      "config": {}
+    },
+    "divide": {
+      "type": "divide",
+      "config": {}
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "input.output.value",
+      "to": "square.input"
+    },
+    {
+      "from": "square.output",
+      "to": "add_ten.a"
+    },
+    {
+      "from": "input.output.value",
+      "to": "add_ten.b"
+    },
+    {
+      "from": "add_ten.output",
+      "to": "divide.a"
+    },
+    {
+      "from": "input.output.value",
+      "to": "divide.b"
+    },
+    {
+      "from": "divide.output",
+      "to": "log_result.input"
+    }
+  ]
+}
+```
+
+### 7. API Gateway Pattern
+
+```json
+{
+  "nodes": {
+    "webhook": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/api/translate",
+        "method": "POST"
+      }
+    },
+    "translate_llm": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "sk-...",
+        "model": "gpt-3.5-turbo",
+        "system_message": "You are a translator. Translate to Spanish.",
+        "max_tokens": 100
+      }
+    },
+    "log_translation": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "webhook.output.text",
+      "to": "translate_llm.prompt"
+    },
+    {
+      "from": "translate_llm.output.content",
+      "to": "log_translation.input"
+    }
+  ]
+}
+```
+
+Uso en producción:
+```bash
+curl -X POST http://localhost:3000/api/translate \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello, how are you?"}'
+```
+
+## Tipos de Nodos Disponibles
+
+### Trigger
+- **trigger_webhook**: Recibe HTTP requests o usa test_payload
+
+### Math
+- **add**: Suma dos números
+- **subtract**: Resta dos números
+- **multiply**: Multiplica dos números
+- **divide**: Divide dos números
+- **exponential**: Eleva a una potencia
+
+### HTTP
+- **http_request**: Realiza peticiones HTTP
+  - Soporta: GET, POST, PUT, DELETE
+  - Configuración dinámica de endpoint, headers, body
+
+### LLM
+- **llm_call**: Integración con LLMs
+  - Proveedores: OpenAI, Gemini, Anthropic
+  - Configuración dinámica completa
+
+### Debug
+- **log**: Imprime valores a consola
+- **mock_input**: Proporciona datos de prueba
+
+## Best Practices
+
+1. **Development Workflow**:
+   - Usa `test_payload` para desarrollo rápido
+   - Verifica con `run` antes de `serve`
+   - Usa `jq` para formatear output: `cargo run ... | jq`
+
+2. **Configuración Dinámica**:
+   - Aprovecha `inputs > config` precedence
+   - Diseña grafos reutilizables
+   - Mantén config estática para valores que no cambian
+
+3. **Security**:
+   - No commitees API keys en grafos
+   - Usa variables de entorno
+   - Implementa rate limiting en producción
+
+4. **Error Handling**:
+   - Los nodos retornan errores descriptivos
+   - Logs muestran el flujo de ejecución
+   - Valida edge connections
+
+5. **Performance**:
+   - El motor ejecuta en orden topológico
+   - Nodos se ejecutan secuencialmente (no paralelo aún)
+   - Usa streaming LLM cuando sea apropiado
+
+## Recursos Adicionales
+
+- [DAG Engine Developer Guide](../developer_guide/12_dag_engine_guide.md)
+- [DAG Engine Design](../dds/DAG_ENGINE_DISEÑO.md)
+- [LLM Module Design](../dds/MODULO_LLM_DISEÑO.md)
+
+Este documento cubre los casos de uso más comunes. Para casos más específicos, consulta la documentación técnica.
