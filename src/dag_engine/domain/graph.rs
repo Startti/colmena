@@ -8,7 +8,7 @@ use std::collections::HashMap;
 pub struct Graph {
     /// Un mapa de todos los nodos en el grafo, usando su ID como clave.
     pub nodes: HashMap<String, NodeConfig>,
-    
+
     /// Una lista de todas las conexiones (bordes) entre los nodos.
     pub edges: Vec<Edge>,
 }
@@ -20,7 +20,7 @@ pub struct NodeConfig {
     /// El tipo de nodo (ej. "add", "log").
     #[serde(rename = "type")]
     pub node_type: String,
-    
+
     /// Configuración estática. `Value` ya implementa Clone por defecto.
     #[serde(default)]
     pub config: Value,

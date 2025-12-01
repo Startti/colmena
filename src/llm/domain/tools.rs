@@ -278,11 +278,7 @@ mod tests {
             required: vec!["x".to_string(), "y".to_string()],
         };
 
-        let tool = ToolDefinition::new(
-            "add".to_string(),
-            "Add two numbers".to_string(),
-            params,
-        );
+        let tool = ToolDefinition::new("add".to_string(), "Add two numbers".to_string(), params);
 
         assert_eq!(tool.name, "add");
         assert_eq!(tool.description, "Add two numbers");
@@ -298,11 +294,7 @@ mod tests {
             )
             .with_required("a".to_string());
 
-        let tool = ToolDefinition::new(
-            "test".to_string(),
-            "Test tool".to_string(),
-            params,
-        );
+        let tool = ToolDefinition::new("test".to_string(), "Test tool".to_string(), params);
 
         assert!(tool.validate().is_ok());
     }
@@ -310,35 +302,34 @@ mod tests {
     #[test]
     fn test_tool_definition_validation_empty_name() {
         let params = ToolParameters::new();
-        let tool = ToolDefinition::new(
-            "".to_string(),
-            "Description".to_string(),
-            params,
-        );
+        let tool = ToolDefinition::new("".to_string(), "Description".to_string(), params);
 
         assert!(tool.validate().is_err());
-        assert!(tool.validate().unwrap_err().contains("name cannot be empty"));
+        assert!(tool
+            .validate()
+            .unwrap_err()
+            .contains("name cannot be empty"));
     }
 
     #[test]
     fn test_tool_definition_validation_missing_required_property() {
-        let params = ToolParameters::new()
-            .with_required("missing_field".to_string());
+        let params = ToolParameters::new().with_required("missing_field".to_string());
 
-        let tool = ToolDefinition::new(
-            "test".to_string(),
-            "Test".to_string(),
-            params,
-        );
+        let tool = ToolDefinition::new("test".to_string(), "Test".to_string(), params);
 
         assert!(tool.validate().is_err());
-        assert!(tool.validate().unwrap_err().contains("not found in properties"));
+        assert!(tool
+            .validate()
+            .unwrap_err()
+            .contains("not found in properties"));
     }
 
     #[test]
     fn test_parameter_property_with_enum() {
-        let prop = ParameterProperty::new("string".to_string(), "HTTP method".to_string())
-            .with_enum(vec!["GET".to_string(), "POST".to_string(), "PUT".to_string()]);
+        let prop =
+            ParameterProperty::new("string".to_string(), "HTTP method".to_string()).with_enum(
+                vec!["GET".to_string(), "POST".to_string(), "PUT".to_string()],
+            );
 
         assert_eq!(prop.property_type, "string");
         assert!(prop.enum_values.is_some());
@@ -347,10 +338,7 @@ mod tests {
 
     #[test]
     fn test_tool_call_creation() {
-        let function = FunctionCall::new(
-            "add".to_string(),
-            r#"{"a": 5, "b": 3}"#.to_string(),
-        );
+        let function = FunctionCall::new("add".to_string(), r#"{"a": 5, "b": 3}"#.to_string());
 
         let tool_call = ToolCall::new("call_123".to_string(), function);
 
@@ -367,10 +355,7 @@ mod tests {
             b: i32,
         }
 
-        let function = FunctionCall::new(
-            "add".to_string(),
-            r#"{"a": 5, "b": 3}"#.to_string(),
-        );
+        let function = FunctionCall::new("add".to_string(), r#"{"a": 5, "b": 3}"#.to_string());
 
         let args: Args = function.parse_arguments().unwrap();
         assert_eq!(args.a, 5);
@@ -389,10 +374,7 @@ mod tests {
 
     #[test]
     fn test_tool_result_failure() {
-        let result = ToolResult::failure(
-            "call_123".to_string(),
-            "Division by zero".to_string(),
-        );
+        let result = ToolResult::failure("call_123".to_string(), "Division by zero".to_string());
 
         assert_eq!(result.tool_call_id, "call_123");
         assert!(!result.success);

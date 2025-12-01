@@ -86,8 +86,11 @@ impl LlmMessage {
     pub fn assistant(content: String) -> Result<Self, LlmError> {
         Self::new(MessageRole::Assistant, content)
     }
-    
-    pub fn assistant_with_tool_calls(content: String, tool_calls: Vec<crate::llm::domain::ToolCall>) -> Result<Self, LlmError> {
+
+    pub fn assistant_with_tool_calls(
+        content: String,
+        tool_calls: Vec<crate::llm::domain::ToolCall>,
+    ) -> Result<Self, LlmError> {
         let mut msg = Self::new(MessageRole::Assistant, content)?;
         msg.tool_calls = Some(tool_calls);
         Ok(msg)
@@ -110,7 +113,7 @@ impl LlmMessage {
     pub fn tool_call_id(&self) -> Option<&str> {
         self.tool_call_id.as_deref()
     }
-    
+
     pub fn tool_calls(&self) -> Option<&[crate::llm::domain::ToolCall]> {
         self.tool_calls.as_deref()
     }
@@ -119,7 +122,7 @@ impl LlmMessage {
         &self.timestamp
     }
 
-    pub fn with_timestamp(mut self, timestamp: DateTime<Utc>)  -> Self {
+    pub fn with_timestamp(mut self, timestamp: DateTime<Utc>) -> Self {
         self.timestamp = timestamp;
         self
     }

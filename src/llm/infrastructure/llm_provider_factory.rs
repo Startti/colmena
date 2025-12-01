@@ -1,5 +1,5 @@
 use crate::llm::domain::{LlmRepository, ProviderKind};
-use crate::llm::infrastructure::{AnthropicAdapter, GeminiAdapter, OpenAiAdapter, MockAdapter};
+use crate::llm::infrastructure::{AnthropicAdapter, GeminiAdapter, MockAdapter, OpenAiAdapter};
 use std::sync::Arc;
 
 pub struct LlmProviderFactory;

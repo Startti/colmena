@@ -1,8 +1,8 @@
 // src/dag_engine/main.rs
+pub mod api;
 pub mod application;
 pub mod domain;
 pub mod infrastructure;
-pub mod api;
 
 use clap::{Parser, Subcommand};
 
@@ -15,7 +15,9 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    Run { file_path: String },
+    Run {
+        file_path: String,
+    },
     Serve {
         file_path: String,
         #[arg(long, default_value_t = 3000)]
