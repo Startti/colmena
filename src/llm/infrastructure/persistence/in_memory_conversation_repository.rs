@@ -29,7 +29,7 @@ impl ConversationRepository for InMemoryConversationRepository {
     async fn get_by_id(&self, id: &ThreadId) -> Result<Conversation, LlmError> {
         let conversations = self.conversations.read().unwrap();
         let messages = conversations.get(&id.0).cloned().unwrap_or_default();
-        
+
         Ok(Conversation {
             thread_id: id.clone(),
             messages,

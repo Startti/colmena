@@ -1,10 +1,12 @@
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
-use std::collections::HashMap;
-use crate::llm::domain::{LlmConfig, LlmMessage, ThreadId, ProviderKind, LlmProvider, ToolExecutor};
+use crate::llm::domain::{
+    LlmConfig, LlmMessage, LlmProvider, ProviderKind, ThreadId, ToolExecutor,
+};
 use crate::llm::infrastructure::{ConversationRepositoryFactory, LlmProviderFactory};
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
 
@@ -32,7 +34,8 @@ impl LlmNode {
     fn resolve_env_var(value: &str) -> Result<String, String> {
         if value.starts_with("${") && value.ends_with("}") {
             let var_name = &value[2..value.len() - 1];
-            std::env::var(var_name).map_err(|_| format!("Environment variable {} not found", var_name))
+            std::env::var(var_name)
+                .map_err(|_| format!("Environment variable {} not found", var_name))
         } else {
             Ok(value.to_string())
         }
@@ -48,9 +51,11 @@ impl ExecutableNode for LlmNode {
         _state: &mut Value,
     ) -> Result<Value, Box<dyn Error>> {
         // --- 1. Resolve Configuration (Inputs > Config) ---
-        
+
         // Provider
-        let provider_str = inputs.get("provider").and_then(|v| v.as_str())
+        let provider_str = inputs
+            .get("provider")
+            .and_then(|v| v.as_str())
             .or_else(|| config.get("provider").and_then(|v| v.as_str()))
             .ok_or("Missing 'provider' in inputs or config")?;
 
@@ -59,51 +64,75 @@ impl ExecutableNode for LlmNode {
             "gemini" => ProviderKind::Gemini,
             "anthropic" => ProviderKind::Anthropic,
             "mock" => ProviderKind::Mock,
-            _ => return Err(format!("Invalid provider '{}'. Supported: openai, gemini, anthropic, mock", provider_str).into()),
+            _ => {
+                return Err(format!(
+                    "Invalid provider '{}'. Supported: openai, gemini, anthropic, mock",
+                    provider_str
+                )
+                .into())
+            }
         };
 
         // API Key
-        let api_key_raw = inputs.get("api_key").and_then(|v| v.as_str())
+        let api_key_raw = inputs
+            .get("api_key")
+            .and_then(|v| v.as_str())
             .or_else(|| config.get("api_key").and_then(|v| v.as_str()))
             .ok_or("Missing 'api_key' in inputs or config")?;
 
         let api_key = Self::resolve_env_var(api_key_raw)?;
 
         // Model
-        let model = inputs.get("model").and_then(|v| v.as_str())
+        let model = inputs
+            .get("model")
+            .and_then(|v| v.as_str())
             .or_else(|| config.get("model").and_then(|v| v.as_str()))
             .map(|s| s.to_string());
 
         // Prompt
-        let prompt = inputs.get("prompt").and_then(|v| v.as_str())
+        let prompt = inputs
+            .get("prompt")
+            .and_then(|v| v.as_str())
             .or_else(|| config.get("prompt").and_then(|v| v.as_str()))
             .ok_or("Missing 'prompt' in inputs or config")?;
 
         // System Message (Optional)
-        let system_message = inputs.get("system_message").and_then(|v| v.as_str())
+        let system_message = inputs
+            .get("system_message")
+            .and_then(|v| v.as_str())
             .or_else(|| config.get("system_message").and_then(|v| v.as_str()));
 
         // Thread ID (Optional - for Memory)
-        let thread_id = inputs.get("thread_id").and_then(|v| v.as_str())
+        let thread_id = inputs
+            .get("thread_id")
+            .and_then(|v| v.as_str())
             .or_else(|| config.get("thread_id").and_then(|v| v.as_str()));
 
         // Connection URL (Optional - for Memory Backend)
-        let connection_url_raw = inputs.get("connection_url").and_then(|v| v.as_str())
+        let connection_url_raw = inputs
+            .get("connection_url")
+            .and_then(|v| v.as_str())
             .or_else(|| config.get("connection_url").and_then(|v| v.as_str()));
 
         // --- 2. Prepare LLM Request ---
-        
+
         let provider = LlmProvider::new(provider_kind.clone(), api_key, model)?;
         let mut llm_config = LlmConfig::new(provider); // Add extra config params here if needed
 
         // Optional Params
-        if let Some(temp) = inputs.get("temperature").and_then(|v| v.as_f64())
-            .or_else(|| config.get("temperature").and_then(|v| v.as_f64())) {
+        if let Some(temp) = inputs
+            .get("temperature")
+            .and_then(|v| v.as_f64())
+            .or_else(|| config.get("temperature").and_then(|v| v.as_f64()))
+        {
             llm_config = llm_config.with_temperature(temp as f32)?;
         }
-        
-        if let Some(max_tokens) = inputs.get("max_tokens").and_then(|v| v.as_u64())
-            .or_else(|| config.get("max_tokens").and_then(|v| v.as_u64())) {
+
+        if let Some(max_tokens) = inputs
+            .get("max_tokens")
+            .and_then(|v| v.as_u64())
+            .or_else(|| config.get("max_tokens").and_then(|v| v.as_u64()))
+        {
             llm_config = llm_config.with_max_tokens(max_tokens as u32)?;
         }
 
@@ -113,9 +142,12 @@ impl ExecutableNode for LlmNode {
         let mut repo_instance = None;
         if let (Some(tid), Some(url_raw)) = (thread_id, connection_url_raw) {
             let connection_url = Self::resolve_env_var(url_raw)?;
-            let repo = self.repository_factory.get_repository(&connection_url).await?;
+            let repo = self
+                .repository_factory
+                .get_repository(&connection_url)
+                .await?;
             repo_instance = Some(repo.clone());
-            
+
             let tid = ThreadId(tid.to_string());
             let conversation = repo.get_by_id(&tid).await?;
             messages.extend(conversation.messages);
@@ -125,27 +157,29 @@ impl ExecutableNode for LlmNode {
         // Note: Usually system message is first. If history exists, maybe we shouldn't add it again?
         // Or maybe the history loading should handle this. For now, let's prepend if messages is empty.
         if let Some(sys_msg) = system_message {
-             if messages.is_empty() {
-                 messages.push(LlmMessage::system(sys_msg.to_string())?);
-             }
+            if messages.is_empty() {
+                messages.push(LlmMessage::system(sys_msg.to_string())?);
+            }
         }
 
         // 2.3 Add User Prompt
         let user_message = LlmMessage::user(prompt.to_string())?;
         messages.push(user_message.clone());
 
-
-
-    // --- 3. Execute LLM Call (via AgentService) ---
+        // --- 3. Execute LLM Call (via AgentService) ---
         let llm_repo = LlmProviderFactory::create(provider_kind);
         let llm_repo_arc: Arc<dyn crate::llm::domain::LlmRepository> = Arc::from(llm_repo); // Convert Box to Arc
 
         // Create Tool Executor
         // We need to resolve the registry from Weak reference
-        let registry = self.registry.upgrade().ok_or("NodeRegistry has been dropped")?;
-        
+        let registry = self
+            .registry
+            .upgrade()
+            .ok_or("NodeRegistry has been dropped")?;
+
         // Parse tool_configurations
-        let tool_configurations: HashMap<String, ToolConfiguration> = inputs.get("tool_configurations")
+        let tool_configurations: HashMap<String, ToolConfiguration> = inputs
+            .get("tool_configurations")
             .or_else(|| config.get("tool_configurations"))
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
@@ -171,30 +205,31 @@ impl ExecutableNode for LlmNode {
         // Let's implement a simple EphemeralConversationRepository or use Mock?
         // Better: Use Sqlite with :memory:? Or just a simple struct.
         // For now, let's require thread_id if tools are used? No, that's restrictive.
-        
+
         // Let's use a temporary SQLite in-memory repo if none provided.
         // But creating a pool is expensive.
         // Maybe we can use a "NoOp" repository that stores nothing?
         // But AgentService reads history.
         // If we use a "Memory" repository (HashMap based), it works for the duration of the request.
         // We don't have a MemoryRepository in domain.
-        
+
         // Let's use the repo_instance if available. If not, we create a temporary one?
         // Or we modify AgentService to make repo optional? No.
-        
+
         // Let's assume for this phase that we use the provided repo or fail if tools are needed but no repo?
         // But AgentService is the *only* way we call LLM now (according to plan).
         // So we need a repo.
-        
-        let conversation_repo: Arc<dyn crate::llm::domain::ConversationRepository> = match repo_instance {
-            Some(repo) => repo,
-            None => {
-                // Fallback to a lightweight in-memory repository
-                // This allows stateless LLM calls without requiring database connections
-                use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
-                Arc::new(InMemoryConversationRepository::new())
-            }
-        };
+
+        let conversation_repo: Arc<dyn crate::llm::domain::ConversationRepository> =
+            match repo_instance {
+                Some(repo) => repo,
+                None => {
+                    // Fallback to a lightweight in-memory repository
+                    // This allows stateless LLM calls without requiring database connections
+                    use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
+                    Arc::new(InMemoryConversationRepository::new())
+                }
+            };
 
         let agent_service = AgentService::new(llm_repo_arc, conversation_repo);
 
@@ -203,7 +238,8 @@ impl ExecutableNode for LlmNode {
         // - Array of specific tool names: ["add", "multiply"]
         // - "*" (wildcard for all tools)
         // - Not specified (no tools)
-        let enabled_tools_config = inputs.get("enabled_tools")
+        let enabled_tools_config = inputs
+            .get("enabled_tools")
             .or_else(|| config.get("enabled_tools"));
 
         let tools = if let Some(enabled) = enabled_tools_config {
@@ -215,7 +251,8 @@ impl ExecutableNode for LlmNode {
                     all_tools
                 } else {
                     // Single tool name as string
-                    all_tools.into_iter()
+                    all_tools
+                        .into_iter()
                         .filter(|t| t.name == wildcard)
                         .collect()
                 }
@@ -225,8 +262,9 @@ impl ExecutableNode for LlmNode {
                     .iter()
                     .filter_map(|v| v.as_str().map(|s| s.to_string()))
                     .collect();
-                
-                all_tools.into_iter()
+
+                all_tools
+                    .into_iter()
                     .filter(|t| names.contains(&t.name))
                     .collect()
             } else {
@@ -238,16 +276,20 @@ impl ExecutableNode for LlmNode {
         };
 
         // Use provided thread_id or generate unique one for stateless calls
-        let tid = thread_id.map(|s| s.to_string()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        
-        let response = agent_service.run(
-            &ThreadId(tid),
-            prompt.to_string(),
-            llm_config,
-            tools,
-            &tool_executor,
-            Some(10), // Max iterations
-        ).await?;
+        let tid = thread_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        let response = agent_service
+            .run(
+                &ThreadId(tid),
+                prompt.to_string(),
+                llm_config,
+                tools,
+                &tool_executor,
+                Some(10), // Max iterations
+            )
+            .await?;
 
         // Output format
         Ok(json!({

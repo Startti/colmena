@@ -1,4 +1,6 @@
-use crate::llm::domain::{LlmMessage, LlmProvider, LlmRequestId, LlmResponseId, LlmUsage, ToolCall};
+use crate::llm::domain::{
+    LlmMessage, LlmProvider, LlmRequestId, LlmResponseId, LlmUsage, ToolCall,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -130,7 +132,10 @@ impl LlmResponse {
 
     /// Check if the response contains tool calls
     pub fn has_tool_calls(&self) -> bool {
-        self.tool_calls.as_ref().map(|t| !t.is_empty()).unwrap_or(false)
+        self.tool_calls
+            .as_ref()
+            .map(|t| !t.is_empty())
+            .unwrap_or(false)
     }
 }
 

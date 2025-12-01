@@ -1,8 +1,8 @@
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
+use reqwest::{Client, Method, Url};
 use serde_json::{json, Value};
 use std::error::Error as StdError;
 use std::str::FromStr;
-use reqwest::{Client, Method, Url};
 
 pub struct HttpNode;
 
@@ -15,18 +15,24 @@ impl ExecutableNode for HttpNode {
         _state: &mut Value,
     ) -> Result<Value, Box<dyn StdError>> {
         // 1. Parse Configuration (Inputs > Config)
-        let base_url = inputs.get("base_url").and_then(|v| v.as_str())
+        let base_url = inputs
+            .get("base_url")
+            .and_then(|v| v.as_str())
             .or_else(|| config.get("base_url").and_then(|v| v.as_str()))
             .unwrap_or("");
-            
-        let endpoint = inputs.get("endpoint").and_then(|v| v.as_str())
+
+        let endpoint = inputs
+            .get("endpoint")
+            .and_then(|v| v.as_str())
             .or_else(|| config.get("endpoint").and_then(|v| v.as_str()))
             .unwrap_or("");
-            
-        let method_str = inputs.get("method").and_then(|v| v.as_str())
+
+        let method_str = inputs
+            .get("method")
+            .and_then(|v| v.as_str())
             .or_else(|| config.get("method").and_then(|v| v.as_str()))
             .unwrap_or("GET");
-        
+
         // 2. Construct URL
         // Handle trailing/leading slashes to avoid double slashes or missing slashes
         let base = base_url.trim_end_matches('/');
@@ -37,15 +43,17 @@ impl ExecutableNode for HttpNode {
             format!("{}/{}", base, path)
         };
 
-        let url = Url::parse(&full_url_str).map_err(|e| format!("Invalid URL '{}': {}", full_url_str, e))?;
-        let method = Method::from_str(method_str).map_err(|e| format!("Invalid HTTP method '{}': {}", method_str, e))?;
+        let url = Url::parse(&full_url_str)
+            .map_err(|e| format!("Invalid URL '{}': {}", full_url_str, e))?;
+        let method = Method::from_str(method_str)
+            .map_err(|e| format!("Invalid HTTP method '{}': {}", method_str, e))?;
 
         // 3. Prepare Client and Request
         // 3. Prepare Client and Request
         // Build client forcing HTTP/1.1 to avoid HTTP/2 issues with some APIs
         let client = Client::builder().http1_only().build()?;
         let mut request_builder = client.request(method, url);
-        
+
         // Add a default User-Agent to improve compatibility with some APIs
         request_builder = request_builder.header("User-Agent", "colmena-http-node/0.1");
 
@@ -85,7 +93,7 @@ impl ExecutableNode for HttpNode {
         // 7. Execute Request
         let response = request_builder.send().await?;
         let status = response.status().as_u16();
-        
+
         // Try to parse response as JSON, fallback to text/string
         let response_body: Value = match response.json::<Value>().await {
             Ok(json) => json,

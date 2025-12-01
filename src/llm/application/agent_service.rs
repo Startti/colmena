@@ -101,10 +101,8 @@ impl AgentService {
                     };
 
                     // E. Create tool result message
-                    let tool_message = LlmMessage::tool(
-                        result.tool_call_id.clone(),
-                        result.output.clone(),
-                    )?;
+                    let tool_message =
+                        LlmMessage::tool(result.tool_call_id.clone(), result.output.clone())?;
 
                     // F. Add to conversation
                     messages.push(tool_message.clone());
@@ -170,7 +168,14 @@ mod tests {
     }
 
     fn create_config() -> LlmConfig {
-        LlmConfig::new(LlmProvider::new(ProviderKind::OpenAi, "key".to_string(), Some("gpt-4".to_string())).unwrap())
+        LlmConfig::new(
+            LlmProvider::new(
+                ProviderKind::OpenAi,
+                "key".to_string(),
+                Some("gpt-4".to_string()),
+            )
+            .unwrap(),
+        )
     }
 
     #[tokio::test]
@@ -187,10 +192,12 @@ mod tests {
             .expect_get_by_id()
             .with(eq(thread_id.clone()))
             .times(1)
-            .returning(|_| Ok(Conversation {
-                thread_id: ThreadId("test-thread".to_string()),
-                messages: vec![],
-            }));
+            .returning(|_| {
+                Ok(Conversation {
+                    thread_id: ThreadId("test-thread".to_string()),
+                    messages: vec![],
+                })
+            });
 
         mock_conv
             .expect_add_message()
@@ -198,27 +205,32 @@ mod tests {
             .returning(|_, _| Ok(()));
 
         // Setup LLM Repo
-        mock_llm
-            .expect_call()
-            .times(1)
-            .returning(|_| {
-                Ok(LlmResponse::new(
-                    LlmRequestId::from_string("req-1".to_string()).unwrap(),
-                    "Hi there!".to_string(),
-                    LlmProvider::new(ProviderKind::OpenAi, "key".to_string(), Some("gpt-4".to_string())).unwrap(),
-                ).unwrap())
-            });
+        mock_llm.expect_call().times(1).returning(|_| {
+            Ok(LlmResponse::new(
+                LlmRequestId::from_string("req-1".to_string()).unwrap(),
+                "Hi there!".to_string(),
+                LlmProvider::new(
+                    ProviderKind::OpenAi,
+                    "key".to_string(),
+                    Some("gpt-4".to_string()),
+                )
+                .unwrap(),
+            )
+            .unwrap())
+        });
 
         let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
-        
-        let result = service.run(
-            &thread_id,
-            prompt,
-            create_config(),
-            vec![],
-            &mock_tool_exec,
-            None
-        ).await;
+
+        let result = service
+            .run(
+                &thread_id,
+                prompt,
+                create_config(),
+                vec![],
+                &mock_tool_exec,
+                None,
+            )
+            .await;
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap().content(), "Hi there!");
@@ -234,27 +246,24 @@ mod tests {
         let prompt = "Add 2+2".to_string();
 
         // Setup Conversation Repo
-        mock_conv
-            .expect_get_by_id()
-            .returning(|_| Ok(Conversation {
+        mock_conv.expect_get_by_id().returning(|_| {
+            Ok(Conversation {
                 thread_id: ThreadId("test-thread".to_string()),
                 messages: vec![],
-            }));
-        
+            })
+        });
+
         mock_conv.expect_add_message().returning(|_, _| Ok(()));
 
         // Setup Tool Executor
-        mock_tool_exec
-            .expect_execute()
-            .times(1)
-            .returning(|call| {
-                Ok(ToolResult {
-                    tool_call_id: call.id.clone(),
-                    success: true,
-                    output: "4".to_string(),
-                    error: None,
-                })
-            });
+        mock_tool_exec.expect_execute().times(1).returning(|call| {
+            Ok(ToolResult {
+                tool_call_id: call.id.clone(),
+                success: true,
+                output: "4".to_string(),
+                error: None,
+            })
+        });
 
         // Setup LLM Repo - Sequence of responses
         let mut seq = mockall::Sequence::new();
@@ -273,12 +282,19 @@ mod tests {
                         arguments: "{\"a\": 2, \"b\": 2}".to_string(),
                     },
                 };
-                
+
                 Ok(LlmResponse::new(
                     LlmRequestId::from_string("req-1".to_string()).unwrap(),
                     "".to_string(),
-                    LlmProvider::new(ProviderKind::OpenAi, "key".to_string(), Some("gpt-4".to_string())).unwrap(),
-                ).unwrap().with_tool_calls(vec![tool_call]))
+                    LlmProvider::new(
+                        ProviderKind::OpenAi,
+                        "key".to_string(),
+                        Some("gpt-4".to_string()),
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+                .with_tool_calls(vec![tool_call]))
             });
 
         // 2. Second call returns final answer
@@ -290,20 +306,28 @@ mod tests {
                 Ok(LlmResponse::new(
                     LlmRequestId::from_string("req-2".to_string()).unwrap(),
                     "The answer is 4".to_string(),
-                    LlmProvider::new(ProviderKind::OpenAi, "key".to_string(), Some("gpt-4".to_string())).unwrap(),
-                ).unwrap())
+                    LlmProvider::new(
+                        ProviderKind::OpenAi,
+                        "key".to_string(),
+                        Some("gpt-4".to_string()),
+                    )
+                    .unwrap(),
+                )
+                .unwrap())
             });
 
         let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
-        
-        let result = service.run(
-            &thread_id,
-            prompt,
-            create_config(),
-            vec![], // Tools list doesn't matter for mock
-            &mock_tool_exec,
-            None
-        ).await;
+
+        let result = service
+            .run(
+                &thread_id,
+                prompt,
+                create_config(),
+                vec![], // Tools list doesn't matter for mock
+                &mock_tool_exec,
+                None,
+            )
+            .await;
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap().content(), "The answer is 4");
@@ -317,10 +341,12 @@ mod tests {
 
         let thread_id = ThreadId("test-thread".to_string());
 
-        mock_conv.expect_get_by_id().returning(|_| Ok(Conversation {
-            thread_id: ThreadId("test-thread".to_string()),
-            messages: vec![],
-        }));
+        mock_conv.expect_get_by_id().returning(|_| {
+            Ok(Conversation {
+                thread_id: ThreadId("test-thread".to_string()),
+                messages: vec![],
+            })
+        });
         mock_conv.expect_add_message().returning(|_, _| Ok(()));
 
         mock_tool_exec.expect_execute().returning(|call| {
@@ -342,25 +368,37 @@ mod tests {
                     arguments: "{}".to_string(),
                 },
             };
-            
+
             Ok(LlmResponse::new(
                 LlmRequestId::from_string("req-loop".to_string()).unwrap(),
                 "".to_string(),
-                LlmProvider::new(ProviderKind::OpenAi, "key".to_string(), Some("gpt-4".to_string())).unwrap(),
-            ).unwrap().with_tool_calls(vec![tool_call]))
+                LlmProvider::new(
+                    ProviderKind::OpenAi,
+                    "key".to_string(),
+                    Some("gpt-4".to_string()),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .with_tool_calls(vec![tool_call]))
         });
 
         let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
-        
-        let result = service.run(
-            &thread_id,
-            "Loop me".to_string(),
-            create_config(),
-            vec![],
-            &mock_tool_exec,
-            Some(3) // Max 3 iterations
-        ).await;
 
-        assert!(matches!(result, Err(LlmError::MaxIterationsReached { max: 3 })));
+        let result = service
+            .run(
+                &thread_id,
+                "Loop me".to_string(),
+                create_config(),
+                vec![],
+                &mock_tool_exec,
+                Some(3), // Max 3 iterations
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(LlmError::MaxIterationsReached { max: 3 })
+        ));
     }
 }

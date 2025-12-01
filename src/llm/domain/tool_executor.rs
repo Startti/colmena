@@ -1,5 +1,5 @@
+use super::{LlmError, ToolCall, ToolDefinition, ToolResult};
 use async_trait::async_trait;
-use super::{ToolCall, ToolDefinition, ToolResult, LlmError};
 
 /// Trait for executing tools requested by LLMs
 ///

@@ -6,12 +6,12 @@
 // Make sure to set your OPENAI_API_KEY environment variable first:
 // export OPENAI_API_KEY="your-api-key-here"
 
+use colmena::llm::domain::LlmRepository;
 use colmena::llm::domain::{
-    LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind,
-    ToolDefinition, ToolParameters, ParameterProperty,
+    LlmConfig, LlmMessage, LlmProvider, LlmRequest, ParameterProperty, ProviderKind,
+    ToolDefinition, ToolParameters,
 };
 use colmena::llm::infrastructure::OpenAiAdapter;
-use colmena::llm::domain::LlmRepository;
 use std::collections::HashMap;
 
 #[tokio::main]
@@ -20,8 +20,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("==================================\n");
 
     // Get API key from environment
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .expect("OPENAI_API_KEY environment variable not set");
+    let api_key =
+        std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY environment variable not set");
 
     // Create LLM provider and config
     let provider = LlmProvider::new(
@@ -36,17 +36,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut properties = HashMap::new();
     properties.insert(
         "a".to_string(),
-        ParameterProperty::new(
-            "number".to_string(),
-            "First number to add".to_string(),
-        ),
+        ParameterProperty::new("number".to_string(), "First number to add".to_string()),
     );
     properties.insert(
         "b".to_string(),
-        ParameterProperty::new(
-            "number".to_string(),
-            "Second number to add".to_string(),
-        ),
+        ParameterProperty::new("number".to_string(), "Second number to add".to_string()),
     );
 
     let add_tool = ToolDefinition {
@@ -63,10 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut multiply_properties = HashMap::new();
     multiply_properties.insert(
         "a".to_string(),
-        ParameterProperty::new(
-            "number".to_string(),
-            "First number to multiply".to_string(),
-        ),
+        ParameterProperty::new("number".to_string(), "First number to multiply".to_string()),
     );
     multiply_properties.insert(
         "b".to_string(),
@@ -87,13 +78,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Create messages
-    let messages = vec![
-        LlmMessage::user("What is (15 + 27) * 3? Use the add and multiply functions to calculate it step by step.".to_string())?,
-    ];
+    let messages = vec![LlmMessage::user(
+        "What is (15 + 27) * 3? Use the add and multiply functions to calculate it step by step."
+            .to_string(),
+    )?];
 
     // Create request with tools
-    let request = LlmRequest::new(messages, config, false)?
-        .with_tools(vec![add_tool, multiply_tool]);
+    let request =
+        LlmRequest::new(messages, config, false)?.with_tools(vec![add_tool, multiply_tool]);
 
     println!("📤 Sending request to OpenAI with 'add' and 'multiply' tools...");
     println!("Prompt: What is (15 + 27) * 3? Use the add and multiply functions to calculate it step by step.\n");
