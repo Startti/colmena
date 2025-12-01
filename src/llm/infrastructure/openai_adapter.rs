@@ -1,5 +1,6 @@
 use crate::llm::domain::{
     LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk, LlmUsage,
+    ToolCall, FunctionCall,
 };
 use async_trait::async_trait;
 use futures::{Stream, StreamExt, TryStreamExt};
@@ -40,10 +41,35 @@ impl OpenAiAdapter {
             .messages()
             .iter()
             .map(|msg| {
-                json!({
+                let mut message_json = json!({
                     "role": msg.role().as_str(),
                     "content": msg.content()
-                })
+                });
+                
+                // Add tool_calls for assistant messages
+                if let Some(tool_calls) = msg.tool_calls() {
+                    let openai_tool_calls: Vec<serde_json::Value> = tool_calls
+                        .iter()
+                        .map(|tc| {
+                            json!({
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments
+                                }
+                            })
+                        })
+                        .collect();
+                    message_json["tool_calls"] = json!(openai_tool_calls);
+                }
+                
+                // Add tool_call_id for tool messages
+                if let Some(tool_call_id) = msg.tool_call_id() {
+                    message_json["tool_call_id"] = json!(tool_call_id);
+                }
+                
+                message_json
             })
             .collect()
     }
@@ -54,6 +80,34 @@ impl OpenAiAdapter {
             "messages": self.build_messages(request),
             "stream": request.stream()
         });
+
+        // Add tools if present (OpenAI format)
+        if let Some(tools) = request.tools() {
+            let openai_tools: Vec<serde_json::Value> = tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": {
+                                "type": tool.parameters.schema_type,
+                                "properties": tool.parameters.properties,
+                                "required": tool.parameters.required
+                            }
+                        }
+                    })
+                })
+                .collect();
+
+            body["tools"] = json!(openai_tools);
+
+            // Add tool_choice if specified
+            if let Some(choice) = request.tool_choice() {
+                body["tool_choice"] = json!(choice);
+            }
+        }
 
         if let Some(temp) = request.config().temperature() {
             body["temperature"] = json!(temp);
@@ -113,11 +167,30 @@ impl LlmRepository for OpenAiAdapter {
             .await
             .map_err(|e| LlmError::parsing_error(e.to_string()))?;
 
+        // Extract tool calls if present
+        let tool_calls = openai_response
+            .choices
+            .first()
+            .and_then(|choice| choice.message.tool_calls.as_ref())
+            .map(|calls| {
+                calls
+                    .iter()
+                    .map(|tc| {
+                        ToolCall::new(
+                            tc.id.clone(),
+                            FunctionCall::new(tc.function.name.clone(), tc.function.arguments.clone()),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
+
+        // Content might be None when there are tool calls
         let content = openai_response
             .choices
             .first()
             .and_then(|choice| choice.message.content.as_ref())
-            .ok_or_else(|| LlmError::parsing_error("No content in response"))?;
+            .unwrap_or(&String::new())
+            .clone();
 
         let usage = openai_response
             .usage
@@ -125,7 +198,7 @@ impl LlmRepository for OpenAiAdapter {
 
         let mut response = LlmResponse::new(
             request.id().clone(),
-            content.clone(),
+            content,
             request.config().provider().clone(),
         )?;
 
@@ -139,6 +212,11 @@ impl LlmRepository for OpenAiAdapter {
             .and_then(|choice| choice.finish_reason.as_ref())
         {
             response = response.with_finish_reason(finish_reason.clone());
+        }
+
+        // Add tool calls if present
+        if let Some(calls) = tool_calls {
+            response = response.with_tool_calls(calls);
         }
 
         Ok(response)
@@ -259,6 +337,21 @@ struct OpenAiChoice {
 #[derive(Debug, Deserialize)]
 struct OpenAiMessage {
     content: Option<String>,
+    tool_calls: Option<Vec<OpenAiToolCall>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    call_type: String,
+    function: OpenAiFunctionCall,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiFunctionCall {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Debug, Deserialize)]

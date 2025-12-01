@@ -1,0 +1,71 @@
+{
+    "nodes": {
+        "trigger": {
+            "type": "trigger_webhook",
+            "config": {
+                "path": "/agent",
+                "method": "POST",
+                "test_payload": {
+                    "request": "Get all active users"
+                }
+            }
+        },
+        "agent": {
+            "type": "llm_call",
+            "config": {
+                "provider": "openai",
+                "api_key": "${OPENAI_API_KEY}",
+                "model": "gpt-4o-mini",
+                "system_message": "You are a helpful API assistant. Use the available tools to fetch data.",
+                "enabled_tools": [
+                    "fetch_users",
+                    "create_user"
+                ],
+                "tool_configurations": {
+                    "fetch_users": {
+                        "name": "fetch_users",
+                        "node_type": "http_request",
+                        "description": "Fetch user data from the API. You can filter by status (active/inactive) and limit the number of results returned.",
+                        "fixed_config": {
+                            "base_url": "https://jsonplaceholder.typicode.com",
+                            "endpoint": "/users",
+                            "method": "GET"
+                        },
+                        "exposed_inputs": [
+                            "query_parameters"
+                        ]
+                    },
+                    "create_user": {
+                        "name": "create_user",
+                        "node_type": "http_request",
+                        "description": "Create a new user in the system. Provide name, email, and phone.",
+                        "fixed_config": {
+                            "base_url": "https://jsonplaceholder.typicode.com",
+                            "endpoint": "/users",
+                            "method": "POST",
+                            "headers": {
+                                "Content-Type": "application/json"
+                            }
+                        },
+                        "exposed_inputs": [
+                            "body"
+                        ]
+                    }
+                }
+            }
+        },
+        "log": {
+            "type": "log"
+        }
+    },
+    "edges": [
+        {
+            "from": "trigger.output.request",
+            "to": "agent.prompt"
+        },
+        {
+            "from": "agent.output",
+            "to": "log.input"
+        }
+    ]
+}

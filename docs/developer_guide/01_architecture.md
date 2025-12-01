@@ -40,6 +40,25 @@ src/
 │       ├── gemini_adapter.rs      # Adapter: Gemini API
 │       ├── anthropic_adapter.rs   # Adapter: Anthropic API
 │       └── llm_provider_factory.rs # Factory para crear adapters
+├── dag_engine/                    # 🧠 MOTOR DE EJECUCIÓN DE GRAFOS (DAG)
+│   ├── mod.rs                     # (No presente, pero conceptualmente aquí)
+│   ├── main.rs                    # Entry point del binario del DAG
+│   ├── domain/                    # 🏛️ CAPA DE DOMINIO DEL DAG
+│   │   ├── mod.rs
+│   │   ├── graph.rs               # Entidades: Graph, NodeConfig, Edge
+│   │   ├── node.rs                # Port: Trait ExecutableNode
+│   │   └── error.rs               # Errores de dominio del DAG
+│   ├── application/               # 🎯 CAPA DE APLICACIÓN DEL DAG
+│   │   ├── mod.rs
+│   │   ├── ports.rs               # Port: Trait NodeRegistryPort
+│   │   └── run_use_case.rs        # Caso de uso: ejecutar un grafo
+│   └── infrastructure/            # 🔧 CAPA DE INFRAESTRUCTURA DEL DAG
+│       ├── mod.rs
+│       ├── registry.rs            # Adapter: HashMapNodeRegistry
+│       └── nodes/                 # Adapters: Implementaciones de nodos
+│           ├── mod.rs
+│           ├── math.rs
+│           └── debug.rs
 ├── shared/                        # 🤝 FUNCIONALIDADES COMPARTIDAS
 │   ├── mod.rs
 │   └── infrastructure/

@@ -1,6 +1,9 @@
 pub mod llm;
+pub mod dag_engine;
+#[cfg(feature = "python")]
 pub mod python_bindings;
 pub mod shared;
 
 pub use llm::*;
+#[cfg(feature = "python")]
 pub use python_bindings::*;

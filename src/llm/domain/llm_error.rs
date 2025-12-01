@@ -64,6 +64,19 @@ pub enum LlmError {
 
     #[error("Internal error: {message}")]
     InternalError { message: String },
+
+    // Tool-related errors
+    #[error("Tool not found: {name}")]
+    ToolNotFound { name: String },
+
+    #[error("Tool execution failed: {message}")]
+    ToolExecutionFailed { message: String },
+
+    #[error("Invalid tool call: {reason}")]
+    InvalidToolCall { reason: String },
+
+    #[error("Max iterations reached: {max} iterations exceeded in ReAct loop")]
+    MaxIterationsReached { max: usize },
 }
 
 impl LlmError {
@@ -112,5 +125,25 @@ impl LlmError {
             provider: provider.into(),
             feature: feature.into(),
         }
+    }
+
+    pub fn tool_not_found(name: impl Into<String>) -> Self {
+        Self::ToolNotFound { name: name.into() }
+    }
+
+    pub fn tool_execution_failed(message: impl Into<String>) -> Self {
+        Self::ToolExecutionFailed {
+            message: message.into(),
+        }
+    }
+
+    pub fn invalid_tool_call(reason: impl Into<String>) -> Self {
+        Self::InvalidToolCall {
+            reason: reason.into(),
+        }
+    }
+
+    pub fn max_iterations_reached(max: usize) -> Self {
+        Self::MaxIterationsReached { max }
     }
 }
