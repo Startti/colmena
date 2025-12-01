@@ -1,9 +1,11 @@
 use crate::llm::domain::{ConversationRepository, LlmError};
-use crate::llm::infrastructure::persistence::{PostgresConversationRepository, SqliteConversationRepository};
+use crate::llm::infrastructure::persistence::{
+    PostgresConversationRepository, SqliteConversationRepository,
+};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::sqlite::{SqlitePoolOptions, SqliteConnectOptions};
-use std::str::FromStr;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -22,7 +24,10 @@ impl ConversationRepositoryFactory {
         }
     }
 
-    pub async fn get_repository(&self, connection_url: &str) -> Result<Arc<dyn ConversationRepository>, LlmError> {
+    pub async fn get_repository(
+        &self,
+        connection_url: &str,
+    ) -> Result<Arc<dyn ConversationRepository>, LlmError> {
         let mut repos = self.repositories.lock().await;
 
         if let Some(repo) = repos.get(connection_url) {
@@ -31,42 +36,53 @@ impl ConversationRepositoryFactory {
 
         println!("🔌 Conectando a nueva base de datos: {}", connection_url);
 
-        let repo: Arc<dyn ConversationRepository> = if connection_url.starts_with("postgres://") || connection_url.starts_with("postgresql://") {
+        let repo: Arc<dyn ConversationRepository> = if connection_url.starts_with("postgres://")
+            || connection_url.starts_with("postgresql://")
+        {
             let pool = PgPoolOptions::new()
                 .max_connections(5)
                 .connect(connection_url)
                 .await
-                .map_err(|e| LlmError::RequestFailed { message: format!("Failed to connect to Postgres: {}", e) })?;
-            
+                .map_err(|e| LlmError::RequestFailed {
+                    message: format!("Failed to connect to Postgres: {}", e),
+                })?;
+
             // Run migrations
             sqlx::migrate!("./migrations/postgres")
                 .run(&pool)
                 .await
-                .map_err(|e| LlmError::RequestFailed { message: format!("Migration failed: {}", e) })?;
+                .map_err(|e| LlmError::RequestFailed {
+                    message: format!("Migration failed: {}", e),
+                })?;
 
             Arc::new(PostgresConversationRepository::new(pool))
         } else if connection_url.starts_with("sqlite://") {
-        
-        let options = SqliteConnectOptions::from_str(connection_url)
-            .map_err(|e| LlmError::RequestFailed { message: format!("Invalid SQLite URL: {}", e) })?
-            .create_if_missing(true);
-        
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .map_err(|e| LlmError::RequestFailed { message: format!("Failed to connect to SQLite: {}", e) })?;
+            let options = SqliteConnectOptions::from_str(connection_url)
+                .map_err(|e| LlmError::RequestFailed {
+                    message: format!("Invalid SQLite URL: {}", e),
+                })?
+                .create_if_missing(true);
 
-        // Run migrations
-        sqlx::migrate!("./migrations/sqlite")
-            .run(&pool)
-            .await
-            .map_err(|e| LlmError::RequestFailed { message: format!("Migration failed: {}", e) })?;
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(options)
+                .await
+                .map_err(|e| LlmError::RequestFailed {
+                    message: format!("Failed to connect to SQLite: {}", e),
+                })?;
 
-        Arc::new(SqliteConversationRepository::new(pool))
+            // Run migrations
+            sqlx::migrate!("./migrations/sqlite")
+                .run(&pool)
+                .await
+                .map_err(|e| LlmError::RequestFailed {
+                    message: format!("Migration failed: {}", e),
+                })?;
+
+            Arc::new(SqliteConversationRepository::new(pool))
         } else {
-            return Err(LlmError::RequestFailed { 
-                message: format!("Unsupported database protocol in URL: {}", connection_url) 
+            return Err(LlmError::RequestFailed {
+                message: format!("Unsupported database protocol in URL: {}", connection_url),
             });
         };
 

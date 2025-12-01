@@ -21,7 +21,8 @@ impl ExecutableNode for PythonNode {
         let code = if let Some(input_code) = inputs.get("code").and_then(|v| v.as_str()) {
             input_code.to_string()
         } else {
-            config.get("code")
+            config
+                .get("code")
                 .and_then(|v| v.as_str())
                 .ok_or("PythonNode error: 'code' field is missing in inputs or config")?
                 .to_string()
@@ -46,7 +47,6 @@ impl ExecutableNode for PythonNode {
         let inputs_clone = inputs.clone();
         let code = code.to_string(); // Convert &str to String for the closure
 
-
         // 3. Ejecución Bloqueante:
         // CPython no es thread-safe con el runtime async de Tokio.
         // Usamos spawn_blocking para mover la carga pesada y el GIL a un thread dedicado.
@@ -58,9 +58,11 @@ impl ExecutableNode for PythonNode {
                 // B. Inyectar Inputs como variables globales en el script
                 // Ejemplo: si inputs tiene {"x": 10}, en python existirá la variable `x`
                 for (key, value) in inputs_clone {
-                    let py_val = pythonize(py, &value)
-                        .map_err(|e| format!("Failed to convert input '{}' to Python: {}", key, e))?;
-                    locals.set_item(&key, py_val)
+                    let py_val = pythonize(py, &value).map_err(|e| {
+                        format!("Failed to convert input '{}' to Python: {}", key, e)
+                    })?;
+                    locals
+                        .set_item(&key, py_val)
                         .map_err(|e| format!("Failed to set input '{}': {}", key, e))?;
                 }
 
@@ -77,14 +79,16 @@ impl ExecutableNode for PythonNode {
                 // Si 'output' no existe, devolvemos null.
                 match locals.get_item("output") {
                     Ok(Some(output_obj)) => {
-                        let json_output: Value = depythonize_bound(output_obj)
-                            .map_err(|e| format!("Failed to convert Python 'output' to JSON: {}", e))?;
+                        let json_output: Value = depythonize_bound(output_obj).map_err(|e| {
+                            format!("Failed to convert Python 'output' to JSON: {}", e)
+                        })?;
                         Ok(json_output)
-                    },
-                    _ => Ok(Value::Null)
+                    }
+                    _ => Ok(Value::Null),
                 }
             })
-        }).await??; // Primer ? es para JoinError (Tokio), segundo ? es para el Result interno
+        })
+        .await??; // Primer ? es para JoinError (Tokio), segundo ? es para el Result interno
 
         // 4. Retornar estructura estándar
         Ok(json!({
@@ -124,7 +128,7 @@ mod tests {
     #[tokio::test]
     async fn test_python_math_logic() {
         let node = PythonNode;
-        
+
         // 1. Configurar Inputs: x = 10, y = 5
         let mut inputs = HashMap::new();
         inputs.insert("x".to_string(), json!(10));
@@ -132,7 +136,7 @@ mod tests {
 
         // 2. Configurar Script: Multiplicar y guardar en 'output'
         let config = json!({
-            "code": "output = x * y + 2" 
+            "code": "output = x * y + 2"
         });
 
         let mut state = json!({});
@@ -149,14 +153,14 @@ mod tests {
         // Verificar que podemos importar librerías estándar (json, math)
         let node = PythonNode;
         let inputs = HashMap::new();
-        
+
         let config = json!({
             "code": "import math\noutput = math.sqrt(16)"
         });
-        
+
         let mut state = json!({});
         let result = node.execute(&inputs, &config, &mut state).await.unwrap();
-        
+
         assert_eq!(result["output"], 4.0);
     }
 }

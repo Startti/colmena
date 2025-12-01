@@ -1,6 +1,6 @@
 // src/dag_engine/main.rs
-use colmena::dag_engine::api;
 use clap::{Parser, Subcommand};
+use colmena::dag_engine::api;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Motor de ejecución de grafos DAG en Rust")]
@@ -11,7 +11,9 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    Run { file_path: String },
+    Run {
+        file_path: String,
+    },
     Serve {
         file_path: String,
         #[arg(long, default_value_t = 3000)]

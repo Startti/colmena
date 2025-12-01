@@ -1,6 +1,6 @@
 use crate::llm::domain::{
-    LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk, LlmUsage,
-    ToolCall, FunctionCall,
+    FunctionCall, LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk,
+    LlmUsage, ToolCall,
 };
 use async_trait::async_trait;
 use futures::{Stream, StreamExt, TryStreamExt};
@@ -45,7 +45,7 @@ impl OpenAiAdapter {
                     "role": msg.role().as_str(),
                     "content": msg.content()
                 });
-                
+
                 // Add tool_calls for assistant messages
                 if let Some(tool_calls) = msg.tool_calls() {
                     let openai_tool_calls: Vec<serde_json::Value> = tool_calls
@@ -63,12 +63,12 @@ impl OpenAiAdapter {
                         .collect();
                     message_json["tool_calls"] = json!(openai_tool_calls);
                 }
-                
+
                 // Add tool_call_id for tool messages
                 if let Some(tool_call_id) = msg.tool_call_id() {
                     message_json["tool_call_id"] = json!(tool_call_id);
                 }
-                
+
                 message_json
             })
             .collect()
@@ -178,7 +178,10 @@ impl LlmRepository for OpenAiAdapter {
                     .map(|tc| {
                         ToolCall::new(
                             tc.id.clone(),
-                            FunctionCall::new(tc.function.name.clone(), tc.function.arguments.clone()),
+                            FunctionCall::new(
+                                tc.function.name.clone(),
+                                tc.function.arguments.clone(),
+                            ),
                         )
                     })
                     .collect::<Vec<_>>()

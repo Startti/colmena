@@ -9,10 +9,15 @@ impl ExecutableNode for TriggerWebhookNode {
     /// The Trigger's execution logic is simple:
     /// It takes the `inputs` (which we will inject from the HTTP request body)
     /// and passes them to the output.
-    async fn execute(&self, inputs: &NodeInputs, config: &Value, _state: &mut Value) -> Result<Value, Box<dyn StdError>> {
+    async fn execute(
+        &self,
+        inputs: &NodeInputs,
+        config: &Value,
+        _state: &mut Value,
+    ) -> Result<Value, Box<dyn StdError>> {
         // For a trigger, the "inputs" ARE the payload from the outside world.
         // We wrap them in "output" to match our convention.
-        
+
         // Priority order:
         // 1. __payload__ (injected by serve command)
         // 2. test_payload (defined by user for local testing with run command)
@@ -25,7 +30,7 @@ impl ExecutableNode for TriggerWebhookNode {
             // Fallback: use inputs if available (e.g. if not running in serve mode or testing)
             serde_json::to_value(inputs)?
         };
-        
+
         // We'll return the whole input map as the output object
         // so downstream nodes can access fields like `trigger.message`.
         Ok(json!({ "output": payload }))
@@ -35,7 +40,7 @@ impl ExecutableNode for TriggerWebhookNode {
         Some("Trigger execution with webhook payloads. Acts as an entry point for external events.")
     }
 
-    fn schema(&self) -> Value { 
+    fn schema(&self) -> Value {
         json!({
             "type": "trigger_webhook",
             "config": {
@@ -46,6 +51,6 @@ impl ExecutableNode for TriggerWebhookNode {
             "outputs": {
                 "output": "any"
             }
-        }) 
+        })
     }
 }
