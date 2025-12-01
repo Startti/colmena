@@ -4,3 +4,4 @@ pub mod math;
 pub mod trigger;
 pub mod http;
 pub mod llm;
+pub mod python_node;
