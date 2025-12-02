@@ -38,10 +38,7 @@ impl ConversationRepository for InMemoryConversationRepository {
 
     async fn add_message(&self, id: &ThreadId, message: LlmMessage) -> Result<(), LlmError> {
         let mut conversations = self.conversations.write().unwrap();
-        conversations
-            .entry(id.0.clone())
-            .or_insert_with(Vec::new)
-            .push(message);
+        conversations.entry(id.0.clone()).or_default().push(message);
         Ok(())
     }
 

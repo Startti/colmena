@@ -1,6 +1,7 @@
 use crate::llm::domain::{
     Conversation, ConversationRepository, LlmError, LlmMessage, MessageRole, ThreadId,
 };
+
 use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::{Row, SqlitePool};
@@ -84,8 +85,7 @@ impl ConversationRepository for SqliteConversationRepository {
         // Serialize tool_calls if present
         let tool_calls_str = message
             .tool_calls()
-            .map(|tc| serde_json::to_string(tc).ok())
-            .flatten();
+            .and_then(|tc| serde_json::to_string(tc).ok());
 
         sqlx::query(
             "INSERT INTO chat_messages (id, thread_id, role, content, tool_call_id, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"

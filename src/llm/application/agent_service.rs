@@ -129,7 +129,7 @@ mod tests {
     use super::*;
     use crate::llm::domain::*;
     use async_trait::async_trait;
-    use chrono::Utc;
+
     use mockall::mock;
     use mockall::predicate::*;
     use std::sync::Arc;

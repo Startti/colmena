@@ -1,10 +1,6 @@
 // src/dag_engine/main.rs
-pub mod api;
-pub mod application;
-pub mod domain;
-pub mod infrastructure;
-
 use clap::{Parser, Subcommand};
+use colmena::dag_engine::api;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Motor de ejecución de grafos DAG en Rust")]

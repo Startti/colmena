@@ -9,6 +9,12 @@ impl MockAdapter {
     }
 }
 
+impl Default for MockAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl LlmRepository for MockAdapter {
     async fn call(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
