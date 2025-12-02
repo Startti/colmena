@@ -40,7 +40,7 @@ impl ConversationRepository for InMemoryConversationRepository {
         let mut conversations = self.conversations.write().unwrap();
         conversations
             .entry(id.0.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(message);
         Ok(())
     }

@@ -81,8 +81,7 @@ impl ConversationRepository for PostgresConversationRepository {
         // Serialize tool_calls if present
         let tool_calls_json = message
             .tool_calls()
-            .map(|tc| serde_json::to_value(tc).ok())
-            .flatten();
+            .and_then(|tc| serde_json::to_value(tc).ok());
 
         sqlx::query(
             "INSERT INTO chat_messages (thread_id, role, content, tool_call_id, tool_calls, created_at) VALUES ($1, $2, $3, $4, $5, $6)"
