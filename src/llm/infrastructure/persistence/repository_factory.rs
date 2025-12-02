@@ -4,8 +4,10 @@ use crate::llm::infrastructure::persistence::{
 };
 use sqlx::postgres::PgPoolOptions;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
 use std::collections::HashMap;
 use std::str::FromStr;
+
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -32,7 +34,6 @@ impl Default for ConversationRepositoryFactory {
 }
 
 impl ConversationRepositoryFactory {
-
     pub async fn get_repository(
         &self,
         connection_url: &str,

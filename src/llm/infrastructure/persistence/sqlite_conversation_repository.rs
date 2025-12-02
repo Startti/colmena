@@ -1,6 +1,7 @@
 use crate::llm::domain::{
     Conversation, ConversationRepository, LlmError, LlmMessage, MessageRole, ThreadId,
 };
+
 use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::{Row, SqlitePool};
