@@ -23,6 +23,15 @@ impl ConversationRepositoryFactory {
             repositories: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+}
+
+impl Default for ConversationRepositoryFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ConversationRepositoryFactory {
 
     pub async fn get_repository(
         &self,

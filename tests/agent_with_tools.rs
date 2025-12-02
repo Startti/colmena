@@ -131,7 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conversation_repo = Arc::new(InMemoryConversationRepository::new());
 
     // 3. Create AgentService
-    let agent_service = AgentService::new(Arc::from(llm_repo), conversation_repo);
+    let agent_service = AgentService::new(llm_repo, conversation_repo);
 
     // 4. Setup tools
     let tool_executor = CalculatorToolExecutor;
