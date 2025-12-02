@@ -168,7 +168,7 @@ impl ExecutableNode for LlmNode {
 
         // --- 3. Execute LLM Call (via AgentService) ---
         let llm_repo = LlmProviderFactory::create(provider_kind);
-        let llm_repo_arc: Arc<dyn crate::llm::domain::LlmRepository> = Arc::from(llm_repo); // Convert Box to Arc
+        let llm_repo_arc: Arc<dyn crate::llm::domain::LlmRepository> = llm_repo; // Already Arc
 
         // Create Tool Executor
         // We need to resolve the registry from Weak reference

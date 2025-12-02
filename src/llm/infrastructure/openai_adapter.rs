@@ -347,6 +347,7 @@ struct OpenAiMessage {
 struct OpenAiToolCall {
     id: String,
     #[serde(rename = "type")]
+    #[allow(dead_code)] // Required for deserialization, always "function" in OpenAI API
     call_type: String,
     function: OpenAiFunctionCall,
 }

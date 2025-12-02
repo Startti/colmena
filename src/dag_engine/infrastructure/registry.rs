@@ -1,6 +1,8 @@
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::domain::node::ExecutableNode;
-use crate::dag_engine::infrastructure::nodes::{debug::*, http::*, llm::*, math::*, trigger::*}; // Importa nuestros nodos
+use crate::dag_engine::infrastructure::nodes::{
+    debug::*, http::*, llm::*, math::*, python_node::*, trigger::*,
+}; // Importa nuestros nodos
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
@@ -43,6 +45,9 @@ impl HashMapNodeRegistry {
                 "llm_call".to_string(),
                 Arc::new(LlmNode::new(repository_factory.clone(), registry_weak)),
             );
+
+            // --- Registrar Nodos Python ---
+            nodes.insert("python_script".to_string(), Arc::new(PythonNode));
 
             Self { nodes }
         })
