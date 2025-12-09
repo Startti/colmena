@@ -1,0 +1,37 @@
+{
+    "nodes": {
+        "my_webhook": {
+            "type": "trigger_webhook",
+            "config": {
+                "path": "/test-llm",
+                "method": "POST",
+                "test_payload": {
+                    "message": "Say hello in Spanish!"
+                }
+            }
+        },
+        "llm_step": {
+            "type": "llm_call",
+            "config": {
+                "provider": "openai",
+                "api_key": "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",
+                "model": "gpt-3.5-turbo",
+                "system_message": "You are a helpful assistant.",
+                "max_tokens": 50
+            }
+        },
+        "log_step": {
+            "type": "log"
+        }
+    },
+    "edges": [
+        {
+            "from": "my_webhook.output.message",
+            "to": "llm_step.prompt"
+        },
+        {
+            "from": "llm_step.output",
+            "to": "log_step.input"
+        }
+    ]
+}

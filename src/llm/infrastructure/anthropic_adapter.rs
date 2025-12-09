@@ -3,10 +3,12 @@ use crate::llm::domain::{
     MessageRole,
 };
 use async_trait::async_trait;
-use futures::StreamExt;
+use futures::{Stream, StreamExt, TryStreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 pub struct AnthropicAdapter {
     client: Client,
@@ -53,6 +55,15 @@ impl AnthropicAdapter {
                     messages.push(AnthropicMessage {
                         role: "assistant".to_string(),
                         content: message.content().to_string(),
+                    });
+                }
+                MessageRole::Tool => {
+                    // Anthropic uses a specific format for tool results (user role with tool_result content block)
+                    // For now, we'll treat it as a user message with the content
+                    // TODO: Implement proper tool result formatting for Anthropic
+                    messages.push(AnthropicMessage {
+                        role: "user".to_string(),
+                        content: format!("Tool result: {}", message.content()),
                     });
                 }
             }
@@ -176,52 +187,42 @@ impl LlmRepository for AnthropicAdapter {
         let request_id = request.id().clone();
         let provider = request.config().provider().clone();
 
-        let stream = response.bytes_stream().filter_map(move |chunk_result| {
+        let byte_stream = response.bytes_stream();
+        let sse_stream = SseParser::new(byte_stream).try_filter_map(move |event| {
             let request_id = request_id.clone();
             let provider = provider.clone();
-
             async move {
-                match chunk_result {
-                    Ok(bytes) => {
-                        // bytes is of type reqwest::Bytes
-                        let text = String::from_utf8_lossy(&bytes);
-
-                        for line in text.lines() {
-                            if let Some(data) = line.strip_prefix("data: ") {
-                                if let Ok(event) =
-                                    serde_json::from_str::<AnthropicStreamEvent>(data)
-                                {
-                                    match event.event_type.as_str() {
-                                        "content_block_delta" => {
-                                            if let Some(delta) = event.delta {
-                                                if let Some(text) = delta.text {
-                                                    return Some(Ok(LlmStreamChunk::new(
-                                                        request_id, text, provider, false,
-                                                    )));
-                                                }
-                                            }
-                                        }
-                                        "message_stop" => {
-                                            return Some(Ok(LlmStreamChunk::new(
-                                                request_id,
-                                                String::new(),
-                                                provider,
-                                                true,
+                match event {
+                    SseEvent::Message(data) => {
+                        if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(&data) {
+                            match event.event_type.as_str() {
+                                "content_block_delta" => {
+                                    if let Some(delta) = event.delta {
+                                        if let Some(text) = delta.text {
+                                            return Ok(Some(LlmStreamChunk::new(
+                                                request_id, text, provider, false,
                                             )));
                                         }
-                                        _ => {}
                                     }
                                 }
+                                "message_stop" => {
+                                    return Ok(Some(LlmStreamChunk::new(
+                                        request_id,
+                                        String::new(),
+                                        provider,
+                                        true,
+                                    )));
+                                }
+                                _ => {}
                             }
                         }
-                        None
+                        Ok(None)
                     }
-                    Err(e) => Some(Err(LlmError::network_error(e.to_string()))),
                 }
             }
         });
 
-        Ok(Box::pin(stream))
+        Ok(Box::pin(sse_stream))
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {
@@ -292,4 +293,72 @@ struct AnthropicStreamEvent {
 #[derive(Debug, Deserialize)]
 struct AnthropicDelta {
     text: Option<String>,
+}
+
+// SSE Parser implementation
+enum SseEvent {
+    Message(String),
+}
+
+struct SseParser<S>
+where
+    S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+{
+    stream: S,
+    buffer: Vec<u8>,
+}
+
+impl<S> SseParser<S>
+where
+    S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+{
+    fn new(stream: S) -> Self {
+        Self {
+            stream,
+            buffer: Vec::new(),
+        }
+    }
+}
+
+impl<S> Stream for SseParser<S>
+where
+    S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+{
+    type Item = Result<SseEvent, LlmError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            // Check for a complete message in the buffer
+            if let Some(i) = self.buffer.windows(2).position(|w| w == b"\n\n") {
+                let message_bytes = self.buffer.drain(..i + 2).collect::<Vec<u8>>();
+                let msg_str = String::from_utf8_lossy(&message_bytes);
+
+                for line in msg_str.lines() {
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        return Poll::Ready(Some(Ok(SseEvent::Message(data.to_string()))));
+                    }
+                }
+                // Continue loop if message was parsed but no data field found
+                continue;
+            }
+
+            // Buffer not ready, poll the underlying stream
+            match self.stream.poll_next_unpin(cx) {
+                Poll::Ready(Some(Ok(chunk))) => {
+                    self.buffer.extend_from_slice(&chunk);
+                    // Loop again to check if a full message is now in the buffer
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    return Poll::Ready(Some(Err(LlmError::network_error(e.to_string()))));
+                }
+                Poll::Ready(None) => {
+                    // Stream is finished. If there's anything left in the buffer, it's an incomplete message.
+                    return Poll::Ready(None);
+                }
+                Poll::Pending => {
+                    return Poll::Pending;
+                }
+            }
+        }
+    }
 }

@@ -1,0 +1,42 @@
+{
+    "nodes": {
+        "start": {
+            "type": "mock_input",
+            "config": {
+                "prompt": "Write a python script that calculates the factorial of 5 and assigns it to 'output'. Do not use markdown blocks, just raw code."
+            }
+        },
+        "llm_gen": {
+            "type": "llm_call",
+            "config": {
+                "provider": "openai",
+                "api_key": "${OPENAI_API_KEY}",
+                "model": "gpt-4o",
+                "temperature": 0.0
+            }
+        },
+        "python_exec": {
+            "type": "python_script",
+            "config": {
+                "code": "output = 'fallback'"
+            }
+        },
+        "log_result": {
+            "type": "log"
+        }
+    },
+    "edges": [
+        {
+            "from": "start.prompt",
+            "to": "llm_gen.prompt"
+        },
+        {
+            "from": "llm_gen.output.content",
+            "to": "python_exec.code"
+        },
+        {
+            "from": "python_exec.output",
+            "to": "log_result.input"
+        }
+    ]
+}

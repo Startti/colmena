@@ -1,15 +1,16 @@
 use crate::llm::domain::{LlmRepository, ProviderKind};
-use crate::llm::infrastructure::{AnthropicAdapter, GeminiAdapter, OpenAiAdapter};
+use crate::llm::infrastructure::{AnthropicAdapter, GeminiAdapter, MockAdapter, OpenAiAdapter};
 use std::sync::Arc;
 
 pub struct LlmProviderFactory;
 
 impl LlmProviderFactory {
-    pub fn create(provider: ProviderKind) -> Arc<dyn LlmRepository> {
-        match provider {
+    pub fn create(kind: ProviderKind) -> Arc<dyn LlmRepository> {
+        match kind {
             ProviderKind::OpenAi => Arc::new(OpenAiAdapter::new()),
             ProviderKind::Gemini => Arc::new(GeminiAdapter::new()),
             ProviderKind::Anthropic => Arc::new(AnthropicAdapter::new()),
+            ProviderKind::Mock => Arc::new(MockAdapter::new()),
         }
     }
 
