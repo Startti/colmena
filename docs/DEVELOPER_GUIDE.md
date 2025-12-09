@@ -14,3 +14,4 @@ Esta guía se ha dividido en varias secciones para facilitar su consulta.
 6.  [**Performance y Optimización**](./developer_guide/06_performance.md): Consejos para medir y mejorar el rendimiento.
 7.  [**Deployment y Distribución**](./developer_guide/07_deployment.md): Proceso de build, CI/CD y publicación.
 8.  [**Cómo Contribuir**](./developer_guide/08_contributing.md): Guía para el proceso de Pull Requests y revisiones de código.
+9.  [**Uso de Herramientas**](./developer_guide/09_tool_calling.md): Configuración y uso de Tool Calling en el DAG.

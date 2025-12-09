@@ -3,6 +3,7 @@
 Tests for streaming scenarios to ensure the system correctly handles streaming responses.
 """
 import os
+import asyncio
 from dotenv import load_dotenv
 
 # Load environment variables from .env
@@ -20,23 +21,28 @@ except ImportError as e:
 GEMINI_PROVIDER = "gemini"
 GEMINI_MODEL = "gemini-2.5-flash"
 OPENAI_PROVIDER = "openai"
-OPENAI_MODEL = "gpt-5-nano-2025-08-07"
+OPENAI_MODEL = "gpt-4o-mini"
+ANTHROPIC_PROVIDER = "anthropic"
+ANTHROPIC_MODEL = "claude-3-haiku-20240307"
 
 
 # --- Streaming Scenarios ---
 
-def test_valid_streaming_conversation_succeeds():
+async def test_valid_streaming_conversation_succeeds():
     """Test a valid streaming conversation succeeds and prints chunks."""
     llm = colmena.ColmenaLlm()
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "Why the sky is blue?"},
+        {"role": "user", "content": "Why is the sky blue?"},
     ]
     try:
         print("📄 Streaming response:")
         full_response = ""
-        # We need to consume the generator to check for errors
-        for chunk in llm.stream(messages=messages, provider=GEMINI_PROVIDER, model=GEMINI_MODEL, max_tokens=1000):
+        options = colmena.LlmConfigOptions()
+        options.model = GEMINI_MODEL
+        options.max_tokens = 1000
+        stream = await llm.stream(messages=messages, provider=GEMINI_PROVIDER, options=options)
+        async for chunk in stream:
             print(f"  -> Received chunk: '{chunk}'")
             full_response += chunk
         
@@ -51,7 +57,7 @@ def test_valid_streaming_conversation_succeeds():
         print(f"❌ FAILED: Valid streaming conversation failed unexpectedly with: {e}")
         return False
 
-def test_consecutive_user_messages_streaming_fails():
+async def test_consecutive_user_messages_streaming_fails():
     """Test that consecutive user messages fail validation in streaming mode."""
     llm = colmena.ColmenaLlm()
     messages = [
@@ -60,8 +66,11 @@ def test_consecutive_user_messages_streaming_fails():
     ]
     try:
         # The generator must be consumed for the error to be triggered.
-        stream = llm.stream(messages=messages, provider=GEMINI_PROVIDER, model=GEMINI_MODEL, max_tokens=100)
-        for _ in stream:
+        options = colmena.LlmConfigOptions()
+        options.model = GEMINI_MODEL
+        options.max_tokens = 100
+        stream = await llm.stream(messages=messages, provider=GEMINI_PROVIDER, options=options)
+        async for _ in stream:
             pass  # Consume the generator
         print("❌ FAILED: Consecutive user messages in streaming did not raise an exception.")
         return False
@@ -73,7 +82,7 @@ def test_consecutive_user_messages_streaming_fails():
         print(f"❌ FAILED: An unexpected error occurred: {e}")
         return False
 
-def test_openai_streaming_succeeds():
+async def test_openai_streaming_succeeds():
     """Test a valid streaming conversation with OpenAI succeeds."""
     if not os.getenv("OPENAI_API_KEY"):
         print("\n⚠️ SKIPPED: OPENAI_API_KEY not set. Skipping OpenAI test.")
@@ -87,8 +96,11 @@ def test_openai_streaming_succeeds():
     try:
         print("📄 Streaming response (OpenAI):")
         full_response = ""
-        stream = llm.stream(messages=messages, provider=OPENAI_PROVIDER, model=OPENAI_MODEL, max_tokens=1500)
-        for chunk in stream:
+        options = colmena.LlmConfigOptions()
+        options.model = OPENAI_MODEL
+        options.max_tokens = 1500
+        stream = await llm.stream(messages=messages, provider=OPENAI_PROVIDER, options=options)
+        async for chunk in stream:
             print(f"  -> Received chunk: '{chunk}'")
             full_response += chunk
 
@@ -104,8 +116,41 @@ def test_openai_streaming_succeeds():
         print(f"❌ FAILED: OpenAI streaming conversation failed unexpectedly with: {e}")
         return False
 
+async def test_anthropic_streaming_succeeds():
+    """Test a valid streaming conversation with Anthropic succeeds."""
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        print("\n⚠️ SKIPPED: ANTHROPIC_API_KEY not set. Skipping Anthropic test.")
+        return True
 
-if __name__ == "__main__":
+    llm = colmena.ColmenaLlm()
+    messages = [
+        {"role": "user", "content": "Write a short haiku about a running stream."},
+    ]
+    try:
+        print("📄 Streaming response (Anthropic):")
+        full_response = ""
+        options = colmena.LlmConfigOptions()
+        options.model = ANTHROPIC_MODEL
+        options.max_tokens = 100
+        stream = await llm.stream(messages=messages, provider=ANTHROPIC_PROVIDER, options=options)
+        async for chunk in stream:
+            print(f"  -> Received chunk: '{chunk}'")
+            full_response += chunk
+
+        if full_response:
+            assert full_response.strip(), "Streamed response content should not be empty."
+            print(f"\n📝 Full response (Anthropic): '{full_response}'")
+            print("✅ PASSED: Anthropic streaming conversation succeeded.")
+            return True
+        else:
+            print("\n❌ FAILED: Anthropic streaming response was empty.")
+            return False
+    except Exception as e:
+        print(f"❌ FAILED: Anthropic streaming conversation failed unexpectedly with: {e}")
+        return False
+
+
+async def main():
     # Check for API key to provide a better error message
     if not os.getenv("GEMINI_API_KEY"):
         print("\n‼️  WARNING: GEMINI_API_KEY environment variable not set.")
@@ -117,6 +162,11 @@ if __name__ == "__main__":
         print("    The OpenAI tests will be skipped. Please create a .env file with your key.")
         print("-" * 60)
 
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        print("\n‼️  WARNING: ANTHROPIC_API_KEY environment variable not set.")
+        print("\n    The Anthropic tests will be skipped. Please create a .env file with your key.")
+        print("-" * 60)
+
     print("🧪 Streaming Scenarios Testing")
     print("="*60)
 
@@ -124,6 +174,7 @@ if __name__ == "__main__":
         test_valid_streaming_conversation_succeeds,
         test_consecutive_user_messages_streaming_fails,
         test_openai_streaming_succeeds,
+        test_anthropic_streaming_succeeds,
     ]
 
     passed = 0
@@ -132,7 +183,7 @@ if __name__ == "__main__":
     for test_func in tests:
         print(f"\n📋 Running {test_func.__name__}")
         try:
-            if test_func():
+            if await test_func():
                 passed += 1
         except Exception as e:
             print(f"❌ Test {test_func.__name__} crashed: {e}")
@@ -142,3 +193,6 @@ if __name__ == "__main__":
 
     if passed != total:
         exit(1)
+
+if __name__ == "__main__":
+    asyncio.run(main())

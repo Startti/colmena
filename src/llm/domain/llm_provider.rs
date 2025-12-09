@@ -3,11 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderKind {
     OpenAi,
     Gemini,
     Anthropic,
+    Mock,
 }
 
 impl Display for ProviderKind {
@@ -16,6 +17,7 @@ impl Display for ProviderKind {
             ProviderKind::OpenAi => write!(f, "openai"),
             ProviderKind::Gemini => write!(f, "gemini"),
             ProviderKind::Anthropic => write!(f, "anthropic"),
+            ProviderKind::Mock => write!(f, "mock"),
         }
     }
 }
@@ -41,6 +43,7 @@ impl ProviderKind {
             ProviderKind::OpenAi => "gpt-4o",
             ProviderKind::Gemini => "gemini-pro",
             ProviderKind::Anthropic => "claude-3-sonnet",
+            ProviderKind::Mock => "mock-model",
         }
     }
 
@@ -49,6 +52,7 @@ impl ProviderKind {
             ProviderKind::OpenAi => "OPENAI_API_KEY",
             ProviderKind::Gemini => "GEMINI_API_KEY",
             ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
+            ProviderKind::Mock => "MOCK_API_KEY",
         }
     }
 }

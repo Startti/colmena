@@ -1,4 +1,4 @@
-use crate::llm::domain::{LlmConfig, LlmError, LlmMessage, LlmRequestId};
+use crate::llm::domain::{LlmConfig, LlmError, LlmMessage, LlmRequestId, ToolDefinition};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7,6 +7,14 @@ pub struct LlmRequest {
     messages: Vec<LlmMessage>,
     config: LlmConfig,
     stream: bool,
+
+    /// Optional tools available for this request
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<ToolDefinition>>,
+
+    /// Control how the model uses tools ("auto", "none", or specific function name)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<String>,
 }
 
 impl LlmRequest {
@@ -38,11 +46,25 @@ impl LlmRequest {
             messages,
             config,
             stream,
+            tools: None,
+            tool_choice: None,
         })
     }
 
     pub fn with_id(mut self, id: LlmRequestId) -> Self {
         self.id = id;
+        self
+    }
+
+    /// Add tools to the request
+    pub fn with_tools(mut self, tools: Vec<ToolDefinition>) -> Self {
+        self.tools = Some(tools);
+        self
+    }
+
+    /// Set how the model should use tools
+    pub fn with_tool_choice(mut self, choice: String) -> Self {
+        self.tool_choice = Some(choice);
         self
     }
 
@@ -78,6 +100,21 @@ impl LlmRequest {
 
     pub fn first_message(&self) -> Option<&LlmMessage> {
         self.messages.first()
+    }
+
+    /// Get the tools available for this request
+    pub fn tools(&self) -> Option<&[ToolDefinition]> {
+        self.tools.as_deref()
+    }
+
+    /// Get the tool choice setting
+    pub fn tool_choice(&self) -> Option<&str> {
+        self.tool_choice.as_deref()
+    }
+
+    /// Check if tools are available
+    pub fn has_tools(&self) -> bool {
+        self.tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false)
     }
 }
 

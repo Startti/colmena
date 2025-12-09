@@ -1,4 +1,6 @@
-use crate::llm::domain::{LlmMessage, LlmProvider, LlmRequestId, LlmResponseId, LlmUsage};
+use crate::llm::domain::{
+    LlmMessage, LlmProvider, LlmRequestId, LlmResponseId, LlmUsage, ToolCall,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +13,10 @@ pub struct LlmResponse {
     provider: LlmProvider,
     timestamp: DateTime<Utc>,
     finish_reason: Option<String>,
+
+    /// Tool calls requested by the LLM
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<ToolCall>>,
 }
 
 impl LlmResponse {
@@ -28,6 +34,7 @@ impl LlmResponse {
             provider,
             timestamp: Utc::now(),
             finish_reason: None,
+            tool_calls: None,
         })
     }
 
@@ -44,6 +51,7 @@ impl LlmResponse {
             provider,
             timestamp: Utc::now(),
             finish_reason: None,
+            tool_calls: None,
         }
     }
 
@@ -59,6 +67,15 @@ impl LlmResponse {
 
     pub fn with_timestamp(mut self, timestamp: DateTime<Utc>) -> Self {
         self.timestamp = timestamp;
+        self
+    }
+
+    pub fn with_tool_calls(mut self, tool_calls: Vec<ToolCall>) -> Self {
+        // Update the message to include tool_calls
+        let content = self.message.content().to_string();
+        self.message = LlmMessage::assistant_with_tool_calls(content, tool_calls.clone())
+            .unwrap_or(self.message); // Fallback to original if fails
+        self.tool_calls = Some(tool_calls);
         self
     }
 
@@ -106,6 +123,19 @@ impl LlmResponse {
 
     pub fn token_count(&self) -> Option<u32> {
         self.usage.as_ref().map(|u| u.total_tokens)
+    }
+
+    /// Get tool calls requested by the LLM
+    pub fn tool_calls(&self) -> Option<&[ToolCall]> {
+        self.tool_calls.as_deref()
+    }
+
+    /// Check if the response contains tool calls
+    pub fn has_tool_calls(&self) -> bool {
+        self.tool_calls
+            .as_ref()
+            .map(|t| !t.is_empty())
+            .unwrap_or(false)
     }
 }
 
