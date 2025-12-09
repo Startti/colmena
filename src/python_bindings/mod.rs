@@ -2,9 +2,16 @@ use crate::llm::domain::{LlmError, LlmMessage, MessageRole, ProviderKind};
 use crate::shared::infrastructure::{ConfigResolver, ServiceContainerFactory};
 use futures::StreamExt;
 use pyo3::prelude::*;
-use pyo3::{create_exception, exceptions::PyException, types::PyDict};
+use pyo3::{
+    create_exception,
+    exceptions::{PyException, PyStopAsyncIteration},
+    types::PyDict,
+};
+use pyo3_asyncio_0_21::tokio::future_into_py;
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 create_exception!(colmena, LlmException, PyException);
 
@@ -15,8 +22,64 @@ impl From<LlmError> for PyErr {
 }
 
 #[pyclass]
+struct PyLlmStream {
+    stream: Arc<Mutex<crate::llm::domain::LlmStream>>,
+}
+
+#[pymethods]
+impl PyLlmStream {
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __anext__<'py>(slf: PyRefMut<'_, Self>, py: Python<'py>) -> PyResult<Option<PyObject>> {
+        let stream = Arc::clone(&slf.stream);
+        let future = async move {
+            let mut stream = stream.lock().await;
+            if let Some(result) = stream.next().await {
+                match result {
+                    Ok(chunk) => Ok(chunk.content().to_string()),
+                    Err(e) => Err(LlmException::new_err(e.to_string())),
+                }
+            } else {
+                Err(PyStopAsyncIteration::new_err(()))
+            }
+        };
+
+        Ok(Some(future_into_py(py, future)?.into()))
+    }
+}
+
+#[pyclass]
+#[derive(Clone, Default)]
+pub struct LlmConfigOptions {
+    #[pyo3(get, set)]
+    pub api_key: Option<String>,
+    #[pyo3(get, set)]
+    pub model: Option<String>,
+    #[pyo3(get, set)]
+    pub temperature: Option<f32>,
+    #[pyo3(get, set)]
+    pub max_tokens: Option<u32>,
+    #[pyo3(get, set)]
+    pub top_p: Option<f32>,
+    #[pyo3(get, set)]
+    pub frequency_penalty: Option<f32>,
+    #[pyo3(get, set)]
+    pub presence_penalty: Option<f32>,
+}
+
+#[pymethods]
+impl LlmConfigOptions {
+    #[new]
+    fn new() -> Self {
+        Default::default()
+    }
+}
+
+#[pyclass]
 pub struct ColmenaLlm {
-    containers: HashMap<String, crate::shared::infrastructure::ServiceContainer>,
+    containers: HashMap<String, Arc<crate::shared::infrastructure::ServiceContainer>>,
 }
 
 #[pymethods]
@@ -26,25 +89,18 @@ impl ColmenaLlm {
         ConfigResolver::load_env()?;
         let mut containers = HashMap::new();
         for (provider, container) in ServiceContainerFactory::create_all() {
-            containers.insert(provider.to_string(), container);
+            containers.insert(provider.to_string(), Arc::new(container));
         }
         Ok(Self { containers })
     }
 
-    #[pyo3(signature = (messages, provider, api_key=None, model=None, temperature=None, max_tokens=None, top_p=None, frequency_penalty=None, presence_penalty=None))]
-    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (messages, provider, options=None))]
     pub fn call(
         &self,
         py: Python,
         messages: Vec<&PyDict>,
         provider: &str,
-        api_key: Option<String>,
-        model: Option<String>,
-        temperature: Option<f32>,
-        max_tokens: Option<u32>,
-        top_p: Option<f32>,
-        frequency_penalty: Option<f32>,
-        presence_penalty: Option<f32>,
+        options: Option<LlmConfigOptions>,
     ) -> PyResult<String> {
         let provider_kind = ProviderKind::from_str(provider)?;
         let container = self
@@ -84,15 +140,16 @@ impl ColmenaLlm {
             })
             .collect();
 
+        let options = options.unwrap_or_default();
         let config = ConfigResolver::create_config(
             provider_kind,
-            api_key,
-            model,
-            temperature,
-            max_tokens,
-            top_p,
-            frequency_penalty,
-            presence_penalty,
+            options.api_key,
+            options.model,
+            options.temperature,
+            options.max_tokens,
+            options.top_p,
+            options.frequency_penalty,
+            options.presence_penalty,
         )?;
 
         py.allow_threads(move || {
@@ -109,25 +166,19 @@ impl ColmenaLlm {
         })
     }
 
-    #[pyo3(signature = (messages, provider, api_key=None, model=None, temperature=None, max_tokens=None, top_p=None, frequency_penalty=None, presence_penalty=None))]
-    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (messages, provider, options=None))]
     pub fn stream(
         &self,
         py: Python,
         messages: Vec<&PyDict>,
         provider: &str,
-        api_key: Option<String>,
-        model: Option<String>,
-        temperature: Option<f32>,
-        max_tokens: Option<u32>,
-        top_p: Option<f32>,
-        frequency_penalty: Option<f32>,
-        presence_penalty: Option<f32>,
+        options: Option<LlmConfigOptions>,
     ) -> PyResult<PyObject> {
         let provider_kind = ProviderKind::from_str(provider)?;
         let container = self
             .containers
             .get(provider)
+            .cloned()
             .ok_or_else(|| LlmException::new_err(format!("Provider {} not found", provider)))?;
 
         // Parse messages from dictionaries
@@ -163,26 +214,32 @@ impl ColmenaLlm {
             .collect();
         let llm_messages = llm_messages?;
 
+        let options = options.unwrap_or_default();
         let config = ConfigResolver::create_config(
             provider_kind,
-            api_key,
-            model,
-            temperature,
-            max_tokens,
-            top_p,
-            frequency_penalty,
-            presence_penalty,
+            options.api_key,
+            options.model,
+            options.temperature,
+            options.max_tokens,
+            options.top_p,
+            options.frequency_penalty,
+            options.presence_penalty,
         )?;
 
-        let stream_result = py.allow_threads(move || {
-            let rt =
-                tokio::runtime::Runtime::new().map_err(|e| LlmException::new_err(e.to_string()))?;
-            rt.block_on(async { container.llm_stream.execute(llm_messages, config).await })
-                .map_err(PyErr::from)
-        })?;
+        future_into_py(py, async move {
+            let stream_result = container.llm_stream.execute(llm_messages, config).await;
 
-        let generator = PyStreamGenerator::new(stream_result);
-        Ok(generator.into_py(py))
+            match stream_result {
+                Ok(stream) => {
+                    let py_stream = PyLlmStream {
+                        stream: Arc::new(Mutex::new(stream)),
+                    };
+                    Ok(py_stream)
+                }
+                Err(e) => Err(PyErr::from(e)),
+            }
+        })
+        .map(|bound| bound.into())
     }
 
     pub fn health_check(&self, py: Python, provider: &str) -> PyResult<bool> {
@@ -209,57 +266,54 @@ impl ColmenaLlm {
     }
 }
 
-#[pyclass]
-struct PyStreamGenerator {
-    chunks: Vec<String>,
-    index: usize,
-}
+// ==================== DAG Engine Bindings ====================
 
-impl PyStreamGenerator {
-    fn new(stream: crate::llm::domain::LlmStream) -> Self {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let chunks = rt.block_on(async {
-            let mut chunks = Vec::new();
-            let mut stream = stream;
-            while let Some(chunk_result) = stream.next().await {
-                if let Ok(chunk) = chunk_result {
-                    if !chunk.content().is_empty() {
-                        chunks.push(chunk.content().to_string());
-                    }
-                    if chunk.is_final() {
-                        break;
-                    }
-                } else {
-                    break;
-                }
+create_exception!(colmena, DagException, PyException);
+
+#[pyfunction]
+#[pyo3(signature = (file_path))]
+fn run_dag(py: Python, file_path: String) -> PyResult<String> {
+    py.allow_threads(move || {
+        let rt =
+            tokio::runtime::Runtime::new().map_err(|e| DagException::new_err(e.to_string()))?;
+
+        rt.block_on(async {
+            match crate::dag_engine::api::run_dag(file_path).await {
+                Ok(result) => serde_json::to_string_pretty(&result)
+                    .map_err(|e| DagException::new_err(e.to_string())),
+                Err(e) => Err(DagException::new_err(e.to_string())),
             }
-            chunks
-        });
-        Self { chunks, index: 0 }
-    }
+        })
+    })
 }
 
-#[pymethods]
-impl PyStreamGenerator {
-    fn __iter__(slf: PyRef<Self>) -> PyRef<Self> {
-        slf
-    }
+#[pyfunction]
+#[pyo3(signature = (file_path, port=3000))]
+fn serve_dag(py: Python, file_path: String, port: u16) -> PyResult<()> {
+    py.allow_threads(move || {
+        let rt =
+            tokio::runtime::Runtime::new().map_err(|e| DagException::new_err(e.to_string()))?;
 
-    fn __next__(mut slf: PyRefMut<Self>) -> Option<String> {
-        if slf.index < slf.chunks.len() {
-            let chunk = slf.chunks[slf.index].clone();
-            slf.index += 1;
-            Some(chunk)
-        } else {
-            None
-        }
-    }
+        rt.block_on(async {
+            crate::dag_engine::api::serve_dag(file_path, port)
+                .await
+                .map_err(|e| DagException::new_err(e.to_string()))
+        })
+    })
 }
 
 #[pymodule]
 #[allow(deprecated)]
 fn colmena(_py: Python, m: &PyModule) -> PyResult<()> {
+    // LLM bindings
     m.add_class::<ColmenaLlm>()?;
+    m.add_class::<LlmConfigOptions>()?;
     m.add("LlmException", _py.get_type_bound::<LlmException>())?;
+
+    // DAG Engine bindings
+    m.add_function(wrap_pyfunction!(run_dag, m)?)?;
+    m.add_function(wrap_pyfunction!(serve_dag, m)?)?;
+    m.add("DagException", _py.get_type_bound::<DagException>())?;
+
     Ok(())
 }

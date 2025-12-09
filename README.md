@@ -9,9 +9,21 @@ Una librería **nativa** de Rust para la orquestación de agentes de IA, diseña
 
 ## 🎯 Características
 
+### 🤖 Módulo LLM
 - **🔌 Multi-Proveedor**: Soporte nativo para OpenAI, Gemini y Anthropic
 - **⚡ Streaming**: Respuestas en tiempo real con chunks de texto
 - **🐍 Python Ready**: Bindings nativos compilados con PyO3 (no wrappers)
+- **🧠 Memoria Persistente**: SQLite y PostgreSQL para historial de conversaciones
+- **🛠️ Tool Calling**: Soporte nativo para herramientas y agentes
+
+### ⚙️ Motor DAG (DAG Engine)
+- **📊 Ejecución de Grafos**: Motor para ejecutar flujos de trabajo complejos
+- **🔗 Composición de Nodos**: Conecta LLMs, HTTP, Python y más
+- **🐍 Python Node**: Ejecuta código Python arbitrario con datos JSON
+- **🤖 Integración LLM**: Los LLMs pueden generar y ejecutar código Python
+- **📝 Configuración JSON**: Define grafos con archivos JSON simple
+
+### 🏗️ Arquitectura
 - **🏗️ Arquitectura Limpia**: Implementación hexagonal para máxima extensibilidad
 - **🔧 Configuración Flexible**: API keys desde variables de entorno o valores directos
 - **🛡️ Manejo de Errores**: Gestión robusta con tipos específicos y recuperación
@@ -20,8 +32,9 @@ Una librería **nativa** de Rust para la orquestación de agentes de IA, diseña
 
 ## ✅ Estado del Proyecto - FUNCIONAL
 
-**El primer módulo base está COMPLETAMENTE FUNCIONAL:**
+**Módulos Completamente Funcionales:**
 
+### 🤖 Módulo LLM Base
 - ✅ **Arquitectura hexagonal completa** y probada
 - ✅ **Soporte Multi-LLM**: OpenAI, Gemini, Anthropic funcionando
 - ✅ **Llamadas síncronas y streaming** implementadas
@@ -30,12 +43,20 @@ Una librería **nativa** de Rust para la orquestación de agentes de IA, diseña
 - ✅ **Tests completos**: 8/8 tests pasando con Gemini
 - ✅ **Documentación técnica** y ejemplos de uso
 
+### ⚙️ Motor DAG (DAG Engine)
+- ✅ **Ejecución de grafos** dirigidos acíclicos (DAGs)
+- ✅ **Nodos disponibles**: Debug, Math, HTTP, LLM, Python, Trigger
+- ✅ **Python Node**: Ejecuta código Python con integración LLM
+- ✅ **Tool Calling**: Los LLMs pueden usar otros nodos como herramientas
+- ✅ **Memoria persistente**: SQLite y PostgreSQL
+- ✅ **Servidor HTTP**: API REST para ejecución de DAGs
+
 ## 📁 Estructura del Proyecto
 
 ```
 src/
 ├── lib.rs                          # Entry point de la librería
-├── llm/                           # Módulo LLM
+├── llm/                           # 🤖 Módulo LLM
 │   ├── domain/                    # 🏛️ Capa de Dominio
 │   │   ├── llm_provider.rs       # Enums de proveedores
 │   │   ├── llm_config.rs         # Configuraciones
@@ -46,12 +67,34 @@ src/
 │   ├── application/               # 🎯 Capa de Aplicación
 │   │   ├── llm_call_use_case.rs  # Caso de uso: llamada normal
 │   │   ├── llm_stream_use_case.rs # Caso de uso: streaming
-│   │   └── llm_health_check_use_case.rs # Health checks
+│   │   └── agent_service.rs      # Servicio de agentes con tools
 │   └── infrastructure/            # 🔧 Capa de Infraestructura
 │       ├── openai_adapter.rs     # Adaptador OpenAI
 │       ├── gemini_adapter.rs     # Adaptador Gemini
 │       ├── anthropic_adapter.rs  # Adaptador Anthropic
-│       └── llm_provider_factory.rs # Factory
+│       ├── llm_provider_factory.rs # Factory
+│       └── persistence/          # Repositorios de memoria
+│           ├── sqlite_conversation_repository.rs
+│           └── postgres_conversation_repository.rs
+├── dag_engine/                    # ⚙️ Motor DAG
+│   ├── main.rs                   # CLI para ejecutar DAGs
+│   ├── domain/                   # 🏛️ Capa de Dominio
+│   │   ├── node.rs              # Trait ExecutableNode
+│   │   └── dag.rs               # Estructura del grafo
+│   ├── application/              # 🎯 Capa de Aplicación
+│   │   ├── dag_executor.rs      # Ejecutor de grafos
+│   │   └── ports/               # Puertos/interfaces
+│   ├── infrastructure/           # 🔧 Capa de Infraestructura
+│   │   ├── nodes/               # Implementaciones de nodos
+│   │   │   ├── debug.rs        # Nodos de depuración
+│   │   │   ├── math.rs         # Nodos matemáticos
+│   │   │   ├── http.rs         # Nodo HTTP
+│   │   │   ├── llm.rs          # Nodo LLM
+│   │   │   └── python_node.rs  # 🐍 Nodo Python (NUEVO)
+│   │   ├── registry.rs          # Registro de nodos
+│   │   └── dag_tool_executor.rs # Herramientas para LLM
+│   └── api/                     # 🌐 API REST
+│       └── server.rs            # Servidor HTTP
 ├── shared/                        # 🤝 Funcionalidades compartidas
 │   └── infrastructure/
 │       ├── config_resolver.rs    # Resolución de configuración
@@ -337,6 +380,150 @@ except colmena.LlmException as e:
 except Exception as e:
     print(f"Error inesperado: {e}")
 ```
+
+## ⚙️ Uso del Motor DAG
+
+El **DAG Engine** permite crear flujos de trabajo complejos conectando diferentes tipos de nodos en un grafo dirigido acíclico (DAG).
+
+### Ejecutar un DAG
+
+```bash
+# Ejecutar un grafo desde un archivo JSON
+cargo run --bin dag_engine run tests/python_simple_graph.json
+
+# Servir un grafo como API HTTP
+cargo run --bin dag_engine serve tests/python_llm_graph.json --port 3000
+```
+
+### Tipos de Nodos Disponibles
+
+| Tipo | Descripción | Ejemplo de Uso |
+|------|-------------|----------------|
+| `mock_input` | Emite datos de configuración | Iniciar flujo con datos estáticos |
+| `log` | Imprime valores a consola | Debugging y visualización |
+| `add`, `subtract`, `multiply`, `divide` | Operaciones matemáticas | Cálculos numéricos |
+| `http_request` | Hace peticiones HTTP | Llamadas a APIs externas |
+| `llm_call` | Ejecuta modelos LLM | Generación de texto, análisis |
+| `python_script` | Ejecuta código Python | Lógica personalizada, transformaciones |
+| `trigger_webhook` | Dispara webhooks | Integración con sistemas externos |
+
+### 🐍 Python Node
+
+El **Python Node** ejecuta código Python arbitrario dentro del flujo del DAG, con integración completa con JSON.
+
+#### Características
+
+- ✅ **Ejecución Segura**: Código Python ejecutado en thread aislado
+- ✅ **Integración JSON**: Inputs/outputs automáticos desde/hacia JSON
+- ✅ **Variables Inyectadas**: Los inputs del nodo se inyectan como variables Python
+- ✅ **Soporte para Funciones**: Define y usa funciones dentro del script
+- ✅ **Compatible con LLMs**: Procesa código generado por LLMs (limpia markdown)
+- ✅ **Librerías Estándar**: Acceso completo a la biblioteca estándar de Python
+
+#### Ejemplo Básico
+
+```json
+{
+  "nodes": {
+    "start": {
+      "type": "mock_input",
+      "config": {
+        "x": 10,
+        "y": 5
+      }
+    },
+    "python_calc": {
+      "type": "python_script",
+      "config": {
+        "code": "output = x * y + 2"
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {"from": "start.x", "to": "python_calc.x"},
+    {"from": "start.y", "to": "python_calc.y"},
+    {"from": "python_calc.output", "to": "log_result.input"}
+  ]
+}
+```
+
+**Resultado**: `52` (10 × 5 + 2)
+
+#### Ejemplo con LLM
+
+El Python Node puede ejecutar código generado dinámicamente por un LLM:
+
+```json
+{
+  "nodes": {
+    "start": {
+      "type": "mock_input",
+      "config": {
+        "prompt": "Write a Python script that calculates the factorial of 5 and assigns it to 'output'"
+      }
+    },
+    "llm_gen": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o"
+      }
+    },
+    "python_exec": {
+      "type": "python_script"
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {"from": "start.prompt", "to": "llm_gen.prompt"},
+    {"from": "llm_gen.output.content", "to": "python_exec.code"},
+    {"from": "python_exec.output", "to": "log_result.input"}
+  ]
+}
+```
+
+**Resultado**: `120` (factorial de 5)
+
+#### Convenciones del Python Node
+
+1. **Inputs**: Todas las entradas del nodo se inyectan como variables globales
+2. **Output**: El script debe asignar el resultado a una variable llamada `output`
+3. **Code Source**: El código puede venir de:
+   - Config: `config.code` (estático)
+   - Input: `inputs.code` (dinámico, por ejemplo desde un LLM)
+4. **Markdown Cleanup**: Automáticamente limpia bloques ```python ... ``` de código LLM
+5. **Librerías**: Se puede usar `import` para cualquier librería estándar de Python
+
+#### Ejemplo Avanzado con Funciones
+
+```python
+# Este código puede estar en config.code o ser generado por un LLM
+def fibonacci(n):
+    if n <= 1:
+        return n
+    return fibonacci(n-1) + fibonacci(n-2)
+
+output = [fibonacci(i) for i in range(10)]
+```
+
+### Flujos Comunes
+
+#### 1. LLM → Python → Resultado
+LLM genera código → Python ejecuta → Log resultado
+
+#### 2. HTTP → Python → LLM  
+API externa → Python transforma datos → LLM analiza
+
+#### 3. Input → Math → Python → Output
+Datos iniciales → Operaciones → Lógica compleja → Resultado
+
+
 
 ## 🧪 Testing y Verificación
 

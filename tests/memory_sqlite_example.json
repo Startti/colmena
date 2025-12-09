@@ -1,0 +1,40 @@
+{
+    "nodes": {
+        "step_1": {
+            "type": "llm_call",
+            "config": {
+                "provider": "gemini",
+                "api_key": "${GEMINI_API_KEY}",
+                "model": "gemini-2.5-flash",
+                "system_message": "You are a helpful assistant with perfect memory.",
+                "thread_id": "sqlite_test_thread_001",
+                "connection_url": "sqlite://colmena_memory.db",
+                "prompt": "My name is Alice and I love programming in Rust."
+            }
+        },
+        "step_2": {
+            "type": "llm_call",
+            "config": {
+                "provider": "gemini",
+                "api_key": "${GEMINI_API_KEY}",
+                "model": "gemini-2.5-flash",
+                "thread_id": "sqlite_test_thread_001",
+                "connection_url": "sqlite://colmena_memory.db",
+                "prompt": "What is my name and what do I love?"
+            }
+        },
+        "log_result": {
+            "type": "log"
+        }
+    },
+    "edges": [
+        {
+            "from": "step_1.output",
+            "to": "step_2.dummy_input"
+        },
+        {
+            "from": "step_2.output",
+            "to": "log_result.input"
+        }
+    ]
+}
