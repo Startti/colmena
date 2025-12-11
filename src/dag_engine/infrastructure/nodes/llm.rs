@@ -40,6 +40,42 @@ impl LlmNode {
             Ok(value.to_string())
         }
     }
+
+    fn resolve_context_vars(value: &str, inputs: &NodeInputs) -> String {
+        let mut result = String::new();
+        let mut last_end = 0;
+
+        while let Some(start) = value[last_end..].find("${context.") {
+            let absolute_start = last_end + start;
+            result.push_str(&value[last_end..absolute_start]);
+
+            if let Some(end) = value[absolute_start..].find('}') {
+                let absolute_end = absolute_start + end;
+                let var_path = &value[absolute_start + 2..absolute_end]; // e.g. "context.amadeus_token"
+                
+                // Look up in inputs
+                // inputs keys are flattened, e.g. "context.amadeus_token"
+                let val = if let Some(v) = inputs.get(var_path) {
+                    match v {
+                        Value::String(s) => s.clone(),
+                        _ => v.to_string(),
+                    }
+                } else {
+                    // Keep original if not found
+                    value[absolute_start..=absolute_end].to_string()
+                };
+                
+                result.push_str(&val);
+                last_end = absolute_end + 1;
+            } else {
+                result.push_str(&value[absolute_start..]);
+                last_end = value.len();
+                break;
+            }
+        }
+        result.push_str(&value[last_end..]);
+        result
+    }
 }
 
 #[async_trait]
@@ -178,11 +214,20 @@ impl ExecutableNode for LlmNode {
             .ok_or("NodeRegistry has been dropped")?;
 
         // Parse tool_configurations
-        let tool_configurations: HashMap<String, ToolConfiguration> = inputs
+        let mut tool_configurations: HashMap<String, ToolConfiguration> = inputs
             .get("tool_configurations")
             .or_else(|| config.get("tool_configurations"))
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
+
+        // Resolve context variables in fixed_config
+        for config in tool_configurations.values_mut() {
+            for val in config.fixed_config.values_mut() {
+                if let Value::String(s) = val {
+                    *val = Value::String(Self::resolve_context_vars(s, inputs));
+                }
+            }
+        }
 
         let tool_executor = DagToolExecutor::new(registry, tool_configurations);
 

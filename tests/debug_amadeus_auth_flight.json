@@ -1,0 +1,109 @@
+{
+    "nodes": {
+        "trigger": {
+            "type": "trigger_webhook",
+            "config": {
+                "path": "/debug-travel",
+                "method": "POST",
+                "test_payload": {
+                    "question": "Search for flights from LON to PAR for tomorrow."
+                }
+            }
+        },
+        "get_amadeus_token": {
+            "type": "http_request",
+            "config": {
+                "base_url": "https://api.amadeus.com/v1/security/oauth2/token",
+                "method": "POST",
+                "headers": {
+                    "Content-Type": "application/x-www-form-urlencoded"
+                },
+                "body": "grant_type=client_credentials&client_id=${AMADEUS_CLIENT_ID}&client_secret=${AMADEUS_CLIENT_SECRET}"
+            }
+        },
+        "agent_llm": {
+            "type": "llm_call",
+            "config": {
+                "provider": "openai",
+                "api_key": "${OPENAI_API_KEY}",
+                "model": "gpt-4o-mini",
+                "system_message": "You are a helpful assistant. Use the search_flights tool to find flights. The token is provided in the context.",
+                "temperature": 0.0,
+                "thread_id": "debug_amadeus_v1",
+                "connection_url": "${DATABASE_URL}",
+                "enabled_tools": [
+                    "search_flights"
+                ],
+                "tool_configurations": {
+                    "search_flights": {
+                        "name": "search_flights",
+                        "node_type": "http_request",
+                        "description": "Search for flight offers. You MUST provide originLocationCode, destinationLocationCode, departureDate, and adults.",
+                        "fixed_config": {
+                            "base_url": "https://api.amadeus.com",
+                            "endpoint": "/v2/shopping/flight-offers",
+                            "method": "GET",
+                            "bearer_token": "${context.amadeus_token}"
+                        },
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "originLocationCode": {
+                                    "type": "string",
+                                    "description": "IATA code of the departure airport (e.g., LON, PAR, NYC)"
+                                },
+                                "destinationLocationCode": {
+                                    "type": "string",
+                                    "description": "IATA code of the arrival airport (e.g., LON, PAR, NYC)"
+                                },
+                                "departureDate": {
+                                    "type": "string",
+                                    "description": "Departure date in YYYY-MM-DD format"
+                                },
+                                "returnDate": {
+                                    "type": "string",
+                                    "description": "Return date in YYYY-MM-DD format"
+                                },
+                                "adults": {
+                                    "type": "integer",
+                                    "description": "Number of adult passengers (default 1)"
+                                },
+                                "max": {
+                                    "type": "integer",
+                                    "description": "Maximum number of results (default 5)"
+                                }
+                            },
+                            "required": [
+                                "originLocationCode",
+                                "destinationLocationCode",
+                                "departureDate",
+                                "adults"
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "log_result": {
+            "type": "log"
+        }
+    },
+    "edges": [
+        {
+            "from": "trigger.output.question",
+            "to": "agent_llm.prompt"
+        },
+        {
+            "from": "trigger.output",
+            "to": "get_amadeus_token.trigger"
+        },
+        {
+            "from": "get_amadeus_token.output.body.access_token",
+            "to": "agent_llm.context.amadeus_token"
+        },
+        {
+            "from": "agent_llm.output",
+            "to": "log_result.input"
+        }
+    ]
+}
