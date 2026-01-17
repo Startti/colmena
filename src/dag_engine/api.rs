@@ -1,10 +1,11 @@
 use axum::{
     extract::{Json, State},
     routing::post,
+    response::IntoResponse,
     Router,
 };
+use std::collections::HashMap;
 use serde_json::Value;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 // Import from crate since this is part of the colmena library
@@ -34,7 +35,11 @@ pub async fn run_dag(file_path: String) -> Result<Value, Box<dyn std::error::Err
 }
 
 /// Serve a DAG as an HTTP API
-pub async fn serve_dag(file_path: String, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn serve_dag(
+    file_path: String,
+    host: String,
+    port: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Load .env file
     dotenvy::dotenv().ok();
 
@@ -61,18 +66,14 @@ pub async fn serve_dag(file_path: String, port: u16) -> Result<(), Box<dyn std::
                     path, node_id
                 );
 
-                // Estado específico para inyectar en el handler
                 let state = AppState {
                     graph: graph_arc.clone(),
                     use_case: run_use_case.clone(),
                 };
 
-                let node_id_clone = node_id.clone();
                 app = app.route(
                     path,
-                    post(move |State(state), Json(payload)| {
-                        handler_webhook(state, payload, node_id_clone)
-                    })
+                    post(handler_webhook)
                     .with_state(state),
                 );
                 routes_count += 1;
@@ -87,10 +88,10 @@ pub async fn serve_dag(file_path: String, port: u16) -> Result<(), Box<dyn std::
     }
 
     // Start the TCP server
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    println!("✅ Server listening on http://0.0.0.0:{}", port);
+    let addr_str = format!("{}:{}", host, port);
+    println!("✅ Server listening on http://{}", addr_str);
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::bind(&addr_str).await?;
     axum::serve(listener, app).await?;
 
     Ok(())
@@ -104,29 +105,97 @@ struct AppState {
 }
 
 /// Handler that executes when an HTTP request arrives
-async fn handler_webhook(state: AppState, payload: Value, trigger_node_id: String) -> Json<Value> {
-    println!("🔔 Webhook received for node: {}", trigger_node_id);
+async fn handler_webhook(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<Value>,
+) -> axum::response::Response {
+    println!("🔔 Webhook received.");
+    
+    // Debug: Print headers to see what Postman sends
+    for (key, value) in &headers {
+        println!("   Header: {:?}: {:?}", key, value);
+    }
+
+    // Check for "Accept: text/event-stream" or Vercel header OR query param
+    let is_sse = headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("text/event-stream"))
+        .unwrap_or(false)
+        || headers.contains_key("x-vercel-ai-ui-message-stream")
+        || params.get("stream").map(|v| v == "true").unwrap_or(false);
 
     // Clone the graph for this specific execution
     let mut graph_instance = (*state.graph).clone();
 
-    // Inject the payload into the trigger node config
-    if let Some(node) = graph_instance.nodes.get_mut(&trigger_node_id) {
-        if node.config.is_null() {
-            node.config = serde_json::json!({});
+    // Find the trigger node (we iterate to find 'trigger_webhook' type)
+    // Note: In the current simpler implementation we might assume there is one trigger or we inject to all.
+    // The previous code injected to "trigger_node_id" passed as closure.
+    // However, axum handler here is generic.
+    // To solve the closure context issue, we'll iterate and inject to all trigger_webhooks in the graph.
+    for (_, node) in graph_instance.nodes.iter_mut() {
+        if node.node_type == "trigger_webhook" {
+            if node.config.is_null() {
+                node.config = serde_json::json!({});
+            }
+            node.config["__payload__"] = payload.clone();
         }
-        node.config["__payload__"] = payload;
     }
 
-    // Execute the graph
-    match state.use_case.execute(graph_instance).await {
-        Ok(output) => {
-            println!("✅ Execution successful.");
-            Json(output)
-        }
-        Err(e) => {
-            eprintln!("❌ Execution error: {}", e);
-            Json(serde_json::json!({ "error": e.to_string() }))
+    if is_sse {
+        use axum::response::sse::{Event, KeepAlive, Sse};
+        use futures::StreamExt;
+
+        let use_case = (*state.use_case).clone();
+        let stream = use_case.execute_stream(graph_instance).map(|result| {
+            match result {
+                Ok(event) => {
+                    // Vercel Protocol: data: {"type": "data", "value": <Event>}
+                    let data_json = serde_json::json!({
+                        "type": "data",
+                        "value": event
+                    });
+                    Event::default().json_data(data_json)
+                }
+                Err(e) => {
+                     // Error event
+                     let err_json = serde_json::json!({
+                        "type": "data",
+                        "value": {
+                            "event": "error",
+                            "message": e.to_string()
+                        }
+                     });
+                     Event::default().json_data(err_json)
+                }
+            }
+        });
+        
+        // Append [DONE] event? The Vercel protocol usually implies connection close or explicit DONE.
+        // We'll trust the stream end. But AI SDK often expects a [DONE] if strictly following text stream, 
+        // for Data stream it might just end. Let's add a wrapper stream to append [DONE] if needed, 
+        // but for now let's serve the data events.
+        
+        Sse::new(stream)
+            .keep_alive(KeepAlive::default())
+            .into_response()
+    } else {
+        // Normal JSON execution
+        match state.use_case.execute(graph_instance).await {
+            Ok(output) => {
+                println!("✅ Execution successful.");
+                Json(output).into_response()
+            }
+            Err(e) => {
+                eprintln!("❌ Execution error: {}", e);
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+                    .into_response()
+            }
         }
     }
 }

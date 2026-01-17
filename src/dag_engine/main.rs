@@ -16,6 +16,8 @@ enum Commands {
     },
     Serve {
         file_path: String,
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
         #[arg(long, default_value_t = 3000)]
         port: u16,
     },
@@ -39,9 +41,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => eprintln!("❌ Error: {}", e),
             }
         }
-        Commands::Serve { file_path, port } => {
+        Commands::Serve {
+            file_path,
+            host,
+            port,
+        } => {
             println!("🌐 Modo Serve: Iniciando...");
-            api::serve_dag(file_path, port).await?;
+            api::serve_dag(file_path, host, port).await?;
         }
     }
 
