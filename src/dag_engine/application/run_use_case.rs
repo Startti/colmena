@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 /// El "Caso de Uso" que orquesta la ejecución de un grafo.
 /// Es agnóstico a la infraestructura (no sabe de dónde vienen los nodos).
+#[derive(Clone)]
 pub struct DagRunUseCase {
     /// El "Puerto" inyectado que nos da acceso a las implementaciones
     /// concretas de los nodos.
@@ -70,6 +71,75 @@ impl DagRunUseCase {
         } else {
             // El grafo estaba vacío
             Ok(Value::Null)
+        }
+    }
+
+    /// Executes the graph and streams events for each step.
+    pub fn execute_stream(
+        self,
+        graph: Graph,
+    ) -> impl futures::Stream<Item = Result<crate::dag_engine::domain::events::DagExecutionEvent, DagError>> 
+    {
+        async_stream::try_stream! {
+            use crate::dag_engine::domain::events::DagExecutionEvent;
+
+            // 1. Obtener el orden de ejecución y detectar ciclos.
+            let execution_order = self.topological_sort(&graph)?;
+
+            let mut global_state = Value::Null;
+            let mut all_outputs: HashMap<String, Value> = HashMap::new();
+
+            // 2. Iterar y ejecutar cada nodo en orden.
+            for node_id in &execution_order {
+                let node_config = graph
+                    .nodes
+                    .get(node_id)
+                    .ok_or_else(|| DagError::NodeIdNotFound(node_id.clone()))?;
+
+                // 3. Obtener implementación
+                let node_impl = self
+                    .registry
+                    .get_node(&node_config.node_type)
+                    .ok_or_else(|| DagError::NodeTypeNotFound(node_config.node_type.clone()))?;
+
+                // 4. Construir inputs
+                let inputs = self.build_inputs_for(node_id, &graph.edges, &all_outputs)?;
+
+                // Yield Start Event (NOW includes inputs and config)
+                yield DagExecutionEvent::NodeStart {
+                    node_id: node_id.clone(),
+                    node_type: node_config.node_type.clone(),
+                    inputs: serde_json::to_value(&inputs).unwrap_or(Value::Null),
+                    config: node_config.config.clone(),
+                };
+
+                // 5. Ejecutar
+                let output = node_impl
+                    .execute(&inputs, &node_config.config, &mut global_state)
+                    .await
+                    .map_err(|e| DagError::NodeExecution(e.to_string()))?;
+
+                // Yield Finish Event
+                yield DagExecutionEvent::NodeFinish {
+                    node_id: node_id.clone(),
+                    output: output.clone(),
+                };
+
+                // 6. Almacenar
+                all_outputs.insert(node_id.to_string(), output);
+            }
+
+            // Yield Graph Finish Event
+            let final_output = if let Some(last_node_id) = execution_order.last() {
+                all_outputs
+                    .get(last_node_id)
+                    .cloned()
+                    .unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            };
+
+            yield DagExecutionEvent::GraphFinish { output: final_output };
         }
     }
 
