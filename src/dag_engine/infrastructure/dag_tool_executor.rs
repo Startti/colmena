@@ -417,6 +417,7 @@ mod tests {
                 node_type: "mock_tool".to_string(),
                 fixed_config,
                 exposed_inputs: None,
+                parameters: None,
             },
         );
 
