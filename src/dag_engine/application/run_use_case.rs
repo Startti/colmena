@@ -53,7 +53,7 @@ impl DagRunUseCase {
 
             // 5. ¡Ejecutar la lógica del nodo!
             let output = node_impl
-                .execute(&inputs, &node_config.config, &mut global_state)
+                .execute(&inputs, &node_config.config, &mut global_state, None)
                 .await
                 .map_err(|e| DagError::NodeExecution(e.to_string()))?;
 
@@ -82,6 +82,7 @@ impl DagRunUseCase {
     {
         async_stream::try_stream! {
             use crate::dag_engine::domain::events::DagExecutionEvent;
+            use crate::dag_engine::domain::observer::NodeEvent;
 
             // 1. Obtener el orden de ejecución y detectar ciclos.
             let execution_order = self.topological_sort(&graph)?;
@@ -105,7 +106,7 @@ impl DagRunUseCase {
                 // 4. Construir inputs
                 let inputs = self.build_inputs_for(node_id, &graph.edges, &all_outputs)?;
 
-                // Yield Start Event (NOW includes inputs and config)
+                // Yield Start Event
                 yield DagExecutionEvent::NodeStart {
                     node_id: node_id.clone(),
                     node_type: node_config.node_type.clone(),
@@ -113,11 +114,34 @@ impl DagRunUseCase {
                     config: node_config.config.clone(),
                 };
 
-                // 5. Ejecutar
-                let output = node_impl
-                    .execute(&inputs, &node_config.config, &mut global_state)
-                    .await
-                    .map_err(|e| DagError::NodeExecution(e.to_string()))?;
+                // Create channel for observer
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                let observer = Arc::new(ChannelObserver { tx });
+
+                // 5. Ejecutar (CONCURRENTLY with event draining)
+                // We wrap execution in a future
+                let execution_future = node_impl.execute(&inputs, &node_config.config, &mut global_state, Some(observer));
+                tokio::pin!(execution_future);
+
+                let output_result = loop {
+                    tokio::select! {
+                        res = &mut execution_future => {
+                            break res;
+                        }
+                        Some(event) = rx.recv() => {
+                            match event {
+                                NodeEvent::LlmToken { token } => {
+                                    yield DagExecutionEvent::LlmToken {
+                                        node_id: node_id.clone(),
+                                        token
+                                    };
+                                }
+                            }
+                        }
+                    }
+                };
+                
+                let output = output_result.map_err(|e| DagError::NodeExecution(e.to_string()))?;
 
                 // Yield Finish Event
                 yield DagExecutionEvent::NodeFinish {
@@ -260,5 +284,16 @@ impl DagRunUseCase {
         }
 
         Ok(inputs)
+    }
+}
+
+/// Observer that sends events to an mpsc channel
+struct ChannelObserver {
+    tx: tokio::sync::mpsc::UnboundedSender<crate::dag_engine::domain::observer::NodeEvent>,
+}
+
+impl crate::dag_engine::domain::observer::ExecutionObserver for ChannelObserver {
+    fn on_event(&self, event: crate::dag_engine::domain::observer::NodeEvent) {
+        let _ = self.tx.send(event);
     }
 }

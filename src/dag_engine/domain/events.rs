@@ -16,6 +16,11 @@ pub enum DagExecutionEvent {
         node_id: String,
         output: Value,
     },
+    #[serde(rename = "llm_token")]
+    LlmToken {
+        node_id: String,
+        token: String,
+    },
     #[serde(rename = "graph_finish")]
     GraphFinish {
         output: Value,

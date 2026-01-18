@@ -1,7 +1,7 @@
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
 use crate::llm::domain::{
-    LlmConfig, LlmMessage, LlmProvider, ProviderKind, ThreadId, ToolExecutor,
+    LlmConfig, LlmMessage, LlmProvider, ProviderKind, ThreadId, ToolDefinition, ToolExecutor,
 };
 use crate::llm::infrastructure::{ConversationRepositoryFactory, LlmProviderFactory};
 use async_trait::async_trait;
@@ -85,7 +85,8 @@ impl ExecutableNode for LlmNode {
         inputs: &NodeInputs,
         config: &Value,
         _state: &mut Value,
-    ) -> Result<Value, Box<dyn Error>> {
+        _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         // --- 1. Resolve Configuration (Inputs > Config) ---
 
         // Provider
@@ -325,6 +326,28 @@ impl ExecutableNode for LlmNode {
             .map(|s| s.to_string())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+        // Check if streaming is enabled
+        let stream_enabled = inputs
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .or_else(|| config.get("stream").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+
+        // Define on_token callback if streaming is enabled and observer is present
+        let on_token: Option<Box<dyn Fn(String) + Send + Sync>> = if stream_enabled {
+            if let Some(obs) = _observer.clone() {
+                // ... (omitted comment)
+                Some(Box::new(move |token: String| {
+                    use crate::dag_engine::domain::observer::NodeEvent;
+                    obs.on_event(NodeEvent::LlmToken { token });
+                }))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let response = agent_service
             .run(
                 &ThreadId(tid),
@@ -333,6 +356,7 @@ impl ExecutableNode for LlmNode {
                 tools,
                 &tool_executor,
                 Some(10), // Max iterations
+                on_token,
             )
             .await?;
 

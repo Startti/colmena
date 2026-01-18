@@ -1,6 +1,7 @@
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use serde_json::{json, Value};
 use std::error::Error as StdError;
+use std::sync::Arc;
 
 pub struct TriggerWebhookNode;
 
@@ -14,7 +15,8 @@ impl ExecutableNode for TriggerWebhookNode {
         inputs: &NodeInputs,
         config: &Value,
         _state: &mut Value,
-    ) -> Result<Value, Box<dyn StdError>> {
+        _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>, // Added observer parameter
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> { // Changed `StdError` to `Error`
         // For a trigger, the "inputs" ARE the payload from the outside world.
         // We wrap them in "output" to match our convention.
 

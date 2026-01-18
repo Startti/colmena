@@ -47,6 +47,7 @@ impl AgentService {
         tools: Vec<ToolDefinition>,
         tool_executor: &dyn ToolExecutor,
         max_iterations: Option<usize>,
+        on_token: Option<Box<dyn Fn(String) + Send + Sync>>,
     ) -> Result<LlmResponse, LlmError> {
         let max_iter = max_iterations.unwrap_or(10);
 
@@ -63,13 +64,50 @@ impl AgentService {
 
         // 3. ReAct Loop
         for _iteration in 0..max_iter {
-            // A. Call LLM with tools (only if tools are provided)
-            let mut request = LlmRequest::new(messages.clone(), config.clone(), false)?;
+            // A. Call LLM with tools
+            let should_stream = on_token.is_some();
+            let mut request = LlmRequest::new(messages.clone(), config.clone(), should_stream)?;
             if !tools.is_empty() {
                 request = request.with_tools(tools.clone());
             }
 
-            let response = self.llm_repository.call(request).await?;
+            // Decide between call() and stream()
+            // We use stream() ONLY if on_token is present AND this is likely a generation step
+            // But we don't know if it's a tool call step or generation step until we get the response.
+            // So we must use stream() if on_token is provided, and handle re-construction.
+            
+            let response = if let Some(callback) = &on_token {
+                let stream = self.llm_repository.stream(request).await?;
+                use futures::StreamExt;
+                // Pin stream
+                let mut stream = stream;
+                
+                let mut full_content = String::new();
+                // We need to capture provider from the first chunk or request?
+                // LlmStreamChunk has provider.
+                let mut captured_provider = config.provider().clone(); 
+                let mut captured_req_id = crate::llm::domain::LlmRequestId::new(); // Dummy until first chunk
+
+                while let Some(chunk_result) = stream.next().await {
+                   match chunk_result {
+                       Ok(chunk) => {
+                           captured_req_id = chunk.request_id().clone();
+                           captured_provider = chunk.provider().clone();
+                           let content_part = chunk.content();
+                           if !content_part.is_empty() {
+                               (callback)(content_part.to_string());
+                               full_content.push_str(content_part);
+                           }
+                           // Tool calls in stream? Not supported yet.
+                       }
+                       Err(e) => return Err(e),
+                   }
+                }
+                
+                LlmResponse::new(captured_req_id, full_content, captured_provider)?
+            } else {
+                self.llm_repository.call(request).await?
+            };
 
             // B. Save assistant response to memory
             self.conversation_repository
@@ -77,21 +115,17 @@ impl AgentService {
                 .await?;
             messages.push(response.message().clone());
 
-            // C. Check if LLM wants to use tools
+            // C. Check if LLM wants to use tools (Response might not have tool calls if streamed!)
             if let Some(tool_calls) = response.tool_calls() {
                 if tool_calls.is_empty() {
-                    // No tool calls, return response
                     return Ok(response);
                 }
                 // D. Execute each tool call
                 for tool_call in tool_calls {
-                    // Execute tool
                     let result = match tool_executor.execute(tool_call).await {
                         Ok(res) => res,
                         Err(e) => {
-                            // If execution fails, we still need to report it to the LLM
-                            // so it can try again or apologize
-                            ToolResult {
+                             ToolResult {
                                 tool_call_id: tool_call.id.clone(),
                                 success: false,
                                 output: format!("Error executing tool: {}", e),
@@ -100,26 +134,20 @@ impl AgentService {
                         }
                     };
 
-                    // E. Create tool result message
                     let tool_message =
                         LlmMessage::tool(result.tool_call_id.clone(), result.output.clone())?;
 
-                    // F. Add to conversation
                     messages.push(tool_message.clone());
                     self.conversation_repository
                         .add_message(thread_id, tool_message)
                         .await?;
                 }
-
-                // Continue loop - LLM will see tool results in next iteration
                 continue;
             } else {
-                // No tool calls - final response
                 return Ok(response);
             }
         }
-
-        // Safety: Max iterations reached
+        
         Err(LlmError::MaxIterationsReached { max: max_iter })
     }
 }
@@ -393,6 +421,7 @@ mod tests {
                 vec![],
                 &mock_tool_exec,
                 Some(3), // Max 3 iterations
+                None,
             )
             .await;
 

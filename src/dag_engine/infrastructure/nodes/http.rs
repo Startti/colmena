@@ -2,6 +2,7 @@ use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use reqwest::{Client, Method, Url};
 use serde_json::{json, Value};
 use std::error::Error as StdError;
+use std::sync::Arc;
 use std::str::FromStr;
 
 pub struct HttpNode;
@@ -40,21 +41,22 @@ impl ExecutableNode for HttpNode {
         inputs: &NodeInputs,
         config: &Value,
         _state: &mut Value,
-    ) -> Result<Value, Box<dyn StdError>> {
+        _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
         // 1. Parse Configuration (Inputs > Config)
         let base_url_raw = inputs
             .get("base_url")
             .and_then(|v| v.as_str())
             .or_else(|| config.get("base_url").and_then(|v| v.as_str()))
             .unwrap_or("");
-        let base_url = Self::resolve_env_vars(base_url_raw).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError>)?;
+        let base_url = Self::resolve_env_vars(base_url_raw).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError + Send + Sync>)?;
 
         let endpoint_raw = inputs
             .get("endpoint")
             .and_then(|v| v.as_str())
             .or_else(|| config.get("endpoint").and_then(|v| v.as_str()))
             .unwrap_or("");
-        let endpoint = Self::resolve_env_vars(endpoint_raw).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError>)?;
+        let endpoint = Self::resolve_env_vars(endpoint_raw).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError + Send + Sync>)?;
 
         let method_str = inputs
             .get("method")
@@ -96,7 +98,7 @@ impl ExecutableNode for HttpNode {
         if let Some(headers) = config.get("headers").and_then(|v| v.as_object()) {
             for (k, v) in headers {
                 if let Some(v_str) = v.as_str() {
-                    let v_resolved = Self::resolve_env_vars(v_str).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError>)?;
+                    let v_resolved = Self::resolve_env_vars(v_str).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError + Send + Sync>)?;
                     request_builder = request_builder.header(k, v_resolved);
                 }
             }
@@ -105,7 +107,7 @@ impl ExecutableNode for HttpNode {
         if let Some(headers) = inputs.get("headers").and_then(|v| v.as_object()) {
             for (k, v) in headers {
                 if let Some(v_str) = v.as_str() {
-                    let v_resolved = Self::resolve_env_vars(v_str).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError>)?;
+                    let v_resolved = Self::resolve_env_vars(v_str).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError + Send + Sync>)?;
                     request_builder = request_builder.header(k, v_resolved);
                 }
             }
@@ -156,7 +158,7 @@ impl ExecutableNode for HttpNode {
 
         if let Some(body) = body_val {
             if let Some(s) = body.as_str() {
-                let s_resolved = Self::resolve_env_vars(s).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError>)?;
+                let s_resolved = Self::resolve_env_vars(s).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError + Send + Sync>)?;
                 println!("DEBUG: Request Body: {}", s_resolved);
                 request_builder = request_builder.body(s_resolved);
             } else {
