@@ -3,7 +3,7 @@ import json
 import sys
 
 # Change port if needed
-url = "http://localhost:8084/test-llm?stream=true" 
+url = "http://localhost:3000/execute" # NOTE: Requires a DAG with a trigger listening on /execute 
 
 payload = {"message": "Hello mock stream"}
 

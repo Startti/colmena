@@ -1,6 +1,6 @@
 use crate::llm::domain::{
     ConversationRepository, LlmConfig, LlmError, LlmMessage, LlmRepository, LlmRequest,
-    LlmResponse, ThreadId, ToolDefinition, ToolExecutor, ToolResult,
+    LlmResponse, LlmStreamPart, ThreadId, ToolCall, ToolDefinition, ToolExecutor, ToolResult,
 };
 use std::sync::Arc;
 
@@ -47,7 +47,7 @@ impl AgentService {
         tools: Vec<ToolDefinition>,
         tool_executor: &dyn ToolExecutor,
         max_iterations: Option<usize>,
-        on_token: Option<Box<dyn Fn(String) + Send + Sync>>,
+        on_token: Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>>,
     ) -> Result<LlmResponse, LlmError> {
         let max_iter = max_iterations.unwrap_or(10);
 
@@ -83,28 +83,67 @@ impl AgentService {
                 let mut stream = stream;
                 
                 let mut full_content = String::new();
-                // We need to capture provider from the first chunk or request?
-                // LlmStreamChunk has provider.
                 let mut captured_provider = config.provider().clone(); 
-                let mut captured_req_id = crate::llm::domain::LlmRequestId::new(); // Dummy until first chunk
+                let mut captured_req_id = crate::llm::domain::LlmRequestId::new(); 
+                let mut accumulated_tool_calls: std::collections::HashMap<usize, ToolCall> = std::collections::HashMap::new();
+                let mut completion_usage = None;
 
                 while let Some(chunk_result) = stream.next().await {
                    match chunk_result {
                        Ok(chunk) => {
                            captured_req_id = chunk.request_id().clone();
                            captured_provider = chunk.provider().clone();
-                           let content_part = chunk.content();
-                           if !content_part.is_empty() {
-                               (callback)(content_part.to_string());
-                               full_content.push_str(content_part);
+                           
+                           // Forward the part to the callback
+                           (callback)(chunk.part().clone());
+
+                           // Accumulate state for returning LlmResponse
+                           match chunk.part() {
+                               LlmStreamPart::Content(c) => {
+                                   full_content.push_str(c);
+                               }
+                               LlmStreamPart::ToolCallChunk(tc) => {
+                                    let entry = accumulated_tool_calls.entry(tc.index).or_insert_with(|| {
+                                        ToolCall::new(
+                                            tc.id.clone(),
+                                            crate::llm::domain::FunctionCall::new(
+                                                tc.name.clone(), 
+                                                String::new()
+                                            )
+                                        )
+                                    });
+                                    // If ID arrives in first chunk (it should), but just in case logic updates
+                                    if !tc.id.is_empty() && entry.id.is_empty() {
+                                        entry.id = tc.id.clone();
+                                    }
+                                   // If name arrives in chunks, append it (usually name is in first chunk but ensuring)
+                                   if !tc.name.is_empty() && entry.function.name.is_empty() {
+                                        entry.function.name = tc.name.clone();
+                                   }
+                                   entry.function.arguments.push_str(&tc.args_chunk);
+                               }
+                               LlmStreamPart::Usage(u) => {
+                                   completion_usage = Some(u.clone());
+                               }
+                               LlmStreamPart::ToolCallStart(_) | LlmStreamPart::ToolCallFinish(_) => {}
                            }
-                           // Tool calls in stream? Not supported yet.
                        }
                        Err(e) => return Err(e),
                    }
                 }
                 
-                LlmResponse::new(captured_req_id, full_content, captured_provider)?
+                let mut final_response = LlmResponse::new(captured_req_id, full_content, captured_provider)?;
+                
+                if !accumulated_tool_calls.is_empty() {
+                    let tools: Vec<ToolCall> = accumulated_tool_calls.into_values().collect();
+                    final_response = final_response.with_tool_calls(tools);
+                }
+
+                if let Some(usage) = completion_usage {
+                    final_response = final_response.with_usage(usage);
+                }
+
+                final_response
             } else {
                 self.llm_repository.call(request).await?
             };
@@ -122,6 +161,11 @@ impl AgentService {
                 }
                 // D. Execute each tool call
                 for tool_call in tool_calls {
+                    // Notify start of execution
+                    if let Some(callback) = &on_token {
+                        (callback)(LlmStreamPart::ToolCallStart(tool_call.clone()));
+                    }
+
                     let result = match tool_executor.execute(tool_call).await {
                         Ok(res) => res,
                         Err(e) => {
@@ -133,6 +177,11 @@ impl AgentService {
                             }
                         }
                     };
+
+                    // Notify result of execution
+                    if let Some(callback) = &on_token {
+                        (callback)(LlmStreamPart::ToolCallFinish(result.clone()));
+                    }
 
                     let tool_message =
                         LlmMessage::tool(result.tool_call_id.clone(), result.output.clone())?;
@@ -257,6 +306,7 @@ mod tests {
                 vec![],
                 &mock_tool_exec,
                 None,
+                None,
             )
             .await;
 
@@ -353,6 +403,7 @@ mod tests {
                 create_config(),
                 vec![], // Tools list doesn't matter for mock
                 &mock_tool_exec,
+                None,
                 None,
             )
             .await;

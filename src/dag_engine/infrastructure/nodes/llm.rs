@@ -1,7 +1,8 @@
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
 use crate::llm::domain::{
-    LlmConfig, LlmMessage, LlmProvider, ProviderKind, ThreadId, ToolDefinition, ToolExecutor,
+    LlmConfig, LlmMessage, LlmProvider, LlmStreamPart, ProviderKind, ThreadId, ToolDefinition,
+    ToolExecutor,
 };
 use crate::llm::infrastructure::{ConversationRepositoryFactory, LlmProviderFactory};
 use async_trait::async_trait;
@@ -334,12 +335,33 @@ impl ExecutableNode for LlmNode {
             .unwrap_or(false);
 
         // Define on_token callback if streaming is enabled and observer is present
-        let on_token: Option<Box<dyn Fn(String) + Send + Sync>> = if stream_enabled {
+        // Define on_token callback if streaming is enabled and observer is present
+        let on_token: Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>> = if stream_enabled {
             if let Some(obs) = _observer.clone() {
-                // ... (omitted comment)
-                Some(Box::new(move |token: String| {
+                Some(Box::new(move |part: LlmStreamPart| {
                     use crate::dag_engine::domain::observer::NodeEvent;
-                    obs.on_event(NodeEvent::LlmToken { token });
+                    match part {
+                        LlmStreamPart::Content(token) => obs.on_event(NodeEvent::LlmToken { token }),
+                        LlmStreamPart::ToolCallChunk(chunk) => obs.on_event(NodeEvent::LlmToolCall {
+                            tool_id: chunk.id,
+                            tool_name: chunk.name,
+                            args_chunk: chunk.args_chunk,
+                        }),
+                        LlmStreamPart::Usage(usage) => obs.on_event(NodeEvent::LlmUsage {
+                            prompt_tokens: usage.prompt_tokens,
+                            completion_tokens: usage.completion_tokens,
+                        }),
+                        LlmStreamPart::ToolCallStart(tc) => obs.on_event(NodeEvent::LlmToolCallStart {
+                            tool_id: tc.id.clone(),
+                            tool_name: tc.function.name.clone(),
+                            tool_args: tc.function.arguments.clone(),
+                        }),
+                        LlmStreamPart::ToolCallFinish(res) => obs.on_event(NodeEvent::LlmToolCallFinish {
+                            tool_id: res.tool_call_id.clone(),
+                            success: res.success,
+                            output: res.output.clone(),
+                        }),
+                    }
                 }))
             } else {
                 None

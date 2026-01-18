@@ -4,7 +4,7 @@ import time
 import os
 
 # Path to a test json
-JSON_PATH = os.path.join(os.path.dirname(__file__), "memory_postgres_example.json")
+JSON_PATH = os.path.join(os.path.dirname(__file__), "../dags/memory_postgres_example.json")
 
 def start_server():
     print("Starting server on localhost:8081...")

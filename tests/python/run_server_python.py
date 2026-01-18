@@ -3,7 +3,7 @@ import os
 import sys
 
 # Path to the webhook DAG
-JSON_PATH = os.path.join(os.path.dirname(__file__), "power_webhook.json")
+JSON_PATH = os.path.join(os.path.dirname(__file__), "../dags/power_webhook.json")
 
 def main():
     if not os.path.exists(JSON_PATH):

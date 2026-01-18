@@ -4,7 +4,7 @@ import time
 import sys
 
 # URL of the server
-URL = "http://127.0.0.1:8089/power"
+URL = "http://localhost:3000/execute" # Modify as needed based on your running DAG
 
 def main():
     print(f"📡 Connecting to {URL} with SSE...")

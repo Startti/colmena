@@ -3,7 +3,10 @@
         "trigger": {
             "type": "trigger_webhook",
             "config": {
-                "path": "/power"
+                "path": "/power",
+                "test_payload": {
+                    "base_num": 5
+                }
             }
         },
         "pow_step": {

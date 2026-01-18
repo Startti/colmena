@@ -1,4 +1,7 @@
-use crate::llm::domain::{LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream};
+use crate::llm::domain::{
+    LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk, LlmStreamPart,
+    LlmUsage,
+};
 use async_trait::async_trait;
 
 pub struct MockAdapter;
@@ -52,7 +55,7 @@ impl LlmRepository for MockAdapter {
         let stream = stream::iter(chunks).map(move |chunk_text| {
             Ok(LlmStreamChunk::new(
                 request_id.clone(),
-                chunk_text,
+                LlmStreamPart::Content(chunk_text),
                 provider.clone(),
                 false, // Not handling is_final perfectly here, simplistic mock
             ))
