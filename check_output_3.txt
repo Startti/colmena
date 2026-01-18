@@ -1,0 +1,250 @@
+    Checking colmena v0.1.0 (/home/daniel-garcia4/startti/colmena)
+warning: unused import: `ToolDefinition`
+ --> src/dag_engine/infrastructure/nodes/llm.rs:4:65
+  |
+4 |     LlmConfig, LlmMessage, LlmProvider, ProviderKind, ThreadId, ToolDefinition, ToolExecutor,
+  |                                                                 ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0277]: `?` couldn't convert the error: `dyn StdError: std::marker::Send` is not satisfied
+  --> src/dag_engine/infrastructure/nodes/http.rs:52:161
+   |
+52 | ... = Self::resolve_env_vars(base_url_raw).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError>)?;
+   |       ------------------------------------ ----------------------------------------------------------------------------------------------------^ `dyn StdError` cannot be sent between threads safely
+   |       |                                    |
+   |       |                                    this can't be annotated with `?` because it has type `Result<_, Box<dyn StdError>>`
+   |       this can't be annotated with `?` because it has type `Result<_, std::string::String>`
+   |
+   = help: the trait `std::marker::Send` is not implemented for `dyn StdError`
+   = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+   = note: required for `Unique<dyn StdError>` to implement `std::marker::Send`
+note: required because it appears within the type `Box<dyn StdError>`
+  --> /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/alloc/src/boxed.rs:231:12
+   = note: required for `Box<dyn StdError + std::marker::Send + Sync>` to implement `From<Box<dyn StdError>>`
+
+error[E0277]: `?` couldn't convert the error: `dyn StdError: Sync` is not satisfied
+  --> src/dag_engine/infrastructure/nodes/http.rs:52:161
+   |
+52 | ... = Self::resolve_env_vars(base_url_raw).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError>)?;
+   |       ------------------------------------ ----------------------------------------------------------------------------------------------------^ `dyn StdError` cannot be shared between threads safely
+   |       |                                    |
+   |       |                                    this can't be annotated with `?` because it has type `Result<_, Box<dyn StdError>>`
+   |       this can't be annotated with `?` because it has type `Result<_, std::string::String>`
+   |
+   = help: the trait `Sync` is not implemented for `dyn StdError`
+   = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+   = note: required for `Unique<dyn StdError>` to implement `Sync`
+note: required because it appears within the type `Box<dyn StdError>`
+  --> /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/alloc/src/boxed.rs:231:12
+   = note: required for `Box<dyn StdError + std::marker::Send + Sync>` to implement `From<Box<dyn StdError>>`
+
+error[E0277]: `?` couldn't convert the error: `dyn StdError: Sized` is not satisfied
+  --> src/dag_engine/infrastructure/nodes/http.rs:52:161
+   |
+52 | ... = Self::resolve_env_vars(base_url_raw).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError>)?;
+   |       ------------------------------------ ----------------------------------------------------------------------------------------------------^ doesn't have a size known at compile-time
+   |       |                                    |
+   |       |                                    this can't be annotated with `?` because it has type `Result<_, Box<dyn StdError>>`
+   |       this can't be annotated with `?` because it has type `Result<_, std::string::String>`
+   |
+   = help: the trait `Sized` is not implemented for `dyn StdError`
+   = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+   = note: required for `Box<dyn StdError>` to implement `StdError`
+   = note: required for `Box<dyn StdError + std::marker::Send + Sync>` to implement `From<Box<dyn StdError>>`
+
+error[E0277]: `?` couldn't convert the error: `dyn StdError: std::marker::Send` is not satisfied
+  --> src/dag_engine/infrastructure/nodes/http.rs:59:161
+   |
+59 | ... = Self::resolve_env_vars(endpoint_raw).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError>)?;
+   |       ------------------------------------ ----------------------------------------------------------------------------------------------------^ `dyn StdError` cannot be sent between threads safely
+   |       |                                    |
+   |       |                                    this can't be annotated with `?` because it has type `Result<_, Box<dyn StdError>>`
+   |       this can't be annotated with `?` because it has type `Result<_, std::string::String>`
+   |
+   = help: the trait `std::marker::Send` is not implemented for `dyn StdError`
+   = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+   = note: required for `Unique<dyn StdError>` to implement `std::marker::Send`
+note: required because it appears within the type `Box<dyn StdError>`
+  --> /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/alloc/src/boxed.rs:231:12
+   = note: required for `Box<dyn StdError + std::marker::Send + Sync>` to implement `From<Box<dyn StdError>>`
+
+error[E0277]: `?` couldn't convert the error: `dyn StdError: Sync` is not satisfied
+  --> src/dag_engine/infrastructure/nodes/http.rs:59:161
+   |
+59 | ... = Self::resolve_env_vars(endpoint_raw).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError>)?;
+   |       ------------------------------------ ----------------------------------------------------------------------------------------------------^ `dyn StdError` cannot be shared between threads safely
+   |       |                                    |
+   |       |                                    this can't be annotated with `?` because it has type `Result<_, Box<dyn StdError>>`
+   |       this can't be annotated with `?` because it has type `Result<_, std::string::String>`
+   |
+   = help: the trait `Sync` is not implemented for `dyn StdError`
+   = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+   = note: required for `Unique<dyn StdError>` to implement `Sync`
+note: required because it appears within the type `Box<dyn StdError>`
+  --> /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/alloc/src/boxed.rs:231:12
+   = note: required for `Box<dyn StdError + std::marker::Send + Sync>` to implement `From<Box<dyn StdError>>`
+
+error[E0277]: `?` couldn't convert the error: `dyn StdError: Sized` is not satisfied
+  --> src/dag_engine/infrastructure/nodes/http.rs:59:161
+   |
+59 | ... = Self::resolve_env_vars(endpoint_raw).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError>)?;
+   |       ------------------------------------ ----------------------------------------------------------------------------------------------------^ doesn't have a size known at compile-time
+   |       |                                    |
+   |       |                                    this can't be annotated with `?` because it has type `Result<_, Box<dyn StdError>>`
+   |       this can't be annotated with `?` because it has type `Result<_, std::string::String>`
+   |
+   = help: the trait `Sized` is not implemented for `dyn StdError`
+   = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+   = note: required for `Box<dyn StdError>` to implement `StdError`
+   = note: required for `Box<dyn StdError + std::marker::Send + Sync>` to implement `From<Box<dyn StdError>>`
+
+error[E0277]: `?` couldn't convert the error: `dyn StdError: std::marker::Send` is not satisfied
+   --> src/dag_engine/infrastructure/nodes/http.rs:101:168
+    |
+101 | ... = Self::resolve_env_vars(v_str).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError>)?;
+    |       ----------------------------- ----------------------------------------------------------------------------------------------------^ `dyn StdError` cannot be sent between threads safely
+    |       |                             |
+    |       |                             this can't be annotated with `?` because it has type `Result<_, Box<dyn StdError>>`
+    |       this can't be annotated with `?` because it has type `Result<_, std::string::String>`
+    |
+    = help: the trait `std::marker::Send` is not implemented for `dyn StdError`
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+    = note: required for `Unique<dyn StdError>` to implement `std::marker::Send`
+note: required because it appears within the type `Box<dyn StdError>`
+   --> /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/alloc/src/boxed.rs:231:12
+    = note: required for `Box<dyn StdError + std::marker::Send + Sync>` to implement `From<Box<dyn StdError>>`
+
+error[E0277]: `?` couldn't convert the error: `dyn StdError: Sync` is not satisfied
+   --> src/dag_engine/infrastructure/nodes/http.rs:101:168
+    |
+101 | ... = Self::resolve_env_vars(v_str).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError>)?;
+    |       ----------------------------- ----------------------------------------------------------------------------------------------------^ `dyn StdError` cannot be shared between threads safely
+    |       |                             |
+    |       |                             this can't be annotated with `?` because it has type `Result<_, Box<dyn StdError>>`
+    |       this can't be annotated with `?` because it has type `Result<_, std::string::String>`
+    |
+    = help: the trait `Sync` is not implemented for `dyn StdError`
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+    = note: required for `Unique<dyn StdError>` to implement `Sync`
+note: required because it appears within the type `Box<dyn StdError>`
+   --> /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/alloc/src/boxed.rs:231:12
+    = note: required for `Box<dyn StdError + std::marker::Send + Sync>` to implement `From<Box<dyn StdError>>`
+
+error[E0277]: `?` couldn't convert the error: `dyn StdError: Sized` is not satisfied
+   --> src/dag_engine/infrastructure/nodes/http.rs:101:168
+    |
+101 | ... = Self::resolve_env_vars(v_str).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError>)?;
+    |       ----------------------------- ----------------------------------------------------------------------------------------------------^ doesn't have a size known at compile-time
+    |       |                             |
+    |       |                             this can't be annotated with `?` because it has type `Result<_, Box<dyn StdError>>`
+    |       this can't be annotated with `?` because it has type `Result<_, std::string::String>`
+    |
+    = help: the trait `Sized` is not implemented for `dyn StdError`
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+    = note: required for `Box<dyn StdError>` to implement `StdError`
+    = note: required for `Box<dyn StdError + std::marker::Send + Sync>` to implement `From<Box<dyn StdError>>`
+
+error[E0277]: `?` couldn't convert the error: `dyn StdError: std::marker::Send` is not satisfied
+   --> src/dag_engine/infrastructure/nodes/http.rs:110:168
+    |
+110 | ... = Self::resolve_env_vars(v_str).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError>)?;
+    |       ----------------------------- ----------------------------------------------------------------------------------------------------^ `dyn StdError` cannot be sent between threads safely
+    |       |                             |
+    |       |                             this can't be annotated with `?` because it has type `Result<_, Box<dyn StdError>>`
+    |       this can't be annotated with `?` because it has type `Result<_, std::string::String>`
+    |
+    = help: the trait `std::marker::Send` is not implemented for `dyn StdError`
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+    = note: required for `Unique<dyn StdError>` to implement `std::marker::Send`
+note: required because it appears within the type `Box<dyn StdError>`
+   --> /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/alloc/src/boxed.rs:231:12
+    = note: required for `Box<dyn StdError + std::marker::Send + Sync>` to implement `From<Box<dyn StdError>>`
+
+error[E0277]: `?` couldn't convert the error: `dyn StdError: Sync` is not satisfied
+   --> src/dag_engine/infrastructure/nodes/http.rs:110:168
+    |
+110 | ... = Self::resolve_env_vars(v_str).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError>)?;
+    |       ----------------------------- ----------------------------------------------------------------------------------------------------^ `dyn StdError` cannot be shared between threads safely
+    |       |                             |
+    |       |                             this can't be annotated with `?` because it has type `Result<_, Box<dyn StdError>>`
+    |       this can't be annotated with `?` because it has type `Result<_, std::string::String>`
+    |
+    = help: the trait `Sync` is not implemented for `dyn StdError`
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+    = note: required for `Unique<dyn StdError>` to implement `Sync`
+note: required because it appears within the type `Box<dyn StdError>`
+   --> /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/alloc/src/boxed.rs:231:12
+    = note: required for `Box<dyn StdError + std::marker::Send + Sync>` to implement `From<Box<dyn StdError>>`
+
+error[E0277]: `?` couldn't convert the error: `dyn StdError: Sized` is not satisfied
+   --> src/dag_engine/infrastructure/nodes/http.rs:110:168
+    |
+110 | ... = Self::resolve_env_vars(v_str).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError>)?;
+    |       ----------------------------- ----------------------------------------------------------------------------------------------------^ doesn't have a size known at compile-time
+    |       |                             |
+    |       |                             this can't be annotated with `?` because it has type `Result<_, Box<dyn StdError>>`
+    |       this can't be annotated with `?` because it has type `Result<_, std::string::String>`
+    |
+    = help: the trait `Sized` is not implemented for `dyn StdError`
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+    = note: required for `Box<dyn StdError>` to implement `StdError`
+    = note: required for `Box<dyn StdError + std::marker::Send + Sync>` to implement `From<Box<dyn StdError>>`
+
+error[E0277]: `?` couldn't convert the error: `dyn StdError: std::marker::Send` is not satisfied
+   --> src/dag_engine/infrastructure/nodes/http.rs:161:160
+    |
+161 | ... = Self::resolve_env_vars(s).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError>)?;
+    |       ------------------------- ----------------------------------------------------------------------------------------------------^ `dyn StdError` cannot be sent between threads safely
+    |       |                         |
+    |       |                         this can't be annotated with `?` because it has type `Result<_, Box<dyn StdError>>`
+    |       this can't be annotated with `?` because it has type `Result<_, std::string::String>`
+    |
+    = help: the trait `std::marker::Send` is not implemented for `dyn StdError`
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+    = note: required for `Unique<dyn StdError>` to implement `std::marker::Send`
+note: required because it appears within the type `Box<dyn StdError>`
+   --> /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/alloc/src/boxed.rs:231:12
+    = note: required for `Box<dyn StdError + std::marker::Send + Sync>` to implement `From<Box<dyn StdError>>`
+
+error[E0277]: `?` couldn't convert the error: `dyn StdError: Sync` is not satisfied
+   --> src/dag_engine/infrastructure/nodes/http.rs:161:160
+    |
+161 | ... = Self::resolve_env_vars(s).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError>)?;
+    |       ------------------------- ----------------------------------------------------------------------------------------------------^ `dyn StdError` cannot be shared between threads safely
+    |       |                         |
+    |       |                         this can't be annotated with `?` because it has type `Result<_, Box<dyn StdError>>`
+    |       this can't be annotated with `?` because it has type `Result<_, std::string::String>`
+    |
+    = help: the trait `Sync` is not implemented for `dyn StdError`
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+    = note: required for `Unique<dyn StdError>` to implement `Sync`
+note: required because it appears within the type `Box<dyn StdError>`
+   --> /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/alloc/src/boxed.rs:231:12
+    = note: required for `Box<dyn StdError + std::marker::Send + Sync>` to implement `From<Box<dyn StdError>>`
+
+error[E0277]: `?` couldn't convert the error: `dyn StdError: Sized` is not satisfied
+   --> src/dag_engine/infrastructure/nodes/http.rs:161:160
+    |
+161 | ... = Self::resolve_env_vars(s).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError>)?;
+    |       ------------------------- ----------------------------------------------------------------------------------------------------^ doesn't have a size known at compile-time
+    |       |                         |
+    |       |                         this can't be annotated with `?` because it has type `Result<_, Box<dyn StdError>>`
+    |       this can't be annotated with `?` because it has type `Result<_, std::string::String>`
+    |
+    = help: the trait `Sized` is not implemented for `dyn StdError`
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+    = note: required for `Box<dyn StdError>` to implement `StdError`
+    = note: required for `Box<dyn StdError + std::marker::Send + Sync>` to implement `From<Box<dyn StdError>>`
+
+warning: unused variable: `node_id`
+   --> src/dag_engine/infrastructure/nodes/llm.rs:339:21
+    |
+339 |                 let node_id = "unknown".to_string(); // We don't have node_id here easily without passing it or capturing it. 
+    |                     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_node_id`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+For more information about this error, try `rustc --explain E0277`.
+warning: `colmena` (lib) generated 2 warnings
+error: could not compile `colmena` (lib) due to 15 previous errors; 2 warnings emitted

@@ -162,7 +162,7 @@ impl ToolExecutor for DagToolExecutor {
         let config = serde_json::json!({});
         let mut state = serde_json::json!({});
 
-        let result = node.execute(&inputs, &config, &mut state).await;
+        let result = node.execute(&inputs, &config, &mut state, None).await;
 
         // 4. Return result
         match result {
@@ -301,7 +301,8 @@ mod tests {
             inputs: &NodeInputs,
             _config: &Value,
             _state: &mut Value,
-        ) -> Result<Value, Box<dyn std::error::Error>> {
+            _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+        ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
             // Echo inputs
             Ok(serde_json::to_value(inputs)?)
         }

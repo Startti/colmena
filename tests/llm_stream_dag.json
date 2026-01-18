@@ -1,0 +1,26 @@
+{
+    "nodes": {
+        "trigger_1": {
+            "type": "trigger_webhook",
+            "config": {
+                "path": "/dag/execute"
+            }
+        },
+        "llm_1": {
+            "type": "llm_call",
+            "config": {
+                "provider": "mock",
+                "api_key": "dummy",
+                "stream": true
+            }
+        }
+    },
+    "edges": [
+        {
+            "source": "trigger_1",
+            "target": "llm_1",
+            "source_handle": "output",
+            "target_handle": "prompt"
+        }
+    ]
+}
