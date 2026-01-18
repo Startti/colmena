@@ -136,6 +136,37 @@ impl DagRunUseCase {
                                         token
                                     };
                                 }
+                                NodeEvent::LlmToolCall { tool_id, tool_name, args_chunk } => {
+                                    yield DagExecutionEvent::LlmToolCall {
+                                        node_id: node_id.clone(),
+                                        tool_id,
+                                        tool_name,
+                                        args_chunk,
+                                    };
+                                }
+                                NodeEvent::LlmUsage { prompt_tokens, completion_tokens } => {
+                                    yield DagExecutionEvent::LlmUsage {
+                                        node_id: node_id.clone(),
+                                        prompt_tokens,
+                                        completion_tokens,
+                                    };
+                                }
+                                NodeEvent::LlmToolCallStart { tool_id, tool_name, tool_args } => {
+                                    yield DagExecutionEvent::LlmToolCallStart {
+                                        node_id: node_id.clone(),
+                                        tool_id,
+                                        tool_name,
+                                        tool_args,
+                                    };
+                                }
+                                NodeEvent::LlmToolCallFinish { tool_id, success, output } => {
+                                    yield DagExecutionEvent::LlmToolCallFinish {
+                                        node_id: node_id.clone(),
+                                        tool_id,
+                                        success,
+                                        output,
+                                    };
+                                }
                             }
                         }
                     }

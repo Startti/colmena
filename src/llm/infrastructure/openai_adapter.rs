@@ -1,6 +1,6 @@
 use crate::llm::domain::{
     FunctionCall, LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk,
-    LlmUsage, ToolCall,
+    LlmStreamPart, LlmUsage, ToolCall, ToolCallChunk,
 };
 use async_trait::async_trait;
 use futures::{Stream, StreamExt, TryStreamExt};
@@ -80,6 +80,10 @@ impl OpenAiAdapter {
             "messages": self.build_messages(request),
             "stream": request.stream()
         });
+        
+        if request.stream() {
+            body["stream_options"] = json!({ "include_usage": true });
+        }
 
         // Add tools if present (OpenAI format)
         if let Some(tools) = request.tools() {
@@ -268,22 +272,65 @@ impl LlmRepository for OpenAiAdapter {
                         }
                         match serde_json::from_str::<OpenAiStreamChunk>(&data) {
                             Ok(chunk_response) => {
+                                // 1. Check for Usage (usually in last chunk with empty choices)
+                                if let Some(usage) = chunk_response.usage {
+                                    return Ok(Some(LlmStreamChunk::new(
+                                        request_id,
+                                        LlmStreamPart::Usage(LlmUsage::new(
+                                            usage.prompt_tokens,
+                                            usage.completion_tokens,
+                                        )),
+                                        provider,
+                                        false, 
+                                    )));
+                                }
+
+                                // 2. Check for content/tool_calls in choices
                                 if let Some(choice) = chunk_response.choices.first() {
                                     let is_final = choice.finish_reason.is_some();
-                                    if let Some(content) = &choice.delta.content {
-                                        Ok(Some(LlmStreamChunk::new(
-                                            request_id,
-                                            content.clone(),
-                                            provider,
+                                    let finish_reason = choice.finish_reason.clone();
+
+                                    let chunk = if let Some(content) = &choice.delta.content {
+                                        Some(LlmStreamChunk::new(
+                                            request_id.clone(),
+                                            LlmStreamPart::Content(content.clone()),
+                                            provider.clone(),
                                             is_final,
-                                        )))
+                                        ))
+                                    } else if let Some(tool_calls) = &choice.delta.tool_calls {
+                                        // Take the first one for now (streaming multiple in parallel is complex)
+                                        if let Some(tc) = tool_calls.first() {
+                                            Some(LlmStreamChunk::new(
+                                                request_id.clone(),
+                                                LlmStreamPart::ToolCallChunk(ToolCallChunk {
+                                                    index: tc.index,
+                                                    id: tc.id.clone().unwrap_or_default(),
+                                                    name: tc.function.name.clone().unwrap_or_default(),
+                                                    args_chunk: tc.function.arguments.clone().unwrap_or_default(),
+                                                }),
+                                                provider.clone(),
+                                                is_final,
+                                            ))
+                                        } else {
+                                            None
+                                        }
                                     } else if is_final {
-                                        Ok(Some(LlmStreamChunk::new(
-                                            request_id,
-                                            String::new(),
-                                            provider,
+                                        // Final chunk (can include finish reason)
+                                        Some(LlmStreamChunk::new(
+                                            request_id.clone(),
+                                            LlmStreamPart::Content(String::new()), // Empty content
+                                            provider.clone(),
                                             true,
-                                        )))
+                                        ))
+                                    } else {
+                                        None
+                                    };
+
+                                    if let Some(mut c) = chunk {
+                                        if let Some(reason) = finish_reason {
+                                            c = c.with_finish_reason(reason);
+                                        }
+                                        Ok(Some(c))
                                     } else {
                                         Ok(None)
                                     }
@@ -368,6 +415,7 @@ struct OpenAiUsage {
 #[derive(Debug, Deserialize)]
 struct OpenAiStreamChunk {
     choices: Vec<OpenAiStreamChoice>,
+    usage: Option<OpenAiUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -379,6 +427,24 @@ struct OpenAiStreamChoice {
 #[derive(Debug, Deserialize)]
 struct OpenAiDelta {
     content: Option<String>,
+    tool_calls: Option<Vec<OpenAiStreamToolCall>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamToolCall {
+    #[allow(dead_code)]
+    index: usize,
+    id: Option<String>,
+    #[allow(dead_code)]
+    #[serde(rename = "type")]
+    call_type: Option<String>,
+    function: OpenAiStreamFunctionCall,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamFunctionCall {
+    name: Option<String>,
+    arguments: Option<String>,
 }
 
 // SSE Parser implementation

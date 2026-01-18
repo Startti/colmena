@@ -110,8 +110,9 @@ impl ToolExecutor for CalculatorToolExecutor {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::test]
+async fn test_agent_execution() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
     println!("🤖 AgentService Tool Calling Example\n");
 
     // 1. Setup LLM provider (using OpenAI)
@@ -151,7 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n🔄 Running agent with tool calling...\n");
 
     match agent_service
-        .run(&thread_id, prompt, config, tools, &tool_executor, Some(10))
+        .run(&thread_id, prompt, config, tools, &tool_executor, Some(10), None)
         .await
     {
         Ok(response) => {

@@ -4,7 +4,8 @@
             "type": "trigger_webhook",
             "config": {
                 "path": "/test-http",
-                "method": "POST"
+                "method": "POST",
+                "test_payload": {}
             }
         },
         "http_call": {

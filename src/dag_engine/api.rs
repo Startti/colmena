@@ -152,21 +152,74 @@ async fn handler_webhook(
         let stream = use_case.execute_stream(graph_instance).map(|result| {
             match result {
                 Ok(event) => {
-                    // Vercel Protocol: data: {"type": "data", "value": <Event>}
-                    let data_json = serde_json::json!({
-                        "type": "data",
-                        "value": event
-                    });
-                    Event::default().json_data(data_json)
+                    use crate::dag_engine::domain::events::DagExecutionEvent;
+                    
+                    // Map DagExecutionEvent to Vercel Data Stream Protocol JSON
+                    let protocol_json = match event {
+                        DagExecutionEvent::LlmToken { token, .. } => serde_json::json!({
+                            "type": "text-delta",
+                            "textDelta": token
+                        }),
+                        DagExecutionEvent::LlmToolCall { tool_id, args_chunk, .. } => serde_json::json!({
+                            "type": "tool-input-delta",
+                            "toolCallId": tool_id,
+                            "argsTextDelta": args_chunk
+                        }),
+                        DagExecutionEvent::LlmToolCallStart { tool_id, tool_name, tool_args, .. } => serde_json::json!({
+                            "type": "tool-input-available",
+                            "toolCallId": tool_id,
+                            "toolName": tool_name,
+                            "input": serde_json::from_str::<serde_json::Value>(&tool_args).unwrap_or(serde_json::Value::String(tool_args))
+                        }),
+                        DagExecutionEvent::LlmToolCallFinish { tool_id, output, success, .. } => {
+                             // Treat output as result. If it's a JSON string, parse it.
+                             let result_val = serde_json::from_str::<serde_json::Value>(&output)
+                                .unwrap_or(serde_json::Value::String(output));
+                                
+                             // If tool failed, we might want to signal error, but protocol says "result". 
+                             // We'll send the output as is.
+                             serde_json::json!({
+                                "type": "tool-output-available",
+                                "toolCallId": tool_id,
+                                "output": result_val,
+                                "isError": !success 
+                            })
+                        },
+                        DagExecutionEvent::LlmUsage { prompt_tokens, completion_tokens, .. } => serde_json::json!({
+                            "type": "finish",
+                            "usage": {
+                                "promptTokens": prompt_tokens,
+                                "completionTokens": completion_tokens
+                            }
+                        }),
+                        // Internal events - Keep valid JSON but use custom types for debugging/logging
+                        DagExecutionEvent::NodeStart { node_id, node_type, .. } => serde_json::json!({
+                            "type": "custom-node-start",
+                            "nodeId": node_id,
+                            "nodeType": node_type
+                        }),
+                        DagExecutionEvent::NodeFinish { node_id, output } => serde_json::json!({
+                            "type": "custom-node-finish",
+                            "nodeId": node_id,
+                            "output": output
+                        }),
+                        DagExecutionEvent::GraphFinish { output } => serde_json::json!({
+                            "type": "custom-graph-finish",
+                            "output": output
+                        }),
+                        DagExecutionEvent::Error { message } => serde_json::json!({
+                            "type": "error",
+                            "error": message
+                        }),
+                    };
+                    
+                    Event::default().json_data(protocol_json)
                 }
                 Err(e) => {
                      // Error event
                      let err_json = serde_json::json!({
-                        "type": "data",
-                        "value": {
-                            "event": "error",
-                            "message": e.to_string()
-                        }
+                        "type": "error",
+                        "error": e.to_string()
                      });
                      Event::default().json_data(err_json)
                 }

@@ -1,0 +1,44 @@
+{
+    "nodes": {
+        "trigger": {
+            "type": "trigger_webhook",
+            "config": {
+                "path": "/agent-demo-stream",
+                "method": "POST",
+                "test_payload": {
+                    "question": "Calculate 25 + 17, then multiply the result by 2"
+                }
+            }
+        },
+        "agent_llm": {
+            "type": "llm_call",
+            "config": {
+                "provider": "openai",
+                "api_key": "${OPENAI_API_KEY}",
+                "model": "gpt-4o-mini",
+                "system_message": "You are a helpful math assistant. You MUST use the available tools (add, multiply, etc.) for every calculation. Do not calculate mentally.",
+                "temperature": 0.0,
+                "stream": true,
+                "enabled_tools": [
+                    "add",
+                    "multiply",
+                    "subtract",
+                    "divide"
+                ]
+            }
+        },
+        "log_result": {
+            "type": "log"
+        }
+    },
+    "edges": [
+        {
+            "from": "trigger.output.question",
+            "to": "agent_llm.prompt"
+        },
+        {
+            "from": "agent_llm.output",
+            "to": "log_result.input"
+        }
+    ]
+}

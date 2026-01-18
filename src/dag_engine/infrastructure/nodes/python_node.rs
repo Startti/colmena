@@ -144,7 +144,7 @@ mod tests {
         let mut state = json!({});
 
         // 3. Ejecutar
-        let result = node.execute(&inputs, &config, &mut state).await.unwrap();
+        let result = node.execute(&inputs, &config, &mut state, None).await.unwrap();
 
         // 4. Aserción: (10 * 5) + 2 = 52
         assert_eq!(result["output"], 52);
@@ -161,7 +161,7 @@ mod tests {
         });
 
         let mut state = json!({});
-        let result = node.execute(&inputs, &config, &mut state).await.unwrap();
+        let result = node.execute(&inputs, &config, &mut state, None).await.unwrap();
 
         assert_eq!(result["output"], 4.0);
     }
