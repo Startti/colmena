@@ -1,6 +1,6 @@
 use crate::llm::domain::{
     FunctionCall, LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk,
-    LlmUsage, MessageRole, ToolCall,
+    LlmStreamPart, LlmUsage, MessageRole, ToolCall,
 };
 use async_trait::async_trait;
 use futures::{Stream, StreamExt, TryStreamExt};
@@ -369,7 +369,10 @@ impl LlmRepository for GeminiAdapter {
                         let is_final = candidate.finish_reason.is_some();
 
                         return Ok(Some(LlmStreamChunk::new(
-                            request_id, text, provider, is_final,
+                            request_id,
+                            LlmStreamPart::Content(text),
+                            provider,
+                            is_final,
                         )));
                     }
                 }

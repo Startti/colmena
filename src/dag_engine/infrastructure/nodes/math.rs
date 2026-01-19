@@ -1,7 +1,8 @@
 // --- IMPORTACIONES AÑADIDAS ---
-use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs}; // Importa nuestro trait y tipo
-use serde_json::{json, Value}; // Importa Value y la macro json!
-use std::error::Error as StdError; // Importa el trait de error estándar
+use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
+use serde_json::{json, Value};
+use std::error::Error as StdError;
+use std::sync::Arc;
 use thiserror::Error;
 // ------------------------------
 
@@ -28,7 +29,8 @@ impl ExecutableNode for AddNode {
         inputs: &NodeInputs,
         _config: &Value,
         _state: &mut Value,
-    ) -> Result<Value, Box<dyn StdError>> {
+        _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
         let a = get_f64(inputs.get("a"), "a")?;
         let b = get_f64(inputs.get("b"), "b")?;
         Ok(json!({ "output": a + b }))
@@ -47,7 +49,8 @@ impl ExecutableNode for SubtractNode {
         inputs: &NodeInputs,
         _config: &Value,
         _state: &mut Value,
-    ) -> Result<Value, Box<dyn StdError>> {
+        _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
         let a = get_f64(inputs.get("a"), "a")?;
         let b = get_f64(inputs.get("b"), "b")?;
         Ok(json!({ "output": a - b }))
@@ -66,7 +69,8 @@ impl ExecutableNode for MultiplyNode {
         inputs: &NodeInputs,
         _config: &Value,
         _state: &mut Value,
-    ) -> Result<Value, Box<dyn StdError>> {
+        _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
         let a = get_f64(inputs.get("a"), "a")?;
         let b = get_f64(inputs.get("b"), "b")?;
         Ok(json!({ "output": a * b }))
@@ -85,9 +89,11 @@ impl ExecutableNode for DivideNode {
         inputs: &NodeInputs,
         _config: &Value,
         _state: &mut Value,
-    ) -> Result<Value, Box<dyn StdError>> {
+        _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
         let a = get_f64(inputs.get("a"), "a")?;
         let b = get_f64(inputs.get("b"), "b")?;
+        
         if b == 0.0 {
             return Err(Box::new(MathError::DivisionByZero));
         }
@@ -106,7 +112,8 @@ impl ExecutableNode for ExponentialNode {
         inputs: &NodeInputs,
         config: &Value,
         _state: &mut Value,
-    ) -> Result<Value, Box<dyn StdError>> {
+        _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
         // 1. Obtener la base de las entradas
         let base = get_f64(inputs.get("input"), "input")?;
 

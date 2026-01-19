@@ -4,7 +4,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pythonize::{depythonize_bound, pythonize};
 use serde_json::{json, Value};
-use std::error::Error;
+use std::error::Error as StdError;
+use std::sync::Arc;
 
 pub struct PythonNode;
 
@@ -15,7 +16,8 @@ impl ExecutableNode for PythonNode {
         inputs: &NodeInputs,
         config: &Value,
         _state: &mut Value,
-    ) -> Result<Value, Box<dyn Error>> {
+        _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
         // 1. Validar Configuración: Extraer el código
         // Prioridad: 1. Inputs ("code"), 2. Config ("code")
         let code = if let Some(input_code) = inputs.get("code").and_then(|v| v.as_str()) {
@@ -142,7 +144,7 @@ mod tests {
         let mut state = json!({});
 
         // 3. Ejecutar
-        let result = node.execute(&inputs, &config, &mut state).await.unwrap();
+        let result = node.execute(&inputs, &config, &mut state, None).await.unwrap();
 
         // 4. Aserción: (10 * 5) + 2 = 52
         assert_eq!(result["output"], 52);
@@ -159,7 +161,7 @@ mod tests {
         });
 
         let mut state = json!({});
-        let result = node.execute(&inputs, &config, &mut state).await.unwrap();
+        let result = node.execute(&inputs, &config, &mut state, None).await.unwrap();
 
         assert_eq!(result["output"], 4.0);
     }

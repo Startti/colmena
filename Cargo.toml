@@ -64,6 +64,7 @@ tracing-subscriber = "0.3"
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "sqlite", "uuid", "chrono", "macros"] }
+async-stream = "0.3.6"
 
 [features]
 default = []
@@ -75,3 +76,15 @@ mockall = "0.11"
 wiremock = "0.5"
 serde_json = "1.0"
 derivative = "2.2"
+
+[[test]]
+name = "agent_with_tools"
+path = "tests/rust/agent_with_tools.rs"
+
+[[test]]
+name = "gemini_tool_test"
+path = "tests/rust/gemini_tool_test.rs"
+
+[[test]]
+name = "openai_tool_test"
+path = "tests/rust/openai_tool_test.rs"

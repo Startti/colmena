@@ -1,6 +1,8 @@
+use crate::dag_engine::domain::observer::ExecutionObserver;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::error::Error as StdError;
+use std::sync::Arc;
 
 /// Un alias de tipo para las entradas de un nodo.
 /// Usamos un HashMap para que las entradas sean nombradas (ej. "a", "b", "prompt").
@@ -18,6 +20,7 @@ pub trait ExecutableNode: Send + Sync {
     /// * `inputs` - Un HashMap que contiene los outputs resueltos de los nodos anteriores.
     /// * `config` - El objeto `Value` de configuración estática del nodo desde `graph.json`.
     /// * `state` - Una referencia mutable al estado global del grafo (lo usaremos más en M2).
+    /// * `observer` - Un observador opcional para notificar eventos de ejecución.
     ///
     /// # Retorna
     /// Un `Result` que contiene el `Value` de salida del nodo o un error.
@@ -26,7 +29,8 @@ pub trait ExecutableNode: Send + Sync {
         inputs: &NodeInputs,
         config: &Value,
         state: &mut Value,
-    ) -> Result<Value, Box<dyn StdError>>;
+        observer: Option<Arc<dyn ExecutionObserver>>,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>>;
 
     /// Retorna un `Value` de JSON Schema que describe la configuración del nodo,
     /// sus entradas esperadas y sus salidas.
