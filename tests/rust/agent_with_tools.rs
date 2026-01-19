@@ -161,8 +161,7 @@ async fn test_agent_execution() -> Result<(), Box<dyn std::error::Error>> {
         on_token: None,
     };
 
-    match agent_service.run(params).await
-    {
+    match agent_service.run(params).await {
         Ok(response) => {
             println!("✅ Agent response:");
             println!("   {}", response.content());
