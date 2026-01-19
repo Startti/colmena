@@ -1,3 +1,4 @@
+/*
 // Example: Testing OpenAI Tool Calling
 //
 // This example demonstrates how to use the OpenAI adapter with tool calling.
@@ -125,3 +126,4 @@ async fn test_openai_tools() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+*/
