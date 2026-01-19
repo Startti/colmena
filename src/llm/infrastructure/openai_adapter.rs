@@ -3,7 +3,7 @@ use crate::llm::domain::{
     LlmStreamPart, LlmUsage, ToolCall, ToolCallChunk,
 };
 use async_trait::async_trait;
-use futures::{Stream, StreamExt, TryStreamExt};
+use futures::{Stream, StreamExt};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
@@ -80,7 +80,7 @@ impl OpenAiAdapter {
             "messages": self.build_messages(request),
             "stream": request.stream()
         });
-        
+
         if request.stream() {
             body["stream_options"] = json!({ "include_usage": true });
         }
@@ -282,7 +282,7 @@ impl LlmRepository for OpenAiAdapter {
                                             usage.completion_tokens,
                                         )),
                                         provider.clone(),
-                                        false, 
+                                        false,
                                     );
                                     continue;
                                 }

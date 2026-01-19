@@ -1,7 +1,6 @@
 use crate::llm::domain::{
     LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk, LlmStreamPart,
-    LlmUsage,
-    MessageRole,
+    LlmUsage, MessageRole,
 };
 use async_trait::async_trait;
 use futures::{Stream, StreamExt, TryStreamExt};
