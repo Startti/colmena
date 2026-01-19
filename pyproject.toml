@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "colmena-ai"
 description = "AI Agent Orchestration Library - LLM abstraction layer with multi-provider support"
-version = "0.1.6"
+version = "0.2.0"
 readme = "README_PYPI.md"
 license = {text = "MIT"}
 
