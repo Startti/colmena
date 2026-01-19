@@ -27,9 +27,18 @@ enum Commands {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
     println!("DEBUG: DATABASE_URL={:?}", std::env::var("DATABASE_URL"));
-    println!("DEBUG: AMADEUS_CLIENT_ID={:?}", std::env::var("AMADEUS_CLIENT_ID"));
-    println!("DEBUG: AMADEUS_CLIENT_SECRET={:?}", std::env::var("AMADEUS_CLIENT_SECRET"));
-    println!("DEBUG: OPENAI_API_KEY={:?}", std::env::var("OPENAI_API_KEY"));
+    println!(
+        "DEBUG: AMADEUS_CLIENT_ID={:?}",
+        std::env::var("AMADEUS_CLIENT_ID")
+    );
+    println!(
+        "DEBUG: AMADEUS_CLIENT_SECRET={:?}",
+        std::env::var("AMADEUS_CLIENT_SECRET")
+    );
+    println!(
+        "DEBUG: OPENAI_API_KEY={:?}",
+        std::env::var("OPENAI_API_KEY")
+    );
     let cli = Cli::parse();
 
     match cli.command {

@@ -12,15 +12,9 @@ pub enum DagExecutionEvent {
         config: Value,
     },
     #[serde(rename = "node_finish")]
-    NodeFinish {
-        node_id: String,
-        output: Value,
-    },
+    NodeFinish { node_id: String, output: Value },
     #[serde(rename = "llm_token")]
-    LlmToken {
-        node_id: String,
-        token: String,
-    },
+    LlmToken { node_id: String, token: String },
     #[serde(rename = "llm_tool_call")]
     LlmToolCall {
         node_id: String,
@@ -49,11 +43,7 @@ pub enum DagExecutionEvent {
         output: String,
     },
     #[serde(rename = "graph_finish")]
-    GraphFinish {
-        output: Value,
-    },
+    GraphFinish { output: Value },
     #[serde(rename = "error")]
-    Error {
-        message: String,
-    },
+    Error { message: String },
 }

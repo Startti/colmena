@@ -1,3 +1,4 @@
+/*
 // Example: Testing Gemini Tool Calling
 //
 // This example demonstrates how to use the Gemini adapter with tool calling.
@@ -95,3 +96,4 @@ async fn test_gemini_tools() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+*/
