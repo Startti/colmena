@@ -4,7 +4,12 @@
             "type": "trigger_webhook",
             "config": {
                 "path": "/hello",
-                "method": "POST"
+                "method": "POST",
+                "test_payload": {
+                    "request": {
+                        "message": "Hello from Simulator!"
+                    }
+                }
             }
         },
         "log_step": {

@@ -1,0 +1,177 @@
+{
+    "nodes": {
+        "trigger": {
+            "type": "trigger_webhook",
+            "config": {
+                "path": "/travel-agent",
+                "method": "POST",
+                "test_payload": {
+                    "question": "I want to go from bogota to miami the next january 1st 2026 for 1 adult two weeks. pelaes find hotels there"
+                }
+            }
+        },
+        "get_amadeus_token": {
+            "type": "http_request",
+            "config": {
+                "base_url": "https://api.amadeus.com/v1/security/oauth2/token",
+                "method": "POST",
+                "headers": {
+                    "Content-Type": "application/x-www-form-urlencoded"
+                },
+                "body": "grant_type=client_credentials&client_id=${AMADEUS_CLIENT_ID}&client_secret=${AMADEUS_CLIENT_SECRET}"
+            }
+        },
+        "agent_llm": {
+            "type": "llm_call",
+            "config": {
+                "provider": "openai",
+                "api_key": "${OPENAI_API_KEY}",
+                "model": "gpt-4o-mini",
+                "system_message": "You are a helpful travel agent assistant. You can search for flights, hotels, and activities using the available tools. Use the provided context to authenticate your requests. Always limit your search results to the minimum necessary (max 1 or 2). Current date: 2025-12-12.",
+                "temperature": 0.7,
+                "thread_id": "travel_agent_demo_v10",
+                "connection_url": "${DATABASE_URL}",
+                "enabled_tools": [
+                    "search_flights",
+                    "search_hotels",
+                    "search_activities"
+                ],
+                "tool_configurations": {
+                    "search_flights": {
+                        "name": "search_flights",
+                        "node_type": "http_request",
+                        "description": "Search for flight offers. You MUST provide originLocationCode, destinationLocationCode, departureDate, and adults.",
+                        "fixed_config": {
+                            "base_url": "https://api.amadeus.com",
+                            "endpoint": "/v2/shopping/flight-offers",
+                            "method": "GET",
+                            "bearer_token": "${context.amadeus_token}",
+                            "query_params": {
+                                "max": "3"
+                            }
+                        },
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "originLocationCode": {
+                                    "type": "string",
+                                    "description": "IATA code of the departure airport (e.g., LON, PAR, NYC)"
+                                },
+                                "destinationLocationCode": {
+                                    "type": "string",
+                                    "description": "IATA code of the arrival airport (e.g., LON, PAR, NYC)"
+                                },
+                                "departureDate": {
+                                    "type": "string",
+                                    "description": "Departure date in YYYY-MM-DD format"
+                                },
+                                "returnDate": {
+                                    "type": "string",
+                                    "description": "Return date in YYYY-MM-DD format"
+                                },
+                                "adults": {
+                                    "type": "integer",
+                                    "description": "Number of adult passengers (default 1)"
+                                },
+                                "max": {
+                                    "type": "integer",
+                                    "description": "Maximum number of results (default 5)"
+                                }
+                            },
+                            "required": [
+                                "originLocationCode",
+                                "destinationLocationCode",
+                                "departureDate",
+                                "adults"
+                            ]
+                        }
+                    },
+                    "search_hotels": {
+                        "name": "search_hotels",
+                        "node_type": "http_request",
+                        "description": "Search for hotels in a specific city. You MUST provide cityCode.",
+                        "fixed_config": {
+                            "base_url": "https://api.amadeus.com",
+                            "endpoint": "/v1/reference-data/locations/hotels/by-city",
+                            "method": "GET",
+                            "bearer_token": "${context.amadeus_token}"
+                        },
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "cityCode": {
+                                    "type": "string",
+                                    "description": "IATA city code (e.g., PAR for Paris, LON for London)"
+                                },
+                                "radius": {
+                                    "type": "integer",
+                                    "description": "Radius in kilometers (default 5)"
+                                },
+                                "radiusUnit": {
+                                    "type": "string",
+                                    "description": "Unit of radius (KM or MILE, default KM)"
+                                }
+                            },
+                            "required": [
+                                "cityCode"
+                            ]
+                        }
+                    },
+                    "search_activities": {
+                        "name": "search_activities",
+                        "node_type": "http_request",
+                        "description": "Search for tours and activities in a location. You MUST provide latitude and longitude.",
+                        "fixed_config": {
+                            "base_url": "https://api.amadeus.com",
+                            "endpoint": "/v1/shopping/activities",
+                            "method": "GET",
+                            "bearer_token": "${context.amadeus_token}"
+                        },
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "latitude": {
+                                    "type": "number",
+                                    "description": "Latitude of the location"
+                                },
+                                "longitude": {
+                                    "type": "number",
+                                    "description": "Longitude of the location"
+                                },
+                                "radius": {
+                                    "type": "integer",
+                                    "description": "Radius in kilometers (default 1)"
+                                }
+                            },
+                            "required": [
+                                "latitude",
+                                "longitude"
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "log_result": {
+            "type": "log"
+        }
+    },
+    "edges": [
+        {
+            "from": "trigger.output.question",
+            "to": "agent_llm.prompt"
+        },
+        {
+            "from": "trigger.output",
+            "to": "get_amadeus_token.trigger"
+        },
+        {
+            "from": "get_amadeus_token.output.body.access_token",
+            "to": "agent_llm.context.amadeus_token"
+        },
+        {
+            "from": "agent_llm.output",
+            "to": "log_result.input"
+        }
+    ]
+}

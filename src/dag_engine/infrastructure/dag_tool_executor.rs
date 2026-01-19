@@ -32,6 +32,21 @@ impl DagToolExecutor {
     ) -> crate::llm::domain::ToolDefinition {
         use crate::llm::domain::{ParameterProperty, ToolDefinition, ToolParameters};
 
+        // If parameters are explicitly defined in config, use them
+        if let Some(params_value) = &tool_config.parameters {
+            if let Ok(params) = serde_json::from_value::<ToolParameters>(params_value.clone()) {
+                 return ToolDefinition {
+                    name: tool_name.to_string(),
+                    description: tool_config.description.clone(),
+                    parameters: params,
+                };
+            } else {
+                println!("WARN: Failed to parse custom parameters for tool {}", tool_name);
+                // Fallback to default generation? or error?
+                // Let's fallback but maybe log.
+            }
+        }
+
         let node_schema = node.schema();
         let inputs_schema = node_schema
             .get("inputs")
@@ -147,7 +162,7 @@ impl ToolExecutor for DagToolExecutor {
         let config = serde_json::json!({});
         let mut state = serde_json::json!({});
 
-        let result = node.execute(&inputs, &config, &mut state).await;
+        let result = node.execute(&inputs, &config, &mut state, None).await;
 
         // 4. Return result
         match result {
@@ -286,7 +301,8 @@ mod tests {
             inputs: &NodeInputs,
             _config: &Value,
             _state: &mut Value,
-        ) -> Result<Value, Box<dyn std::error::Error>> {
+            _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+        ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
             // Echo inputs
             Ok(serde_json::to_value(inputs)?)
         }
@@ -402,6 +418,7 @@ mod tests {
                 node_type: "mock_tool".to_string(),
                 fixed_config,
                 exposed_inputs: None,
+                parameters: None,
             },
         );
 

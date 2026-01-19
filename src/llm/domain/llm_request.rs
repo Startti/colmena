@@ -33,6 +33,11 @@ impl LlmRequest {
             let current_msg = &messages[i];
 
             if prev_msg.role() == current_msg.role() {
+                // Allow consecutive Tool messages (for parallel tool calls)
+                if *current_msg.role() == crate::llm::domain::MessageRole::Tool {
+                    continue;
+                }
+
                 return Err(LlmError::ConsecutiveRoles {
                     role: current_msg.role().to_string(),
                     index1: i - 1,
