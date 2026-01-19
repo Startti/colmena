@@ -50,6 +50,7 @@ Issues = "https://github.com/Startti/colmena/issues"
 [tool.maturin]
 module-name = "colmena"
 features = ["pyo3/extension-module", "python"]
+no-default-features = true
 
 [tool.black]
 line-length = 88
