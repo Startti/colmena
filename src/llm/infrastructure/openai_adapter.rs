@@ -1,6 +1,6 @@
 use crate::llm::domain::{
     FunctionCall, LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk,
-    LlmUsage, ToolCall,
+    LlmStreamPart, LlmUsage, ToolCall, ToolCallChunk,
 };
 use async_trait::async_trait;
 use futures::{Stream, StreamExt, TryStreamExt};
@@ -80,6 +80,10 @@ impl OpenAiAdapter {
             "messages": self.build_messages(request),
             "stream": request.stream()
         });
+        
+        if request.stream() {
+            body["stream_options"] = json!({ "include_usage": true });
+        }
 
         // Add tools if present (OpenAI format)
         if let Some(tools) = request.tools() {
@@ -256,51 +260,100 @@ impl LlmRepository for OpenAiAdapter {
         let provider = request.config().provider().clone();
 
         let byte_stream = response.bytes_stream();
+        let mut sse_parser = SseParser::new(byte_stream);
+        let mut tool_ids_by_index = std::collections::HashMap::new();
 
-        let sse_stream = SseParser::new(byte_stream).try_filter_map(move |event| {
-            let request_id = request_id.clone();
-            let provider = provider.clone();
-            let fut = async move {
+        let sse_stream = async_stream::try_stream! {
+            while let Some(event_result) = sse_parser.next().await {
+                let event = event_result?;
                 match event {
                     SseEvent::Message(data) => {
                         if data == "[DONE]" {
-                            return Ok(None);
+                            continue;
                         }
                         match serde_json::from_str::<OpenAiStreamChunk>(&data) {
                             Ok(chunk_response) => {
+                                // 1. Check for Usage
+                                if let Some(usage) = chunk_response.usage {
+                                    yield LlmStreamChunk::new(
+                                        request_id.clone(),
+                                        LlmStreamPart::Usage(LlmUsage::new(
+                                            usage.prompt_tokens,
+                                            usage.completion_tokens,
+                                        )),
+                                        provider.clone(),
+                                        false, 
+                                    );
+                                    continue;
+                                }
+
+                                // 2. Check for content/tool_calls
                                 if let Some(choice) = chunk_response.choices.first() {
                                     let is_final = choice.finish_reason.is_some();
+                                    let finish_reason = choice.finish_reason.clone();
+
                                     if let Some(content) = &choice.delta.content {
-                                        Ok(Some(LlmStreamChunk::new(
-                                            request_id,
-                                            content.clone(),
-                                            provider,
+                                        let mut chunk = LlmStreamChunk::new(
+                                            request_id.clone(),
+                                            LlmStreamPart::Content(content.clone()),
+                                            provider.clone(),
                                             is_final,
-                                        )))
+                                        );
+                                        if let Some(reason) = finish_reason {
+                                            chunk = chunk.with_finish_reason(reason);
+                                        }
+                                        yield chunk;
+                                    } else if let Some(tool_calls) = &choice.delta.tool_calls {
+                                        if let Some(tc) = tool_calls.first() {
+                                            // Register ID if provided
+                                            if let Some(id) = &tc.id {
+                                                tool_ids_by_index.insert(tc.index, id.clone());
+                                            }
+
+                                            // Retrieve ID from tracking
+                                            let final_id = tc.id.clone()
+                                                .or_else(|| tool_ids_by_index.get(&tc.index).cloned())
+                                                .unwrap_or_default();
+
+                                            let mut chunk = LlmStreamChunk::new(
+                                                request_id.clone(),
+                                                LlmStreamPart::ToolCallChunk(ToolCallChunk {
+                                                    index: tc.index,
+                                                    id: final_id,
+                                                    name: tc.function.name.clone().unwrap_or_default(),
+                                                    args_chunk: tc.function.arguments.clone().unwrap_or_default(),
+                                                }),
+                                                provider.clone(),
+                                                is_final,
+                                            );
+                                            if let Some(reason) = finish_reason {
+                                                chunk = chunk.with_finish_reason(reason);
+                                            }
+                                            yield chunk;
+                                        }
                                     } else if is_final {
-                                        Ok(Some(LlmStreamChunk::new(
-                                            request_id,
-                                            String::new(),
-                                            provider,
+                                        let mut chunk = LlmStreamChunk::new(
+                                            request_id.clone(),
+                                            LlmStreamPart::Content(String::new()),
+                                            provider.clone(),
                                             true,
-                                        )))
-                                    } else {
-                                        Ok(None)
+                                        );
+                                        if let Some(reason) = finish_reason {
+                                            chunk = chunk.with_finish_reason(reason);
+                                        }
+                                        yield chunk;
                                     }
-                                } else {
-                                    Ok(None)
                                 }
                             }
                             Err(e) => Err(LlmError::parsing_error(format!(
                                 "Failed to parse stream chunk: {}",
                                 e
-                            ))),
+                            )))?,
                         }
                     }
                 }
-            };
-            fut
-        });
+            }
+        };
 
         Ok(Box::pin(sse_stream))
     }
@@ -368,6 +421,7 @@ struct OpenAiUsage {
 #[derive(Debug, Deserialize)]
 struct OpenAiStreamChunk {
     choices: Vec<OpenAiStreamChoice>,
+    usage: Option<OpenAiUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -379,6 +433,24 @@ struct OpenAiStreamChoice {
 #[derive(Debug, Deserialize)]
 struct OpenAiDelta {
     content: Option<String>,
+    tool_calls: Option<Vec<OpenAiStreamToolCall>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamToolCall {
+    #[allow(dead_code)]
+    index: usize,
+    id: Option<String>,
+    #[allow(dead_code)]
+    #[serde(rename = "type")]
+    call_type: Option<String>,
+    function: OpenAiStreamFunctionCall,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamFunctionCall {
+    name: Option<String>,
+    arguments: Option<String>,
 }
 
 // SSE Parser implementation

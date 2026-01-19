@@ -20,4 +20,7 @@ pub struct ToolConfiguration {
     /// Which input parameters to expose to the LLM
     /// If None, expose all inputs not in fixed_config
     pub exposed_inputs: Option<Vec<String>>,
+
+    /// Optional JSON Schema for parameters to override node schema
+    pub parameters: Option<Value>,
 }

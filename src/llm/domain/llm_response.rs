@@ -1,5 +1,5 @@
 use crate::llm::domain::{
-    LlmMessage, LlmProvider, LlmRequestId, LlmResponseId, LlmUsage, ToolCall,
+    LlmMessage, LlmProvider, LlmRequestId, LlmResponseId, LlmUsage, ToolCall, ToolResult,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -141,49 +141,53 @@ impl LlmResponse {
 
 // For streaming responses
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallChunk {
+    pub index: usize,
+    pub id: String,
+    pub name: String,
+    pub args_chunk: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LlmStreamPart {
+    Content(String),
+    ToolCallChunk(ToolCallChunk),
+    Usage(LlmUsage),
+    ToolCallStart(ToolCall),
+    ToolCallFinish(ToolResult),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmStreamChunk {
     id: LlmResponseId,
     request_id: LlmRequestId,
-    content: String,
+    part: LlmStreamPart,
     provider: LlmProvider,
     timestamp: DateTime<Utc>,
     is_final: bool,
     finish_reason: Option<String>,
-    prompt_tokens: Option<u32>,
-    completion_tokens: Option<u32>,
-    total_tokens: Option<u32>,
 }
 
 impl LlmStreamChunk {
     pub fn new(
         request_id: LlmRequestId,
-        content: String,
+        part: LlmStreamPart,
         provider: LlmProvider,
         is_final: bool,
     ) -> Self {
         Self {
             id: LlmResponseId::new(),
             request_id,
-            content,
+            part,
             provider,
             timestamp: Utc::now(),
             is_final,
             finish_reason: None,
-            prompt_tokens: None,
-            completion_tokens: None,
-            total_tokens: None,
         }
     }
 
     pub fn with_finish_reason(mut self, reason: String) -> Self {
         self.finish_reason = Some(reason);
-        self
-    }
-
-    pub fn with_token_counts(mut self, prompt: u32, completion: u32, total: u32) -> Self {
-        self.prompt_tokens = Some(prompt);
-        self.completion_tokens = Some(completion);
-        self.total_tokens = Some(total);
         self
     }
 
@@ -196,8 +200,15 @@ impl LlmStreamChunk {
         &self.request_id
     }
 
+    pub fn part(&self) -> &LlmStreamPart {
+        &self.part
+    }
+
     pub fn content(&self) -> &str {
-        &self.content
+        match &self.part {
+            LlmStreamPart::Content(c) => c,
+            _ => "",
+        }
     }
 
     pub fn provider(&self) -> &LlmProvider {
@@ -218,18 +229,6 @@ impl LlmStreamChunk {
 
     pub fn finish_reason(&self) -> Option<&str> {
         self.finish_reason.as_deref()
-    }
-
-    pub fn prompt_tokens(&self) -> Option<u32> {
-        self.prompt_tokens
-    }
-
-    pub fn completion_tokens(&self) -> Option<u32> {
-        self.completion_tokens
-    }
-
-    pub fn total_tokens(&self) -> Option<u32> {
-        self.total_tokens
     }
 }
 
@@ -294,20 +293,16 @@ mod tests {
         let provider = create_test_provider();
         let chunk = LlmStreamChunk::new(
             request_id.clone(),
-            "chunk content".to_string(),
+            LlmStreamPart::Content("chunk content".to_string()),
             provider.clone(),
             true,
         )
-        .with_finish_reason("stop".to_string())
-        .with_token_counts(10, 20, 30);
+        .with_finish_reason("stop".to_string());
 
         assert_eq!(chunk.request_id(), &request_id);
         assert_eq!(chunk.content(), "chunk content");
         assert_eq!(chunk.provider().kind(), provider.kind());
         assert!(chunk.is_final());
         assert_eq!(chunk.finish_reason(), Some("stop"));
-        assert_eq!(chunk.prompt_tokens(), Some(10));
-        assert_eq!(chunk.completion_tokens(), Some(20));
-        assert_eq!(chunk.total_tokens(), Some(30));
     }
 }

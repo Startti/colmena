@@ -1,0 +1,46 @@
+{
+    "nodes": {
+        "trigger": {
+            "type": "trigger_webhook",
+            "config": {
+                "path": "/execute",
+                "test_payload": {
+                    "request": {
+                        "prompt": "What is the weather in Paris?"
+                    }
+                }
+            }
+        },
+        "llm": {
+            "type": "llm_call",
+            "config": {
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "api_key": "${OPENAI_API_KEY}",
+                "prompt": "${trigger.output.prompt}",
+                "stream": true,
+                "enabled_tools": [
+                    "mock_weather"
+                ],
+                "tool_configurations": {
+                    "mock_weather": {
+                        "name": "mock_weather",
+                        "description": "Get weather for a location",
+                        "node_type": "http_request",
+                        "fixed_config": {
+                            "base_url": "http://localhost:8085/weather",
+                            "endpoint": "",
+                            "method": "GET"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "edges": [
+        {
+            "from": "trigger.output.prompt",
+            "to": "llm.prompt"
+        }
+    ]
+}

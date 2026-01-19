@@ -1,7 +1,8 @@
 // --- IMPORTACIONES AÑADIDAS ---
-use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs}; // Importa nuestro trait y tipo
-use serde_json::{json, Value}; // Importa Value y la macro json!
-use std::error::Error as StdError; // Importa el trait de error estándar
+use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
+use serde_json::{json, Value};
+use std::error::Error as StdError;
+use std::sync::Arc;
                                    // ------------------------------
 
 // --- LogNode ---
@@ -14,7 +15,8 @@ impl ExecutableNode for LogNode {
         inputs: &NodeInputs,
         _config: &Value,
         _state: &mut Value,
-    ) -> Result<Value, Box<dyn StdError>> {
+        _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
         let input_val = inputs.get("input").cloned().unwrap_or(Value::Null);
         println!("[LogNode]: {}", serde_json::to_string_pretty(&input_val)?);
 
@@ -41,7 +43,8 @@ impl ExecutableNode for MockInputNode {
         _inputs: &NodeInputs,
         config: &Value,
         _state: &mut Value,
-    ) -> Result<Value, Box<dyn StdError>> {
+        _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
         // Devuelve su propia configuración como salida
         Ok(config.clone())
     }
