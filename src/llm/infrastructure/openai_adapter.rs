@@ -260,94 +260,100 @@ impl LlmRepository for OpenAiAdapter {
         let provider = request.config().provider().clone();
 
         let byte_stream = response.bytes_stream();
+        let mut sse_parser = SseParser::new(byte_stream);
+        let mut tool_ids_by_index = std::collections::HashMap::new();
 
-        let sse_stream = SseParser::new(byte_stream).try_filter_map(move |event| {
-            let request_id = request_id.clone();
-            let provider = provider.clone();
-            let fut = async move {
+        let sse_stream = async_stream::try_stream! {
+            while let Some(event_result) = sse_parser.next().await {
+                let event = event_result?;
                 match event {
                     SseEvent::Message(data) => {
                         if data == "[DONE]" {
-                            return Ok(None);
+                            continue;
                         }
                         match serde_json::from_str::<OpenAiStreamChunk>(&data) {
                             Ok(chunk_response) => {
-                                // 1. Check for Usage (usually in last chunk with empty choices)
+                                // 1. Check for Usage
                                 if let Some(usage) = chunk_response.usage {
-                                    return Ok(Some(LlmStreamChunk::new(
-                                        request_id,
+                                    yield LlmStreamChunk::new(
+                                        request_id.clone(),
                                         LlmStreamPart::Usage(LlmUsage::new(
                                             usage.prompt_tokens,
                                             usage.completion_tokens,
                                         )),
-                                        provider,
+                                        provider.clone(),
                                         false, 
-                                    )));
+                                    );
+                                    continue;
                                 }
 
-                                // 2. Check for content/tool_calls in choices
+                                // 2. Check for content/tool_calls
                                 if let Some(choice) = chunk_response.choices.first() {
                                     let is_final = choice.finish_reason.is_some();
                                     let finish_reason = choice.finish_reason.clone();
 
-                                    let chunk = if let Some(content) = &choice.delta.content {
-                                        Some(LlmStreamChunk::new(
+                                    if let Some(content) = &choice.delta.content {
+                                        let mut chunk = LlmStreamChunk::new(
                                             request_id.clone(),
                                             LlmStreamPart::Content(content.clone()),
                                             provider.clone(),
                                             is_final,
-                                        ))
+                                        );
+                                        if let Some(reason) = finish_reason {
+                                            chunk = chunk.with_finish_reason(reason);
+                                        }
+                                        yield chunk;
                                     } else if let Some(tool_calls) = &choice.delta.tool_calls {
-                                        // Take the first one for now (streaming multiple in parallel is complex)
                                         if let Some(tc) = tool_calls.first() {
-                                            Some(LlmStreamChunk::new(
+                                            // Register ID if provided
+                                            if let Some(id) = &tc.id {
+                                                tool_ids_by_index.insert(tc.index, id.clone());
+                                            }
+
+                                            // Retrieve ID from tracking
+                                            let final_id = tc.id.clone()
+                                                .or_else(|| tool_ids_by_index.get(&tc.index).cloned())
+                                                .unwrap_or_default();
+
+                                            let mut chunk = LlmStreamChunk::new(
                                                 request_id.clone(),
                                                 LlmStreamPart::ToolCallChunk(ToolCallChunk {
                                                     index: tc.index,
-                                                    id: tc.id.clone().unwrap_or_default(),
+                                                    id: final_id,
                                                     name: tc.function.name.clone().unwrap_or_default(),
                                                     args_chunk: tc.function.arguments.clone().unwrap_or_default(),
                                                 }),
                                                 provider.clone(),
                                                 is_final,
-                                            ))
-                                        } else {
-                                            None
+                                            );
+                                            if let Some(reason) = finish_reason {
+                                                chunk = chunk.with_finish_reason(reason);
+                                            }
+                                            yield chunk;
                                         }
                                     } else if is_final {
-                                        // Final chunk (can include finish reason)
-                                        Some(LlmStreamChunk::new(
+                                        let mut chunk = LlmStreamChunk::new(
                                             request_id.clone(),
-                                            LlmStreamPart::Content(String::new()), // Empty content
+                                            LlmStreamPart::Content(String::new()),
                                             provider.clone(),
                                             true,
-                                        ))
-                                    } else {
-                                        None
-                                    };
-
-                                    if let Some(mut c) = chunk {
+                                        );
                                         if let Some(reason) = finish_reason {
-                                            c = c.with_finish_reason(reason);
+                                            chunk = chunk.with_finish_reason(reason);
                                         }
-                                        Ok(Some(c))
-                                    } else {
-                                        Ok(None)
+                                        yield chunk;
                                     }
-                                } else {
-                                    Ok(None)
                                 }
                             }
                             Err(e) => Err(LlmError::parsing_error(format!(
                                 "Failed to parse stream chunk: {}",
                                 e
-                            ))),
+                            )))?,
                         }
                     }
                 }
-            };
-            fut
-        });
+            }
+        };
 
         Ok(Box::pin(sse_stream))
     }
