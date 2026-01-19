@@ -1,6 +1,5 @@
 use crate::llm::domain::{
-    LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk, LlmStreamPart,
-    LlmUsage,
+    LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamPart,
 };
 use async_trait::async_trait;
 
