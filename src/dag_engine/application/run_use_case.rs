@@ -78,8 +78,9 @@ impl DagRunUseCase {
     pub fn execute_stream(
         self,
         graph: Graph,
-    ) -> impl futures::Stream<Item = Result<crate::dag_engine::domain::events::DagExecutionEvent, DagError>> 
-    {
+    ) -> impl futures::Stream<
+        Item = Result<crate::dag_engine::domain::events::DagExecutionEvent, DagError>,
+    > {
         async_stream::try_stream! {
             use crate::dag_engine::domain::events::DagExecutionEvent;
             use crate::dag_engine::domain::observer::NodeEvent;
@@ -171,7 +172,7 @@ impl DagRunUseCase {
                         }
                     }
                 };
-                
+
                 let output = output_result.map_err(|e| DagError::NodeExecution(e.to_string()))?;
 
                 // Yield Finish Event

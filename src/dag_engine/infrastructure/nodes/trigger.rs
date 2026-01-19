@@ -16,7 +16,8 @@ impl ExecutableNode for TriggerWebhookNode {
         config: &Value,
         _state: &mut Value,
         _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>, // Added observer parameter
-    ) -> Result<Value, Box<dyn StdError + Send + Sync>> { // Changed `StdError` to `Error`
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+        // Changed `StdError` to `Error`
         // For a trigger, the "inputs" ARE the payload from the outside world.
         // We wrap them in "output" to match our convention.
 
