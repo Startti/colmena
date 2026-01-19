@@ -45,10 +45,7 @@ impl AgentService {
     ///
     /// # Returns
     /// Final response from the LLM after tool execution
-    pub async fn run<'a>(
-        &self,
-        params: AgentRunParams<'a>,
-    ) -> Result<LlmResponse, LlmError> {
+    pub async fn run<'a>(&self, params: AgentRunParams<'a>) -> Result<LlmResponse, LlmError> {
         let max_iter = params.max_iterations.unwrap_or(10);
         let thread_id = params.thread_id;
         let prompt = params.prompt;
