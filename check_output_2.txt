@@ -1,0 +1,85 @@
+    Checking colmena v0.1.0 (/home/daniel-garcia4/startti/colmena)
+warning: unused import: `ToolDefinition`
+ --> src/dag_engine/infrastructure/nodes/llm.rs:4:65
+  |
+4 |     LlmConfig, LlmMessage, LlmProvider, ProviderKind, ThreadId, ToolDefinition, ToolExecutor,
+  |                                                                 ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error: future cannot be sent between threads safely
+   --> src/dag_engine/api.rs:181:18
+    |
+181 |         Sse::new(stream)
+    |                  ^^^^^^ future created by async block is not `Send`
+    |
+    = help: the trait `std::marker::Send` is not implemented for `dyn StdError`
+note: future is not `Send` as this value is used across an await
+   --> src/dag_engine/application/run_use_case.rs:83:9
+    |
+ 83 | /          async_stream::try_stream! {
+ 84 | |              use crate::dag_engine::domain::events::DagExecutionEvent;
+ 85 | |              use crate::dag_engine::domain::observer::NodeEvent;
+...   |
+127 | |/                     tokio::select! {
+128 | ||                         res = &mut execution_future => {
+129 | ||                             break res;
+...   ||
+141 | ||                     }
+    | ||_____________________- has type `Out<Result<JsonValue, Box<dyn StdError>>, std::option::Option<NodeEvent>>` which is not `Send`
+...   |
+166 | |              yield DagExecutionEvent::GraphFinish { output: final_output };
+167 | |          }
+    | |__________^ await occurs here, with `mut output` maybe used later
+note: required by a bound in `Sse::<S>::new`
+   --> /home/daniel-garcia4/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/axum-0.7.9/src/response/sse.rs:68:36
+    |
+ 66 |     pub fn new(stream: S) -> Self
+    |            --- required by a bound in this associated function
+ 67 |     where
+ 68 |         S: TryStream<Ok = Event> + Send + 'static,
+    |                                    ^^^^ required by this bound in `Sse::<S>::new`
+    = note: this error originates in the macro `async_stream::try_stream` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the method `into_response` exists for struct `Sse<Map<impl Stream<Item = Result<DagExecutionEvent, DagError>>, ...>>`, but its trait bounds were not satisfied
+   --> src/dag_engine/api.rs:183:14
+    |
+181 | /         Sse::new(stream)
+182 | |             .keep_alive(KeepAlive::default())
+183 | |             .into_response()
+    | |             -^^^^^^^^^^^^^ method cannot be called due to unsatisfied trait bounds
+    | |_____________|
+    |
+    |
+   ::: /home/daniel-garcia4/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/axum-0.7.9/src/response/sse.rs:56:1
+    |
+ 56 |   pub struct Sse<S> {
+    |   ----------------- doesn't satisfy `_: IntoResponse`
+    |
+   ::: /home/daniel-garcia4/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-util-0.3.31/src/stream/stream/map.rs:12:1
+    |
+ 12 | / pin_project! {
+ 13 | |     /// Stream for the [`map`](super::StreamExt::map) method.
+ 14 | |     #[must_use = "streams do nothing unless polled"]
+ 15 | |     pub struct Map<St, F> {
+...   |
+ 20 | | }
+    | |_- doesn't satisfy `_: Send`
+    |
+    = note: the following trait bounds were not satisfied:
+            `futures::stream::Map<impl Stream<Item = Result<DagExecutionEvent, DagError>>, {closure@src/dag_engine/api.rs:152:66: 152:74}>: std::marker::Send`
+            which is required by `Sse<futures::stream::Map<impl Stream<Item = Result<DagExecutionEvent, DagError>>, {closure@src/dag_engine/api.rs:152:66: 152:74}>>: IntoResponse`
+    = note: the full name for the type has been written to '/home/daniel-garcia4/startti/colmena/target/debug/deps/colmena-67754604c89f60cd.long-type-9673803740513948362.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+warning: unused variable: `node_id`
+   --> src/dag_engine/infrastructure/nodes/llm.rs:339:21
+    |
+339 |                 let node_id = "unknown".to_string(); // We don't have node_id here easily without passing it or capturing it. 
+    |                     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_node_id`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+For more information about this error, try `rustc --explain E0599`.
+warning: `colmena` (lib) generated 2 warnings
+error: could not compile `colmena` (lib) due to 2 previous errors; 2 warnings emitted

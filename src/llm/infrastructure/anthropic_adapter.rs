@@ -1,5 +1,6 @@
 use crate::llm::domain::{
-    LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk, LlmUsage,
+    LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk, LlmStreamPart,
+    LlmUsage,
     MessageRole,
 };
 use async_trait::async_trait;
@@ -200,7 +201,10 @@ impl LlmRepository for AnthropicAdapter {
                                     if let Some(delta) = event.delta {
                                         if let Some(text) = delta.text {
                                             return Ok(Some(LlmStreamChunk::new(
-                                                request_id, text, provider, false,
+                                                request_id,
+                                                LlmStreamPart::Content(text),
+                                                provider,
+                                                false,
                                             )));
                                         }
                                     }
@@ -208,7 +212,7 @@ impl LlmRepository for AnthropicAdapter {
                                 "message_stop" => {
                                     return Ok(Some(LlmStreamChunk::new(
                                         request_id,
-                                        String::new(),
+                                        LlmStreamPart::Content(String::new()),
                                         provider,
                                         true,
                                     )));

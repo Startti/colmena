@@ -288,14 +288,14 @@ fn run_dag(py: Python, file_path: String) -> PyResult<String> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (file_path, port=3000))]
-fn serve_dag(py: Python, file_path: String, port: u16) -> PyResult<()> {
+#[pyo3(signature = (file_path, host="0.0.0.0".to_string(), port=8080))]
+fn serve_dag(py: Python, file_path: String, host: String, port: u16) -> PyResult<()> {
     py.allow_threads(move || {
         let rt =
             tokio::runtime::Runtime::new().map_err(|e| DagException::new_err(e.to_string()))?;
 
         rt.block_on(async {
-            crate::dag_engine::api::serve_dag(file_path, port)
+            crate::dag_engine::api::serve_dag(file_path, host, port)
                 .await
                 .map_err(|e| DagException::new_err(e.to_string()))
         })

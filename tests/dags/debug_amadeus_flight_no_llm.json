@@ -1,0 +1,90 @@
+{
+    "nodes": {
+        "trigger": {
+            "type": "trigger_webhook",
+            "config": {
+                "path": "/debug-flight-direct",
+                "method": "POST",
+                "test_payload": {}
+            }
+        },
+        "get_amadeus_token": {
+            "type": "http_request",
+            "config": {
+                "base_url": "https://api.amadeus.com/v1/security/oauth2/token",
+                "method": "POST",
+                "headers": {
+                    "Content-Type": "application/x-www-form-urlencoded"
+                },
+                "body": "grant_type=client_credentials&client_id=${AMADEUS_CLIENT_ID}&client_secret=${AMADEUS_CLIENT_SECRET}"
+            }
+        },
+        "search_flights": {
+            "type": "http_request",
+            "config": {
+                "base_url": "https://api.amadeus.com",
+                "endpoint": "/v2/shopping/flight-offers",
+                "method": "POST",
+                "headers": {
+                    "Content-Type": "application/json"
+                },
+                "body": {
+                    "currencyCode": "USD",
+                    "originDestinations": [
+                        {
+                            "id": "1",
+                            "originLocationCode": "LON",
+                            "destinationLocationCode": "PAR",
+                            "departureDateTimeRange": {
+                                "date": "2025-12-25"
+                            }
+                        }
+                    ],
+                    "travelers": [
+                        {
+                            "id": "1",
+                            "travelerType": "ADULT",
+                            "fareOptions": [
+                                "STANDARD"
+                            ]
+                        }
+                    ],
+                    "sources": [
+                        "GDS"
+                    ],
+                    "searchCriteria": {
+                        "maxFlightOffers": 10,
+                        "flightFilters": {
+                            "cabinRestrictions": [
+                                {
+                                    "cabin": "ECONOMY",
+                                    "coverage": "MOST_SEGMENTS",
+                                    "originDestinationIds": [
+                                        "1"
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "log_result": {
+            "type": "log"
+        }
+    },
+    "edges": [
+        {
+            "from": "trigger.output",
+            "to": "get_amadeus_token.trigger"
+        },
+        {
+            "from": "get_amadeus_token.output.body.access_token",
+            "to": "search_flights.bearer_token"
+        },
+        {
+            "from": "search_flights.output",
+            "to": "log_result.input"
+        }
+    ]
+}

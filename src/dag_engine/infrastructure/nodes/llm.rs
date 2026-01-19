@@ -1,7 +1,8 @@
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
 use crate::llm::domain::{
-    LlmConfig, LlmMessage, LlmProvider, ProviderKind, ThreadId, ToolExecutor,
+    LlmConfig, LlmMessage, LlmProvider, LlmStreamPart, ProviderKind, ThreadId, ToolDefinition,
+    ToolExecutor,
 };
 use crate::llm::infrastructure::{ConversationRepositoryFactory, LlmProviderFactory};
 use async_trait::async_trait;
@@ -40,6 +41,42 @@ impl LlmNode {
             Ok(value.to_string())
         }
     }
+
+    fn resolve_context_vars(value: &str, inputs: &NodeInputs) -> String {
+        let mut result = String::new();
+        let mut last_end = 0;
+
+        while let Some(start) = value[last_end..].find("${context.") {
+            let absolute_start = last_end + start;
+            result.push_str(&value[last_end..absolute_start]);
+
+            if let Some(end) = value[absolute_start..].find('}') {
+                let absolute_end = absolute_start + end;
+                let var_path = &value[absolute_start + 2..absolute_end]; // e.g. "context.amadeus_token"
+                
+                // Look up in inputs
+                // inputs keys are flattened, e.g. "context.amadeus_token"
+                let val = if let Some(v) = inputs.get(var_path) {
+                    match v {
+                        Value::String(s) => s.clone(),
+                        _ => v.to_string(),
+                    }
+                } else {
+                    // Keep original if not found
+                    value[absolute_start..=absolute_end].to_string()
+                };
+                
+                result.push_str(&val);
+                last_end = absolute_end + 1;
+            } else {
+                result.push_str(&value[absolute_start..]);
+                last_end = value.len();
+                break;
+            }
+        }
+        result.push_str(&value[last_end..]);
+        result
+    }
 }
 
 #[async_trait]
@@ -49,7 +86,8 @@ impl ExecutableNode for LlmNode {
         inputs: &NodeInputs,
         config: &Value,
         _state: &mut Value,
-    ) -> Result<Value, Box<dyn Error>> {
+        _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         // --- 1. Resolve Configuration (Inputs > Config) ---
 
         // Provider
@@ -178,11 +216,20 @@ impl ExecutableNode for LlmNode {
             .ok_or("NodeRegistry has been dropped")?;
 
         // Parse tool_configurations
-        let tool_configurations: HashMap<String, ToolConfiguration> = inputs
+        let mut tool_configurations: HashMap<String, ToolConfiguration> = inputs
             .get("tool_configurations")
             .or_else(|| config.get("tool_configurations"))
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
+
+        // Resolve context variables in fixed_config
+        for config in tool_configurations.values_mut() {
+            for val in config.fixed_config.values_mut() {
+                if let Value::String(s) = val {
+                    *val = Value::String(Self::resolve_context_vars(s, inputs));
+                }
+            }
+        }
 
         let tool_executor = DagToolExecutor::new(registry, tool_configurations);
 
@@ -280,6 +327,49 @@ impl ExecutableNode for LlmNode {
             .map(|s| s.to_string())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+        // Check if streaming is enabled
+        let stream_enabled = inputs
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .or_else(|| config.get("stream").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+
+        // Define on_token callback if streaming is enabled and observer is present
+        // Define on_token callback if streaming is enabled and observer is present
+        let on_token: Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>> = if stream_enabled {
+            if let Some(obs) = _observer.clone() {
+                Some(Box::new(move |part: LlmStreamPart| {
+                    use crate::dag_engine::domain::observer::NodeEvent;
+                    match part {
+                        LlmStreamPart::Content(token) => obs.on_event(NodeEvent::LlmToken { token }),
+                        LlmStreamPart::ToolCallChunk(chunk) => obs.on_event(NodeEvent::LlmToolCall {
+                            tool_id: chunk.id,
+                            tool_name: chunk.name,
+                            args_chunk: chunk.args_chunk,
+                        }),
+                        LlmStreamPart::Usage(usage) => obs.on_event(NodeEvent::LlmUsage {
+                            prompt_tokens: usage.prompt_tokens,
+                            completion_tokens: usage.completion_tokens,
+                        }),
+                        LlmStreamPart::ToolCallStart(tc) => obs.on_event(NodeEvent::LlmToolCallStart {
+                            tool_id: tc.id.clone(),
+                            tool_name: tc.function.name.clone(),
+                            tool_args: tc.function.arguments.clone(),
+                        }),
+                        LlmStreamPart::ToolCallFinish(res) => obs.on_event(NodeEvent::LlmToolCallFinish {
+                            tool_id: res.tool_call_id.clone(),
+                            success: res.success,
+                            output: res.output.clone(),
+                        }),
+                    }
+                }))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let response = agent_service
             .run(
                 &ThreadId(tid),
@@ -288,6 +378,7 @@ impl ExecutableNode for LlmNode {
                 tools,
                 &tool_executor,
                 Some(10), // Max iterations
+                on_token,
             )
             .await?;
 

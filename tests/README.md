@@ -1,132 +1,116 @@
-# Colmena Tests & Examples
+# Colmena Tests
 
-This directory contains integration tests, example DAGs, and standalone Rust examples for the Colmena framework.
+Este directorio contiene la suite de pruebas de integración, ejemplos de DAGs y scripts de verificación para Colmena.
 
-## JSON DAG Examples
+## Estructura de Directorios
 
-These JSON files define Directed Acyclic Graphs (DAGs) that can be executed using the `dag_engine` binary. They demonstrate various features of Colmena, including tool calling, memory persistence, and different node types.
+- **`rust/`**: Tests de integración escritos en Rust.
+- **`python/`**: Scripts de verificación y ejemplos de cliente en Python.
+- **`dags/`**: Definiciones de grafos (DAGs) en formato JSON.
 
-### How to Run
+---
 
-Use the `dag_engine` binary to run these examples:
+## 🏗️ DAGs de Ejemplo (`tests/dags/`)
 
-```bash
-cargo run --bin dag_engine run tests/<example_file>.json
-```
+A continuación se listan todos los DAGs disponibles para probar diferentes funcionalidades del motor.
 
-### Available Examples
-
-#### 🐍 Python Node Examples
-
-- **`python_simple_graph.json`**: Demonstrates basic Python code execution with variables injected from inputs. Calculates `x * y + 2` where x=10 and y=5, producing output `52`.
-- **`python_llm_graph.json`**: Advanced example showing LLM-to-Python integration. An LLM (GPT-4) generates Python code to calculate factorial(5), which is then executed by the Python Node, producing output `120`.
-
-#### 🤖 Agent & Tool Examples
-
-- **`agent_with_tools.json`**: A basic example of an agent with tools enabled.
-- **`agent_with_tools_postgres.json`**: An agent using PostgreSQL for conversation memory.
-- **`agent_with_tools_postgres_recall.json`**: Demonstrates an agent recalling information from PostgreSQL memory.
-- **`http_tool_configured.json`**: Demonstrates how to configure HTTP nodes as tools for an LLM agent. The LLM can "call" these tools (e.g., `fetch_users`, `create_user`) to interact with an external API.
-
-#### 💾 Memory Examples
-
-- **`memory_postgres_example.json`**: Example focusing on PostgreSQL memory persistence.
-- **`memory_sqlite_example.json`**: Example focusing on SQLite memory persistence.
-
-#### 🌐 HTTP & Trigger Examples
-
-- **`dynamic_http.json`**: Demonstrates dynamic HTTP requests.
-- **`trigger.json`**: Shows how to use the TriggerWebhookNode.
-
-## 🐍 Python Node
-
-The **Python Node** (`python_script`) allows you to execute arbitrary Python code within a DAG workflow. It seamlessly integrates with JSON inputs/outputs and works especially well with LLM-generated code.
-
-### Features
-
-- **JSON Integration**: Automatically converts inputs to Python variables and outputs back to JSON
-- **LLM Compatible**: Strips markdown code blocks from LLM-generated code
-- **Function Support**: Define and use functions within the same script
-- **Standard Library**: Access to Python's standard library (import allowed)
-- **Safe Execution**: Runs in isolated thread with GIL management
-
-### Usage
-
-**Config Schema:**
-```json
-{
-  "type": "python_script",
-  "config": {
-    "code": "output = some_expression"  // Optional: fallback code
-  }
-}
-```
-
-**Inputs:**
-- `code` (string, optional): Python code to execute (overrides config.code)
-- Any other inputs are injected as variables into the Python script
-
-**Outputs:**
-- `output`: The value assigned to the `output` variable in the script
-
-### Examples
-
-#### Basic Math Operation
-```json
-{
-  "type": "python_script", 
-  "config": {
-    "code": "output = x * y + 2"
-  }
-}
-```
-With inputs `x=10, y=5` → Output: `52`
-
-#### With Functions
-```json
-{
-  "type": "python_script",
-  "config": {
-    "code": "def factorial(n):\\n    return 1 if n <= 1 else n * factorial(n-1)\\noutput = factorial(5)"
-  }
-}
-```
-Output: `120`
-
-#### LLM-Generated Code
-The Python Node automatically strips markdown from LLM responses:
-```
-Input (from LLM): "```python\noutput = 42\n```"
-Extracted: "output = 42"
-```
-
-### Best Practices
-
-1. **Always assign to `output`**: This is the convention for returning values
-2. **Use inputs for dynamic data**: Let the DAG pass data to your script
-3. **Keep code simple**: Complex logic might be better as a separate node type
-4. **Test with static config first**: Then try dynamic LLM generation
-
-## Rust Integration Tests & Examples
-
-These Rust files contain standalone examples and integration tests.
-
-- **`agent_with_tools.rs`**: A standalone Rust program demonstrating how to programmatically set up an agent with tools.
-- **`gemini_tool_test.rs`**: Integration test for Gemini provider tool calling.
-- **`openai_tool_test.rs`**: Integration test for OpenAI provider tool calling.
-
-### How to Run Rust Examples
-
-To run the standalone Rust examples (if they are configured as binaries or examples in `Cargo.toml`), you would typically use:
+### Cómo ejecutar un DAG
+Para todos los DAGs listados con "Webhook Path", se pueden ejecutar con:
 
 ```bash
-cargo run --example agent_with_tools
+# 1. Iniciar el servidor
+cargo run --bin dag_engine -- serve tests/dags/<archivo>.json
+
+# 2. Enviar el payload (usando curl o Postman)
+curl -X POST -H "Content-Type: application/json" -d '<payload>' http://localhost:3000<path>
 ```
 
-*Note: You may need to move these back to `examples/` or configure `Cargo.toml` to point to them if you want to run them as cargo examples. Currently, they are located here for consolidation.*
+### 📡 Activación de Streaming
+Para activar el streaming (SSE) en **cualquier DAG**, simplemente agrega los siguientes headers a tu petición:
 
-To run tests:
+- `Accept: text/event-stream`
+- `x-vercel-ai-ui-message-stream: v1`
 
+Ejemplo genérico con curl:
+
+```bash
+curl -N -X POST \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -H "x-vercel-ai-ui-message-stream: v1" \
+  -d '<payload>' \
+  http://localhost:3000<path>
+```
+
+### Tabla de Referencia
+
+| Archivo | Descripción | Path (WebHook) | Payload de Prueba |
+|---|---|---|---|
+| **Agentes ReAct (OpenAI)** | | | |
+| `agent_with_tools.json` | Asistente matemático (Sin Streaming). | `/agent-demo` | `{"question": "Calculate 25 + 17, then multiply the result by 2"}` |
+| `agent_with_tools_stream.json` | Asistente matemático (**Con Streaming Enabled**). | `/agent-demo-stream` | `{"question": "Calculate 25 + 17, then multiply the result by 2"}` |
+| `agent_with_tools_postgres.json` | Agente con memoria persistente (PostgreSQL). | `/agent-memory-demo` | `{"question": "What is 50 + 25? Then multiply by 3."}` |
+| `agent_with_tools_postgres_recall.json` | Prueba de recuperación de memoria (Contexto previo). | `/agent-memory-demo-2` | `{"question": "What was the result of my previous calculation?"}` |
+| `http_tool_configured.json` | Agente interactuando con API REST externa (JSONPlaceholder). | `/agent` | `{"request": "Get all active users"}` |
+| | | | |
+| **Agente de Viajes (Amadeus Integration)** | | | |
+| `travel_agent_amadeus.json` | Agente completo. Autenticación + Búsqueda de Vuelos/Hoteles. | `/travel-agent` | `{"question": "I want to go from bogota to miami..."}` |
+| `debug_amadeus_auth_flight.json` | Versión simplificada para debug de auth + búsqueda. | `/debug-travel` | `{"question": "Search for flights to Paris"}` |
+| `debug_amadeus_flight_no_llm.json` | Llamada directa a APIs de Amadeus (sin LLM) para probar conectividad. | `/debug-flight-direct` | `{}` |
+| `debug_amadeus_token_only.json` | Solo prueba de obtención de token OAuth2. | `/debug-token` | `{}` |
+| | | | |
+| **LLM & Streaming** | | | |
+| `llm_stream_tool.json` | **Principal (Verificación)**. Streaming de LLM + Herramienta (Mock Weather). | `/execute` | `{"prompt": "What is the weather in Paris?"}` |
+| `llm_call.json` | Llamada simple a LLM con Streaming activado. | `/test-llm` | `{"message": "Say hello in Spanish!"}` |
+| `llm_local_test.json` | Llamada simple a LLM (sin streaming). | `/test-llm` | `{"message": "Say hello in Spanish!"}` |
+| | | | |
+| **Integración HTTP & Webhooks** | | | |
+| `trigger.json` | Webhook simple (Echo). | `/hello` | `{"request": {"message": "Hello!"}}` |
+| `dynamic_http.json` | Webhook que define dinámicamente el endpoint a llamar. | `/dynamic-test` | `{"endpoint": "/random_joke"}` |
+| `http_request.json` | Llamada HTTP estática simple. | `/test-http` | `{}` |
+| `power_webhook.json` | Webhook + Cálculo Exponencial. | `/power` | `{"base_num": 5}` |
+| | | | |
+| **Pruebas Internas / Sin Webhook** | *Estos DAGs usan `mock_input` o no tienen trigger directo.* | N/A | N/A |
+| `power.json` | Cálculo exponencial simple. | N/A | N/A |
+| `memory_postgres_example.json` | Test secuencial de memoria Postgres (sin trigger). | N/A | N/A |
+| `memory_sqlite_example.json` | Test secuencial de memoria SQLite (sin trigger). | N/A | N/A |
+| `python_llm_graph.json` | Generación y ejecución de código Python. | N/A | N/A |
+| `python_simple_graph.json` | Ejecución simple de script Python. | N/A | N/A |
+| `llm_stream_dag.json` | Test interno de streaming con proveedor Mock. | `/dag/execute` | N/A |
+
+---
+
+## 🦀 Tests de Rust (`tests/rust/`)
+
+Estos tests verifican la lógica interna del motor y los adaptadores.
+
+**Ejecución:**
 ```bash
 cargo test
+# O para correr uno específico:
+cargo test --test agent_with_tools
 ```
+
+| Archivo | Descripción |
+|---|---|
+| `agent_with_tools.rs` | Verifica un ciclo completo ReAct con herramientas mockeadas. |
+| `openai_tool_test.rs` | Verifica específicamente el adaptador de OpenAI y la serialización de tools. |
+| `gemini_tool_test.rs` | Verifica el adaptador de Google Gemini. |
+
+---
+
+## 🐍 Scripts de Python (`tests/python/`)
+
+Utilidades para verificar el comportamiento del servidor externamente.
+
+**Ejecución:**
+```bash
+.venv/bin/python tests/python/<script>.py
+```
+
+| Archivo | Descripción |
+|---|---|
+| `verify_tool_stream.py` | Verifica el protocolo de streaming SSE (Tool Calls + Usage + Text). Úsese con `llm_stream_tool.json`. |
+| `verify_sse.py` | Cliente genérico de SSE para probar cualquier endpoint que sopporte streaming. |
+| `run_server_python.py` | Ejemplo de cómo iniciar el servidor Colmena desde código Python (bindings). |
+| `test_server_binding.py` | Test automatizado para verificar que los bindings de Python respetan host/puerto. |
