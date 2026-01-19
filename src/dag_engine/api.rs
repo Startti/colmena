@@ -1,11 +1,11 @@
 use axum::{
     extract::{Json, State},
-    routing::post,
     response::IntoResponse,
+    routing::post,
     Router,
 };
-use std::collections::HashMap;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 // Import from crate since this is part of the colmena library
@@ -71,11 +71,7 @@ pub async fn serve_dag(
                     use_case: run_use_case.clone(),
                 };
 
-                app = app.route(
-                    path,
-                    post(handler_webhook)
-                    .with_state(state),
-                );
+                app = app.route(path, post(handler_webhook).with_state(state));
                 routes_count += 1;
             }
         }
@@ -112,7 +108,7 @@ async fn handler_webhook(
     Json(payload): Json<Value>,
 ) -> axum::response::Response {
     println!("🔔 Webhook received.");
-    
+
     // Debug: Print headers to see what Postman sends
     for (key, value) in &headers {
         println!("   Header: {:?}: {:?}", key, value);
@@ -145,13 +141,13 @@ async fn handler_webhook(
     }
 
     if is_sse {
+        use crate::dag_engine::domain::events::DagExecutionEvent;
         use axum::response::sse::{Event, KeepAlive, Sse};
         use futures::StreamExt;
-        use crate::dag_engine::domain::events::DagExecutionEvent;
 
         let use_case = (*state.use_case).clone();
         let internal_stream = use_case.execute_stream(graph_instance);
-        
+
         // Wrap the internal stream to manage protocol state (text-start, text-end, [DONE])
         let protocol_stream = async_stream::stream! {
             // 1. Send the global START part
@@ -163,7 +159,7 @@ async fn handler_webhook(
             let mut text_block_uuids = std::collections::HashMap::new();
             let mut total_prompt_tokens = 0;
             let mut total_completion_tokens = 0;
-            
+
             tokio::pin!(internal_stream);
 
             while let Some(result) = internal_stream.next().await {
@@ -267,7 +263,7 @@ async fn handler_webhook(
                     "id": part_id
                 })).expect("json_data"));
             }
-            
+
             // 4. Send the literal [DONE] marker
             yield Ok(Event::default().data("[DONE]"));
         };
@@ -275,13 +271,13 @@ async fn handler_webhook(
         let mut response = Sse::new(protocol_stream)
             .keep_alive(KeepAlive::default())
             .into_response();
-            
+
         // Essential header for the AI SDK to recognize the Data Stream
         response.headers_mut().insert(
             "x-vercel-ai-ui-message-stream",
-            axum::http::HeaderValue::from_static("v1")
+            axum::http::HeaderValue::from_static("v1"),
         );
-        
+
         response
     } else {
         // Normal JSON execution

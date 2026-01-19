@@ -3,7 +3,7 @@ use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use serde_json::{json, Value};
 use std::error::Error as StdError;
 use std::sync::Arc;
-                                   // ------------------------------
+// ------------------------------
 
 // --- LogNode ---
 /// Un nodo simple que imprime sus entradas a la consola y las pasa.

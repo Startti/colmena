@@ -80,7 +80,7 @@ impl OpenAiAdapter {
             "messages": self.build_messages(request),
             "stream": request.stream()
         });
-        
+
         if request.stream() {
             body["stream_options"] = json!({ "include_usage": true });
         }
@@ -282,7 +282,7 @@ impl LlmRepository for OpenAiAdapter {
                                             usage.completion_tokens,
                                         )),
                                         provider.clone(),
-                                        false, 
+                                        false,
                                     );
                                     continue;
                                 }

@@ -75,65 +75,70 @@ impl AgentService {
             // We use stream() ONLY if on_token is present AND this is likely a generation step
             // But we don't know if it's a tool call step or generation step until we get the response.
             // So we must use stream() if on_token is provided, and handle re-construction.
-            
+
             let response = if let Some(callback) = &on_token {
                 let stream = self.llm_repository.stream(request).await?;
                 use futures::StreamExt;
                 // Pin stream
                 let mut stream = stream;
-                
+
                 let mut full_content = String::new();
-                let mut captured_provider = config.provider().clone(); 
-                let mut captured_req_id = crate::llm::domain::LlmRequestId::new(); 
-                let mut accumulated_tool_calls: std::collections::HashMap<usize, ToolCall> = std::collections::HashMap::new();
+                let mut captured_provider = config.provider().clone();
+                let mut captured_req_id = crate::llm::domain::LlmRequestId::new();
+                let mut accumulated_tool_calls: std::collections::HashMap<usize, ToolCall> =
+                    std::collections::HashMap::new();
                 let mut completion_usage = None;
 
                 while let Some(chunk_result) = stream.next().await {
-                   match chunk_result {
-                       Ok(chunk) => {
-                           captured_req_id = chunk.request_id().clone();
-                           captured_provider = chunk.provider().clone();
-                           
-                           // Forward the part to the callback
-                           (callback)(chunk.part().clone());
+                    match chunk_result {
+                        Ok(chunk) => {
+                            captured_req_id = chunk.request_id().clone();
+                            captured_provider = chunk.provider().clone();
 
-                           // Accumulate state for returning LlmResponse
-                           match chunk.part() {
-                               LlmStreamPart::Content(c) => {
-                                   full_content.push_str(c);
-                               }
-                               LlmStreamPart::ToolCallChunk(tc) => {
-                                    let entry = accumulated_tool_calls.entry(tc.index).or_insert_with(|| {
-                                        ToolCall::new(
-                                            tc.id.clone(),
-                                            crate::llm::domain::FunctionCall::new(
-                                                tc.name.clone(), 
-                                                String::new()
+                            // Forward the part to the callback
+                            (callback)(chunk.part().clone());
+
+                            // Accumulate state for returning LlmResponse
+                            match chunk.part() {
+                                LlmStreamPart::Content(c) => {
+                                    full_content.push_str(c);
+                                }
+                                LlmStreamPart::ToolCallChunk(tc) => {
+                                    let entry = accumulated_tool_calls
+                                        .entry(tc.index)
+                                        .or_insert_with(|| {
+                                            ToolCall::new(
+                                                tc.id.clone(),
+                                                crate::llm::domain::FunctionCall::new(
+                                                    tc.name.clone(),
+                                                    String::new(),
+                                                ),
                                             )
-                                        )
-                                    });
+                                        });
                                     // If ID arrives in first chunk (it should), but just in case logic updates
                                     if !tc.id.is_empty() && entry.id.is_empty() {
                                         entry.id = tc.id.clone();
                                     }
-                                   // If name arrives in chunks, append it (usually name is in first chunk but ensuring)
-                                   if !tc.name.is_empty() && entry.function.name.is_empty() {
+                                    // If name arrives in chunks, append it (usually name is in first chunk but ensuring)
+                                    if !tc.name.is_empty() && entry.function.name.is_empty() {
                                         entry.function.name = tc.name.clone();
-                                   }
-                                   entry.function.arguments.push_str(&tc.args_chunk);
-                               }
-                               LlmStreamPart::Usage(u) => {
-                                   completion_usage = Some(u.clone());
-                               }
-                               LlmStreamPart::ToolCallStart(_) | LlmStreamPart::ToolCallFinish(_) => {}
-                           }
-                       }
-                       Err(e) => return Err(e),
-                   }
+                                    }
+                                    entry.function.arguments.push_str(&tc.args_chunk);
+                                }
+                                LlmStreamPart::Usage(u) => {
+                                    completion_usage = Some(u.clone());
+                                }
+                                LlmStreamPart::ToolCallStart(_)
+                                | LlmStreamPart::ToolCallFinish(_) => {}
+                            }
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
-                
-                let mut final_response = LlmResponse::new(captured_req_id, full_content, captured_provider)?;
-                
+
+                let mut final_response =
+                    LlmResponse::new(captured_req_id, full_content, captured_provider)?;
+
                 if !accumulated_tool_calls.is_empty() {
                     let tools: Vec<ToolCall> = accumulated_tool_calls.into_values().collect();
                     final_response = final_response.with_tool_calls(tools);
@@ -168,14 +173,12 @@ impl AgentService {
 
                     let result = match tool_executor.execute(tool_call).await {
                         Ok(res) => res,
-                        Err(e) => {
-                             ToolResult {
-                                tool_call_id: tool_call.id.clone(),
-                                success: false,
-                                output: format!("Error executing tool: {}", e),
-                                error: Some(e.to_string()),
-                            }
-                        }
+                        Err(e) => ToolResult {
+                            tool_call_id: tool_call.id.clone(),
+                            success: false,
+                            output: format!("Error executing tool: {}", e),
+                            error: Some(e.to_string()),
+                        },
                     };
 
                     // Notify result of execution
@@ -196,7 +199,7 @@ impl AgentService {
                 return Ok(response);
             }
         }
-        
+
         Err(LlmError::MaxIterationsReached { max: max_iter })
     }
 }
