@@ -147,93 +147,142 @@ async fn handler_webhook(
     if is_sse {
         use axum::response::sse::{Event, KeepAlive, Sse};
         use futures::StreamExt;
+        use crate::dag_engine::domain::events::DagExecutionEvent;
 
         let use_case = (*state.use_case).clone();
-        let stream = use_case.execute_stream(graph_instance).map(|result| {
-            match result {
-                Ok(event) => {
-                    use crate::dag_engine::domain::events::DagExecutionEvent;
-                    
-                    // Map DagExecutionEvent to Vercel Data Stream Protocol JSON
-                    let protocol_json = match event {
-                        DagExecutionEvent::LlmToken { token, .. } => serde_json::json!({
-                            "type": "text-delta",
-                            "textDelta": token
-                        }),
-                        DagExecutionEvent::LlmToolCall { tool_id, args_chunk, .. } => serde_json::json!({
-                            "type": "tool-input-delta",
-                            "toolCallId": tool_id,
-                            "argsTextDelta": args_chunk
-                        }),
-                        DagExecutionEvent::LlmToolCallStart { tool_id, tool_name, tool_args, .. } => serde_json::json!({
-                            "type": "tool-input-available",
-                            "toolCallId": tool_id,
-                            "toolName": tool_name,
-                            "input": serde_json::from_str::<serde_json::Value>(&tool_args).unwrap_or(serde_json::Value::String(tool_args))
-                        }),
-                        DagExecutionEvent::LlmToolCallFinish { tool_id, output, success, .. } => {
-                             // Treat output as result. If it's a JSON string, parse it.
-                             let result_val = serde_json::from_str::<serde_json::Value>(&output)
-                                .unwrap_or(serde_json::Value::String(output));
-                                
-                             // If tool failed, we might want to signal error, but protocol says "result". 
-                             // We'll send the output as is.
-                             serde_json::json!({
-                                "type": "tool-output-available",
-                                "toolCallId": tool_id,
-                                "output": result_val,
-                                "isError": !success 
-                            })
-                        },
-                        DagExecutionEvent::LlmUsage { prompt_tokens, completion_tokens, .. } => serde_json::json!({
-                            "type": "finish",
-                            "usage": {
-                                "promptTokens": prompt_tokens,
-                                "completionTokens": completion_tokens
-                            }
-                        }),
-                        // Internal events - Keep valid JSON but use custom types for debugging/logging
-                        DagExecutionEvent::NodeStart { node_id, node_type, .. } => serde_json::json!({
-                            "type": "custom-node-start",
-                            "nodeId": node_id,
-                            "nodeType": node_type
-                        }),
-                        DagExecutionEvent::NodeFinish { node_id, output } => serde_json::json!({
-                            "type": "custom-node-finish",
-                            "nodeId": node_id,
-                            "output": output
-                        }),
-                        DagExecutionEvent::GraphFinish { output } => serde_json::json!({
-                            "type": "custom-graph-finish",
-                            "output": output
-                        }),
-                        DagExecutionEvent::Error { message } => serde_json::json!({
+        let internal_stream = use_case.execute_stream(graph_instance);
+        
+        // Wrap the internal stream to manage protocol state (text-start, text-end, [DONE])
+        let protocol_stream = async_stream::stream! {
+            // 1. Send the global START part
+            yield Ok::<Event, std::io::Error>(Event::default().json_data(serde_json::json!({
+                "type": "start",
+                "messageId": format!("msg_{}", uuid::Uuid::new_v4())
+            })).expect("json_data"));
+
+            let mut text_block_uuids = std::collections::HashMap::new();
+            let mut total_prompt_tokens = 0;
+            let mut total_completion_tokens = 0;
+            
+            tokio::pin!(internal_stream);
+
+            while let Some(result) = internal_stream.next().await {
+                // Here we ignore DAG errors for the protocol stream but we could also yield an Error part
+                let event = match result {
+                    Ok(ev) => ev,
+                    Err(e) => {
+                        yield Ok(Event::default().json_data(serde_json::json!({
                             "type": "error",
-                            "error": message
-                        }),
-                    };
-                    
-                    Event::default().json_data(protocol_json)
+                            "errorText": e.to_string()
+                        })).expect("json_data"));
+                        continue;
+                    }
+                };
+
+                // Protocol State Management
+                match &event {
+                    DagExecutionEvent::LlmToken { node_id, .. } => {
+                        if !text_block_uuids.contains_key(node_id) {
+                            let part_id = format!("txt_{}", uuid::Uuid::new_v4());
+                            yield Ok(Event::default().json_data(serde_json::json!({
+                                "type": "text-start",
+                                "id": part_id
+                            })).expect("json_data"));
+                            text_block_uuids.insert(node_id.clone(), part_id);
+                        }
+                    },
+                    DagExecutionEvent::NodeFinish { node_id, .. } => {
+                        if let Some(part_id) = text_block_uuids.remove(node_id) {
+                            yield Ok(Event::default().json_data(serde_json::json!({
+                                "type": "text-end",
+                                "id": part_id
+                            })).expect("json_data"));
+                        }
+                    },
+                    DagExecutionEvent::LlmUsage { prompt_tokens, completion_tokens, .. } => {
+                        total_prompt_tokens += prompt_tokens;
+                        total_completion_tokens += completion_tokens;
+                    },
+                    _ => {}
                 }
-                Err(e) => {
-                     // Error event
-                     let err_json = serde_json::json!({
+
+                // Map to official Data Stream Protocol JSON
+                let protocol_json = match event {
+                    DagExecutionEvent::LlmToken { node_id, token } => {
+                        let part_id = text_block_uuids.get(&node_id).cloned().unwrap_or_else(|| node_id.clone());
+                        Some(serde_json::json!({
+                            "type": "text-delta",
+                            "id": part_id,
+                            "delta": token
+                        }))
+                    },
+                    DagExecutionEvent::LlmToolCall { tool_id, args_chunk, .. } => Some(serde_json::json!({
+                        "type": "tool-input-delta",
+                        "toolCallId": tool_id,
+                        "inputTextDelta": args_chunk
+                    })),
+                    DagExecutionEvent::LlmToolCallStart { tool_id, tool_name, tool_args, .. } => Some(serde_json::json!({
+                        "type": "tool-input-available",
+                        "toolCallId": tool_id,
+                        "toolName": tool_name,
+                        "input": serde_json::from_str::<serde_json::Value>(&tool_args).unwrap_or(serde_json::Value::String(tool_args))
+                    })),
+                    DagExecutionEvent::LlmToolCallFinish { tool_id, output, .. } => Some(serde_json::json!({
+                        "type": "tool-output-available",
+                        "toolCallId": tool_id,
+                        "output": serde_json::from_str::<serde_json::Value>(&output).unwrap_or(serde_json::Value::String(output))
+                    })),
+                    DagExecutionEvent::LlmUsage { prompt_tokens, completion_tokens, .. } => Some(serde_json::json!({
+                        "type": "finish-step",
+                        "finishReason": "stop",
+                        "usage": {
+                            "promptTokens": prompt_tokens,
+                            "completionTokens": completion_tokens
+                        }
+                    })),
+                    DagExecutionEvent::GraphFinish { .. } => Some(serde_json::json!({
+                        "type": "finish",
+                        "finishReason": "stop",
+                        "usage": {
+                            "promptTokens": total_prompt_tokens,
+                            "completionTokens": total_completion_tokens
+                        }
+                    })),
+                    DagExecutionEvent::Error { message } => Some(serde_json::json!({
                         "type": "error",
-                        "error": e.to_string()
-                     });
-                     Event::default().json_data(err_json)
+                        "errorText": message
+                    })),
+                    _ => None
+                };
+
+                if let Some(json) = protocol_json {
+                    yield Ok(Event::default().json_data(json).expect("json_data"));
                 }
             }
-        });
-        
-        // Append [DONE] event? The Vercel protocol usually implies connection close or explicit DONE.
-        // We'll trust the stream end. But AI SDK often expects a [DONE] if strictly following text stream, 
-        // for Data stream it might just end. Let's add a wrapper stream to append [DONE] if needed, 
-        // but for now let's serve the data events.
-        
-        Sse::new(stream)
+
+            // 3. Finalization: Ensure all pending text blocks are ended
+            for (_, part_id) in text_block_uuids {
+                yield Ok(Event::default().json_data(serde_json::json!({
+                    "type": "text-end",
+                    "id": part_id
+                })).expect("json_data"));
+            }
+            
+            // 4. Send the literal [DONE] marker
+            yield Ok(Event::default().data("[DONE]"));
+        };
+
+        let mut response = Sse::new(protocol_stream)
             .keep_alive(KeepAlive::default())
-            .into_response()
+            .into_response();
+            
+        // Essential header for the AI SDK to recognize the Data Stream
+        response.headers_mut().insert(
+            "x-vercel-ai-ui-message-stream",
+            axum::http::HeaderValue::from_static("v1")
+        );
+        
+        response
     } else {
         // Normal JSON execution
         match state.use_case.execute(graph_instance).await {
