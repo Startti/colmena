@@ -28,7 +28,9 @@ impl LlmStreamUseCase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::domain::{LlmProvider, LlmStreamChunk, MockLlmRepository, ProviderKind};
+    use crate::llm::domain::{
+        LlmProvider, LlmStreamChunk, LlmStreamPart, MockLlmRepository, ProviderKind,
+    };
     use futures::stream;
     use std::sync::Arc;
 
@@ -44,7 +46,12 @@ mod tests {
 
     fn create_mock_stream() -> LlmStream {
         let provider = LlmProvider::new(ProviderKind::OpenAi, "test".into(), None).unwrap();
-        let chunk = LlmStreamChunk::new(Default::default(), "data".to_string(), provider, true);
+        let chunk = LlmStreamChunk::new(
+            Default::default(),
+            LlmStreamPart::Content("data".to_string()),
+            provider,
+            true,
+        );
         Box::pin(stream::iter(vec![Ok(chunk)]))
     }
 
