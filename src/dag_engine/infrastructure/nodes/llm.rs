@@ -53,7 +53,7 @@ impl LlmNode {
             if let Some(end) = value[absolute_start..].find('}') {
                 let absolute_end = absolute_start + end;
                 let var_path = &value[absolute_start + 2..absolute_end]; // e.g. "context.amadeus_token"
-                
+
                 // Look up in inputs
                 // inputs keys are flattened, e.g. "context.amadeus_token"
                 let val = if let Some(v) = inputs.get(var_path) {
@@ -65,7 +65,7 @@ impl LlmNode {
                     // Keep original if not found
                     value[absolute_start..=absolute_end].to_string()
                 };
-                
+
                 result.push_str(&val);
                 last_end = absolute_end + 1;
             } else {
@@ -341,26 +341,34 @@ impl ExecutableNode for LlmNode {
                 Some(Box::new(move |part: LlmStreamPart| {
                     use crate::dag_engine::domain::observer::NodeEvent;
                     match part {
-                        LlmStreamPart::Content(token) => obs.on_event(NodeEvent::LlmToken { token }),
-                        LlmStreamPart::ToolCallChunk(chunk) => obs.on_event(NodeEvent::LlmToolCall {
-                            tool_id: chunk.id,
-                            tool_name: chunk.name,
-                            args_chunk: chunk.args_chunk,
-                        }),
+                        LlmStreamPart::Content(token) => {
+                            obs.on_event(NodeEvent::LlmToken { token })
+                        }
+                        LlmStreamPart::ToolCallChunk(chunk) => {
+                            obs.on_event(NodeEvent::LlmToolCall {
+                                tool_id: chunk.id,
+                                tool_name: chunk.name,
+                                args_chunk: chunk.args_chunk,
+                            })
+                        }
                         LlmStreamPart::Usage(usage) => obs.on_event(NodeEvent::LlmUsage {
                             prompt_tokens: usage.prompt_tokens,
                             completion_tokens: usage.completion_tokens,
                         }),
-                        LlmStreamPart::ToolCallStart(tc) => obs.on_event(NodeEvent::LlmToolCallStart {
-                            tool_id: tc.id.clone(),
-                            tool_name: tc.function.name.clone(),
-                            tool_args: tc.function.arguments.clone(),
-                        }),
-                        LlmStreamPart::ToolCallFinish(res) => obs.on_event(NodeEvent::LlmToolCallFinish {
-                            tool_id: res.tool_call_id.clone(),
-                            success: res.success,
-                            output: res.output.clone(),
-                        }),
+                        LlmStreamPart::ToolCallStart(tc) => {
+                            obs.on_event(NodeEvent::LlmToolCallStart {
+                                tool_id: tc.id.clone(),
+                                tool_name: tc.function.name.clone(),
+                                tool_args: tc.function.arguments.clone(),
+                            })
+                        }
+                        LlmStreamPart::ToolCallFinish(res) => {
+                            obs.on_event(NodeEvent::LlmToolCallFinish {
+                                tool_id: res.tool_call_id.clone(),
+                                success: res.success,
+                                output: res.output.clone(),
+                            })
+                        }
                     }
                 }))
             } else {

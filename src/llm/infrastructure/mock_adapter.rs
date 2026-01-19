@@ -38,20 +38,20 @@ impl LlmRepository for MockAdapter {
         use crate::llm::domain::LlmStreamChunk;
         use futures::stream;
         use futures::StreamExt;
-        
+
         let last_message = request.messages().last().ok_or(LlmError::RequestFailed {
             message: "No messages in request".to_string(),
         })?;
-        
+
         let full_text = format!("Mock stream response to: {}", last_message.content());
         let chunks: Vec<String> = full_text
             .split_whitespace()
             .map(|s| s.to_string() + " ")
             .collect();
-            
+
         let request_id = request.id().clone();
         let provider = request.config().provider().clone();
-        
+
         let stream = stream::iter(chunks).map(move |chunk_text| {
             Ok(LlmStreamChunk::new(
                 request_id.clone(),
@@ -60,7 +60,7 @@ impl LlmRepository for MockAdapter {
                 false, // Not handling is_final perfectly here, simplistic mock
             ))
         });
-        
+
         Ok(Box::pin(stream))
     }
 

@@ -93,7 +93,7 @@ impl ExecutableNode for DivideNode {
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
         let a = get_f64(inputs.get("a"), "a")?;
         let b = get_f64(inputs.get("b"), "b")?;
-        
+
         if b == 0.0 {
             return Err(Box::new(MathError::DivisionByZero));
         }

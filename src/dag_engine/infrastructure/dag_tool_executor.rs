@@ -35,13 +35,16 @@ impl DagToolExecutor {
         // If parameters are explicitly defined in config, use them
         if let Some(params_value) = &tool_config.parameters {
             if let Ok(params) = serde_json::from_value::<ToolParameters>(params_value.clone()) {
-                 return ToolDefinition {
+                return ToolDefinition {
                     name: tool_name.to_string(),
                     description: tool_config.description.clone(),
                     parameters: params,
                 };
             } else {
-                println!("WARN: Failed to parse custom parameters for tool {}", tool_name);
+                println!(
+                    "WARN: Failed to parse custom parameters for tool {}",
+                    tool_name
+                );
                 // Fallback to default generation? or error?
                 // Let's fallback but maybe log.
             }

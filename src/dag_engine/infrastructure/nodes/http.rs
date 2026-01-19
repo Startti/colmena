@@ -2,8 +2,8 @@ use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use reqwest::{Client, Method, Url};
 use serde_json::{json, Value};
 use std::error::Error as StdError;
-use std::sync::Arc;
 use std::str::FromStr;
+use std::sync::Arc;
 
 pub struct HttpNode;
 
@@ -19,7 +19,8 @@ impl HttpNode {
             if let Some(end) = input[absolute_start..].find('}') {
                 let absolute_end = absolute_start + end;
                 let var_name = &input[absolute_start + 2..absolute_end];
-                let val = std::env::var(var_name).map_err(|_| format!("Env var {} not found", var_name))?;
+                let val = std::env::var(var_name)
+                    .map_err(|_| format!("Env var {} not found", var_name))?;
                 result.push_str(&val);
                 last_end = absolute_end + 1;
             } else {
@@ -35,7 +36,6 @@ impl HttpNode {
 
 #[async_trait::async_trait]
 impl ExecutableNode for HttpNode {
-
     async fn execute(
         &self,
         inputs: &NodeInputs,
@@ -49,14 +49,20 @@ impl ExecutableNode for HttpNode {
             .and_then(|v| v.as_str())
             .or_else(|| config.get("base_url").and_then(|v| v.as_str()))
             .unwrap_or("");
-        let base_url = Self::resolve_env_vars(base_url_raw).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError + Send + Sync>)?;
+        let base_url = Self::resolve_env_vars(base_url_raw).map_err(|e| {
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                as Box<dyn StdError + Send + Sync>
+        })?;
 
         let endpoint_raw = inputs
             .get("endpoint")
             .and_then(|v| v.as_str())
             .or_else(|| config.get("endpoint").and_then(|v| v.as_str()))
             .unwrap_or("");
-        let endpoint = Self::resolve_env_vars(endpoint_raw).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError + Send + Sync>)?;
+        let endpoint = Self::resolve_env_vars(endpoint_raw).map_err(|e| {
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                as Box<dyn StdError + Send + Sync>
+        })?;
 
         let method_str = inputs
             .get("method")
@@ -82,11 +88,10 @@ impl ExecutableNode for HttpNode {
         // 3. Prepare Client and Request
         // Build client forcing HTTP/1.1 to avoid HTTP/2 issues with some APIs
         let client = Client::builder().http1_only().build()?;
-        
+
         println!("DEBUG: Sending HTTP Request");
         println!("DEBUG: URL: {}", url);
         println!("DEBUG: Method: {}", method);
-
 
         let mut request_builder = client.request(method, url);
 
@@ -98,7 +103,10 @@ impl ExecutableNode for HttpNode {
         if let Some(headers) = config.get("headers").and_then(|v| v.as_object()) {
             for (k, v) in headers {
                 if let Some(v_str) = v.as_str() {
-                    let v_resolved = Self::resolve_env_vars(v_str).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError + Send + Sync>)?;
+                    let v_resolved = Self::resolve_env_vars(v_str).map_err(|e| {
+                        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                            as Box<dyn StdError + Send + Sync>
+                    })?;
                     request_builder = request_builder.header(k, v_resolved);
                 }
             }
@@ -107,7 +115,10 @@ impl ExecutableNode for HttpNode {
         if let Some(headers) = inputs.get("headers").and_then(|v| v.as_object()) {
             for (k, v) in headers {
                 if let Some(v_str) = v.as_str() {
-                    let v_resolved = Self::resolve_env_vars(v_str).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError + Send + Sync>)?;
+                    let v_resolved = Self::resolve_env_vars(v_str).map_err(|e| {
+                        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                            as Box<dyn StdError + Send + Sync>
+                    })?;
                     request_builder = request_builder.header(k, v_resolved);
                 }
             }
@@ -115,10 +126,10 @@ impl ExecutableNode for HttpNode {
 
         // Handle specific auth inputs
         if let Some(token) = inputs.get("bearer_token").and_then(|v| v.as_str()) {
-             request_builder = request_builder.header("Authorization", format!("Bearer {}", token));
+            request_builder = request_builder.header("Authorization", format!("Bearer {}", token));
         }
         if let Some(auth) = inputs.get("authorization").and_then(|v| v.as_str()) {
-             request_builder = request_builder.header("Authorization", auth);
+            request_builder = request_builder.header("Authorization", auth);
         }
 
         // 5. Query Params (Config + Inputs)
@@ -130,7 +141,16 @@ impl ExecutableNode for HttpNode {
         }
 
         // Collect extra inputs as query params (for tools that flatten params)
-        let reserved_keys = ["base_url", "endpoint", "method", "headers", "body", "query_parameters", "bearer_token", "authorization"];
+        let reserved_keys = [
+            "base_url",
+            "endpoint",
+            "method",
+            "headers",
+            "body",
+            "query_parameters",
+            "bearer_token",
+            "authorization",
+        ];
         let mut extra_params = std::collections::HashMap::new();
         for (k, v) in inputs {
             if !reserved_keys.contains(&k.as_str()) {
@@ -158,7 +178,10 @@ impl ExecutableNode for HttpNode {
 
         if let Some(body) = body_val {
             if let Some(s) = body.as_str() {
-                let s_resolved = Self::resolve_env_vars(s).map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)) as Box<dyn StdError + Send + Sync>)?;
+                let s_resolved = Self::resolve_env_vars(s).map_err(|e| {
+                    Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                        as Box<dyn StdError + Send + Sync>
+                })?;
                 println!("DEBUG: Request Body: {}", s_resolved);
                 request_builder = request_builder.body(s_resolved);
             } else {
@@ -180,11 +203,11 @@ impl ExecutableNode for HttpNode {
             Ok(json) => {
                 println!("DEBUG: Response Body: {}", json);
                 json
-            },
+            }
             Err(_) => {
                 println!("DEBUG: Response Body is not JSON or empty");
                 Value::Null
-            }, // Or handle text content if needed
+            } // Or handle text content if needed
         };
 
         // 8. Return Output
