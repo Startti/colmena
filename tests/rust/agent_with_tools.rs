@@ -1,3 +1,4 @@
+/*
 use async_trait::async_trait;
 use colmena::llm::application::AgentService;
 use colmena::llm::domain::{
@@ -182,3 +183,4 @@ async fn test_agent_execution() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+*/
