@@ -1,8 +1,7 @@
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
 use crate::llm::domain::{
-    LlmConfig, LlmMessage, LlmProvider, LlmStreamPart, ProviderKind, ThreadId, ToolDefinition,
-    ToolExecutor,
+    LlmConfig, LlmMessage, LlmProvider, LlmStreamPart, ProviderKind, ThreadId, ToolExecutor,
 };
 use crate::llm::infrastructure::{ConversationRepositoryFactory, LlmProviderFactory};
 use async_trait::async_trait;
@@ -378,17 +377,18 @@ impl ExecutableNode for LlmNode {
             None
         };
 
-        let response = agent_service
-            .run(
-                &ThreadId(tid),
-                prompt.to_string(),
-                llm_config,
-                tools,
-                &tool_executor,
-                Some(10), // Max iterations
-                on_token,
-            )
-            .await?;
+        // Create AgentService parameters
+        let params = crate::llm::application::AgentRunParams {
+            thread_id: &ThreadId(tid),
+            prompt: prompt.to_string(),
+            config: llm_config,
+            tools,
+            tool_executor: &tool_executor,
+            max_iterations: Some(10), // Max iterations
+            on_token,
+        };
+
+        let response = agent_service.run(params).await?;
 
         // Output format
         Ok(json!({

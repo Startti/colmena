@@ -4,6 +4,17 @@ use crate::llm::domain::{
 };
 use std::sync::Arc;
 
+/// Parameters for running the agent
+pub struct AgentRunParams<'a> {
+    pub thread_id: &'a ThreadId,
+    pub prompt: String,
+    pub config: LlmConfig,
+    pub tools: Vec<ToolDefinition>,
+    pub tool_executor: &'a dyn ToolExecutor,
+    pub max_iterations: Option<usize>,
+    pub on_token: Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>>,
+}
+
 /// Agent service implementing the ReAct (Reasoning + Acting) pattern
 ///
 /// This service orchestrates the LLM reasoning loop:
@@ -30,26 +41,21 @@ impl AgentService {
     /// Run the agent with tool execution capabilities
     ///
     /// # Arguments
-    /// * `thread_id` - Conversation thread for memory
-    /// * `prompt` - User's prompt/request
-    /// * `config` - LLM configuration
-    /// * `tools` - List of tools available to the agent (from enabled_tools config)
-    /// * `tool_executor` - Implementation that executes tools
-    /// * `max_iterations` - Safety limit for ReAct loop (default: 10)
+    /// * `params` - Agent execution parameters
     ///
     /// # Returns
     /// Final response from the LLM after tool execution
-    pub async fn run(
+    pub async fn run<'a>(
         &self,
-        thread_id: &ThreadId,
-        prompt: String,
-        config: LlmConfig,
-        tools: Vec<ToolDefinition>,
-        tool_executor: &dyn ToolExecutor,
-        max_iterations: Option<usize>,
-        on_token: Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>>,
+        params: AgentRunParams<'a>,
     ) -> Result<LlmResponse, LlmError> {
-        let max_iter = max_iterations.unwrap_or(10);
+        let max_iter = params.max_iterations.unwrap_or(10);
+        let thread_id = params.thread_id;
+        let prompt = params.prompt;
+        let config = params.config;
+        let tools = params.tools;
+        let tool_executor = params.tool_executor;
+        let on_token = params.on_token;
 
         // 1. Load conversation history
         let conversation = self.conversation_repository.get_by_id(thread_id).await?;
@@ -302,15 +308,15 @@ mod tests {
         let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
 
         let result = service
-            .run(
-                &thread_id,
+            .run(AgentRunParams {
+                thread_id: &thread_id,
                 prompt,
-                create_config(),
-                vec![],
-                &mock_tool_exec,
-                None,
-                None,
-            )
+                config: create_config(),
+                tools: vec![],
+                tool_executor: &mock_tool_exec,
+                max_iterations: None,
+                on_token: None,
+            })
             .await;
 
         assert!(result.is_ok());
@@ -400,15 +406,15 @@ mod tests {
         let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
 
         let result = service
-            .run(
-                &thread_id,
+            .run(AgentRunParams {
+                thread_id: &thread_id,
                 prompt,
-                create_config(),
-                vec![], // Tools list doesn't matter for mock
-                &mock_tool_exec,
-                None,
-                None,
-            )
+                config: create_config(),
+                tools: vec![], // Tools list doesn't matter for mock
+                tool_executor: &mock_tool_exec,
+                max_iterations: None,
+                on_token: None,
+            })
             .await;
 
         assert!(result.is_ok());
@@ -468,15 +474,15 @@ mod tests {
         let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
 
         let result = service
-            .run(
-                &thread_id,
-                "Loop me".to_string(),
-                create_config(),
-                vec![],
-                &mock_tool_exec,
-                Some(3), // Max 3 iterations
-                None,
-            )
+            .run(AgentRunParams {
+                thread_id: &thread_id,
+                prompt: "Loop me".to_string(),
+                config: create_config(),
+                tools: vec![],
+                tool_executor: &mock_tool_exec,
+                max_iterations: Some(3), // Max 3 iterations
+                on_token: None,
+            })
             .await;
 
         assert!(matches!(

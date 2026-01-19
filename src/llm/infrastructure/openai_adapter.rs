@@ -3,7 +3,7 @@ use crate::llm::domain::{
     LlmStreamPart, LlmUsage, ToolCall, ToolCallChunk,
 };
 use async_trait::async_trait;
-use futures::{Stream, StreamExt, TryStreamExt};
+use futures::{Stream, StreamExt};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
