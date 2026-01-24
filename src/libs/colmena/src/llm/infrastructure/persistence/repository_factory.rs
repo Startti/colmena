@@ -58,7 +58,7 @@ impl ConversationRepositoryFactory {
                 })?;
 
             // Run migrations
-            sqlx::migrate!("./migrations/postgres")
+            sqlx::migrate!("migrations/postgres")
                 .run(&pool)
                 .await
                 .map_err(|e| LlmError::RequestFailed {
@@ -82,7 +82,7 @@ impl ConversationRepositoryFactory {
                 })?;
 
             // Run migrations
-            sqlx::migrate!("./migrations/sqlite")
+            sqlx::migrate!("migrations/sqlite")
                 .run(&pool)
                 .await
                 .map_err(|e| LlmError::RequestFailed {
