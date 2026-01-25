@@ -1,8 +1,5 @@
 [workspace]
 members = [
-    "src/libs/colmena",
-    "src/platform/api",
-    "src/platform/worker",
-    "src/platform/shared"
+    "src/libs/colmena"
 ]
 resolver = "2"
