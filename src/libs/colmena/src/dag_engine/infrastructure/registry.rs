@@ -1,7 +1,7 @@
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::domain::node::ExecutableNode;
 use crate::dag_engine::infrastructure::nodes::{
-    debug::*, http::*, llm::*, math::*, python_node::*, trigger::*,
+    debug::*, http::*, input::*, llm::*, math::*, python_node::*, trigger::*,
 }; // Importa nuestros nodos
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -34,6 +34,7 @@ impl HashMapNodeRegistry {
 
             // --- Registrar Nodos de Trigger ---
             nodes.insert("trigger_webhook".to_string(), Arc::new(TriggerWebhookNode));
+            nodes.insert("input".to_string(), Arc::new(InputNode));
 
             // --- Registrar Nodos HTTP ---
             nodes.insert("http_request".to_string(), Arc::new(HttpNode));
