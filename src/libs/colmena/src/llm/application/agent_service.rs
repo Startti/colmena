@@ -8,6 +8,7 @@ use std::sync::Arc;
 pub struct AgentRunParams<'a> {
     pub thread_id: &'a ThreadId,
     pub prompt: String,
+    pub messages: Option<Vec<LlmMessage>>,
     pub config: LlmConfig,
     pub tools: Vec<ToolDefinition>,
     pub tool_executor: &'a dyn ToolExecutor,
@@ -58,12 +59,21 @@ impl AgentService {
         let conversation = self.conversation_repository.get_by_id(thread_id).await?;
         let mut messages = conversation.messages;
 
-        // 2. Add user prompt
-        let user_message = LlmMessage::user(prompt)?;
-        messages.push(user_message.clone());
-        self.conversation_repository
-            .add_message(thread_id, user_message)
-            .await?;
+        // 2. Add user prompt (or pre-built messages)
+        if let Some(custom_messages) = params.messages {
+            for custom_msg in custom_messages {
+                messages.push(custom_msg.clone());
+                self.conversation_repository
+                    .add_message(thread_id, custom_msg)
+                    .await?;
+            }
+        } else {
+            let user_message = LlmMessage::user(prompt)?;
+            messages.push(user_message.clone());
+            self.conversation_repository
+                .add_message(thread_id, user_message)
+                .await?;
+        }
 
         let mut cumulative_usage = LlmUsage {
             prompt_tokens: 0,

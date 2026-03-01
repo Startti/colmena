@@ -47,6 +47,12 @@ impl MessageRole {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileData {
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(Derivative))]
 #[cfg_attr(test, derivative(PartialEq))]
 pub struct LlmMessage {
@@ -56,6 +62,8 @@ pub struct LlmMessage {
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<crate::llm::domain::ToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    files: Option<Vec<FileData>>,
     #[cfg_attr(test, derivative(PartialEq = "ignore"))]
     timestamp: DateTime<Utc>,
 }
@@ -71,6 +79,7 @@ impl LlmMessage {
             content: content.trim().to_string(),
             tool_call_id: None,
             tool_calls: None,
+            files: None,
             timestamp: Utc::now(),
         })
     }
@@ -81,6 +90,12 @@ impl LlmMessage {
 
     pub fn user(content: String) -> Result<Self, LlmError> {
         Self::new(MessageRole::User, content)
+    }
+
+    pub fn user_with_files(content: String, files: Vec<FileData>) -> Result<Self, LlmError> {
+        let mut msg = Self::new(MessageRole::User, content)?;
+        msg.files = Some(files);
+        Ok(msg)
     }
 
     pub fn assistant(content: String) -> Result<Self, LlmError> {
@@ -116,6 +131,10 @@ impl LlmMessage {
 
     pub fn tool_calls(&self) -> Option<&[crate::llm::domain::ToolCall]> {
         self.tool_calls.as_deref()
+    }
+
+    pub fn files(&self) -> Option<&[FileData]> {
+        self.files.as_deref()
     }
 
     pub fn timestamp(&self) -> &DateTime<Utc> {

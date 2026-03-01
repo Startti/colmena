@@ -43,8 +43,34 @@ impl OpenAiAdapter {
             .map(|msg| {
                 let mut message_json = json!({
                     "role": msg.role().as_str(),
-                    "content": msg.content()
                 });
+
+                if let Some(files) = msg.files() {
+                    let mut content_arr = vec![json!({
+                        "type": "text",
+                        "text": msg.content()
+                    })];
+
+                    use base64::{engine::general_purpose::STANDARD, Engine as _};
+                    for file in files {
+                        if file.mime_type.starts_with("image/") {
+                            let b64 = STANDARD.encode(&file.bytes);
+                            let data_uri = format!("data:{};base64,{}", file.mime_type, b64);
+                            
+                            content_arr.push(json!({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": data_uri
+                                }
+                            }));
+                        } else {
+                            println!("WARN: OpenAI chat completions only support image files via inline upload. Ignoring {}", file.mime_type);
+                        }
+                    }
+                    message_json["content"] = json!(content_arr);
+                } else {
+                    message_json["content"] = json!(msg.content());
+                }
 
                 // Add tool_calls for assistant messages
                 if let Some(tool_calls) = msg.tool_calls() {
@@ -166,9 +192,12 @@ impl LlmRepository for OpenAiAdapter {
             )));
         }
 
-        let openai_response: OpenAiResponse = response
-            .json()
+        let response_text = response
+            .text()
             .await
+            .map_err(|e| LlmError::parsing_error(e.to_string()))?;
+
+        let openai_response: OpenAiResponse = serde_json::from_str(&response_text)
             .map_err(|e| LlmError::parsing_error(e.to_string()))?;
 
         // Extract tool calls if present

@@ -200,7 +200,59 @@ impl ExecutableNode for LlmNode {
         }
 
         // 2.3 Add User Prompt
-        let user_message = LlmMessage::user(prompt.to_string())?;
+        let mut resolved_files = Vec::new();
+
+        // Check if there are any files passed in the node inputs
+        if let Some(files_val) = inputs.get("files").or_else(|| config.get("files")) {
+            if let Some(files_arr) = files_val.as_array() {
+                for file_obj in files_arr {
+                    if let Some(obj) = file_obj.as_object() {
+                        let mime_type = obj
+                            .get("mime_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("application/octet-stream")
+                            .to_string();
+
+                        if let Some(data) = obj.get("data").and_then(|v| v.as_str()) {
+                            use base64::{engine::general_purpose::STANDARD, Engine as _};
+                            
+                            // It's a base64 inline string. Remove data URI scheme if present:
+                            let base64_data = if data.starts_with("data:") {
+                                data.find(',').map(|idx| &data[idx + 1..]).unwrap_or(data)
+                            } else {
+                                data
+                            };
+
+                            if let Ok(bytes) = STANDARD.decode(base64_data) {
+                                resolved_files.push(crate::llm::domain::FileData {
+                                    mime_type,
+                                    bytes,
+                                });
+                            } else {
+                                println!("WARN: Failed to decode base64 file data");
+                            }
+                        } else if let Some(path_str) = obj.get("path").and_then(|v| v.as_str()) {
+                            // Read from local filesystem
+                            if let Ok(bytes) = std::fs::read(path_str) {
+                                resolved_files.push(crate::llm::domain::FileData {
+                                    mime_type,
+                                    bytes,
+                                });
+                            } else {
+                                println!("WARN: Failed to read file from path: {}", path_str);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let user_message = if resolved_files.is_empty() {
+            LlmMessage::user(prompt.to_string())?
+        } else {
+            LlmMessage::user_with_files(prompt.to_string(), resolved_files)?
+        };
+        
         messages.push(user_message.clone());
 
         // --- 3. Execute LLM Call (via AgentService) ---
@@ -381,6 +433,7 @@ impl ExecutableNode for LlmNode {
         let params = crate::llm::application::AgentRunParams {
             thread_id: &ThreadId(tid),
             prompt: prompt.to_string(),
+            messages: Some(messages),
             config: llm_config,
             tools,
             tool_executor: &tool_executor,
@@ -430,7 +483,8 @@ impl ExecutableNode for LlmNode {
                 "max_tokens": "integer (optional)",
                 "thread_id": "string (optional, enables memory)",
                 "connection_url": "string (optional)",
-                "enabled_tools": "array of strings or '*' (optional)"
+                "enabled_tools": "array of strings or '*' (optional)",
+                "files": "array of objects [{mime_type, data|path}] (optional)"
             },
             "outputs": {
                 "content": "string",

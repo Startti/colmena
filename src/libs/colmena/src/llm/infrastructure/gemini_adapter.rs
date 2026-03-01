@@ -51,13 +51,32 @@ impl GeminiAdapter {
                     system_instructions.push(message.content().to_string());
                 }
                 MessageRole::User => {
+                    let mut parts = Vec::new();
+                    parts.push(GeminiPart {
+                        text: Some(message.content().to_string()),
+                        function_call: None,
+                        function_response: None,
+                        inline_data: None,
+                    });
+
+                    if let Some(files) = message.files() {
+                        use base64::{engine::general_purpose::STANDARD, Engine as _};
+                        for file in files {
+                            parts.push(GeminiPart {
+                                text: None,
+                                function_call: None,
+                                function_response: None,
+                                inline_data: Some(GeminiInlineData {
+                                    mime_type: file.mime_type.clone(),
+                                    data: STANDARD.encode(&file.bytes),
+                                }),
+                            });
+                        }
+                    }
+
                     contents.push(GeminiContent {
                         role: "user".to_string(),
-                        parts: Some(vec![GeminiPart {
-                            text: Some(message.content().to_string()),
-                            function_call: None,
-                            function_response: None,
-                        }]),
+                        parts: Some(parts),
                         text: None,
                     });
                 }
@@ -69,6 +88,7 @@ impl GeminiAdapter {
                             text: Some(message.content().to_string()),
                             function_call: None,
                             function_response: None,
+                            inline_data: None,
                         });
                     }
 
@@ -81,6 +101,7 @@ impl GeminiAdapter {
                                     args: serde_json::from_str(&tc.function.arguments).unwrap_or(json!({})),
                                 }),
                                 function_response: None,
+                                inline_data: None,
                             });
                         }
                     }
@@ -91,6 +112,7 @@ impl GeminiAdapter {
                             text: Some(String::new()),
                             function_call: None,
                             function_response: None,
+                            inline_data: None,
                         });
                     }
 
@@ -126,6 +148,7 @@ impl GeminiAdapter {
                                 "name": tool_name,
                                 "response": parsed_content
                             })),
+                            inline_data: None,
                         }]),
                         text: None,
                     });
@@ -250,6 +273,7 @@ impl LlmRepository for GeminiAdapter {
             .text()
             .await
             .map_err(|e| LlmError::parsing_error(e.to_string()))?;
+            
         let gemini_response: GeminiResponse =
             serde_json::from_str(&response_text).map_err(|e| {
                 LlmError::parsing_error(format!(
@@ -542,6 +566,15 @@ struct GeminiPart {
     function_call: Option<GeminiFunctionCall>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "functionResponse")]
     function_response: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "inlineData")]
+    inline_data: Option<GeminiInlineData>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GeminiInlineData {
+    #[serde(rename = "mimeType")]
+    mime_type: String,
+    data: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
