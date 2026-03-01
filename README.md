@@ -397,15 +397,15 @@ cargo run --bin dag_engine serve tests/python_llm_graph.json --port 3000
 
 ### Tipos de Nodos Disponibles
 
-| Tipo | Descripción | Ejemplo de Uso |
-|------|-------------|----------------|
-| `mock_input` | Emite datos de configuración | Iniciar flujo con datos estáticos |
-| `log` | Imprime valores a consola | Debugging y visualización |
-| `add`, `subtract`, `multiply`, `divide` | Operaciones matemáticas | Cálculos numéricos |
-| `http_request` | Hace peticiones HTTP | Llamadas a APIs externas |
-| `llm_call` | Ejecuta modelos LLM | Generación de texto, análisis |
-| `python_script` | Ejecuta código Python | Lógica personalizada, transformaciones |
-| `trigger_webhook` | Dispara webhooks | Integración con sistemas externos |
+| Tipo                                    | Descripción                  | Ejemplo de Uso                         |
+| --------------------------------------- | ---------------------------- | -------------------------------------- |
+| `mock_input`                            | Emite datos de configuración | Iniciar flujo con datos estáticos      |
+| `log`                                   | Imprime valores a consola    | Debugging y visualización              |
+| `add`, `subtract`, `multiply`, `divide` | Operaciones matemáticas      | Cálculos numéricos                     |
+| `http_request`                          | Hace peticiones HTTP         | Llamadas a APIs externas               |
+| `llm_call`                              | Ejecuta modelos LLM          | Generación de texto, análisis          |
+| `python_script`                         | Ejecuta código Python        | Lógica personalizada, transformaciones |
+| `trigger_webhook`                       | Dispara webhooks             | Integración con sistemas externos      |
 
 ### 🐍 Python Node
 
@@ -535,8 +535,8 @@ El proyecto incluye un script de testing completo:
 # Activar entorno virtual
 source venv/bin/activate
 
-# Ejecutar tests de Gemini (requiere API key válida)
-python test_gemini.py
+# Ejecutar tests de streaming (requiere API key válida)
+python python/tests/test_streaming_scenarios.py
 ```
 
 ### Tests Incluidos
@@ -574,12 +574,12 @@ Este script demuestra que:
 
 ### Benchmarks (Aproximados)
 
-| Operación | Tiempo (ms) | Notas |
-|-----------|-------------|--------|
-| Inicialización | <1 | Una sola vez por proceso |
-| Llamada Simple | 500-2000 | Depende del proveedor LLM |
-| Streaming Chunk | <10 | Por chunk individual |
-| Parsing JSON | <5 | Nativo con serde |
+| Operación       | Tiempo (ms) | Notas                     |
+| --------------- | ----------- | ------------------------- |
+| Inicialización  | <1          | Una sola vez por proceso  |
+| Llamada Simple  | 500-2000    | Depende del proveedor LLM |
+| Streaming Chunk | <10         | Por chunk individual      |
+| Parsing JSON    | <5          | Nativo con serde          |
 
 ## 🏗️ Arquitectura
 

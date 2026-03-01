@@ -1,6 +1,6 @@
 use crate::llm::domain::{
     FunctionCall, LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk,
-    LlmStreamPart, LlmUsage, MessageRole, ToolCall,
+    LlmStreamPart, LlmUsage, MessageRole, ToolCall, ToolCallChunk,
 };
 use async_trait::async_trait;
 use futures::{Stream, StreamExt, TryStreamExt};
@@ -43,7 +43,9 @@ impl GeminiAdapter {
         let mut system_instructions = Vec::new();
         let mut contents = Vec::new();
 
-        for message in request.messages() {
+        let messages = request.messages();
+
+        for (i, message) in messages.iter().enumerate() {
             match message.role() {
                 MessageRole::System => {
                     system_instructions.push(message.content().to_string());
@@ -60,30 +62,69 @@ impl GeminiAdapter {
                     });
                 }
                 MessageRole::Assistant => {
-                    contents.push(GeminiContent {
-                        role: "model".to_string(),
-                        parts: Some(vec![GeminiPart {
+                    let mut parts = Vec::new();
+                    
+                    if !message.content().is_empty() {
+                        parts.push(GeminiPart {
                             text: Some(message.content().to_string()),
                             function_call: None,
                             function_response: None,
-                        }]),
+                        });
+                    }
+
+                    if let Some(tool_calls) = message.tool_calls() {
+                        for tc in tool_calls {
+                            parts.push(GeminiPart {
+                                text: None,
+                                function_call: Some(GeminiFunctionCall {
+                                    name: tc.function.name.clone(),
+                                    args: serde_json::from_str(&tc.function.arguments).unwrap_or(json!({})),
+                                }),
+                                function_response: None,
+                            });
+                        }
+                    }
+
+                    // If parts is empty, Gemini still requires something, so add empty text
+                    if parts.is_empty() {
+                         parts.push(GeminiPart {
+                            text: Some(String::new()),
+                            function_call: None,
+                            function_response: None,
+                        });
+                    }
+
+                    contents.push(GeminiContent {
+                        role: "model".to_string(),
+                        parts: Some(parts),
                         text: None,
                     });
                 }
                 MessageRole::Tool => {
-                    // Gemini expects function responses in a specific format
-                    // For now, we'll add a placeholder implementation
-                    // TODO: Implement proper function response formatting
+                    let target_id = message.tool_call_id().unwrap_or_default();
+                    let mut tool_name = "unknown".to_string();
+
+                    // Find the tool call in previous messages to get its name
+                    for prev_msg in messages.iter().take(i) {
+                        if let Some(tc) = prev_msg.tool_calls() {
+                            if let Some(call) = tc.iter().find(|t| t.id == target_id) {
+                                tool_name = call.function.name.clone();
+                                break;
+                            }
+                        }
+                    }
+
+                    let parsed_content = serde_json::from_str::<serde_json::Value>(message.content())
+                        .unwrap_or_else(|_| serde_json::json!({ "result": message.content() }));
+
                     contents.push(GeminiContent {
                         role: "function".to_string(),
                         parts: Some(vec![GeminiPart {
                             text: None,
                             function_call: None,
                             function_response: Some(serde_json::json!({
-                                "name": "unknown", // We need to store/retrieve the function name
-                                "response": {
-                                    "content": message.content()
-                                }
+                                "name": tool_name,
+                                "response": parsed_content
                             })),
                         }]),
                         text: None,
@@ -349,36 +390,94 @@ impl LlmRepository for GeminiAdapter {
         let provider = request.config().provider().clone();
 
         let byte_stream = response.bytes_stream();
-        let json_stream = JsonStreamParser::new(byte_stream).try_filter_map(move |json_bytes| {
-            let request_id = request_id.clone();
-            let provider = provider.clone();
-            async move {
+        let mut json_parser = JsonStreamParser::new(byte_stream);
+
+        let json_stream = async_stream::try_stream! {
+            while let Some(json_bytes_result) = json_parser.next().await {
+                let json_bytes = json_bytes_result?;
                 let chunk_response = serde_json::from_slice::<GeminiResponse>(&json_bytes)
                     .map_err(|e| LlmError::parsing_error(e.to_string()))?;
 
                 if let Some(candidate) = chunk_response.candidates.first() {
-                    let content_text = if let Some(text) = &candidate.content.text {
-                        Some(text.clone())
-                    } else {
-                        candidate.content.parts.as_ref().and_then(|parts| {
-                            parts.iter().find_map(|part| part.text.as_ref().cloned())
-                        })
-                    };
+                    let is_final = candidate.finish_reason.is_some();
+                    let finish_reason = candidate.finish_reason.clone();
 
-                    if let Some(text) = content_text {
-                        let is_final = candidate.finish_reason.is_some();
+                    if let Some(parts) = &candidate.content.parts {
+                        for part in parts {
+                            if let Some(text) = &part.text {
+                                if !text.is_empty() {
+                                    let mut chunk = LlmStreamChunk::new(
+                                        request_id.clone(),
+                                        LlmStreamPart::Content(text.clone()),
+                                        provider.clone(),
+                                        is_final,
+                                    );
+                                    if let Some(reason) = &finish_reason {
+                                        chunk = chunk.with_finish_reason(reason.clone());
+                                    }
+                                    yield chunk;
+                                }
+                            }
 
-                        return Ok(Some(LlmStreamChunk::new(
-                            request_id,
-                            LlmStreamPart::Content(text),
-                            provider,
+                            if let Some(fc) = &part.function_call {
+                                let call_id = format!("call_{}", uuid::Uuid::new_v4());
+                                let args_str = serde_json::to_string(&fc.args).unwrap_or_default();
+                                
+                                let mut chunk = LlmStreamChunk::new(
+                                    request_id.clone(),
+                                    LlmStreamPart::ToolCallChunk(ToolCallChunk {
+                                        index: 0,
+                                        id: call_id,
+                                        name: fc.name.clone(),
+                                        args_chunk: args_str,
+                                    }),
+                                    provider.clone(),
+                                    is_final,
+                                );
+                                if let Some(reason) = &finish_reason {
+                                    chunk = chunk.with_finish_reason(reason.clone());
+                                }
+                                yield chunk;
+                            }
+                        }
+                    } else if let Some(text) = &candidate.content.text {
+                        let mut chunk = LlmStreamChunk::new(
+                            request_id.clone(),
+                            LlmStreamPart::Content(text.clone()),
+                            provider.clone(),
                             is_final,
-                        )));
+                        );
+                        if let Some(reason) = &finish_reason {
+                            chunk = chunk.with_finish_reason(reason.clone());
+                        }
+                        yield chunk;
+                    } else if is_final {
+                        let mut chunk = LlmStreamChunk::new(
+                            request_id.clone(),
+                            LlmStreamPart::Content(String::new()),
+                            provider.clone(),
+                            true,
+                        );
+                        if let Some(reason) = &finish_reason {
+                            chunk = chunk.with_finish_reason(reason.clone());
+                        }
+                        yield chunk;
                     }
                 }
-                Ok(None)
+
+                if let Some(usage) = &chunk_response.usage_metadata {
+                    yield LlmStreamChunk::new(
+                        request_id.clone(),
+                        LlmStreamPart::Usage(LlmUsage::new(
+                            usage.prompt_token_count.unwrap_or(0),
+                            usage.candidates_token_count.unwrap_or(0)
+                        )),
+                        provider.clone(),
+                        false,
+                    );
+                }
             }
-        });
+        };
 
         Ok(Box::pin(json_stream))
     }

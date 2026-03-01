@@ -124,54 +124,70 @@ impl DagRunUseCase {
                 let execution_future = node_impl.execute(&inputs, &node_config.config, &mut global_state, Some(observer));
                 tokio::pin!(execution_future);
 
-                let output_result = loop {
+                let mut output_opt = None;
+                loop {
                     tokio::select! {
-                        res = &mut execution_future => {
-                            break res;
+                        res = &mut execution_future, if output_opt.is_none() => {
+                            output_opt = Some(res);
                         }
-                        Some(event) = rx.recv() => {
-                            match event {
-                                NodeEvent::LlmToken { token } => {
-                                    yield DagExecutionEvent::LlmToken {
-                                        node_id: node_id.clone(),
-                                        token
-                                    };
+                        event_opt = rx.recv() => {
+                            match event_opt {
+                                Some(event) => {
+                                    match event {
+                                        NodeEvent::LlmToken { token } => {
+                                            yield DagExecutionEvent::LlmToken {
+                                                node_id: node_id.clone(),
+                                                token
+                                            };
+                                        }
+                                        NodeEvent::LlmToolCall { tool_id, tool_name, args_chunk } => {
+                                            yield DagExecutionEvent::LlmToolCall {
+                                                node_id: node_id.clone(),
+                                                tool_id,
+                                                tool_name,
+                                                args_chunk,
+                                            };
+                                        }
+                                        NodeEvent::LlmUsage { prompt_tokens, completion_tokens } => {
+                                            yield DagExecutionEvent::LlmUsage {
+                                                node_id: node_id.clone(),
+                                                prompt_tokens,
+                                                completion_tokens,
+                                            };
+                                        }
+                                        NodeEvent::LlmToolCallStart { tool_id, tool_name, tool_args } => {
+                                            yield DagExecutionEvent::LlmToolCallStart {
+                                                node_id: node_id.clone(),
+                                                tool_id,
+                                                tool_name,
+                                                tool_args,
+                                            };
+                                        }
+                                        NodeEvent::LlmToolCallFinish { tool_id, success, output } => {
+                                            yield DagExecutionEvent::LlmToolCallFinish {
+                                                node_id: node_id.clone(),
+                                                tool_id,
+                                                success,
+                                                output,
+                                            };
+                                        }
+                                    }
                                 }
-                                NodeEvent::LlmToolCall { tool_id, tool_name, args_chunk } => {
-                                    yield DagExecutionEvent::LlmToolCall {
-                                        node_id: node_id.clone(),
-                                        tool_id,
-                                        tool_name,
-                                        args_chunk,
-                                    };
-                                }
-                                NodeEvent::LlmUsage { prompt_tokens, completion_tokens } => {
-                                    yield DagExecutionEvent::LlmUsage {
-                                        node_id: node_id.clone(),
-                                        prompt_tokens,
-                                        completion_tokens,
-                                    };
-                                }
-                                NodeEvent::LlmToolCallStart { tool_id, tool_name, tool_args } => {
-                                    yield DagExecutionEvent::LlmToolCallStart {
-                                        node_id: node_id.clone(),
-                                        tool_id,
-                                        tool_name,
-                                        tool_args,
-                                    };
-                                }
-                                NodeEvent::LlmToolCallFinish { tool_id, success, output } => {
-                                    yield DagExecutionEvent::LlmToolCallFinish {
-                                        node_id: node_id.clone(),
-                                        tool_id,
-                                        success,
-                                        output,
-                                    };
+                                None => {
+                                    // Channel closed, all events drained
+                                    break;
                                 }
                             }
                         }
                     }
-                };
+                }
+
+                // We know it must be Some because rx channel is dropped only when execution_future completes
+                let output_result = output_opt.unwrap_or_else(|| {
+                    Err(Box::new(DagError::NodeExecution(
+                        "Future did not complete but channel closed".to_string(),
+                    )))
+                });
 
                 let output = output_result.map_err(|e| DagError::NodeExecution(e.to_string()))?;
 
