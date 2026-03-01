@@ -393,6 +393,7 @@ impl LlmRepository for GeminiAdapter {
         let mut json_parser = JsonStreamParser::new(byte_stream);
 
         let json_stream = async_stream::try_stream! {
+            let mut latest_usage = None;
             while let Some(json_bytes_result) = json_parser.next().await {
                 let json_bytes = json_bytes_result?;
                 let chunk_response = serde_json::from_slice::<GeminiResponse>(&json_bytes)
@@ -466,16 +467,20 @@ impl LlmRepository for GeminiAdapter {
                 }
 
                 if let Some(usage) = &chunk_response.usage_metadata {
-                    yield LlmStreamChunk::new(
-                        request_id.clone(),
-                        LlmStreamPart::Usage(LlmUsage::new(
-                            usage.prompt_token_count.unwrap_or(0),
-                            usage.candidates_token_count.unwrap_or(0)
-                        )),
-                        provider.clone(),
-                        false,
-                    );
+                    latest_usage = Some(LlmUsage::new(
+                        usage.prompt_token_count.unwrap_or(0),
+                        usage.candidates_token_count.unwrap_or(0)
+                    ));
                 }
+            }
+
+            if let Some(usage) = latest_usage {
+                yield LlmStreamChunk::new(
+                    request_id.clone(),
+                    LlmStreamPart::Usage(usage),
+                    provider.clone(),
+                    true,
+                );
             }
         };
 

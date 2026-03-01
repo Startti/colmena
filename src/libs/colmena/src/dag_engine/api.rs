@@ -50,6 +50,7 @@ pub async fn run_dag(file_path: String) -> Result<Value, Box<dyn std::error::Err
         );
 
         let mut text_block_uuids = std::collections::HashMap::new();
+        let mut seen_tool_ids = std::collections::HashSet::new();
         let mut total_prompt_tokens = 0;
         let mut total_completion_tokens = 0;
         let mut final_output: Value = Value::Null;
@@ -102,6 +103,21 @@ pub async fn run_dag(file_path: String) -> Result<Value, Box<dyn std::error::Err
                 } => {
                     total_prompt_tokens += prompt_tokens;
                     total_completion_tokens += completion_tokens;
+                }
+                DagExecutionEvent::LlmToolCall {
+                    tool_id, tool_name, ..
+                } => {
+                    if !seen_tool_ids.contains(tool_id) {
+                        seen_tool_ids.insert(tool_id.clone());
+                        println!(
+                            "data: {}\n",
+                            serde_json::json!({
+                                "type": "tool-input-start",
+                                "toolCallId": tool_id,
+                                "toolName": tool_name
+                            })
+                        );
+                    }
                 }
                 DagExecutionEvent::GraphFinish { output } => {
                     final_output = output.clone();
@@ -327,6 +343,7 @@ async fn handler_webhook(
             })).expect("json_data"));
 
             let mut text_block_uuids = std::collections::HashMap::new();
+            let mut seen_tool_ids = std::collections::HashSet::new();
             let mut total_prompt_tokens = 0;
             let mut total_completion_tokens = 0;
 
@@ -368,6 +385,16 @@ async fn handler_webhook(
                     DagExecutionEvent::LlmUsage { prompt_tokens, completion_tokens, .. } => {
                         total_prompt_tokens += prompt_tokens;
                         total_completion_tokens += completion_tokens;
+                    },
+                    DagExecutionEvent::LlmToolCall { tool_id, tool_name, .. } => {
+                        if !seen_tool_ids.contains(tool_id) {
+                            seen_tool_ids.insert(tool_id.clone());
+                            yield Ok(Event::default().json_data(serde_json::json!({
+                                "type": "tool-input-start",
+                                "toolCallId": tool_id,
+                                "toolName": tool_name
+                            })).expect("json_data"));
+                        }
                     },
                     _ => {}
                 }

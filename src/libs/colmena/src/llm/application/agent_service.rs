@@ -1,6 +1,6 @@
 use crate::llm::domain::{
     ConversationRepository, LlmConfig, LlmError, LlmMessage, LlmRepository, LlmRequest,
-    LlmResponse, LlmStreamPart, ThreadId, ToolCall, ToolDefinition, ToolExecutor, ToolResult,
+    LlmResponse, LlmStreamPart, LlmUsage, ThreadId, ToolCall, ToolDefinition, ToolExecutor, ToolResult,
 };
 use std::sync::Arc;
 
@@ -65,6 +65,13 @@ impl AgentService {
             .add_message(thread_id, user_message)
             .await?;
 
+        let mut cumulative_usage = LlmUsage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+        };
+        let mut all_tool_calls_executed = Vec::new();
+
         // 3. ReAct Loop
         for _iteration in 0..max_iter {
             // A. Call LLM with tools
@@ -75,11 +82,7 @@ impl AgentService {
             }
 
             // Decide between call() and stream()
-            // We use stream() ONLY if on_token is present AND this is likely a generation step
-            // But we don't know if it's a tool call step or generation step until we get the response.
-            // So we must use stream() if on_token is provided, and handle re-construction.
-
-            let response = if let Some(callback) = &on_token {
+            let mut response = if let Some(callback) = &on_token {
                 let stream = self.llm_repository.stream(request).await?;
                 use futures::StreamExt;
                 // Pin stream
@@ -118,11 +121,9 @@ impl AgentService {
                                                 ),
                                             )
                                         });
-                                    // If ID arrives in first chunk (it should), but just in case logic updates
                                     if !tc.id.is_empty() && entry.id.is_empty() {
                                         entry.id = tc.id.clone();
                                     }
-                                    // If name arrives in chunks, append it (usually name is in first chunk but ensuring)
                                     if !tc.name.is_empty() && entry.function.name.is_empty() {
                                         entry.function.name = tc.name.clone();
                                     }
@@ -156,6 +157,13 @@ impl AgentService {
                 self.llm_repository.call(request).await?
             };
 
+            // Accumulate usage for this step
+            if let Some(usage) = response.usage() {
+                cumulative_usage.prompt_tokens += usage.prompt_tokens;
+                cumulative_usage.completion_tokens += usage.completion_tokens;
+                cumulative_usage.total_tokens += usage.total_tokens;
+            }
+
             // B. Save assistant response to memory
             self.conversation_repository
                 .add_message(thread_id, response.message().clone())
@@ -165,10 +173,17 @@ impl AgentService {
             // C. Check if LLM wants to use tools (Response might not have tool calls if streamed!)
             if let Some(tool_calls) = response.tool_calls() {
                 if tool_calls.is_empty() {
+                    response = response.with_usage(cumulative_usage);
+                    if !all_tool_calls_executed.is_empty() {
+                        response = response.with_tool_calls(all_tool_calls_executed);
+                    }
                     return Ok(response);
                 }
+                
                 // D. Execute each tool call
                 for tool_call in tool_calls {
+                    let mut executed_call = tool_call.clone();
+
                     // Notify start of execution
                     if let Some(callback) = &on_token {
                         (callback)(LlmStreamPart::ToolCallStart(tool_call.clone()));
@@ -183,6 +198,12 @@ impl AgentService {
                             error: Some(e.to_string()),
                         },
                     };
+
+                    // Populate tool call output tracker
+                    let parsed_output = serde_json::from_str::<serde_json::Value>(&result.output)
+                        .unwrap_or_else(|_| serde_json::Value::String(result.output.clone()));
+                    executed_call.output = Some(parsed_output);
+                    all_tool_calls_executed.push(executed_call);
 
                     // Notify result of execution
                     if let Some(callback) = &on_token {
@@ -199,6 +220,10 @@ impl AgentService {
                 }
                 continue;
             } else {
+                response = response.with_usage(cumulative_usage);
+                if !all_tool_calls_executed.is_empty() {
+                    response = response.with_tool_calls(all_tool_calls_executed);
+                }
                 return Ok(response);
             }
         }
