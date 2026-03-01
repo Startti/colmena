@@ -202,7 +202,7 @@ impl AgentService {
                     // Populate tool call output tracker
                     let parsed_output = serde_json::from_str::<serde_json::Value>(&result.output)
                         .unwrap_or_else(|_| serde_json::Value::String(result.output.clone()));
-                    executed_call.output = Some(parsed_output);
+                    executed_call.response = Some(parsed_output);
                     all_tool_calls_executed.push(executed_call);
 
                     // Notify result of execution
