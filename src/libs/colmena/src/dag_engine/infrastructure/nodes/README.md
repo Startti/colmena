@@ -20,6 +20,12 @@ Resumen de los nodos disponibles en este directorio (`src/libs/colmena/src/dag_e
         *   Streaming de tokens (opcional).
         *   Configuración de `system_message`, temperatura, max_tokens, etc.
 
+## 📝 Extracción de Información (`extraction.rs`)
+*   **`ExtractionNode`**: Nodo para extraer información estructurada a partir de texto no estructurado.
+    *   **Identificador**: `information_extraction`.
+    *   **Funcionamiento**: Recibe un mapa de textos (`texts`) y un esquema JSON (`schema`). Utiliza un modelo de lenguaje para procesar los textos y generar una salida validada en formato JSON que coincide estrictamente con el esquema solicitado.
+    *   **Soporte Multi-Entrada**: Permite inyectar múltiples fragmentos de texto o documentos al mismo nodo definiendo variables en `texts` a través de los *edges* del DAG (ej. `node_foo.texts.doc1`, `node_foo.texts.doc2`).
+
 ## 🧮 Matemáticas (`math.rs`)
 Operaciones aritméticas básicas para manipular valores numéricos:
 *   **`AddNode`**: Suma (`a + b`).

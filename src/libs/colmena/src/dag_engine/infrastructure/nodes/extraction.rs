@@ -1,0 +1,207 @@
+use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
+use async_trait::async_trait;
+use serde_json::{json, Value};
+use std::error::Error;
+use std::sync::Arc;
+
+use crate::llm::domain::{
+    LlmConfig, LlmMessage, LlmProvider, ProviderKind, ThreadId
+};
+use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
+use crate::llm::infrastructure::LlmProviderFactory;
+use crate::llm::application::AgentService;
+
+pub struct ExtractionNode;
+
+impl ExtractionNode {
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn resolve_env_var(value: &str) -> Result<String, String> {
+        if value.starts_with("${") && value.ends_with("}") {
+            let var_name = &value[2..value.len() - 1];
+            std::env::var(var_name)
+                .map_err(|_| format!("Environment variable {} not found", var_name))
+        } else {
+            Ok(value.to_string())
+        }
+    }
+}
+
+#[async_trait]
+impl ExecutableNode for ExtractionNode {
+    async fn execute(
+        &self,
+        inputs: &NodeInputs,
+        config: &Value,
+        _state: &mut Value,
+        _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
+        
+        // --- 1. Resolve Provider Configuration ---
+        let provider_str = config.get("provider").and_then(|v| v.as_str())
+            .ok_or("Missing 'provider' in config")?;
+
+        let provider_kind = match provider_str.to_lowercase().as_str() {
+            "openai" => ProviderKind::OpenAi,
+            "gemini" => ProviderKind::Gemini,
+            "anthropic" => ProviderKind::Anthropic,
+            _ => return Err(format!("Invalid provider '{}'.", provider_str).into()),
+        };
+
+        let api_key_raw = config.get("api_key").and_then(|v| v.as_str())
+            .ok_or("Missing 'api_key' in config")?;
+        let api_key = Self::resolve_env_var(api_key_raw)?;
+
+        let model = config.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+        // --- 2. Resolve Schema & Build System Message ---
+        let schema = config.get("schema").ok_or("Missing 'schema' in config")?;
+        
+        let user_system_message = inputs.get("system_message").and_then(|v| v.as_str())
+            .or_else(|| config.get("system_message").and_then(|v| v.as_str()))
+            .unwrap_or("");
+
+        let user_system_message_section = if !user_system_message.is_empty() {
+            format!("\n\nContext/Rules for extraction:\n{}\n", user_system_message)
+        } else {
+            String::new()
+        };
+
+        let system_message = format!(
+            "You are a strict data extraction system. You must extract information from the provided texts and output ONLY valid JSON. \n{} \
+            Do NOT wrap the JSON in markdown blocks (no ```json ... ```). Output exactly the requested JSON object matching this schema:\n{}",
+            user_system_message_section,
+            serde_json::to_string_pretty(schema)?
+        );
+
+        // --- 3. Gather and Format Texts ---
+        let mut formatted_texts = String::new();
+        
+        // The DAG engine flattens input paths (e.g. from edge.to = "extract_info.texts.slack_message")
+        // So we look for any input key that starts with "texts."
+        for (key, val) in inputs {
+            if let Some(text_name) = key.strip_prefix("texts.") {
+                let text_str = match val {
+                    Value::String(s) => s.clone(),
+                    Value::Null => continue, // Ignore explicitly null values
+                    _ => val.to_string(), // Serialize objects or numbers to string
+                };
+                
+                // If it serialized a string with quotes (e.g., "Hello"), strip them
+                let clean_text = if text_str.starts_with('"') && text_str.ends_with('"') {
+                    text_str[1..text_str.len()-1].to_string()
+                } else {
+                    text_str
+                };
+
+                formatted_texts.push_str(&format!("# {}\n\n{}\n\n", text_name, clean_text));
+            }
+        }
+        
+        // Also support static config
+        if let Some(texts_obj) = config.get("texts").and_then(|v| v.as_object()) {
+            for (key, val) in texts_obj {
+                if let Some(text_str) = val.as_str() {
+                    formatted_texts.push_str(&format!("# {}\n\n{}\n\n", key, text_str));
+                }
+            }
+        }
+
+        if formatted_texts.is_empty() {
+             return Err("The 'texts' input map was empty or contained no valid strings under 'texts.*' keys".into());
+        }
+
+        println!("DEBUG: Formatted texts sent to LLM:\n{}", formatted_texts);
+
+        // --- 4. Call LLM using AgentService ---
+        let provider = LlmProvider::new(provider_kind.clone(), api_key, model)?;
+        let mut llm_config = LlmConfig::new(provider);
+        // Force low temperature for extraction
+        llm_config = llm_config.with_temperature(0.1)?;
+
+        // Setup Ephemeral Environment for LLM
+        let llm_repo = LlmProviderFactory::create(provider_kind);
+        let conversation_repo = Arc::new(InMemoryConversationRepository::new());
+        let agent_service = AgentService::new(llm_repo, conversation_repo);
+
+        let tid_val = uuid::Uuid::new_v4().to_string();
+        let tid = ThreadId(tid_val.clone());
+
+        let mut messages = Vec::new();
+        messages.push(LlmMessage::system(system_message)?);
+        messages.push(LlmMessage::user(formatted_texts)?);
+
+        // Define empty tool executor to satisfy AgentService
+        struct EmptyToolExecutor;
+        #[async_trait]
+        impl crate::llm::domain::ToolExecutor for EmptyToolExecutor {
+            async fn execute(&self, _tool_call: &crate::llm::domain::ToolCall) -> Result<crate::llm::domain::ToolResult, crate::llm::domain::LlmError> {
+                 Err(crate::llm::domain::LlmError::ToolExecutionFailed{ message: "No tools available".into() })
+            }
+            async fn available_tools(&self) -> Vec<crate::llm::domain::ToolDefinition> {
+                vec![]
+            }
+        }
+        let empty_executor = EmptyToolExecutor;
+
+        let params = crate::llm::application::AgentRunParams {
+            thread_id: &tid,
+            prompt: String::new(), // We already prepopulated messages
+            messages: Some(messages),
+            config: llm_config,
+            tools: vec![],
+            tool_executor: &empty_executor,
+            max_iterations: Some(1),
+            on_token: None,
+        };
+
+        let response = agent_service.run(params).await?;
+        let output_content = response.content();
+
+        // --- 5. Parse and Validate LLM response as JSON ---
+        // Some models still wrap in markdown despite the prompt. Try to strip it.
+        let mut clean_json_str = output_content.trim();
+        if clean_json_str.starts_with("```json") {
+             clean_json_str = clean_json_str.trim_start_matches("```json");
+        } else if clean_json_str.starts_with("```") {
+             clean_json_str = clean_json_str.trim_start_matches("```");
+        }
+        if clean_json_str.ends_with("```") {
+             clean_json_str = clean_json_str.trim_end_matches("```");
+        }
+        clean_json_str = clean_json_str.trim();
+
+        let parsed_json: Value = serde_json::from_str(clean_json_str)
+            .map_err(|e| format!("Failed to parse LLM response as JSON: {}. Raw response: {}", e, output_content))?;
+
+        Ok(json!({
+            "output": parsed_json
+        }))
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some("Extracts structured information from unstructured text based on a provided JSON schema using an LLM.")
+    }
+
+    fn schema(&self) -> Value {
+        json!({
+            "type": "information_extraction",
+            "config": {
+                "provider": "string",
+                "api_key": "string",
+                "model": "string (optional)",
+                "system_message": "string (optional)",
+                "schema": "object"
+            },
+            "inputs": {
+                "texts": "object mapping names to text strings",
+                "system_message": "string (optional)"
+            },
+            "outputs": {
+                "extracted field": "varies according to schema"
+            }
+        })
+    }
+}

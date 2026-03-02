@@ -50,6 +50,10 @@ impl HashMapNodeRegistry {
             // --- Registrar Nodos Python ---
             nodes.insert("python_script".to_string(), Arc::new(PythonNode));
 
+            // --- Registrar Nodos Extraccion ---
+            nodes.insert("information_extraction".to_string(), Arc::new(crate::dag_engine::infrastructure::nodes::extraction::ExtractionNode::new()));
+
+
             Self { nodes }
         })
     }

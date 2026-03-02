@@ -726,6 +726,42 @@ curl -X POST http://localhost:3000/test \
 }
 ```
 
+### Ejemplo 4: Extracción de Información a JSON Estructurado
+
+El nodo `information_extraction` permite tomar texto no estructurado y usar un LLM para extraer un JSON estrictamente apegado a un `schema`. Soporta múltiples entradas inyectadas dinámicamente en el objeto `texts`.
+
+```json
+{
+  "nodes": {
+    "slack_message": {
+      "type": "input",
+      "config": {
+        "data": "Hi team, let's ship the new deployment feature. The deadline for this is 15-11-2026. Juan and Maria are assigned to the backend."
+      }
+    },
+    "extract_info": {
+      "type": "information_extraction",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o",
+        "schema": {
+          "main_objective": { "type": "string", "description": "The main goal or objective mentioned" },
+          "dead_line": { "type": "string", "description": "The deadline in DD-MM-YYYY format" },
+          "people_assigned": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  },
+  "edges": [
+    {
+      "from": "slack_message.output",
+      "to": "extract_info.texts.slack_message"
+    }
+  ]
+}
+```
+
 ## 🚀 Comandos de Ejecución
 
 ### Run Mode (Local Testing)
