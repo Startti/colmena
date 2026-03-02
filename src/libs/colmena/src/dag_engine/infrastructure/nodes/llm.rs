@@ -223,19 +223,39 @@ impl ExecutableNode for LlmNode {
                                 data
                             };
 
+                            let filename = obj
+                                .get("filename")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("upload.file")
+                                .to_string();
+
                             if let Ok(bytes) = STANDARD.decode(base64_data) {
                                 resolved_files.push(crate::llm::domain::FileData {
                                     mime_type,
+                                    filename,
                                     bytes,
                                 });
                             } else {
                                 println!("WARN: Failed to decode base64 file data");
                             }
                         } else if let Some(path_str) = obj.get("path").and_then(|v| v.as_str()) {
+                            let filename = obj
+                                .get("filename")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_else(|| {
+                                    std::path::Path::new(path_str)
+                                        .file_name()
+                                        .unwrap_or_default()
+                                        .to_str()
+                                        .unwrap_or("upload.file")
+                                })
+                                .to_string();
+
                             // Read from local filesystem
                             if let Ok(bytes) = std::fs::read(path_str) {
                                 resolved_files.push(crate::llm::domain::FileData {
                                     mime_type,
+                                    filename,
                                     bytes,
                                 });
                             } else {

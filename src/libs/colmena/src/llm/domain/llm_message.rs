@@ -49,6 +49,7 @@ impl MessageRole {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileData {
     pub mime_type: String,
+    pub filename: String,
     pub bytes: Vec<u8>,
 }
 

@@ -161,11 +161,18 @@ impl OpenAiAdapter {
 
         body
     }
-}
 
-#[async_trait]
-impl LlmRepository for OpenAiAdapter {
-    async fn call(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
+    fn is_responses_api_required(&self, request: &LlmRequest) -> bool {
+        request.messages().iter().any(|msg| {
+            if let Some(files) = msg.files() {
+                files.iter().any(|f| !f.mime_type.starts_with("image/"))
+            } else {
+                false
+            }
+        })
+    }
+
+    async fn call_chat_completions(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
         let body = self.build_request_body(&request);
 
         let response = self
@@ -258,7 +265,7 @@ impl LlmRepository for OpenAiAdapter {
         Ok(response)
     }
 
-    async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
+    async fn stream_chat_completions(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
         let body = self.build_request_body(&request);
 
         let response = self
@@ -386,6 +393,29 @@ impl LlmRepository for OpenAiAdapter {
 
         Ok(Box::pin(sse_stream))
     }
+}
+
+#[async_trait]
+impl LlmRepository for OpenAiAdapter {
+    async fn call(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
+        if self.is_responses_api_required(&request) {
+            self.call_responses(request).await
+        } else {
+            self.call_chat_completions(request).await
+        }
+    }
+
+    async fn stream(
+        &self,
+        request: LlmRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, LlmError>> + Send>>, LlmError> {
+        if self.is_responses_api_required(&request) {
+            self.stream_responses(request).await
+        } else {
+            self.stream_chat_completions(request).await
+        }
+    }
+
     async fn health_check(&self) -> Result<(), LlmError> {
         let response = self
             .client
@@ -547,5 +577,180 @@ where
                 }
             }
         }
+    }
+}
+
+impl OpenAiAdapter {
+    fn build_responses_request_body(&self, request: &LlmRequest) -> serde_json::Value {
+        let mut body = json!({
+            "model": request.config().model(),
+            "input": request.messages().iter().map(|msg| {
+                let mut content_arr = vec![];
+                content_arr.push(json!({
+                    "type": "input_text",
+                    "text": msg.content()
+                }));
+
+                if let Some(files) = msg.files() {
+                    use base64::{engine::general_purpose::STANDARD, Engine as _};
+                    for file in files {
+                        let b64 = STANDARD.encode(&file.bytes);
+                        let data_uri = format!("data:{};base64,{}", file.mime_type, b64);
+                        content_arr.push(json!({
+                            "type": "input_file",
+                            "filename": file.filename,
+                            "file_data": data_uri
+                        }));
+                    }
+                }
+                
+                json!({
+                    "role": msg.role().as_str(),
+                    "content": content_arr
+                })
+            }).collect::<Vec<_>>()
+        });
+
+        if let Some(temp) = request.config().temperature() { body["temperature"] = json!(temp); }
+        if let Some(max_tokens) = request.config().max_tokens() { body["max_tokens"] = json!(max_tokens); }
+        if let Some(top_p) = request.config().top_p() { body["top_p"] = json!(top_p); }
+        
+        body
+    }
+
+    async fn call_responses(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let body = self.build_responses_request_body(&request);
+
+        let response = self
+            .client
+            .post(format!("{}/responses", self.base_url))
+            .header("Authorization", format!("Bearer {}", request.config().api_key()))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LlmError::network_error(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(LlmError::request_failed(format!("OpenAI Responses API error: {}", error_text)));
+        }
+
+        let response_text = response.text().await.map_err(|e| LlmError::parsing_error(e.to_string()))?;
+        let json_val: serde_json::Value = serde_json::from_str(&response_text).map_err(|e| LlmError::parsing_error(e.to_string()))?;
+        
+        let mut content = String::new();
+        if let Some(outputs) = json_val.get("output").and_then(|o| o.as_array()) {
+            if let Some(first) = outputs.first() {
+                if let Some(contents) = first.get("content").and_then(|c| c.as_array()) {
+                    for block in contents {
+                        if block.get("type").and_then(|t| t.as_str()) == Some("output_text") {
+                            if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                                content.push_str(t);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut usage_obj = None;
+        if let Some(usage) = json_val.get("usage") {
+            if let (Some(input), Some(output)) = (usage.get("input_tokens").and_then(|v| v.as_u64()), usage.get("output_tokens").and_then(|v| v.as_u64())) {
+                usage_obj = Some(LlmUsage::new(input as u32, output as u32));
+            }
+        }
+
+        let mut llm_response = LlmResponse::new(request.id().clone(), content, request.config().provider().clone())?;
+        if let Some(u) = usage_obj {
+            llm_response = llm_response.with_usage(u);
+        }
+
+        Ok(llm_response)
+    }
+
+    async fn stream_responses(
+        &self,
+        request: LlmRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, LlmError>> + Send>>, LlmError> {
+        let mut body = self.build_responses_request_body(&request);
+        body["stream"] = json!(true);
+
+        let response = self
+            .client
+            .post(format!("{}/responses", self.base_url))
+            .header("Authorization", format!("Bearer {}", request.config().api_key()))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LlmError::network_error(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(LlmError::request_failed(format!("OpenAI Responses API error: {}", error_text)));
+        }
+
+        let stream = response.bytes_stream();
+        let sse_parser = SseParser::new(stream);
+        let request_id = request.id().clone();
+        let provider = request.config().provider().clone();
+
+        let sse_stream = async_stream::stream! {
+            let mut parser = sse_parser;
+            while let Some(event_res) = parser.next().await {
+                match event_res {
+                    Ok(SseEvent::Message(data)) => {
+                        if data.starts_with("[DONE]") {
+                            break;
+                        }
+                        
+                        let event_json: serde_json::Value = match serde_json::from_str(&data) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+
+                        let event_type = event_json.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        
+                        if event_type == "response.output_text.delta" {
+                            if let Some(delta) = event_json.get("delta").and_then(|d| d.as_str()) {
+                                yield Ok(LlmStreamChunk::new(
+                                    request_id.clone(),
+                                    LlmStreamPart::Content(delta.to_string()),
+                                    provider.clone(),
+                                    false,
+                                ));
+                            }
+                        } else if event_type == "response.completed" {
+                            if let Some(usage) = event_json.get("response").and_then(|r| r.get("usage")) {
+                                if let (Some(input_tokens), Some(output_tokens)) = (
+                                    usage.get("input_tokens").and_then(|v| v.as_u64()),
+                                    usage.get("output_tokens").and_then(|v| v.as_u64()),
+                                ) {
+                                    yield Ok(LlmStreamChunk::new(
+                                        request_id.clone(),
+                                        LlmStreamPart::Usage(LlmUsage::new(
+                                            input_tokens as u32,
+                                            output_tokens as u32,
+                                        )),
+                                        provider.clone(),
+                                        false,
+                                    ));
+                                }
+                            }
+                            yield Ok(LlmStreamChunk::new(
+                                request_id.clone(),
+                                LlmStreamPart::Content(String::new()),
+                                provider.clone(),
+                                true,
+                            ).with_finish_reason("stop".to_string()));
+                        }
+                    }
+                    Err(e) => yield Err(e),
+                }
+            }
+        };
+
+        Ok(Box::pin(sse_stream))
     }
 }

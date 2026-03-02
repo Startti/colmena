@@ -6,7 +6,7 @@
                 "path": "/agent-demo",
                 "method": "POST",
                 "test_payload": {
-                    "question": "What is the content of this document?"
+                    "question": "What does the gentle breeze do in the poem?"
                 }
             }
         },
