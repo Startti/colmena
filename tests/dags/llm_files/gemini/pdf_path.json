@@ -6,23 +6,23 @@
                 "path": "/agent-demo",
                 "method": "POST",
                 "test_payload": {
-                    "question": "What is inside this image?"
+                    "question": "What does the gentle breeze do in the poem?"
                 }
             }
         },
         "agent_llm": {
             "type": "llm_call",
             "config": {
-                "provider": "openai",
-                "model": "gpt-4o-mini",
-                "api_key": "${OPENAI_API_KEY}",
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
+                "api_key": "${GEMINI_API_KEY}",
                 "stream": true,
                 "system_message": "You are a helpful analyst.",
                 "temperature": 0.0,
                 "files": [
                     {
-                        "mime_type": "image/png",
-                        "path": "../../../tests/dags/test_image.jpg"
+                        "mime_type": "application/pdf",
+                        "path": "../../../tests/dags/media/sample.pdf"
                     }
                 ]
             }

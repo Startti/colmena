@@ -86,3 +86,9 @@ Este proyecto no es una aplicación de Rust pura, sino una **librería de Python
 - **PyO3 es el puente**: La librería `pyo3` permite exponer las funciones de Rust a Python de una manera idiomática y eficiente.
 
 El objetivo es combinar la flexibilidad de Python con el rendimiento de Rust, delegando las tareas pesadas al código nativo compilado.
+
+### Hybrid API Routing (OpenAI)
+
+Para maximizar la compatibilidad y funcionalidad, algunos adaptadores (como OpenAI) implementan un **enrutamiento híbrido**. 
+- Las peticiones estándar de texto e imágenes se enrutan a través del endpoint `/v1/chat/completions`.
+- Las peticiones que contienen documentos complejos (como PDFs) se transforman automáticamente y se enrutan a través del nuevo endpoint `/v1/responses` (OpenAI Responses API), permitiendo un procesamiento nativo de archivos sin romper la interfaz del dominio.

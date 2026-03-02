@@ -81,7 +81,33 @@ Esta capa implementa todos los "Puertos" definidos en las capas `domain` y `appl
 - `http_request`: Realiza peticiones HTTP a APIs externas
 
 ### Nodos LLM
-- `llm_call`: Llama a modelos de lenguaje (OpenAI, Gemini, Anthropic). Soporta **Memoria** y **Function Calling** (próximamente).
+- `llm_call`: Llama a modelos de lenguaje (OpenAI, Gemini, Anthropic). Soporta **Memoria**, **Streaming** y **Visión/Documentos**.
+
+#### Visión y Soporte de Documentos
+El nodo `llm_call` permite enviar archivos (imágenes y PDFs) a los modelos que lo soportan. Puedes pasar archivos de dos formas: mediante una ruta local o mediante un string Base64.
+
+**Configuración de `files`:**
+```json
+"files": [
+  {
+    "mime_type": "application/pdf",
+    "filename": "documento.pdf",
+    "path": "ruta/al/archivo.pdf"
+  },
+  {
+    "mime_type": "image/jpeg",
+    "data": "base64_encoded_string..."
+  }
+]
+```
+
+- **`mime_type`**: Tipo MIME del archivo (ej. `image/png`, `application/pdf`).
+- **`filename`**: (Recomendado) Nombre del archivo. Requerido por algunos proveedores como OpenAI para procesar documentos PDF.
+- **`path`**: Ruta al archivo en el disco local.
+- **`data`**: Contenido del archivo codificado en Base64 (si no se usa `path`).
+
+> [!NOTE]
+> **OpenAI Dual-Routing**: Para OpenAI, el motor utiliza automáticamente el endpoint `/v1/responses` cuando se detectan documentos (PDF), permitiendo un procesamiento nativo superior a la conversión a imágenes. Las imágenes siguen usando `/v1/chat/completions`.
 
 ## 🧠 Memoria y Persistencia
 
@@ -153,13 +179,13 @@ DATABASE_URL="postgresql://postgres:password@db.xxxxx.supabase.co:5432/postgres"
 
 ### 📝 Formatos de Connection URL Soportados
 
-| Base de Datos | Formato | Ejemplo |
-|---------------|---------|---------|
-| SQLite (relativo) | `sqlite://path/to/file.db` | `sqlite://memory.db` |
-| SQLite (absoluto) | `sqlite:///absolute/path/to/file.db` | `sqlite:///var/data/memory.db` |
-| SQLite (memoria) | `sqlite::memory:` | `sqlite::memory:` |
-| PostgreSQL | `postgresql://user:pass@host:port/db` | `postgresql://postgres:pwd@localhost:5432/mydb` |
-| PostgreSQL (alternativo) | `postgres://user:pass@host:port/db` | `postgres://postgres:pwd@localhost:5432/mydb` |
+| Base de Datos            | Formato                               | Ejemplo                                         |
+| ------------------------ | ------------------------------------- | ----------------------------------------------- |
+| SQLite (relativo)        | `sqlite://path/to/file.db`            | `sqlite://memory.db`                            |
+| SQLite (absoluto)        | `sqlite:///absolute/path/to/file.db`  | `sqlite:///var/data/memory.db`                  |
+| SQLite (memoria)         | `sqlite::memory:`                     | `sqlite::memory:`                               |
+| PostgreSQL               | `postgresql://user:pass@host:port/db` | `postgresql://postgres:pwd@localhost:5432/mydb` |
+| PostgreSQL (alternativo) | `postgres://user:pass@host:port/db`   | `postgres://postgres:pwd@localhost:5432/mydb`   |
 
 ### 🎯 Uso en Nodos `llm_call`
 

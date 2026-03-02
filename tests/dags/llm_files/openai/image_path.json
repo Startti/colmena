@@ -6,7 +6,7 @@
                 "path": "/agent-demo",
                 "method": "POST",
                 "test_payload": {
-                    "question": "What does the gentle breeze do in the poem?"
+                    "question": "What is inside this image?"
                 }
             }
         },
@@ -21,8 +21,8 @@
                 "temperature": 0.0,
                 "files": [
                     {
-                        "mime_type": "application/pdf",
-                        "path": "../../../tests/dags/sample.pdf"
+                        "mime_type": "image/png",
+                        "path": "../../../tests/dags/media/test_image.jpg"
                     }
                 ]
             }

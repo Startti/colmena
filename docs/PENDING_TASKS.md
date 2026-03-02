@@ -140,6 +140,17 @@ Este documento rastrea el trabajo restante para completar la transformación del
 
 ---
 
+## ✅ Fase 9: Soporte de Visión y Documentos - COMPLETADO
+
+- [x] Soporte nativo de archivos en `LlmMessage` y `FileData`
+- [x] Implementación de **OpenAI Responses API** para procesamiento de PDFs
+- [x] Enrutamiento híbrido automático para OpenAI (Completions vs Responses)
+- [x] Soporte de `inline_data` para Gemini
+- [x] Extracción automática de metadatos (filenane) y lectura de disco local en el DAG Engine
+- [x] Documentación completa y suite de tests organizados
+
+---
+
 ## 📊 Criterios de Éxito
 
 - [ ] ✅ Los 3 proveedores (OpenAI, Anthropic, Gemini) soportan tool calling
