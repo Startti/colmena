@@ -7,6 +7,8 @@ use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
+use crate::dag_engine::domain::state::{DagRunState, DagRunStatus, DagStateRepository};
+
 /// El "Caso de Uso" que orquesta la ejecución de un grafo.
 /// Es agnóstico a la infraestructura (no sabe de dónde vienen los nodos).
 #[derive(Clone)]
@@ -14,28 +16,66 @@ pub struct DagRunUseCase {
     /// El "Puerto" inyectado que nos da acceso a las implementaciones
     /// concretas de los nodos.
     registry: Arc<dyn NodeRegistryPort>,
+    /// El repositorio opcional para persistir y recuperar el estado de ejecución del DAG.
+    state_repository: Option<Arc<dyn DagStateRepository>>,
 }
 
 impl DagRunUseCase {
     /// Constructor para inyectar las dependencias (Puertos).
-    pub fn new(registry: Arc<dyn NodeRegistryPort>) -> Self {
-        Self { registry }
+    pub fn new(
+        registry: Arc<dyn NodeRegistryPort>,
+        state_repository: Option<Arc<dyn DagStateRepository>>,
+    ) -> Self {
+        Self { registry, state_repository }
     }
 
     /// Método principal que ejecuta el grafo.
-    pub async fn execute(&self, graph: Graph) -> Result<Value, DagError> {
+    pub async fn execute(
+        &self,
+        graph: Graph,
+        resume_run_id: Option<String>,
+        resume_answer: Option<String>,
+    ) -> Result<Value, DagError> {
         // 1. Obtener el orden de ejecución y detectar ciclos.
         let execution_order = self.topological_sort(&graph)?;
 
         let mut global_state = Value::Null; // Estado global (usado en M2)
 
         // Almacén para todas las salidas de los nodos.
-        // La clave es el "node_id" (ej. "node_a"),
-        // el valor es el `Value` que ese nodo produjo.
         let mut all_outputs: HashMap<String, Value> = HashMap::new();
+
+        let run_id = if let Some(id) = resume_run_id {
+            if let Some(repo) = &self.state_repository {
+                if let Some(state) = repo.get_by_id(&id).await? {
+                    all_outputs = state.all_outputs;
+                }
+            }
+            id
+        } else {
+            uuid::Uuid::new_v4().to_string()
+        };
 
         // 2. Iterar y ejecutar cada nodo en orden.
         for node_id in &execution_order {
+            let mut should_skip = false;
+            if let Some(existing_output) = all_outputs.get(node_id) {
+                if let Some(obj) = existing_output.as_object() {
+                    if obj.get("__colmena_status").and_then(|v| v.as_str()) == Some("SUSPENDED") {
+                        should_skip = false; // We must re-run suspended nodes!
+                    } else {
+                        should_skip = true;
+                    }
+                } else {
+                    should_skip = true;
+                }
+            }
+            if should_skip {
+                continue;
+            }
+
+            // Remove the old SUSPENDED output from all_outputs if it's there
+            all_outputs.remove(node_id);
+
             let node_config = graph
                 .nodes
                 .get(node_id)
@@ -49,7 +89,12 @@ impl DagRunUseCase {
                 .ok_or_else(|| DagError::NodeTypeNotFound(node_config.node_type.clone()))?;
 
             // 4. Construir el `NodeInputs` para este nodo.
-            let inputs = self.build_inputs_for(node_id, &graph.edges, &all_outputs)?;
+            let mut inputs = self.build_inputs_for(node_id, &graph.edges, &all_outputs)?;
+
+            // Inyectar la respuesta del usuario si estamos reanudando este nodo
+            if let Some(ans) = &resume_answer {
+                inputs.insert("__colmena_resume_answer".to_string(), Value::String(ans.clone()));
+            }
 
             // 5. ¡Ejecutar la lógica del nodo!
             let output = node_impl
@@ -57,8 +102,46 @@ impl DagRunUseCase {
                 .await
                 .map_err(|e| DagError::NodeExecution(e.to_string()))?;
 
+            // Check if node initiated a SUSPEND
+            if let Some(obj) = output.as_object() {
+                if let Some(status) = obj.get("__colmena_status") {
+                    if status.as_str() == Some("SUSPENDED") {
+                        let mut final_output = output.clone();
+                        if let Some(final_obj) = final_output.as_object_mut() {
+                            final_obj.insert("run_id".to_string(), Value::String(run_id.clone()));
+                        }
+
+                        all_outputs.insert(node_id.to_string(), final_output.clone());
+                        
+                        // Save suspended state
+                        if let Some(repo) = &self.state_repository {
+                            let state = DagRunState {
+                                run_id: run_id.clone(),
+                                graph_json: serde_json::to_value(&graph).unwrap_or(Value::Null),
+                                all_outputs: all_outputs.clone(),
+                                status: DagRunStatus::Suspended,
+                            };
+                            repo.save(&state).await?;
+                        }
+                        
+                        return Ok(final_output);
+                    }
+                }
+            }
+
             // 6. Almacenar la salida del nodo para que los nodos futuros la usen.
             all_outputs.insert(node_id.to_string(), output);
+        }
+
+        // Save completed state
+        if let Some(repo) = &self.state_repository {
+            let state = DagRunState {
+                run_id: run_id.clone(),
+                graph_json: serde_json::to_value(&graph).unwrap_or(Value::Null),
+                all_outputs: all_outputs.clone(),
+                status: DagRunStatus::Completed,
+            };
+            repo.save(&state).await?;
         }
 
         // Retornar la salida del último nodo *en el orden de ejecución*.
@@ -78,6 +161,8 @@ impl DagRunUseCase {
     pub fn execute_stream(
         self,
         graph: Graph,
+        resume_run_id: Option<String>,
+        resume_answer: Option<String>,
     ) -> impl futures::Stream<
         Item = Result<crate::dag_engine::domain::events::DagExecutionEvent, DagError>,
     > {
@@ -91,8 +176,36 @@ impl DagRunUseCase {
             let mut global_state = Value::Null;
             let mut all_outputs: HashMap<String, Value> = HashMap::new();
 
+            let run_id = if let Some(id) = resume_run_id {
+                if let Some(repo) = &self.state_repository {
+                    if let Some(state) = repo.get_by_id(&id).await? {
+                        all_outputs = state.all_outputs;
+                    }
+                }
+                id
+            } else {
+                uuid::Uuid::new_v4().to_string()
+            };
+
             // 2. Iterar y ejecutar cada nodo en orden.
             for node_id in &execution_order {
+                let mut should_skip = false;
+                if let Some(existing_output) = all_outputs.get(node_id) {
+                    if let Some(obj) = existing_output.as_object() {
+                        if obj.get("__colmena_status").and_then(|v| v.as_str()) == Some("SUSPENDED") {
+                            should_skip = false; // We must re-run suspended nodes!
+                        } else {
+                            should_skip = true;
+                        }
+                    } else {
+                        should_skip = true;
+                    }
+                }
+                if should_skip {
+                    continue;
+                }
+
+                all_outputs.remove(node_id);
                 let node_config = graph
                     .nodes
                     .get(node_id)
@@ -105,7 +218,11 @@ impl DagRunUseCase {
                     .ok_or_else(|| DagError::NodeTypeNotFound(node_config.node_type.clone()))?;
 
                 // 4. Construir inputs
-                let inputs = self.build_inputs_for(node_id, &graph.edges, &all_outputs)?;
+                let mut inputs = self.build_inputs_for(node_id, &graph.edges, &all_outputs)?;
+
+                if let Some(ans) = &resume_answer {
+                    inputs.insert("__colmena_resume_answer".to_string(), Value::String(ans.clone()));
+                }
 
                 // Yield Start Event
                 yield DagExecutionEvent::NodeStart {
@@ -197,8 +314,46 @@ impl DagRunUseCase {
                     output: output.clone(),
                 };
 
+                if let Some(obj) = output.as_object() {
+                    if let Some(status) = obj.get("__colmena_status") {
+                        if status.as_str() == Some("SUSPENDED") {
+                            let mut final_output = output.clone();
+                            if let Some(final_obj) = final_output.as_object_mut() {
+                                final_obj.insert("run_id".to_string(), Value::String(run_id.clone()));
+                            }
+
+                            all_outputs.insert(node_id.to_string(), final_output.clone());
+                            
+                            // Save suspended state
+                            if let Some(repo) = &self.state_repository {
+                                let state = DagRunState {
+                                    run_id: run_id.clone(),
+                                    graph_json: serde_json::to_value(&graph).unwrap_or(Value::Null),
+                                    all_outputs: all_outputs.clone(),
+                                    status: DagRunStatus::Suspended,
+                                };
+                                repo.save(&state).await?;
+                            }
+                            
+                            yield DagExecutionEvent::GraphFinish { output: final_output };
+                            return;
+                        }
+                    }
+                }
+
                 // 6. Almacenar
                 all_outputs.insert(node_id.to_string(), output);
+            }
+
+            // Save completed state
+            if let Some(repo) = &self.state_repository {
+                let state = DagRunState {
+                    run_id: run_id.clone(),
+                    graph_json: serde_json::to_value(&graph).unwrap_or(Value::Null),
+                    all_outputs: all_outputs.clone(),
+                    status: DagRunStatus::Completed,
+                };
+                repo.save(&state).await?;
             }
 
             // Yield Graph Finish Event

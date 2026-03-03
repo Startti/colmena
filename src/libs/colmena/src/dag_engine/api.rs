@@ -15,14 +15,23 @@ use crate::dag_engine::infrastructure::registry::HashMapNodeRegistry;
 use crate::llm::infrastructure::ConversationRepositoryFactory;
 
 /// Execute a DAG from a file path
-pub async fn run_dag(file_path: String) -> Result<Value, Box<dyn std::error::Error>> {
+pub async fn run_dag(
+    file_path: String,
+    resume_id: Option<String>,
+    resume_answer: Option<String>,
+) -> Result<Value, Box<dyn std::error::Error>> {
     // Load .env file
     dotenvy::dotenv().ok();
 
-    // Initialize Repository Factory
+    // Initialize Database Pool
+    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = sqlx::PgPool::connect(&db_url).await?;
+
+    // Initialize Repository Factory and State Repo
     let repository_factory = Arc::new(ConversationRepositoryFactory::new());
+    let state_repo = Arc::new(crate::dag_engine::infrastructure::persistence::postgres_dag_state_repository::PostgresDagStateRepository::new(pool.clone()));
     let registry = HashMapNodeRegistry::new(repository_factory);
-    let run_use_case = DagRunUseCase::new(registry);
+    let run_use_case = DagRunUseCase::new(registry, Some(state_repo));
 
     // Load and execute the graph
     let file_content = tokio::fs::read_to_string(&file_path).await?;
@@ -37,7 +46,7 @@ pub async fn run_dag(file_path: String) -> Result<Value, Box<dyn std::error::Err
         use crate::dag_engine::domain::events::DagExecutionEvent;
         use futures::StreamExt;
 
-        let internal_stream = run_use_case.execute_stream(graph);
+        let internal_stream = run_use_case.execute_stream(graph, resume_id.clone(), resume_answer.clone());
         tokio::pin!(internal_stream);
 
         // 1. Send the global START part
@@ -214,7 +223,7 @@ pub async fn run_dag(file_path: String) -> Result<Value, Box<dyn std::error::Err
         Ok(final_output)
     } else {
         run_use_case
-            .execute(graph)
+            .execute(graph, resume_id, resume_answer)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     }
@@ -229,10 +238,15 @@ pub async fn serve_dag(
     // Load .env file
     dotenvy::dotenv().ok();
 
-    // Initialize Repository Factory
+    // Initialize Database Pool
+    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = sqlx::PgPool::connect(&db_url).await?;
+
+    // Initialize Repository Factory and State Repo
     let repository_factory = Arc::new(ConversationRepositoryFactory::new());
+    let state_repo = Arc::new(crate::dag_engine::infrastructure::persistence::postgres_dag_state_repository::PostgresDagStateRepository::new(pool.clone()));
     let registry = HashMapNodeRegistry::new(repository_factory);
-    let run_use_case = Arc::new(DagRunUseCase::new(registry));
+    let run_use_case = Arc::new(DagRunUseCase::new(registry, Some(state_repo)));
 
     // Load the graph
     let file_content = tokio::fs::read_to_string(&file_path).await?;
@@ -265,8 +279,16 @@ pub async fn serve_dag(
 
     if routes_count == 0 {
         eprintln!(
-            "⚠️ ALERT: No 'trigger_webhook' nodes found. The server is running but has no routes."
+            "⚠️ ALERT: No 'trigger_webhook' nodes found. The server is running but has no default routes."
         );
+    } else {
+        // Also register the resume route when serving
+        let state = AppState {
+            graph: graph_arc.clone(),
+            use_case: run_use_case.clone(),
+        };
+        println!("   └── Registering route: POST /resume (System)");
+        app = app.route("/resume", post(handler_resume).with_state(state));
     }
 
     // Start the TCP server
@@ -284,6 +306,12 @@ pub async fn serve_dag(
 struct AppState {
     graph: Arc<Graph>,
     use_case: Arc<DagRunUseCase>,
+}
+
+#[derive(serde::Deserialize)]
+struct ResumePayload {
+    run_id: String,
+    answer: String,
 }
 
 /// Handler that executes when an HTTP request arrives
@@ -332,7 +360,7 @@ async fn handler_webhook(
         use futures::StreamExt;
 
         let use_case = (*state.use_case).clone();
-        let internal_stream = use_case.execute_stream(graph_instance);
+        let internal_stream = use_case.execute_stream(graph_instance, None, None);
 
         // Wrap the internal stream to manage protocol state (text-start, text-end, [DONE])
         let protocol_stream = async_stream::stream! {
@@ -478,7 +506,7 @@ async fn handler_webhook(
         response
     } else {
         // Normal JSON execution
-        match state.use_case.execute(graph_instance).await {
+        match state.use_case.execute(graph_instance, None, None).await {
             Ok(output) => {
                 println!("✅ Execution successful.");
                 Json(output).into_response()
@@ -491,6 +519,47 @@ async fn handler_webhook(
                 )
                     .into_response()
             }
+        }
+    }
+}
+
+/// Handler that executes when a suspended DAG is resumed with human input
+async fn handler_resume(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<ResumePayload>,
+) -> axum::response::Response {
+    println!("🔔 Resume requested for run_id: {}", payload.run_id);
+    
+    // Check for "Accept: text/event-stream" or Vercel header
+    let is_sse = headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("text/event-stream"))
+        .unwrap_or(false)
+        || headers.contains_key("x-vercel-ai-ui-message-stream");
+
+    let graph_instance = (*state.graph).clone();
+
+    if is_sse {
+        // ... We could duplicate the SSE stream runner here, but for brevity in Phase 1 
+        // we'll execute the rest. Let's just do a normal execute.
+        // If SSE is truly required for resuming, we can abstract the runner.
+        eprintln!("⚠️ SSE not fully supported yet on /resume, falling back to JSON");
+    }
+
+    match state.use_case.execute(graph_instance, Some(payload.run_id), Some(payload.answer)).await {
+        Ok(output) => {
+            println!("✅ Resume successful.");
+            Json(output).into_response()
+        }
+        Err(e) => {
+            eprintln!("❌ Resume error: {}", e);
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
         }
     }
 }

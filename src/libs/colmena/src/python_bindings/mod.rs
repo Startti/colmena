@@ -278,7 +278,7 @@ fn run_dag(py: Python, file_path: String) -> PyResult<String> {
             tokio::runtime::Runtime::new().map_err(|e| DagException::new_err(e.to_string()))?;
 
         rt.block_on(async {
-            match crate::dag_engine::api::run_dag(file_path).await {
+            match crate::dag_engine::api::run_dag(file_path, None).await {
                 Ok(result) => serde_json::to_string_pretty(&result)
                     .map_err(|e| DagException::new_err(e.to_string())),
                 Err(e) => Err(DagException::new_err(e.to_string())),

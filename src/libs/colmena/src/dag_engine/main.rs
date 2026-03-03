@@ -13,6 +13,10 @@ struct Cli {
 enum Commands {
     Run {
         file_path: String,
+        #[arg(long)]
+        resume_id: Option<String>,
+        #[arg(long)]
+        answer: Option<String>,
     },
     Serve {
         file_path: String,
@@ -42,10 +46,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { file_path } => {
+        Commands::Run { file_path, resume_id, answer } => {
             println!("🚀 Modo Run: Cargando grafo desde {}", file_path);
-            println!("Ejecutando grafo...");
-            match api::run_dag(file_path).await {
+            if let Some(id) = &resume_id {
+                println!("Reanudando ejecución con ID: {}", id);
+            } else {
+                println!("Ejecutando grafo...");
+            }
+            match api::run_dag(file_path, resume_id, answer).await {
                 Ok(out) => println!("Output Final:\n{}", serde_json::to_string_pretty(&out)?),
                 Err(e) => eprintln!("❌ Error: {}", e),
             }

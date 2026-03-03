@@ -7,3 +7,4 @@ pub mod math;
 pub mod python_node;
 pub mod trigger;
 pub mod extraction;
+pub mod suspend;

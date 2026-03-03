@@ -53,6 +53,9 @@ impl HashMapNodeRegistry {
             // --- Registrar Nodos Extraccion ---
             nodes.insert("information_extraction".to_string(), Arc::new(crate::dag_engine::infrastructure::nodes::extraction::ExtractionNode::new()));
 
+            // --- Registrar Mock de Suspension ---
+            nodes.insert("suspend".to_string(), Arc::new(crate::dag_engine::infrastructure::nodes::suspend::SuspendNode));
+
 
             Self { nodes }
         })
