@@ -30,6 +30,7 @@ pub async fn run_dag(
     // Initialize Repository Factory and State Repo
     let repository_factory = Arc::new(ConversationRepositoryFactory::new());
     let state_repo = Arc::new(crate::dag_engine::infrastructure::persistence::postgres_dag_state_repository::PostgresDagStateRepository::new(pool.clone()));
+    state_repo.migrate().await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
     let registry = HashMapNodeRegistry::new(
         repository_factory,
         Some(state_repo.clone() as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),
@@ -260,6 +261,7 @@ pub async fn serve_dag(
     // Initialize Repository Factory and State Repo
     let repository_factory = Arc::new(ConversationRepositoryFactory::new());
     let state_repo = Arc::new(crate::dag_engine::infrastructure::persistence::postgres_dag_state_repository::PostgresDagStateRepository::new(pool.clone()));
+    state_repo.migrate().await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
     let registry = HashMapNodeRegistry::new(
         repository_factory,
         Some(state_repo.clone() as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),

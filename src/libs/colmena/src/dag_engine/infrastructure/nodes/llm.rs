@@ -129,21 +129,55 @@ impl ExecutableNode for LlmNode {
             .or_else(|| config.get("model").and_then(|v| v.as_str()))
             .map(|s| s.to_string());
 
-        // Prompt (If missing, we gracefully return Null, assuming this agent is bypassed by the Orchestrator this turn)
-        let prompt = match inputs.get("prompt").and_then(|v| v.as_str()).or_else(|| config.get("prompt").and_then(|v| v.as_str())) {
-            Some(p) => p,
-            None => {
-                let agent_hint = config.get("system_message")
-                    .and_then(|v| v.as_str())
-                    .map(|s| {
-                        let preview: String = s.chars().take(60).collect();
-                        if s.len() > 60 { format!("{}...", preview) } else { preview }
-                    })
-                    .unwrap_or_else(|| "(no system_message)".to_string());
-                println!("⚠️ [LlmNode] Skipped (not active this turn) — agent: \"{}\"", agent_hint);
-                return Ok(Value::Null);
+        // Prompt — accepts string OR any JSON value (arrays, objects are serialized).
+        // This allows the synthesizer to receive `final_result` (a JSON array) directly.
+        let prompt_raw_str: String;
+        let prompt: &str = {
+            let val = inputs.get("prompt").or_else(|| config.get("prompt"));
+            match val {
+                Some(Value::String(s)) if !s.is_empty() => {
+                    prompt_raw_str = s.clone();
+                    &prompt_raw_str
+                }
+                Some(Value::Null) | None => {
+                    let agent_hint = config.get("system_message")
+                        .and_then(|v| v.as_str())
+                        .map(|s| {
+                            let preview: String = s.chars().take(60).collect();
+                            if s.len() > 60 { format!("{}...", preview) } else { preview }
+                        })
+                        .unwrap_or_else(|| "(no system_message)".to_string());
+                    println!("⚠️ [LlmNode] Skipped (not active this turn) — agent: \"{}\"", agent_hint);
+                    return Ok(Value::Null);
+                }
+                Some(other) => {
+                    // JSON array / object — serialize to pretty string so the LLM can read it
+                    prompt_raw_str = serde_json::to_string_pretty(other)
+                        .unwrap_or_else(|_| other.to_string());
+                    &prompt_raw_str
+                }
             }
         };
+
+        // Optional user_request — if present, prepend it so the LLM has the original question.
+        // Useful for the synthesizer pattern:
+        //   user_request = original question from trigger
+        //   prompt       = final_result (all completed task outputs)
+        let combined_prompt_str: String;
+        let prompt: &str = {
+            let user_req = inputs.get("user_request").and_then(|v| v.as_str())
+                .or_else(|| config.get("user_request").and_then(|v| v.as_str()));
+            if let Some(req) = user_req {
+                combined_prompt_str = format!(
+                    "User Request:\n{}\n\n---\n\nAgent Results:\n{}",
+                    req, prompt
+                );
+                &combined_prompt_str
+            } else {
+                prompt
+            }
+        };
+
 
         // Verbose flag for debugging — prints prompt, system message, and raw response.
         let verbose = inputs.get("verbose").and_then(|v| v.as_bool())

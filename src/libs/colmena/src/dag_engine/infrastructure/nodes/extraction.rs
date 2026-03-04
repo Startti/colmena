@@ -215,6 +215,8 @@ impl ExecutableNode for ExtractionNode {
                             assigned_to,
                             completed: false,
                             result: None,
+                            phase: 1,
+                            parallel: false,
                         };
                         repo.add_task(&new_task).await?;
                     }

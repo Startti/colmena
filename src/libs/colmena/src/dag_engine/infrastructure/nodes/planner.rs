@@ -28,9 +28,17 @@ fn default_planner_schema() -> Value {
                 "completed": {
                     "type": "boolean",
                     "description": "Always set to false for new tasks."
+                },
+                "phase": {
+                    "type": "integer",
+                    "description": "Execution phase (starting at 1). Tasks in lower phases run first. Assign the same phase to tasks that can run simultaneously."
+                },
+                "parallel": {
+                    "type": "boolean",
+                    "description": "Set to true if this task can run at the same time as other tasks in the same phase. Set to false if it must run alone sequentially."
                 }
             },
-            "required": ["task", "assigned_to", "completed"]
+            "required": ["task", "assigned_to", "completed", "phase", "parallel"]
         }
     })
 }
@@ -41,6 +49,14 @@ You are an expert task planner. Your role is to analyze the provided input \
 and break it down into a list of clearly defined, non-overlapping tasks. \
 Each task MUST be assigned to the most appropriate specialist agent. \
 Every task MUST start with 'completed' = false. \
+\n\
+For each task you MUST also set:\
+- 'phase': an integer starting at 1. Tasks that can run independently of each other \
+  and have no dependency on other tasks should share the same phase number. \
+  Tasks that depend on the results of a previous phase should be in a higher phase.\
+- 'parallel': true if this task can safely run at the same time as other tasks \
+  in the same phase, false if it must run alone sequentially.\
+\n\
 Output ONLY valid JSON matching the schema. Do NOT include markdown or code fences.";
 
 pub struct PlannerNode {
@@ -191,9 +207,17 @@ impl ExecutableNode for PlannerNode {
                         "completed": {
                             "type": "boolean",
                             "description": "Always false for new tasks."
+                        },
+                        "phase": {
+                            "type": "integer",
+                            "description": "Execution phase (starting at 1). Tasks in lower phases run first. Assign the same phase to tasks that can run simultaneously."
+                        },
+                        "parallel": {
+                            "type": "boolean",
+                            "description": "Set to true if this task can run at the same time as other tasks in the same phase. Set to false if it must run alone sequentially."
                         }
                     },
-                    "required": ["task", "assigned_to", "completed"]
+                    "required": ["task", "assigned_to", "completed", "phase", "parallel"]
                 }
             })
         } else {

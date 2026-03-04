@@ -4,22 +4,23 @@
             "type": "input",
             "config": {
                 "data": {
-                    "prompt": "I am traveling to Aspen, Colorado for a 3-day ski trip. Please plan what I need to bring. Create one task for clothing, and one task for ski equipment."
+                    "prompt": "I am traveling to Aspen, Colorado for a 3-day ski trip. Please plan what I need to bring, and estimate a budget based on the items."
                 }
             }
         },
         "planner": {
             "type": "planner",
             "config": {
-                "provider": "openai",
-                "api_key": "${OPENAI_API_KEY}",
-                "model": "gpt-4o-mini",
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
+                "api_key": "${GEMINI_API_KEY}",
                 "verbose": true,
                 "agents": [
                     "clothing_expert",
-                    "gear_expert"
+                    "gear_expert",
+                    "budget_expert"
                 ],
-                "system_message": "Read the user's trip request and break it down into exactly the specialized tasks requested. Every task MUST have 'completed' set to false."
+                "system_message": "Read the user's trip request and break it down into tasks. Create one task for clothing_expert and one for gear_expert (these should be in phase 1, parallel=true). Then, create a third task for budget_expert that depends on the clothing and gear tasks to calculate the total cost (this MUST be in a higher phase, parallel=false)."
             }
         },
         "orchestrator_node": {
@@ -31,40 +32,76 @@
         "clothing_expert": {
             "type": "llm_call",
             "config": {
-                "provider": "openai",
-                "api_key": "${OPENAI_API_KEY}",
-                "model": "gpt-4o-mini",
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
+                "api_key": "${GEMINI_API_KEY}",
                 "verbose": true,
-                "description": "Specialist in clothing, apparel, and wearable items for any trip or activity. Handles tasks about what to wear, pack in terms of garments, footwear, and accessories.",
-                "system_message": "You are a professional clothing stylist. Recommend essential clothing items for the given trip details. Output a simple bulleted list.",
+                "description": "Specialist in clothing, apparel, and wearable items for any trip or activity.",
+                "system_message": "You are a professional clothing stylist. Recommend essential clothing items for the given trip details. Output a simple bulleted list with estimated prices.",
                 "write_to_memory": true
             }
         },
         "gear_expert": {
             "type": "llm_call",
             "config": {
-                "provider": "openai",
-                "api_key": "${OPENAI_API_KEY}",
-                "model": "gpt-4o-mini",
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
+                "api_key": "${GEMINI_API_KEY}",
                 "verbose": true,
-                "description": "Specialist in equipment, tools, and sports gear. Handles tasks about physical equipment, technical gear, and any non-clothing items needed for an activity.",
-                "system_message": "You are a professional ski equipment outfitter. Recommend essential gear items for the given trip details. Output a simple bulleted list.",
+                "description": "Specialist in equipment, tools, and sports gear for activities.",
+                "system_message": "You are a professional ski equipment outfitter. Recommend essential gear items for the given trip details. Output a simple bulleted list with estimated prices.",
+                "write_to_memory": true
+            }
+        },
+        "budget_expert": {
+            "type": "llm_call",
+            "config": {
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
+                "api_key": "${GEMINI_API_KEY}",
+                "verbose": true,
+                "description": "Specialist in finance and budget estimation. Takes lists of items and calculates a total expected cost.",
+                "system_message": "You are a travel budget estimator. Analyze the given lists of clothing and gear, and provide a clear, categorized budget estimate with a final total cost.",
                 "write_to_memory": true
             }
         },
         "critic": {
             "type": "critic",
             "config": {
-                "provider": "openai",
-                "api_key": "${OPENAI_API_KEY}",
-                "model": "gpt-4o-mini",
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
+                "api_key": "${GEMINI_API_KEY}",
                 "verbose": true,
                 "agents": [
                     "clothing_expert",
-                    "gear_expert"
+                    "gear_expert",
+                    "budget_expert"
                 ],
-                "system_message": "You are reviewing results for a ski trip packing assistant. Be strict about completeness — the user must have everything they need for 3 days in Aspen."
+                "system_message": "You are reviewing results for a ski trip packing assistant. Be strict about completeness."
             }
+        },
+        "phase_reactor": {
+            "type": "reactor",
+            "config": {
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
+                "api_key": "${GEMINI_API_KEY}",
+                "verbose": true,
+                "system_message": "You are summarizing the results of a completed phase. Combine what the specialists produced into a concise, well-organized summary. Set task_ok=true and write the summary in 'response'."
+            }
+        },
+        "final_reactor": {
+            "type": "reactor",
+            "config": {
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
+                "api_key": "${GEMINI_API_KEY}",
+                "verbose": true,
+                "system_message": "You are the final step in a ski trip planning assistant. You will receive all completed tasks, and phase summaries. Combine everything into a single, well-organized response including clothing, gear, and budget. Set task_ok=true."
+            }
+        },
+        "log_result": {
+            "type": "log"
         }
     },
     "edges": [
@@ -81,7 +118,7 @@
             "to": "clothing_expert.prompt"
         },
         {
-            "from": "orchestrator_node.output.active_task_id",
+            "from": "orchestrator_node.output.agents.clothing_expert.id",
             "to": "clothing_expert.task_id"
         },
         {
@@ -89,8 +126,16 @@
             "to": "gear_expert.prompt"
         },
         {
-            "from": "orchestrator_node.output.active_task_id",
+            "from": "orchestrator_node.output.agents.gear_expert.id",
             "to": "gear_expert.task_id"
+        },
+        {
+            "from": "orchestrator_node.output.agents.budget_expert.task",
+            "to": "budget_expert.prompt"
+        },
+        {
+            "from": "orchestrator_node.output.agents.budget_expert.id",
+            "to": "budget_expert.task_id"
         },
         {
             "from": "clothing_expert.output.content",
@@ -101,8 +146,32 @@
             "to": "critic.texts.gear_result"
         },
         {
-            "from": "orchestrator_node.output.active_task",
-            "to": "critic.texts.current_task"
+            "from": "budget_expert.output.content",
+            "to": "critic.texts.budget_result"
+        },
+        {
+            "from": "orchestrator_node.output.phase_tasks",
+            "to": "phase_reactor.texts.phase_tasks"
+        },
+        {
+            "from": "orchestrator_node.output.current_phase",
+            "to": "phase_reactor.phase"
+        },
+        {
+            "from": "orchestrator_node.output.all_tasks",
+            "to": "final_reactor.texts.agent_results"
+        },
+        {
+            "from": "orchestrator_node.output.phase_summaries",
+            "to": "final_reactor.texts.phase_summaries"
+        },
+        {
+            "from": "trigger.output.prompt",
+            "to": "final_reactor.texts.user_request"
+        },
+        {
+            "from": "final_reactor.output",
+            "to": "log_result.input"
         }
     ]
 }

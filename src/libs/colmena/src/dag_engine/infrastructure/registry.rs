@@ -74,6 +74,11 @@ impl HashMapNodeRegistry {
             // --- Registrar Critic ---
             nodes.insert("critic".to_string(), Arc::new(crate::dag_engine::infrastructure::nodes::critic::CriticNode::new()));
 
+            // --- Registrar Reactor ---
+            nodes.insert("reactor".to_string(), Arc::new(crate::dag_engine::infrastructure::nodes::reactor::ReactorNode::new(
+                Some(task_memory_repo.clone().unwrap_or_else(|| panic!("ReactorNode requires task_memory_repo")))
+            )));
+
             Self { nodes }
         })
     }

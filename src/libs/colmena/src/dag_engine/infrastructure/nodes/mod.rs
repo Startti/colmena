@@ -13,3 +13,4 @@ pub mod task_memory_writer;
 pub mod loop_controller;
 pub mod planner;
 pub mod critic;
+pub mod reactor;
