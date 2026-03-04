@@ -534,11 +534,15 @@ impl ExecutableNode for LlmNode {
             println!("═══════════════════════════════════════\n");
         }
 
-        // Format result json
-        let result_json = json!({
-            "content": response.content(),
+        // Format result json in standardized structure
+        let mut extra_info = json!({
             "usage": response.usage(),
             "tool_calls": response.tool_calls()
+        });
+
+        let result_json = json!({
+            "result": response.content(),
+            "extra_info": extra_info
         });
 
         // Check if we need to write to memory
@@ -550,6 +554,7 @@ impl ExecutableNode for LlmNode {
             if let Some(repo) = &self.task_memory_repo {
                 if let Some(task_id_val) = inputs.get("task_id").or_else(|| config.get("task_id")) {
                     if let Some(task_id) = task_id_val.as_str() {
+                        // Store the standardized result structure in the DB
                         repo.update_task_result(task_id, result_json.clone()).await?;
 
                         let run_id = _state.get("run_id").and_then(|v| v.as_str()).unwrap_or("unknown_run").to_string();
@@ -569,14 +574,17 @@ impl ExecutableNode for LlmNode {
             }
         }
 
-        // Output format
-        let mut final_output = json!({
-            "output": result_json
-        });
-
         if write_to_memory && !output_tasks.is_empty() {
-             final_output["output"]["all_tasks"] = json!(output_tasks);
+             extra_info["all_tasks"] = json!(output_tasks);
         }
+
+        // Output format
+        let final_output = json!({
+            "output": {
+                "result": response.content(),
+                "extra_info": extra_info
+            }
+        });
 
         Ok(final_output)
     }

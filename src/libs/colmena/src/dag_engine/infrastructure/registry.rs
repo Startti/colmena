@@ -1,7 +1,7 @@
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::domain::node::ExecutableNode;
 use crate::dag_engine::infrastructure::nodes::{
-    debug::*, http::*, input::*, llm::*, math::*, python_node::*, trigger::*, orchestrator::*, task_memory_writer::*
+    debug::*, http::*, input::*, llm::*, math::*, python_node::*, trigger::*, orchestrator::*, task_memory_writer::*, output::*
 }; // Importa nuestros nodos
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -26,6 +26,7 @@ impl HashMapNodeRegistry {
             // --- Registrar Nodos de Depuración ---
             nodes.insert("mock_input".to_string(), Arc::new(MockInputNode));
             nodes.insert("log".to_string(), Arc::new(LogNode));
+            nodes.insert("output".to_string(), Arc::new(OutputNode));
 
             // --- Registrar Nodos Matemáticos ---
             nodes.insert("add".to_string(), Arc::new(AddNode));

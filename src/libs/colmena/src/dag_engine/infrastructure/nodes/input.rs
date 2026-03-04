@@ -24,9 +24,7 @@ impl ExecutableNode for InputNode {
         // Fallback to static "data" for Turn 1
         let data = config.get("data").cloned().unwrap_or_else(|| json!({}));
 
-        // We'll return the whole input map as the output object
-        // so downstream nodes can access fields.
-        Ok(json!({ "output": data }))
+        Ok(json!({ "output": { "result": data, "extra_info": {} } }))
     }
 
     fn description(&self) -> Option<&str> {

@@ -35,6 +35,7 @@ impl DagRunUseCase {
         graph: Graph,
         resume_run_id: Option<String>,
         resume_answer: Option<String>,
+        include_extra_info: bool,
     ) -> Result<Value, DagError> {
         // 1. Obtener el orden de ejecución y detectar ciclos.
         let execution_order = self.topological_sort(&graph)?;
@@ -156,17 +157,64 @@ impl DagRunUseCase {
             repo.save(&state).await?;
         }
 
-        // --- IMPLICIT LOOP FINALIZATION ---
-        // Instead of returning only the last node's output, we return an aggregated map 
-        // of ALL node outputs from this execution turn.
-        // This allows the API/CLI runners to deeply inspect the entire state for 
-        // loop control flags (__colmena_loop_status, suspend, etc.) without requiring
-        // the user to build an explicit `loop_controller` node into their DAG.
         let mut final_aggregated_output = serde_json::to_value(&all_outputs).unwrap_or(Value::Null);
+        // Per-node extra_info stripping:
+        // - If CLI flag `-e` is on → keep extra_info for ALL nodes
+        // - Otherwise, only keep for nodes that have `include_extra_info: true` in their config
+        if !include_extra_info {
+            if let Some(output_map) = final_aggregated_output.as_object_mut() {
+                for (node_id, node_output) in output_map.iter_mut() {
+                    let node_wants_extra = graph
+                        .nodes
+                        .get(node_id)
+                        .and_then(|nc| nc.config.get("include_extra_info"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if !node_wants_extra {
+                        Self::strip_extra_info(node_output);
+                    }
+                }
+            }
+        }
         if let Some(obj) = final_aggregated_output.as_object_mut() {
             obj.insert("__colmena_run_id".to_string(), Value::String(run_id.clone()));
         }
         Ok(final_aggregated_output)
+    }
+
+    /// Recursively strips `extra_info` fields from the output.
+    pub fn strip_extra_info(val: &mut Value) {
+        if let Value::Object(map) = val {
+            let mut preserved_flags = std::collections::HashMap::new();
+            if let Some(Value::Object(extra)) = map.get("extra_info") {
+                if let Some(status) = extra.get("__colmena_status") {
+                    preserved_flags.insert("__colmena_status", status.clone());
+                }
+                if let Some(loop_status) = extra.get("__colmena_loop_status") {
+                    preserved_flags.insert("__colmena_loop_status", loop_status.clone());
+                }
+                if let Some(is_output_node) = extra.get("__colmena_is_output_node") {
+                    preserved_flags.insert("__colmena_is_output_node", is_output_node.clone());
+                }
+            }
+
+            if map.contains_key("extra_info") {
+                map.remove("extra_info");
+            }
+
+            for (k, v) in preserved_flags {
+                map.insert(k.to_string(), v);
+            }
+
+            // Need to collect values to iterate mutably
+            for (_, v) in map.iter_mut() {
+                Self::strip_extra_info(v);
+            }
+        } else if let Value::Array(arr) = val {
+            for item in arr.iter_mut() {
+                Self::strip_extra_info(item);
+            }
+        }
     }
 
     /// Executes the graph and streams events for each step.
@@ -175,6 +223,7 @@ impl DagRunUseCase {
         graph: Graph,
         resume_run_id: Option<String>,
         resume_answer: Option<String>,
+        include_extra_info: bool,
     ) -> impl futures::Stream<
         Item = Result<crate::dag_engine::domain::events::DagExecutionEvent, DagError>,
     > {
@@ -333,6 +382,9 @@ impl DagRunUseCase {
                     if let Some(status) = obj.get("__colmena_status") {
                         if status.as_str() == Some("SUSPENDED") {
                             let mut final_output = output.clone();
+                            if !include_extra_info {
+                                Self::strip_extra_info(&mut final_output);
+                            }
                             if let Some(final_obj) = final_output.as_object_mut() {
                                 final_obj.insert("run_id".to_string(), Value::String(run_id.clone()));
                             }
@@ -373,7 +425,22 @@ impl DagRunUseCase {
 
             // Yield Graph Finish Event
             // --- IMPLICIT LOOP FINALIZATION ---
-            let final_aggregated_output = serde_json::to_value(&all_outputs).unwrap_or(Value::Null);
+            let mut final_aggregated_output = serde_json::to_value(&all_outputs).unwrap_or(Value::Null);
+            if !include_extra_info {
+                if let Some(output_map) = final_aggregated_output.as_object_mut() {
+                    for (node_id, node_output) in output_map.iter_mut() {
+                        let node_wants_extra = graph
+                            .nodes
+                            .get(node_id)
+                            .and_then(|nc| nc.config.get("include_extra_info"))
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        if !node_wants_extra {
+                            Self::strip_extra_info(node_output);
+                        }
+                    }
+                }
+            }
 
             yield DagExecutionEvent::GraphFinish { output: final_aggregated_output };
         }

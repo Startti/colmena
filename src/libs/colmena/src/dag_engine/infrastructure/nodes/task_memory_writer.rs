@@ -83,19 +83,23 @@ impl ExecutableNode for TaskMemoryWriterNode {
                 }
             }
 
-            // Check if we need to suspend
             let suspend = inputs.get("suspend").and_then(|v| v.as_bool()).unwrap_or(false);
             if suspend {
                 return Ok(json!({
-                    "__colmena_status": "SUSPENDED",
-                    "output": "Suspended by Critic Node",
-                    "all_tasks": all_tasks_json
+                    "output": {
+                        "result": "Suspended by Critic Node",
+                        "extra_info": {
+                            "__colmena_status": "SUSPENDED",
+                            "all_tasks": all_tasks_json
+                        }
+                    }
                 }));
             }
 
             Ok(json!({
                 "output": {
-                    "all_tasks": all_tasks_json,
+                    "result": all_tasks_json,
+                    "extra_info": {}
                 }
             }))
         } else {

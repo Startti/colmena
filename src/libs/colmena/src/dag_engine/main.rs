@@ -19,6 +19,8 @@ enum Commands {
         answer: Option<String>,
         #[arg(long, default_value_t = false)]
         r#loop: bool,
+        #[arg(long, short = 'e', default_value_t = false)]
+        include_extra_info: bool,
     },
     Serve {
         file_path: String,
@@ -48,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { file_path, resume_id, answer, r#loop } => {
+        Commands::Run { file_path, resume_id, answer, r#loop, include_extra_info } => {
             println!("🚀 Modo Run: Cargando grafo desde {}", file_path);
             if let Some(id) = &resume_id {
                 println!("Reanudando ejecución con ID: {}", id);
@@ -67,8 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if r#loop {
                     println!("\n🔄 -- Turno {} --", turn_count);
                 }
-
-                match api::run_dag(file_path.clone(), current_resume_id.clone(), current_answer.clone(), inject_payload.clone()).await {
+                match api::run_dag(file_path.clone(), current_resume_id.clone(), current_answer.clone(), inject_payload.clone(), include_extra_info).await {
                     Ok(mut out) => {
                         // Check if we need to stop the loop
                         let mut should_stop_loop = !r#loop; // If not in loop mode, always break after 1 turn
@@ -87,10 +88,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             if let Some(v) = output_obj.get(key) {
                                                 return Some(v.clone());
                                             }
+                                            if let Some(extra) = output_obj.get("extra_info").and_then(|v| v.as_object()) {
+                                                if let Some(v) = extra.get(key) {
+                                                    return Some(v.clone());
+                                                }
+                                            }
+                                            if let Some(res) = output_obj.get("result").and_then(|v| v.as_object()) {
+                                                if let Some(v) = res.get(key) {
+                                                    return Some(v.clone());
+                                                }
+                                            }
                                         }
                                         // Direct check just in case
                                         if let Some(v) = child_obj.get(key) {
                                             return Some(v.clone());
+                                        }
+                                        if let Some(extra) = child_obj.get("extra_info").and_then(|v| v.as_object()) {
+                                            if let Some(v) = extra.get(key) {
+                                                return Some(v.clone());
+                                            }
                                         }
                                     }
                                 }
@@ -112,13 +128,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(loop_status_val) = find_field(obj, "__colmena_loop_status") {
                                 if loop_status_val.as_str() == Some("FINISHED") {
                                     should_stop_loop = true;
-                                    if let Some(final_result) = find_field(obj, "all_tasks") {
-                                       out = serde_json::json!({
+                                    
+                                    // If an OutputNode ran, its result is the definitive final output of the DAG
+                                    let mut output_node_result = None;
+                                    for (_node_name, node_output) in obj {
+                                        if let Some(node_output_obj) = node_output.as_object() {
+                                            if let Some(extra) = find_field(node_output_obj, "extra_info") {
+                                                if let Some(is_output) = extra.as_object().and_then(|e| e.get("__colmena_is_output_node")) {
+                                                    if is_output.as_bool() == Some(true) {
+                                                        output_node_result = find_field(node_output_obj, "result");
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    if let Some(actual_output) = output_node_result {
+                                        out = serde_json::json!({
                                             "output": {
                                                 "__colmena_loop_status": "FINISHED",
-                                                "final_result": final_result
+                                                "final_result": actual_output
                                             }
-                                       });
+                                        });
                                     }
                                 }
                             }

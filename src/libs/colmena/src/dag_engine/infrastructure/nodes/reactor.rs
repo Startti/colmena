@@ -300,12 +300,14 @@ impl ExecutableNode for ReactorNode {
 
         Ok(json!({
             "output": {
-                "task_ok":   task_ok,
-                "response":  response_text,
-                "add_tasks": add_tasks,
-                "suspend":   suspend,
-                "question":  question,
-                "__colmena_status": if suspend { "SUSPENDED" } else { "OK" }
+                "result":  response_text,
+                "extra_info": {
+                    "task_ok":   task_ok,
+                    "add_tasks": add_tasks,
+                    "suspend":   suspend,
+                    "question":  question,
+                    "__colmena_status": if suspend { "SUSPENDED" } else { "OK" }
+                }
             }
         }))
     }

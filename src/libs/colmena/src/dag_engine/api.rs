@@ -19,6 +19,7 @@ pub async fn run_dag(
     resume_id: Option<String>,
     resume_answer: Option<String>,
     inject_payload: Option<Value>,
+    include_extra_info: bool,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     // Load .env file
     dotenvy::dotenv().ok();
@@ -62,7 +63,7 @@ pub async fn run_dag(
         use crate::dag_engine::domain::events::DagExecutionEvent;
         use futures::StreamExt;
 
-        let internal_stream = run_use_case.execute_stream(graph, resume_id.clone(), resume_answer.clone());
+        let internal_stream = run_use_case.execute_stream(graph, resume_id.clone(), resume_answer.clone(), include_extra_info);
         tokio::pin!(internal_stream);
 
         // 1. Send the global START part
@@ -239,7 +240,7 @@ pub async fn run_dag(
         Ok(final_output)
     } else {
         run_use_case
-            .execute(graph, resume_id, resume_answer)
+            .execute(graph, resume_id, resume_answer, include_extra_info)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     }
@@ -408,7 +409,7 @@ async fn handler_webhook(
                     })).expect("json_data"));
                 }
 
-                let internal_stream = use_case.clone().execute_stream(current_graph.clone(), None, None);
+                let internal_stream = use_case.clone().execute_stream(current_graph.clone(), None, None, false);
                 let mut final_output_value: Option<Value> = None;
                 
                 tokio::pin!(internal_stream);
@@ -606,8 +607,7 @@ async fn handler_webhook(
             if is_loop {
                 println!("\n🔄 -- API Turno {} --", turn_count);
             }
-
-            match state.use_case.execute(graph_instance.clone(), current_resume_id.clone(), None).await {
+            match state.use_case.execute(graph_instance.clone(), current_resume_id.clone(), None, false).await {
                 Ok(mut out) => {
                     let mut should_stop_loop = !is_loop;
 
@@ -625,10 +625,25 @@ async fn handler_webhook(
                                         if let Some(v) = output_obj.get(key) {
                                             return Some(v.clone());
                                         }
+                                        if let Some(extra) = output_obj.get("extra_info").and_then(|v| v.as_object()) {
+                                            if let Some(v) = extra.get(key) {
+                                                return Some(v.clone());
+                                            }
+                                        }
+                                        if let Some(res) = output_obj.get("result").and_then(|v| v.as_object()) {
+                                            if let Some(v) = res.get(key) {
+                                                return Some(v.clone());
+                                            }
+                                        }
                                     }
                                     // Direct check just in case
                                     if let Some(v) = child_obj.get(key) {
                                         return Some(v.clone());
+                                    }
+                                    if let Some(extra) = child_obj.get("extra_info").and_then(|v| v.as_object()) {
+                                        if let Some(v) = extra.get(key) {
+                                            return Some(v.clone());
+                                        }
                                     }
                                 }
                             }
@@ -647,13 +662,29 @@ async fn handler_webhook(
                         if let Some(loop_status_val) = find_field(obj, "__colmena_loop_status") {
                             if loop_status_val.as_str() == Some("FINISHED") {
                                 should_stop_loop = true;
-                                if let Some(final_result) = find_field(obj, "all_tasks") {
-                                   out = serde_json::json!({
+                                
+                                // If an OutputNode ran, its result is the definitive final output of the DAG
+                                let mut output_node_result = None;
+                                for (_node_name, node_output) in obj {
+                                    if let Some(node_output_obj) = node_output.as_object() {
+                                        if let Some(extra) = find_field(node_output_obj, "extra_info") {
+                                            if let Some(is_output) = extra.as_object().and_then(|e| e.get("__colmena_is_output_node")) {
+                                                if is_output.as_bool() == Some(true) {
+                                                    output_node_result = find_field(node_output_obj, "result");
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                if let Some(actual_output) = output_node_result {
+                                    out = serde_json::json!({
                                         "output": {
                                             "__colmena_loop_status": "FINISHED",
-                                            "final_result": final_result
+                                            "final_result": actual_output
                                         }
-                                   });
+                                    });
                                 }
                             }
                         }
@@ -723,7 +754,7 @@ async fn handler_resume(
         eprintln!("⚠️ SSE not fully supported yet on /resume, falling back to JSON");
     }
 
-    match state.use_case.execute(graph_instance, Some(payload.run_id), Some(payload.answer)).await {
+    match state.use_case.execute(graph_instance, Some(payload.run_id), Some(payload.answer), false).await {
         Ok(output) => {
             println!("✅ Resume successful.");
             Json(output).into_response()

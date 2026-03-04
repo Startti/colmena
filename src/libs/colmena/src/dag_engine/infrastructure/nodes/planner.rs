@@ -347,7 +347,12 @@ impl ExecutableNode for PlannerNode {
         // Wrap in `items` to match what the OrchestratorNode expects (it checks plan.items or plan array)
         Ok(json!({
             "output": {
-                "items": parsed
+                "result": {
+                    "items": parsed
+                },
+                "extra_info": {
+                    "raw_response": raw
+                }
             }
         }))
     }

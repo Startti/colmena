@@ -21,7 +21,7 @@ impl ExecutableNode for LogNode {
         println!("[LogNode]: {}", serde_json::to_string_pretty(&input_val)?);
 
         // También envuelve su salida para ser consistente
-        Ok(json!({ "output": input_val }))
+        Ok(json!({ "output": { "result": input_val, "extra_info": {} } }))
     }
     fn description(&self) -> Option<&str> {
         Some("Log data to console for debugging. Useful for inspecting intermediate values in the flow.")
