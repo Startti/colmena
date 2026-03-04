@@ -11,11 +11,13 @@ use crate::llm::infrastructure::persistence::in_memory_conversation_repository::
 use crate::llm::infrastructure::LlmProviderFactory;
 use crate::llm::application::AgentService;
 
-pub struct ExtractionNode;
+pub struct ExtractionNode {
+    task_memory_repo: Option<Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>>,
+}
 
 impl ExtractionNode {
-    pub fn new() -> Self {
-        Self
+    pub fn new(task_memory_repo: Option<Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>>) -> Self {
+        Self { task_memory_repo }
     }
 
     fn resolve_env_var(value: &str) -> Result<String, String> {
@@ -55,6 +57,9 @@ impl ExecutableNode for ExtractionNode {
         let api_key = Self::resolve_env_var(api_key_raw)?;
 
         let model = config.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+        // Verbose flag for debugging.
+        let verbose = config.get("verbose").and_then(|v| v.as_bool()).unwrap_or(false);
 
         // --- 2. Resolve Schema & Build System Message ---
         let schema = config.get("schema").ok_or("Missing 'schema' in config")?;
@@ -110,10 +115,19 @@ impl ExecutableNode for ExtractionNode {
         }
 
         if formatted_texts.is_empty() {
-             return Err("The 'texts' input map was empty or contained no valid strings under 'texts.*' keys".into());
+             println!("⚠️ [ExtractionNode] Skipped execution because 'texts' input was missing or empty.");
+             return Ok(Value::Null);
         }
 
-        println!("DEBUG: Formatted texts sent to LLM:\n{}", formatted_texts);
+        if verbose {
+            println!("\n═══════════════════════════════════════");
+            println!("🔍 [ExtractionNode] VERBOSE — System Prompt:");
+            println!("───────────────────────────────────────");
+            println!("{}", system_message);
+            println!("───────────────────────────────────────");
+            println!("Texts:\n{}", formatted_texts);
+            println!("═══════════════════════════════════════\n");
+        }
 
         // --- 4. Call LLM using AgentService ---
         let provider = LlmProvider::new(provider_kind.clone(), api_key, model)?;
@@ -175,6 +189,71 @@ impl ExecutableNode for ExtractionNode {
 
         let parsed_json: Value = serde_json::from_str(clean_json_str)
             .map_err(|e| format!("Failed to parse LLM response as JSON: {}. Raw response: {}", e, output_content))?;
+
+        if verbose {
+            println!("\n═══════════════════════════════════════");
+            println!("🔍 [ExtractionNode] VERBOSE — Parsed Output:");
+            println!("───────────────────────────────────────");
+            println!("{}", serde_json::to_string_pretty(&parsed_json).unwrap_or_default());
+            println!("═══════════════════════════════════════\n");
+        }
+
+        let run_id = _state.get("run_id").and_then(|v| v.as_str()).unwrap_or("unknown_run").to_string();
+
+        if let Some(repo) = &self.task_memory_repo {
+            // Process Critic modifications (Add tasks)
+            if let Some(add_array) = parsed_json.get("add_tasks").and_then(|v| v.as_array()) {
+                for task_val in add_array {
+                    if let Some(task_obj) = task_val.as_object() {
+                        let task_name = task_obj.get("task").and_then(|v| v.as_str()).unwrap_or("Unknown").to_string();
+                        let assigned_to = task_obj.get("assigned_to").and_then(|v| v.as_str()).unwrap_or("Unknown").to_string();
+                        
+                        let new_task = crate::dag_engine::domain::state::DagTask {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            run_id: run_id.clone(),
+                            task_name,
+                            assigned_to,
+                            completed: false,
+                            result: None,
+                        };
+                        repo.add_task(&new_task).await?;
+                    }
+                }
+            }
+
+            // Process Critic modifications (Delete tasks)
+            if let Some(delete_array) = parsed_json.get("delete_tasks").and_then(|v| v.as_array()) {
+                for id_val in delete_array {
+                    if let Some(id_str) = id_val.as_str() {
+                        let _ = repo.delete_task(id_str).await;
+                    }
+                }
+            }
+            
+            // Generate updated tasks list for next nodes
+            let mut all_tasks_json = Vec::new();
+            if let Ok(tasks) = repo.get_tasks_for_run(&run_id).await {
+                for t in tasks {
+                    all_tasks_json.push(json!({
+                        "id": t.id,
+                        "task_name": t.task_name,
+                        "assigned_to": t.assigned_to,
+                        "completed": t.completed,
+                        "result": t.result
+                    }));
+                }
+            }
+
+            // Check if we need to suspend
+            let suspend = parsed_json.get("suspend").and_then(|v| v.as_bool()).unwrap_or(false);
+            if suspend {
+                return Ok(json!({
+                    "__colmena_status": "SUSPENDED",
+                    "output": parsed_json,
+                    "all_tasks": all_tasks_json
+                }));
+            }
+        }
 
         Ok(json!({
             "output": parsed_json

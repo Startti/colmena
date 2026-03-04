@@ -1,7 +1,7 @@
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::domain::node::ExecutableNode;
 use crate::dag_engine::infrastructure::nodes::{
-    debug::*, http::*, input::*, llm::*, math::*, python_node::*, trigger::*,
+    debug::*, http::*, input::*, llm::*, math::*, python_node::*, trigger::*, orchestrator::*, task_memory_writer::*
 }; // Importa nuestros nodos
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -16,7 +16,10 @@ use crate::llm::infrastructure::ConversationRepositoryFactory;
 
 impl HashMapNodeRegistry {
     /// Construye un nuevo registro e inicializa todos los nodos estándar.
-    pub fn new(repository_factory: Arc<ConversationRepositoryFactory>) -> Arc<Self> {
+    pub fn new(
+        repository_factory: Arc<ConversationRepositoryFactory>,
+        task_memory_repo: Option<Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>>,
+    ) -> Arc<Self> {
         Arc::new_cyclic(|weak_self| {
             let mut nodes: HashMap<String, Arc<dyn ExecutableNode>> = HashMap::new();
 
@@ -44,18 +47,32 @@ impl HashMapNodeRegistry {
             let registry_weak = weak_self.clone() as Weak<dyn NodeRegistryPort>;
             nodes.insert(
                 "llm_call".to_string(),
-                Arc::new(LlmNode::new(repository_factory.clone(), registry_weak)),
+                Arc::new(LlmNode::new(repository_factory.clone(), registry_weak, task_memory_repo.clone())),
             );
 
             // --- Registrar Nodos Python ---
             nodes.insert("python_script".to_string(), Arc::new(PythonNode));
 
             // --- Registrar Nodos Extraccion ---
-            nodes.insert("information_extraction".to_string(), Arc::new(crate::dag_engine::infrastructure::nodes::extraction::ExtractionNode::new()));
+            nodes.insert("information_extraction".to_string(), Arc::new(crate::dag_engine::infrastructure::nodes::extraction::ExtractionNode::new(task_memory_repo.clone())));
 
             // --- Registrar Mock de Suspension ---
             nodes.insert("suspend".to_string(), Arc::new(crate::dag_engine::infrastructure::nodes::suspend::SuspendNode));
 
+            // --- Registrar Loop Controller ---
+            nodes.insert("loop_controller".to_string(), Arc::new(crate::dag_engine::infrastructure::nodes::loop_controller::LoopControllerNode::new()));
+
+            // --- Registrar Orchestrator ---
+            nodes.insert("orchestrator".to_string(), Arc::new(OrchestratorNode::new(task_memory_repo.clone())));
+            
+            // --- Registrar Task Memory Writer ---
+            nodes.insert("task_memory_writer".to_string(), Arc::new(TaskMemoryWriterNode::new(task_memory_repo.clone())));
+
+            // --- Registrar Planner ---
+            nodes.insert("planner".to_string(), Arc::new(crate::dag_engine::infrastructure::nodes::planner::PlannerNode::new(task_memory_repo.clone())));
+
+            // --- Registrar Critic ---
+            nodes.insert("critic".to_string(), Arc::new(crate::dag_engine::infrastructure::nodes::critic::CriticNode::new()));
 
             Self { nodes }
         })

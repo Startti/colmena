@@ -1,0 +1,127 @@
+{
+    "nodes": {
+        "trigger": {
+            "type": "input",
+            "config": {
+                "data": {
+                    "prompt": "I am traveling to Aspen, Colorado for a 3-day ski trip. Please plan what I need to bring. Create one task for clothing, and one task for ski equipment."
+                }
+            }
+        },
+        "planner": {
+            "type": "information_extraction",
+            "config": {
+                "provider": "openai",
+                "api_key": "${OPENAI_API_KEY}",
+                "model": "gpt-4o-mini",
+                "system_message": "Read the user's trip request and break it down into exactly the specialized tasks requested. Every task MUST have 'completed' set to false. Assign tasks exactly to either 'clothing_expert' or 'gear_expert'.",
+                "schema": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "task": {
+                                "type": "string"
+                            },
+                            "assigned_to": {
+                                "type": "string",
+                                "enum": [
+                                    "clothing_expert",
+                                    "gear_expert"
+                                ]
+                            },
+                            "completed": {
+                                "type": "boolean"
+                            }
+                        },
+                        "required": [
+                            "task",
+                            "assigned_to",
+                            "completed"
+                        ]
+                    }
+                }
+            }
+        },
+        "state_merger": {
+            "type": "python_script",
+            "config": {
+                "code": "try:\n    inj = injected_plan\nexcept NameError:\n    inj = None\n\ntry:\n    llm = llm_plan['output']\nexcept (NameError, TypeError, KeyError):\n    llm = None\n\noutput = inj if inj else llm"
+            }
+        },
+        "orchestrator_node": {
+            "type": "orchestrator",
+            "config": {}
+        },
+        "clothing_expert": {
+            "type": "llm_call",
+            "config": {
+                "provider": "openai",
+                "api_key": "${OPENAI_API_KEY}",
+                "model": "gpt-4o-mini",
+                "system_message": "You are a professional clothing stylist. Recommend essential clothing items for the given trip details. Output a simple bulleted list."
+            }
+        },
+        "gear_expert": {
+            "type": "llm_call",
+            "config": {
+                "provider": "openai",
+                "api_key": "${OPENAI_API_KEY}",
+                "model": "gpt-4o-mini",
+                "system_message": "You are a professional ski equipment outfitter. Recommend essential gear items for the given trip details. Output a simple bulleted list."
+            }
+        },
+        "finalizer": {
+            "type": "python_script",
+            "config": {
+                "code": "try:\n    c_res = c_res\nexcept NameError:\n    c_res = None\n\ntry:\n    g_res = g_res\nexcept NameError:\n    g_res = None\n\nif c_res:\n    print('\\n👕 CLOTHING EXPERT SAYS:\\n', c_res)\nif g_res:\n    print('\\n🎿 GEAR EXPERT SAYS:\\n', g_res)\n\noutput = {'__colmena_loop_status': status, 'plan': plan, 'prompt': prompt_str}"
+            }
+        }
+    },
+    "edges": [
+        {
+            "from": "trigger.output.prompt",
+            "to": "planner.texts.request"
+        },
+        {
+            "from": "trigger.output.plan",
+            "to": "state_merger.injected_plan"
+        },
+        {
+            "from": "planner.output",
+            "to": "state_merger.llm_plan"
+        },
+        {
+            "from": "state_merger.output",
+            "to": "orchestrator_node.plan"
+        },
+        {
+            "from": "orchestrator_node.output.agents.clothing_expert.task",
+            "to": "clothing_expert.prompt"
+        },
+        {
+            "from": "orchestrator_node.output.agents.gear_expert.task",
+            "to": "gear_expert.prompt"
+        },
+        {
+            "from": "orchestrator_node.output.__colmena_loop_status",
+            "to": "finalizer.status"
+        },
+        {
+            "from": "orchestrator_node.output.plan",
+            "to": "finalizer.plan"
+        },
+        {
+            "from": "trigger.output.prompt",
+            "to": "finalizer.prompt_str"
+        },
+        {
+            "from": "clothing_expert.output",
+            "to": "finalizer.c_res"
+        },
+        {
+            "from": "gear_expert.output",
+            "to": "finalizer.g_res"
+        }
+    ]
+}

@@ -39,21 +39,33 @@ impl DagRunUseCase {
         // 1. Obtener el orden de ejecución y detectar ciclos.
         let execution_order = self.topological_sort(&graph)?;
 
-        let mut global_state = Value::Null; // Estado global (usado en M2)
-
         // Almacén para todas las salidas de los nodos.
         let mut all_outputs: HashMap<String, Value> = HashMap::new();
 
         let run_id = if let Some(id) = resume_run_id {
-            if let Some(repo) = &self.state_repository {
-                if let Some(state) = repo.get_by_id(&id).await? {
-                    all_outputs = state.all_outputs;
-                }
-            }
+            // For loop continuity: we reuse the provided run_id so the Orchestrator
+            // reads the correct Postgres task queue. We do NOT restore all_outputs from
+            // state here — each turn must execute all nodes fresh, with the Orchestrator
+            // reading the task queue state from Postgres directly.
+            // (Restoring all_outputs is only appropriate for SUSPENDED resume, handled below.)
             id
         } else {
             uuid::Uuid::new_v4().to_string()
         };
+
+        let mut global_state = serde_json::json!({
+            "run_id": run_id
+        });
+
+        // Inject all node configs into global_state so nodes (e.g. PlannerNode, CriticNode)
+        // can look up sibling node metadata (like "description") by node ID at runtime.
+        {
+            let mut graph_nodes_meta = serde_json::Map::new();
+            for (node_id, node) in &graph.nodes {
+                graph_nodes_meta.insert(node_id.clone(), node.config.clone());
+            }
+            global_state["__graph_nodes"] = Value::Object(graph_nodes_meta);
+        }
 
         // 2. Iterar y ejecutar cada nodo en orden.
         for node_id in &execution_order {
@@ -144,17 +156,17 @@ impl DagRunUseCase {
             repo.save(&state).await?;
         }
 
-        // Retornar la salida del último nodo *en el orden de ejecución*.
-        if let Some(last_node_id) = execution_order.last() {
-            // Obtiene la salida del último nodo (ej. "log_step") del mapa
-            Ok(all_outputs
-                .get(last_node_id)
-                .cloned()
-                .unwrap_or(Value::Null))
-        } else {
-            // El grafo estaba vacío
-            Ok(Value::Null)
+        // --- IMPLICIT LOOP FINALIZATION ---
+        // Instead of returning only the last node's output, we return an aggregated map 
+        // of ALL node outputs from this execution turn.
+        // This allows the API/CLI runners to deeply inspect the entire state for 
+        // loop control flags (__colmena_loop_status, suspend, etc.) without requiring
+        // the user to build an explicit `loop_controller` node into their DAG.
+        let mut final_aggregated_output = serde_json::to_value(&all_outputs).unwrap_or(Value::Null);
+        if let Some(obj) = final_aggregated_output.as_object_mut() {
+            obj.insert("__colmena_run_id".to_string(), Value::String(run_id.clone()));
         }
+        Ok(final_aggregated_output)
     }
 
     /// Executes the graph and streams events for each step.
@@ -173,7 +185,6 @@ impl DagRunUseCase {
             // 1. Obtener el orden de ejecución y detectar ciclos.
             let execution_order = self.topological_sort(&graph)?;
 
-            let mut global_state = Value::Null;
             let mut all_outputs: HashMap<String, Value> = HashMap::new();
 
             let run_id = if let Some(id) = resume_run_id {
@@ -186,6 +197,10 @@ impl DagRunUseCase {
             } else {
                 uuid::Uuid::new_v4().to_string()
             };
+
+            let mut global_state = serde_json::json!({
+                "run_id": run_id
+            });
 
             // 2. Iterar y ejecutar cada nodo en orden.
             for node_id in &execution_order {
@@ -357,16 +372,10 @@ impl DagRunUseCase {
             }
 
             // Yield Graph Finish Event
-            let final_output = if let Some(last_node_id) = execution_order.last() {
-                all_outputs
-                    .get(last_node_id)
-                    .cloned()
-                    .unwrap_or(Value::Null)
-            } else {
-                Value::Null
-            };
+            // --- IMPLICIT LOOP FINALIZATION ---
+            let final_aggregated_output = serde_json::to_value(&all_outputs).unwrap_or(Value::Null);
 
-            yield DagExecutionEvent::GraphFinish { output: final_output };
+            yield DagExecutionEvent::GraphFinish { output: final_aggregated_output };
         }
     }
 

@@ -18,16 +18,19 @@ use std::sync::Weak;
 pub struct LlmNode {
     repository_factory: Arc<ConversationRepositoryFactory>,
     registry: Weak<dyn NodeRegistryPort>,
+    task_memory_repo: Option<Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>>,
 }
 
 impl LlmNode {
     pub fn new(
         repository_factory: Arc<ConversationRepositoryFactory>,
         registry: Weak<dyn NodeRegistryPort>,
+        task_memory_repo: Option<Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>>,
     ) -> Self {
         Self {
             repository_factory,
             registry,
+            task_memory_repo,
         }
     }
 
@@ -126,12 +129,26 @@ impl ExecutableNode for LlmNode {
             .or_else(|| config.get("model").and_then(|v| v.as_str()))
             .map(|s| s.to_string());
 
-        // Prompt
-        let prompt = inputs
-            .get("prompt")
-            .and_then(|v| v.as_str())
-            .or_else(|| config.get("prompt").and_then(|v| v.as_str()))
-            .ok_or("Missing 'prompt' in inputs or config")?;
+        // Prompt (If missing, we gracefully return Null, assuming this agent is bypassed by the Orchestrator this turn)
+        let prompt = match inputs.get("prompt").and_then(|v| v.as_str()).or_else(|| config.get("prompt").and_then(|v| v.as_str())) {
+            Some(p) => p,
+            None => {
+                let agent_hint = config.get("system_message")
+                    .and_then(|v| v.as_str())
+                    .map(|s| {
+                        let preview: String = s.chars().take(60).collect();
+                        if s.len() > 60 { format!("{}...", preview) } else { preview }
+                    })
+                    .unwrap_or_else(|| "(no system_message)".to_string());
+                println!("⚠️ [LlmNode] Skipped (not active this turn) — agent: \"{}\"", agent_hint);
+                return Ok(Value::Null);
+            }
+        };
+
+        // Verbose flag for debugging — prints prompt, system message, and raw response.
+        let verbose = inputs.get("verbose").and_then(|v| v.as_bool())
+            .or_else(|| config.get("verbose").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
 
         // System Message (Optional)
         let system_message = inputs
@@ -453,7 +470,7 @@ impl ExecutableNode for LlmNode {
         let params = crate::llm::application::AgentRunParams {
             thread_id: &ThreadId(tid),
             prompt: prompt.to_string(),
-            messages: Some(messages),
+            messages: Some(messages.clone()),
             config: llm_config,
             tools,
             tool_executor: &tool_executor,
@@ -461,16 +478,73 @@ impl ExecutableNode for LlmNode {
             on_token,
         };
 
+        if verbose {
+            println!("\n═══════════════════════════════════════");
+            println!("🤖 [LlmNode] VERBOSE — Request:");
+            println!("───────────────────────────────────────");
+            if let Some(sys) = system_message {
+                println!("System: {}", sys);
+                println!("───────────────────────────────────────");
+            }
+            println!("Prompt: {}", prompt);
+            println!("═══════════════════════════════════════\n");
+        }
+
         let response = agent_service.run(params).await?;
 
-        // Output format
-        Ok(json!({
-            "output": {
-                "content": response.content(),
-                "usage": response.usage(),
-                "tool_calls": response.tool_calls()
+        if verbose {
+            println!("\n═══════════════════════════════════════");
+            println!("🤖 [LlmNode] VERBOSE — Response:");
+            println!("───────────────────────────────────────");
+            println!("{}", response.content());
+            println!("═══════════════════════════════════════\n");
+        }
+
+        // Format result json
+        let result_json = json!({
+            "content": response.content(),
+            "usage": response.usage(),
+            "tool_calls": response.tool_calls()
+        });
+
+        // Check if we need to write to memory
+        let write_to_memory = inputs.get("write_to_memory").and_then(|v| v.as_bool()).or_else(|| config.get("write_to_memory").and_then(|v| v.as_bool())).unwrap_or(false);
+
+        let mut output_tasks = Vec::new();
+
+        if write_to_memory {
+            if let Some(repo) = &self.task_memory_repo {
+                if let Some(task_id_val) = inputs.get("task_id").or_else(|| config.get("task_id")) {
+                    if let Some(task_id) = task_id_val.as_str() {
+                        repo.update_task_result(task_id, result_json.clone()).await?;
+
+                        let run_id = _state.get("run_id").and_then(|v| v.as_str()).unwrap_or("unknown_run").to_string();
+                        if let Ok(tasks) = repo.get_tasks_for_run(&run_id).await {
+                            for t in tasks {
+                                output_tasks.push(json!({
+                                    "id": t.id,
+                                    "task_name": t.task_name,
+                                    "assigned_to": t.assigned_to,
+                                    "completed": t.completed,
+                                    "result": t.result
+                                }));
+                            }
+                        }
+                    }
+                }
             }
-        }))
+        }
+
+        // Output format
+        let mut final_output = json!({
+            "output": result_json
+        });
+
+        if write_to_memory && !output_tasks.is_empty() {
+             final_output["output"]["all_tasks"] = json!(output_tasks);
+        }
+
+        Ok(final_output)
     }
 
     fn description(&self) -> Option<&str> {
@@ -491,7 +565,9 @@ impl ExecutableNode for LlmNode {
                 "thread_id": "string (optional, enables memory)",
                 "connection_url": "string (optional, database connection for memory)",
                 "enabled_tools": "array of strings or '*' (optional, enables tool calling)",
-                "tool_configurations": "map<string, ToolConfiguration> (optional, partial config for tools)"
+                "tool_configurations": "map<string, ToolConfiguration> (optional, partial config for tools)",
+                "write_to_memory": "boolean (optional, if true writes output to db and returns all_tasks)",
+                "task_id": "string (optional, required if write_to_memory is true)"
             },
             "inputs": {
                 "provider": "string (optional)",

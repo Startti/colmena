@@ -1,0 +1,71 @@
+{
+    "nodes": {
+        "trigger": {
+            "type": "input",
+            "config": {
+                "data": {
+                    "plan": [
+                        {
+                            "assigned_to": "clothing_expert",
+                            "completed": false,
+                            "task": "Pack Winter Clothes"
+                        },
+                        {
+                            "assigned_to": "gear_expert",
+                            "completed": false,
+                            "task": "Pack Ski Equipment"
+                        }
+                    ]
+                }
+            }
+        },
+        "orchestrator_node": {
+            "type": "orchestrator",
+            "config": {}
+        },
+        "clothing_expert": {
+            "type": "log",
+            "config": {}
+        },
+        "gear_expert": {
+            "type": "log",
+            "config": {}
+        },
+        "finalizer": {
+            "type": "python_script",
+            "config": {
+                "code": "output = {'__colmena_loop_status': status, 'plan': plan}"
+            }
+        }
+    },
+    "edges": [
+        {
+            "from": "trigger.output.plan",
+            "to": "orchestrator_node.plan"
+        },
+        {
+            "from": "orchestrator_node.output.agents.clothing_expert",
+            "to": "clothing_expert.input"
+        },
+        {
+            "from": "orchestrator_node.output.agents.gear_expert",
+            "to": "gear_expert.input"
+        },
+        {
+            "from": "clothing_expert.output",
+            "to": "finalizer.clothing_result"
+        },
+        {
+            "from": "gear_expert.output",
+            "to": "finalizer.gear_result"
+        },
+        {
+            "from": "orchestrator_node.output.__colmena_loop_status",
+            "to": "finalizer.status"
+        },
+        {
+            "from": "orchestrator_node.output.plan",
+            "to": "finalizer.plan"
+        }
+    ]
+}

@@ -1,0 +1,108 @@
+{
+    "nodes": {
+        "trigger": {
+            "type": "input",
+            "config": {
+                "data": {
+                    "prompt": "I am traveling to Aspen, Colorado for a 3-day ski trip. Please plan what I need to bring. Create one task for clothing, and one task for ski equipment."
+                }
+            }
+        },
+        "planner": {
+            "type": "planner",
+            "config": {
+                "provider": "openai",
+                "api_key": "${OPENAI_API_KEY}",
+                "model": "gpt-4o-mini",
+                "verbose": true,
+                "agents": [
+                    "clothing_expert",
+                    "gear_expert"
+                ],
+                "system_message": "Read the user's trip request and break it down into exactly the specialized tasks requested. Every task MUST have 'completed' set to false."
+            }
+        },
+        "orchestrator_node": {
+            "type": "orchestrator",
+            "config": {
+                "verbose": true
+            }
+        },
+        "clothing_expert": {
+            "type": "llm_call",
+            "config": {
+                "provider": "openai",
+                "api_key": "${OPENAI_API_KEY}",
+                "model": "gpt-4o-mini",
+                "verbose": true,
+                "description": "Specialist in clothing, apparel, and wearable items for any trip or activity. Handles tasks about what to wear, pack in terms of garments, footwear, and accessories.",
+                "system_message": "You are a professional clothing stylist. Recommend essential clothing items for the given trip details. Output a simple bulleted list.",
+                "write_to_memory": true
+            }
+        },
+        "gear_expert": {
+            "type": "llm_call",
+            "config": {
+                "provider": "openai",
+                "api_key": "${OPENAI_API_KEY}",
+                "model": "gpt-4o-mini",
+                "verbose": true,
+                "description": "Specialist in equipment, tools, and sports gear. Handles tasks about physical equipment, technical gear, and any non-clothing items needed for an activity.",
+                "system_message": "You are a professional ski equipment outfitter. Recommend essential gear items for the given trip details. Output a simple bulleted list.",
+                "write_to_memory": true
+            }
+        },
+        "critic": {
+            "type": "critic",
+            "config": {
+                "provider": "openai",
+                "api_key": "${OPENAI_API_KEY}",
+                "model": "gpt-4o-mini",
+                "verbose": true,
+                "agents": [
+                    "clothing_expert",
+                    "gear_expert"
+                ],
+                "system_message": "You are reviewing results for a ski trip packing assistant. Be strict about completeness — the user must have everything they need for 3 days in Aspen."
+            }
+        }
+    },
+    "edges": [
+        {
+            "from": "trigger.output.prompt",
+            "to": "planner.texts.request"
+        },
+        {
+            "from": "planner.output",
+            "to": "orchestrator_node.plan"
+        },
+        {
+            "from": "orchestrator_node.output.agents.clothing_expert.task",
+            "to": "clothing_expert.prompt"
+        },
+        {
+            "from": "orchestrator_node.output.active_task_id",
+            "to": "clothing_expert.task_id"
+        },
+        {
+            "from": "orchestrator_node.output.agents.gear_expert.task",
+            "to": "gear_expert.prompt"
+        },
+        {
+            "from": "orchestrator_node.output.active_task_id",
+            "to": "gear_expert.task_id"
+        },
+        {
+            "from": "clothing_expert.output.content",
+            "to": "critic.texts.clothing_result"
+        },
+        {
+            "from": "gear_expert.output.content",
+            "to": "critic.texts.gear_result"
+        },
+        {
+            "from": "orchestrator_node.output.active_task",
+            "to": "critic.texts.current_task"
+        }
+    ]
+}

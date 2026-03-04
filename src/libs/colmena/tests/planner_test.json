@@ -1,0 +1,38 @@
+{
+    "nodes": {
+        "trigger": {
+            "type": "input",
+            "config": {
+                "data": {
+                    "prompt": "I am traveling to Aspen, Colorado for a 3-day ski trip. Please plan what I need to bring. Create one task for clothing and one task for ski equipment."
+                }
+            }
+        },
+        "planner": {
+            "type": "planner",
+            "config": {
+                "provider": "openai",
+                "api_key": "${OPENAI_API_KEY}",
+                "model": "gpt-4o-mini",
+                "verbose": true,
+                "agents": [
+                    {
+                        "name": "clothing_expert",
+                        "description": "Specialist in clothing, apparel, and wearable items for any trip or activity. Handles tasks about what to wear, pack in terms of garments, footwear, and accessories."
+                    },
+                    {
+                        "name": "gear_expert",
+                        "description": "Specialist in equipment, tools, and sports gear. Handles tasks about physical equipment, technical gear, and any non-clothing items needed for an activity."
+                    }
+                ],
+                "system_message": "Read the user's trip request and break it down into exactly the specialized tasks requested. Every task MUST have 'completed' set to false."
+            }
+        }
+    },
+    "edges": [
+        {
+            "from": "trigger.output.prompt",
+            "to": "planner.request"
+        }
+    ]
+}
