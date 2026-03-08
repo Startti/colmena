@@ -35,154 +35,159 @@ enum Commands {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
     println!("DEBUG: DATABASE_URL={:?}", std::env::var("DATABASE_URL"));
-    println!(
-        "DEBUG: AMADEUS_CLIENT_ID={:?}",
-        std::env::var("AMADEUS_CLIENT_ID")
-    );
-    println!(
-        "DEBUG: AMADEUS_CLIENT_SECRET={:?}",
-        std::env::var("AMADEUS_CLIENT_SECRET")
-    );
-    println!(
-        "DEBUG: OPENAI_API_KEY={:?}",
-        std::env::var("OPENAI_API_KEY")
-    );
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { file_path, resume_id, answer, r#loop, include_extra_info } => {
+        Commands::Run { file_path, resume_id, answer: _answer, r#loop, include_extra_info } => {
+            use colmena::dag_engine::application::run_use_case::DagRunUseCase;
+            use colmena::dag_engine::domain::events::DagExecutionEvent;
+            use colmena::dag_engine::infrastructure::registry::HashMapNodeRegistry;
+            use colmena::llm::infrastructure::ConversationRepositoryFactory;
+            use futures::StreamExt;
+            use std::sync::Arc;
+
             println!("🚀 Modo Run: Cargando grafo desde {}", file_path);
-            if let Some(id) = &resume_id {
-                println!("Reanudando ejecución con ID: {}", id);
-            } else if r#loop {
-                println!("Ejecutando grafo en modo Bucle (Iterativo)...");
+            if !r#loop {
+                println!("Ejecutando grafo en modo single-turn...");
             } else {
-                println!("Ejecutando grafo...");
+                println!("Ejecutando grafo en modo Loop (streaming protocol)...");
             }
 
-            let mut current_resume_id = resume_id.clone();
-            let mut current_answer = answer.clone();
-            let mut inject_payload = None;
-            let mut turn_count = 1;
+            // Bootstrap the engine
+            dotenvy::dotenv().ok();
+            let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+            let pool = sqlx::PgPool::connect(&db_url).await?;
+            let repository_factory = Arc::new(ConversationRepositoryFactory::new());
+            let state_repo = Arc::new(
+                colmena::dag_engine::infrastructure::persistence::postgres_dag_state_repository::PostgresDagStateRepository::new(pool.clone())
+            );
+            state_repo.migrate().await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+            let registry = HashMapNodeRegistry::new(
+                repository_factory,
+                Some(state_repo.clone() as Arc<dyn colmena::dag_engine::domain::state::DagTaskMemoryRepository>),
+            );
+            let run_use_case = DagRunUseCase::new(registry, Some(state_repo));
 
-            loop {
-                if r#loop {
-                    println!("\n🔄 -- Turno {} --", turn_count);
-                }
-                match api::run_dag(file_path.clone(), current_resume_id.clone(), current_answer.clone(), inject_payload.clone(), include_extra_info).await {
-                    Ok(mut out) => {
-                        // Check if we need to stop the loop
-                        let mut should_stop_loop = !r#loop; // If not in loop mode, always break after 1 turn
+            let file_content = tokio::fs::read_to_string(&file_path).await?;
+            let graph: colmena::dag_engine::domain::graph::Graph = serde_json::from_str(&file_content)?;
 
-                        if let Some(obj) = out.as_object() {
-                            let find_field = |o: &serde_json::Map<String, serde_json::Value>, key: &str| -> Option<serde_json::Value> {
-                                // Search root
-                                if let Some(v) = o.get(key) {
-                                    return Some(v.clone());
-                                }
-                                // Search 1 level deep (since all_outputs has node_id as first level)
-                                for (_, val) in o {
-                                    if let Some(child_obj) = val.as_object() {
-                                        // Output is mostly nested inside 'output' key
-                                        if let Some(output_obj) = child_obj.get("output").and_then(|v| v.as_object()) {
-                                            if let Some(v) = output_obj.get(key) {
-                                                return Some(v.clone());
-                                            }
-                                            if let Some(extra) = output_obj.get("extra_info").and_then(|v| v.as_object()) {
-                                                if let Some(v) = extra.get(key) {
-                                                    return Some(v.clone());
-                                                }
-                                            }
-                                            if let Some(res) = output_obj.get("result").and_then(|v| v.as_object()) {
-                                                if let Some(v) = res.get(key) {
-                                                    return Some(v.clone());
-                                                }
-                                            }
-                                        }
-                                        // Direct check just in case
-                                        if let Some(v) = child_obj.get(key) {
-                                            return Some(v.clone());
-                                        }
-                                        if let Some(extra) = child_obj.get("extra_info").and_then(|v| v.as_object()) {
-                                            if let Some(v) = extra.get(key) {
-                                                return Some(v.clone());
-                                            }
-                                        }
-                                    }
-                                }
-                                None
-                            };
+            // State for tracking open text blocks and token counts
+            let mut text_block_ids: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+            let mut total_prompt_tokens: u32 = 0;
+            let mut total_completion_tokens: u32 = 0;
 
-                            // Stop naturally if SUSPENDED
-                            if let Some(status_val) = find_field(obj, "__colmena_status") {
-                                if status_val.as_str() == Some("SUSPENDED") {
-                                    should_stop_loop = true;
-                                    println!("⏸️  Ejecución SUSPENDIDA. Esperando input humano.");
-                                    if let Some(question) = find_field(obj, "question") {
-                                        println!("❓ Pregunta: {}", question.as_str().unwrap_or(&question.to_string()));
-                                    }
-                                }
-                            }
-                            
-                            // Check explicit loop status flag from planner/orchestrator
-                            if let Some(loop_status_val) = find_field(obj, "__colmena_loop_status") {
-                                if loop_status_val.as_str() == Some("FINISHED") {
-                                    should_stop_loop = true;
-                                    
-                                    // If an OutputNode ran, its result is the definitive final output of the DAG
-                                    let mut output_node_result = None;
-                                    for (_node_name, node_output) in obj {
-                                        if let Some(node_output_obj) = node_output.as_object() {
-                                            if let Some(extra) = find_field(node_output_obj, "extra_info") {
-                                                if let Some(is_output) = extra.as_object().and_then(|e| e.get("__colmena_is_output_node")) {
-                                                    if is_output.as_bool() == Some(true) {
-                                                        output_node_result = find_field(node_output_obj, "result");
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    
-                                    if let Some(actual_output) = output_node_result {
-                                        out = serde_json::json!({
-                                            "output": {
-                                                "__colmena_loop_status": "FINISHED",
-                                                "final_result": actual_output
-                                            }
-                                        });
-                                    }
-                                }
-                            }
-                        }
+            // The new active_queue engine natively handles both linear and cyclic graphs
+            let s = run_use_case.execute_stream(graph, resume_id.clone(), None, include_extra_info);
+            let stream = Box::pin(s);
+            tokio::pin!(stream);
 
-                        if should_stop_loop {
-                            println!("Output Final:\n{}", serde_json::to_string_pretty(&out)?);
-                            break;
-                        } else {
-                            println!("Output Parcial: Volviendo a planificar el siguiente turno en background de forma nativa...");
-                            // Extract run_id from the output to reuse in the next turn.
-                            // When run_id is available, the Orchestrator reads state from Postgres
-                            // directly — no need to reinject the full payload via the InputNode.
-                            if let Some(run_id_val) = out.as_object().and_then(|o| o.get("__colmena_run_id")) {
-                                current_resume_id = run_id_val.as_str().map(|s| s.to_string());
-                                inject_payload = None; // Postgres state is the source of truth
-                            } else {
-                                // Fallback for stateless DAGs (no DB): reinject output as payload
-                                inject_payload = Some(out.clone());
-                                current_resume_id = None;
-                            }
-                            current_answer = None;
-                            turn_count += 1;
-                        }
-                    }
+            while let Some(result) = stream.next().await {
+                let event = match result {
+                    Ok(ev) => ev,
                     Err(e) => {
-                        eprintln!("❌ Error: {}", e);
-                        break;
+                        let err_msg = e.to_string();
+                        println!("data: {}\n", serde_json::json!({ "type": "error", "errorText": err_msg }));
+                        continue;
                     }
+                };
+
+                // Pre-process: open text blocks for new LLM token streams
+                match &event {
+                    DagExecutionEvent::LlmToken { node_id, .. } => {
+                        if !text_block_ids.contains_key(node_id) {
+                            let part_id = format!("txt_{}", uuid::Uuid::new_v4());
+                            println!("data: {}\n", serde_json::json!({ "type": "text-start", "id": part_id }));
+                            text_block_ids.insert(node_id.clone(), part_id);
+                        }
+                    }
+                    DagExecutionEvent::NodeFinish { node_id, .. } => {
+                        if let Some(part_id) = text_block_ids.remove(node_id) {
+                            println!("data: {}\n", serde_json::json!({ "type": "text-end", "id": part_id }));
+                        }
+                    }
+                    DagExecutionEvent::LlmUsage { prompt_tokens, completion_tokens, .. } => {
+                        total_prompt_tokens += *prompt_tokens;
+                        total_completion_tokens += *completion_tokens;
+                    }
+                    _ => {}
+                }
+
+                // Map event → Data Stream Protocol
+                let protocol_line: Option<serde_json::Value> = match &event {
+                    DagExecutionEvent::NodeStart { node_id, config, node_type, .. } => Some(serde_json::json!({
+                        "type": "node-start",
+                        "node_id": node_id,
+                        "node_type": node_type,
+                        "config": config
+                    })),
+                    DagExecutionEvent::TurnStart { turn } => {
+                        println!("🔄 [Engine] Starting Turn {}", turn);
+                        None
+                    },
+                    DagExecutionEvent::NodeFinish { node_id, output } => Some(serde_json::json!({
+                        "type": "node-end",
+                        "node_id": node_id,
+                        "output": output
+                    })),
+                    DagExecutionEvent::LlmToken { node_id, token } => {
+                        Some(serde_json::json!({ "type": "node-delta", "node_id": node_id, "delta": token }))
+                    }
+                    DagExecutionEvent::LlmUsage { prompt_tokens, completion_tokens, .. } => Some(serde_json::json!({
+                        "type": "finish-step",
+                        "finishReason": "stop",
+                        "usage": { "promptTokens": prompt_tokens, "completionTokens": completion_tokens }
+                    })),
+                    DagExecutionEvent::LlmToolCall { tool_id, args_chunk, .. } => Some(serde_json::json!({
+                        "type": "tool-input-delta",
+                        "toolCallId": tool_id,
+                        "inputTextDelta": args_chunk
+                    })),
+                    DagExecutionEvent::LlmToolCallStart { tool_id, tool_name, tool_args, .. } => Some(serde_json::json!({
+                        "type": "tool-input-available",
+                        "toolCallId": tool_id,
+                        "toolName": tool_name,
+                        "input": serde_json::from_str::<serde_json::Value>(tool_args).unwrap_or(serde_json::Value::String(tool_args.clone()))
+                    })),
+                    DagExecutionEvent::LlmToolCallFinish { tool_id, output, .. } => Some(serde_json::json!({
+                        "type": "tool-output-available",
+                        "toolCallId": tool_id,
+                        "output": serde_json::from_str::<serde_json::Value>(output).unwrap_or(serde_json::Value::String(output.clone()))
+                    })),
+                    DagExecutionEvent::GraphFinish { .. } if !r#loop => Some(serde_json::json!({
+                        "type": "finish",
+                        "finishReason": "stop",
+                        "usage": { "promptTokens": total_prompt_tokens, "completionTokens": total_completion_tokens }
+                    })),
+                    DagExecutionEvent::LoopFinished { output } => {
+                        // Emit the final output as a data part, then close
+                        println!("data: {}\n", serde_json::json!({
+                            "type": "data-final-output",
+                            "data": output
+                        }));
+                        Some(serde_json::json!({
+                            "type": "finish",
+                            "finishReason": "stop",
+                            "usage": { "promptTokens": total_prompt_tokens, "completionTokens": total_completion_tokens }
+                        }))
+                    }
+                    DagExecutionEvent::Error { message } => Some(serde_json::json!({
+                        "type": "error", "errorText": message
+                    })),
+                    _ => None,
+                };
+
+                if let Some(line) = protocol_line {
+                    println!("data: {}\n", line);
                 }
             }
+
+            // Close any remaining open text blocks
+            for (_, part_id) in text_block_ids {
+                println!("data: {}\n", serde_json::json!({ "type": "text-end", "id": part_id }));
+            }
+            println!("data: [DONE]\n");
         }
+
         Commands::Serve {
             file_path,
             host,

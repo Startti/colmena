@@ -44,6 +44,26 @@ pub struct DagRunState {
     pub graph_json: Value,
     pub all_outputs: HashMap<String, Value>,
     pub status: DagRunStatus,
+    
+    /// Global shared state acting as a persistent whiteboard for all nodes
+    #[serde(default)]
+    pub global_shared_state: Value,
+    
+    /// The current execution queue. When suspending, this captures what is left to run.
+    #[serde(default)]
+    pub active_queue: std::collections::VecDeque<String>,
+    
+    /// Sequence of executed nodes as (CallerId, TargetId) 
+    #[serde(default)]
+    pub execution_history: Vec<(String, String)>,
+    
+    /// Total execution count per node
+    #[serde(default)]
+    pub global_calls: HashMap<String, u32>,
+    
+    /// Caller-specific execution count matrix: caller_id -> target_id -> count
+    #[serde(default)]
+    pub caller_specific_calls: HashMap<String, HashMap<String, u32>>,
 }
 
 #[async_trait]

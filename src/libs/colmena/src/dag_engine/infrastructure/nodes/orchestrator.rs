@@ -38,7 +38,7 @@ impl ExecutableNode for OrchestratorNode {
             let existing_tasks = repo.get_tasks_for_run(&run_id).await?;
 
             if existing_tasks.is_empty() {
-                if let Some(plan_val) = inputs.get("plan").or_else(|| config.get("plan")) {
+                if let Some(plan_val) = _state.get("plan").or_else(|| inputs.get("plan")).or_else(|| config.get("plan")) {
                     let plan_array_opt = plan_val.as_array()
                         .or_else(|| plan_val.get("items").and_then(|i| i.as_array()));
 
@@ -146,8 +146,6 @@ impl ExecutableNode for OrchestratorNode {
                     let mut first_task_json = None;
 
                     for task in &tasks_to_dispatch {
-                        repo.update_task_result(&task.id, json!({"status": "dispatched"})).await?;
-
                         agents_map.insert(task.assigned_to.clone(), json!({
                             "task": task.task_name,
                             "id":   task.id
@@ -159,7 +157,7 @@ impl ExecutableNode for OrchestratorNode {
                                 "id":          task.id,
                                 "task":        task.task_name,
                                 "assigned_to": task.assigned_to,
-                                "completed":   true,
+                                "completed":   task.completed,
                                 "phase":       task.phase,
                                 "parallel":    task.parallel
                             }));
@@ -182,12 +180,14 @@ impl ExecutableNode for OrchestratorNode {
                         // (Agents run, write results, then next turn we detect phase complete.)
                     }
 
+                    // Omit all_tasks from the general turn output so the final_reactor is not queued early
                     Ok(json!({
                         "output": {
-                            "result": Value::Object(agents_map),
+                            "result": { 
+                                "dispatched_agents": Value::Object(agents_map)
+                            },
                             "extra_info": {
                                 "__colmena_loop_status": "NEXT_TURN",
-                                "current_phase": current_phase,
                                 "active_task_id": first_task_id,
                                 "active_task": first_task_json
                             }
@@ -222,9 +222,13 @@ impl ExecutableNode for OrchestratorNode {
                     }) {
                         let agent = task.get("assigned_to").and_then(|v| v.as_str()).unwrap_or("unknown");
                         println!("🚦 [OrchestratorNode] Routing task to agent: '{}'", agent);
+                        
                         return Ok(json!({
                             "output": {
-                                "result": { agent: { "task": task.get("task") } },
+                                "result": { 
+                                    "dispatched_agents": { agent: { "task": task.get("task") } },
+                                    "all_tasks": plan_array
+                                },
                                 "extra_info": {
                                     "__colmena_loop_status": "NEXT_TURN",
                                     "active_task": task

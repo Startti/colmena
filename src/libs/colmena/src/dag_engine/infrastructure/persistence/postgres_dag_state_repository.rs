@@ -97,6 +97,11 @@ impl DagStateRepository for PostgresDagStateRepository {
                     graph_json: row.get("graph_json"),
                     all_outputs,
                     status,
+                    global_shared_state: serde_json::Value::Null,
+                    active_queue: std::collections::VecDeque::new(),
+                    execution_history: Vec::new(),
+                    global_calls: HashMap::new(),
+                    caller_specific_calls: HashMap::new(),
                 }))
             }
             None => Ok(None),

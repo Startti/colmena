@@ -27,7 +27,7 @@
             "type": "orchestrator",
             "config": {
                 "verbose": false,
-                "include_extra_info": true
+                "include_extra_info": false
             }
         },
         "clothing_expert": {
@@ -38,8 +38,9 @@
                 "api_key": "${GEMINI_API_KEY}",
                 "verbose": false,
                 "description": "Specialist in clothing, apparel, and wearable items for any trip or activity.",
-                "system_message": "You are a professional clothing stylist. Recommend essential clothing items for the given trip details. Output a simple bulleted list with estimated prices.",
-                "write_to_memory": true
+                "system_message": "You are a professional clothing stylist. Recommend exactly 1 to 2 essential clothing items for the given trip details. Output a very short bulleted list (max 2 items) with estimated prices. Be brief.",
+                "write_to_memory": true,
+                "stream": false
             }
         },
         "gear_expert": {
@@ -50,8 +51,9 @@
                 "api_key": "${GEMINI_API_KEY}",
                 "verbose": false,
                 "description": "Specialist in equipment, tools, and sports gear for activities.",
-                "system_message": "You are a professional ski equipment outfitter. Recommend essential gear items for the given trip details. Output a simple bulleted list with estimated prices.",
-                "write_to_memory": true
+                "system_message": "You are a professional ski equipment outfitter. Recommend exactly 1 to 2 essential gear items for the given trip details. Output a very short bulleted list (max 2 items) with estimated prices. Be brief.",
+                "write_to_memory": true,
+                "stream": false
             }
         },
         "budget_expert": {
@@ -62,8 +64,9 @@
                 "api_key": "${GEMINI_API_KEY}",
                 "verbose": false,
                 "description": "Specialist in finance and budget estimation. Takes lists of items and calculates a total expected cost.",
-                "system_message": "You are a travel budget estimator. Analyze the given lists of clothing and gear, and provide a clear, categorized budget estimate with a final total cost.",
-                "write_to_memory": true
+                "system_message": "You are a travel budget estimator. Analyze the given lists of clothing and gear, and provide a very brief budget estimate with a final total. Keep it to 2-3 lines maximum.",
+                "write_to_memory": true,
+                "stream": false
             }
         },
         "critic": {
@@ -73,37 +76,40 @@
                 "model": "gemini-2.5-flash",
                 "api_key": "${GEMINI_API_KEY}",
                 "verbose": false,
-                "include_extra_info": true,
+                "include_extra_info": false,
                 "agents": [
                     "clothing_expert",
                     "gear_expert",
                     "budget_expert"
                 ],
-                "system_message": "You are reviewing results for a ski trip packing assistant. Be strict about completeness."
+                "system_message": "You are reviewing results for a ski trip packing assistant. Be very brief. If the results look reasonable, set task_ok=true and add_tasks=[]. Only add 1 task at most if something critical is missing."
             }
         },
         "phase_reactor": {
             "type": "reactor",
+            "trigger_on": "FINISHED_PHASE",
             "config": {
                 "provider": "gemini",
                 "model": "gemini-2.5-flash",
                 "api_key": "${GEMINI_API_KEY}",
                 "verbose": false,
-                "system_message": "You are summarizing the results of a completed phase. Combine what the specialists produced into a concise, well-organized summary. Set task_ok=true and write the summary in 'response'."
+                "system_message": "You are summarizing the results of a completed phase. Write a single sentence summary. Set task_ok=true."
             }
         },
         "final_reactor": {
             "type": "reactor",
+            "trigger_on": "FINISHED",
             "config": {
                 "provider": "gemini",
                 "model": "gemini-2.5-flash",
                 "api_key": "${GEMINI_API_KEY}",
                 "verbose": false,
-                "system_message": "You are the final step in a ski trip planning assistant. You will receive all completed tasks, and phase summaries. Combine everything into a single, well-organized response including clothing, gear, and budget. Set task_ok=true."
+                "system_message": "You are the final step in a ski trip planning assistant. Combine everything into a 2-3 line summary covering clothing, gear, and budget. Set task_ok=true."
             }
         },
         "final_output": {
-            "type": "output"
+            "type": "output",
+            "trigger_on": "FINISHED"
         }
     },
     "edges": [
@@ -116,27 +122,27 @@
             "to": "orchestrator_node.plan"
         },
         {
-            "from": "orchestrator_node.output.result.clothing_expert.task",
+            "from": "orchestrator_node.output.result.dispatched_agents.clothing_expert.task",
             "to": "clothing_expert.prompt"
         },
         {
-            "from": "orchestrator_node.output.result.clothing_expert.id",
+            "from": "orchestrator_node.output.result.dispatched_agents.clothing_expert.id",
             "to": "clothing_expert.task_id"
         },
         {
-            "from": "orchestrator_node.output.result.gear_expert.task",
+            "from": "orchestrator_node.output.result.dispatched_agents.gear_expert.task",
             "to": "gear_expert.prompt"
         },
         {
-            "from": "orchestrator_node.output.result.gear_expert.id",
+            "from": "orchestrator_node.output.result.dispatched_agents.gear_expert.id",
             "to": "gear_expert.task_id"
         },
         {
-            "from": "orchestrator_node.output.result.budget_expert.task",
+            "from": "orchestrator_node.output.result.dispatched_agents.budget_expert.task",
             "to": "budget_expert.prompt"
         },
         {
-            "from": "orchestrator_node.output.result.budget_expert.id",
+            "from": "orchestrator_node.output.result.dispatched_agents.budget_expert.id",
             "to": "budget_expert.task_id"
         },
         {
@@ -170,6 +176,16 @@
         {
             "from": "trigger.output.result.prompt",
             "to": "final_reactor.texts.user_request"
+        },
+        {
+            "from": "phase_reactor.output.result",
+            "to": "orchestrator_node.trigger",
+            "cyclic": true
+        },
+        {
+            "from": "critic.output.result",
+            "to": "orchestrator_node.trigger",
+            "cyclic": true
         },
         {
             "from": "final_reactor.output.result",

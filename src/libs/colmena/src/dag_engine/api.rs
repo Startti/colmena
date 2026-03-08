@@ -389,11 +389,7 @@ async fn handler_webhook(
             let mut current_graph = graph_instance;
 
             loop {
-                // 1. Send the global START part for this turn
-                yield Ok::<Event, std::io::Error>(Event::default().json_data(serde_json::json!({
-                    "type": "start",
-                    "messageId": format!("msg_{}_turn{}", uuid::Uuid::new_v4(), turn_count)
-                })).expect("json_data"));
+                // Node start messages are emitted dynamically below.
 
                 let mut text_block_uuids = std::collections::HashMap::new();
                 let mut seen_tool_ids = std::collections::HashSet::new();
@@ -402,7 +398,7 @@ async fn handler_webhook(
                 
                 // Emitting custom event to show turn change in UI
                 if is_loop {
-                    yield Ok(Event::default().json_data(serde_json::json!({
+                    yield Ok::<Event, std::io::Error>(Event::default().json_data(serde_json::json!({
                         "type": "text-delta",
                         "id": format!("txt_sys_{}", uuid::Uuid::new_v4()),
                         "delta": format!("\n\n*--- Starting Turn {} ---*\n\n", turn_count)
@@ -468,12 +464,22 @@ async fn handler_webhook(
                     }
 
                     // Map to official Data Stream Protocol JSON
-                    let protocol_json = match event {
+                    let protocol_json = match &event {
+                        DagExecutionEvent::NodeStart { node_id, config, node_type, .. } => Some(serde_json::json!({
+                            "type": "node-start",
+                            "node_id": node_id,
+                            "node_type": node_type,
+                            "config": config
+                        })),
+                        DagExecutionEvent::NodeFinish { node_id, output } => Some(serde_json::json!({
+                            "type": "node-end",
+                            "node_id": node_id,
+                            "output": output
+                        })),
                         DagExecutionEvent::LlmToken { node_id, token } => {
-                            let part_id = text_block_uuids.get(&node_id).cloned().unwrap_or_else(|| node_id.clone());
                             Some(serde_json::json!({
-                                "type": "text-delta",
-                                "id": part_id,
+                                "type": "node-delta",
+                                "node_id": node_id,
                                 "delta": token
                             }))
                         },
@@ -486,12 +492,12 @@ async fn handler_webhook(
                             "type": "tool-input-available",
                             "toolCallId": tool_id,
                             "toolName": tool_name,
-                            "input": serde_json::from_str::<serde_json::Value>(&tool_args).unwrap_or(serde_json::Value::String(tool_args))
+                            "input": serde_json::from_str::<serde_json::Value>(tool_args).unwrap_or(serde_json::Value::String(tool_args.clone()))
                         })),
                         DagExecutionEvent::LlmToolCallFinish { tool_id, output, .. } => Some(serde_json::json!({
                             "type": "tool-output-available",
                             "toolCallId": tool_id,
-                            "output": serde_json::from_str::<serde_json::Value>(&output).unwrap_or(serde_json::Value::String(output))
+                            "output": serde_json::from_str::<serde_json::Value>(output).unwrap_or(serde_json::Value::String(output.clone()))
                         })),
                         DagExecutionEvent::LlmUsage { prompt_tokens, completion_tokens, .. } => Some(serde_json::json!({
                             "type": "finish-step",
@@ -548,6 +554,20 @@ async fn handler_webhook(
                             None
                         };
 
+                        let find_bool = |o: &serde_json::Map<String, serde_json::Value>, key: &str| -> bool {
+                            if let Some(v) = o.get(key).and_then(|v| v.as_bool()) {
+                                if v { return true; }
+                            }
+                            for (_, val) in o {
+                                if let Some(child_obj) = val.as_object() {
+                                    if let Some(v) = child_obj.get(key).and_then(|v| v.as_bool()) {
+                                        if v { return true; }
+                                    }
+                                }
+                            }
+                            false
+                        };
+
                         if let Some(status) = find_status(obj, "__colmena_status") {
                             if status == "SUSPENDED" {
                                 should_stop_loop = true;
@@ -557,6 +577,9 @@ async fn handler_webhook(
                             if loop_status == "FINISHED" {
                                 should_stop_loop = true;
                             }
+                        }
+                        if find_bool(obj, "__colmena_is_output_node") {
+                            should_stop_loop = true;
                         }
                     }
                     

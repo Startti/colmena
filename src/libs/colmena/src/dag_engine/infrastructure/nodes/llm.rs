@@ -140,14 +140,10 @@ impl ExecutableNode for LlmNode {
                     &prompt_raw_str
                 }
                 Some(Value::Null) | None => {
-                    let agent_hint = config.get("system_message")
+                    let node_name = inputs.get("__node_id")
                         .and_then(|v| v.as_str())
-                        .map(|s| {
-                            let preview: String = s.chars().take(60).collect();
-                            if s.len() > 60 { format!("{}...", preview) } else { preview }
-                        })
-                        .unwrap_or_else(|| "(no system_message)".to_string());
-                    println!("⚠️ [LlmNode] Skipped (not active this turn) — agent: \"{}\"", agent_hint);
+                        .unwrap_or("(unknown)");
+                    println!("⚠️ [LlmNode] Skipped (not active this turn) — node: \"{}\"", node_name);
                     return Ok(Value::Null);
                 }
                 Some(other) => {

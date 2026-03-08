@@ -282,7 +282,7 @@ impl ExecutableNode for PlannerNode {
             println!("{}", formatted_texts);
             println!("═══════════════════════════════════════\n");
         } else {
-            println!("🗂️ [PlannerNode] Planning tasks (set verbose=true in config to see full prompt)...");
+            println!("🗂️ [PlannerNode] Planning tasks (set verbose=true in config to see full prompt)");
         }
 
         // --- 4. Call LLM ---
@@ -344,7 +344,12 @@ impl ExecutableNode for PlannerNode {
             .map_err(|e| format!("PlannerNode: Failed to parse LLM output as JSON: {}. Raw: {}", e, raw))?;
 
         // --- 6. Return ---
-        // Wrap in `items` to match what the OrchestratorNode expects (it checks plan.items or plan array)
+        // Write it to global shared state so the Orchestrator can find it natively
+        if let Some(state_obj) = state.as_object_mut() {
+            state_obj.insert("plan".to_string(), json!({ "items": parsed.clone() }));
+        }
+
+        // Return gracefully (it will still be emitted as an output event)
         Ok(json!({
             "output": {
                 "result": {
