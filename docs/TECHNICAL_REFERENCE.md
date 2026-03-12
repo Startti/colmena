@@ -123,3 +123,17 @@ Puedes extraer datos muy profundos: `"from": "llm.choices.0.message.content"`. E
 - **`build_inputs_for`**: La función más importante de `run_use_case.rs`. Es la que hace la "magia" de buscar datos en `all_outputs` basándose en las rutas de los `edges`.
 - **`PostgresDagStateRepository`**: Nuestra capa de persistencia. Recientemente mejorada para guardar no solo los resultados, sino también la cola de ejecución y el historial de llamadas, permitiendo reanudar grafos complejos sin perder el progreso.
 - **`Registry`**: El lugar donde se mapean nombres como `"python_script"` a la clase Rust que lo ejecuta. Permite que el sistema sea extensible sin tocar el núcleo del motor.
+
+---
+
+## 6. Observabilidad y Métricas
+
+El motor de Colmena rastrea el uso de recursos a lo largo de toda la vida del grafo.
+
+### Rastreo de Tokens (LLM Usage)
+Una de las métricas más importantes es el uso de tokens. El sistema funciona de forma acumulativa:
+1.  **Emisión**: Cada nodo que interactúa con un LLM emite eventos `LlmUsage` con los tokens de su llamada específica.
+2.  **Agregación**: El orquestador de la CLI (`main.rs`) captura estos eventos y los suma en acumuladores globales.
+3.  **Reporte Final**: Al emitir el evento `finish`, el motor incluye el objeto `usage` con la suma total de `promptTokens` y `completionTokens` de todos los nodos que participaron.
+
+Esto permite tener una visión clara del costo total de una ejecución, especialmente en grafos con múltiples agentes o herramientas.

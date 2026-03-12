@@ -245,6 +245,18 @@ impl ExecutableNode for ReactorNode {
         };
 
         let response = agent_service.run(params).await?;
+
+        // Notify observer of usage
+        if let Some(obs) = _observer {
+            if let Some(usage) = response.usage() {
+                use crate::dag_engine::domain::observer::NodeEvent;
+                obs.on_event(NodeEvent::LlmUsage {
+                    prompt_tokens: usage.prompt_tokens,
+                    completion_tokens: usage.completion_tokens,
+                });
+            }
+        }
+
         let raw = response.content();
 
         if verbose {
