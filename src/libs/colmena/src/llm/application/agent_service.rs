@@ -343,6 +343,7 @@ mod tests {
             .run(AgentRunParams {
                 thread_id: &thread_id,
                 prompt,
+                messages: None,
                 config: create_config(),
                 tools: vec![],
                 tool_executor: &mock_tool_exec,
@@ -400,6 +401,7 @@ mod tests {
                         name: "add".to_string(),
                         arguments: "{\"a\": 2, \"b\": 2}".to_string(),
                     },
+                    response: None,
                 };
 
                 Ok(LlmResponse::new(
@@ -441,6 +443,7 @@ mod tests {
             .run(AgentRunParams {
                 thread_id: &thread_id,
                 prompt,
+                messages: None,
                 config: create_config(),
                 tools: vec![], // Tools list doesn't matter for mock
                 tool_executor: &mock_tool_exec,
@@ -487,6 +490,7 @@ mod tests {
                     name: "loop".to_string(),
                     arguments: "{}".to_string(),
                 },
+                response: None,
             };
 
             Ok(LlmResponse::new(
@@ -509,6 +513,7 @@ mod tests {
             .run(AgentRunParams {
                 thread_id: &thread_id,
                 prompt: "Loop me".to_string(),
+                messages: None,
                 config: create_config(),
                 tools: vec![],
                 tool_executor: &mock_tool_exec,

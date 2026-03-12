@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { file_path, resume_id, answer: _answer, r#loop, include_extra_info } => {
+        Commands::Run { file_path, resume_id, answer, r#loop, include_extra_info } => {
             use colmena::dag_engine::application::run_use_case::DagRunUseCase;
             use colmena::dag_engine::domain::events::DagExecutionEvent;
             use colmena::dag_engine::infrastructure::registry::HashMapNodeRegistry;
@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut total_completion_tokens: u32 = 0;
 
             // The new active_queue engine natively handles both linear and cyclic graphs
-            let s = run_use_case.execute_stream(graph, resume_id.clone(), None, include_extra_info);
+            let s = run_use_case.execute_stream(graph, resume_id.clone(), answer, include_extra_info);
             let stream = Box::pin(s);
             tokio::pin!(stream);
 
@@ -153,27 +153,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "toolCallId": tool_id,
                         "output": serde_json::from_str::<serde_json::Value>(output).unwrap_or(serde_json::Value::String(output.clone()))
                     })),
-                    DagExecutionEvent::GraphFinish { .. } if !r#loop => Some(serde_json::json!({
-                        "type": "finish",
-                        "finishReason": "stop",
-                        "usage": { "promptTokens": total_prompt_tokens, "completionTokens": total_completion_tokens }
-                    })),
-                    DagExecutionEvent::LoopFinished { output } => {
-                        // Emit the final output as a data part, then close
-                        println!("data: {}\n", serde_json::json!({
-                            "type": "data-final-output",
-                            "data": output
-                        }));
+                    DagExecutionEvent::GraphFinish { output } => {
+                        let mut finish_reason = "stop";
+                        let status = output.get("__colmena_status")
+                            .or_else(|| output.get("extra_info").and_then(|e| e.get("__colmena_status")))
+                            .and_then(|s| s.as_str());
+
+                        if status == Some("SUSPENDED") {
+                            finish_reason = "suspended";
+                        }
+                        
                         Some(serde_json::json!({
                             "type": "finish",
-                            "finishReason": "stop",
-                            "usage": { "promptTokens": total_prompt_tokens, "completionTokens": total_completion_tokens }
+                            "finishReason": finish_reason,
+                            "usage": { "promptTokens": total_prompt_tokens, "completionTokens": total_completion_tokens },
+                            "output": output
                         }))
-                    }
+                    },
                     DagExecutionEvent::Error { message } => Some(serde_json::json!({
                         "type": "error", "errorText": message
                     })),
-                    _ => None,
                 };
 
                 if let Some(line) = protocol_line {

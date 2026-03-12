@@ -317,14 +317,12 @@ impl ExecutableNode for CriticNode {
         );
 
         Ok(json!({
-            "output": {
-                "result": task_ok,
-                "extra_info": {
-                    "add_tasks": add_tasks,
-                    "suspend":   suspend,
-                    "question":  question,
-                    "__colmena_status": if suspend { "SUSPENDED" } else { "OK" }
-                }
+            "result": task_ok,
+            "extra_info": {
+                "add_tasks": add_tasks,
+                "suspend":   suspend,
+                "question":  question,
+                "__colmena_status": if suspend { "SUSPENDED" } else { "OK" }
             }
         }))
     }

@@ -282,9 +282,20 @@ impl ExecutableNode for ReactorNode {
         if task_ok {
             let run_id = _state.get("run_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
             // `phase` comes from edge: orchestrator.output.current_phase → reactor.phase
-            let phase_input = inputs.get("phase")
+            let mut phase_input = inputs.get("phase")
                 .and_then(|v| v.as_i64())
                 .map(|p| p as i32);
+                
+            if phase_input.is_none() {
+                for val in inputs.values() {
+                    if let Some(extra) = val.get("extra_info") {
+                        if let Some(p) = extra.get("current_phase").and_then(|v| v.as_i64()) {
+                            phase_input = Some(p as i32);
+                            break;
+                        }
+                    }
+                }
+            }
 
             if let (Some(phase), Some(repo), true) = (phase_input, &self.task_memory_repo, !run_id.is_empty()) {
                 let summary_str = response_text.as_str().unwrap_or("");
@@ -299,15 +310,13 @@ impl ExecutableNode for ReactorNode {
         }
 
         Ok(json!({
-            "output": {
-                "result":  response_text,
-                "extra_info": {
-                    "task_ok":   task_ok,
-                    "add_tasks": add_tasks,
-                    "suspend":   suspend,
-                    "question":  question,
-                    "__colmena_status": if suspend { "SUSPENDED" } else { "OK" }
-                }
+            "result":  response_text,
+            "extra_info": {
+                "task_ok":   task_ok,
+                "add_tasks": add_tasks,
+                "suspend":   suspend,
+                "question":  question,
+                "__colmena_status": if suspend { "SUSPENDED" } else { "OK" }
             }
         }))
     }

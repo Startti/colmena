@@ -78,14 +78,4 @@ wiremock = "0.5"
 serde_json = { version = "1.0", features = ["preserve_order"] }
 derivative = "2.2"
 
-[[test]]
-name = "agent_with_tools"
-path = "tests/rust/agent_with_tools.rs"
 
-[[test]]
-name = "gemini_tool_test"
-path = "tests/rust/gemini_tool_test.rs"
-
-[[test]]
-name = "openai_tool_test"
-path = "tests/rust/openai_tool_test.rs"

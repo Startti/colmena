@@ -40,7 +40,9 @@
                 "description": "Specialist in clothing, apparel, and wearable items for any trip or activity.",
                 "system_message": "You are a professional clothing stylist. Recommend exactly 1 to 2 essential clothing items for the given trip details. Output a very short bulleted list (max 2 items) with estimated prices. Be brief.",
                 "write_to_memory": true,
-                "stream": false
+                "stream": false,
+                "prompt": "{{orchestrator_node.result.dispatched_agents.clothing_expert.task}}",
+                "task_id": "{{orchestrator_node.result.dispatched_agents.clothing_expert.id}}"
             }
         },
         "gear_expert": {
@@ -53,7 +55,9 @@
                 "description": "Specialist in equipment, tools, and sports gear for activities.",
                 "system_message": "You are a professional ski equipment outfitter. Recommend exactly 1 to 2 essential gear items for the given trip details. Output a very short bulleted list (max 2 items) with estimated prices. Be brief.",
                 "write_to_memory": true,
-                "stream": false
+                "stream": false,
+                "prompt": "{{orchestrator_node.result.dispatched_agents.gear_expert.task}}",
+                "task_id": "{{orchestrator_node.result.dispatched_agents.gear_expert.id}}"
             }
         },
         "budget_expert": {
@@ -66,7 +70,9 @@
                 "description": "Specialist in finance and budget estimation. Takes lists of items and calculates a total expected cost.",
                 "system_message": "You are a travel budget estimator. Analyze the given lists of clothing and gear, and provide a very brief budget estimate with a final total. Keep it to 2-3 lines maximum.",
                 "write_to_memory": true,
-                "stream": false
+                "stream": false,
+                "prompt": "{{orchestrator_node.result.dispatched_agents.budget_expert.task}}",
+                "task_id": "{{orchestrator_node.result.dispatched_agents.budget_expert.id}}"
             }
         },
         "critic": {
@@ -114,82 +120,62 @@
     },
     "edges": [
         {
-            "from": "trigger.output.result.prompt",
-            "to": "planner.texts.request"
+            "from": "trigger",
+            "to": "planner"
         },
         {
-            "from": "planner.output.result",
-            "to": "orchestrator_node.plan"
+            "from": "planner",
+            "to": "orchestrator_node"
         },
         {
-            "from": "orchestrator_node.output.result.dispatched_agents.clothing_expert.task",
-            "to": "clothing_expert.prompt"
+            "from": "orchestrator_node",
+            "to": "clothing_expert"
         },
         {
-            "from": "orchestrator_node.output.result.dispatched_agents.clothing_expert.id",
-            "to": "clothing_expert.task_id"
+            "from": "orchestrator_node",
+            "to": "gear_expert"
         },
         {
-            "from": "orchestrator_node.output.result.dispatched_agents.gear_expert.task",
-            "to": "gear_expert.prompt"
+            "from": "orchestrator_node",
+            "to": "budget_expert"
         },
         {
-            "from": "orchestrator_node.output.result.dispatched_agents.gear_expert.id",
-            "to": "gear_expert.task_id"
+            "from": "clothing_expert",
+            "to": "critic"
         },
         {
-            "from": "orchestrator_node.output.result.dispatched_agents.budget_expert.task",
-            "to": "budget_expert.prompt"
+            "from": "gear_expert",
+            "to": "critic"
         },
         {
-            "from": "orchestrator_node.output.result.dispatched_agents.budget_expert.id",
-            "to": "budget_expert.task_id"
+            "from": "budget_expert",
+            "to": "critic"
         },
         {
-            "from": "clothing_expert.output.result",
-            "to": "critic.texts.clothing_result"
+            "from": "orchestrator_node",
+            "to": "phase_reactor"
         },
         {
-            "from": "gear_expert.output.result",
-            "to": "critic.texts.gear_result"
+            "from": "orchestrator_node",
+            "to": "final_reactor"
         },
         {
-            "from": "budget_expert.output.result",
-            "to": "critic.texts.budget_result"
+            "from": "trigger",
+            "to": "final_reactor"
         },
         {
-            "from": "orchestrator_node.output.result.phase_tasks",
-            "to": "phase_reactor.texts.phase_tasks"
-        },
-        {
-            "from": "orchestrator_node.output.extra_info.current_phase",
-            "to": "phase_reactor.phase"
-        },
-        {
-            "from": "orchestrator_node.output.result.all_tasks",
-            "to": "final_reactor.texts.agent_results"
-        },
-        {
-            "from": "orchestrator_node.output.extra_info.phase_summaries",
-            "to": "final_reactor.texts.phase_summaries"
-        },
-        {
-            "from": "trigger.output.result.prompt",
-            "to": "final_reactor.texts.user_request"
-        },
-        {
-            "from": "phase_reactor.output.result",
-            "to": "orchestrator_node.trigger",
+            "from": "phase_reactor",
+            "to": "orchestrator_node",
             "cyclic": true
         },
         {
-            "from": "critic.output.result",
-            "to": "orchestrator_node.trigger",
+            "from": "critic",
+            "to": "orchestrator_node",
             "cyclic": true
         },
         {
-            "from": "final_reactor.output.result",
-            "to": "final_output.input"
+            "from": "final_reactor",
+            "to": "final_output"
         }
     ]
 }

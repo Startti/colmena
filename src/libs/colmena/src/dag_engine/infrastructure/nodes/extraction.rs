@@ -250,22 +250,18 @@ impl ExecutableNode for ExtractionNode {
             let suspend = parsed_json.get("suspend").and_then(|v| v.as_bool()).unwrap_or(false);
             if suspend {
                 return Ok(json!({
-                    "output": {
-                        "result": parsed_json.clone(),
-                        "extra_info": {
-                            "__colmena_status": "SUSPENDED",
-                            "all_tasks": all_tasks_json
-                        }
+                    "result": parsed_json.clone(),
+                    "extra_info": {
+                        "__colmena_status": "SUSPENDED",
+                        "all_tasks": all_tasks_json
                     }
                 }));
             }
         }
 
         Ok(json!({
-            "output": {
-                "result": parsed_json,
-                "extra_info": {}
-            }
+            "result": parsed_json,
+            "extra_info": {}
         }))
     }
 

@@ -1,0 +1,22 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "my_count": 0
+      }
+    },
+    "node_loop": {
+      "type": "python_script",
+      "config": {
+        "code": "my_count += 1\nstatus = 'FINISHED' if my_count >= 3 else 'NEXT_TURN'\noutput = {'count': my_count, '__colmena_loop_status': status}"
+      }
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "node_loop"
+    }
+  ]
+}

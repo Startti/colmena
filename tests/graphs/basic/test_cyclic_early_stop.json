@@ -1,0 +1,35 @@
+{
+  "nodes": {
+    "start": {
+      "type": "input",
+      "config": {
+        "counter": 1
+      }
+    },
+    "looper": {
+      "type": "python_script",
+      "config": {
+        "code": "print(f'Control de flujo: counter={counter}')\nif counter < 5:\n    output = {'counter': counter + 1}\nelse:\n    print('Condición cumplida. Terminando loop...')\n    output = None"
+      },
+      "max_total_calls": 10
+    },
+    "log_final": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "start",
+      "to": "looper"
+    },
+    {
+      "from": "looper",
+      "to": "looper",
+      "cyclic": true
+    },
+    {
+      "from": "looper",
+      "to": "log_final"
+    }
+  ]
+}

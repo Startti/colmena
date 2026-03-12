@@ -49,7 +49,4 @@ pub enum DagExecutionEvent {
     /// Emitted at the beginning of each loop turn
     #[serde(rename = "turn_start")]
     TurnStart { turn: u32 },
-    /// Emitted when the loop detects FINISHED and the final output is ready
-    #[serde(rename = "loop_finished")]
-    LoopFinished { output: Value },
 }

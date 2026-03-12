@@ -300,6 +300,11 @@ impl DagRunUseCase {
                     all_outputs.insert(node_id.to_string(), final_output.clone());
                     
                     if let Some(repo) = &self.state_repository {
+                        // Crucial: When suspending, we must put the node back at the BEGINNING 
+                        // of the queue so it re-executes first when resuming (receiving the answer).
+                        let mut resume_queue = active_queue.clone();
+                        resume_queue.push_front(node_id.clone());
+
                         let state = DagRunState {
                             run_id: run_id.clone(),
                             graph_json: serde_json::to_value(&graph).unwrap_or(Value::Null),
@@ -308,7 +313,7 @@ impl DagRunUseCase {
                             execution_history: execution_history.clone(),
                             global_calls: global_calls.clone(),
                             caller_specific_calls: caller_specific_calls.clone(),
-                            active_queue: active_queue.clone(),
+                            active_queue: resume_queue,
                             status: DagRunStatus::Suspended,
                         };
                         repo.save(&state).await?;
@@ -384,7 +389,6 @@ impl DagRunUseCase {
             }
 
             yield DagExecutionEvent::GraphFinish { output: final_aggregated_output.clone() };
-            yield DagExecutionEvent::LoopFinished { output: final_aggregated_output };
         }
     }
 
@@ -419,12 +423,15 @@ impl DagRunUseCase {
 
         for edge in incoming_edges {
             let parts_to: Vec<&str> = edge.to.splitn(2, '.').collect();
-            if parts_to.len() != 2 { continue; }
-            let input_name = parts_to[1];
-
             let parts_from: Vec<&str> = edge.from.splitn(2, '.').collect();
             if parts_from.is_empty() { continue; }
             let source_node_id = parts_from[0];
+
+            let input_name = if parts_to.len() == 2 {
+                parts_to[1]
+            } else {
+                source_node_id
+            };
 
             let value_to_pass = if let Some(source_output_value) = all_outputs.get(source_node_id) {
                 if parts_from.len() == 1 {
@@ -437,7 +444,23 @@ impl DagRunUseCase {
                 Value::Null
             };
 
-            inputs.insert(input_name.to_string(), value_to_pass);
+            // --- AUTO-FLATTENING LOGIC ---
+            // If the target (edge.to) does NOT contain a dot, it means the user wants to 
+            // inject the source data directly into the target node's input space.
+            // If the source data is an object, we merge its keys.
+            if parts_to.len() == 1 {
+                if let Some(obj) = value_to_pass.as_object() {
+                    for (k, v) in obj {
+                        inputs.insert(k.clone(), v.clone());
+                    }
+                } else {
+                    // Fallback for non-objects: use the source node ID as the key
+                    inputs.insert(input_name.to_string(), value_to_pass);
+                }
+            } else {
+                // Standard behavior: explicit mapping to a named input
+                inputs.insert(input_name.to_string(), value_to_pass);
+            }
         }
         Ok(inputs)
     }

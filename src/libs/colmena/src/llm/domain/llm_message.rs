@@ -47,6 +47,7 @@ impl MessageRole {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct FileData {
     pub mime_type: String,
     pub filename: String,

@@ -95,12 +95,10 @@ impl ExecutableNode for OrchestratorNode {
                     })).collect();
 
                     return Ok(json!({
-                        "output": {
-                            "result": { "all_tasks": all_tasks_json },
-                            "extra_info": {
-                                "__colmena_loop_status": "FINISHED",
-                                "phase_summaries": phase_summaries_json
-                            }
+                        "result": { "all_tasks": all_tasks_json },
+                        "extra_info": {
+                            "__colmena_loop_status": "FINISHED",
+                            "phase_summaries": phase_summaries_json
                         }
                     }));
                 }
@@ -119,12 +117,10 @@ impl ExecutableNode for OrchestratorNode {
                         );
                         println!("🏁 [OrchestratorNode] Phase {} complete → FINISHED_PHASE", current_phase);
                         return Ok(json!({
-                            "output": {
-                                "result": { "phase_tasks": phase_tasks },
-                                "extra_info": {
-                                    "__colmena_loop_status": "FINISHED_PHASE",
-                                    "current_phase": current_phase
-                                }
+                            "result": { "phase_tasks": phase_tasks },
+                            "extra_info": {
+                                "__colmena_loop_status": "FINISHED_PHASE",
+                                "current_phase": current_phase
                             }
                         }));
                     }
@@ -182,15 +178,13 @@ impl ExecutableNode for OrchestratorNode {
 
                     // Omit all_tasks from the general turn output so the final_reactor is not queued early
                     Ok(json!({
-                        "output": {
-                            "result": { 
-                                "dispatched_agents": Value::Object(agents_map)
-                            },
-                            "extra_info": {
-                                "__colmena_loop_status": "NEXT_TURN",
-                                "active_task_id": first_task_id,
-                                "active_task": first_task_json
-                            }
+                        "result": { 
+                            "dispatched_agents": Value::Object(agents_map)
+                        },
+                        "extra_info": {
+                            "__colmena_loop_status": "NEXT_TURN",
+                            "active_task_id": first_task_id,
+                            "active_task": first_task_json
                         }
                     }))
                 }
@@ -208,11 +202,9 @@ impl ExecutableNode for OrchestratorNode {
 
                     if all_completed {
                         return Ok(json!({
-                            "output": {
-                                "result": { "all_tasks": plan_array },
-                                "extra_info": {
-                                    "__colmena_loop_status": "FINISHED"
-                                }
+                            "result": { "all_tasks": plan_array },
+                            "extra_info": {
+                                "__colmena_loop_status": "FINISHED"
                             }
                         }));
                     }
@@ -224,15 +216,13 @@ impl ExecutableNode for OrchestratorNode {
                         println!("🚦 [OrchestratorNode] Routing task to agent: '{}'", agent);
                         
                         return Ok(json!({
-                            "output": {
-                                "result": { 
-                                    "dispatched_agents": { agent: { "task": task.get("task") } },
-                                    "all_tasks": plan_array
-                                },
-                                "extra_info": {
-                                    "__colmena_loop_status": "NEXT_TURN",
-                                    "active_task": task
-                                }
+                            "result": { 
+                                "dispatched_agents": { agent: { "task": task.get("task") } },
+                                "all_tasks": plan_array
+                            },
+                            "extra_info": {
+                                "__colmena_loop_status": "NEXT_TURN",
+                                "active_task": task
                             }
                         }));
                     }
@@ -240,11 +230,9 @@ impl ExecutableNode for OrchestratorNode {
             }
 
             Ok(json!({
-                "output": {
-                    "result": { "all_tasks": [] },
-                    "extra_info": {
-                        "__colmena_loop_status": "FINISHED"
-                    }
+                "result": { "all_tasks": [] },
+                "extra_info": {
+                    "__colmena_loop_status": "FINISHED"
                 }
             }))
         }

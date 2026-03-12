@@ -17,11 +17,24 @@ impl ExecutableNode for LogNode {
         _state: &mut Value,
         _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
-        let input_val = inputs.get("input").cloned().unwrap_or(Value::Null);
+        // Flexibilidad: Buscar llaves comunes o tomar TODO lo que venga inyectado (Auto-Flattening)
+        let input_val = if let Some(val) = inputs.get("input").or(inputs.get("result")).or(inputs.get("output")) {
+            val.clone()
+        } else if !inputs.is_empty() {
+            // Si no hay ninguna de las llaves estándar pero hay entradas, las mostramos todas
+            // Esto es ideal para conexiones blunt { "from": "A", "to": "log" }
+            let mut map = serde_json::Map::new();
+            for (k, v) in inputs {
+                map.insert(k.clone(), v.clone());
+            }
+            Value::Object(map)
+        } else {
+            Value::Null
+        };
+
         println!("[LogNode]: {}", serde_json::to_string_pretty(&input_val)?);
 
-        // También envuelve su salida para ser consistente
-        Ok(json!({ "output": { "result": input_val, "extra_info": {} } }))
+        Ok(input_val)
     }
     fn description(&self) -> Option<&str> {
         Some("Log data to console for debugging. Useful for inspecting intermediate values in the flow.")

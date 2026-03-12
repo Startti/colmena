@@ -79,6 +79,57 @@ impl LlmNode {
         result.push_str(&value[last_end..]);
         result
     }
+
+    fn resolve_template_vars(value: &str, inputs: &NodeInputs) -> String {
+        let mut result = String::new();
+        let mut last_end = 0;
+
+        while let Some(start) = value[last_end..].find("{{") {
+            let absolute_start = last_end + start;
+            result.push_str(&value[last_end..absolute_start]);
+
+            if let Some(end) = value[absolute_start..].find("}}") {
+                let absolute_end = absolute_start + end + 1; // points to the last }
+                let var_path = value[absolute_start + 2..absolute_end - 1].trim(); 
+
+                let parts: Vec<&str> = var_path.splitn(2, '.').collect();
+                let val_str = if parts.is_empty() || parts[0].is_empty() {
+                    String::new()
+                } else {
+                    let root_key = parts[0];
+                    if let Some(root_val) = inputs.get(root_key) {
+                        if parts.len() == 1 {
+                            match root_val {
+                                Value::String(s) => s.clone(),
+                                _ => serde_json::to_string(root_val).unwrap_or_default(),
+                            }
+                        } else {
+                            let json_pointer = format!("/{}", parts[1].replace('.', "/"));
+                            if let Some(nested_val) = root_val.pointer(&json_pointer) {
+                                match nested_val {
+                                    Value::String(s) => s.clone(),
+                                    _ => serde_json::to_string(nested_val).unwrap_or_default(),
+                                }
+                            } else {
+                                String::new()
+                            }
+                        }
+                    } else {
+                        String::new()
+                    }
+                };
+
+                result.push_str(&val_str);
+                last_end = absolute_end + 1;
+            } else {
+                result.push_str(&value[absolute_start..]);
+                last_end = value.len();
+                break;
+            }
+        }
+        result.push_str(&value[last_end..]);
+        result
+    }
 }
 
 #[async_trait]
@@ -135,8 +186,15 @@ impl ExecutableNode for LlmNode {
         let prompt: &str = {
             let val = inputs.get("prompt").or_else(|| config.get("prompt"));
             match val {
-                Some(Value::String(s)) if !s.is_empty() => {
-                    prompt_raw_str = s.clone();
+                Some(Value::String(s)) => {
+                    prompt_raw_str = Self::resolve_template_vars(s, inputs);
+                    if prompt_raw_str.is_empty() {
+                        let node_name = inputs.get("__node_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("(unknown)");
+                        println!("⚠️ [LlmNode] Skipped (prompt resolved to empty) — node: \"{}\"", node_name);
+                        return Ok(Value::Null);
+                    }
                     &prompt_raw_str
                 }
                 Some(Value::Null) | None => {
@@ -181,10 +239,17 @@ impl ExecutableNode for LlmNode {
             .unwrap_or(false);
 
         // System Message (Optional)
-        let system_message = inputs
+        let mut system_message_str = String::new();
+        let system_message = if let Some(sys) = inputs
             .get("system_message")
             .and_then(|v| v.as_str())
-            .or_else(|| config.get("system_message").and_then(|v| v.as_str()));
+            .or_else(|| config.get("system_message").and_then(|v| v.as_str()))
+        {
+            system_message_str = Self::resolve_template_vars(sys, inputs);
+            Some(system_message_str.as_str())
+        } else {
+            None
+        };
 
         // Thread ID (Optional - for Memory)
         let thread_id = inputs
@@ -548,10 +613,12 @@ impl ExecutableNode for LlmNode {
 
         if write_to_memory {
             if let Some(repo) = &self.task_memory_repo {
-                if let Some(task_id_val) = inputs.get("task_id").or_else(|| config.get("task_id")) {
-                    if let Some(task_id) = task_id_val.as_str() {
+                let raw_task_id = inputs.get("task_id").and_then(|v| v.as_str()).or_else(|| config.get("task_id").and_then(|v| v.as_str()));
+                if let Some(raw_tid) = raw_task_id {
+                    let task_id = Self::resolve_template_vars(raw_tid, inputs);
+                    if !task_id.is_empty() {
                         // Store the standardized result structure in the DB
-                        repo.update_task_result(task_id, result_json.clone()).await?;
+                        repo.update_task_result(&task_id, result_json.clone()).await?;
 
                         let run_id = _state.get("run_id").and_then(|v| v.as_str()).unwrap_or("unknown_run").to_string();
                         if let Ok(tasks) = repo.get_tasks_for_run(&run_id).await {
@@ -576,10 +643,8 @@ impl ExecutableNode for LlmNode {
 
         // Output format
         let final_output = json!({
-            "output": {
-                "result": response.content(),
-                "extra_info": extra_info
-            }
+            "result": response.content(),
+            "extra_info": extra_info
         });
 
         Ok(final_output)

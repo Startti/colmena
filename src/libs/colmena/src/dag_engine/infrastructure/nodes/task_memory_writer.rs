@@ -86,21 +86,17 @@ impl ExecutableNode for TaskMemoryWriterNode {
             let suspend = inputs.get("suspend").and_then(|v| v.as_bool()).unwrap_or(false);
             if suspend {
                 return Ok(json!({
-                    "output": {
-                        "result": "Suspended by Critic Node",
-                        "extra_info": {
-                            "__colmena_status": "SUSPENDED",
-                            "all_tasks": all_tasks_json
-                        }
+                    "result": "Suspended by Critic Node",
+                    "extra_info": {
+                        "__colmena_status": "SUSPENDED",
+                        "all_tasks": all_tasks_json
                     }
                 }));
             }
 
             Ok(json!({
-                "output": {
-                    "result": all_tasks_json,
-                    "extra_info": {}
-                }
+                "result": all_tasks_json,
+                "extra_info": {}
             }))
         } else {
              Err("TaskMemoryWriterNode requires a Task Memory Repository".into())

@@ -351,13 +351,11 @@ impl ExecutableNode for PlannerNode {
 
         // Return gracefully (it will still be emitted as an output event)
         Ok(json!({
-            "output": {
-                "result": {
-                    "items": parsed
-                },
-                "extra_info": {
-                    "raw_response": raw
-                }
+            "result": {
+                "items": parsed
+            },
+            "extra_info": {
+                "raw_response": raw
             }
         }))
     }

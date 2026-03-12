@@ -1,6 +1,7 @@
 use crate::dag_engine::domain::error::DagError;
 use crate::dag_engine::domain::state::{DagRunState, DagRunStatus, DagStateRepository, DagTask, DagPhaseSummary};
 use async_trait::async_trait;
+use serde_json::Value;
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 
@@ -15,6 +16,22 @@ impl PostgresDagStateRepository {
 
     /// Apply schema migrations at startup (idempotent).
     pub async fn migrate(&self) -> Result<(), DagError> {
+        // Ensure dag_runs table has full state columns
+        let migration_queries = vec![
+            "ALTER TABLE dag_runs ADD COLUMN IF NOT EXISTS active_queue JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE dag_runs ADD COLUMN IF NOT EXISTS execution_history JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE dag_runs ADD COLUMN IF NOT EXISTS global_calls JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ALTER TABLE dag_runs ADD COLUMN IF NOT EXISTS caller_specific_calls JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ALTER TABLE dag_runs ADD COLUMN IF NOT EXISTS global_shared_state JSONB NOT NULL DEFAULT '{}'::jsonb",
+        ];
+
+        for query in migration_queries {
+            sqlx::query(query)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| DagError::StateError(format!("Migration error: {}", e)))?;
+        }
+
         // Ensure dag_task_memory has phase + parallel columns
         sqlx::query(
             "ALTER TABLE dag_task_memory ADD COLUMN IF NOT EXISTS phase INT NOT NULL DEFAULT 1"
@@ -73,7 +90,7 @@ fn row_to_task(row: &sqlx::postgres::PgRow) -> DagTask {
 impl DagStateRepository for PostgresDagStateRepository {
     async fn get_by_id(&self, run_id: &str) -> Result<Option<DagRunState>, DagError> {
         let row_opt = sqlx::query(
-            "SELECT run_id, graph_json, all_outputs, status FROM dag_runs WHERE run_id = $1"
+            "SELECT run_id, graph_json, all_outputs, status, active_queue, execution_history, global_calls, caller_specific_calls, global_shared_state FROM dag_runs WHERE run_id = $1"
         )
         .bind(run_id)
         .fetch_optional(&self.pool)
@@ -86,22 +103,33 @@ impl DagStateRepository for PostgresDagStateRepository {
                 let status = status_str.parse::<DagRunStatus>().unwrap_or(DagRunStatus::Failed);
 
                 let all_outputs_json: serde_json::Value = row.get("all_outputs");
-                let all_outputs = if let Some(obj) = all_outputs_json.as_object() {
-                    obj.into_iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-                } else {
-                    HashMap::new()
-                };
+                let all_outputs: HashMap<String, Value> = serde_json::from_value(all_outputs_json)
+                    .unwrap_or_default();
+
+                let active_queue_json: serde_json::Value = row.get("active_queue");
+                let active_queue = serde_json::from_value(active_queue_json).unwrap_or_default();
+
+                let execution_history_json: serde_json::Value = row.get("execution_history");
+                let execution_history = serde_json::from_value(execution_history_json).unwrap_or_default();
+
+                let global_calls_json: serde_json::Value = row.get("global_calls");
+                let global_calls = serde_json::from_value(global_calls_json).unwrap_or_default();
+
+                let caller_specific_calls_json: serde_json::Value = row.get("caller_specific_calls");
+                let caller_specific_calls = serde_json::from_value(caller_specific_calls_json).unwrap_or_default();
+
+                let global_shared_state: serde_json::Value = row.get("global_shared_state");
 
                 Ok(Some(DagRunState {
                     run_id: row.get("run_id"),
                     graph_json: row.get("graph_json"),
                     all_outputs,
                     status,
-                    global_shared_state: serde_json::Value::Null,
-                    active_queue: std::collections::VecDeque::new(),
-                    execution_history: Vec::new(),
-                    global_calls: HashMap::new(),
-                    caller_specific_calls: HashMap::new(),
+                    global_shared_state,
+                    active_queue,
+                    execution_history,
+                    global_calls,
+                    caller_specific_calls,
                 }))
             }
             None => Ok(None),
@@ -112,20 +140,42 @@ impl DagStateRepository for PostgresDagStateRepository {
         let status_str = state.status.to_string();
         let all_outputs_json = serde_json::to_value(&state.all_outputs)
             .map_err(|e| DagError::StateError(format!("Serialization error: {}", e)))?;
+        
+        let active_queue_json = serde_json::to_value(&state.active_queue)
+            .map_err(|e| DagError::StateError(format!("Serialization error (queue): {}", e)))?;
+            
+        let execution_history_json = serde_json::to_value(&state.execution_history)
+            .map_err(|e| DagError::StateError(format!("Serialization error (history): {}", e)))?;
+            
+        let global_calls_json = serde_json::to_value(&state.global_calls)
+            .map_err(|e| DagError::StateError(format!("Serialization error (global_calls): {}", e)))?;
+            
+        let caller_specific_calls_json = serde_json::to_value(&state.caller_specific_calls)
+            .map_err(|e| DagError::StateError(format!("Serialization error (caller_calls): {}", e)))?;
 
         sqlx::query(
-            r#"INSERT INTO dag_runs (run_id, graph_json, all_outputs, status, updated_at)
-               VALUES ($1, $2, $3, $4, NOW())
+            r#"INSERT INTO dag_runs (run_id, graph_json, all_outputs, status, active_queue, execution_history, global_calls, caller_specific_calls, global_shared_state, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
                ON CONFLICT (run_id) DO UPDATE SET
                  graph_json = EXCLUDED.graph_json,
                  all_outputs = EXCLUDED.all_outputs,
                  status = EXCLUDED.status,
+                 active_queue = EXCLUDED.active_queue,
+                 execution_history = EXCLUDED.execution_history,
+                 global_calls = EXCLUDED.global_calls,
+                 caller_specific_calls = EXCLUDED.caller_specific_calls,
+                 global_shared_state = EXCLUDED.global_shared_state,
                  updated_at = NOW()"#
         )
         .bind(&state.run_id)
         .bind(&state.graph_json)
         .bind(&all_outputs_json)
         .bind(&status_str)
+        .bind(&active_queue_json)
+        .bind(&execution_history_json)
+        .bind(&global_calls_json)
+        .bind(&caller_specific_calls_json)
+        .bind(&state.global_shared_state)
         .execute(&self.pool)
         .await
         .map_err(|e| DagError::StateError(format!("Database error on save: {}", e)))?;

@@ -23,11 +23,9 @@ impl ExecutableNode for OutputNode {
         };
 
         Ok(serde_json::json!({
-            "output": {
-                "result": input_val,
-                "extra_info": {
-                    "__colmena_is_output_node": true
-                }
+            "result": input_val,
+            "extra_info": {
+                "__colmena_is_output_node": true
             }
         }))
     }

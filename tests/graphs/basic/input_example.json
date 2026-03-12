@@ -1,0 +1,20 @@
+{
+  "nodes": {
+    "start": {
+      "type": "input",
+      "config": {
+        "question": "What is the capital of France?",
+        "context": "Geography trivia"
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "start",
+      "to": "log_result"
+    }
+  ]
+}

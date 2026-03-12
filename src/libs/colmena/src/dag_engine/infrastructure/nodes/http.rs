@@ -212,10 +212,8 @@ impl ExecutableNode for HttpNode {
 
         // 8. Return Output
         Ok(json!({
-            "output": {
-                "status": status,
-                "body": response_body
-            }
+            "status": status,
+            "body": response_body
         }))
     }
 
