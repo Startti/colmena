@@ -125,11 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     DagExecutionEvent::LlmToken { node_id, token } => {
                         Some(serde_json::json!({ "type": "node-delta", "node_id": node_id, "delta": token }))
                     }
-                    DagExecutionEvent::LlmUsage { prompt_tokens, completion_tokens, .. } => Some(serde_json::json!({
-                        "type": "finish-step",
-                        "finishReason": "stop",
-                        "usage": { "promptTokens": prompt_tokens, "completionTokens": completion_tokens }
-                    })),
+                    DagExecutionEvent::LlmUsage { .. } => None,
                     DagExecutionEvent::LlmToolCall { tool_id, args_chunk, .. } => Some(serde_json::json!({
                         "type": "tool-input-delta",
                         "toolCallId": tool_id,
@@ -169,10 +165,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "node_type": "llm_message",
                         "config": null
                     })),
-                    DagExecutionEvent::LlmMessageFinish { node_id } => Some(serde_json::json!({
+                    DagExecutionEvent::LlmMessageFinish { node_id, usage } => Some(serde_json::json!({
                         "type": "node-end",
                         "node_id": node_id,
-                        "output": null
+                        "output": null,
+                        "extra_info": {
+                            "usage": usage,
+                            "finishReason": "stop"
+                        }
                     })),
                     DagExecutionEvent::Error { message } => Some(serde_json::json!({
                         "type": "error", "errorText": message

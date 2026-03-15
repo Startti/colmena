@@ -191,18 +191,21 @@ pub async fn run_dag(
                         "output": serde_json::from_str::<serde_json::Value>(&output).unwrap_or(serde_json::Value::String(output))
                     }))
                 }
-                DagExecutionEvent::LlmUsage {
-                    prompt_tokens,
-                    completion_tokens,
-                    ..
-                } => Some(serde_json::json!({
-                    "type": "finish-step",
-                    "finishReason": "stop",
-                    "usage": {
-                        "promptTokens": prompt_tokens,
-                        "completionTokens": completion_tokens
+                DagExecutionEvent::LlmUsage { .. } => None,
+                DagExecutionEvent::NodeFinish { node_id, .. } => {
+                    if let Some(part_id) = text_block_uuids.get(&node_id) {
+                        Some(serde_json::json!({
+                            "type": "node-end",
+                            "id": part_id,
+                            "usage": {
+                                "promptTokens": total_prompt_tokens,
+                                "completionTokens": total_completion_tokens
+                            }
+                        }))
+                    } else {
+                        None
                     }
-                })),
+                }
                 DagExecutionEvent::GraphFinish { .. } => Some(serde_json::json!({
                     "type": "finish",
                     "finishReason": "stop",
@@ -476,6 +479,15 @@ async fn handler_webhook(
                             "node_id": node_id,
                             "output": output
                         })),
+                        DagExecutionEvent::LlmMessageFinish { node_id, usage } => Some(serde_json::json!({
+                            "type": "node-end",
+                            "node_id": node_id,
+                            "output": null,
+                            "extra_info": {
+                                "usage": usage,
+                                "finishReason": "stop"
+                            }
+                        })),
                         DagExecutionEvent::LlmToken { node_id, token } => {
                             Some(serde_json::json!({
                                 "type": "node-delta",
@@ -499,14 +511,7 @@ async fn handler_webhook(
                             "toolCallId": tool_id,
                             "output": serde_json::from_str::<serde_json::Value>(output).unwrap_or(serde_json::Value::String(output.clone()))
                         })),
-                        DagExecutionEvent::LlmUsage { prompt_tokens, completion_tokens, .. } => Some(serde_json::json!({
-                            "type": "finish-step",
-                            "finishReason": "stop",
-                            "usage": {
-                                "promptTokens": prompt_tokens,
-                                "completionTokens": completion_tokens
-                            }
-                        })),
+                        DagExecutionEvent::LlmUsage { .. } => None,
                         DagExecutionEvent::GraphFinish { .. } => Some(serde_json::json!({
                             "type": "finish",
                             "finishReason": "stop",

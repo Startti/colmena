@@ -25,7 +25,7 @@ pub enum NodeEvent {
         output: String,
     },
     LlmMessageStart,
-    LlmMessageFinish,
+    LlmMessageFinish(Option<crate::llm::domain::LlmUsage>),
 }
 
 pub trait ExecutionObserver: Send + Sync {

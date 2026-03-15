@@ -98,6 +98,7 @@ impl AgentService {
             }
 
             // Decide between call() and stream()
+            let mut completion_usage = None;
             let mut response = if let Some(callback) = &on_token {
                 let stream = self.llm_repository.stream(request).await?;
                 use futures::StreamExt;
@@ -109,7 +110,6 @@ impl AgentService {
                 let mut captured_req_id = crate::llm::domain::LlmRequestId::new();
                 let mut accumulated_tool_calls: std::collections::HashMap<usize, ToolCall> =
                     std::collections::HashMap::new();
-                let mut completion_usage = None;
 
                 while let Some(chunk_result) = stream.next().await {
                     match chunk_result {
@@ -148,10 +148,10 @@ impl AgentService {
                                 LlmStreamPart::Usage(u) => {
                                     completion_usage = Some(u.clone());
                                 }
-                                LlmStreamPart::ToolCallStart(_)
-                                | LlmStreamPart::ToolCallFinish(_)
+                                LlmStreamPart::LlmToolCallStart(_)
+                                | LlmStreamPart::LlmToolCallFinish(_)
                                 | LlmStreamPart::LlmMessageStart
-                                | LlmStreamPart::LlmMessageFinish => {}
+                                | LlmStreamPart::LlmMessageFinish(_) => {}
                             }
                         }
                         Err(e) => return Err(e),
@@ -166,18 +166,20 @@ impl AgentService {
                     final_response = final_response.with_tool_calls(tools);
                 }
 
-                if let Some(usage) = completion_usage {
-                    final_response = final_response.with_usage(usage);
+                if let Some(usage) = &completion_usage {
+                    final_response = final_response.with_usage(usage.clone());
                 }
 
                 final_response
             } else {
-                self.llm_repository.call(request).await?
+                let res = self.llm_repository.call(request).await?;
+                completion_usage = res.usage().cloned();
+                res
             };
 
             // Signal end of message/iteration
             if let Some(callback) = &on_token {
-                (callback)(LlmStreamPart::LlmMessageFinish);
+                (callback)(LlmStreamPart::LlmMessageFinish(completion_usage));
             }
 
             // Accumulate usage for this step
@@ -219,7 +221,7 @@ impl AgentService {
 
                     // Notify start of execution
                     if let Some(callback) = &on_token {
-                        (callback)(LlmStreamPart::ToolCallStart(tool_call.clone()));
+                        (callback)(LlmStreamPart::LlmToolCallStart(tool_call.clone()));
                     }
 
                     let result = match tool_executor.execute(tool_call).await {
@@ -240,7 +242,7 @@ impl AgentService {
 
                     // Notify result of execution
                     if let Some(callback) = &on_token {
-                        (callback)(LlmStreamPart::ToolCallFinish(result.clone()));
+                        (callback)(LlmStreamPart::LlmToolCallFinish(result.clone()));
                     }
 
                     let tool_message =

@@ -163,10 +163,10 @@ pub enum LlmStreamPart {
     Content(String),
     ToolCallChunk(ToolCallChunk),
     Usage(LlmUsage),
-    ToolCallStart(ToolCall),
-    ToolCallFinish(ToolResult),
+    LlmToolCallStart(ToolCall),
+    LlmToolCallFinish(ToolResult),
     LlmMessageStart,
-    LlmMessageFinish,
+    LlmMessageFinish(Option<LlmUsage>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
