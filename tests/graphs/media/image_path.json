@@ -22,7 +22,7 @@
         "files": [
           {
             "mime_type": "image/png",
-            "path": "../../../tests/dags/media/test_image.jpg"
+            "path": "tests/dags/media/test_image.jpg"
           }
         ]
       }

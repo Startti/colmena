@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::error::Error;
 use std::sync::Arc;
 
-use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, ProviderKind, ThreadId};
+use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, ProviderKind, SessionId};
 use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
 use crate::llm::infrastructure::LlmProviderFactory;
 use crate::llm::application::AgentService;
@@ -216,7 +216,7 @@ impl ExecutableNode for ReactorNode {
         let llm_repo = LlmProviderFactory::create(provider_kind);
         let conversation_repo = Arc::new(InMemoryConversationRepository::new());
         let agent_service = AgentService::new(llm_repo, conversation_repo);
-        let tid = ThreadId(uuid::Uuid::new_v4().to_string());
+        let tid = SessionId(uuid::Uuid::new_v4().to_string());
 
         let messages = vec![
             LlmMessage::system(system_message)?,
@@ -234,7 +234,7 @@ impl ExecutableNode for ReactorNode {
         }
 
         let params = crate::llm::application::AgentRunParams {
-            thread_id: &tid,
+            session_id: &tid,
             prompt: String::new(),
             messages: Some(messages),
             config: llm_config,
@@ -292,7 +292,7 @@ impl ExecutableNode for ReactorNode {
 
         // --- 6. Persist phase summary if this is a FINISHED_PHASE turn ---
         if task_ok {
-            let run_id = _state.get("run_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let session_id = _state.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
             // `phase` comes from edge: orchestrator.output.current_phase → reactor.phase
             let mut phase_input = inputs.get("phase")
                 .and_then(|v| v.as_i64())
@@ -309,10 +309,10 @@ impl ExecutableNode for ReactorNode {
                 }
             }
 
-            if let (Some(phase), Some(repo), true) = (phase_input, &self.task_memory_repo, !run_id.is_empty()) {
+            if let (Some(phase), Some(repo), true) = (phase_input, &self.task_memory_repo, !session_id.is_empty()) {
                 let summary_str = response_text.as_str().unwrap_or("");
                 if !summary_str.is_empty() {
-                    if let Err(e) = repo.save_phase_summary(&run_id, phase, summary_str).await {
+                    if let Err(e) = repo.save_phase_summary(&session_id, phase, summary_str).await {
                         eprintln!("⚠️ [ReactorNode] Failed to save phase summary: {:?}", e);
                     } else {
                         println!("💾 [ReactorNode] Phase {} summary saved to DB.", phase);

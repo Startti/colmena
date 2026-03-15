@@ -22,7 +22,7 @@
         "files": [
           {
             "mime_type": "application/pdf",
-            "path": "../../../tests/dags/media/sample.pdf"
+            "path": "tests/dags/media/sample.pdf"
           }
         ]
       }

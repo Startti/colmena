@@ -29,7 +29,7 @@
         "model": "gpt-4o-mini",
         "system_message": "You are a helpful assistant. Use the search_flights tool to find flights. The token is provided in the context.",
         "temperature": 0.0,
-        "thread_id": "debug_amadeus_v1",
+        "session_id": "debug_amadeus_v1",
         "connection_url": "${DATABASE_URL}",
         "enabled_tools": [
           "search_flights"

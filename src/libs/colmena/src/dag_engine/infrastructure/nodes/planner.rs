@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::error::Error;
 use std::sync::Arc;
 
-use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, ProviderKind, ThreadId};
+use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, ProviderKind, SessionId};
 use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
 use crate::llm::infrastructure::LlmProviderFactory;
 use crate::llm::application::AgentService;
@@ -89,13 +89,13 @@ impl ExecutableNode for PlannerNode {
         _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     ) -> Result<Value, Box<dyn Error + Send + Sync>> {
 
-        // --- 0. Skip if tasks already exist in Postgres for this run_id ---
+        // --- 0. Skip if tasks already exist in Postgres for this session_id ---
         // This prevents wasted LLM calls on Turn 2+: once the plan is loaded
         // into the DB the Orchestrator handles routing, so we short-circuit here.
-        let run_id = state.get("run_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        if !run_id.is_empty() {
+        let session_id = state.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if !session_id.is_empty() {
             if let Some(repo) = &self.task_memory_repo {
-                let existing = repo.get_tasks_for_run(&run_id).await?;
+                let existing = repo.get_tasks_for_run(&session_id).await?;
                 if !existing.is_empty() {
                     println!("⏭️  [PlannerNode] Plan already exists in DB ({} tasks) — skipping LLM call.", existing.len());
                     return Ok(Value::Null);
@@ -295,7 +295,7 @@ impl ExecutableNode for PlannerNode {
         let agent_service = AgentService::new(llm_repo, conversation_repo);
 
         let tid_val = uuid::Uuid::new_v4().to_string();
-        let tid = ThreadId(tid_val.clone());
+        let tid = SessionId(tid_val.clone());
 
         let messages = vec![
             LlmMessage::system(system_message)?,
@@ -312,7 +312,7 @@ impl ExecutableNode for PlannerNode {
         }
 
         let params = crate::llm::application::AgentRunParams {
-            thread_id: &tid,
+            session_id: &tid,
             prompt: String::new(),
             messages: Some(messages),
             config: llm_config,

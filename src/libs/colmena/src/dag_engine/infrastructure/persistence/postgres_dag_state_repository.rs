@@ -51,7 +51,7 @@ impl PostgresDagStateRepository {
         sqlx::query(
             r#"CREATE TABLE IF NOT EXISTS dag_phase_summaries (
                 id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                run_id     TEXT NOT NULL,
+                session_id TEXT NOT NULL,
                 phase      INT  NOT NULL,
                 summary    TEXT NOT NULL,
                 created_at TIMESTAMPTZ DEFAULT NOW()
@@ -74,7 +74,7 @@ fn row_to_task(row: &sqlx::postgres::PgRow) -> DagTask {
 
     DagTask {
         id: id_uuid.to_string(),
-        run_id: row.get("run_id"),
+        session_id: row.get("session_id"),
         task_name: row.get("task_name"),
         assigned_to: row.get("assigned_to"),
         completed: row.get("completed"),
@@ -88,11 +88,11 @@ fn row_to_task(row: &sqlx::postgres::PgRow) -> DagTask {
 
 #[async_trait]
 impl DagStateRepository for PostgresDagStateRepository {
-    async fn get_by_id(&self, run_id: &str) -> Result<Option<DagRunState>, DagError> {
+    async fn get_by_id(&self, session_id: &str) -> Result<Option<DagRunState>, DagError> {
         let row_opt = sqlx::query(
-            "SELECT run_id, graph_json, all_outputs, status, active_queue, execution_history, global_calls, caller_specific_calls, global_shared_state FROM dag_runs WHERE run_id = $1"
+            "SELECT session_id, graph_json, all_outputs, status, active_queue, execution_history, global_calls, caller_specific_calls, global_shared_state FROM dag_runs WHERE session_id = $1"
         )
-        .bind(run_id)
+        .bind(session_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| DagError::StateError(format!("Database error on get: {}", e)))?;
@@ -121,7 +121,7 @@ impl DagStateRepository for PostgresDagStateRepository {
                 let global_shared_state: serde_json::Value = row.get("global_shared_state");
 
                 Ok(Some(DagRunState {
-                    run_id: row.get("run_id"),
+                    session_id: row.get("session_id"),
                     graph_json: row.get("graph_json"),
                     all_outputs,
                     status,
@@ -154,9 +154,9 @@ impl DagStateRepository for PostgresDagStateRepository {
             .map_err(|e| DagError::StateError(format!("Serialization error (caller_calls): {}", e)))?;
 
         sqlx::query(
-            r#"INSERT INTO dag_runs (run_id, graph_json, all_outputs, status, active_queue, execution_history, global_calls, caller_specific_calls, global_shared_state, updated_at)
+            r#"INSERT INTO dag_runs (session_id, graph_json, all_outputs, status, active_queue, execution_history, global_calls, caller_specific_calls, global_shared_state, updated_at)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
-               ON CONFLICT (run_id) DO UPDATE SET
+               ON CONFLICT (session_id) DO UPDATE SET
                  graph_json = EXCLUDED.graph_json,
                  all_outputs = EXCLUDED.all_outputs,
                  status = EXCLUDED.status,
@@ -167,7 +167,7 @@ impl DagStateRepository for PostgresDagStateRepository {
                  global_shared_state = EXCLUDED.global_shared_state,
                  updated_at = NOW()"#
         )
-        .bind(&state.run_id)
+        .bind(&state.session_id)
         .bind(&state.graph_json)
         .bind(&all_outputs_json)
         .bind(&status_str)
@@ -195,11 +195,11 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
             .map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null));
 
         sqlx::query(
-            "INSERT INTO dag_task_memory (id, run_id, task_name, assigned_to, completed, result, phase, parallel) \
+            "INSERT INTO dag_task_memory (id, session_id, task_name, assigned_to, completed, result, phase, parallel) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
         )
         .bind(id_uuid)
-        .bind(&task.run_id)
+        .bind(&task.session_id)
         .bind(&task.task_name)
         .bind(&task.assigned_to)
         .bind(task.completed)
@@ -229,12 +229,12 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
         Ok(())
     }
 
-    async fn get_tasks_for_run(&self, run_id: &str) -> Result<Vec<DagTask>, DagError> {
+    async fn get_tasks_for_run(&self, session_id: &str) -> Result<Vec<DagTask>, DagError> {
         let rows = sqlx::query(
-            "SELECT id, run_id, task_name, assigned_to, completed, result, phase, parallel \
-             FROM dag_task_memory WHERE run_id = $1 ORDER BY phase ASC, created_at ASC"
+            "SELECT id, session_id, task_name, assigned_to, completed, result, phase, parallel \
+             FROM dag_task_memory WHERE session_id = $1 ORDER BY phase ASC, created_at ASC"
         )
-        .bind(run_id)
+        .bind(session_id)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| DagError::StateError(format!("Database error on get_tasks_for_run: {}", e)))?;
@@ -242,13 +242,13 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
         Ok(rows.iter().map(row_to_task).collect())
     }
 
-    async fn get_first_uncompleted_task(&self, run_id: &str) -> Result<Option<DagTask>, DagError> {
+    async fn get_first_uncompleted_task(&self, session_id: &str) -> Result<Option<DagTask>, DagError> {
         let row_opt = sqlx::query(
-            "SELECT id, run_id, task_name, assigned_to, completed, result, phase, parallel \
-             FROM dag_task_memory WHERE run_id = $1 AND completed = FALSE \
+            "SELECT id, session_id, task_name, assigned_to, completed, result, phase, parallel \
+             FROM dag_task_memory WHERE session_id = $1 AND completed = FALSE \
              ORDER BY phase ASC, created_at ASC LIMIT 1"
         )
-        .bind(run_id)
+        .bind(session_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| DagError::StateError(format!("Database error on get_first_uncompleted_task: {}", e)))?;
@@ -269,9 +269,9 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
         Ok(())
     }
 
-    async fn clear_tasks_for_run(&self, run_id: &str) -> Result<(), DagError> {
-        sqlx::query("DELETE FROM dag_task_memory WHERE run_id = $1")
-            .bind(run_id)
+    async fn clear_tasks_for_run(&self, session_id: &str) -> Result<(), DagError> {
+        sqlx::query("DELETE FROM dag_task_memory WHERE session_id = $1")
+            .bind(session_id)
             .execute(&self.pool)
             .await
             .map_err(|e| DagError::StateError(format!("Database error on clear_tasks_for_run: {}", e)))?;
@@ -281,13 +281,13 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
 
     // ── Phase-aware routing ────────────────────────────────────────────────────
 
-    async fn get_current_phase(&self, run_id: &str) -> Result<Option<i32>, DagError> {
+    async fn get_current_phase(&self, session_id: &str) -> Result<Option<i32>, DagError> {
         // MIN() aggregate always returns exactly one row (NULL if no matching rows)
         let row = sqlx::query(
             "SELECT MIN(phase) as min_phase FROM dag_task_memory \
-             WHERE run_id = $1 AND completed = FALSE"
+             WHERE session_id = $1 AND completed = FALSE"
         )
-        .bind(run_id)
+        .bind(session_id)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| DagError::StateError(format!("Database error on get_current_phase: {}", e)))?;
@@ -297,13 +297,13 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
         Ok(min_phase)
     }
 
-    async fn get_uncompleted_tasks_for_phase(&self, run_id: &str, phase: i32) -> Result<Vec<DagTask>, DagError> {
+    async fn get_uncompleted_tasks_for_phase(&self, session_id: &str, phase: i32) -> Result<Vec<DagTask>, DagError> {
         let rows = sqlx::query(
-            "SELECT id, run_id, task_name, assigned_to, completed, result, phase, parallel \
-             FROM dag_task_memory WHERE run_id = $1 AND phase = $2 AND completed = FALSE \
+            "SELECT id, session_id, task_name, assigned_to, completed, result, phase, parallel \
+             FROM dag_task_memory WHERE session_id = $1 AND phase = $2 AND completed = FALSE \
              ORDER BY created_at ASC"
         )
-        .bind(run_id)
+        .bind(session_id)
         .bind(phase)
         .fetch_all(&self.pool)
         .await
@@ -314,11 +314,11 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
 
     // ── Phase summaries ────────────────────────────────────────────────────────
 
-    async fn save_phase_summary(&self, run_id: &str, phase: i32, summary: &str) -> Result<(), DagError> {
+    async fn save_phase_summary(&self, session_id: &str, phase: i32, summary: &str) -> Result<(), DagError> {
         sqlx::query(
-            "INSERT INTO dag_phase_summaries (run_id, phase, summary) VALUES ($1, $2, $3)"
+            "INSERT INTO dag_phase_summaries (session_id, phase, summary) VALUES ($1, $2, $3)"
         )
-        .bind(run_id)
+        .bind(session_id)
         .bind(phase)
         .bind(summary)
         .execute(&self.pool)
@@ -328,18 +328,18 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
         Ok(())
     }
 
-    async fn get_phase_summaries(&self, run_id: &str) -> Result<Vec<DagPhaseSummary>, DagError> {
+    async fn get_phase_summaries(&self, session_id: &str) -> Result<Vec<DagPhaseSummary>, DagError> {
         let rows = sqlx::query(
-            "SELECT run_id, phase, summary FROM dag_phase_summaries \
-             WHERE run_id = $1 ORDER BY phase ASC"
+            "SELECT session_id, phase, summary FROM dag_phase_summaries \
+             WHERE session_id = $1 ORDER BY phase ASC"
         )
-        .bind(run_id)
+        .bind(session_id)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| DagError::StateError(format!("Database error on get_phase_summaries: {}", e)))?;
 
         Ok(rows.iter().map(|row| DagPhaseSummary {
-            run_id: row.get("run_id"),
+            session_id: row.get("session_id"),
             phase: row.get("phase"),
             summary: row.get("summary"),
         }).collect())

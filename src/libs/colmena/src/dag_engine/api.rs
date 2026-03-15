@@ -331,7 +331,7 @@ struct AppState {
 
 #[derive(serde::Deserialize)]
 struct ResumePayload {
-    run_id: String,
+    session_id: String,
     answer: String,
 }
 
@@ -730,8 +730,8 @@ async fn handler_webhook(
                             }
                         }
                         
-                        if let Some(run_id_val) = out.as_object().and_then(|o| o.get("__colmena_run_id")) {
-                            current_resume_id = run_id_val.as_str().map(|s| s.to_string());
+                        if let Some(session_id_val) = out.as_object().and_then(|o| o.get("__colmena_session_id")) {
+                            current_resume_id = session_id_val.as_str().map(|s| s.to_string());
                         } else {
                             current_resume_id = None;
                         }
@@ -758,7 +758,7 @@ async fn handler_resume(
     headers: axum::http::HeaderMap,
     Json(payload): Json<ResumePayload>,
 ) -> axum::response::Response {
-    println!("🔔 Resume requested for run_id: {}", payload.run_id);
+    println!("🔔 Resume requested for session_id: {}", payload.session_id);
     
     // Check for "Accept: text/event-stream" or Vercel header
     let is_sse = headers
@@ -777,7 +777,7 @@ async fn handler_resume(
         eprintln!("⚠️ SSE not fully supported yet on /resume, falling back to JSON");
     }
 
-    match state.use_case.execute(graph_instance, Some(payload.run_id), Some(payload.answer), false).await {
+    match state.use_case.execute(graph_instance, Some(payload.session_id), Some(payload.answer), false).await {
         Ok(output) => {
             println!("✅ Resume successful.");
             Json(output).into_response()

@@ -18,7 +18,7 @@
         "model": "gpt-4o-mini",
         "system_message": "You are a helpful math assistant with a memory. Use the available tools to solve math problems step by step. Remember previous conversations.",
         "temperature": 0.7,
-        "thread_id": "math_agent_postgres_demo",
+        "session_id": "math_agent_postgres_demo",
         "connection_url": "${DATABASE_URL}",
         "enabled_tools": [
           "add",

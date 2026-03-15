@@ -6,10 +6,10 @@
         "provider": "gemini",
         "api_key": "${GEMINI_API_KEY}",
         "model": "gemini-2.5-flash",
-        "system_message": "You are a helpful assistant with perfect memory.",
-        "session_id": "sqlite_test_thread_001",
-        "connection_url": "sqlite://colmena_memory.db",
-        "prompt": "My name is Alice and I love programming in Rust."
+        "system_message": "You are a helpful assistant that can perform math. Use tools when necessary.",
+        "connection_url": "${DATABASE_URL}",
+        "enabled_tools": ["add", "subtract"],
+        "prompt": "My name is Daniel. Calculate 123 + 456 and remember my name."
       }
     },
     "step_2": {
@@ -18,9 +18,9 @@
         "provider": "gemini",
         "api_key": "${GEMINI_API_KEY}",
         "model": "gemini-2.5-flash",
-        "session_id": "sqlite_test_thread_001",
-        "connection_url": "sqlite://colmena_memory.db",
-        "prompt": "What is my name and what do I love?"
+        "connection_url": "${DATABASE_URL}",
+        "enabled_tools": ["multiply"],
+        "prompt": "What is my name? Also, multiply the previous result by 2."
       }
     },
     "log_result": {

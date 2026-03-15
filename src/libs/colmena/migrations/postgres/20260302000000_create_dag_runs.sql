@@ -1,5 +1,5 @@
 CREATE TABLE IF NOT EXISTS dag_runs (
-    run_id VARCHAR(255) PRIMARY KEY,
+    session_id VARCHAR(255) PRIMARY KEY,
     graph_json JSONB NOT NULL,
     all_outputs JSONB NOT NULL,
     status VARCHAR(50) NOT NULL,

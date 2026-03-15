@@ -1,7 +1,7 @@
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
 use crate::llm::domain::{
-    LlmConfig, LlmMessage, LlmProvider, LlmStreamPart, ProviderKind, ThreadId, ToolExecutor,
+    LlmConfig, LlmMessage, LlmProvider, LlmStreamPart, ProviderKind, SessionId, ToolExecutor,
 };
 use crate::llm::infrastructure::{ConversationRepositoryFactory, LlmProviderFactory};
 use async_trait::async_trait;
@@ -184,7 +184,10 @@ impl ExecutableNode for LlmNode {
         // This allows the synthesizer to receive `final_result` (a JSON array) directly.
         let prompt_raw_str: String;
         let prompt: &str = {
-            let val = inputs.get("prompt").or_else(|| config.get("prompt"));
+            let val = inputs.get("prompt")
+                .or_else(|| config.get("prompt"))
+                .or_else(|| inputs.get("task")) // Added fallback to "task"
+                .or_else(|| config.get("task")); // Added fallback to "task"
             match val {
                 Some(Value::String(s)) => {
                     prompt_raw_str = Self::resolve_template_vars(s, inputs);
@@ -252,10 +255,12 @@ impl ExecutableNode for LlmNode {
         };
 
         // Thread ID (Optional - for Memory)
-        let thread_id = inputs
-            .get("thread_id")
+        // Priority: Global Session > Input Override > Config Sync
+        let session_id = inputs
+            .get("__colmena_session_id")
             .and_then(|v| v.as_str())
-            .or_else(|| config.get("thread_id").and_then(|v| v.as_str()));
+            .or_else(|| inputs.get("session_id").and_then(|v| v.as_str()))
+            .or_else(|| config.get("session_id").and_then(|v| v.as_str()));
 
         // Connection URL (Optional - for Memory Backend)
         let connection_url_raw = inputs
@@ -286,10 +291,11 @@ impl ExecutableNode for LlmNode {
         }
 
         let mut messages = Vec::new();
+        let mut history_exists = false;
 
         // 2.1 Load History if Thread ID and Connection URL are present
         let mut repo_instance = None;
-        if let (Some(tid), Some(url_raw)) = (thread_id, connection_url_raw) {
+        if let (Some(tid), Some(url_raw)) = (session_id, connection_url_raw) {
             let connection_url = Self::resolve_env_var(url_raw)?;
             let repo = self
                 .repository_factory
@@ -297,16 +303,15 @@ impl ExecutableNode for LlmNode {
                 .await?;
             repo_instance = Some(repo.clone());
 
-            let tid = ThreadId(tid.to_string());
+            let tid = SessionId(tid.to_string());
             let conversation = repo.get_by_id(&tid).await?;
-            messages.extend(conversation.messages);
+            // We only need to know if history exists to decide on system message
+            history_exists = !conversation.messages.is_empty();
         }
 
-        // 2.2 Add System Message if present (and not already in history? For now just add it if provided)
-        // Note: Usually system message is first. If history exists, maybe we shouldn't add it again?
-        // Or maybe the history loading should handle this. For now, let's prepend if messages is empty.
+        // 2.2 Add System Message if present and history is empty
         if let Some(sys_msg) = system_message {
-            if messages.is_empty() {
+            if !history_exists {
                 messages.push(LlmMessage::system(sys_msg.to_string())?);
             }
         }
@@ -421,11 +426,11 @@ impl ExecutableNode for LlmNode {
         // We have repo_instance which is Arc<dyn ConversationRepository> (if memory enabled).
         // If memory is NOT enabled, we need a dummy/mock repository or handle it.
         // AgentService *requires* a repository to store history.
-        // If the user didn't provide thread_id, we can't persist history.
+        // If the user didn't provide session_id, we can't persist history.
         // However, AgentService logic depends on it.
         // For now, if no memory is configured, we can use an in-memory repository or fail?
         // Or we can create a temporary in-memory repository for this execution?
-        // Let's assume for now we use a temporary in-memory repo if no thread_id provided,
+        // Let's assume for now we use a temporary in-memory repo if no session_id provided,
         // but wait, AgentService assumes persistence.
         // If we don't provide a repo, AgentService can't work.
         // Actually, AgentService is designed for stateful agents.
@@ -434,7 +439,7 @@ impl ExecutableNode for LlmNode {
         // So we should provide an ephemeral repository.
         // Let's implement a simple EphemeralConversationRepository or use Mock?
         // Better: Use Sqlite with :memory:? Or just a simple struct.
-        // For now, let's require thread_id if tools are used? No, that's restrictive.
+        // For now, let's require session_id if tools are used? No, that's restrictive.
 
         // Let's use a temporary SQLite in-memory repo if none provided.
         // But creating a pool is expensive.
@@ -505,8 +510,8 @@ impl ExecutableNode for LlmNode {
             Vec::new()
         };
 
-        // Use provided thread_id or generate unique one for stateless calls
-        let tid = thread_id
+        // Use provided session_id or generate unique one for stateless calls
+        let tid = session_id
             .map(|s| s.to_string())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
@@ -552,6 +557,12 @@ impl ExecutableNode for LlmNode {
                                 output: res.output.clone(),
                             })
                         }
+                        LlmStreamPart::LlmMessageStart => {
+                            obs.on_event(NodeEvent::LlmMessageStart)
+                        }
+                        LlmStreamPart::LlmMessageFinish => {
+                            obs.on_event(NodeEvent::LlmMessageFinish)
+                        }
                     }
                 }))
             } else {
@@ -563,7 +574,7 @@ impl ExecutableNode for LlmNode {
 
         // Create AgentService parameters
         let params = crate::llm::application::AgentRunParams {
-            thread_id: &ThreadId(tid),
+            session_id: &SessionId(tid),
             prompt: prompt.to_string(),
             messages: Some(messages.clone()),
             config: llm_config,
@@ -631,8 +642,8 @@ impl ExecutableNode for LlmNode {
                         // Store the standardized result structure in the DB
                         repo.update_task_result(&task_id, result_json.clone()).await?;
 
-                        let run_id = _state.get("run_id").and_then(|v| v.as_str()).unwrap_or("unknown_run").to_string();
-                        if let Ok(tasks) = repo.get_tasks_for_run(&run_id).await {
+                        let session_id = _state.get("session_id").and_then(|v| v.as_str()).unwrap_or("unknown_run").to_string();
+                        if let Ok(tasks) = repo.get_tasks_for_run(&session_id).await {
                             for t in tasks {
                                 output_tasks.push(json!({
                                     "id": t.id,
@@ -676,7 +687,7 @@ impl ExecutableNode for LlmNode {
                 "prompt": "string (optional)",
                 "temperature": "number (optional)",
                 "max_tokens": "integer (optional)",
-                "thread_id": "string (optional, enables memory)",
+                "session_id": "string (optional, enables memory)",
                 "connection_url": "string (optional, database connection for memory)",
                 "enabled_tools": "array of strings or '*' (optional, enables tool calling)",
                 "tool_configurations": "map<string, ToolConfiguration> (optional, partial config for tools)",
@@ -691,7 +702,7 @@ impl ExecutableNode for LlmNode {
                 "prompt": "string (optional)",
                 "temperature": "number (optional)",
                 "max_tokens": "integer (optional)",
-                "thread_id": "string (optional, enables memory)",
+                "session_id": "string (optional, enables memory)",
                 "connection_url": "string (optional)",
                 "enabled_tools": "array of strings or '*' (optional)",
                 "files": "array of objects [{mime_type, data|path}] (optional)"

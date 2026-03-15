@@ -10,8 +10,8 @@ El proyecto está organizado siguiendo principios de **Arquitectura Limpia**, se
 
 ### Directorios Principales
 - `src/libs/colmena/src/dag_engine`: Núcleo del motor de grafos.
-    - `domain/`: Contiene los modelos base (`Graph`, `Node`, `Edge`, `DagExecutionEvent`). Aquí se define **qué es** un grafo.
-    - `application/`: Contiene el orquestador (`run_use_case.rs`). Aquí se define **cómo se ejecuta** un grafo.
+    - `domain/`: Modelos base (`Graph`, `Node`, `Edge`). Define la **identidad unificada** (`SessionId`).
+    - `application/`: Orquestador (`run_use_case.rs`). Gestiona la propagación del `session_id`.
     - `infrastructure/`: Implementaciones concretas.
         - `nodes/`: Catálogo de todos los tipos de nodos (Python, LLM, Math, etc.).
         - `persistence/`: Gestión de la base de datos Postgres y el estado de ejecución.
@@ -37,8 +37,8 @@ Cuando se inicia un grafo, el motor sigue estos pasos:
 
 ### Mecanismo de Suspensión y Resume
 Es una de las características más avanzadas de Colmena:
-- **Suspensión**: Si un nodo devuelve la bandera `__colmena_status: "SUSPENDED"`, el motor pausa todo, guarda la cola de ejecución actual y las variables en Postgres, y genera un `run_id`.
-- **Reanudación**: Al usar `--resume-id`, el motor restaura exactamente el mismo punto de la cola. El nodo que suspendió recibe la "respuesta humana" (`--answer`) en la variable `__colmena_resume_answer` y puede continuar su lógica.
+- **Suspensión**: Si un nodo devuelve la bandera `__colmena_status: "SUSPENDED"`, el motor pausa todo, guarda la cola de ejecución actual y las variables en Postgres bajo el `session_id` generado.
+- **Reanudación**: Al usar `--session-id` (o `--resume-id`), el motor restaura el estado exacto. El nodo recibe la respuesta en `__colmena_resume_answer`.
 
 ---
 
@@ -136,4 +136,57 @@ Una de las métricas más importantes es el uso de tokens. El sistema funciona d
 2.  **Agregación**: El orquestador de la CLI (`main.rs`) captura estos eventos y los suma en acumuladores globales.
 3.  **Reporte Final**: Al emitir el evento `finish`, el motor incluye el objeto `usage` con la suma total de `promptTokens` y `completionTokens` de todos los nodos que participaron.
 
-Esto permite tener una visión clara del costo total de una ejecución, especialmente en grafos con múltiples agentes o herramientas.
+---
+
+## 7. Soporte Multimedia (Visión y Documentos)
+
+El motor permite enviar archivos a los modelos de lenguaje (especialmente útil para modelos con visión como GPT-4o o Gemini Flash).
+
+### Cómo funciona
+1.  **Configuración en el JSON**: En el nodo `llm_call`, se añade una lista de `files` con su `mime_type` y `path`.
+2.  **Resolución de Archivos**: El motor lee el archivo del sistema local, lo codifica en Base64 y lo inserta en la estructura de mensajes del adaptador LLM.
+3.  **Mime Types Soportados**:
+    - `image/png`, `image/jpeg`: Soportados nativamente para visión.
+    - `application/pdf`: Soportado para análisis de documentos (vía GPT-4o o Gemini).
+
+**Ejemplos Verificados:**
+- `media/image_path.json`: Envía una imagen local para descripción.
+- `media/pdf_path.json`: Envía un PDF (ej. un poema) para análisis de texto.
+
+---
+
+## 8. Memoria y Persistencia de Conversación
+
+El motor permite que los nodos LLM mantengan el contexto de una conversación a través de múltiples ejecuciones o pasos del grafo mediante un `thread_id`.
+
+### Unificación de Identidad (session_id)
+El motor utiliza un único identificador para toda la vida del grafo:
+1.  **session_id**: Se genera al inicio (o se provee externamente).
+2.  **Persistencia**: Se usa como llave primaria en `dag_runs` y como identificador de conversación en `llm_node_history`.
+3.  **Transparencia**: Los nodos AI ya no requieren configurar un `thread_id` manual; heredan automáticamente el `session_id` de la ejecución actual.
+
+### Cómo funciona
+1.  **Session Context**: Al iniciar, el motor inyecta `session_id` en el estado global.
+2.  **Repositorios de Memoria**: Soporta múltiples backends:
+    - **Postgres**: Ideal para producción y escalabilidad. Se configura con un `connection_url` de PostgreSQL.
+    - **SQLite**: Ideal para desarrollo local o sistemas embebidos.
+    - **In-Memory**: (Default) Memoria efímera para la sesión actual.
+
+**Ejemplos Verificados:**
+- `memory/memory_postgres_example.json`: Un grafo de dos pasos donde el segundo paso recuerda datos del primero usando PostgreSQL.
+
+---
+
+## 10. Mantenimiento y Reset de Base de Datos
+
+Para limpiar el estado de la aplicación y aplicar nuevos esquemas, se recomienda borrar las tablas en el orden correcto:
+
+```sql
+DROP TABLE IF EXISTS dag_runs CASCADE;
+DROP TABLE IF EXISTS llm_node_history CASCADE;
+DROP TABLE IF EXISTS dag_task_memory CASCADE;
+DROP TABLE IF EXISTS dag_phase_summaries CASCADE;
+DROP TABLE IF EXISTS _sqlx_migrations CASCADE;
+```
+
+Al reiniciar el motor con el CLI, se ejecutarán automáticamente las migraciones idempotentes definidas en `infrastructure/persistence/`.

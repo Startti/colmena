@@ -5,7 +5,7 @@ use std::error::Error;
 use std::sync::Arc;
 
 use crate::llm::domain::{
-    LlmConfig, LlmMessage, LlmProvider, ProviderKind, ThreadId
+    LlmConfig, LlmMessage, LlmProvider, ProviderKind, SessionId
 };
 use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
 use crate::llm::infrastructure::LlmProviderFactory;
@@ -141,7 +141,7 @@ impl ExecutableNode for ExtractionNode {
         let agent_service = AgentService::new(llm_repo, conversation_repo);
 
         let tid_val = uuid::Uuid::new_v4().to_string();
-        let tid = ThreadId(tid_val.clone());
+        let tid = SessionId(tid_val.clone());
 
         let mut messages = Vec::new();
         messages.push(LlmMessage::system(system_message)?);
@@ -161,7 +161,7 @@ impl ExecutableNode for ExtractionNode {
         let empty_executor = EmptyToolExecutor;
 
         let params = crate::llm::application::AgentRunParams {
-            thread_id: &tid,
+            session_id: &tid,
             prompt: String::new(), // We already prepopulated messages
             messages: Some(messages),
             config: llm_config,
@@ -210,7 +210,7 @@ impl ExecutableNode for ExtractionNode {
             println!("═══════════════════════════════════════\n");
         }
 
-        let run_id = _state.get("run_id").and_then(|v| v.as_str()).unwrap_or("unknown_run").to_string();
+        let session_id = _state.get("session_id").and_then(|v| v.as_str()).unwrap_or("unknown_run").to_string();
 
         if let Some(repo) = &self.task_memory_repo {
             // Process Critic modifications (Add tasks)
@@ -222,7 +222,7 @@ impl ExecutableNode for ExtractionNode {
                         
                         let new_task = crate::dag_engine::domain::state::DagTask {
                             id: uuid::Uuid::new_v4().to_string(),
-                            run_id: run_id.clone(),
+                            session_id: session_id.clone(),
                             task_name,
                             assigned_to,
                             completed: false,
@@ -246,7 +246,7 @@ impl ExecutableNode for ExtractionNode {
             
             // Generate updated tasks list for next nodes
             let mut all_tasks_json = Vec::new();
-            if let Ok(tasks) = repo.get_tasks_for_run(&run_id).await {
+            if let Ok(tasks) = repo.get_tasks_for_run(&session_id).await {
                 for t in tasks {
                     all_tasks_json.push(json!({
                         "id": t.id,

@@ -23,7 +23,7 @@ impl ExecutableNode for TaskMemoryWriterNode {
         _state: &mut Value,
         _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
-        let run_id = _state.get("run_id").and_then(|v| v.as_str()).unwrap_or("unknown_run").to_string();
+        let session_id = _state.get("session_id").and_then(|v| v.as_str()).unwrap_or("unknown_run").to_string();
 
         if let Some(repo) = &self.task_memory_repo {
             // 1. Update the result of the completed task
@@ -44,7 +44,7 @@ impl ExecutableNode for TaskMemoryWriterNode {
                             
                             let new_task = crate::dag_engine::domain::state::DagTask {
                                 id: Uuid::new_v4().to_string(),
-                                run_id: run_id.clone(),
+                                session_id: session_id.clone(),
                                 task_name,
                                 assigned_to,
                                 completed: false,
@@ -71,7 +71,7 @@ impl ExecutableNode for TaskMemoryWriterNode {
 
             // 4. Return all current tasks and final loop status
             let mut all_tasks_json = Vec::new();
-            if let Ok(tasks) = repo.get_tasks_for_run(&run_id).await {
+            if let Ok(tasks) = repo.get_tasks_for_run(&session_id).await {
                 for t in tasks {
                     all_tasks_json.push(json!({
                         "id": t.id,

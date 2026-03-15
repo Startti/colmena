@@ -62,7 +62,7 @@ impl DagRunUseCase {
     pub async fn execute(
         &self,
         graph: Graph,
-        resume_run_id: Option<String>,
+        resume_session_id: Option<String>,
         resume_answer: Option<String>,
         include_extra_info: bool,
     ) -> Result<Value, DagError> {
@@ -108,7 +108,7 @@ impl DagRunUseCase {
     pub fn execute_stream(
         self,
         graph: Graph,
-        resume_run_id: Option<String>,
+        resume_session_id: Option<String>,
         resume_answer: Option<String>,
         include_extra_info: bool,
     ) -> impl futures::Stream<
@@ -120,33 +120,39 @@ impl DagRunUseCase {
 
             let mut all_outputs: HashMap<String, Value> = HashMap::new();
             let mut active_queue: VecDeque<String> = VecDeque::new();
-            let mut run_id = uuid::Uuid::new_v4().to_string();
+            let mut session_id = uuid::Uuid::new_v4().to_string();
             let mut execution_history: Vec<(String, String)> = Vec::new();
             let mut global_calls: HashMap<String, u32> = HashMap::new();
             let mut caller_specific_calls: HashMap<String, HashMap<String, u32>> = HashMap::new();
             let mut global_shared_state = serde_json::json!({});
 
             // Context loader
-            if let Some(id) = resume_run_id {
+            if let Some(id) = resume_session_id {
                 if let Some(repo) = &self.state_repository {
                     if let Some(state) = repo.get_by_id(&id).await? {
                         all_outputs = state.all_outputs;
                         active_queue = state.active_queue;
-                        run_id = state.run_id;
+                        session_id = state.session_id;
                         execution_history = state.execution_history;
                         global_calls = state.global_calls;
                         caller_specific_calls = state.caller_specific_calls;
                         global_shared_state = state.global_shared_state;
                     } else {
-                        run_id = id;
+                        session_id = id;
                     }
                 } else {
-                    run_id = id;
+                    session_id = id;
                 }
-            } else {
-                // Initialize queue with nodes that have 0 incoming dependencies
+            }
+
+            // If queue is still empty, initialize with nodes that have 0 incoming dependencies
+            if active_queue.is_empty() {
                 for (node_id, _) in &graph.nodes {
-                    let in_degree = graph.edges.iter().filter(|e| e.to.starts_with(node_id)).count();
+                    let in_degree = graph.edges.iter().filter(|e| {
+                        // Exact match or matches "node_id." (JSON pointer)
+                        e.to == *node_id || e.to.starts_with(&format!("{}.", node_id))
+                    }).count();
+                    
                     if in_degree == 0 {
                         active_queue.push_back(node_id.clone());
                     }
@@ -157,7 +163,7 @@ impl DagRunUseCase {
                 global_shared_state = serde_json::json!({});
             }
             if let Some(obj) = global_shared_state.as_object_mut() {
-                obj.insert("run_id".to_string(), Value::String(run_id.clone()));
+                obj.insert("session_id".to_string(), Value::String(session_id.clone()));
                 
                 let mut graph_nodes_meta = serde_json::Map::new();
                 for (nid, node) in &graph.nodes {
@@ -174,7 +180,7 @@ impl DagRunUseCase {
                 // 1. Check if node has all required inputs before acting on it
                 // Ignore cyclic loopback edges because they shouldn't block the node from starting its very first turn
                 let incoming_edges: Vec<_> = graph.edges.iter().filter(|e| {
-                    e.to.starts_with(&node_id) && !e.cyclic.unwrap_or(false)
+                    (e.to == node_id || e.to.starts_with(&format!("{}.", node_id))) && !e.cyclic.unwrap_or(false)
                 }).collect();
                 
                 let mut is_ready = true;
@@ -183,7 +189,16 @@ impl DagRunUseCase {
                     let source_node_id = parts_from[0];
 
                     // If a node explicitly depends on an upstream node's output, that upstream node MUST have completed at least once
-                    if !all_outputs.contains_key(source_node_id) {
+                    if let Some(output) = all_outputs.get(source_node_id) {
+                        if parts_from.len() > 1 {
+                            // If user specified a sub-path (e.g. node.field), ensure the field actually exists in the output
+                            let pointer = format!("/{}", parts_from[1].replace('.', "/"));
+                            if output.pointer(&pointer).is_none() {
+                                is_ready = false;
+                                break;
+                            }
+                        }
+                    } else {
                         is_ready = false;
                         break;
                     }
@@ -237,6 +252,7 @@ impl DagRunUseCase {
                 if let Some(ans) = &resume_answer {
                     inputs.insert("__colmena_resume_answer".to_string(), Value::String(ans.clone()));
                 }
+                inputs.insert("__colmena_session_id".to_string(), Value::String(session_id.clone()));
                 inputs.insert("__node_id".to_string(), Value::String(node_id.clone()));
 
                 yield DagExecutionEvent::NodeStart {
@@ -268,6 +284,8 @@ impl DagRunUseCase {
                                             NodeEvent::LlmUsage { prompt_tokens, completion_tokens } => yield DagExecutionEvent::LlmUsage { node_id: node_id.clone(), prompt_tokens, completion_tokens },
                                             NodeEvent::LlmToolCallStart { tool_id, tool_name, tool_args } => yield DagExecutionEvent::LlmToolCallStart { node_id: node_id.clone(), tool_id, tool_name, tool_args },
                                             NodeEvent::LlmToolCallFinish { tool_id, success, output } => yield DagExecutionEvent::LlmToolCallFinish { node_id: node_id.clone(), tool_id, success, output },
+                                            NodeEvent::LlmMessageStart => yield DagExecutionEvent::LlmMessageStart { node_id: node_id.clone() },
+                                            NodeEvent::LlmMessageFinish => yield DagExecutionEvent::LlmMessageFinish { node_id: node_id.clone() },
                                         }
                                     }
                                     None => break,
@@ -294,7 +312,7 @@ impl DagRunUseCase {
                         Self::strip_extra_info(&mut final_output);
                     }
                     if let Some(final_obj) = final_output.as_object_mut() {
-                        final_obj.insert("run_id".to_string(), Value::String(run_id.clone()));
+                        final_obj.insert("session_id".to_string(), Value::String(session_id.clone()));
                     }
 
                     all_outputs.insert(node_id.to_string(), final_output.clone());
@@ -306,7 +324,7 @@ impl DagRunUseCase {
                         resume_queue.push_front(node_id.clone());
 
                         let state = DagRunState {
-                            run_id: run_id.clone(),
+                            session_id: session_id.clone(),
                             graph_json: serde_json::to_value(&graph).unwrap_or(Value::Null),
                             all_outputs: all_outputs.clone(),
                             global_shared_state: global_shared_state.clone(),
@@ -360,7 +378,7 @@ impl DagRunUseCase {
             // Completed
             if let Some(repo) = &self.state_repository {
                 let state = DagRunState {
-                    run_id: run_id.clone(),
+                    session_id: session_id.clone(),
                     graph_json: serde_json::to_value(&graph).unwrap_or(Value::Null),
                     all_outputs: all_outputs.clone(),
                     global_shared_state: global_shared_state.clone(),
@@ -385,7 +403,7 @@ impl DagRunUseCase {
                 }
             }
             if let Some(obj) = final_aggregated_output.as_object_mut() {
-                obj.insert("__colmena_run_id".to_string(), Value::String(run_id.clone()));
+                obj.insert("__colmena_session_id".to_string(), Value::String(session_id.clone()));
             }
 
             yield DagExecutionEvent::GraphFinish { output: final_aggregated_output.clone() };

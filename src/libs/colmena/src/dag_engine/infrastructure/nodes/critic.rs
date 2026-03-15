@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::error::Error;
 use std::sync::Arc;
 
-use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, ProviderKind, ThreadId};
+use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, ProviderKind, SessionId};
 use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
 use crate::llm::infrastructure::LlmProviderFactory;
 use crate::llm::application::AgentService;
@@ -255,7 +255,7 @@ impl ExecutableNode for CriticNode {
         let llm_repo = LlmProviderFactory::create(provider_kind);
         let conversation_repo = Arc::new(InMemoryConversationRepository::new());
         let agent_service = AgentService::new(llm_repo, conversation_repo);
-        let tid = ThreadId(uuid::Uuid::new_v4().to_string());
+        let tid = SessionId(uuid::Uuid::new_v4().to_string());
 
         let messages = vec![
             LlmMessage::system(system_message)?,
@@ -273,7 +273,7 @@ impl ExecutableNode for CriticNode {
         }
 
         let params = crate::llm::application::AgentRunParams {
-            thread_id: &tid,
+            session_id: &tid,
             prompt: String::new(),
             messages: Some(messages),
             config: llm_config,

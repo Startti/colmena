@@ -40,7 +40,7 @@ impl std::str::FromStr for DagRunStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DagRunState {
-    pub run_id: String,
+    pub session_id: String,
     pub graph_json: Value,
     pub all_outputs: HashMap<String, Value>,
     pub status: DagRunStatus,
@@ -68,14 +68,14 @@ pub struct DagRunState {
 
 #[async_trait]
 pub trait DagStateRepository: Send + Sync {
-    async fn get_by_id(&self, run_id: &str) -> Result<Option<DagRunState>, DagError>;
+    async fn get_by_id(&self, session_id: &str) -> Result<Option<DagRunState>, DagError>;
     async fn save(&self, state: &DagRunState) -> Result<(), DagError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DagTask {
     pub id: String,
-    pub run_id: String,
+    pub session_id: String,
     pub task_name: String,
     pub assigned_to: String,
     pub completed: bool,
@@ -89,7 +89,7 @@ pub struct DagTask {
 /// A summary produced by the ReactorNode at the end of a phase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DagPhaseSummary {
-    pub run_id: String,
+    pub session_id: String,
     pub phase: i32,
     pub summary: String,
 }
@@ -98,19 +98,19 @@ pub struct DagPhaseSummary {
 pub trait DagTaskMemoryRepository: Send + Sync {
     async fn add_task(&self, task: &DagTask) -> Result<(), DagError>;
     async fn update_task_result(&self, task_id: &str, result: Value) -> Result<(), DagError>;
-    async fn get_tasks_for_run(&self, run_id: &str) -> Result<Vec<DagTask>, DagError>;
-    async fn get_first_uncompleted_task(&self, run_id: &str) -> Result<Option<DagTask>, DagError>;
+    async fn get_tasks_for_run(&self, session_id: &str) -> Result<Vec<DagTask>, DagError>;
+    async fn get_first_uncompleted_task(&self, session_id: &str) -> Result<Option<DagTask>, DagError>;
     async fn delete_task(&self, task_id: &str) -> Result<(), DagError>;
-    async fn clear_tasks_for_run(&self, run_id: &str) -> Result<(), DagError>;
+    async fn clear_tasks_for_run(&self, session_id: &str) -> Result<(), DagError>;
 
     // --- Phase-aware routing ---
     /// Returns the lowest phase number that still has incomplete tasks, or None if all done.
-    async fn get_current_phase(&self, run_id: &str) -> Result<Option<i32>, DagError>;
+    async fn get_current_phase(&self, session_id: &str) -> Result<Option<i32>, DagError>;
     /// Returns all incomplete tasks for a specific phase.
-    async fn get_uncompleted_tasks_for_phase(&self, run_id: &str, phase: i32) -> Result<Vec<DagTask>, DagError>;
+    async fn get_uncompleted_tasks_for_phase(&self, session_id: &str, phase: i32) -> Result<Vec<DagTask>, DagError>;
 
     // --- Phase summaries (written by ReactorNode, read by final_reactor) ---
-    async fn save_phase_summary(&self, run_id: &str, phase: i32, summary: &str) -> Result<(), DagError>;
-    async fn get_phase_summaries(&self, run_id: &str) -> Result<Vec<DagPhaseSummary>, DagError>;
+    async fn save_phase_summary(&self, session_id: &str, phase: i32, summary: &str) -> Result<(), DagError>;
+    async fn get_phase_summaries(&self, session_id: &str) -> Result<Vec<DagPhaseSummary>, DagError>;
 }
 

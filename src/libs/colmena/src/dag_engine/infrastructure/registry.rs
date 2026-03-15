@@ -64,7 +64,8 @@ impl HashMapNodeRegistry {
             nodes.insert("loop_controller".to_string(), Arc::new(crate::dag_engine::infrastructure::nodes::loop_controller::LoopControllerNode::new()));
 
             // --- Registrar Orchestrator ---
-            nodes.insert("orchestrator".to_string(), Arc::new(OrchestratorNode::new(task_memory_repo.clone())));
+            let registry_weak = weak_self.clone() as Weak<dyn NodeRegistryPort>;
+            nodes.insert("orchestrator".to_string(), Arc::new(OrchestratorNode::new(task_memory_repo.clone(), registry_weak)));
             
             // --- Registrar Task Memory Writer ---
             nodes.insert("task_memory_writer".to_string(), Arc::new(TaskMemoryWriterNode::new(task_memory_repo.clone())));

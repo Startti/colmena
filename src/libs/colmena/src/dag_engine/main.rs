@@ -13,13 +13,11 @@ struct Cli {
 enum Commands {
     Run {
         file_path: String,
-        #[arg(long)]
-        resume_id: Option<String>,
+        #[arg(long, alias = "resume-id")]
+        session_id: Option<String>,
         #[arg(long)]
         answer: Option<String>,
         #[arg(long, default_value_t = false)]
-        r#loop: bool,
-        #[arg(long, short = 'e', default_value_t = false)]
         include_extra_info: bool,
     },
     Serve {
@@ -38,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { file_path, resume_id, answer, r#loop, include_extra_info } => {
+        Commands::Run { file_path, session_id, answer, include_extra_info } => {
             use colmena::dag_engine::application::run_use_case::DagRunUseCase;
             use colmena::dag_engine::domain::events::DagExecutionEvent;
             use colmena::dag_engine::infrastructure::registry::HashMapNodeRegistry;
@@ -46,12 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             use futures::StreamExt;
             use std::sync::Arc;
 
-            println!("🚀 Modo Run: Cargando grafo desde {}", file_path);
-            if !r#loop {
-                println!("Ejecutando grafo en modo single-turn...");
-            } else {
-                println!("Ejecutando grafo en modo Loop (streaming protocol)...");
-            }
+            println!("🚀 Ejecutando grafo: {}", file_path);
 
             // Bootstrap the engine
             dotenvy::dotenv().ok();
@@ -77,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut total_completion_tokens: u32 = 0;
 
             // The new active_queue engine natively handles both linear and cyclic graphs
-            let s = run_use_case.execute_stream(graph, resume_id.clone(), answer, include_extra_info);
+            let s = run_use_case.execute_stream(graph, session_id.clone(), answer, include_extra_info);
             let stream = Box::pin(s);
             tokio::pin!(stream);
 
@@ -170,6 +163,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "output": output
                         }))
                     },
+                    DagExecutionEvent::LlmMessageStart { node_id } => Some(serde_json::json!({
+                        "type": "node-start",
+                        "node_id": node_id,
+                        "node_type": "llm_message",
+                        "config": null
+                    })),
+                    DagExecutionEvent::LlmMessageFinish { node_id } => Some(serde_json::json!({
+                        "type": "node-end",
+                        "node_id": node_id,
+                        "output": null
+                    })),
                     DagExecutionEvent::Error { message } => Some(serde_json::json!({
                         "type": "error", "errorText": message
                     })),

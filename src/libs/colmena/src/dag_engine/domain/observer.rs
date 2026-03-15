@@ -24,6 +24,8 @@ pub enum NodeEvent {
         success: bool,
         output: String,
     },
+    LlmMessageStart,
+    LlmMessageFinish,
 }
 
 pub trait ExecutionObserver: Send + Sync {

@@ -1,15 +1,120 @@
+use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
+use crate::dag_engine::domain::state::{DagTask, DagTaskMemoryRepository};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::error::Error as StdError;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 pub struct OrchestratorNode {
-    task_memory_repo: Option<Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>>,
+    task_memory_repo: Option<Arc<dyn DagTaskMemoryRepository>>,
+    registry: Weak<dyn NodeRegistryPort>,
 }
 
 impl OrchestratorNode {
-    pub fn new(task_memory_repo: Option<Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>>) -> Self {
-        Self { task_memory_repo }
+    pub fn new(task_memory_repo: Option<Arc<dyn DagTaskMemoryRepository>>, registry: Weak<dyn NodeRegistryPort>) -> Self {
+        Self { task_memory_repo, registry }
+    }
+
+    async fn handle_phase_completion(
+        &self,
+        repo: &Arc<dyn DagTaskMemoryRepository>,
+        session_id: &str,
+        phase: i32,
+        config: &Value,
+        state: &mut Value,
+        observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+        println!("🏁 [OrchestratorNode] Phase {} complete. Processing reaction...", phase);
+        
+        let all_tasks = repo.get_tasks_for_run(session_id).await?;
+        let phase_tasks: Vec<_> = all_tasks.iter().filter(|t| t.phase == phase).collect();
+        
+        let mut phase_output = Value::Null;
+
+        if let Some(reactor_cfg) = config.get("phase_reactor") {
+            println!("⚡ [OrchestratorNode] Internal Phase Reactor starting...");
+            let registry = self.registry.upgrade().ok_or("Registry already dropped")?;
+            let reactor_node = registry.get_node("reactor").ok_or("Reactor node not found")?;
+
+            let mut reactor_inputs = HashMap::new();
+            reactor_inputs.insert("phase".to_string(), json!(phase));
+            
+            for task in &phase_tasks {
+                if let Some(res) = &task.result {
+                    let text = res.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                    reactor_inputs.insert(format!("texts.{}", task.assigned_to), Value::String(text.to_string()));
+                }
+            }
+
+            let reactor_res = reactor_node.execute(&reactor_inputs, reactor_cfg, state, observer).await?;
+            phase_output = reactor_res.get("result").cloned().unwrap_or(Value::Null);
+        } else {
+            // FALLBACK: Concatenar resultados
+            println!("🔗 [OrchestratorNode] No reactor found. Concatenating phase results...");
+            let mut results = Vec::new();
+            for task in &phase_tasks {
+                if let Some(res) = &task.result {
+                    let text = res.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                    results.push(format!("# Agent: {}\n\n{}", task.assigned_to, text));
+                }
+            }
+            phase_output = Value::String(results.join("\n\n---\n\n"));
+        }
+
+        Ok(json!({
+            "phase_tasks": build_tasks_json(phase_tasks.into_iter().cloned().collect()),
+            "phase_output": phase_output,
+            "extra_info": {
+                "__colmena_loop_status": "FINISHED_PHASE",
+                "current_phase": phase
+            }
+        }))
+    }
+
+    async fn finalize_execution(
+        &self,
+        repo: &Arc<dyn DagTaskMemoryRepository>,
+        session_id: &str,
+        config: &Value,
+        state: &mut Value,
+        observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+        println!("✅ [OrchestratorNode] All phases complete. Finalizing...");
+        
+        let all_tasks = repo.get_tasks_for_run(session_id).await?;
+        let all_tasks_json = build_tasks_json(all_tasks);
+        let phase_summaries = repo.get_phase_summaries(session_id).await?;
+        
+        let mut final_response = Value::Null;
+
+        if let Some(final_reactor_cfg) = config.get("final_reactor") {
+            println!("⚡ [OrchestratorNode] Internal Final Reactor starting...");
+            let registry = self.registry.upgrade().ok_or("Registry already dropped")?;
+            let reactor_node = registry.get_node("reactor").ok_or("Reactor node not found")?;
+
+            let mut reactor_inputs = HashMap::new();
+            for summary in &phase_summaries {
+                reactor_inputs.insert(format!("texts.phase_{}", summary.phase), Value::String(summary.summary.clone()));
+            }
+
+            let reactor_res = reactor_node.execute(&reactor_inputs, final_reactor_cfg, state, observer).await?;
+            final_response = reactor_res.get("result").cloned().unwrap_or(Value::Null);
+        }
+
+        let phase_summaries_json: Vec<Value> = phase_summaries.iter().map(|s| json!({
+            "phase": s.phase,
+            "summary": s.summary
+        })).collect();
+
+        Ok(json!({
+            "all_tasks": all_tasks_json,
+            "final_response": final_response,
+            "extra_info": {
+                "__colmena_loop_status": "FINISHED",
+                "phase_summaries": phase_summaries_json
+            }
+        }))
     }
 }
 
@@ -22,49 +127,62 @@ impl ExecutableNode for OrchestratorNode {
         _state: &mut Value,
         _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
-        let run_id = _state.get("run_id").and_then(|v| v.as_str()).unwrap_or("unknown_run").to_string();
+        let session_id = _state.get("session_id").and_then(|v| v.as_str()).unwrap_or("unknown_run").to_string();
         let verbose = config.get("verbose").and_then(|v| v.as_bool()).unwrap_or(false);
 
         if verbose {
             println!("\n═══════════════════════════════════════");
-            println!("🚦 [OrchestratorNode] VERBOSE — run_id: {}", run_id);
+            println!("🚦 [OrchestratorNode] VERBOSE — session_id: {}", session_id);
             println!("───────────────────────────────────────");
             println!("Inputs: {:?}", inputs);
             println!("═══════════════════════════════════════\n");
         }
 
         if let Some(repo) = &self.task_memory_repo {
-            // ── 1. Seed DB with initial plan if empty ──────────────────────────
-            let existing_tasks = repo.get_tasks_for_run(&run_id).await?;
+            // ── 1. Auto-Planificación ─────────────────────────────────────────
+            // Si hay config de 'planner' y la DB está vacía, ejecutamos el planner interno
+            if let Some(planner_cfg) = config.get("planner") {
+                let existing_tasks = repo.get_tasks_for_run(&session_id).await?;
+                if existing_tasks.is_empty() {
+                    println!("🗂️ [OrchestratorNode] Internal Planning started...");
+                    
+                    // Derivar agentes automáticamente de config["agents"]
+                    let mut agent_names = Vec::new();
+                    if let Some(agents_obj) = config.get("agents").and_then(|a| a.as_object()) {
+                        for name in agents_obj.keys() {
+                            agent_names.push(Value::String(name.clone()));
+                        }
+                    }
 
-            if existing_tasks.is_empty() {
-                if let Some(plan_val) = _state.get("plan").or_else(|| inputs.get("plan")).or_else(|| config.get("plan")) {
-                    let plan_array_opt = plan_val.as_array()
-                        .or_else(|| plan_val.get("items").and_then(|i| i.as_array()));
+                    let mut internal_planner_cfg = planner_cfg.clone();
+                    if let Some(obj) = internal_planner_cfg.as_object_mut() {
+                        obj.insert("agents".to_string(), Value::Array(agent_names));
+                        // Asegurar que el planner use la misma API KEY que el resto si no tiene una propia
+                        if obj.get("api_key").is_none() {
+                             if let Some(ak) = config.get("api_key") {
+                                 obj.insert("api_key".to_string(), ak.clone());
+                             }
+                        }
+                    }
 
-                    if let Some(plan_array) = plan_array_opt {
-                        for task_val in plan_array {
+                    let registry = self.registry.upgrade().ok_or("Registry already dropped")?;
+                    let planner_node = registry.get_node("planner").ok_or("Planner node not found")?;
+                    
+                    // Ejecutamos el planner. El PlannerNode escribe el plan en 'state' y retorna { result: { items: [...] } }
+                    let planner_result = planner_node.execute(inputs, &internal_planner_cfg, _state, _observer.clone()).await?;
+                    
+                    // Sembrar la DB con el plan obtenido
+                    if let Some(items) = planner_result.get("result").and_then(|r| r.get("items")).and_then(|i| i.as_array()) {
+                        for task_val in items {
                             if let Some(task_obj) = task_val.as_object() {
-                                println!("🐛 [OrchestratorNode] RAW TASK FROM PLANNER: {}", serde_json::to_string(task_obj).unwrap_or_default());
                                 let task_name  = task_obj.get("task").and_then(|v| v.as_str()).unwrap_or("Unknown").to_string();
                                 let assigned   = task_obj.get("assigned_to").and_then(|v| v.as_str()).unwrap_or("Unknown").to_string();
-                                let phase = task_obj.get("phase").and_then(|v| {
-                                    if let Some(num) = v.as_i64() { Some(num) }
-                                    else if let Some(s) = v.as_str() { s.parse::<i64>().ok() }
-                                    else { None }
-                                }).unwrap_or(1) as i32;
+                                let phase = task_obj.get("phase").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
+                                let parallel = task_obj.get("parallel").and_then(|v| v.as_bool()).unwrap_or(false);
 
-                                let parallel = task_obj.get("parallel").and_then(|v| {
-                                    if let Some(b) = v.as_bool() { Some(b) }
-                                    else if let Some(s) = v.as_str() { Some(s.eq_ignore_ascii_case("true")) }
-                                    else { None }
-                                }).unwrap_or(false);
-                                
-                                println!("🐛 [OrchestratorNode] PARSED -> phase: {}, parallel: {}", phase, parallel);
-
-                                let new_task = crate::dag_engine::domain::state::DagTask {
+                                let new_task = DagTask {
                                     id: uuid::Uuid::new_v4().to_string(),
-                                    run_id: run_id.clone(),
+                                    session_id: session_id.clone(),
                                     task_name,
                                     assigned_to: assigned,
                                     completed: false,
@@ -75,186 +193,166 @@ impl ExecutableNode for OrchestratorNode {
                                 repo.add_task(&new_task).await?;
                             }
                         }
+                        println!("💾 [OrchestratorNode] DB seeded with {} tasks from internal planner.", items.len());
+                    }
+                }
+            } else {
+                // Si no hay planner interno, intentamos sembrar desde los inputs tradicionales (retro-compatibilidad)
+                let existing_tasks = repo.get_tasks_for_run(&session_id).await?;
+                if existing_tasks.is_empty() {
+                    if let Some(plan_val) = _state.get("plan").or_else(|| inputs.get("plan")).or_else(|| config.get("plan")) {
+                         // ... (lógica anterior de siembra manual) ...
+                         // (Mejor mantenemos la lógica de siembra manual por si acaso)
+                         seed_db_manually(repo, &session_id, plan_val).await?;
                     }
                 }
             }
 
-            // ── 2. Find current phase ──────────────────────────────────────────
-            let current_phase_opt = repo.get_current_phase(&run_id).await?;
+            // ── 2. Despacho, Crítica y Ejecución Interna ──────────────────────
+            let current_phase_opt = repo.get_current_phase(&session_id).await?;
 
             match current_phase_opt {
                 None => {
-                    // ── All phases done → FINISHED ─────────────────────────────
-                    println!("✅ [OrchestratorNode] All phases complete → FINISHED");
-
-                    let all_tasks_json = build_tasks_json(repo.get_tasks_for_run(&run_id).await?);
-                    let phase_summaries = repo.get_phase_summaries(&run_id).await?;
-                    let phase_summaries_json: Vec<Value> = phase_summaries.iter().map(|s| json!({
-                        "phase": s.phase,
-                        "summary": s.summary
-                    })).collect();
-
-                    return Ok(json!({
-                        "result": { "all_tasks": all_tasks_json },
-                        "extra_info": {
-                            "__colmena_loop_status": "FINISHED",
-                            "phase_summaries": phase_summaries_json
-                        }
-                    }));
+                    // Todas las fases terminadas
+                    return self.finalize_execution(repo, &session_id, config, _state, _observer).await;
                 }
 
                 Some(current_phase) => {
-                    let incomplete_in_phase = repo.get_uncompleted_tasks_for_phase(&run_id, current_phase).await?;
+                    let incomplete_in_phase = repo.get_uncompleted_tasks_for_phase(&session_id, current_phase).await?;
 
                     if incomplete_in_phase.is_empty() {
-                        // Phase exists but all tasks are done → FINISHED_PHASE
-                        // (This should not happen because get_current_phase only returns phases with incomplete tasks,
-                        //  but guard just in case.)
-                        let phase_tasks = build_tasks_json(
-                            repo.get_tasks_for_run(&run_id).await?.into_iter()
-                                .filter(|t| t.phase == current_phase)
-                                .collect()
-                        );
-                        println!("🏁 [OrchestratorNode] Phase {} complete → FINISHED_PHASE", current_phase);
-                        return Ok(json!({
-                            "result": { "phase_tasks": phase_tasks },
-                            "extra_info": {
-                                "__colmena_loop_status": "FINISHED_PHASE",
-                                "current_phase": current_phase
-                            }
-                        }));
+                        // Fase terminada -> Reaccionar
+                        return self.handle_phase_completion(repo, &session_id, current_phase, config, _state, _observer).await;
                     }
 
-                    // ── 3. Determine dispatch strategy ─────────────────────────
+                    // Determinar estrategia de despacho
                     let any_parallel = incomplete_in_phase.iter().any(|t| t.parallel);
+                    let tasks_to_run: Vec<_> = if any_parallel { incomplete_in_phase } else { incomplete_in_phase.into_iter().take(1).collect() };
 
-                    let tasks_to_dispatch: Vec<_> = if any_parallel {
-                        // Parallel mode: dispatch ALL incomplete tasks of this phase at once
-                        incomplete_in_phase
-                    } else {
-                        // Sequential mode: dispatch just the first task
-                        incomplete_in_phase.into_iter().take(1).collect()
-                    };
+                    let registry = self.registry.upgrade().ok_or("Registry already dropped")?;
 
-                    // Mark all dispatched tasks as completed instantly (so next turn they are skipped)
-                    let mut agents_map = serde_json::Map::new();
-                    let mut first_task_id = None;
-                    let mut first_task_json = None;
+                    for task in tasks_to_run {
+                        println!("🚀 [OrchestratorNode] Internal Execution: Task '{}' -> Agent '{}'", task.task_name, task.assigned_to);
+                        
+                        // Preparar inputs para el agente
+                        let mut task_inputs = inputs.clone();
+                        task_inputs.insert("task".to_string(), Value::String(task.task_name.clone()));
+                        task_inputs.insert("prompt".to_string(), Value::String(task.task_name.clone()));
+                        
+                        // Obtener config del agente del bloque 'agents'
+                        let agent_node_cfg = config.get("agents").and_then(|a| a.get(&task.assigned_to))
+                            .ok_or_else(|| format!("Configuration for agent '{}' not found in orchestrator config", task.assigned_to))?;
+                        
+                        // Ejecutar Agente (LlmNode)
+                        let llm_node = registry.get_node("llm_call").ok_or("llm_call node not found")?;
+                        let agent_result = llm_node.execute(&task_inputs, agent_node_cfg, _state, _observer.clone()).await?;
+                        
+                        // ── Crítica ──
+                        let mut is_ok = true;
+                        if let Some(critic_cfg) = config.get("critic") {
+                            println!("🔎 [OrchestratorNode] Internal Critique for task '{}'...", task.task_name);
+                            let critic_node = registry.get_node("critic").ok_or("critic node not found")?;
+                            
+                            let mut critic_inputs = task_inputs.clone();
+                            critic_inputs.insert("agent_result".to_string(), agent_result.clone());
+                            // También pasamos el resultado bajo la llave que espera el critic si es necesario
+                            critic_inputs.insert(format!("texts.{}", task.assigned_to), agent_result.clone());
 
-                    for task in &tasks_to_dispatch {
-                        agents_map.insert(task.assigned_to.clone(), json!({
-                            "task": task.task_name,
-                            "id":   task.id
-                        }));
-
-                        if first_task_id.is_none() {
-                            first_task_id = Some(task.id.clone());
-                            first_task_json = Some(json!({
-                                "id":          task.id,
-                                "task":        task.task_name,
-                                "assigned_to": task.assigned_to,
-                                "completed":   task.completed,
-                                "phase":       task.phase,
-                                "parallel":    task.parallel
-                            }));
+                            let critic_res = critic_node.execute(&critic_inputs, critic_cfg, _state, _observer.clone()).await?;
+                            is_ok = critic_res.get("extra_info").and_then(|e| e.get("task_ok")).and_then(|v| v.as_bool()).unwrap_or(true);
                         }
 
-                        if any_parallel {
-                            println!("🚦 [OrchestratorNode] [Phase {}|parallel] Routing task to agent: '{}'", current_phase, task.assigned_to);
+                        if is_ok {
+                            repo.update_task_result(&task.id, agent_result).await?;
+                            println!("✅ [OrchestratorNode] Task '{}' completed successfully.", task.task_name);
                         } else {
-                            println!("🚦 [OrchestratorNode] [Phase {}|sequential] Routing task to agent: '{}'", current_phase, task.assigned_to);
+                            println!("❌ [OrchestratorNode] Task '{}' rejected by critic.", task.task_name);
+                            // TODO: Lógica de re-intento o bifurcación. Por ahora solo dejamos incompleta.
                         }
                     }
 
-                    // ── 4. After dispatch, check if phase is now fully done ────
-                    let remaining = repo.get_uncompleted_tasks_for_phase(&run_id, current_phase).await?;
-
+                    // Después de ejecutar, volvemos a evaluar si la fase terminó
+                    let remaining = repo.get_uncompleted_tasks_for_phase(&session_id, current_phase).await?;
                     if remaining.is_empty() {
-                        // Phase now fully dispatched → signal FINISHED_PHASE on this same turn
-                        // BUT we still need agents to know what to do this turn, so we return NEXT_TURN
-                        // and the FINISHED_PHASE will be detected on the *next* turn when agents have run.
-                        // (Agents run, write results, then next turn we detect phase complete.)
+                         return self.handle_phase_completion(repo, &session_id, current_phase, config, _state, _observer).await;
                     }
 
-                    // Omit all_tasks from the general turn output so the final_reactor is not queued early
                     Ok(json!({
-                        "result": { 
-                            "dispatched_agents": Value::Object(agents_map)
-                        },
                         "extra_info": {
                             "__colmena_loop_status": "NEXT_TURN",
-                            "active_task_id": first_task_id,
-                            "active_task": first_task_json
+                            "current_phase": current_phase
                         }
                     }))
                 }
             }
         } else {
-            // ── Static plan (no DB) — fallback to old behavior ────────────────
-            if let Some(plan_val) = inputs.get("plan").or_else(|| config.get("plan")) {
-                let plan_array_opt = plan_val.as_array()
-                    .or_else(|| plan_val.get("items").and_then(|i| i.as_array()));
-
-                if let Some(plan_array) = plan_array_opt {
-                    let all_completed = plan_array.iter().all(|t| {
-                        t.get("completed").and_then(|v| v.as_bool()).unwrap_or(false)
-                    });
-
-                    if all_completed {
-                        return Ok(json!({
-                            "result": { "all_tasks": plan_array },
-                            "extra_info": {
-                                "__colmena_loop_status": "FINISHED"
-                            }
-                        }));
-                    }
-
-                    if let Some(task) = plan_array.iter().find(|t| {
-                        !t.get("completed").and_then(|v| v.as_bool()).unwrap_or(false)
-                    }) {
-                        let agent = task.get("assigned_to").and_then(|v| v.as_str()).unwrap_or("unknown");
-                        println!("🚦 [OrchestratorNode] Routing task to agent: '{}'", agent);
-                        
-                        return Ok(json!({
-                            "result": { 
-                                "dispatched_agents": { agent: { "task": task.get("task") } },
-                                "all_tasks": plan_array
-                            },
-                            "extra_info": {
-                                "__colmena_loop_status": "NEXT_TURN",
-                                "active_task": task
-                            }
-                        }));
-                    }
-                }
-            }
-
-            Ok(json!({
-                "result": { "all_tasks": [] },
-                "extra_info": {
-                    "__colmena_loop_status": "FINISHED"
-                }
-            }))
+            // Sin DB - Fallback a comportamiento estático (simplificado)
+            Ok(json!({ "error": "Autonomous Orchestrator requires task_memory_repo" }))
         }
     }
 
+
     fn description(&self) -> Option<&str> {
-        Some("Routes tasks to agents phase by phase. Supports parallel dispatch within a phase and FINISHED_PHASE/FINISHED signaling.")
+        Some("Autonomous Orchestrator that manages the full Plan -> Execute -> Critique -> React lifecycle internally.")
     }
 
     fn schema(&self) -> Value {
         json!({
             "type": "orchestrator",
+            "config": {
+                "planner": { "provider": "string", "model": "string", "system_message": "string" },
+                "agents": { "agent_id": { "provider": "string", "model": "string", "system_message": "string" } },
+                "critic": { "provider": "string", "model": "string", "system_message": "string" },
+                "phase_reactor": { "provider": "string", "model": "string", "system_message": "string" },
+                "final_reactor": { "provider": "string", "model": "string", "system_message": "string" }
+            },
             "outputs": {
                 "__colmena_loop_status": "NEXT_TURN | FINISHED_PHASE | FINISHED",
                 "current_phase": "integer",
-                "agents": "object (agent_id → { task, id })",
-                "phase_tasks": "array — tasks of the just-completed phase (on FINISHED_PHASE)",
-                "all_tasks": "array — all tasks (on FINISHED)",
-                "phase_summaries": "array — phase summaries (on FINISHED)"
+                "phase_tasks": "array",
+                "all_tasks": "array",
+                "final_response": "string"
             }
         })
     }
+}
+
+async fn seed_db_manually(repo: &Arc<dyn DagTaskMemoryRepository>, session_id: &str, plan_val: &Value) -> Result<(), Box<dyn StdError + Send + Sync>> {
+    let plan_array_opt = plan_val.as_array()
+        .or_else(|| plan_val.get("items").and_then(|i| i.as_array()));
+
+    if let Some(plan_array) = plan_array_opt {
+        for task_val in plan_array {
+            if let Some(task_obj) = task_val.as_object() {
+                let task_name  = task_obj.get("task").and_then(|v| v.as_str()).unwrap_or("Unknown").to_string();
+                let assigned   = task_obj.get("assigned_to").and_then(|v| v.as_str()).unwrap_or("Unknown").to_string();
+                let phase = task_obj.get("phase").and_then(|v| {
+                    if let Some(num) = v.as_i64() { Some(num) }
+                    else if let Some(s) = v.as_str() { s.parse::<i64>().ok() }
+                    else { None }
+                }).unwrap_or(1) as i32;
+
+                let parallel = task_obj.get("parallel").and_then(|v| {
+                    if let Some(b) = v.as_bool() { Some(b) }
+                    else if let Some(s) = v.as_str() { Some(s.eq_ignore_ascii_case("true")) }
+                    else { None }
+                }).unwrap_or(false);
+
+                let new_task = DagTask {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    session_id: session_id.to_string(),
+                    task_name,
+                    assigned_to: assigned,
+                    completed: false,
+                    result: None,
+                    phase,
+                    parallel,
+                };
+                repo.add_task(&new_task).await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 // Helper: convert a Vec<DagTask> to a JSON array with result content

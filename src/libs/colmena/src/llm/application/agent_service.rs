@@ -1,12 +1,12 @@
 use crate::llm::domain::{
     ConversationRepository, LlmConfig, LlmError, LlmMessage, LlmRepository, LlmRequest,
-    LlmResponse, LlmStreamPart, LlmUsage, ThreadId, ToolCall, ToolDefinition, ToolExecutor, ToolResult,
+    LlmResponse, LlmStreamPart, LlmUsage, SessionId, ToolCall, ToolDefinition, ToolExecutor, ToolResult,
 };
 use std::sync::Arc;
 
 /// Parameters for running the agent
 pub struct AgentRunParams<'a> {
-    pub thread_id: &'a ThreadId,
+    pub session_id: &'a SessionId,
     pub prompt: String,
     pub messages: Option<Vec<LlmMessage>>,
     pub config: LlmConfig,
@@ -48,7 +48,7 @@ impl AgentService {
     /// Final response from the LLM after tool execution
     pub async fn run<'a>(&self, params: AgentRunParams<'a>) -> Result<LlmResponse, LlmError> {
         let max_iter = params.max_iterations.unwrap_or(10);
-        let thread_id = params.thread_id;
+        let session_id = params.session_id;
         let prompt = params.prompt;
         let config = params.config;
         let tools = params.tools;
@@ -56,7 +56,7 @@ impl AgentService {
         let on_token = params.on_token;
 
         // 1. Load conversation history
-        let conversation = self.conversation_repository.get_by_id(thread_id).await?;
+        let conversation = self.conversation_repository.get_by_id(session_id).await?;
         let mut messages = conversation.messages;
 
         // 2. Add user prompt (or pre-built messages)
@@ -64,14 +64,14 @@ impl AgentService {
             for custom_msg in custom_messages {
                 messages.push(custom_msg.clone());
                 self.conversation_repository
-                    .add_message(thread_id, custom_msg)
+                    .add_message(session_id, custom_msg)
                     .await?;
             }
         } else {
             let user_message = LlmMessage::user(prompt)?;
             messages.push(user_message.clone());
             self.conversation_repository
-                .add_message(thread_id, user_message)
+                .add_message(session_id, user_message)
                 .await?;
         }
 
@@ -81,9 +81,15 @@ impl AgentService {
             total_tokens: 0,
         };
         let mut all_tool_calls_executed = Vec::new();
+        let mut cumulative_content = String::new();
 
         // 3. ReAct Loop
         for _iteration in 0..max_iter {
+            // Signal start of a new message/iteration
+            if let Some(callback) = &on_token {
+                (callback)(LlmStreamPart::LlmMessageStart);
+            }
+
             // A. Call LLM with tools
             let should_stream = on_token.is_some();
             let mut request = LlmRequest::new(messages.clone(), config.clone(), should_stream)?;
@@ -143,7 +149,9 @@ impl AgentService {
                                     completion_usage = Some(u.clone());
                                 }
                                 LlmStreamPart::ToolCallStart(_)
-                                | LlmStreamPart::ToolCallFinish(_) => {}
+                                | LlmStreamPart::ToolCallFinish(_)
+                                | LlmStreamPart::LlmMessageStart
+                                | LlmStreamPart::LlmMessageFinish => {}
                             }
                         }
                         Err(e) => return Err(e),
@@ -167,6 +175,11 @@ impl AgentService {
                 self.llm_repository.call(request).await?
             };
 
+            // Signal end of message/iteration
+            if let Some(callback) = &on_token {
+                (callback)(LlmStreamPart::LlmMessageFinish);
+            }
+
             // Accumulate usage for this step
             if let Some(usage) = response.usage() {
                 cumulative_usage.prompt_tokens += usage.prompt_tokens;
@@ -176,14 +189,24 @@ impl AgentService {
 
             // B. Save assistant response to memory
             self.conversation_repository
-                .add_message(thread_id, response.message().clone())
+                .add_message(session_id, response.message().clone())
                 .await?;
             messages.push(response.message().clone());
+
+            // Accumulate content
+            let content = response.content();
+            if !content.is_empty() {
+                if !cumulative_content.is_empty() {
+                    cumulative_content.push_str("\n\n");
+                }
+                cumulative_content.push_str(content);
+            }
 
             // C. Check if LLM wants to use tools (Response might not have tool calls if streamed!)
             if let Some(tool_calls) = response.tool_calls() {
                 if tool_calls.is_empty() {
                     response = response.with_usage(cumulative_usage);
+                    response = response.with_content(cumulative_content);
                     if !all_tool_calls_executed.is_empty() {
                         response = response.with_tool_calls(all_tool_calls_executed);
                     }
@@ -225,12 +248,13 @@ impl AgentService {
 
                     messages.push(tool_message.clone());
                     self.conversation_repository
-                        .add_message(thread_id, tool_message)
+                        .add_message(session_id, tool_message)
                         .await?;
                 }
                 continue;
             } else {
                 response = response.with_usage(cumulative_usage);
+                response = response.with_content(cumulative_content);
                 if !all_tool_calls_executed.is_empty() {
                     response = response.with_tool_calls(all_tool_calls_executed);
                 }
@@ -269,9 +293,9 @@ mod tests {
         pub ConversationRepo {}
         #[async_trait]
         impl ConversationRepository for ConversationRepo {
-            async fn get_by_id(&self, thread_id: &ThreadId) -> Result<Conversation, LlmError>;
-            async fn add_message(&self, thread_id: &ThreadId, message: LlmMessage) -> Result<(), LlmError>;
-            async fn delete(&self, thread_id: &ThreadId) -> Result<(), LlmError>;
+            async fn get_by_id(&self, session_id: &SessionId) -> Result<Conversation, LlmError>;
+            async fn add_message(&self, session_id: &SessionId, message: LlmMessage) -> Result<(), LlmError>;
+            async fn delete(&self, session_id: &SessionId) -> Result<(), LlmError>;
         }
     }
 
@@ -302,17 +326,17 @@ mod tests {
         let mut mock_conv = MockConversationRepo::new();
         let mock_tool_exec = MockToolExec::new();
 
-        let thread_id = ThreadId("test-thread".to_string());
+        let session_id = SessionId("test-thread".to_string());
         let prompt = "Hello".to_string();
 
         // Setup Conversation Repo
         mock_conv
             .expect_get_by_id()
-            .with(eq(thread_id.clone()))
+            .with(eq(session_id.clone()))
             .times(1)
             .returning(|_| {
                 Ok(Conversation {
-                    thread_id: ThreadId("test-thread".to_string()),
+                    session_id: SessionId("test-thread".to_string()),
                     messages: vec![],
                 })
             });
@@ -341,7 +365,7 @@ mod tests {
 
         let result = service
             .run(AgentRunParams {
-                thread_id: &thread_id,
+                session_id: &session_id,
                 prompt,
                 messages: None,
                 config: create_config(),
@@ -362,13 +386,13 @@ mod tests {
         let mut mock_conv = MockConversationRepo::new();
         let mut mock_tool_exec = MockToolExec::new();
 
-        let thread_id = ThreadId("test-thread".to_string());
+        let session_id = SessionId("test-thread".to_string());
         let prompt = "Add 2+2".to_string();
 
         // Setup Conversation Repo
         mock_conv.expect_get_by_id().returning(|_| {
             Ok(Conversation {
-                thread_id: ThreadId("test-thread".to_string()),
+                session_id: SessionId("test-thread".to_string()),
                 messages: vec![],
             })
         });
@@ -441,7 +465,7 @@ mod tests {
 
         let result = service
             .run(AgentRunParams {
-                thread_id: &thread_id,
+                session_id: &session_id,
                 prompt,
                 messages: None,
                 config: create_config(),
@@ -462,11 +486,11 @@ mod tests {
         let mut mock_conv = MockConversationRepo::new();
         let mut mock_tool_exec = MockToolExec::new();
 
-        let thread_id = ThreadId("test-thread".to_string());
+        let session_id = SessionId("test-thread".to_string());
 
         mock_conv.expect_get_by_id().returning(|_| {
             Ok(Conversation {
-                thread_id: ThreadId("test-thread".to_string()),
+                session_id: SessionId("test-thread".to_string()),
                 messages: vec![],
             })
         });
@@ -511,7 +535,7 @@ mod tests {
 
         let result = service
             .run(AgentRunParams {
-                thread_id: &thread_id,
+                session_id: &session_id,
                 prompt: "Loop me".to_string(),
                 messages: None,
                 config: create_config(),
