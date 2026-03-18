@@ -56,7 +56,7 @@ impl OpenAiAdapter {
                         if file.mime_type.starts_with("image/") {
                             let b64 = STANDARD.encode(&file.bytes);
                             let data_uri = format!("data:{};base64,{}", file.mime_type, b64);
-                            
+
                             content_arr.push(json!({
                                 "type": "image_url",
                                 "image_url": {
@@ -408,7 +408,8 @@ impl LlmRepository for OpenAiAdapter {
     async fn stream(
         &self,
         request: LlmRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, LlmError>> + Send>>, LlmError> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, LlmError>> + Send>>, LlmError>
+    {
         if self.is_responses_api_required(&request) {
             self.stream_responses(request).await
         } else {
@@ -603,7 +604,7 @@ impl OpenAiAdapter {
                         }));
                     }
                 }
-                
+
                 json!({
                     "role": msg.role().as_str(),
                     "content": content_arr
@@ -611,10 +612,16 @@ impl OpenAiAdapter {
             }).collect::<Vec<_>>()
         });
 
-        if let Some(temp) = request.config().temperature() { body["temperature"] = json!(temp); }
-        if let Some(max_tokens) = request.config().max_tokens() { body["max_tokens"] = json!(max_tokens); }
-        if let Some(top_p) = request.config().top_p() { body["top_p"] = json!(top_p); }
-        
+        if let Some(temp) = request.config().temperature() {
+            body["temperature"] = json!(temp);
+        }
+        if let Some(max_tokens) = request.config().max_tokens() {
+            body["max_tokens"] = json!(max_tokens);
+        }
+        if let Some(top_p) = request.config().top_p() {
+            body["top_p"] = json!(top_p);
+        }
+
         body
     }
 
@@ -624,7 +631,10 @@ impl OpenAiAdapter {
         let response = self
             .client
             .post(format!("{}/responses", self.base_url))
-            .header("Authorization", format!("Bearer {}", request.config().api_key()))
+            .header(
+                "Authorization",
+                format!("Bearer {}", request.config().api_key()),
+            )
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
@@ -632,13 +642,23 @@ impl OpenAiAdapter {
             .map_err(|e| LlmError::network_error(e.to_string()))?;
 
         if !response.status().is_success() {
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(LlmError::request_failed(format!("OpenAI Responses API error: {}", error_text)));
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(LlmError::request_failed(format!(
+                "OpenAI Responses API error: {}",
+                error_text
+            )));
         }
 
-        let response_text = response.text().await.map_err(|e| LlmError::parsing_error(e.to_string()))?;
-        let json_val: serde_json::Value = serde_json::from_str(&response_text).map_err(|e| LlmError::parsing_error(e.to_string()))?;
-        
+        let response_text = response
+            .text()
+            .await
+            .map_err(|e| LlmError::parsing_error(e.to_string()))?;
+        let json_val: serde_json::Value = serde_json::from_str(&response_text)
+            .map_err(|e| LlmError::parsing_error(e.to_string()))?;
+
         let mut content = String::new();
         if let Some(outputs) = json_val.get("output").and_then(|o| o.as_array()) {
             if let Some(first) = outputs.first() {
@@ -656,12 +676,19 @@ impl OpenAiAdapter {
 
         let mut usage_obj = None;
         if let Some(usage) = json_val.get("usage") {
-            if let (Some(input), Some(output)) = (usage.get("input_tokens").and_then(|v| v.as_u64()), usage.get("output_tokens").and_then(|v| v.as_u64())) {
+            if let (Some(input), Some(output)) = (
+                usage.get("input_tokens").and_then(|v| v.as_u64()),
+                usage.get("output_tokens").and_then(|v| v.as_u64()),
+            ) {
                 usage_obj = Some(LlmUsage::new(input as u32, output as u32));
             }
         }
 
-        let mut llm_response = LlmResponse::new(request.id().clone(), content, request.config().provider().clone())?;
+        let mut llm_response = LlmResponse::new(
+            request.id().clone(),
+            content,
+            request.config().provider().clone(),
+        )?;
         if let Some(u) = usage_obj {
             llm_response = llm_response.with_usage(u);
         }
@@ -672,14 +699,18 @@ impl OpenAiAdapter {
     async fn stream_responses(
         &self,
         request: LlmRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, LlmError>> + Send>>, LlmError> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, LlmError>> + Send>>, LlmError>
+    {
         let mut body = self.build_responses_request_body(&request);
         body["stream"] = json!(true);
 
         let response = self
             .client
             .post(format!("{}/responses", self.base_url))
-            .header("Authorization", format!("Bearer {}", request.config().api_key()))
+            .header(
+                "Authorization",
+                format!("Bearer {}", request.config().api_key()),
+            )
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
@@ -687,8 +718,14 @@ impl OpenAiAdapter {
             .map_err(|e| LlmError::network_error(e.to_string()))?;
 
         if !response.status().is_success() {
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(LlmError::request_failed(format!("OpenAI Responses API error: {}", error_text)));
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(LlmError::request_failed(format!(
+                "OpenAI Responses API error: {}",
+                error_text
+            )));
         }
 
         let stream = response.bytes_stream();
@@ -704,14 +741,14 @@ impl OpenAiAdapter {
                         if data.starts_with("[DONE]") {
                             break;
                         }
-                        
+
                         let event_json: serde_json::Value = match serde_json::from_str(&data) {
                             Ok(v) => v,
                             Err(_) => continue,
                         };
 
                         let event_type = event_json.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                        
+
                         if event_type == "response.output_text.delta" {
                             if let Some(delta) = event_json.get("delta").and_then(|d| d.as_str()) {
                                 yield Ok(LlmStreamChunk::new(

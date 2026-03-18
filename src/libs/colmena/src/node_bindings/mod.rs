@@ -1,11 +1,11 @@
-use napi_derive::napi;
-use napi::bindgen_prelude::*;
 use crate::llm::domain::{MessageRole, ProviderKind};
 use crate::shared::infrastructure::{ConfigResolver, ServiceContainerFactory};
+use napi::bindgen_prelude::*;
+use napi_derive::napi;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use serde_json::Value;
 
 // ==================== LLM Bindings ====================
 
@@ -36,7 +36,8 @@ pub struct ColmenaLlm {
 impl ColmenaLlm {
     #[napi(constructor)]
     pub fn new() -> Result<Self> {
-        ConfigResolver::load_env().map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+        ConfigResolver::load_env()
+            .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
         let mut containers = HashMap::new();
         for (provider, container) in ServiceContainerFactory::create_all() {
             containers.insert(provider.to_string(), Arc::new(container));
@@ -56,7 +57,12 @@ impl ColmenaLlm {
         let container = self
             .containers
             .get(&provider)
-            .ok_or_else(|| Error::new(Status::InvalidArg, format!("Provider {} not found", provider)))?
+            .ok_or_else(|| {
+                Error::new(
+                    Status::InvalidArg,
+                    format!("Provider {} not found", provider),
+                )
+            })?
             .clone();
 
         let llm_messages: Result<Vec<crate::llm::domain::LlmMessage>> = messages
@@ -79,7 +85,8 @@ impl ColmenaLlm {
             options.top_p.map(|v| v as f32),
             options.frequency_penalty.map(|v| v as f32),
             options.presence_penalty.map(|v| v as f32),
-        ).map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+        )
+        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
 
         container
             .llm_call
@@ -94,9 +101,14 @@ impl ColmenaLlm {
         let container = self
             .containers
             .get(&provider)
-            .ok_or_else(|| Error::new(Status::InvalidArg, format!("Provider {} not found", provider)))?
+            .ok_or_else(|| {
+                Error::new(
+                    Status::InvalidArg,
+                    format!("Provider {} not found", provider),
+                )
+            })?
             .clone();
-        
+
         container
             .llm_health_check
             .execute()
@@ -138,7 +150,7 @@ pub async fn run_dag(
 pub async fn serve_dag(file_path: String, host: Option<String>, port: Option<u16>) -> Result<()> {
     let host = host.unwrap_or_else(|| "0.0.0.0".to_string());
     let port = port.unwrap_or(8080);
-    
+
     crate::dag_engine::api::serve_dag(file_path, host, port)
         .await
         .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))

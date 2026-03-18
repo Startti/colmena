@@ -31,10 +31,14 @@ pub async fn run_dag(
     // Initialize Repository Factory and State Repo
     let repository_factory = Arc::new(ConversationRepositoryFactory::new());
     let state_repo = Arc::new(crate::dag_engine::infrastructure::persistence::postgres_dag_state_repository::PostgresDagStateRepository::new(pool.clone()));
-    state_repo.migrate().await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+    state_repo
+        .migrate()
+        .await
+        .map_err(|e| anyhow::anyhow!("{:?}", e))?;
     let registry = HashMapNodeRegistry::new(
         repository_factory,
-        Some(state_repo.clone() as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),
+        Some(state_repo.clone()
+            as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),
     );
     let run_use_case = DagRunUseCase::new(registry, Some(state_repo));
 
@@ -45,7 +49,10 @@ pub async fn run_dag(
     // If an injected payload was provided (e.g. from a previous loop), inject it into start nodes
     if let Some(payload) = inject_payload {
         for (_, node) in graph.nodes.iter_mut() {
-            if node.node_type == "trigger_webhook" || node.node_type == "input" || node.node_type == "mock_input" {
+            if node.node_type == "trigger_webhook"
+                || node.node_type == "input"
+                || node.node_type == "mock_input"
+            {
                 if node.config.is_null() {
                     node.config = serde_json::json!({});
                 }
@@ -56,14 +63,22 @@ pub async fn run_dag(
 
     // Check if any node has streaming enabled
     let is_stream = graph.nodes.values().any(|node| {
-        node.config.get("stream").and_then(|v| v.as_bool()).unwrap_or(false)
+        node.config
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
     });
 
     if is_stream {
         use crate::dag_engine::domain::events::DagExecutionEvent;
         use futures::StreamExt;
 
-        let internal_stream = run_use_case.execute_stream(graph, resume_id.clone(), resume_answer.clone(), include_extra_info);
+        let internal_stream = run_use_case.execute_stream(
+            graph,
+            resume_id.clone(),
+            resume_answer.clone(),
+            include_extra_info,
+        );
         tokio::pin!(internal_stream);
 
         // 1. Send the global START part
@@ -184,13 +199,13 @@ pub async fn run_dag(
                     "toolName": tool_name,
                     "input": serde_json::from_str::<serde_json::Value>(&tool_args).unwrap_or(serde_json::Value::String(tool_args))
                 })),
-                DagExecutionEvent::LlmToolCallFinish { tool_id, output, .. } => {
-                    Some(serde_json::json!({
-                        "type": "tool-output-available",
-                        "toolCallId": tool_id,
-                        "output": serde_json::from_str::<serde_json::Value>(&output).unwrap_or(serde_json::Value::String(output))
-                    }))
-                }
+                DagExecutionEvent::LlmToolCallFinish {
+                    tool_id, output, ..
+                } => Some(serde_json::json!({
+                    "type": "tool-output-available",
+                    "toolCallId": tool_id,
+                    "output": serde_json::from_str::<serde_json::Value>(&output).unwrap_or(serde_json::Value::String(output))
+                })),
                 DagExecutionEvent::LlmUsage { .. } => None,
                 DagExecutionEvent::NodeFinish { node_id, .. } => {
                     if let Some(part_id) = text_block_uuids.get(&node_id) {
@@ -265,10 +280,14 @@ pub async fn serve_dag(
     // Initialize Repository Factory and State Repo
     let repository_factory = Arc::new(ConversationRepositoryFactory::new());
     let state_repo = Arc::new(crate::dag_engine::infrastructure::persistence::postgres_dag_state_repository::PostgresDagStateRepository::new(pool.clone()));
-    state_repo.migrate().await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+    state_repo
+        .migrate()
+        .await
+        .map_err(|e| anyhow::anyhow!("{:?}", e))?;
     let registry = HashMapNodeRegistry::new(
         repository_factory,
-        Some(state_repo.clone() as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),
+        Some(state_repo.clone()
+            as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),
     );
     let run_use_case = Arc::new(DagRunUseCase::new(registry, Some(state_repo)));
 
@@ -398,7 +417,7 @@ async fn handler_webhook(
                 let mut seen_tool_ids = std::collections::HashSet::new();
                 let mut total_prompt_tokens = 0;
                 let mut total_completion_tokens = 0;
-                
+
                 // Emitting custom event to show turn change in UI
                 if is_loop {
                     yield Ok::<Event, std::io::Error>(Event::default().json_data(serde_json::json!({
@@ -410,7 +429,7 @@ async fn handler_webhook(
 
                 let internal_stream = use_case.clone().execute_stream(current_graph.clone(), None, None, false);
                 let mut final_output_value: Option<Value> = None;
-                
+
                 tokio::pin!(internal_stream);
 
                 while let Some(result) = internal_stream.next().await {
@@ -539,10 +558,10 @@ async fn handler_webhook(
                         "id": part_id
                     })).expect("json_data"));
                 }
-                
+
                 // End of turn logic
                 let mut should_stop_loop = !is_loop;
-                
+
                 if let Some(out) = final_output_value.as_ref() {
                     if let Some(obj) = out.as_object() {
                         let find_status = |o: &serde_json::Map<String, serde_json::Value>, key: &str| -> Option<String> {
@@ -587,7 +606,7 @@ async fn handler_webhook(
                             should_stop_loop = true;
                         }
                     }
-                    
+
                     if !should_stop_loop {
                         // Prepare next iteration's input
                         for (_, node) in current_graph.nodes.iter_mut() {
@@ -635,12 +654,23 @@ async fn handler_webhook(
             if is_loop {
                 println!("\n🔄 -- API Turno {} --", turn_count);
             }
-            match state.use_case.execute(graph_instance.clone(), current_resume_id.clone(), None, false).await {
+            match state
+                .use_case
+                .execute(
+                    graph_instance.clone(),
+                    current_resume_id.clone(),
+                    None,
+                    false,
+                )
+                .await
+            {
                 Ok(mut out) => {
                     let mut should_stop_loop = !is_loop;
 
                     if let Some(obj) = out.as_object() {
-                        let find_field = |o: &serde_json::Map<String, serde_json::Value>, key: &str| -> Option<serde_json::Value> {
+                        let find_field = |o: &serde_json::Map<String, serde_json::Value>,
+                                          key: &str|
+                         -> Option<serde_json::Value> {
                             // Search root
                             if let Some(v) = o.get(key) {
                                 return Some(v.clone());
@@ -649,16 +679,22 @@ async fn handler_webhook(
                             for (_, val) in o {
                                 if let Some(child_obj) = val.as_object() {
                                     // Output is mostly nested inside 'output' key
-                                    if let Some(output_obj) = child_obj.get("output").and_then(|v| v.as_object()) {
+                                    if let Some(output_obj) =
+                                        child_obj.get("output").and_then(|v| v.as_object())
+                                    {
                                         if let Some(v) = output_obj.get(key) {
                                             return Some(v.clone());
                                         }
-                                        if let Some(extra) = output_obj.get("extra_info").and_then(|v| v.as_object()) {
+                                        if let Some(extra) =
+                                            output_obj.get("extra_info").and_then(|v| v.as_object())
+                                        {
                                             if let Some(v) = extra.get(key) {
                                                 return Some(v.clone());
                                             }
                                         }
-                                        if let Some(res) = output_obj.get("result").and_then(|v| v.as_object()) {
+                                        if let Some(res) =
+                                            output_obj.get("result").and_then(|v| v.as_object())
+                                        {
                                             if let Some(v) = res.get(key) {
                                                 return Some(v.clone());
                                             }
@@ -668,7 +704,9 @@ async fn handler_webhook(
                                     if let Some(v) = child_obj.get(key) {
                                         return Some(v.clone());
                                     }
-                                    if let Some(extra) = child_obj.get("extra_info").and_then(|v| v.as_object()) {
+                                    if let Some(extra) =
+                                        child_obj.get("extra_info").and_then(|v| v.as_object())
+                                    {
                                         if let Some(v) = extra.get(key) {
                                             return Some(v.clone());
                                         }
@@ -683,29 +721,38 @@ async fn handler_webhook(
                                 should_stop_loop = true;
                                 println!("⏸️  Ejecución SUSPENDIDA. Esperando input humano.");
                                 if let Some(question) = find_field(obj, "question") {
-                                    println!("❓ Pregunta: {}", question.as_str().unwrap_or(&question.to_string()));
+                                    println!(
+                                        "❓ Pregunta: {}",
+                                        question.as_str().unwrap_or(&question.to_string())
+                                    );
                                 }
                             }
                         }
                         if let Some(loop_status_val) = find_field(obj, "__colmena_loop_status") {
                             if loop_status_val.as_str() == Some("FINISHED") {
                                 should_stop_loop = true;
-                                
+
                                 // If an OutputNode ran, its result is the definitive final output of the DAG
                                 let mut output_node_result = None;
                                 for (_node_name, node_output) in obj {
                                     if let Some(node_output_obj) = node_output.as_object() {
-                                        if let Some(extra) = find_field(node_output_obj, "extra_info") {
-                                            if let Some(is_output) = extra.as_object().and_then(|e| e.get("__colmena_is_output_node")) {
+                                        if let Some(extra) =
+                                            find_field(node_output_obj, "extra_info")
+                                        {
+                                            if let Some(is_output) = extra
+                                                .as_object()
+                                                .and_then(|e| e.get("__colmena_is_output_node"))
+                                            {
                                                 if is_output.as_bool() == Some(true) {
-                                                    output_node_result = find_field(node_output_obj, "result");
+                                                    output_node_result =
+                                                        find_field(node_output_obj, "result");
                                                     break;
                                                 }
                                             }
                                         }
                                     }
                                 }
-                                
+
                                 if let Some(actual_output) = output_node_result {
                                     out = serde_json::json!({
                                         "output": {
@@ -724,7 +771,7 @@ async fn handler_webhook(
                     } else {
                         // Prepare next iteration's input
                         println!("Output Parcial: Volviendo a planificar el siguiente turno en background de forma nativa...");
-                        
+
                         // Inject output as input for the next round
                         for (_, node) in graph_instance.nodes.iter_mut() {
                             if node.node_type == "trigger_webhook" || node.node_type == "input" {
@@ -734,13 +781,15 @@ async fn handler_webhook(
                                 node.config["__payload__"] = out.clone();
                             }
                         }
-                        
-                        if let Some(session_id_val) = out.as_object().and_then(|o| o.get("__colmena_session_id")) {
+
+                        if let Some(session_id_val) =
+                            out.as_object().and_then(|o| o.get("__colmena_session_id"))
+                        {
                             current_resume_id = session_id_val.as_str().map(|s| s.to_string());
                         } else {
                             current_resume_id = None;
                         }
-                        
+
                         turn_count += 1;
                     }
                 }
@@ -764,7 +813,7 @@ async fn handler_resume(
     Json(payload): Json<ResumePayload>,
 ) -> axum::response::Response {
     println!("🔔 Resume requested for session_id: {}", payload.session_id);
-    
+
     // Check for "Accept: text/event-stream" or Vercel header
     let is_sse = headers
         .get("accept")
@@ -776,13 +825,22 @@ async fn handler_resume(
     let graph_instance = (*state.graph).clone();
 
     if is_sse {
-        // ... We could duplicate the SSE stream runner here, but for brevity in Phase 1 
+        // ... We could duplicate the SSE stream runner here, but for brevity in Phase 1
         // we'll execute the rest. Let's just do a normal execute.
         // If SSE is truly required for resuming, we can abstract the runner.
         eprintln!("⚠️ SSE not fully supported yet on /resume, falling back to JSON");
     }
 
-    match state.use_case.execute(graph_instance, Some(payload.session_id), Some(payload.answer), false).await {
+    match state
+        .use_case
+        .execute(
+            graph_instance,
+            Some(payload.session_id),
+            Some(payload.answer),
+            false,
+        )
+        .await
+    {
         Ok(output) => {
             println!("✅ Resume successful.");
             Json(output).into_response()

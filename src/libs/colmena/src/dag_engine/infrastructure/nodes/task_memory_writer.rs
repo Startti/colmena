@@ -9,7 +9,11 @@ pub struct TaskMemoryWriterNode {
 }
 
 impl TaskMemoryWriterNode {
-    pub fn new(task_memory_repo: Option<Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>>) -> Self {
+    pub fn new(
+        task_memory_repo: Option<
+            Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>,
+        >,
+    ) -> Self {
         Self { task_memory_repo }
     }
 }
@@ -23,13 +27,21 @@ impl ExecutableNode for TaskMemoryWriterNode {
         _state: &mut Value,
         _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
-        let session_id = _state.get("session_id").and_then(|v| v.as_str()).unwrap_or("unknown_run").to_string();
+        let session_id = _state
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown_run")
+            .to_string();
 
         if let Some(repo) = &self.task_memory_repo {
             // 1. Update the result of the completed task
             if let Some(task_id_val) = inputs.get("task_id").or_else(|| config.get("task_id")) {
                 if let Some(task_id) = task_id_val.as_str() {
-                    let result_val = inputs.get("result").or_else(|| config.get("result")).cloned().unwrap_or(Value::Null);
+                    let result_val = inputs
+                        .get("result")
+                        .or_else(|| config.get("result"))
+                        .cloned()
+                        .unwrap_or(Value::Null);
                     repo.update_task_result(task_id, result_val).await?;
                 }
             }
@@ -39,9 +51,17 @@ impl ExecutableNode for TaskMemoryWriterNode {
                 if let Some(add_array) = add_val.as_array() {
                     for task_val in add_array {
                         if let Some(task_obj) = task_val.as_object() {
-                            let task_name = task_obj.get("task").and_then(|v| v.as_str()).unwrap_or("Unknown").to_string();
-                            let assigned_to = task_obj.get("assigned_to").and_then(|v| v.as_str()).unwrap_or("Unknown").to_string();
-                            
+                            let task_name = task_obj
+                                .get("task")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Unknown")
+                                .to_string();
+                            let assigned_to = task_obj
+                                .get("assigned_to")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Unknown")
+                                .to_string();
+
                             let new_task = crate::dag_engine::domain::state::DagTask {
                                 id: Uuid::new_v4().to_string(),
                                 session_id: session_id.clone(),
@@ -59,7 +79,10 @@ impl ExecutableNode for TaskMemoryWriterNode {
             }
 
             // 3. Process Critic modifications (Delete tasks)
-            if let Some(delete_val) = inputs.get("delete_tasks").or_else(|| config.get("delete_tasks")) {
+            if let Some(delete_val) = inputs
+                .get("delete_tasks")
+                .or_else(|| config.get("delete_tasks"))
+            {
                 if let Some(delete_array) = delete_val.as_array() {
                     for id_val in delete_array {
                         if let Some(id_str) = id_val.as_str() {
@@ -83,7 +106,10 @@ impl ExecutableNode for TaskMemoryWriterNode {
                 }
             }
 
-            let suspend = inputs.get("suspend").and_then(|v| v.as_bool()).unwrap_or(false);
+            let suspend = inputs
+                .get("suspend")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if suspend {
                 return Ok(json!({
                     "result": "Suspended by Critic Node",
@@ -99,7 +125,7 @@ impl ExecutableNode for TaskMemoryWriterNode {
                 "extra_info": {}
             }))
         } else {
-             Err("TaskMemoryWriterNode requires a Task Memory Repository".into())
+            Err("TaskMemoryWriterNode requires a Task Memory Repository".into())
         }
     }
 

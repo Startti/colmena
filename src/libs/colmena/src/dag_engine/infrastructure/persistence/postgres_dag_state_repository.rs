@@ -1,5 +1,7 @@
 use crate::dag_engine::domain::error::DagError;
-use crate::dag_engine::domain::state::{DagRunState, DagRunStatus, DagStateRepository, DagTask, DagPhaseSummary};
+use crate::dag_engine::domain::state::{
+    DagPhaseSummary, DagRunState, DagRunStatus, DagStateRepository, DagTask,
+};
 use async_trait::async_trait;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
@@ -34,7 +36,7 @@ impl PostgresDagStateRepository {
 
         // Ensure dag_task_memory has phase + parallel columns
         sqlx::query(
-            "ALTER TABLE dag_task_memory ADD COLUMN IF NOT EXISTS phase INT NOT NULL DEFAULT 1"
+            "ALTER TABLE dag_task_memory ADD COLUMN IF NOT EXISTS phase INT NOT NULL DEFAULT 1",
         )
         .execute(&self.pool)
         .await
@@ -55,11 +57,13 @@ impl PostgresDagStateRepository {
                 phase      INT  NOT NULL,
                 summary    TEXT NOT NULL,
                 created_at TIMESTAMPTZ DEFAULT NOW()
-            )"#
+            )"#,
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| DagError::StateError(format!("Migration error (dag_phase_summaries): {}", e)))?;
+        .map_err(|e| {
+            DagError::StateError(format!("Migration error (dag_phase_summaries): {}", e))
+        })?;
 
         Ok(())
     }
@@ -100,23 +104,28 @@ impl DagStateRepository for PostgresDagStateRepository {
         match row_opt {
             Some(row) => {
                 let status_str: String = row.get("status");
-                let status = status_str.parse::<DagRunStatus>().unwrap_or(DagRunStatus::Failed);
+                let status = status_str
+                    .parse::<DagRunStatus>()
+                    .unwrap_or(DagRunStatus::Failed);
 
                 let all_outputs_json: serde_json::Value = row.get("all_outputs");
-                let all_outputs: HashMap<String, Value> = serde_json::from_value(all_outputs_json)
-                    .unwrap_or_default();
+                let all_outputs: HashMap<String, Value> =
+                    serde_json::from_value(all_outputs_json).unwrap_or_default();
 
                 let active_queue_json: serde_json::Value = row.get("active_queue");
                 let active_queue = serde_json::from_value(active_queue_json).unwrap_or_default();
 
                 let execution_history_json: serde_json::Value = row.get("execution_history");
-                let execution_history = serde_json::from_value(execution_history_json).unwrap_or_default();
+                let execution_history =
+                    serde_json::from_value(execution_history_json).unwrap_or_default();
 
                 let global_calls_json: serde_json::Value = row.get("global_calls");
                 let global_calls = serde_json::from_value(global_calls_json).unwrap_or_default();
 
-                let caller_specific_calls_json: serde_json::Value = row.get("caller_specific_calls");
-                let caller_specific_calls = serde_json::from_value(caller_specific_calls_json).unwrap_or_default();
+                let caller_specific_calls_json: serde_json::Value =
+                    row.get("caller_specific_calls");
+                let caller_specific_calls =
+                    serde_json::from_value(caller_specific_calls_json).unwrap_or_default();
 
                 let global_shared_state: serde_json::Value = row.get("global_shared_state");
 
@@ -140,18 +149,21 @@ impl DagStateRepository for PostgresDagStateRepository {
         let status_str = state.status.to_string();
         let all_outputs_json = serde_json::to_value(&state.all_outputs)
             .map_err(|e| DagError::StateError(format!("Serialization error: {}", e)))?;
-        
+
         let active_queue_json = serde_json::to_value(&state.active_queue)
             .map_err(|e| DagError::StateError(format!("Serialization error (queue): {}", e)))?;
-            
+
         let execution_history_json = serde_json::to_value(&state.execution_history)
             .map_err(|e| DagError::StateError(format!("Serialization error (history): {}", e)))?;
-            
-        let global_calls_json = serde_json::to_value(&state.global_calls)
-            .map_err(|e| DagError::StateError(format!("Serialization error (global_calls): {}", e)))?;
-            
+
+        let global_calls_json = serde_json::to_value(&state.global_calls).map_err(|e| {
+            DagError::StateError(format!("Serialization error (global_calls): {}", e))
+        })?;
+
         let caller_specific_calls_json = serde_json::to_value(&state.caller_specific_calls)
-            .map_err(|e| DagError::StateError(format!("Serialization error (caller_calls): {}", e)))?;
+            .map_err(|e| {
+                DagError::StateError(format!("Serialization error (caller_calls): {}", e))
+            })?;
 
         sqlx::query(
             r#"INSERT INTO dag_runs (session_id, graph_json, all_outputs, status, active_queue, execution_history, global_calls, caller_specific_calls, global_shared_state, updated_at)
@@ -188,10 +200,11 @@ impl DagStateRepository for PostgresDagStateRepository {
 
 #[async_trait]
 impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagStateRepository {
-
     async fn add_task(&self, task: &DagTask) -> Result<(), DagError> {
         let id_uuid = uuid::Uuid::parse_str(&task.id).unwrap_or_else(|_| uuid::Uuid::new_v4());
-        let result_json = task.result.as_ref()
+        let result_json = task
+            .result
+            .as_ref()
             .map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null));
 
         sqlx::query(
@@ -213,7 +226,11 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
         Ok(())
     }
 
-    async fn update_task_result(&self, task_id: &str, result: serde_json::Value) -> Result<(), DagError> {
+    async fn update_task_result(
+        &self,
+        task_id: &str,
+        result: serde_json::Value,
+    ) -> Result<(), DagError> {
         let id_uuid = uuid::Uuid::parse_str(task_id)
             .map_err(|_| DagError::StateError("Invalid UUID for task_id".to_string()))?;
 
@@ -232,7 +249,7 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
     async fn get_tasks_for_run(&self, session_id: &str) -> Result<Vec<DagTask>, DagError> {
         let rows = sqlx::query(
             "SELECT id, session_id, task_name, assigned_to, completed, result, phase, parallel \
-             FROM dag_task_memory WHERE session_id = $1 ORDER BY phase ASC, created_at ASC"
+             FROM dag_task_memory WHERE session_id = $1 ORDER BY phase ASC, created_at ASC",
         )
         .bind(session_id)
         .fetch_all(&self.pool)
@@ -242,16 +259,24 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
         Ok(rows.iter().map(row_to_task).collect())
     }
 
-    async fn get_first_uncompleted_task(&self, session_id: &str) -> Result<Option<DagTask>, DagError> {
+    async fn get_first_uncompleted_task(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<DagTask>, DagError> {
         let row_opt = sqlx::query(
             "SELECT id, session_id, task_name, assigned_to, completed, result, phase, parallel \
              FROM dag_task_memory WHERE session_id = $1 AND completed = FALSE \
-             ORDER BY phase ASC, created_at ASC LIMIT 1"
+             ORDER BY phase ASC, created_at ASC LIMIT 1",
         )
         .bind(session_id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| DagError::StateError(format!("Database error on get_first_uncompleted_task: {}", e)))?;
+        .map_err(|e| {
+            DagError::StateError(format!(
+                "Database error on get_first_uncompleted_task: {}",
+                e
+            ))
+        })?;
 
         Ok(row_opt.as_ref().map(row_to_task))
     }
@@ -274,7 +299,9 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
             .bind(session_id)
             .execute(&self.pool)
             .await
-            .map_err(|e| DagError::StateError(format!("Database error on clear_tasks_for_run: {}", e)))?;
+            .map_err(|e| {
+                DagError::StateError(format!("Database error on clear_tasks_for_run: {}", e))
+            })?;
 
         Ok(())
     }
@@ -285,7 +312,7 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
         // MIN() aggregate always returns exactly one row (NULL if no matching rows)
         let row = sqlx::query(
             "SELECT MIN(phase) as min_phase FROM dag_task_memory \
-             WHERE session_id = $1 AND completed = FALSE"
+             WHERE session_id = $1 AND completed = FALSE",
         )
         .bind(session_id)
         .fetch_one(&self.pool)
@@ -297,51 +324,75 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
         Ok(min_phase)
     }
 
-    async fn get_uncompleted_tasks_for_phase(&self, session_id: &str, phase: i32) -> Result<Vec<DagTask>, DagError> {
+    async fn get_uncompleted_tasks_for_phase(
+        &self,
+        session_id: &str,
+        phase: i32,
+    ) -> Result<Vec<DagTask>, DagError> {
         let rows = sqlx::query(
             "SELECT id, session_id, task_name, assigned_to, completed, result, phase, parallel \
              FROM dag_task_memory WHERE session_id = $1 AND phase = $2 AND completed = FALSE \
-             ORDER BY created_at ASC"
+             ORDER BY created_at ASC",
         )
         .bind(session_id)
         .bind(phase)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| DagError::StateError(format!("Database error on get_uncompleted_tasks_for_phase: {}", e)))?;
+        .map_err(|e| {
+            DagError::StateError(format!(
+                "Database error on get_uncompleted_tasks_for_phase: {}",
+                e
+            ))
+        })?;
 
         Ok(rows.iter().map(row_to_task).collect())
     }
 
     // ── Phase summaries ────────────────────────────────────────────────────────
 
-    async fn save_phase_summary(&self, session_id: &str, phase: i32, summary: &str) -> Result<(), DagError> {
+    async fn save_phase_summary(
+        &self,
+        session_id: &str,
+        phase: i32,
+        summary: &str,
+    ) -> Result<(), DagError> {
         sqlx::query(
-            "INSERT INTO dag_phase_summaries (session_id, phase, summary) VALUES ($1, $2, $3)"
+            "INSERT INTO dag_phase_summaries (session_id, phase, summary) VALUES ($1, $2, $3)",
         )
         .bind(session_id)
         .bind(phase)
         .bind(summary)
         .execute(&self.pool)
         .await
-        .map_err(|e| DagError::StateError(format!("Database error on save_phase_summary: {}", e)))?;
+        .map_err(|e| {
+            DagError::StateError(format!("Database error on save_phase_summary: {}", e))
+        })?;
 
         Ok(())
     }
 
-    async fn get_phase_summaries(&self, session_id: &str) -> Result<Vec<DagPhaseSummary>, DagError> {
+    async fn get_phase_summaries(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<DagPhaseSummary>, DagError> {
         let rows = sqlx::query(
             "SELECT session_id, phase, summary FROM dag_phase_summaries \
-             WHERE session_id = $1 ORDER BY phase ASC"
+             WHERE session_id = $1 ORDER BY phase ASC",
         )
         .bind(session_id)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| DagError::StateError(format!("Database error on get_phase_summaries: {}", e)))?;
+        .map_err(|e| {
+            DagError::StateError(format!("Database error on get_phase_summaries: {}", e))
+        })?;
 
-        Ok(rows.iter().map(|row| DagPhaseSummary {
-            session_id: row.get("session_id"),
-            phase: row.get("phase"),
-            summary: row.get("summary"),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|row| DagPhaseSummary {
+                session_id: row.get("session_id"),
+                phase: row.get("phase"),
+                summary: row.get("summary"),
+            })
+            .collect())
     }
 }

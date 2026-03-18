@@ -1,6 +1,7 @@
 use crate::llm::domain::{
     ConversationRepository, LlmConfig, LlmError, LlmMessage, LlmRepository, LlmRequest,
-    LlmResponse, LlmStreamPart, LlmUsage, SessionId, ToolCall, ToolDefinition, ToolExecutor, ToolResult,
+    LlmResponse, LlmStreamPart, LlmUsage, SessionId, ToolCall, ToolDefinition, ToolExecutor,
+    ToolResult,
 };
 use std::sync::Arc;
 
@@ -214,7 +215,7 @@ impl AgentService {
                     }
                     return Ok(response);
                 }
-                
+
                 // D. Execute each tool call
                 for tool_call in tool_calls {
                     let mut executed_call = tool_call.clone();

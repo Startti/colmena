@@ -4,5 +4,5 @@ pub mod events;
 pub mod graph;
 pub mod node;
 pub mod observer;
-pub mod tool_configuration;
 pub mod state;
+pub mod tool_configuration;

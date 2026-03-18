@@ -25,7 +25,9 @@ impl LlmNode {
     pub fn new(
         repository_factory: Arc<ConversationRepositoryFactory>,
         registry: Weak<dyn NodeRegistryPort>,
-        task_memory_repo: Option<Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>>,
+        task_memory_repo: Option<
+            Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>,
+        >,
     ) -> Self {
         Self {
             repository_factory,
@@ -90,7 +92,7 @@ impl LlmNode {
 
             if let Some(end) = value[absolute_start..].find("}}") {
                 let absolute_end = absolute_start + end + 1; // points to the last }
-                let var_path = value[absolute_start + 2..absolute_end - 1].trim(); 
+                let var_path = value[absolute_start + 2..absolute_end - 1].trim();
 
                 let parts: Vec<&str> = var_path.splitn(2, '.').collect();
                 let val_str = if parts.is_empty() || parts[0].is_empty() {
@@ -184,7 +186,8 @@ impl ExecutableNode for LlmNode {
         // This allows the synthesizer to receive `final_result` (a JSON array) directly.
         let prompt_raw_str: String;
         let prompt: &str = {
-            let val = inputs.get("prompt")
+            let val = inputs
+                .get("prompt")
                 .or_else(|| config.get("prompt"))
                 .or_else(|| inputs.get("task")) // Added fallback to "task"
                 .or_else(|| config.get("task")); // Added fallback to "task"
@@ -192,25 +195,33 @@ impl ExecutableNode for LlmNode {
                 Some(Value::String(s)) => {
                     prompt_raw_str = Self::resolve_template_vars(s, inputs);
                     if prompt_raw_str.is_empty() {
-                        let node_name = inputs.get("__node_id")
+                        let node_name = inputs
+                            .get("__node_id")
                             .and_then(|v| v.as_str())
                             .unwrap_or("(unknown)");
-                        println!("⚠️ [LlmNode] Skipped (prompt resolved to empty) — node: \"{}\"", node_name);
+                        println!(
+                            "⚠️ [LlmNode] Skipped (prompt resolved to empty) — node: \"{}\"",
+                            node_name
+                        );
                         return Ok(Value::Null);
                     }
                     &prompt_raw_str
                 }
                 Some(Value::Null) | None => {
-                    let node_name = inputs.get("__node_id")
+                    let node_name = inputs
+                        .get("__node_id")
                         .and_then(|v| v.as_str())
                         .unwrap_or("(unknown)");
-                    println!("⚠️ [LlmNode] Skipped (not active this turn) — node: \"{}\"", node_name);
+                    println!(
+                        "⚠️ [LlmNode] Skipped (not active this turn) — node: \"{}\"",
+                        node_name
+                    );
                     return Ok(Value::Null);
                 }
                 Some(other) => {
                     // JSON array / object — serialize to pretty string so the LLM can read it
-                    prompt_raw_str = serde_json::to_string_pretty(other)
-                        .unwrap_or_else(|_| other.to_string());
+                    prompt_raw_str =
+                        serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string());
                     &prompt_raw_str
                 }
             }
@@ -222,7 +233,9 @@ impl ExecutableNode for LlmNode {
         //   prompt       = final_result (all completed task outputs)
         let combined_prompt_str: String;
         let prompt: &str = {
-            let user_req = inputs.get("user_request").and_then(|v| v.as_str())
+            let user_req = inputs
+                .get("user_request")
+                .and_then(|v| v.as_str())
                 .or_else(|| config.get("user_request").and_then(|v| v.as_str()));
             if let Some(req) = user_req {
                 combined_prompt_str = format!(
@@ -235,9 +248,10 @@ impl ExecutableNode for LlmNode {
             }
         };
 
-
         // Verbose flag for debugging — prints prompt, system message, and raw response.
-        let verbose = inputs.get("verbose").and_then(|v| v.as_bool())
+        let verbose = inputs
+            .get("verbose")
+            .and_then(|v| v.as_bool())
             .or_else(|| config.get("verbose").and_then(|v| v.as_bool()))
             .unwrap_or(false);
 
@@ -332,7 +346,7 @@ impl ExecutableNode for LlmNode {
 
                         if let Some(data) = obj.get("data").and_then(|v| v.as_str()) {
                             use base64::{engine::general_purpose::STANDARD, Engine as _};
-                            
+
                             // It's a base64 inline string. Remove data URI scheme if present:
                             let base64_data = if data.starts_with("data:") {
                                 data.find(',').map(|idx| &data[idx + 1..]).unwrap_or(data)
@@ -389,7 +403,7 @@ impl ExecutableNode for LlmNode {
         } else {
             LlmMessage::user_with_files(prompt.to_string(), resolved_files)?
         };
-        
+
         messages.push(user_message.clone());
 
         // --- 3. Execute LLM Call (via AgentService) ---
@@ -524,50 +538,51 @@ impl ExecutableNode for LlmNode {
 
         // Define on_token callback if streaming is enabled and observer is present
         let observer_for_stream = _observer.clone();
-        let on_token: Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>> = if let Some(obs) = observer_for_stream {
-            Some(Box::new(move |part: LlmStreamPart| {
-                use crate::dag_engine::domain::observer::NodeEvent;
-                match part {
-                    LlmStreamPart::Content(token) if stream_enabled => {
-                        obs.on_event(NodeEvent::LlmToken { token })
+        let on_token: Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>> =
+            if let Some(obs) = observer_for_stream {
+                Some(Box::new(move |part: LlmStreamPart| {
+                    use crate::dag_engine::domain::observer::NodeEvent;
+                    match part {
+                        LlmStreamPart::Content(token) if stream_enabled => {
+                            obs.on_event(NodeEvent::LlmToken { token })
+                        }
+                        LlmStreamPart::ToolCallChunk(chunk) if stream_enabled => {
+                            obs.on_event(NodeEvent::LlmToolCall {
+                                tool_id: chunk.id,
+                                tool_name: chunk.name,
+                                args_chunk: chunk.args_chunk,
+                            })
+                        }
+                        LlmStreamPart::Usage(usage) if stream_enabled => {
+                            obs.on_event(NodeEvent::LlmUsage {
+                                prompt_tokens: usage.prompt_tokens,
+                                completion_tokens: usage.completion_tokens,
+                            })
+                        }
+                        LlmStreamPart::LlmToolCallStart(tc) => {
+                            obs.on_event(NodeEvent::LlmToolCallStart {
+                                tool_id: tc.id.clone(),
+                                tool_name: tc.function.name.clone(),
+                                tool_args: tc.function.arguments.clone(),
+                            })
+                        }
+                        LlmStreamPart::LlmToolCallFinish(res) => {
+                            obs.on_event(NodeEvent::LlmToolCallFinish {
+                                tool_id: res.tool_call_id.clone(),
+                                success: res.success,
+                                output: res.output.clone(),
+                            });
+                        }
+                        LlmStreamPart::LlmMessageStart => obs.on_event(NodeEvent::LlmMessageStart),
+                        LlmStreamPart::LlmMessageFinish(usage) => {
+                            obs.on_event(NodeEvent::LlmMessageFinish(usage));
+                        }
+                        _ => {}
                     }
-                    LlmStreamPart::ToolCallChunk(chunk) if stream_enabled => {
-                        obs.on_event(NodeEvent::LlmToolCall {
-                            tool_id: chunk.id,
-                            tool_name: chunk.name,
-                            args_chunk: chunk.args_chunk,
-                        })
-                    }
-                    LlmStreamPart::Usage(usage) if stream_enabled => obs.on_event(NodeEvent::LlmUsage {
-                        prompt_tokens: usage.prompt_tokens,
-                        completion_tokens: usage.completion_tokens,
-                    }),
-                    LlmStreamPart::LlmToolCallStart(tc) => {
-                        obs.on_event(NodeEvent::LlmToolCallStart {
-                            tool_id: tc.id.clone(),
-                            tool_name: tc.function.name.clone(),
-                            tool_args: tc.function.arguments.clone(),
-                        })
-                    }
-                    LlmStreamPart::LlmToolCallFinish(res) => {
-                        obs.on_event(NodeEvent::LlmToolCallFinish {
-                            tool_id: res.tool_call_id.clone(),
-                            success: res.success,
-                            output: res.output.clone(),
-                        });
-                    }
-                    LlmStreamPart::LlmMessageStart => {
-                        obs.on_event(NodeEvent::LlmMessageStart)
-                    }
-                    LlmStreamPart::LlmMessageFinish(usage) => {
-                        obs.on_event(NodeEvent::LlmMessageFinish(usage));
-                    }
-                    _ => {}
-                }
-            }))
-        } else {
-            None
-        };
+                }))
+            } else {
+                None
+            };
 
         // Create AgentService parameters
         let params = crate::llm::application::AgentRunParams {
@@ -626,20 +641,32 @@ impl ExecutableNode for LlmNode {
         });
 
         // Check if we need to write to memory
-        let write_to_memory = inputs.get("write_to_memory").and_then(|v| v.as_bool()).or_else(|| config.get("write_to_memory").and_then(|v| v.as_bool())).unwrap_or(false);
+        let write_to_memory = inputs
+            .get("write_to_memory")
+            .and_then(|v| v.as_bool())
+            .or_else(|| config.get("write_to_memory").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
 
         let mut output_tasks = Vec::new();
 
         if write_to_memory {
             if let Some(repo) = &self.task_memory_repo {
-                let raw_task_id = inputs.get("task_id").and_then(|v| v.as_str()).or_else(|| config.get("task_id").and_then(|v| v.as_str()));
+                let raw_task_id = inputs
+                    .get("task_id")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| config.get("task_id").and_then(|v| v.as_str()));
                 if let Some(raw_tid) = raw_task_id {
                     let task_id = Self::resolve_template_vars(raw_tid, inputs);
                     if !task_id.is_empty() {
                         // Store the standardized result structure in the DB
-                        repo.update_task_result(&task_id, result_json.clone()).await?;
+                        repo.update_task_result(&task_id, result_json.clone())
+                            .await?;
 
-                        let session_id = _state.get("session_id").and_then(|v| v.as_str()).unwrap_or("unknown_run").to_string();
+                        let session_id = _state
+                            .get("session_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown_run")
+                            .to_string();
                         if let Ok(tasks) = repo.get_tasks_for_run(&session_id).await {
                             for t in tasks {
                                 output_tasks.push(json!({
@@ -657,7 +684,7 @@ impl ExecutableNode for LlmNode {
         }
 
         if write_to_memory && !output_tasks.is_empty() {
-             extra_info["all_tasks"] = json!(output_tasks);
+            extra_info["all_tasks"] = json!(output_tasks);
         }
 
         // Output format

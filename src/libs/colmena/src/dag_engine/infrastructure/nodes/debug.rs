@@ -18,7 +18,11 @@ impl ExecutableNode for LogNode {
         _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
         // Flexibilidad: Buscar llaves comunes o tomar TODO lo que venga inyectado (Auto-Flattening)
-        let input_val = if let Some(val) = inputs.get("input").or(inputs.get("result")).or(inputs.get("output")) {
+        let input_val = if let Some(val) = inputs
+            .get("input")
+            .or(inputs.get("result"))
+            .or(inputs.get("output"))
+        {
             val.clone()
         } else if !inputs.is_empty() {
             // Si no hay ninguna de las llaves estándar pero hay entradas, las mostramos todas

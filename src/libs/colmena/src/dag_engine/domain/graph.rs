@@ -44,7 +44,7 @@ pub struct NodeConfig {
 pub struct Edge {
     pub from: String,
     pub to: String,
-    
+
     /// Optional flag to indicate if this edge forms a backward cycle.
     /// Cyclic edges don't block the target node from executing initially.
     #[serde(default)]

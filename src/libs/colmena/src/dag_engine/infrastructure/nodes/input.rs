@@ -15,7 +15,7 @@ impl ExecutableNode for InputNode {
         _state: &mut Value,
         _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
-        // If a state payload was injected (e.g. from a loop), yield it directly 
+        // If a state payload was injected (e.g. from a loop), yield it directly
         // to prevent double-nesting the graph output state.
         if let Some(p) = config.get("__payload__") {
             return Ok(p.clone());
