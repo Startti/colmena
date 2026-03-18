@@ -127,6 +127,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_python_math_logic() {
+        pyo3::prepare_freethreaded_python();
         let node = PythonNode;
 
         // 1. Configurar Inputs: x = 10, y = 5
@@ -153,6 +154,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_python_imports() {
+        pyo3::prepare_freethreaded_python();
         // Verificar que podemos importar librerías estándar (json, math)
         let node = PythonNode;
         let inputs = HashMap::new();
