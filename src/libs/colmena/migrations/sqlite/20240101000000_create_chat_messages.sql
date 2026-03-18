@@ -1,6 +1,8 @@
-CREATE TABLE IF NOT EXISTS chat_messages (
+DROP TABLE IF EXISTS chat_messages;
+
+CREATE TABLE IF NOT EXISTS llm_node_history (
     id TEXT PRIMARY KEY,
-    thread_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
     tool_call_id TEXT,
@@ -8,5 +10,5 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     created_at TEXT NOT NULL
 );
 
-CREATE INDEX idx_chat_messages_thread_id ON chat_messages(thread_id);
-CREATE INDEX idx_chat_messages_created_at ON chat_messages(created_at);
+CREATE INDEX idx_llm_node_history_session_id ON llm_node_history(session_id);
+CREATE INDEX idx_llm_node_history_created_at ON llm_node_history(created_at);

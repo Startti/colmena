@@ -42,8 +42,15 @@ pub enum DagExecutionEvent {
         success: bool,
         output: String,
     },
+    #[serde(rename = "llm_message_start")]
+    LlmMessageStart { node_id: String },
+    #[serde(rename = "llm_message_finish")]
+    LlmMessageFinish { node_id: String, usage: Option<Value> },
     #[serde(rename = "graph_finish")]
     GraphFinish { output: Value },
     #[serde(rename = "error")]
     Error { message: String },
+    /// Emitted at the beginning of each loop turn
+    #[serde(rename = "turn_start")]
+    TurnStart { turn: u32 },
 }

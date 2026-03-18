@@ -15,12 +15,20 @@ impl ExecutableNode for InputNode {
         _state: &mut Value,
         _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
-        // Read the "data" from config, fallback to empty object if not provided
-        let data = config.get("data").cloned().unwrap_or_else(|| json!({}));
+        // If a state payload was injected (e.g. from a loop), yield it directly 
+        // to prevent double-nesting the graph output state.
+        if let Some(p) = config.get("__payload__") {
+            return Ok(p.clone());
+        }
 
-        // We'll return the whole input map as the output object
-        // so downstream nodes can access fields.
-        Ok(json!({ "output": data }))
+        // Check for static "data" key first
+        if let Some(data) = config.get("data") {
+            return Ok(data.clone());
+        }
+
+        // Fallback: return the whole configuration directly
+        // This allows users to define inputs at the top level of the config.
+        Ok(config.clone())
     }
 
     fn description(&self) -> Option<&str> {

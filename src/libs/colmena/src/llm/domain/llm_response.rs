@@ -79,6 +79,16 @@ impl LlmResponse {
         self
     }
 
+    pub fn with_content(mut self, content: String) -> Self {
+        if let Some(tool_calls) = &self.tool_calls {
+            self.message = LlmMessage::assistant_with_tool_calls(content, tool_calls.clone())
+                .unwrap_or(self.message);
+        } else {
+            self.message = LlmMessage::assistant(content).unwrap_or(self.message);
+        }
+        self
+    }
+
     // Getters
     pub fn id(&self) -> &LlmResponseId {
         &self.id
@@ -153,8 +163,10 @@ pub enum LlmStreamPart {
     Content(String),
     ToolCallChunk(ToolCallChunk),
     Usage(LlmUsage),
-    ToolCallStart(ToolCall),
-    ToolCallFinish(ToolResult),
+    LlmToolCallStart(ToolCall),
+    LlmToolCallFinish(ToolResult),
+    LlmMessageStart,
+    LlmMessageFinish(Option<LlmUsage>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

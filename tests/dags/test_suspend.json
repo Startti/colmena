@@ -1,0 +1,32 @@
+{
+    "nodes": {
+        "start": {
+            "type": "mock_input",
+            "config": {
+                "value": "Initial Data"
+            }
+        },
+        "ask": {
+            "type": "suspend",
+            "config": {
+                "question": "Provide some manual input"
+            }
+        },
+        "finish": {
+            "type": "log",
+            "config": {
+                "prefix": "Final output:"
+            }
+        }
+    },
+    "edges": [
+        {
+            "from": "start.output",
+            "to": "ask.input_data"
+        },
+        {
+            "from": "ask",
+            "to": "finish.input"
+        }
+    ]
+}

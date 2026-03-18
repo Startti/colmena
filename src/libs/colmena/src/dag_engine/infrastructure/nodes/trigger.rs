@@ -34,9 +34,9 @@ impl ExecutableNode for TriggerWebhookNode {
             serde_json::to_value(inputs)?
         };
 
-        // We'll return the whole input map as the output object
-        // so downstream nodes can access fields like `trigger.message`.
-        Ok(json!({ "output": payload }))
+        // We return the raw payload directly to allow Auto-Flattening to work
+        // just like the InputNode.
+        Ok(payload)
     }
 
     fn description(&self) -> Option<&str> {

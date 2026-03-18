@@ -14,19 +14,45 @@ use crate::dag_engine::domain::graph::Graph;
 use crate::dag_engine::infrastructure::registry::HashMapNodeRegistry;
 use crate::llm::infrastructure::ConversationRepositoryFactory;
 
-/// Execute a DAG from a file path
-pub async fn run_dag(file_path: String) -> Result<Value, Box<dyn std::error::Error>> {
+pub async fn run_dag(
+    file_path: String,
+    resume_id: Option<String>,
+    resume_answer: Option<String>,
+    inject_payload: Option<Value>,
+    include_extra_info: bool,
+) -> Result<Value, Box<dyn std::error::Error>> {
     // Load .env file
     dotenvy::dotenv().ok();
 
-    // Initialize Repository Factory
+    // Initialize Database Pool
+    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = sqlx::PgPool::connect(&db_url).await?;
+
+    // Initialize Repository Factory and State Repo
     let repository_factory = Arc::new(ConversationRepositoryFactory::new());
-    let registry = HashMapNodeRegistry::new(repository_factory);
-    let run_use_case = DagRunUseCase::new(registry);
+    let state_repo = Arc::new(crate::dag_engine::infrastructure::persistence::postgres_dag_state_repository::PostgresDagStateRepository::new(pool.clone()));
+    state_repo.migrate().await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+    let registry = HashMapNodeRegistry::new(
+        repository_factory,
+        Some(state_repo.clone() as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),
+    );
+    let run_use_case = DagRunUseCase::new(registry, Some(state_repo));
 
     // Load and execute the graph
     let file_content = tokio::fs::read_to_string(&file_path).await?;
-    let graph: Graph = serde_json::from_str(&file_content)?;
+    let mut graph: Graph = serde_json::from_str(&file_content)?;
+
+    // If an injected payload was provided (e.g. from a previous loop), inject it into start nodes
+    if let Some(payload) = inject_payload {
+        for (_, node) in graph.nodes.iter_mut() {
+            if node.node_type == "trigger_webhook" || node.node_type == "input" || node.node_type == "mock_input" {
+                if node.config.is_null() {
+                    node.config = serde_json::json!({});
+                }
+                node.config["__payload__"] = payload.clone();
+            }
+        }
+    }
 
     // Check if any node has streaming enabled
     let is_stream = graph.nodes.values().any(|node| {
@@ -37,7 +63,7 @@ pub async fn run_dag(file_path: String) -> Result<Value, Box<dyn std::error::Err
         use crate::dag_engine::domain::events::DagExecutionEvent;
         use futures::StreamExt;
 
-        let internal_stream = run_use_case.execute_stream(graph);
+        let internal_stream = run_use_case.execute_stream(graph, resume_id.clone(), resume_answer.clone(), include_extra_info);
         tokio::pin!(internal_stream);
 
         // 1. Send the global START part
@@ -165,18 +191,21 @@ pub async fn run_dag(file_path: String) -> Result<Value, Box<dyn std::error::Err
                         "output": serde_json::from_str::<serde_json::Value>(&output).unwrap_or(serde_json::Value::String(output))
                     }))
                 }
-                DagExecutionEvent::LlmUsage {
-                    prompt_tokens,
-                    completion_tokens,
-                    ..
-                } => Some(serde_json::json!({
-                    "type": "finish-step",
-                    "finishReason": "stop",
-                    "usage": {
-                        "promptTokens": prompt_tokens,
-                        "completionTokens": completion_tokens
+                DagExecutionEvent::LlmUsage { .. } => None,
+                DagExecutionEvent::NodeFinish { node_id, .. } => {
+                    if let Some(part_id) = text_block_uuids.get(&node_id) {
+                        Some(serde_json::json!({
+                            "type": "node-end",
+                            "id": part_id,
+                            "usage": {
+                                "promptTokens": total_prompt_tokens,
+                                "completionTokens": total_completion_tokens
+                            }
+                        }))
+                    } else {
+                        None
                     }
-                })),
+                }
                 DagExecutionEvent::GraphFinish { .. } => Some(serde_json::json!({
                     "type": "finish",
                     "finishReason": "stop",
@@ -214,7 +243,7 @@ pub async fn run_dag(file_path: String) -> Result<Value, Box<dyn std::error::Err
         Ok(final_output)
     } else {
         run_use_case
-            .execute(graph)
+            .execute(graph, resume_id, resume_answer, include_extra_info)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     }
@@ -229,10 +258,19 @@ pub async fn serve_dag(
     // Load .env file
     dotenvy::dotenv().ok();
 
-    // Initialize Repository Factory
+    // Initialize Database Pool
+    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = sqlx::PgPool::connect(&db_url).await?;
+
+    // Initialize Repository Factory and State Repo
     let repository_factory = Arc::new(ConversationRepositoryFactory::new());
-    let registry = HashMapNodeRegistry::new(repository_factory);
-    let run_use_case = Arc::new(DagRunUseCase::new(registry));
+    let state_repo = Arc::new(crate::dag_engine::infrastructure::persistence::postgres_dag_state_repository::PostgresDagStateRepository::new(pool.clone()));
+    state_repo.migrate().await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+    let registry = HashMapNodeRegistry::new(
+        repository_factory,
+        Some(state_repo.clone() as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),
+    );
+    let run_use_case = Arc::new(DagRunUseCase::new(registry, Some(state_repo)));
 
     // Load the graph
     let file_content = tokio::fs::read_to_string(&file_path).await?;
@@ -265,8 +303,16 @@ pub async fn serve_dag(
 
     if routes_count == 0 {
         eprintln!(
-            "⚠️ ALERT: No 'trigger_webhook' nodes found. The server is running but has no routes."
+            "⚠️ ALERT: No 'trigger_webhook' nodes found. The server is running but has no default routes."
         );
+    } else {
+        // Also register the resume route when serving
+        let state = AppState {
+            graph: graph_arc.clone(),
+            use_case: run_use_case.clone(),
+        };
+        println!("   └── Registering route: POST /resume (System)");
+        app = app.route("/resume", post(handler_resume).with_state(state));
     }
 
     // Start the TCP server
@@ -284,6 +330,12 @@ pub async fn serve_dag(
 struct AppState {
     graph: Arc<Graph>,
     use_case: Arc<DagRunUseCase>,
+}
+
+#[derive(serde::Deserialize)]
+struct ResumePayload {
+    session_id: String,
+    answer: String,
 }
 
 /// Handler that executes when an HTTP request arrives
@@ -332,133 +384,230 @@ async fn handler_webhook(
         use futures::StreamExt;
 
         let use_case = (*state.use_case).clone();
-        let internal_stream = use_case.execute_stream(graph_instance);
 
         // Wrap the internal stream to manage protocol state (text-start, text-end, [DONE])
         let protocol_stream = async_stream::stream! {
-            // 1. Send the global START part
-            yield Ok::<Event, std::io::Error>(Event::default().json_data(serde_json::json!({
-                "type": "start",
-                "messageId": format!("msg_{}", uuid::Uuid::new_v4())
-            })).expect("json_data"));
+            let is_loop = params.get("loop").map(|v| v == "true").unwrap_or(false);
+            let mut turn_count = 1;
+            let mut current_graph = graph_instance;
 
-            let mut text_block_uuids = std::collections::HashMap::new();
-            let mut seen_tool_ids = std::collections::HashSet::new();
-            let mut total_prompt_tokens = 0;
-            let mut total_completion_tokens = 0;
+            loop {
+                // Node start messages are emitted dynamically below.
 
-            tokio::pin!(internal_stream);
+                let mut text_block_uuids = std::collections::HashMap::new();
+                let mut seen_tool_ids = std::collections::HashSet::new();
+                let mut total_prompt_tokens = 0;
+                let mut total_completion_tokens = 0;
+                
+                // Emitting custom event to show turn change in UI
+                if is_loop {
+                    yield Ok::<Event, std::io::Error>(Event::default().json_data(serde_json::json!({
+                        "type": "text-delta",
+                        "id": format!("txt_sys_{}", uuid::Uuid::new_v4()),
+                        "delta": format!("\n\n*--- Starting Turn {} ---*\n\n", turn_count)
+                    })).expect("json_data"));
+                }
 
-            while let Some(result) = internal_stream.next().await {
-                // Here we ignore DAG errors for the protocol stream but we could also yield an Error part
-                let event = match result {
-                    Ok(ev) => ev,
-                    Err(e) => {
-                        yield Ok(Event::default().json_data(serde_json::json!({
-                            "type": "error",
-                            "errorText": e.to_string()
-                        })).expect("json_data"));
-                        continue;
+                let internal_stream = use_case.clone().execute_stream(current_graph.clone(), None, None, false);
+                let mut final_output_value: Option<Value> = None;
+                
+                tokio::pin!(internal_stream);
+
+                while let Some(result) = internal_stream.next().await {
+                    // Here we ignore DAG errors for the protocol stream but we could also yield an Error part
+                    let event = match result {
+                        Ok(ev) => ev,
+                        Err(e) => {
+                            yield Ok(Event::default().json_data(serde_json::json!({
+                                "type": "error",
+                                "errorText": e.to_string()
+                            })).expect("json_data"));
+                            continue;
+                        }
+                    };
+
+                    // Protocol State Management
+                    match &event {
+                        DagExecutionEvent::LlmToken { node_id, .. } => {
+                            if !text_block_uuids.contains_key(node_id) {
+                                let part_id = format!("txt_{}", uuid::Uuid::new_v4());
+                                yield Ok(Event::default().json_data(serde_json::json!({
+                                    "type": "text-start",
+                                    "id": part_id
+                                })).expect("json_data"));
+                                text_block_uuids.insert(node_id.clone(), part_id);
+                            }
+                        },
+                        DagExecutionEvent::NodeFinish { node_id, .. } => {
+                            if let Some(part_id) = text_block_uuids.remove(node_id) {
+                                yield Ok(Event::default().json_data(serde_json::json!({
+                                    "type": "text-end",
+                                    "id": part_id
+                                })).expect("json_data"));
+                            }
+                        },
+                        DagExecutionEvent::LlmUsage { prompt_tokens, completion_tokens, .. } => {
+                            total_prompt_tokens += prompt_tokens;
+                            total_completion_tokens += completion_tokens;
+                        },
+                        DagExecutionEvent::LlmToolCall { tool_id, tool_name, .. } => {
+                            if !seen_tool_ids.contains(tool_id) {
+                                seen_tool_ids.insert(tool_id.clone());
+                                yield Ok(Event::default().json_data(serde_json::json!({
+                                    "type": "tool-input-start",
+                                    "toolCallId": tool_id,
+                                    "toolName": tool_name
+                                })).expect("json_data"));
+                            }
+                        },
+                        DagExecutionEvent::GraphFinish { output } => {
+                            final_output_value = Some(output.clone());
+                        },
+                        _ => {}
                     }
-                };
 
-                // Protocol State Management
-                match &event {
-                    DagExecutionEvent::LlmToken { node_id, .. } => {
-                        if !text_block_uuids.contains_key(node_id) {
-                            let part_id = format!("txt_{}", uuid::Uuid::new_v4());
-                            yield Ok(Event::default().json_data(serde_json::json!({
-                                "type": "text-start",
-                                "id": part_id
-                            })).expect("json_data"));
-                            text_block_uuids.insert(node_id.clone(), part_id);
-                        }
-                    },
-                    DagExecutionEvent::NodeFinish { node_id, .. } => {
-                        if let Some(part_id) = text_block_uuids.remove(node_id) {
-                            yield Ok(Event::default().json_data(serde_json::json!({
-                                "type": "text-end",
-                                "id": part_id
-                            })).expect("json_data"));
-                        }
-                    },
-                    DagExecutionEvent::LlmUsage { prompt_tokens, completion_tokens, .. } => {
-                        total_prompt_tokens += prompt_tokens;
-                        total_completion_tokens += completion_tokens;
-                    },
-                    DagExecutionEvent::LlmToolCall { tool_id, tool_name, .. } => {
-                        if !seen_tool_ids.contains(tool_id) {
-                            seen_tool_ids.insert(tool_id.clone());
-                            yield Ok(Event::default().json_data(serde_json::json!({
-                                "type": "tool-input-start",
-                                "toolCallId": tool_id,
-                                "toolName": tool_name
-                            })).expect("json_data"));
-                        }
-                    },
-                    _ => {}
+                    // Map to official Data Stream Protocol JSON
+                    let protocol_json = match &event {
+                        DagExecutionEvent::NodeStart { node_id, config, node_type, .. } => Some(serde_json::json!({
+                            "type": "node-start",
+                            "node_id": node_id,
+                            "node_type": node_type,
+                            "config": config
+                        })),
+                        DagExecutionEvent::NodeFinish { node_id, output } => Some(serde_json::json!({
+                            "type": "node-end",
+                            "node_id": node_id,
+                            "output": output
+                        })),
+                        DagExecutionEvent::LlmMessageFinish { node_id, usage } => Some(serde_json::json!({
+                            "type": "node-end",
+                            "node_id": node_id,
+                            "output": null,
+                            "extra_info": {
+                                "usage": usage,
+                                "finishReason": "stop"
+                            }
+                        })),
+                        DagExecutionEvent::LlmToken { node_id, token } => {
+                            Some(serde_json::json!({
+                                "type": "node-delta",
+                                "node_id": node_id,
+                                "delta": token
+                            }))
+                        },
+                        DagExecutionEvent::LlmToolCall { tool_id, args_chunk, .. } => Some(serde_json::json!({
+                            "type": "tool-input-delta",
+                            "toolCallId": tool_id,
+                            "inputTextDelta": args_chunk
+                        })),
+                        DagExecutionEvent::LlmToolCallStart { tool_id, tool_name, tool_args, .. } => Some(serde_json::json!({
+                            "type": "tool-input-available",
+                            "toolCallId": tool_id,
+                            "toolName": tool_name,
+                            "input": serde_json::from_str::<serde_json::Value>(tool_args).unwrap_or(serde_json::Value::String(tool_args.clone()))
+                        })),
+                        DagExecutionEvent::LlmToolCallFinish { tool_id, output, .. } => Some(serde_json::json!({
+                            "type": "tool-output-available",
+                            "toolCallId": tool_id,
+                            "output": serde_json::from_str::<serde_json::Value>(output).unwrap_or(serde_json::Value::String(output.clone()))
+                        })),
+                        DagExecutionEvent::LlmUsage { .. } => None,
+                        DagExecutionEvent::GraphFinish { .. } => Some(serde_json::json!({
+                            "type": "finish",
+                            "finishReason": "stop",
+                            "usage": {
+                                "promptTokens": total_prompt_tokens,
+                                "completionTokens": total_completion_tokens
+                            }
+                        })),
+                        DagExecutionEvent::Error { message } => Some(serde_json::json!({
+                            "type": "error",
+                            "errorText": message
+                        })),
+                        _ => None
+                    };
+
+                    if let Some(json) = protocol_json {
+                        yield Ok(Event::default().json_data(json).expect("json_data"));
+                    }
                 }
 
-                // Map to official Data Stream Protocol JSON
-                let protocol_json = match event {
-                    DagExecutionEvent::LlmToken { node_id, token } => {
-                        let part_id = text_block_uuids.get(&node_id).cloned().unwrap_or_else(|| node_id.clone());
-                        Some(serde_json::json!({
-                            "type": "text-delta",
-                            "id": part_id,
-                            "delta": token
-                        }))
-                    },
-                    DagExecutionEvent::LlmToolCall { tool_id, args_chunk, .. } => Some(serde_json::json!({
-                        "type": "tool-input-delta",
-                        "toolCallId": tool_id,
-                        "inputTextDelta": args_chunk
-                    })),
-                    DagExecutionEvent::LlmToolCallStart { tool_id, tool_name, tool_args, .. } => Some(serde_json::json!({
-                        "type": "tool-input-available",
-                        "toolCallId": tool_id,
-                        "toolName": tool_name,
-                        "input": serde_json::from_str::<serde_json::Value>(&tool_args).unwrap_or(serde_json::Value::String(tool_args))
-                    })),
-                    DagExecutionEvent::LlmToolCallFinish { tool_id, output, .. } => Some(serde_json::json!({
-                        "type": "tool-output-available",
-                        "toolCallId": tool_id,
-                        "output": serde_json::from_str::<serde_json::Value>(&output).unwrap_or(serde_json::Value::String(output))
-                    })),
-                    DagExecutionEvent::LlmUsage { prompt_tokens, completion_tokens, .. } => Some(serde_json::json!({
-                        "type": "finish-step",
-                        "finishReason": "stop",
-                        "usage": {
-                            "promptTokens": prompt_tokens,
-                            "completionTokens": completion_tokens
-                        }
-                    })),
-                    DagExecutionEvent::GraphFinish { .. } => Some(serde_json::json!({
-                        "type": "finish",
-                        "finishReason": "stop",
-                        "usage": {
-                            "promptTokens": total_prompt_tokens,
-                            "completionTokens": total_completion_tokens
-                        }
-                    })),
-                    DagExecutionEvent::Error { message } => Some(serde_json::json!({
-                        "type": "error",
-                        "errorText": message
-                    })),
-                    _ => None
-                };
-
-                if let Some(json) = protocol_json {
-                    yield Ok(Event::default().json_data(json).expect("json_data"));
+                // 3. Finalization: Ensure all pending text blocks are ended for this turn
+                for (_, part_id) in text_block_uuids {
+                    yield Ok(Event::default().json_data(serde_json::json!({
+                        "type": "text-end",
+                        "id": part_id
+                    })).expect("json_data"));
                 }
-            }
+                
+                // End of turn logic
+                let mut should_stop_loop = !is_loop;
+                
+                if let Some(out) = final_output_value.as_ref() {
+                    if let Some(obj) = out.as_object() {
+                        let find_status = |o: &serde_json::Map<String, serde_json::Value>, key: &str| -> Option<String> {
+                            if let Some(v) = o.get(key) {
+                                return v.as_str().map(|s| s.to_string());
+                            }
+                            for (_, val) in o {
+                                if let Some(child_obj) = val.as_object() {
+                                    if let Some(v) = child_obj.get(key) {
+                                        return v.as_str().map(|s| s.to_string());
+                                    }
+                                }
+                            }
+                            None
+                        };
 
-            // 3. Finalization: Ensure all pending text blocks are ended
-            for (_, part_id) in text_block_uuids {
-                yield Ok(Event::default().json_data(serde_json::json!({
-                    "type": "text-end",
-                    "id": part_id
-                })).expect("json_data"));
+                        let find_bool = |o: &serde_json::Map<String, serde_json::Value>, key: &str| -> bool {
+                            if let Some(v) = o.get(key).and_then(|v| v.as_bool()) {
+                                if v { return true; }
+                            }
+                            for (_, val) in o {
+                                if let Some(child_obj) = val.as_object() {
+                                    if let Some(v) = child_obj.get(key).and_then(|v| v.as_bool()) {
+                                        if v { return true; }
+                                    }
+                                }
+                            }
+                            false
+                        };
+
+                        if let Some(status) = find_status(obj, "__colmena_status") {
+                            if status == "SUSPENDED" {
+                                should_stop_loop = true;
+                            }
+                        }
+                        if let Some(loop_status) = find_status(obj, "__colmena_loop_status") {
+                            if loop_status == "FINISHED" {
+                                should_stop_loop = true;
+                            }
+                        }
+                        if find_bool(obj, "__colmena_is_output_node") {
+                            should_stop_loop = true;
+                        }
+                    }
+                    
+                    if !should_stop_loop {
+                        // Prepare next iteration's input
+                        for (_, node) in current_graph.nodes.iter_mut() {
+                            if node.node_type == "trigger_webhook" || node.node_type == "input" {
+                                if node.config.is_null() {
+                                    node.config = serde_json::json!({});
+                                }
+                                node.config["__payload__"] = out.clone();
+                            }
+                        }
+                        turn_count += 1;
+                    }
+                } else {
+                    // No output = graph crashed or finished empty. Stop looping.
+                    should_stop_loop = true;
+                }
+
+                if should_stop_loop {
+                    break;
+                }
             }
 
             // 4. Send the literal [DONE] marker
@@ -478,19 +627,173 @@ async fn handler_webhook(
         response
     } else {
         // Normal JSON execution
-        match state.use_case.execute(graph_instance).await {
-            Ok(output) => {
-                println!("✅ Execution successful.");
-                Json(output).into_response()
+        let is_loop = params.get("loop").map(|v| v == "true").unwrap_or(false);
+        let mut turn_count = 1;
+        let mut current_resume_id: Option<String> = None;
+
+        loop {
+            if is_loop {
+                println!("\n🔄 -- API Turno {} --", turn_count);
             }
-            Err(e) => {
-                eprintln!("❌ Execution error: {}", e);
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": e.to_string() })),
-                )
-                    .into_response()
+            match state.use_case.execute(graph_instance.clone(), current_resume_id.clone(), None, false).await {
+                Ok(mut out) => {
+                    let mut should_stop_loop = !is_loop;
+
+                    if let Some(obj) = out.as_object() {
+                        let find_field = |o: &serde_json::Map<String, serde_json::Value>, key: &str| -> Option<serde_json::Value> {
+                            // Search root
+                            if let Some(v) = o.get(key) {
+                                return Some(v.clone());
+                            }
+                            // Search 1 level deep (since all_outputs has node_id as first level)
+                            for (_, val) in o {
+                                if let Some(child_obj) = val.as_object() {
+                                    // Output is mostly nested inside 'output' key
+                                    if let Some(output_obj) = child_obj.get("output").and_then(|v| v.as_object()) {
+                                        if let Some(v) = output_obj.get(key) {
+                                            return Some(v.clone());
+                                        }
+                                        if let Some(extra) = output_obj.get("extra_info").and_then(|v| v.as_object()) {
+                                            if let Some(v) = extra.get(key) {
+                                                return Some(v.clone());
+                                            }
+                                        }
+                                        if let Some(res) = output_obj.get("result").and_then(|v| v.as_object()) {
+                                            if let Some(v) = res.get(key) {
+                                                return Some(v.clone());
+                                            }
+                                        }
+                                    }
+                                    // Direct check just in case
+                                    if let Some(v) = child_obj.get(key) {
+                                        return Some(v.clone());
+                                    }
+                                    if let Some(extra) = child_obj.get("extra_info").and_then(|v| v.as_object()) {
+                                        if let Some(v) = extra.get(key) {
+                                            return Some(v.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            None
+                        };
+
+                        if let Some(status_val) = find_field(obj, "__colmena_status") {
+                            if status_val.as_str() == Some("SUSPENDED") {
+                                should_stop_loop = true;
+                                println!("⏸️  Ejecución SUSPENDIDA. Esperando input humano.");
+                                if let Some(question) = find_field(obj, "question") {
+                                    println!("❓ Pregunta: {}", question.as_str().unwrap_or(&question.to_string()));
+                                }
+                            }
+                        }
+                        if let Some(loop_status_val) = find_field(obj, "__colmena_loop_status") {
+                            if loop_status_val.as_str() == Some("FINISHED") {
+                                should_stop_loop = true;
+                                
+                                // If an OutputNode ran, its result is the definitive final output of the DAG
+                                let mut output_node_result = None;
+                                for (_node_name, node_output) in obj {
+                                    if let Some(node_output_obj) = node_output.as_object() {
+                                        if let Some(extra) = find_field(node_output_obj, "extra_info") {
+                                            if let Some(is_output) = extra.as_object().and_then(|e| e.get("__colmena_is_output_node")) {
+                                                if is_output.as_bool() == Some(true) {
+                                                    output_node_result = find_field(node_output_obj, "result");
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                if let Some(actual_output) = output_node_result {
+                                    out = serde_json::json!({
+                                        "output": {
+                                            "__colmena_loop_status": "FINISHED",
+                                            "final_result": actual_output
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    if should_stop_loop {
+                        println!("✅ Execution successful. Returning final output.");
+                        return Json(out).into_response();
+                    } else {
+                        // Prepare next iteration's input
+                        println!("Output Parcial: Volviendo a planificar el siguiente turno en background de forma nativa...");
+                        
+                        // Inject output as input for the next round
+                        for (_, node) in graph_instance.nodes.iter_mut() {
+                            if node.node_type == "trigger_webhook" || node.node_type == "input" {
+                                if node.config.is_null() {
+                                    node.config = serde_json::json!({});
+                                }
+                                node.config["__payload__"] = out.clone();
+                            }
+                        }
+                        
+                        if let Some(session_id_val) = out.as_object().and_then(|o| o.get("__colmena_session_id")) {
+                            current_resume_id = session_id_val.as_str().map(|s| s.to_string());
+                        } else {
+                            current_resume_id = None;
+                        }
+                        
+                        turn_count += 1;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("❌ Execution error: {}", e);
+                    return (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({ "error": e.to_string() })),
+                    )
+                        .into_response();
+                }
             }
+        }
+    }
+}
+
+/// Handler that executes when a suspended DAG is resumed with human input
+async fn handler_resume(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<ResumePayload>,
+) -> axum::response::Response {
+    println!("🔔 Resume requested for session_id: {}", payload.session_id);
+    
+    // Check for "Accept: text/event-stream" or Vercel header
+    let is_sse = headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("text/event-stream"))
+        .unwrap_or(false)
+        || headers.contains_key("x-vercel-ai-ui-message-stream");
+
+    let graph_instance = (*state.graph).clone();
+
+    if is_sse {
+        // ... We could duplicate the SSE stream runner here, but for brevity in Phase 1 
+        // we'll execute the rest. Let's just do a normal execute.
+        // If SSE is truly required for resuming, we can abstract the runner.
+        eprintln!("⚠️ SSE not fully supported yet on /resume, falling back to JSON");
+    }
+
+    match state.use_case.execute(graph_instance, Some(payload.session_id), Some(payload.answer), false).await {
+        Ok(output) => {
+            println!("✅ Resume successful.");
+            Json(output).into_response()
+        }
+        Err(e) => {
+            eprintln!("❌ Resume error: {}", e);
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
         }
     }
 }
