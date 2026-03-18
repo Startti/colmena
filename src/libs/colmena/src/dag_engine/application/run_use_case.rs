@@ -156,7 +156,7 @@ impl DagRunUseCase {
 
             // If queue is still empty, initialize with nodes that have 0 incoming dependencies
             if active_queue.is_empty() {
-                for (node_id, _) in &graph.nodes {
+                for node_id in graph.nodes.keys() {
                     let in_degree = graph.edges.iter().filter(|e| {
                         // Exact match or matches "node_id." (JSON pointer)
                         e.to == *node_id || e.to.starts_with(&format!("{}.", node_id))
@@ -371,12 +371,11 @@ impl DagRunUseCase {
 
                         if has_data {
                             let target_node_id = edge.to.split('.').next().unwrap_or("");
-                            if graph.nodes.contains_key(target_node_id) {
-                                if !active_queue.contains(&target_node_id.to_string()) {
+                            if graph.nodes.contains_key(target_node_id)
+                                && !active_queue.contains(&target_node_id.to_string()) {
                                     println!("DEBUG [Queue Push]: Enqueuing {} -> {}", node_id, target_node_id);
                                     active_queue.push_back(target_node_id.to_string());
                                 }
-                            }
                         }
                     }
                 }

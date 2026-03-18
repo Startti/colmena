@@ -208,8 +208,7 @@ pub async fn run_dag(
                 })),
                 DagExecutionEvent::LlmUsage { .. } => None,
                 DagExecutionEvent::NodeFinish { node_id, .. } => {
-                    if let Some(part_id) = text_block_uuids.get(&node_id) {
-                        Some(serde_json::json!({
+                    text_block_uuids.get(&node_id).map(|part_id| serde_json::json!({
                             "type": "node-end",
                             "id": part_id,
                             "usage": {
@@ -217,9 +216,6 @@ pub async fn run_dag(
                                 "completionTokens": total_completion_tokens
                             }
                         }))
-                    } else {
-                        None
-                    }
                 }
                 DagExecutionEvent::GraphFinish { .. } => Some(serde_json::json!({
                     "type": "finish",

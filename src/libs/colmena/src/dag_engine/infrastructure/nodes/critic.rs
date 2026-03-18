@@ -82,6 +82,12 @@ Output ONLY valid JSON matching the schema. Do NOT include markdown or code fenc
 
 pub struct CriticNode;
 
+impl Default for CriticNode {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CriticNode {
     pub fn new() -> Self {
         Self
