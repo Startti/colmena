@@ -1,6 +1,6 @@
 {
   "name": "colmena-ai",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "TypeScript bindings for Colmena LLM and DAG Engine",
   "main": "index.js",
   "types": "index.d.ts",
