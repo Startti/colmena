@@ -1,0 +1,29 @@
+# Documentación de Nodos de Colmena
+
+Este documento detalla los nodos disponibles en el Dag Engine de Colmena, definiendo sus funcionalidades, parámetros de entrada, configuraciones y salidas estimadas. Esta información es útil para construir grafos y entender el rol de cada nodo en el flujo de ejecución.
+
+## Tabla Resumen de Nodos
+
+| Tipo de Nodo | Descripción Simple | Inputs (Entradas) | Config (Configuración Estática) | Outputs (Salidas) |
+| --- | --- | --- | --- | --- |
+| `add` | Realiza la suma matemática sobre dos números. | `a` (number), `b` (number) | N/A | `output` (number) |
+| `subtract` | Realiza la resta matemática sobre dos números. | `a` (number), `b` (number) | N/A | `output` (number) |
+| `multiply` | Realiza la multiplicación matemática sobre dos números. | `a` (number), `b` (number) | N/A | `output` (number) |
+| `divide` | Realiza la división matemática sobre dos números. | `a` (number), `b` (number) | N/A | `output` (number) |
+| `exponential` | Calcula la potencia de un número iterando un exponente provisto en config. | `input` (number) | `exponent` (number) | `output` (number) |
+| `python_script` | Ejecuta código Python. El código y los inputs se inyectan como variables. El resultado se extrae de la variable `output`. | `code` (string, opcional), `[llaves varias]` (inyectadas como vars) | `code` (string, fallback) | `output` (any) |
+| `input` | Nodo de entrada general que simplemente devuelve los datos estáticos definidos. | (Ignorados) | `data` (any) | `output` (any) |
+| `log` | Imprime datos en consola para depuración. Pasa los valores de entrada intactos a la salida. | `input` (any, o recibe y agrupa todas las llaves inyectadas) | N/A | `output` (any) |
+| `mock_input` | Nodo de prueba. Emite siempre su propia configuración como el objeto de datos raíz. | (Ignorados) | `[Cualquier JSON Object]` | `output` (basado en config) |
+| `information_extraction` | Extrae información estructurada a partir de texto no estructurado usando un esquema JSON provisto y un modelo LLM. | `texts.[name]` (strings), `system_message` (str, opcional) | `provider`, `api_key`, `model`, `system_message`, `schema` | Estructuras variadas correspondientes al `schema` |
+| `llm_call` | Invoca modelos de lenguaje (OpenAI, Gemini, Anthropic) integrando llamadas a herramientas, prompt variables y memoria de conversaciones. | `provider`, `api_key`, `model`, `system_message`, `prompt`, `temperature`, `max_tokens`, `session_id`, `connection_url`, `enabled_tools`, `files` | Idénticos a Inputs (actúan como fallback), `tool_configurations`, `write_to_memory`, `task_id` | `content` (string), `usage` (object), `tool_calls` (array) |
+| `orchestrator` | Nodo orquestador autónomo que administra el ciclo completo interno: Planear -> Ejecutar -> Criticar -> Reaccionar. | Campos de estado y dependencias en ejecución | `planner`, `agents`, `critic`, `phase_reactor`, `final_reactor` | `__colmena_loop_status`, `current_phase`, `phase_tasks`, `all_tasks`, `final_response` |
+| `reactor` | Actúa como revisor final que evalúa la respuesta consolidada de un flujo y produce una respuesta cara al usuario, o solicita información extra. | `texts.[name]` (contextos varios), `system_message` | `provider`, `api_key`, `model`, `verbose`, `texts`, `system_message` | `task_ok` (bool), `response` (string), `add_tasks` (array), `suspend` (bool), `question` (string) |
+| `task_memory_writer` | Actualiza dinámicamente la memoria de tareas PostgreSQL, grabando resultados e inyectando/borrando dependencias si el crítico lo solicita. | `task_id`, `result`, `add_tasks`, `delete_tasks`, `suspend` | Ídem (Idénticos a Inputs como fallback opcional) | Lista completa de las tareas de la sesión. Si suspendido, emite "__colmena_status". |
+| `planner` | Recibe una instrucción de alto nivel y delibera creando una lista estructurada y estructurable de tareas (con fases y paralelos). | `request` / `texts.[name]`, `system_message` | `provider`, `api_key`, `model`, `system_message`, `agents` (agentes listados) | `output.items` (array con `task`, `assigned_to`, `completed`, `phase`, `parallel`) |
+| `trigger_webhook` | Recibe activaciones externas HTTP e inyecta payloads remotos en el sistema. | Inyectado automáticamente vía HTTP request body | `path` (string), `method` (string), `test_payload` (opcional modo local) | `output` (any payload inicial) |
+| `critic` | Funciona como juez frente al trabajo del agente: acepta si todo está OK, añade tareas de corrección, o exige información adicional parando la ejecución. | `texts.*` (ej. texts.agent_result) | `provider`, `api_key`, `model`, `verbose`, `agents`, `system_message` | `task_ok` (bool), `add_tasks` (array), `suspend` (bool), `question` (string), `__colmena_status` |
+| `loop_controller` | Agrega los resultados del ciclo y determina si el flujo de eventos continúa, termina, o si requiere suspender todo hasta nueva orden. | `loop_status` (string), `suspend_flag` (bool), `question`, `all_tasks` | Ídem (Idénticos a Inputs como fallback opcional) | `__colmena_loop_status`, `question` (opcional), `final_result` (opcional) |
+| `http_request` | Realiza peticiones a APIs externas (GET, POST, PUT, DELETE, etc.) soportando params en querystring y configuraciones header/auth. | `base_url`, `endpoint`, `method`, `body`, `headers`, `query_params`, `bearer_token`, `authorization` y extras arbitrarios | `base_url`, `endpoint`, `method`, `headers`, `query_params`, `body` | `status` (integer), `body` (any) |
+| `suspend` (interno) | Nodo emulado para testear capacidades de pausa e interrupción end-to-end de flujos interactivos. | `__colmena_resume_answer` | `question` (string) | JSON con `__colmena_status` de "SUSPENDED" y `question`. |
+| `output` (interno) | Nodo de terminación explícito para cerrar partes asíncronas de un subgrafo. | `input` (cualquier valor de las ramas previas) | N/A | `{"result": input, "extra_info": {"__colmena_is_output_node": true}}` |

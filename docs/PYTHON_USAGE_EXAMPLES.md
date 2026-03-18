@@ -242,9 +242,86 @@ def conversacion_interactiva():
 # conversacion_interactiva()  # Descomenta para ejecutar
 ```
 
+## 👁️ Visión y Soporte de Documentos
+
+Colmena permite enviar archivos multimedia (imágenes y documentos) a los modelos. Puedes pasar los archivos mediante una ruta local o directamente como datos Base64.
+
+### 8. Análisis de Imágenes y PDFs
+
+```python
+def analizar_archivos():
+    """Análisis coordinado de imágenes y documentos"""
+    llm = colmena.ColmenaLlm()
+
+    # Ejemplo 1: Imagen por ruta local
+    response_img = llm.call(
+        messages=["¿Qué hay en esta imagen?"],
+        provider="gemini",
+        api_key="tu-gemini-key",
+        files=[
+            {
+                "mime_type": "image/jpeg",
+                "path": "docs/assets/diagrama.jpg"
+            }
+        ]
+    )
+    print(f"Análisis Imagen: {response_img}")
+
+    # Ejemplo 2: PDF nativo para OpenAI
+    # Nota: OpenAI usa automáticamente el Responses API para PDFs
+    response_pdf = llm.call(
+        messages=["Resume los puntos clave de este contrato"],
+        provider="openai",
+        model="gpt-4o",
+        api_key="tu-openai-key",
+        files=[
+            {
+                "mime_type": "application/pdf",
+                "filename": "contrato_v1.pdf",
+                "path": "tests/dags/sample.pdf"
+            }
+        ]
+    )
+    print(f"Resumen PDF: {response_pdf}")
+
+analizar_archivos()
+```
+
+### 9. Envío de Archivos vía Base64
+
+Útil cuando los archivos vienen de un buffer en memoria o cargados desde una base de datos.
+
+```python
+import base64
+
+def enviar_archivo_base64():
+    """Envío de archivos sin usar el sistema de ficheros"""
+    llm = colmena.ColmenaLlm()
+
+    # Supongamos que tenemos los bytes de un PDF
+    pdf_bytes = b"%PDF-1.4..." 
+    pdf_b64 = base64.b64encode(pdf_bytes).decode('utf-8')
+
+    response = llm.call(
+        messages=["¿A qué fecha corresponde este documento?"],
+        provider="openai",
+        api_key="tu-openai-key",
+        files=[
+            {
+                "mime_type": "application/pdf",
+                "filename": "documento_memoria.pdf",
+                "data": pdf_b64
+            }
+        ]
+    )
+    print(f"Respuesta: {response}")
+
+enviar_archivo_base64()
+```
+
 ## 🧠 Casos de Uso Avanzados
 
-### 8. Análisis de Código
+### 10. Análisis de Código
 
 ```python
 def analizar_codigo():
@@ -292,7 +369,7 @@ Por favor proporciona:
 analizar_codigo()
 ```
 
-### 9. Generación de Documentación
+### 11. Generación de Documentación
 
 ```python
 def generar_documentacion():
@@ -347,7 +424,7 @@ Incluye:
 generar_documentacion()
 ```
 
-### 10. Traductor de Código
+### 12. Traductor de Código
 
 ```python
 def traducir_codigo():
@@ -404,7 +481,7 @@ traducir_codigo()
 
 ## 🛠️ Utilidades Prácticas
 
-### 11. Wrapper con Manejo de Errores
+### 13. Wrapper con Manejo de Errors
 
 ```python
 class ColmenaWrapper:
@@ -596,7 +673,7 @@ def usar_cache():
 usar_cache()
 ```
 
-### 13. Batch Processing
+### 15. Batch Processing
 
 ```python
 import concurrent.futures

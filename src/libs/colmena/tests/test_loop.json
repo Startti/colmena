@@ -1,0 +1,20 @@
+{
+    "nodes": {
+        "trigger": {
+            "type": "input",
+            "config": {}
+        },
+        "node_loop": {
+            "type": "python_script",
+            "config": {
+                "code": "payload = globals().get('__payload__', {})\ncount = payload.get('output', {}).get('count', 0)\ncount += 1\nstatus = 'FINISHED' if count >= 3 else 'NEXT_TURN'\nresult = {'count': count, '__colmena_loop_status': status}\noutput = result"
+            }
+        }
+    },
+    "edges": [
+        {
+            "from": "trigger.output",
+            "to": "node_loop.__payload__"
+        }
+    ]
+}
