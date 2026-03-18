@@ -5,6 +5,12 @@ use std::sync::Arc;
 
 pub struct LoopControllerNode;
 
+impl Default for LoopControllerNode {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LoopControllerNode {
     pub fn new() -> Self {
         Self
