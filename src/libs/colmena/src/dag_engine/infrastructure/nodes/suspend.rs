@@ -1,11 +1,11 @@
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
+use crate::dag_engine::domain::observer::ExecutionObserver;
 use async_trait::async_trait;
 use serde_json::Value;
-use std::sync::Arc;
-use crate::dag_engine::domain::observer::ExecutionObserver;
 use std::error::Error;
+use std::sync::Arc;
 
-/// A mock node specifically designed to test the Suspend/Resume functionality 
+/// A mock node specifically designed to test the Suspend/Resume functionality
 /// of the DagRunUseCase.
 pub struct SuspendNode;
 

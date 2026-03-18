@@ -36,7 +36,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { file_path, session_id, answer, include_extra_info } => {
+        Commands::Run {
+            file_path,
+            session_id,
+            answer,
+            include_extra_info,
+        } => {
             use colmena::dag_engine::application::run_use_case::DagRunUseCase;
             use colmena::dag_engine::domain::events::DagExecutionEvent;
             use colmena::dag_engine::infrastructure::registry::HashMapNodeRegistry;
@@ -54,23 +59,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let state_repo = Arc::new(
                 colmena::dag_engine::infrastructure::persistence::postgres_dag_state_repository::PostgresDagStateRepository::new(pool.clone())
             );
-            state_repo.migrate().await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+            state_repo
+                .migrate()
+                .await
+                .map_err(|e| anyhow::anyhow!("{:?}", e))?;
             let registry = HashMapNodeRegistry::new(
                 repository_factory,
-                Some(state_repo.clone() as Arc<dyn colmena::dag_engine::domain::state::DagTaskMemoryRepository>),
+                Some(state_repo.clone()
+                    as Arc<dyn colmena::dag_engine::domain::state::DagTaskMemoryRepository>),
             );
             let run_use_case = DagRunUseCase::new(registry, Some(state_repo));
 
             let file_content = tokio::fs::read_to_string(&file_path).await?;
-            let graph: colmena::dag_engine::domain::graph::Graph = serde_json::from_str(&file_content)?;
+            let graph: colmena::dag_engine::domain::graph::Graph =
+                serde_json::from_str(&file_content)?;
 
             // State for tracking open text blocks and token counts
-            let mut text_block_ids: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+            let mut text_block_ids: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
             let mut total_prompt_tokens: u32 = 0;
             let mut total_completion_tokens: u32 = 0;
 
             // The new active_queue engine natively handles both linear and cyclic graphs
-            let s = run_use_case.execute_stream(graph, session_id.clone(), answer, include_extra_info);
+            let s =
+                run_use_case.execute_stream(graph, session_id.clone(), answer, include_extra_info);
             let stream = Box::pin(s);
             tokio::pin!(stream);
 
@@ -79,7 +91,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(ev) => ev,
                     Err(e) => {
                         let err_msg = e.to_string();
-                        println!("data: {}\n", serde_json::json!({ "type": "error", "errorText": err_msg }));
+                        println!(
+                            "data: {}\n",
+                            serde_json::json!({ "type": "error", "errorText": err_msg })
+                        );
                         continue;
                     }
                 };
@@ -89,16 +104,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     DagExecutionEvent::LlmToken { node_id, .. } => {
                         if !text_block_ids.contains_key(node_id) {
                             let part_id = format!("txt_{}", uuid::Uuid::new_v4());
-                            println!("data: {}\n", serde_json::json!({ "type": "text-start", "id": part_id }));
+                            println!(
+                                "data: {}\n",
+                                serde_json::json!({ "type": "text-start", "id": part_id })
+                            );
                             text_block_ids.insert(node_id.clone(), part_id);
                         }
                     }
                     DagExecutionEvent::NodeFinish { node_id, .. } => {
                         if let Some(part_id) = text_block_ids.remove(node_id) {
-                            println!("data: {}\n", serde_json::json!({ "type": "text-end", "id": part_id }));
+                            println!(
+                                "data: {}\n",
+                                serde_json::json!({ "type": "text-end", "id": part_id })
+                            );
                         }
                     }
-                    DagExecutionEvent::LlmUsage { prompt_tokens, completion_tokens, .. } => {
+                    DagExecutionEvent::LlmUsage {
+                        prompt_tokens,
+                        completion_tokens,
+                        ..
+                    } => {
                         total_prompt_tokens += *prompt_tokens;
                         total_completion_tokens += *completion_tokens;
                     }
@@ -107,7 +132,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Map event → Data Stream Protocol
                 let protocol_line: Option<serde_json::Value> = match &event {
-                    DagExecutionEvent::NodeStart { node_id, config, node_type, .. } => Some(serde_json::json!({
+                    DagExecutionEvent::NodeStart {
+                        node_id,
+                        config,
+                        node_type,
+                        ..
+                    } => Some(serde_json::json!({
                         "type": "node-start",
                         "node_id": node_id,
                         "node_type": node_type,
@@ -116,64 +146,82 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     DagExecutionEvent::TurnStart { turn } => {
                         println!("🔄 [Engine] Starting Turn {}", turn);
                         None
-                    },
+                    }
                     DagExecutionEvent::NodeFinish { node_id, output } => Some(serde_json::json!({
                         "type": "node-end",
                         "node_id": node_id,
                         "output": output
                     })),
-                    DagExecutionEvent::LlmToken { node_id, token } => {
-                        Some(serde_json::json!({ "type": "node-delta", "node_id": node_id, "delta": token }))
-                    }
+                    DagExecutionEvent::LlmToken { node_id, token } => Some(
+                        serde_json::json!({ "type": "node-delta", "node_id": node_id, "delta": token }),
+                    ),
                     DagExecutionEvent::LlmUsage { .. } => None,
-                    DagExecutionEvent::LlmToolCall { tool_id, args_chunk, .. } => Some(serde_json::json!({
+                    DagExecutionEvent::LlmToolCall {
+                        tool_id,
+                        args_chunk,
+                        ..
+                    } => Some(serde_json::json!({
                         "type": "tool-input-delta",
                         "toolCallId": tool_id,
                         "inputTextDelta": args_chunk
                     })),
-                    DagExecutionEvent::LlmToolCallStart { tool_id, tool_name, tool_args, .. } => Some(serde_json::json!({
+                    DagExecutionEvent::LlmToolCallStart {
+                        tool_id,
+                        tool_name,
+                        tool_args,
+                        ..
+                    } => Some(serde_json::json!({
                         "type": "tool-input-available",
                         "toolCallId": tool_id,
                         "toolName": tool_name,
                         "input": serde_json::from_str::<serde_json::Value>(tool_args).unwrap_or(serde_json::Value::String(tool_args.clone()))
                     })),
-                    DagExecutionEvent::LlmToolCallFinish { tool_id, output, .. } => Some(serde_json::json!({
+                    DagExecutionEvent::LlmToolCallFinish {
+                        tool_id, output, ..
+                    } => Some(serde_json::json!({
                         "type": "tool-output-available",
                         "toolCallId": tool_id,
                         "output": serde_json::from_str::<serde_json::Value>(output).unwrap_or(serde_json::Value::String(output.clone()))
                     })),
                     DagExecutionEvent::GraphFinish { output } => {
                         let mut finish_reason = "stop";
-                        let status = output.get("__colmena_status")
-                            .or_else(|| output.get("extra_info").and_then(|e| e.get("__colmena_status")))
+                        let status = output
+                            .get("__colmena_status")
+                            .or_else(|| {
+                                output
+                                    .get("extra_info")
+                                    .and_then(|e| e.get("__colmena_status"))
+                            })
                             .and_then(|s| s.as_str());
 
                         if status == Some("SUSPENDED") {
                             finish_reason = "suspended";
                         }
-                        
+
                         Some(serde_json::json!({
                             "type": "finish",
                             "finishReason": finish_reason,
                             "usage": { "promptTokens": total_prompt_tokens, "completionTokens": total_completion_tokens },
                             "output": output
                         }))
-                    },
+                    }
                     DagExecutionEvent::LlmMessageStart { node_id } => Some(serde_json::json!({
                         "type": "node-start",
                         "node_id": node_id,
                         "node_type": "llm_message",
                         "config": null
                     })),
-                    DagExecutionEvent::LlmMessageFinish { node_id, usage } => Some(serde_json::json!({
-                        "type": "node-end",
-                        "node_id": node_id,
-                        "output": null,
-                        "extra_info": {
-                            "usage": usage,
-                            "finishReason": "stop"
-                        }
-                    })),
+                    DagExecutionEvent::LlmMessageFinish { node_id, usage } => {
+                        Some(serde_json::json!({
+                            "type": "node-end",
+                            "node_id": node_id,
+                            "output": null,
+                            "extra_info": {
+                                "usage": usage,
+                                "finishReason": "stop"
+                            }
+                        }))
+                    }
                     DagExecutionEvent::Error { message } => Some(serde_json::json!({
                         "type": "error", "errorText": message
                     })),
@@ -186,7 +234,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Close any remaining open text blocks
             for (_, part_id) in text_block_ids {
-                println!("data: {}\n", serde_json::json!({ "type": "text-end", "id": part_id }));
+                println!(
+                    "data: {}\n",
+                    serde_json::json!({ "type": "text-end", "id": part_id })
+                );
             }
             println!("data: [DONE]\n");
         }

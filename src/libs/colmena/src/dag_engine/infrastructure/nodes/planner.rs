@@ -4,10 +4,10 @@ use serde_json::{json, Value};
 use std::error::Error;
 use std::sync::Arc;
 
+use crate::llm::application::AgentService;
 use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, ProviderKind, SessionId};
 use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
 use crate::llm::infrastructure::LlmProviderFactory;
-use crate::llm::application::AgentService;
 
 /// The internal, fixed schema that every PlannerNode uses.
 /// It produces an array of tasks, each with a name, assignee, and completed flag.
@@ -64,7 +64,11 @@ pub struct PlannerNode {
 }
 
 impl PlannerNode {
-    pub fn new(task_memory_repo: Option<Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>>) -> Self {
+    pub fn new(
+        task_memory_repo: Option<
+            Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>,
+        >,
+    ) -> Self {
         Self { task_memory_repo }
     }
 
@@ -88,11 +92,14 @@ impl ExecutableNode for PlannerNode {
         state: &mut Value,
         _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     ) -> Result<Value, Box<dyn Error + Send + Sync>> {
-
         // --- 0. Skip if tasks already exist in Postgres for this session_id ---
         // This prevents wasted LLM calls on Turn 2+: once the plan is loaded
         // into the DB the Orchestrator handles routing, so we short-circuit here.
-        let session_id = state.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let session_id = state
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if !session_id.is_empty() {
             if let Some(repo) = &self.task_memory_repo {
                 let existing = repo.get_tasks_for_run(&session_id).await?;
@@ -104,7 +111,9 @@ impl ExecutableNode for PlannerNode {
         }
 
         // --- 1. Resolve Provider Configuration ---
-        let provider_str = config.get("provider").and_then(|v| v.as_str())
+        let provider_str = config
+            .get("provider")
+            .and_then(|v| v.as_str())
             .ok_or("PlannerNode: Missing 'provider' in config")?;
 
         let provider_kind = match provider_str.to_lowercase().as_str() {
@@ -114,14 +123,22 @@ impl ExecutableNode for PlannerNode {
             _ => return Err(format!("PlannerNode: Invalid provider '{}'.", provider_str).into()),
         };
 
-        let api_key_raw = config.get("api_key").and_then(|v| v.as_str())
+        let api_key_raw = config
+            .get("api_key")
+            .and_then(|v| v.as_str())
             .ok_or("PlannerNode: Missing 'api_key' in config")?;
         let api_key = Self::resolve_env_var(api_key_raw)?;
 
-        let model = config.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let model = config
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         // Optional verbose flag for debugging: prints prompt sent and raw response received.
-        let verbose = config.get("verbose").and_then(|v| v.as_bool()).unwrap_or(false);
+        let verbose = config
+            .get("verbose")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         // --- 2. Read Available Agents ---
         // Each entry can be:
@@ -136,7 +153,9 @@ impl ExecutableNode for PlannerNode {
                         if let Some(obj) = v.as_object() {
                             // Full object: { "name": "...", "description": "..." }
                             let name = obj.get("name").and_then(|n| n.as_str())?.to_string();
-                            let desc = obj.get("description").and_then(|d| d.as_str())
+                            let desc = obj
+                                .get("description")
+                                .and_then(|d| d.as_str())
                                 .unwrap_or("No description provided.")
                                 .to_string();
                             Some((name, desc))
@@ -163,7 +182,9 @@ impl ExecutableNode for PlannerNode {
         }
 
         // --- 3. Compose System Message ---
-        let extra_system_msg = inputs.get("system_message").and_then(|v| v.as_str())
+        let extra_system_msg = inputs
+            .get("system_message")
+            .and_then(|v| v.as_str())
             .or_else(|| config.get("system_message").and_then(|v| v.as_str()))
             .unwrap_or("");
 
@@ -187,7 +208,8 @@ impl ExecutableNode for PlannerNode {
 
         // Build schema with enum constrained to actual agent names (names only — no descriptions)
         let schema = if !agents.is_empty() {
-            let agent_values: Vec<Value> = agents.iter()
+            let agent_values: Vec<Value> = agents
+                .iter()
                 .map(|(name, _)| Value::String(name.clone()))
                 .collect();
             json!({
@@ -282,7 +304,9 @@ impl ExecutableNode for PlannerNode {
             println!("{}", formatted_texts);
             println!("═══════════════════════════════════════\n");
         } else {
-            println!("🗂️ [PlannerNode] Planning tasks (set verbose=true in config to see full prompt)");
+            println!(
+                "🗂️ [PlannerNode] Planning tasks (set verbose=true in config to see full prompt)"
+            );
         }
 
         // --- 4. Call LLM ---
@@ -305,10 +329,17 @@ impl ExecutableNode for PlannerNode {
         struct EmptyToolExecutor;
         #[async_trait]
         impl crate::llm::domain::ToolExecutor for EmptyToolExecutor {
-            async fn execute(&self, _tc: &crate::llm::domain::ToolCall) -> Result<crate::llm::domain::ToolResult, crate::llm::domain::LlmError> {
-                Err(crate::llm::domain::LlmError::ToolExecutionFailed { message: "No tools".into() })
+            async fn execute(
+                &self,
+                _tc: &crate::llm::domain::ToolCall,
+            ) -> Result<crate::llm::domain::ToolResult, crate::llm::domain::LlmError> {
+                Err(crate::llm::domain::LlmError::ToolExecutionFailed {
+                    message: "No tools".into(),
+                })
             }
-            async fn available_tools(&self) -> Vec<crate::llm::domain::ToolDefinition> { vec![] }
+            async fn available_tools(&self) -> Vec<crate::llm::domain::ToolDefinition> {
+                vec![]
+            }
         }
 
         let params = crate::llm::application::AgentRunParams {
@@ -347,13 +378,22 @@ impl ExecutableNode for PlannerNode {
 
         // --- 5. Parse JSON Response ---
         let mut clean = raw.trim();
-        if clean.starts_with("```json") { clean = clean.trim_start_matches("```json"); }
-        else if clean.starts_with("```") { clean = clean.trim_start_matches("```"); }
-        if clean.ends_with("```") { clean = clean.trim_end_matches("```"); }
+        if clean.starts_with("```json") {
+            clean = clean.trim_start_matches("```json");
+        } else if clean.starts_with("```") {
+            clean = clean.trim_start_matches("```");
+        }
+        if clean.ends_with("```") {
+            clean = clean.trim_end_matches("```");
+        }
         clean = clean.trim();
 
-        let parsed: Value = serde_json::from_str(clean)
-            .map_err(|e| format!("PlannerNode: Failed to parse LLM output as JSON: {}. Raw: {}", e, raw))?;
+        let parsed: Value = serde_json::from_str(clean).map_err(|e| {
+            format!(
+                "PlannerNode: Failed to parse LLM output as JSON: {}. Raw: {}",
+                e, raw
+            )
+        })?;
 
         // --- 6. Return ---
         // Write it to global shared state so the Orchestrator can find it natively

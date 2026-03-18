@@ -82,7 +82,7 @@ impl GeminiAdapter {
                 }
                 MessageRole::Assistant => {
                     let mut parts = Vec::new();
-                    
+
                     if !message.content().is_empty() {
                         parts.push(GeminiPart {
                             text: Some(message.content().to_string()),
@@ -98,7 +98,8 @@ impl GeminiAdapter {
                                 text: None,
                                 function_call: Some(GeminiFunctionCall {
                                     name: tc.function.name.clone(),
-                                    args: serde_json::from_str(&tc.function.arguments).unwrap_or(json!({})),
+                                    args: serde_json::from_str(&tc.function.arguments)
+                                        .unwrap_or(json!({})),
                                 }),
                                 function_response: None,
                                 inline_data: None,
@@ -108,7 +109,7 @@ impl GeminiAdapter {
 
                     // If parts is empty, Gemini still requires something, so add empty text
                     if parts.is_empty() {
-                         parts.push(GeminiPart {
+                        parts.push(GeminiPart {
                             text: Some(String::new()),
                             function_call: None,
                             function_response: None,
@@ -136,8 +137,9 @@ impl GeminiAdapter {
                         }
                     }
 
-                    let parsed_content = serde_json::from_str::<serde_json::Value>(message.content())
-                        .unwrap_or_else(|_| serde_json::json!({ "result": message.content() }));
+                    let parsed_content =
+                        serde_json::from_str::<serde_json::Value>(message.content())
+                            .unwrap_or_else(|_| serde_json::json!({ "result": message.content() }));
 
                     contents.push(GeminiContent {
                         role: "function".to_string(),
@@ -273,7 +275,7 @@ impl LlmRepository for GeminiAdapter {
             .text()
             .await
             .map_err(|e| LlmError::parsing_error(e.to_string()))?;
-            
+
         let gemini_response: GeminiResponse =
             serde_json::from_str(&response_text).map_err(|e| {
                 LlmError::parsing_error(format!(
@@ -447,7 +449,7 @@ impl LlmRepository for GeminiAdapter {
                             if let Some(fc) = &part.function_call {
                                 let call_id = format!("call_{}", uuid::Uuid::new_v4());
                                 let args_str = serde_json::to_string(&fc.args).unwrap_or_default();
-                                
+
                                 let mut chunk = LlmStreamChunk::new(
                                     request_id.clone(),
                                     LlmStreamPart::ToolCallChunk(ToolCallChunk {

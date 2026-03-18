@@ -21,7 +21,10 @@ impl DagRunUseCase {
         registry: Arc<dyn NodeRegistryPort>,
         state_repository: Option<Arc<dyn DagStateRepository>>,
     ) -> Self {
-        Self { registry, state_repository }
+        Self {
+            registry,
+            state_repository,
+        }
     }
 
     /// Evaluates if a node has exceeded its call limits
@@ -30,13 +33,16 @@ impl DagRunUseCase {
         caller_id: Option<&str>,
         graph: &Graph,
         global_calls: &mut HashMap<String, u32>,
-        caller_specific_calls: &mut HashMap<String, HashMap<String, u32>>
+        caller_specific_calls: &mut HashMap<String, HashMap<String, u32>>,
     ) -> Result<(), DagError> {
         if let Some(node_config) = graph.nodes.get(node_id) {
             let current_global = *global_calls.get(node_id).unwrap_or(&0);
             if let Some(max_global) = node_config.max_total_calls {
                 if current_global >= max_global {
-                    return Err(DagError::NodeExecution(format!("Node {} reached max_total_calls limit of {}", node_id, max_global)));
+                    return Err(DagError::NodeExecution(format!(
+                        "Node {} reached max_total_calls limit of {}",
+                        node_id, max_global
+                    )));
                 }
             }
 
@@ -49,7 +55,10 @@ impl DagRunUseCase {
                             .copied()
                             .unwrap_or(0);
                         if current_specific >= *limit {
-                            return Err(DagError::NodeExecution(format!("Node {} reached max_calls_from limit of {} from caller {}", node_id, limit, caller)));
+                            return Err(DagError::NodeExecution(format!(
+                                "Node {} reached max_calls_from limit of {} from caller {}",
+                                node_id, limit, caller
+                            )));
                         }
                     }
                 }
@@ -152,7 +161,7 @@ impl DagRunUseCase {
                         // Exact match or matches "node_id." (JSON pointer)
                         e.to == *node_id || e.to.starts_with(&format!("{}.", node_id))
                     }).count();
-                    
+
                     if in_degree == 0 {
                         active_queue.push_back(node_id.clone());
                     }
@@ -164,7 +173,7 @@ impl DagRunUseCase {
             }
             if let Some(obj) = global_shared_state.as_object_mut() {
                 obj.insert("session_id".to_string(), Value::String(session_id.clone()));
-                
+
                 let mut graph_nodes_meta = serde_json::Map::new();
                 for (nid, node) in &graph.nodes {
                     graph_nodes_meta.insert(nid.clone(), node.config.clone());
@@ -176,13 +185,13 @@ impl DagRunUseCase {
 
             // Start cyclic execution loop
             while let Some(node_id) = active_queue.pop_front() {
-                
+
                 // 1. Check if node has all required inputs before acting on it
                 // Ignore cyclic loopback edges because they shouldn't block the node from starting its very first turn
                 let incoming_edges: Vec<_> = graph.edges.iter().filter(|e| {
                     (e.to == node_id || e.to.starts_with(&format!("{}.", node_id))) && !e.cyclic.unwrap_or(false)
                 }).collect();
-                
+
                 let mut is_ready = true;
                 for edge in &incoming_edges {
                     let parts_from: Vec<&str> = edge.from.splitn(2, '.').collect();
@@ -316,9 +325,9 @@ impl DagRunUseCase {
                     }
 
                     all_outputs.insert(node_id.to_string(), final_output.clone());
-                    
+
                     if let Some(repo) = &self.state_repository {
-                        // Crucial: When suspending, we must put the node back at the BEGINNING 
+                        // Crucial: When suspending, we must put the node back at the BEGINNING
                         // of the queue so it re-executes first when resuming (receiving the answer).
                         let mut resume_queue = active_queue.clone();
                         resume_queue.push_front(node_id.clone());
@@ -336,7 +345,7 @@ impl DagRunUseCase {
                         };
                         repo.save(&state).await?;
                     }
-                    
+
                     yield DagExecutionEvent::GraphFinish { output: final_output };
                     return;
                 }
@@ -348,7 +357,7 @@ impl DagRunUseCase {
                 if !output.is_null() {
                     let outgoing_edges = graph.edges.iter().filter(|e| e.from.starts_with(&node_id));
                     for edge in outgoing_edges {
-                        
+
                         // Check if the specific JSON path exists in the emitted output
                         let parts_from: Vec<&str> = edge.from.splitn(2, '.').collect();
                         let has_data = if parts_from.len() == 1 {
@@ -412,20 +421,42 @@ impl DagRunUseCase {
 
     fn find_status_by_key(val: &Value, key: &str) -> Option<String> {
         if let Some(obj) = val.as_object() {
-            if let Some(status) = obj.get(key).and_then(|v| v.as_str()) { return Some(status.to_string()); }
-            for v in obj.values() { if let Some(s) = Self::find_status_by_key(v, key) { return Some(s); } }
+            if let Some(status) = obj.get(key).and_then(|v| v.as_str()) {
+                return Some(status.to_string());
+            }
+            for v in obj.values() {
+                if let Some(s) = Self::find_status_by_key(v, key) {
+                    return Some(s);
+                }
+            }
         } else if let Some(arr) = val.as_array() {
-            for v in arr { if let Some(s) = Self::find_status_by_key(v, key) { return Some(s); } }
+            for v in arr {
+                if let Some(s) = Self::find_status_by_key(v, key) {
+                    return Some(s);
+                }
+            }
         }
         None
     }
 
     fn find_bool_by_key(val: &Value, key: &str) -> bool {
         if let Some(obj) = val.as_object() {
-            if let Some(status) = obj.get(key).and_then(|v| v.as_bool()) { if status { return true; } }
-            for v in obj.values() { if Self::find_bool_by_key(v, key) { return true; } }
+            if let Some(status) = obj.get(key).and_then(|v| v.as_bool()) {
+                if status {
+                    return true;
+                }
+            }
+            for v in obj.values() {
+                if Self::find_bool_by_key(v, key) {
+                    return true;
+                }
+            }
         } else if let Some(arr) = val.as_array() {
-            for v in arr { if Self::find_bool_by_key(v, key) { return true; } }
+            for v in arr {
+                if Self::find_bool_by_key(v, key) {
+                    return true;
+                }
+            }
         }
         false
     }
@@ -437,12 +468,16 @@ impl DagRunUseCase {
         all_outputs: &HashMap<String, Value>,
     ) -> Result<NodeInputs, DagError> {
         let mut inputs: NodeInputs = HashMap::new();
-        let incoming_edges = all_edges.iter().filter(|edge| edge.to.starts_with(current_node_id));
+        let incoming_edges = all_edges
+            .iter()
+            .filter(|edge| edge.to.starts_with(current_node_id));
 
         for edge in incoming_edges {
             let parts_to: Vec<&str> = edge.to.splitn(2, '.').collect();
             let parts_from: Vec<&str> = edge.from.splitn(2, '.').collect();
-            if parts_from.is_empty() { continue; }
+            if parts_from.is_empty() {
+                continue;
+            }
             let source_node_id = parts_from[0];
 
             let input_name = if parts_to.len() == 2 {
@@ -456,14 +491,17 @@ impl DagRunUseCase {
                     source_output_value.clone()
                 } else {
                     let json_pointer = parts_from[1].replace('.', "/");
-                    source_output_value.pointer(&format!("/{}", json_pointer)).cloned().unwrap_or(Value::Null)
+                    source_output_value
+                        .pointer(&format!("/{}", json_pointer))
+                        .cloned()
+                        .unwrap_or(Value::Null)
                 }
             } else {
                 Value::Null
             };
 
             // --- AUTO-FLATTENING LOGIC ---
-            // If the target (edge.to) does NOT contain a dot, it means the user wants to 
+            // If the target (edge.to) does NOT contain a dot, it means the user wants to
             // inject the source data directly into the target node's input space.
             // If the source data is an object, we merge its keys.
             if parts_to.len() == 1 {
@@ -484,7 +522,11 @@ impl DagRunUseCase {
     }
 }
 
-struct ChannelObserver { tx: tokio::sync::mpsc::UnboundedSender<crate::dag_engine::domain::observer::NodeEvent> }
+struct ChannelObserver {
+    tx: tokio::sync::mpsc::UnboundedSender<crate::dag_engine::domain::observer::NodeEvent>,
+}
 impl crate::dag_engine::domain::observer::ExecutionObserver for ChannelObserver {
-    fn on_event(&self, event: crate::dag_engine::domain::observer::NodeEvent) { let _ = self.tx.send(event); }
+    fn on_event(&self, event: crate::dag_engine::domain::observer::NodeEvent) {
+        let _ = self.tx.send(event);
+    }
 }

@@ -36,7 +36,7 @@ impl ExecutableNode for LoopControllerNode {
             .unwrap_or(false);
 
         if suspend_flag {
-             loop_status = "SUSPENDED".to_string();
+            loop_status = "SUSPENDED".to_string();
         }
 
         let mut output_payload = json!({
@@ -46,11 +46,18 @@ impl ExecutableNode for LoopControllerNode {
         // Add additional context based on status
         if loop_status == "SUSPENDED" {
             if let Some(question) = inputs.get("question").or_else(|| config.get("question")) {
-                 output_payload.as_object_mut().unwrap().insert("question".to_string(), question.clone());
+                output_payload
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("question".to_string(), question.clone());
             }
         } else if loop_status == "FINISHED" {
-            if let Some(final_result) = inputs.get("all_tasks").or_else(|| config.get("all_tasks")) {
-                 output_payload.as_object_mut().unwrap().insert("final_result".to_string(), final_result.clone());
+            if let Some(final_result) = inputs.get("all_tasks").or_else(|| config.get("all_tasks"))
+            {
+                output_payload
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("final_result".to_string(), final_result.clone());
             }
         }
 

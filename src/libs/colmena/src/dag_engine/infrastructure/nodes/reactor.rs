@@ -4,10 +4,10 @@ use serde_json::{json, Value};
 use std::error::Error;
 use std::sync::Arc;
 
+use crate::llm::application::AgentService;
 use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, ProviderKind, SessionId};
 use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
 use crate::llm::infrastructure::LlmProviderFactory;
-use crate::llm::application::AgentService;
 
 // ---------------------------------------------------------------------------
 // ReactorNode — the final reviewer in a multi-agent DAG.
@@ -86,7 +86,11 @@ pub struct ReactorNode {
 }
 
 impl ReactorNode {
-    pub fn new(task_memory_repo: Option<Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>>) -> Self {
+    pub fn new(
+        task_memory_repo: Option<
+            Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>,
+        >,
+    ) -> Self {
         Self { task_memory_repo }
     }
 
@@ -110,30 +114,41 @@ impl ExecutableNode for ReactorNode {
         _state: &mut Value,
         _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     ) -> Result<Value, Box<dyn Error + Send + Sync>> {
-
         // --- 1. Resolve Provider Configuration ---
-        let provider_str = config.get("provider").and_then(|v| v.as_str())
+        let provider_str = config
+            .get("provider")
+            .and_then(|v| v.as_str())
             .ok_or("ReactorNode: Missing 'provider' in config")?;
 
         let provider_kind = match provider_str.to_lowercase().as_str() {
-            "openai"    => ProviderKind::OpenAi,
-            "gemini"    => ProviderKind::Gemini,
+            "openai" => ProviderKind::OpenAi,
+            "gemini" => ProviderKind::Gemini,
             "anthropic" => ProviderKind::Anthropic,
             _ => return Err(format!("ReactorNode: Invalid provider '{}'.", provider_str).into()),
         };
 
-        let api_key_raw = config.get("api_key").and_then(|v| v.as_str())
+        let api_key_raw = config
+            .get("api_key")
+            .and_then(|v| v.as_str())
             .ok_or("ReactorNode: Missing 'api_key' in config")?;
         let api_key = Self::resolve_env_var(api_key_raw)?;
 
-        let model = config.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let verbose = config.get("verbose").and_then(|v| v.as_bool()).unwrap_or(false);
+        let model = config
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let verbose = config
+            .get("verbose")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         // --- 2. Collect input texts ---
         // All keys that start with "texts." are treated as context for the Reactor.
         let mut formatted_texts = String::new();
         for (key, val) in inputs.iter() {
-            if key == "system_message" { continue; }
+            if key == "system_message" {
+                continue;
+            }
             let label = key.strip_prefix("texts.").unwrap_or(key.as_str());
             let text_str = match val {
                 Value::String(s) => s.clone(),
@@ -177,7 +192,9 @@ impl ExecutableNode for ReactorNode {
         }
 
         // --- 3. Compose system message ---
-        let extra_system_msg = inputs.get("system_message").and_then(|v| v.as_str())
+        let extra_system_msg = inputs
+            .get("system_message")
+            .and_then(|v| v.as_str())
             .or_else(|| config.get("system_message").and_then(|v| v.as_str()))
             .unwrap_or("");
 
@@ -226,11 +243,17 @@ impl ExecutableNode for ReactorNode {
         struct EmptyToolExecutor;
         #[async_trait]
         impl crate::llm::domain::ToolExecutor for EmptyToolExecutor {
-            async fn execute(&self, _tc: &crate::llm::domain::ToolCall)
-                -> Result<crate::llm::domain::ToolResult, crate::llm::domain::LlmError> {
-                Err(crate::llm::domain::LlmError::ToolExecutionFailed { message: "No tools".into() })
+            async fn execute(
+                &self,
+                _tc: &crate::llm::domain::ToolCall,
+            ) -> Result<crate::llm::domain::ToolResult, crate::llm::domain::LlmError> {
+                Err(crate::llm::domain::LlmError::ToolExecutionFailed {
+                    message: "No tools".into(),
+                })
             }
-            async fn available_tools(&self) -> Vec<crate::llm::domain::ToolDefinition> { vec![] }
+            async fn available_tools(&self) -> Vec<crate::llm::domain::ToolDefinition> {
+                vec![]
+            }
         }
 
         let params = crate::llm::application::AgentRunParams {
@@ -269,19 +292,30 @@ impl ExecutableNode for ReactorNode {
 
         // --- 5. Parse and return ---
         let mut clean = raw.trim();
-        if clean.starts_with("```json") { clean = clean.trim_start_matches("```json"); }
-        else if clean.starts_with("```") { clean = clean.trim_start_matches("```"); }
-        if clean.ends_with("```") { clean = clean.trim_end_matches("```"); }
+        if clean.starts_with("```json") {
+            clean = clean.trim_start_matches("```json");
+        } else if clean.starts_with("```") {
+            clean = clean.trim_start_matches("```");
+        }
+        if clean.ends_with("```") {
+            clean = clean.trim_end_matches("```");
+        }
         let clean = clean.trim();
 
         let parsed: Value = serde_json::from_str(clean)
             .map_err(|e| format!("ReactorNode: Failed to parse LLM JSON: {}. Raw: {}", e, raw))?;
 
-        let task_ok   = parsed.get("task_ok").and_then(|v| v.as_bool()).unwrap_or(false);
+        let task_ok = parsed
+            .get("task_ok")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let response_text = parsed.get("response").cloned().unwrap_or(Value::Null);
         let add_tasks = parsed.get("add_tasks").cloned().unwrap_or(json!([]));
-        let suspend   = parsed.get("suspend").and_then(|v| v.as_bool()).unwrap_or(false);
-        let question  = parsed.get("question").cloned().unwrap_or(Value::Null);
+        let suspend = parsed
+            .get("suspend")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let question = parsed.get("question").cloned().unwrap_or(Value::Null);
 
         println!(
             "⚡ [ReactorNode] Decision → task_ok={}, new_tasks={}, suspend={}",
@@ -292,12 +326,17 @@ impl ExecutableNode for ReactorNode {
 
         // --- 6. Persist phase summary if this is a FINISHED_PHASE turn ---
         if task_ok {
-            let session_id = _state.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let session_id = _state
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             // `phase` comes from edge: orchestrator.output.current_phase → reactor.phase
-            let mut phase_input = inputs.get("phase")
+            let mut phase_input = inputs
+                .get("phase")
                 .and_then(|v| v.as_i64())
                 .map(|p| p as i32);
-                
+
             if phase_input.is_none() {
                 for val in inputs.values() {
                     if let Some(extra) = val.get("extra_info") {
@@ -309,10 +348,15 @@ impl ExecutableNode for ReactorNode {
                 }
             }
 
-            if let (Some(phase), Some(repo), true) = (phase_input, &self.task_memory_repo, !session_id.is_empty()) {
+            if let (Some(phase), Some(repo), true) =
+                (phase_input, &self.task_memory_repo, !session_id.is_empty())
+            {
                 let summary_str = response_text.as_str().unwrap_or("");
                 if !summary_str.is_empty() {
-                    if let Err(e) = repo.save_phase_summary(&session_id, phase, summary_str).await {
+                    if let Err(e) = repo
+                        .save_phase_summary(&session_id, phase, summary_str)
+                        .await
+                    {
                         eprintln!("⚠️ [ReactorNode] Failed to save phase summary: {:?}", e);
                     } else {
                         println!("💾 [ReactorNode] Phase {} summary saved to DB.", phase);

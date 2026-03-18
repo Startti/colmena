@@ -45,7 +45,10 @@ pub enum DagExecutionEvent {
     #[serde(rename = "llm_message_start")]
     LlmMessageStart { node_id: String },
     #[serde(rename = "llm_message_finish")]
-    LlmMessageFinish { node_id: String, usage: Option<Value> },
+    LlmMessageFinish {
+        node_id: String,
+        usage: Option<Value>,
+    },
     #[serde(rename = "graph_finish")]
     GraphFinish { output: Value },
     #[serde(rename = "error")]
