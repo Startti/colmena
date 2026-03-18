@@ -1,0 +1,30 @@
+{
+  "name": "colmena-ai",
+  "version": "0.1.0",
+  "description": "TypeScript bindings for Colmena LLM and DAG Engine",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "build": "napi build --platform --release --features node --cargo-cwd src/libs/colmena --cargo-name colmena --cargo-flags=\"--lib\"",
+    "build:debug": "napi build --platform --features node --cargo-cwd src/libs/colmena --cargo-name colmena --cargo-flags=\"--lib\"",
+    "prepublishOnly": "npm run build"
+  },
+  "napi": {
+    "name": "colmena",
+    "triples": {
+      "defaults": true,
+      "additional": [
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">= 10"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.4"
+  }
+}
