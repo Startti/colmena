@@ -271,14 +271,35 @@ impl ColmenaLlm {
 create_exception!(colmena, DagException, PyException);
 
 #[pyfunction]
-#[pyo3(signature = (file_path))]
-fn run_dag(py: Python, file_path: String) -> PyResult<String> {
+#[pyo3(signature = (file_path, resume_id=None, resume_answer=None, inject_payload=None, include_extra_info=false))]
+fn run_dag(
+    py: Python,
+    file_path: String,
+    resume_id: Option<String>,
+    resume_answer: Option<String>,
+    inject_payload: Option<pyo3::Bound<'_, pyo3::PyAny>>,
+    include_extra_info: bool,
+) -> PyResult<String> {
+    let inject_payload_val: Option<serde_json::Value> = match inject_payload {
+        Some(obj) => Some(
+            pythonize::depythonize_bound(obj).map_err(|e| DagException::new_err(e.to_string()))?,
+        ),
+        None => None,
+    };
     py.allow_threads(move || {
         let rt =
             tokio::runtime::Runtime::new().map_err(|e| DagException::new_err(e.to_string()))?;
 
         rt.block_on(async {
-            match crate::dag_engine::api::run_dag(file_path, None).await {
+            match crate::dag_engine::api::run_dag(
+                file_path,
+                resume_id,
+                resume_answer,
+                inject_payload_val,
+                include_extra_info,
+            )
+            .await
+            {
                 Ok(result) => serde_json::to_string_pretty(&result)
                     .map_err(|e| DagException::new_err(e.to_string())),
                 Err(e) => Err(DagException::new_err(e.to_string())),
