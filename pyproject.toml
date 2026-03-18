@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "colmena-ai"
 description = "High-performance Rust library for multi-provider LLM orchestration with native Python bindings"
-version = "0.1.0"
+version = "0.3.0"
 readme = "README_PYPI.md"
 license = {text = "MIT"}
 authors = [

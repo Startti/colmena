@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-03-18
+
+### Added
+- Complete architecture migration to Workspace-based layout in `src/libs/colmena`.
+- Node.js/TypeScript bindings via `napi-rs`.
+- Unified `run_dag` signature (5 arguments) across Rust, Python, and Node.js.
+- Fully resolved all clippy warnings and modernised PyO3 integration (0.21.x).
+- Corrected CI/CD workflows for workspace member builds.
+
+
 ### Added
 - Initial project setup with Hexagonal Architecture
 - Multi-provider LLM support (OpenAI, Gemini, Anthropic)
