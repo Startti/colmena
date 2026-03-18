@@ -796,6 +796,33 @@ curl -X POST http://localhost:3000/fetch-joke \
 }
 ```
 
+### 4. Soporte de Visión y Documentos (Novedad)
+
+Envía imágenes o PDFs directamente en el DAG:
+
+```json
+{
+  "nodes": {
+    "vision_step": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o",
+        "prompt": "Explica el contenido de este documento",
+        "files": [
+          {
+            "mime_type": "application/pdf",
+            "filename": "reporte.pdf",
+            "path": "tests/dags/media/sample.pdf"
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
 Output del log incluye:
 ```json
 {

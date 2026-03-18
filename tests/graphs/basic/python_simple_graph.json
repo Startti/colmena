@@ -1,0 +1,30 @@
+{
+  "nodes": {
+    "start": {
+      "type": "mock_input",
+      "config": {
+        "x": 10,
+        "y": 5
+      }
+    },
+    "python_calc": {
+      "type": "python_script",
+      "config": {
+        "code": "output = x * y + 2"
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "start",
+      "to": "python_calc"
+    },
+    {
+      "from": "python_calc",
+      "to": "log_result"
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+    "nodes": {
+        "my_webhook": {
+            "type": "trigger_webhook",
+            "config": {
+                "path": "/hello",
+                "method": "POST",
+                "test_payload": {
+                    "request": {
+                        "message": "Hello from Simulator!"
+                    }
+                }
+            }
+        },
+        "log_step": {
+            "type": "log"
+        }
+    },
+    "edges": [
+        {
+            "from": "my_webhook.output.message",
+            "to": "log_step.input"
+        }
+    ]
+}

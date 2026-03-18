@@ -1,0 +1,36 @@
+{
+    "nodes": {
+        "my_webhook": {
+            "type": "trigger_webhook",
+            "config": {
+                "path": "/test-http",
+                "method": "POST",
+                "test_payload": {}
+            }
+        },
+        "http_call": {
+            "type": "http_request",
+            "config": {
+                "base_url": "https://official-joke-api.appspot.com",
+                "endpoint": "/random_joke",
+                "method": "GET",
+                "headers": {
+                    "Content-Type": "application/json"
+                }
+            }
+        },
+        "log_step": {
+            "type": "log"
+        }
+    },
+    "edges": [
+        {
+            "from": "my_webhook.output",
+            "to": "http_call.dummy"
+        },
+        {
+            "from": "http_call.output",
+            "to": "log_step.input"
+        }
+    ]
+}

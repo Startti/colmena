@@ -104,3 +104,19 @@ cargo test -- --nocapture
 # Tests con coverage (requiere cargo-tarpaulin)
 cargo tarpaulin --all-features --workspace
 ```
+
+### System Tests (DAGs)
+
+El motor DAG (`dag_engine`) utiliza ficheros JSON para definir escenarios de prueba completos. Estos tests se encuentran organizados en `tests/dags/` por categoría y proveedor:
+
+- **`tests/dags/core/`**: Funcionalidades básicas del motor (triggers, logs, llm_calls simples).
+- **`tests/dags/tools/`**: Ejemplos de uso de herramientas (Tool Calling).
+- **`tests/dags/llm_files/`**: Tests de Visión y Documentos (organizados por `openai/` y `gemini/`).
+- **`tests/dags/memory/`**: Tests de persistencia con SQLite y PostgreSQL.
+- **`tests/dags/amadeus/`**: Integraciones específicas con la API de Amadeus.
+- **`tests/dags/media/`**: Activos multimedia (PDFs, imágenes) utilizados por los tests.
+
+Para ejecutar un test de sistema:
+```bash
+cargo run --bin dag_engine -- run tests/dags/[categoria]/[fichero].json
+```

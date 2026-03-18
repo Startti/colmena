@@ -1,0 +1,65 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "plan": [
+          {
+            "assigned_to": "clothing_expert",
+            "completed": false,
+            "task": "Pack Winter Clothes"
+          },
+          {
+            "assigned_to": "gear_expert",
+            "completed": false,
+            "task": "Pack Ski Equipment"
+          }
+        ]
+      }
+    },
+    "orchestrator_node": {
+      "type": "orchestrator",
+      "config": {}
+    },
+    "clothing_expert": {
+      "type": "log",
+      "config": {}
+    },
+    "gear_expert": {
+      "type": "log",
+      "config": {}
+    },
+    "finalizer": {
+      "type": "python_script",
+      "config": {
+        "code": "output = {'__colmena_loop_status': status, 'plan': plan}"
+      }
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "orchestrator_node"
+    },
+    {
+      "from": "orchestrator_node.dispatched_agents.clothing_expert",
+      "to": "clothing_expert"
+    },
+    {
+      "from": "orchestrator_node.dispatched_agents.gear_expert",
+      "to": "gear_expert"
+    },
+    {
+      "from": "clothing_expert",
+      "to": "finalizer"
+    },
+    {
+      "from": "gear_expert",
+      "to": "finalizer"
+    },
+    {
+      "from": "orchestrator_node",
+      "to": "finalizer"
+    }
+  ]
+}

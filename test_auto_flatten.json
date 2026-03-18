@@ -1,0 +1,27 @@
+{
+  "nodes": {
+    "predecide": {
+      "type": "mock_input",
+      "config": {
+        "a": 50,
+        "b": 50
+      }
+    },
+    "sumar": {
+      "type": "add"
+    },
+    "ver_resultado": {
+        "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "predecide",
+      "to": "sumar"
+    },
+    {
+        "from": "sumar",
+        "to": "ver_resultado"
+    }
+  ]
+}

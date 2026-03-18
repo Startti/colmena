@@ -1,0 +1,101 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/travel-agent",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "I want to go from bogota to miami the next january 1st 2026 for 1 adult two weeks. pelaes find hotels there"
+        }
+      }
+    },
+    "get_amadeus_token": {
+      "type": "http_request",
+      "config": {
+        "base_url": "https://api.amadeus.com/v1/security/oauth2/token",
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        "body": "grant_type=client_credentials&client_id=${AMADEUS_CLIENT_ID}&client_secret=${AMADEUS_CLIENT_SECRET}"
+      }
+    },
+    "agent_llm": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o-mini",
+        "system_message": "You are a helpful travel agent assistant. You can search for flights, hotels, and activities using the available tools. Use the provided context to authenticate your requests. Always limit your search results to the minimum necessary (max 1 or 2). Current date: 2025-12-12.",
+        "temperature": 0.7,
+        "session_id": "travel_agent_demo_v10",
+        "connection_url": "${DATABASE_URL}",
+        "enabled_tools": [
+          "search_flights",
+          "search_hotels",
+          "search_activities"
+        ],
+        "tool_configurations": {
+          "search_flights": {
+            "name": "search_flights",
+            "node_type": "http_request",
+            "description": "Search for flight offers. You MUST provide originLocationCode, destinationLocationCode, departureDate, and adults.",
+            "fixed_config": {
+              "base_url": "https://api.amadeus.com",
+              "endpoint": "/v2/shopping/flight-offers",
+              "method": "GET",
+              "bearer_token": "${context.amadeus_token}",
+              "query_params": {
+                "max": "3"
+              }
+            }
+          },
+          "search_hotels": {
+            "name": "search_hotels",
+            "node_type": "http_request",
+            "description": "Search for hotels in a specific city. You MUST provide cityCode.",
+            "fixed_config": {
+              "base_url": "https://api.amadeus.com",
+              "endpoint": "/v1/reference-data/locations/hotels/by-city",
+              "method": "GET",
+              "bearer_token": "${context.amadeus_token}"
+            }
+          },
+          "search_activities": {
+            "name": "search_activities",
+            "node_type": "http_request",
+            "description": "Search for tours and activities in a location. You MUST provide latitude and longitude.",
+            "fixed_config": {
+              "base_url": "https://api.amadeus.com",
+              "endpoint": "/v1/shopping/activities",
+              "method": "GET",
+              "bearer_token": "${context.amadeus_token}"
+            }
+          }
+        }
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "agent_llm"
+    },
+    {
+      "from": "trigger",
+      "to": "get_amadeus_token"
+    },
+    {
+      "from": "get_amadeus_token.access_token",
+      "to": "agent_llm.context.amadeus_token"
+    },
+    {
+      "from": "agent_llm",
+      "to": "log_result"
+    }
+  ]
+}

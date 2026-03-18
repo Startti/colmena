@@ -1,0 +1,24 @@
+{
+  "nodes": {
+    "step_3": {
+      "type": "llm_call",
+      "config": {
+        "provider": "gemini",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "connection_url": "${DATABASE_URL}",
+        "enabled_tools": ["divide"],
+        "prompt": "Using our conversation history, tell me my name first, then divide the previous result by 2. Ensure both are in your final answer."
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "step_3",
+      "to": "log_result"
+    }
+  ]
+}

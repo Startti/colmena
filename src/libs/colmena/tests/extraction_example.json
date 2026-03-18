@@ -1,0 +1,59 @@
+{
+    "nodes": {
+        "slack_message": {
+            "type": "input",
+            "config": {
+                "data": "Hi team, let's ship the new deployment feature. The deadline for this is 15-11-2026. Juan and Maria are assigned to the backend, and Daniel is doing testing."
+            }
+        },
+        "email_body": {
+            "type": "input",
+            "config": {
+                "data": "Also, a quick note on the deployment feature... it must include the new UI changes too. Alice is taking care of the frontend."
+            }
+        },
+        "extract_info": {
+            "type": "information_extraction",
+            "config": {
+                "provider": "openai",
+                "api_key": "${OPENAI_API_KEY}",
+                "model": "gpt-4o",
+                "system_message": "Please extract the names of the people assigned to the project. If there are multiple names, return them as a list of strings.",
+                "schema": {
+                    "main_objective": {
+                        "type": "string",
+                        "description": "The main goal or objective mentioned"
+                    },
+                    "dead_line": {
+                        "type": "string",
+                        "description": "The deadline in DD-MM-YYYY format"
+                    },
+                    "people_assigned": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "List of people assigned"
+                    }
+                }
+            }
+        },
+        "log_result": {
+            "type": "log"
+        }
+    },
+    "edges": [
+        {
+            "from": "slack_message.output",
+            "to": "extract_info.texts.slack_message"
+        },
+        {
+            "from": "email_body.output",
+            "to": "extract_info.texts.email_body"
+        },
+        {
+            "from": "extract_info.output",
+            "to": "log_result.input"
+        }
+    ]
+}

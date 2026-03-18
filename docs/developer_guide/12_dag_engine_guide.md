@@ -81,7 +81,33 @@ Esta capa implementa todos los "Puertos" definidos en las capas `domain` y `appl
 - `http_request`: Realiza peticiones HTTP a APIs externas
 
 ### Nodos LLM
-- `llm_call`: Llama a modelos de lenguaje (OpenAI, Gemini, Anthropic). Soporta **Memoria** y **Function Calling** (próximamente).
+- `llm_call`: Llama a modelos de lenguaje (OpenAI, Gemini, Anthropic). Soporta **Memoria**, **Streaming** y **Visión/Documentos**.
+
+#### Visión y Soporte de Documentos
+El nodo `llm_call` permite enviar archivos (imágenes y PDFs) a los modelos que lo soportan. Puedes pasar archivos de dos formas: mediante una ruta local o mediante un string Base64.
+
+**Configuración de `files`:**
+```json
+"files": [
+  {
+    "mime_type": "application/pdf",
+    "filename": "documento.pdf",
+    "path": "ruta/al/archivo.pdf"
+  },
+  {
+    "mime_type": "image/jpeg",
+    "data": "base64_encoded_string..."
+  }
+]
+```
+
+- **`mime_type`**: Tipo MIME del archivo (ej. `image/png`, `application/pdf`).
+- **`filename`**: (Recomendado) Nombre del archivo. Requerido por algunos proveedores como OpenAI para procesar documentos PDF.
+- **`path`**: Ruta al archivo en el disco local.
+- **`data`**: Contenido del archivo codificado en Base64 (si no se usa `path`).
+
+> [!NOTE]
+> **OpenAI Dual-Routing**: Para OpenAI, el motor utiliza automáticamente el endpoint `/v1/responses` cuando se detectan documentos (PDF), permitiendo un procesamiento nativo superior a la conversión a imágenes. Las imágenes siguen usando `/v1/chat/completions`.
 
 ## 🧠 Memoria y Persistencia
 
@@ -153,13 +179,13 @@ DATABASE_URL="postgresql://postgres:password@db.xxxxx.supabase.co:5432/postgres"
 
 ### 📝 Formatos de Connection URL Soportados
 
-| Base de Datos | Formato | Ejemplo |
-|---------------|---------|---------|
-| SQLite (relativo) | `sqlite://path/to/file.db` | `sqlite://memory.db` |
-| SQLite (absoluto) | `sqlite:///absolute/path/to/file.db` | `sqlite:///var/data/memory.db` |
-| SQLite (memoria) | `sqlite::memory:` | `sqlite::memory:` |
-| PostgreSQL | `postgresql://user:pass@host:port/db` | `postgresql://postgres:pwd@localhost:5432/mydb` |
-| PostgreSQL (alternativo) | `postgres://user:pass@host:port/db` | `postgres://postgres:pwd@localhost:5432/mydb` |
+| Base de Datos            | Formato                               | Ejemplo                                         |
+| ------------------------ | ------------------------------------- | ----------------------------------------------- |
+| SQLite (relativo)        | `sqlite://path/to/file.db`            | `sqlite://memory.db`                            |
+| SQLite (absoluto)        | `sqlite:///absolute/path/to/file.db`  | `sqlite:///var/data/memory.db`                  |
+| SQLite (memoria)         | `sqlite::memory:`                     | `sqlite::memory:`                               |
+| PostgreSQL               | `postgresql://user:pass@host:port/db` | `postgresql://postgres:pwd@localhost:5432/mydb` |
+| PostgreSQL (alternativo) | `postgres://user:pass@host:port/db`   | `postgres://postgres:pwd@localhost:5432/mydb`   |
 
 ### 🎯 Uso en Nodos `llm_call`
 
@@ -695,6 +721,42 @@ curl -X POST http://localhost:3000/test \
     {
       "from": "analyze_joke.output",
       "to": "log_analysis.input"
+    }
+  ]
+}
+```
+
+### Ejemplo 4: Extracción de Información a JSON Estructurado
+
+El nodo `information_extraction` permite tomar texto no estructurado y usar un LLM para extraer un JSON estrictamente apegado a un `schema`. Soporta múltiples entradas inyectadas dinámicamente en el objeto `texts`.
+
+```json
+{
+  "nodes": {
+    "slack_message": {
+      "type": "input",
+      "config": {
+        "data": "Hi team, let's ship the new deployment feature. The deadline for this is 15-11-2026. Juan and Maria are assigned to the backend."
+      }
+    },
+    "extract_info": {
+      "type": "information_extraction",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o",
+        "schema": {
+          "main_objective": { "type": "string", "description": "The main goal or objective mentioned" },
+          "dead_line": { "type": "string", "description": "The deadline in DD-MM-YYYY format" },
+          "people_assigned": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  },
+  "edges": [
+    {
+      "from": "slack_message.output",
+      "to": "extract_info.texts.slack_message"
     }
   ]
 }

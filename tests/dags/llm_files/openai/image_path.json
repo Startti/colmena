@@ -1,0 +1,37 @@
+{
+    "nodes": {
+        "trigger": {
+            "type": "trigger_webhook",
+            "config": {
+                "path": "/agent-demo",
+                "method": "POST",
+                "test_payload": {
+                    "question": "What is inside this image?"
+                }
+            }
+        },
+        "agent_llm": {
+            "type": "llm_call",
+            "config": {
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "api_key": "${OPENAI_API_KEY}",
+                "stream": true,
+                "system_message": "You are a helpful analyst.",
+                "temperature": 0.0,
+                "files": [
+                    {
+                        "mime_type": "image/png",
+                        "path": "../../../tests/dags/media/test_image.jpg"
+                    }
+                ]
+            }
+        }
+    },
+    "edges": [
+        {
+            "from": "trigger.output.question",
+            "to": "agent_llm.prompt"
+        }
+    ]
+}
