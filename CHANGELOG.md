@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-03-18
+## [0.3.2] - 2026-03-18
 
+### Changed
+- Bumped version to 0.3.2 due to tag collision on 0.3.1.
+- PythonNode test explicitly initializing interpreter with pyo3 freethreaded environment.
+
+## [0.3.0] - 2026-03-18
 ### Added
 - Complete architecture migration to Workspace-based layout in `src/libs/colmena`.
 - Node.js/TypeScript bindings via `napi-rs`.
