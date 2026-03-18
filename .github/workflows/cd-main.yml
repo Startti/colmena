@@ -150,7 +150,7 @@ jobs:
         uses: messense/maturin-action@v1
         with:
           target: x86_64
-          args: --release --out dist
+          args: --release --out dist --manifest-path src/libs/colmena/Cargo.toml
           sccache: 'true'
           manylinux: auto
 
@@ -159,7 +159,7 @@ jobs:
         uses: messense/maturin-action@v1
         with:
           target: aarch64
-          args: --release --out dist
+          args: --release --out dist --manifest-path src/libs/colmena/Cargo.toml
           sccache: 'true'
 
       - name: Upload wheels
@@ -181,7 +181,7 @@ jobs:
         uses: messense/maturin-action@v1
         with:
           command: sdist
-          args: --out dist
+          args: --out dist --manifest-path src/libs/colmena/Cargo.toml
       
       - name: Upload sdist
         uses: actions/upload-artifact@v4
