@@ -161,9 +161,10 @@ impl ExecutableNode for ExtractionNode {
         let tid_val = uuid::Uuid::new_v4().to_string();
         let tid = SessionId(tid_val.clone());
 
-        let mut messages = Vec::new();
-        messages.push(LlmMessage::system(system_message)?);
-        messages.push(LlmMessage::user(formatted_texts)?);
+        let messages = vec![
+            LlmMessage::system(system_message)?,
+            LlmMessage::user(formatted_texts)?,
+        ];
 
         // Define empty tool executor to satisfy AgentService
         struct EmptyToolExecutor;
