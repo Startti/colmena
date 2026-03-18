@@ -482,7 +482,9 @@ async fn seed_db_manually(
                     .and_then(|v| {
                         if let Some(b) = v.as_bool() {
                             Some(b)
-                        } else { v.as_str().map(|s| s.eq_ignore_ascii_case("true")) }
+                        } else {
+                            v.as_str().map(|s| s.eq_ignore_ascii_case("true"))
+                        }
                     })
                     .unwrap_or(false);
 

@@ -208,14 +208,16 @@ pub async fn run_dag(
                 })),
                 DagExecutionEvent::LlmUsage { .. } => None,
                 DagExecutionEvent::NodeFinish { node_id, .. } => {
-                    text_block_uuids.get(&node_id).map(|part_id| serde_json::json!({
+                    text_block_uuids.get(&node_id).map(|part_id| {
+                        serde_json::json!({
                             "type": "node-end",
                             "id": part_id,
                             "usage": {
                                 "promptTokens": total_prompt_tokens,
                                 "completionTokens": total_completion_tokens
                             }
-                        }))
+                        })
+                    })
                 }
                 DagExecutionEvent::GraphFinish { .. } => Some(serde_json::json!({
                     "type": "finish",
