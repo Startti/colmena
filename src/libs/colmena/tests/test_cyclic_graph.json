@@ -1,0 +1,29 @@
+{
+    "nodes": {
+        "trigger": {
+            "type": "input",
+            "config": {
+                "data": {
+                    "start": true
+                }
+            }
+        },
+        "cyclic_node": {
+            "type": "python_script",
+            "config": {
+                "code": "output = 'Looping explicitly'"
+            },
+            "max_total_calls": 3
+        }
+    },
+    "edges": [
+        {
+            "from": "trigger",
+            "to": "cyclic_node.input"
+        },
+        {
+            "from": "cyclic_node",
+            "to": "cyclic_node.input"
+        }
+    ]
+}

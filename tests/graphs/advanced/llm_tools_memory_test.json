@@ -1,0 +1,40 @@
+{
+  "nodes": {
+    "step_1": {
+      "type": "llm_call",
+      "config": {
+        "provider": "gemini",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "system_message": "You are a helpful assistant that can perform math. Use tools when necessary.",
+        "connection_url": "${DATABASE_URL}",
+        "enabled_tools": ["add", "subtract"],
+        "prompt": "My name is Daniel. Calculate 123 + 456 and remember my name."
+      }
+    },
+    "step_2": {
+      "type": "llm_call",
+      "config": {
+        "provider": "gemini",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "connection_url": "${DATABASE_URL}",
+        "enabled_tools": ["multiply"],
+        "prompt": "What is my name? Also, multiply the previous result by 2."
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "step_1",
+      "to": "step_2"
+    },
+    {
+      "from": "step_2",
+      "to": "log_result"
+    }
+  ]
+}

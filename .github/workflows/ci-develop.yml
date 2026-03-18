@@ -56,7 +56,7 @@ jobs:
         run: cargo test --verbose
 
       - name: Build Python package
-        run: maturin build --release --interpreter python${{ matrix.python-version }}
+        run: maturin build --release --interpreter python${{ matrix.python-version }} --manifest-path src/libs/colmena/Cargo.toml
 
       - name: Install Python package
         run: pip install target/wheels/colmena_ai-*-cp$(echo "${{ matrix.python-version }}" | tr -d '.')-*.whl

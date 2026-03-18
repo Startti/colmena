@@ -1,0 +1,118 @@
+warning: unused import: `crate::dag_engine::domain::error::DagError`
+ --> src/libs/colmena/src/dag_engine/infrastructure/nodes/output.rs:1:5
+  |
+1 | use crate::dag_engine::domain::error::DagError;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `graph`
+  --> src/libs/colmena/src/dag_engine/application/run_use_case.rs:64:9
+   |
+64 |         graph: Graph,
+   |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_graph`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `resume_run_id`
+  --> src/libs/colmena/src/dag_engine/application/run_use_case.rs:65:9
+   |
+65 |         resume_run_id: Option<String>,
+   |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_resume_run_id`
+
+warning: unused variable: `resume_answer`
+  --> src/libs/colmena/src/dag_engine/application/run_use_case.rs:66:9
+   |
+66 |         resume_answer: Option<String>,
+   |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_resume_answer`
+
+warning: unused variable: `include_extra_info`
+  --> src/libs/colmena/src/dag_engine/application/run_use_case.rs:67:9
+   |
+67 |         include_extra_info: bool,
+   |         ^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_include_extra_info`
+
+warning: value assigned to `system_message_str` is never read
+   --> src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs:235:38
+    |
+235 |         let mut system_message_str = String::new();
+    |                                      ^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `find_bool_by_key` is never used
+   --> src/libs/colmena/src/dag_engine/application/run_use_case.rs:401:8
+    |
+ 19 | impl DagRunUseCase {
+    | ------------------ associated function in this implementation
+...
+401 |     fn find_bool_by_key(val: &Value, key: &str) -> bool {
+    |        ^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `colmena_dag_engine` (lib) generated 7 warnings (run `cargo fix --lib -p colmena_dag_engine` to apply 5 suggestions)
+    Checking colmena_dag_engine v0.1.0 (/home/daniel-garcia4/startti/colmena/src/libs/colmena)
+error: couldn't read `src/libs/colmena/tests/rust/agent_with_tools.rs`: No such file or directory (os error 2)
+
+error: couldn't read `src/libs/colmena/tests/rust/gemini_tool_test.rs`: No such file or directory (os error 2)
+
+error: couldn't read `src/libs/colmena/tests/rust/openai_tool_test.rs`: No such file or directory (os error 2)
+
+error: could not compile `colmena_dag_engine` (test "openai_tool_test") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `colmena_dag_engine` (test "gemini_tool_test") due to 1 previous error
+error: could not compile `colmena_dag_engine` (test "agent_with_tools") due to 1 previous error
+error[E0063]: missing field `messages` in initializer of `agent_service::AgentRunParams<'_>`
+   --> src/libs/colmena/src/llm/application/agent_service.rs:343:18
+    |
+343 |             .run(AgentRunParams {
+    |                  ^^^^^^^^^^^^^^ missing `messages`
+
+error[E0063]: missing field `response` in initializer of `tools::ToolCall`
+   --> src/libs/colmena/src/llm/application/agent_service.rs:396:33
+    |
+396 |                 let tool_call = ToolCall {
+    |                                 ^^^^^^^^ missing `response`
+
+error[E0063]: missing field `messages` in initializer of `agent_service::AgentRunParams<'_>`
+   --> src/libs/colmena/src/llm/application/agent_service.rs:441:18
+    |
+441 |             .run(AgentRunParams {
+    |                  ^^^^^^^^^^^^^^ missing `messages`
+
+error[E0063]: missing field `response` in initializer of `tools::ToolCall`
+   --> src/libs/colmena/src/llm/application/agent_service.rs:483:29
+    |
+483 |             let tool_call = ToolCall {
+    |                             ^^^^^^^^ missing `response`
+
+error[E0063]: missing field `messages` in initializer of `agent_service::AgentRunParams<'_>`
+   --> src/libs/colmena/src/llm/application/agent_service.rs:509:18
+    |
+509 |             .run(AgentRunParams {
+    |                  ^^^^^^^^^^^^^^ missing `messages`
+
+error[E0369]: binary operation `==` cannot be applied to type `&std::option::Option<Vec<FileData>>`
+  --> src/libs/colmena/src/llm/domain/llm_message.rs:57:25
+   |
+57 | #[cfg_attr(test, derive(Derivative))]
+   |                         ^^^^^^^^^^
+   |
+note: an implementation of `PartialEq` might be missing for `FileData`
+  --> src/libs/colmena/src/llm/domain/llm_message.rs:50:1
+   |
+50 | pub struct FileData {
+   | ^^^^^^^^^^^^^^^^^^^ must implement `PartialEq`
+   = note: this error originates in the derive macro `Derivative` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider annotating `FileData` with `#[derive(PartialEq)]`
+   |
+50 + #[derive(PartialEq)]
+51 | pub struct FileData {
+   |
+
+Some errors have detailed explanations: E0063, E0369.
+For more information about an error, try `rustc --explain E0063`.
+warning: `colmena_dag_engine` (lib test) generated 6 warnings (6 duplicates)
+error: could not compile `colmena_dag_engine` (lib test) due to 6 previous errors; 6 warnings emitted

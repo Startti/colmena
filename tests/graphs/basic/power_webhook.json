@@ -1,0 +1,32 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/power",
+        "test_payload": {
+          "input": 10
+        }
+      }
+    },
+    "pow_step": {
+      "type": "exponential",
+      "config": {
+        "exponent": 3
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "pow_step"
+    },
+    {
+      "from": "pow_step",
+      "to": "log_result"
+    }
+  ]
+}
