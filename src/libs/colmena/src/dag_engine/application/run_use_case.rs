@@ -70,10 +70,10 @@ impl DagRunUseCase {
     /// Método principal que ejecuta el grafo (Bloqueante).
     pub async fn execute(
         &self,
-        graph: Graph,
-        resume_session_id: Option<String>,
-        resume_answer: Option<String>,
-        include_extra_info: bool,
+        _graph: Graph,
+        _resume_session_id: Option<String>,
+        _resume_answer: Option<String>,
+        _include_extra_info: bool,
     ) -> Result<Value, DagError> {
         // Collect state from stream output (For simplicity, `execute` relies upon `execute_stream`)
         unimplemented!("execute() is deprecated! Call execute_stream() and drain it wrapper style if needed. (Colmena single-turn API actually consumes execute_stream directly now).");
@@ -436,28 +436,6 @@ impl DagRunUseCase {
             }
         }
         None
-    }
-
-    fn find_bool_by_key(val: &Value, key: &str) -> bool {
-        if let Some(obj) = val.as_object() {
-            if let Some(status) = obj.get(key).and_then(|v| v.as_bool()) {
-                if status {
-                    return true;
-                }
-            }
-            for v in obj.values() {
-                if Self::find_bool_by_key(v, key) {
-                    return true;
-                }
-            }
-        } else if let Some(arr) = val.as_array() {
-            for v in arr {
-                if Self::find_bool_by_key(v, key) {
-                    return true;
-                }
-            }
-        }
-        false
     }
 
     fn build_inputs_for(

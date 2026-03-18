@@ -39,7 +39,7 @@ impl OrchestratorNode {
         let all_tasks = repo.get_tasks_for_run(session_id).await?;
         let phase_tasks: Vec<_> = all_tasks.iter().filter(|t| t.phase == phase).collect();
 
-        let mut phase_output = Value::Null;
+        let phase_output;
 
         if let Some(reactor_cfg) = config.get("phase_reactor") {
             println!("⚡ [OrchestratorNode] Internal Phase Reactor starting...");

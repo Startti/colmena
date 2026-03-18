@@ -13,14 +13,15 @@ pub enum DagRunStatus {
     Failed,
 }
 
-impl ToString for DagRunStatus {
-    fn to_string(&self) -> String {
-        match self {
-            DagRunStatus::Running => "RUNNING".to_string(),
-            DagRunStatus::Suspended => "SUSPENDED".to_string(),
-            DagRunStatus::Completed => "COMPLETED".to_string(),
-            DagRunStatus::Failed => "FAILED".to_string(),
-        }
+impl std::fmt::Display for DagRunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            DagRunStatus::Running => "RUNNING",
+            DagRunStatus::Suspended => "SUSPENDED",
+            DagRunStatus::Completed => "COMPLETED",
+            DagRunStatus::Failed => "FAILED",
+        };
+        write!(f, "{}", s)
     }
 }
 

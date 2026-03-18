@@ -256,7 +256,7 @@ impl ExecutableNode for LlmNode {
             .unwrap_or(false);
 
         // System Message (Optional)
-        let mut system_message_str = String::new();
+        let system_message_str;
         let system_message = if let Some(sys) = inputs
             .get("system_message")
             .and_then(|v| v.as_str())
