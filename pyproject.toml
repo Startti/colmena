@@ -8,6 +8,7 @@ description = "High-performance Rust library for multi-provider LLM orchestratio
 version = "0.3.0"
 readme = "README_PYPI.md"
 license = {text = "MIT"}
+
 authors = [
     {name = "Colmena Team", email = "contact@startti.co"}
 ]
