@@ -55,6 +55,9 @@ jobs:
       - name: Run Rust tests
         run: cargo test --verbose
 
+      - name: Clean target/wheels
+        run: rm -rf target/wheels
+
       - name: Build Python package
         run: maturin build --release --interpreter python${{ matrix.python-version }} --manifest-path src/libs/colmena/Cargo.toml
 
