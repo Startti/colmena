@@ -1,5 +1,5 @@
 use crate::llm::domain::{
-    Conversation, ConversationRepository, LlmError, LlmMessage, MessageRole, ThreadId,
+    Conversation, ConversationRepository, LlmError, LlmMessage, MessageRole, SessionId,
 };
 
 use async_trait::async_trait;
@@ -18,9 +18,9 @@ impl SqliteConversationRepository {
 
 #[async_trait]
 impl ConversationRepository for SqliteConversationRepository {
-    async fn get_by_id(&self, id: &ThreadId) -> Result<Conversation, LlmError> {
+    async fn get_by_id(&self, id: &SessionId) -> Result<Conversation, LlmError> {
         let rows = sqlx::query(
-            "SELECT role, content, tool_call_id, tool_calls, created_at FROM chat_messages WHERE thread_id = ? ORDER BY created_at ASC"
+            "SELECT role, content, tool_call_id, tool_calls, created_at FROM llm_node_history WHERE session_id = ? ORDER BY created_at ASC"
         )
         .bind(&id.0)
         .fetch_all(&self.pool)
@@ -66,12 +66,12 @@ impl ConversationRepository for SqliteConversationRepository {
             .collect();
 
         Ok(Conversation {
-            thread_id: id.clone(),
+            session_id: id.clone(),
             messages,
         })
     }
 
-    async fn add_message(&self, id: &ThreadId, message: LlmMessage) -> Result<(), LlmError> {
+    async fn add_message(&self, id: &SessionId, message: LlmMessage) -> Result<(), LlmError> {
         let role_str = match message.role() {
             MessageRole::System => "system",
             MessageRole::User => "user",
@@ -88,7 +88,7 @@ impl ConversationRepository for SqliteConversationRepository {
             .and_then(|tc| serde_json::to_string(tc).ok());
 
         sqlx::query(
-            "INSERT INTO chat_messages (id, thread_id, role, content, tool_call_id, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO llm_node_history (id, session_id, role, content, tool_call_id, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(msg_id)
         .bind(&id.0)
@@ -104,8 +104,8 @@ impl ConversationRepository for SqliteConversationRepository {
         Ok(())
     }
 
-    async fn delete(&self, id: &ThreadId) -> Result<(), LlmError> {
-        sqlx::query("DELETE FROM chat_messages WHERE thread_id = $1")
+    async fn delete(&self, id: &SessionId) -> Result<(), LlmError> {
+        sqlx::query("DELETE FROM llm_node_history WHERE session_id = ?")
             .bind(&id.0)
             .execute(&self.pool)
             .await

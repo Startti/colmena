@@ -1,0 +1,29 @@
+{
+  "nodes": {
+    "start": {
+      "type": "input",
+      "config": {
+        "msg": "Procesando paso 1..."
+      }
+    },
+    "controller": {
+      "type": "python_script",
+      "config": {
+        "code": "if '__colmena_resume_answer' in locals():\n    print(f'>>> RESUMEN RECIBIDO: {__colmena_resume_answer}')\n    output = {'status': 'PROCESADO', 'respuesta': __colmena_resume_answer}\nelse:\n    print(f'>>> SUSPENDIENDO: {msg}')\n    output = {'__colmena_status': 'SUSPENDED', 'info': 'Esperando aprobacion'}"
+      }
+    },
+    "final": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "start",
+      "to": "controller"
+    },
+    {
+      "from": "controller",
+      "to": "final"
+    }
+  ]
+}

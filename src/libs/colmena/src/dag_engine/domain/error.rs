@@ -22,4 +22,8 @@ pub enum DagError {
     /// devuelto por un `ExecutableNode`.
     #[error("Error de ejecución en el nodo: {0}")]
     NodeExecution(String),
+
+    /// Ocurre cuando hay un error persistiendo o recuperando el estado del DAG (Postgres).
+    #[error("Error de estado: {0}")]
+    StateError(String),
 }

@@ -92,10 +92,8 @@ impl ExecutableNode for PythonNode {
         })
         .await??; // Primer ? es para JoinError (Tokio), segundo ? es para el Result interno
 
-        // 4. Retornar estructura estándar
-        Ok(json!({
-            "output": output_json
-        }))
+        // 4. Retornar el valor directamente para permitir Auto-Flattening y Early-Stop (vía null)
+        Ok(output_json)
     }
 
     fn schema(&self) -> Value {
@@ -150,7 +148,7 @@ mod tests {
             .unwrap();
 
         // 4. Aserción: (10 * 5) + 2 = 52
-        assert_eq!(result["output"], 52);
+        assert_eq!(result, 52);
     }
 
     #[tokio::test]
@@ -169,6 +167,6 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result["output"], 4.0);
+        assert_eq!(result, 4.0);
     }
 }
