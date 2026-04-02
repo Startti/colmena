@@ -27,5 +27,4 @@ target
 .venv
 .env
 venv
-CLAUDE.md
 .claude
