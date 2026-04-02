@@ -64,6 +64,7 @@
 - `/python_dev` — Python development protocol (PyO3/maturin-aware, includes documentation)
 - `/typescript_dev` — TypeScript/Node.js development protocol (napi-rs-aware, includes documentation)
 - `/ideation` — Expert critic and ideation partner for brainstorming and planning
+- `/test_graph` — Run, validate, and debug JSON DAG graph files via the DAG engine CLI
 
 ## Current Status
 - See `docs/PENDING_TASKS.md` for detailed task tracking
