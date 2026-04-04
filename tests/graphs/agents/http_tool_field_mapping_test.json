@@ -1,0 +1,72 @@
+{
+  "comment": "Test HTTP tool with field_mapping and mergeable_fields. LLM generates mixed body content.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/create_post",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Create a blog post about the future of AI"
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o-mini",
+        "system_message": "You are a blog post writer. Use the create_blog_post tool to create posts. Be concise (2-3 sentences max for content).",
+        "enabled_tools": [
+          "create_blog_post"
+        ],
+        "tool_configurations": {
+          "create_blog_post": {
+            "name": "create_blog_post",
+            "node_type": "http_request",
+            "description": "Create a new blog post. You provide the title and content. Author is always 'Fulanito' and posts are always published.",
+            "fixed_config": {
+              "base_url": "https://jsonplaceholder.typicode.com",
+              "endpoint": "/posts",
+              "method": "POST",
+              "headers": {
+                "Content-Type": "application/json"
+              },
+              "body": {
+                "userId": 1,
+                "author": "Fulanito"
+              }
+            },
+            "exposed_inputs": [
+              "title",
+              "content",
+              "tags"
+            ],
+            "mergeable_fields": [
+              "body"
+            ],
+            "field_mapping": {
+              "title": "body",
+              "content": "body",
+              "tags": "body"
+            }
+          }
+        }
+      }
+    },
+    "log": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "agent"
+    },
+    {
+      "from": "agent",
+      "to": "log"
+    }
+  ]
+}
