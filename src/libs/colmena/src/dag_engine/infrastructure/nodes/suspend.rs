@@ -38,6 +38,14 @@ impl ExecutableNode for SuspendNode {
         }))
     }
 
+    fn default_input(&self) -> Option<&str> {
+        Some("question")
+    }
+
+    fn default_output(&self) -> Option<&str> {
+        Some("answer_received")
+    }
+
     fn schema(&self) -> Value {
         serde_json::json!({})
     }

@@ -1,0 +1,32 @@
+{
+  "comment": "Smart extraction: raw output object matching target field. Same as tests/graphs/basic/power.json",
+  "nodes": {
+    "start": {
+      "type": "mock_input",
+      "config": {
+        "input": 7
+      }
+    },
+    "pow_step": {
+      "type": "exponential",
+      "config": {
+        "exponent": 2
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "comment": "Implicit: start (no default_output) emits raw { input: 7 }. ExponentialNode.default_input='input' → smart extract .input",
+      "from": "start",
+      "to": "pow_step"
+    },
+    {
+      "comment": "Implicit: pow_step.output → log_result.input",
+      "from": "pow_step",
+      "to": "log_result"
+    }
+  ]
+}

@@ -421,6 +421,10 @@ impl ExecutableNode for OrchestratorNode {
         Some("Autonomous Orchestrator that manages the full Plan -> Execute -> Critique -> React lifecycle internally.")
     }
 
+    fn default_output(&self) -> Option<&str> {
+        Some("result")
+    }
+
     fn schema(&self) -> Value {
         json!({
             "type": "orchestrator",

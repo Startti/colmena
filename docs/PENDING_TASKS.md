@@ -151,6 +151,41 @@ Este documento rastrea el trabajo restante para completar la transformación del
 
 ---
 
+## ✅ Fase 10: Sistema de Puertos por Defecto (Default Input/Output) - COMPLETADO
+
+**Objetivo:** Simplificar la definición de edges en grafos DAG mediante declaración de puertos por defecto.
+
+### Implementación
+- [x] Agregar métodos `default_input()` y `default_output()` al trait `ExecutableNode`
+- [x] Implementar defaults en los 19 nodos del repositorio:
+  - [x] Nodos con input claro: `llm_call`, `output`, `log`, `suspend`, `loop_controller`, `exponential`
+  - [x] Nodos solo output: `add`, `subtract`, `multiply`, `divide`, `http_request`, `python_script`, etc.
+  - [x] Nodos con inputs dinámicos: `planner`, `critic`, `information_extraction`, `reactor`
+- [x] Modificar `build_inputs_for()` para usar defaults:
+  - [x] Resolución inteligente de campos de salida
+  - [x] Smart extraction (si source emite objeto raw y target espera campo específico)
+  - [x] Auto-flatten fallback (si target no tiene default_input)
+  - [x] Backward compatibility con edges existentes
+- [x] Crear suite de test graphs:
+  - [x] `test_case_1_1_implicit_with_defaults.json` ✅
+  - [x] `test_case_1_4_fully_explicit.json` ✅
+  - [x] `test_case_2_2_explicit_required_add.json` ✅
+  - [x] `test_case_4_1_smart_extraction.json` ✅
+  - [x] `test_case_4_2_no_field_match.json` ✅
+  - [x] `test_case_5_1_auto_flatten_fallback.json` (bloqueado por PyO3 init)
+- [x] Documentación:
+  - [x] `docs/agent_context/node_ports_reference.md` — Guía completa de puertos
+  - [x] Sección en `docs/developer_guide/12_dag_engine_guide.md` explicando el sistema
+  - [x] Ejemplos en todos los casos de uso
+
+### Beneficios
+- **Edges más limpios:** `{ from: "A", to: "B" }` en lugar de `{ from: "A.result", to: "B.prompt" }`
+- **Intención explícita:** No más "aplanado ciego" accidental
+- **Mejor DX:** Agentes y usuarios pueden crear grafos más fácilmente
+- **Backward compatible:** Todos los grafos existentes siguen funcionando
+
+---
+
 ## 📊 Criterios de Éxito
 
 - [ ] ✅ Los 3 proveedores (OpenAI, Anthropic, Gemini) soportan tool calling

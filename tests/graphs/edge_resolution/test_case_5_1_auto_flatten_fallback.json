@@ -1,0 +1,33 @@
+{
+  "comment": "Auto-flatten fallback: source has default_output, target has NO default_input → merge all keys",
+  "nodes": {
+    "start": {
+      "type": "mock_input",
+      "config": {
+        "a": 3,
+        "b": 4,
+        "c": 5
+      }
+    },
+    "python_node": {
+      "type": "python_script",
+      "config": {
+        "code": "output = a + b + c"
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "comment": "Implicit: start (no default_output) → python (no default_input). Fallback: flatten all keys a, b, c as Python variables",
+      "from": "start",
+      "to": "python_node"
+    },
+    {
+      "from": "python_node",
+      "to": "log_result"
+    }
+  ]
+}

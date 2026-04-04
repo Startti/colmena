@@ -1,0 +1,21 @@
+{
+  "nodes": {
+    "start": {
+      "type": "mock_input",
+      "config": {
+        "result": "Hello from mock input",
+        "usage": { "tokens": 42 }
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "comment": "Implicit: should resolve to start.result → log_result.input (both have defaults)",
+      "from": "start",
+      "to": "log_result"
+    }
+  ]
+}

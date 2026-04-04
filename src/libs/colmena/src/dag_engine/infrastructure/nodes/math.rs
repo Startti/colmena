@@ -35,6 +35,10 @@ impl ExecutableNode for AddNode {
         let b = get_f64(inputs.get("b"), "b")?;
         Ok(json!({ "output": a + b }))
     }
+    fn default_output(&self) -> Option<&str> {
+        Some("output")
+    }
+
     fn schema(&self) -> Value {
         json!({"type": "add", "inputs": {"a": "number", "b": "number"}, "outputs": {"output": "number"}})
     }
@@ -55,6 +59,10 @@ impl ExecutableNode for SubtractNode {
         let b = get_f64(inputs.get("b"), "b")?;
         Ok(json!({ "output": a - b }))
     }
+    fn default_output(&self) -> Option<&str> {
+        Some("output")
+    }
+
     fn schema(&self) -> Value {
         json!({"type": "subtract", "inputs": {"a": "number", "b": "number"}, "outputs": {"output": "number"}})
     }
@@ -75,6 +83,10 @@ impl ExecutableNode for MultiplyNode {
         let b = get_f64(inputs.get("b"), "b")?;
         Ok(json!({ "output": a * b }))
     }
+    fn default_output(&self) -> Option<&str> {
+        Some("output")
+    }
+
     fn schema(&self) -> Value {
         json!({"type": "multiply", "inputs": {"a": "number", "b": "number"}, "outputs": {"output": "number"}})
     }
@@ -99,6 +111,10 @@ impl ExecutableNode for DivideNode {
         }
         Ok(json!({ "output": a / b }))
     }
+    fn default_output(&self) -> Option<&str> {
+        Some("output")
+    }
+
     fn schema(&self) -> Value {
         json!({"type": "divide", "inputs": {"a": "number", "b": "number"}, "outputs": {"output": "number"}})
     }
@@ -124,6 +140,14 @@ impl ExecutableNode for ExponentialNode {
         let result = base.powf(exponent);
 
         Ok(json!({ "output": result }))
+    }
+
+    fn default_input(&self) -> Option<&str> {
+        Some("input")
+    }
+
+    fn default_output(&self) -> Option<&str> {
+        Some("output")
     }
 
     fn schema(&self) -> Value {

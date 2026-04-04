@@ -1,0 +1,40 @@
+{
+  "comment": "Demo: Encadenamiento de dos LLMs usando Default Ports. Step 1: Generate name. Step 2: Create birthday message.",
+  "nodes": {
+    "name_generator": {
+      "type": "llm_call",
+      "config": {
+        "provider": "gemini",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "prompt": "Generate a random person's name (first name and last name only). Respond with ONLY the name, nothing else.",
+        "temperature": 0.7
+      }
+    },
+    "birthday_message_creator": {
+      "type": "llm_call",
+      "config": {
+        "provider": "gemini",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "system_message": "You are a friendly birthday greeting writer. Keep the message short (2-3 sentences) and cheerful.",
+        "temperature": 0.8
+      }
+    },
+    "output_node": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    {
+      "comment": "IMPLICIT EDGE: name_generator.result → birthday_message_creator.prompt (using defaults)",
+      "from": "name_generator",
+      "to": "birthday_message_creator"
+    },
+    {
+      "comment": "EXPLICIT EDGE: birthday_message_creator.result → output_node.input",
+      "from": "birthday_message_creator",
+      "to": "output_node"
+    }
+  ]
+}

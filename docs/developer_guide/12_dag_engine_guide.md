@@ -64,6 +64,89 @@ Esta capa implementa todos los "Puertos" definidos en las capas `domain` y `appl
 -   **`infrastructure/registry.rs`**: Es el "Adaptador" que implementa el `NodeRegistryPort`. `HashMapNodeRegistry` usa un simple `HashMap` para conectar strings (ej. `"add"`, `"http_request"`) con la estructura concreta del nodo.
 -   **`main.rs`**: Es el "Adaptador Primario" o "Ensamblador". Inicializa el `HashMapNodeRegistry`, lo inyecta en el `DagRunUseCase`, y luego le indica al caso de uso que se ejecute.
 
+## 🔌 Sistema de Puertos por Defecto (Default Input/Output)
+
+> **Novedad v0.3.0**: Cada nodo ahora declara sus puertos de entrada y salida por defecto, permitiendo definir edges sin especificar campos de forma explícita.
+
+### ¿Por qué?
+
+Anteriormente, las edges requerían especificar siempre los campos:
+```json
+{ "from": "llm1.result", "to": "llm2.prompt" }  // Verboso
+```
+
+Ahora, con defaults, puedes simplificar:
+```json
+{ "from": "llm1", "to": "llm2" }  // Limpio e intencional
+```
+
+El engine automáticamente resuelve `llm1.result → llm2.prompt` basándose en los defaults declarados por cada nodo.
+
+### Cómo Funciona
+
+Cada nodo implementa:
+```rust
+fn default_input(&self) -> Option<&str> { Some("prompt") }
+fn default_output(&self) -> Option<&str> { Some("result") }
+```
+
+**Resolución de Edges:**
+
+| Edge | Comportamiento |
+|---|---|
+| `{ from: "A", to: "B" }` | Usa `A.default_output → B.default_input` |
+| `{ from: "A.field", to: "B" }` | Usa `A.field → B.default_input` |
+| `{ from: "A", to: "B.field" }` | Usa `A.default_output → B.field` |
+| `{ from: "A.x", to: "B.y" }` | Usa `A.x → B.y` (sin defaults) |
+
+**Smart Extraction & Fallbacks:**
+- Si source emite objeto raw sin campo de salida específico, y target espera campo específico, el engine extrae automáticamente ese campo.
+- Si target no tiene `default_input`, intenta aplanar (flatten) todas las claves del source.
+
+### Tabla de Puertos por Defecto
+
+Para la lista completa de nodos y sus defaults, ver [`docs/agent_context/node_ports_reference.md`](../agent_context/node_ports_reference.md).
+
+**Resumen:**
+- Nodos con `default_input`: `llm_call`, `output`, `log`, `suspend`, `loop_controller`, `exponential`
+- Nodos **sin** `default_input` (requieren campos explícitos): `add`, `subtract`, `multiply`, `divide`, `http_request`, `task_memory_writer`
+- Nodos con inputs dinámicos: `python_script`, `planner`, `critic`, `information_extraction`, `reactor`
+
+### Ejemplos
+
+#### Ejemplo 1: LLM Chain (Implicit)
+```json
+{
+  "edges": [
+    { "from": "researcher", "to": "writer" }
+  ]
+}
+```
+✅ Funciona: `researcher.result → writer.prompt`
+
+#### Ejemplo 2: Math Operations (Explicit Required)
+```json
+{
+  "edges": [
+    { "from": "input_a.output", "to": "add_node.a" },
+    { "from": "input_b.output", "to": "add_node.b" }
+  ]
+}
+```
+✅ Necesario: `AddNode` no tiene `default_input`
+
+#### Ejemplo 3: Smart Extraction
+```json
+{
+  "edges": [
+    { "from": "mock_input", "to": "exponential" }
+  ]
+}
+```
+✅ Mock emite `{ input: 5 }`, exponential extrae `.input` automáticamente
+
+---
+
 ## 📦 Tipos de Nodos Disponibles
 
 ### Nodos Matemáticos

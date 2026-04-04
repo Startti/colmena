@@ -256,7 +256,7 @@ impl DagRunUseCase {
                     .get_node(&node_config.node_type)
                     .ok_or_else(|| DagError::NodeTypeNotFound(node_config.node_type.clone()))?;
 
-                let mut inputs = self.build_inputs_for(&node_id, &graph.edges, &all_outputs)?;
+                let mut inputs = self.build_inputs_for(&node_id, &graph.edges, &all_outputs, &graph)?;
 
                 if let Some(ans) = &resume_answer {
                     inputs.insert("__colmena_resume_answer".to_string(), Value::String(ans.clone()));
@@ -443,6 +443,7 @@ impl DagRunUseCase {
         current_node_id: &str,
         all_edges: &[Edge],
         all_outputs: &HashMap<String, Value>,
+        graph: &Graph,
     ) -> Result<NodeInputs, DagError> {
         let mut inputs: NodeInputs = HashMap::new();
         let incoming_edges = all_edges
@@ -457,42 +458,94 @@ impl DagRunUseCase {
             }
             let source_node_id = parts_from[0];
 
-            let input_name = if parts_to.len() == 2 {
-                parts_to[1]
+            // --- Step 1: Resolve source output field ---
+            // If edge.from has no dot, use the source node's default_output (if any)
+            let source_field_opt = if parts_from.len() == 1 {
+                // Check if source node has a default_output
+                if let Some(source_node_cfg) = graph.nodes.get(source_node_id) {
+                    if let Some(source_node_impl) = self.registry.get_node(&source_node_cfg.node_type) {
+                        source_node_impl.default_output().map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             } else {
-                source_node_id
+                Some(parts_from[1].to_string())
             };
 
+            // Extract the value from all_outputs using the resolved field
             let value_to_pass = if let Some(source_output_value) = all_outputs.get(source_node_id) {
-                if parts_from.len() == 1 {
-                    source_output_value.clone()
-                } else {
-                    let json_pointer = parts_from[1].replace('.', "/");
-                    source_output_value
-                        .pointer(&format!("/{}", json_pointer))
-                        .cloned()
-                        .unwrap_or(Value::Null)
+                match &source_field_opt {
+                    Some(field) => {
+                        let json_pointer = field.replace('.', "/");
+                        let extracted = source_output_value
+                            .pointer(&format!("/{}", json_pointer))
+                            .cloned();
+
+                        // If the field wasn't found but the source output is an object,
+                        // it might mean the node is already flattened output (fallback)
+                        if extracted.is_none() && source_output_value.is_object() {
+                            source_output_value.clone()
+                        } else {
+                            extracted.unwrap_or(Value::Null)
+                        }
+                    }
+                    None => {
+                        // No default_output and no explicit field — use entire output
+                        source_output_value.clone()
+                    }
                 }
             } else {
                 Value::Null
             };
 
-            // --- AUTO-FLATTENING LOGIC ---
-            // If the target (edge.to) does NOT contain a dot, it means the user wants to
-            // inject the source data directly into the target node's input space.
-            // If the source data is an object, we merge its keys.
-            if parts_to.len() == 1 {
-                if let Some(obj) = value_to_pass.as_object() {
-                    for (k, v) in obj {
-                        inputs.insert(k.clone(), v.clone());
+            // --- Step 2: Resolve target input field ---
+            // If edge.to has no dot, use the target node's default_input (if any)
+            if parts_to.len() == 2 {
+                // Explicit target field — insert directly
+                inputs.insert(parts_to[1].to_string(), value_to_pass);
+            } else {
+                // No explicit field — check for default_input
+                let inserted = if let Some(target_node_cfg) = graph.nodes.get(current_node_id) {
+                    if let Some(target_node_impl) = self.registry.get_node(&target_node_cfg.node_type) {
+                        if let Some(field) = target_node_impl.default_input() {
+                            // Smart extraction: if no explicit source field and target has default_input,
+                            // try to extract that field from the source object
+                            let val_to_insert = if source_field_opt.is_none() && value_to_pass.is_object() {
+                                // Try to extract the target field from the source object
+                                value_to_pass
+                                    .get(field)
+                                    .cloned()
+                                    .unwrap_or_else(|| value_to_pass.clone())
+                            } else {
+                                value_to_pass.clone()
+                            };
+                            inputs.insert(field.to_string(), val_to_insert);
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
                     }
                 } else {
-                    // Fallback for non-objects: use the source node ID as the key
-                    inputs.insert(input_name.to_string(), value_to_pass);
+                    false
+                };
+
+                // If no default_input, try auto-flattening as last resort
+                if !inserted {
+                    if let Some(obj) = value_to_pass.as_object() {
+                        // Object — merge all its keys
+                        for (k, v) in obj {
+                            inputs.insert(k.clone(), v.clone());
+                        }
+                    } else {
+                        // Non-object — use source node ID as key
+                        inputs.insert(source_node_id.to_string(), value_to_pass);
+                    }
                 }
-            } else {
-                // Standard behavior: explicit mapping to a named input
-                inputs.insert(input_name.to_string(), value_to_pass);
             }
         }
         Ok(inputs)

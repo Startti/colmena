@@ -42,4 +42,18 @@ pub trait ExecutableNode: Send + Sync {
     fn description(&self) -> Option<&str> {
         None
     }
+
+    /// The default input port name for this node.
+    /// Used by the engine when an incoming edge specifies no target field.
+    /// Return `None` if the node requires explicit field mapping.
+    fn default_input(&self) -> Option<&str> {
+        None
+    }
+
+    /// The default output port name for this node.
+    /// Used by the engine when an outgoing edge specifies no source field.
+    /// Return `None` if the node has no single primary output.
+    fn default_output(&self) -> Option<&str> {
+        None
+    }
 }

@@ -327,6 +327,10 @@ impl ExecutableNode for ExtractionNode {
         Some("Extracts structured information from unstructured text based on a provided JSON schema using an LLM.")
     }
 
+    fn default_output(&self) -> Option<&str> {
+        Some("result")
+    }
+
     fn schema(&self) -> Value {
         json!({
             "type": "information_extraction",

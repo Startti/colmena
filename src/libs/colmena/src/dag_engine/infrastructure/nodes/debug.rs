@@ -44,6 +44,14 @@ impl ExecutableNode for LogNode {
         Some("Log data to console for debugging. Useful for inspecting intermediate values in the flow.")
     }
 
+    fn default_input(&self) -> Option<&str> {
+        Some("input")
+    }
+
+    fn default_output(&self) -> Option<&str> {
+        Some("output")
+    }
+
     fn schema(&self) -> Value {
         json!({"type": "log", "inputs": {"input": "any"}, "outputs": {"output": "any"}})
     }
@@ -65,6 +73,11 @@ impl ExecutableNode for MockInputNode {
         // Devuelve su propia configuración como salida
         Ok(config.clone())
     }
+
+    fn default_output(&self) -> Option<&str> {
+        None  // Emits raw config, no specific output field
+    }
+
     fn schema(&self) -> Value {
         json!({"type": "mock_input", "inputs": {}, "outputs": {"output": "any (from config)"}})
     }

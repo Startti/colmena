@@ -96,6 +96,10 @@ impl ExecutableNode for PythonNode {
         Ok(output_json)
     }
 
+    fn default_output(&self) -> Option<&str> {
+        Some("output")
+    }
+
     fn schema(&self) -> Value {
         json!({
             "name": "python_script",

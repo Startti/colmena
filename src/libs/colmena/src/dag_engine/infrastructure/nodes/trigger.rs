@@ -43,6 +43,10 @@ impl ExecutableNode for TriggerWebhookNode {
         Some("Trigger execution with webhook payloads. Acts as an entry point for external events.")
     }
 
+    fn default_output(&self) -> Option<&str> {
+        Some("output")
+    }
+
     fn schema(&self) -> Value {
         json!({
             "type": "trigger_webhook",

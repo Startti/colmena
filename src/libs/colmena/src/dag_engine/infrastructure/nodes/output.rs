@@ -29,6 +29,14 @@ impl ExecutableNode for OutputNode {
         }))
     }
 
+    fn default_input(&self) -> Option<&str> {
+        Some("input")
+    }
+
+    fn default_output(&self) -> Option<&str> {
+        Some("result")
+    }
+
     fn schema(&self) -> Value {
         serde_json::json!({})
     }

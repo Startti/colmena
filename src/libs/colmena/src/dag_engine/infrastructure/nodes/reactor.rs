@@ -381,6 +381,10 @@ impl ExecutableNode for ReactorNode {
         Some("Final reviewer that evaluates a synthesized response and either produces the user-facing answer or requests corrections/more info.")
     }
 
+    fn default_output(&self) -> Option<&str> {
+        Some("result")
+    }
+
     fn schema(&self) -> Value {
         reactor_schema()
     }

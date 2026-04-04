@@ -1,0 +1,23 @@
+{
+  "nodes": {
+    "start": {
+      "type": "input",
+      "config": {
+        "data": {
+          "result": "Full response",
+          "usage": { "prompt_tokens": 10, "completion_tokens": 20 }
+        }
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "comment": "Fully explicit: from.field → to.field (no defaults used)",
+      "from": "start.result",
+      "to": "log_result.input"
+    }
+  ]
+}

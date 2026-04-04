@@ -1,0 +1,24 @@
+{
+  "comment": "Raw output without field match: InputNode emits { question, context }. LogNode expects 'input' field that doesn't exist → fallback use whole object",
+  "nodes": {
+    "start": {
+      "type": "input",
+      "config": {
+        "data": {
+          "question": "What is the capital of France?",
+          "context": "Geography trivia"
+        }
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "comment": "Implicit: start.output emits raw { question, context }. LogNode.default_input='input' → field 'input' doesn't exist → fallback use whole object",
+      "from": "start",
+      "to": "log_result"
+    }
+  ]
+}

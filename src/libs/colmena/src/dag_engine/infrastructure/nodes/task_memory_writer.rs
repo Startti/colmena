@@ -133,6 +133,10 @@ impl ExecutableNode for TaskMemoryWriterNode {
         Some("Updates the PostgreSQL Task Memory with task results and applies Critic mutations (add/delete/suspend).")
     }
 
+    fn default_output(&self) -> Option<&str> {
+        Some("result")
+    }
+
     fn schema(&self) -> Value {
         json!({
             "type": "task_memory_writer",

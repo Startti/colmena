@@ -416,6 +416,10 @@ impl ExecutableNode for PlannerNode {
         Some("Breaks down a user request into a list of structured tasks using an LLM. The schema is built-in; only provider, api_key, model, and optional system_message are required.")
     }
 
+    fn default_output(&self) -> Option<&str> {
+        Some("result")
+    }
+
     fn schema(&self) -> Value {
         json!({
             "type": "planner",

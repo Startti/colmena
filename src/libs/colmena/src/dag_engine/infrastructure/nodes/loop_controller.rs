@@ -76,6 +76,14 @@ impl ExecutableNode for LoopControllerNode {
         Some("Aggregates state and determines whether to continue the loop (NEXT_TURN), suspend (SUSPENDED), or break it (FINISHED).")
     }
 
+    fn default_input(&self) -> Option<&str> {
+        Some("loop_status")
+    }
+
+    fn default_output(&self) -> Option<&str> {
+        Some("output")
+    }
+
     fn schema(&self) -> Value {
         json!({
             "type": "loop_controller",

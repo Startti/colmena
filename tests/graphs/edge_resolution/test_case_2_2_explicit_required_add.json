@@ -1,0 +1,38 @@
+{
+  "nodes": {
+    "input_a": {
+      "type": "mock_input",
+      "config": {
+        "output": 10
+      }
+    },
+    "input_b": {
+      "type": "mock_input",
+      "config": {
+        "output": 5
+      }
+    },
+    "add_node": {
+      "type": "add"
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "comment": "Explicit required: AddNode has NO default_input, must specify fields. Extract .output from each input",
+      "from": "input_a.output",
+      "to": "add_node.a"
+    },
+    {
+      "from": "input_b.output",
+      "to": "add_node.b"
+    },
+    {
+      "comment": "AddNode.output → log_result.input (both have defaults)",
+      "from": "add_node",
+      "to": "log_result"
+    }
+  ]
+}

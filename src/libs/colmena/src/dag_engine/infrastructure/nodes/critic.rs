@@ -391,6 +391,10 @@ impl ExecutableNode for CriticNode {
         Some("Reviews the result of a specialist agent and decides if the task is complete, needs more work, or requires user input.")
     }
 
+    fn default_output(&self) -> Option<&str> {
+        Some("result")
+    }
+
     fn schema(&self) -> Value {
         json!({
             "type": "critic",

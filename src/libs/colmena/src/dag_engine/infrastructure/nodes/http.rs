@@ -221,6 +221,10 @@ impl ExecutableNode for HttpNode {
         Some("Make HTTP requests to external APIs. Supports GET, POST, PUT, DELETE methods with custom headers and query parameters.")
     }
 
+    fn default_output(&self) -> Option<&str> {
+        Some("body")
+    }
+
     fn schema(&self) -> Value {
         json!({
             "type": "http_request",

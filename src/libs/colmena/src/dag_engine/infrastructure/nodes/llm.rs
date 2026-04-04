@@ -700,6 +700,14 @@ impl ExecutableNode for LlmNode {
         Some("Call language models with conversation memory and tool calling capabilities. Supports OpenAI, Gemini, and Anthropic.")
     }
 
+    fn default_input(&self) -> Option<&str> {
+        Some("prompt")
+    }
+
+    fn default_output(&self) -> Option<&str> {
+        Some("result")
+    }
+
     fn schema(&self) -> Value {
         json!({
             "type": "llm_call",

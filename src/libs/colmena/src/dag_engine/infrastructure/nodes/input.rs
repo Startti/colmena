@@ -35,6 +35,10 @@ impl ExecutableNode for InputNode {
         Some("Input node that outputs hardcoded data from its configuration.")
     }
 
+    fn default_output(&self) -> Option<&str> {
+        Some("output")
+    }
+
     fn schema(&self) -> Value {
         json!({
             "type": "input",
