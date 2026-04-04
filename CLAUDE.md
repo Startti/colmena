@@ -31,8 +31,45 @@
 - **Rust**: `cargo check`, `cargo build`, `cargo test`, `cargo clippy`, `cargo fmt`
 - **Python**: `maturin develop` (builds PyO3 bindings into `.venv`)
 - **TypeScript**: `npm run build` (napi build with `--features node`)
-- **DAG Engine CLI**: `cargo run --bin dag_engine -- --file <path>`
+- **DAG Engine CLI (run)**: `cargo run --bin dag_engine -- run <path/to/graph.json>`
+- **DAG Engine CLI (serve)**: `cargo run --bin dag_engine -- serve <path/to/graph.json>`
 - **Docs**: `cargo doc --no-deps --open`
+
+## Running JSON DAG Graphs
+
+All JSON test graphs live in `tests/graphs/` organized by category:
+
+| Categoría | Ruta | Descripción |
+|-----------|------|-------------|
+| Basic | `tests/graphs/basic/` | Nodos simples: math, log, trigger, suspend |
+| Agents | `tests/graphs/agents/` | llm_call, tool calling, streaming, extraction |
+| Advanced | `tests/graphs/advanced/` | Orchestrators, planners, multi-step agents |
+| Memory | `tests/graphs/memory/` | SQLite y PostgreSQL persistence |
+| External | `tests/graphs/external/` | HTTP requests, Amadeus API |
+| Media | `tests/graphs/media/` | Vision and document processing |
+
+### Ejecutar un grafo en modo local (run)
+```bash
+# Sintaxis
+cargo run --bin dag_engine -- run <path/to/graph.json>
+
+# Ejemplos concretos
+cargo run --bin dag_engine -- run tests/graphs/basic/trigger.json
+cargo run --bin dag_engine -- run tests/graphs/agents/llm_call.json
+cargo run --bin dag_engine -- run tests/graphs/agents/http_tool_dynamic_placeholder_test.json
+cargo run --bin dag_engine -- run tests/graphs/memory/memory_sqlite_example.json
+```
+
+### Opciones adicionales del subcomando `run`
+```bash
+cargo run --bin dag_engine -- run <file> [--session-id <id>] [--answer <text>] [--include-extra-info]
+```
+
+### Levantar como servidor HTTP (serve)
+```bash
+cargo run --bin dag_engine -- serve tests/graphs/agents/llm_call.json
+# Servidor disponible en http://localhost:3000
+```
 
 ## Architecture Rules
 - Domain layer has **ZERO** infrastructure dependencies

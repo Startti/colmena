@@ -105,18 +105,52 @@ cargo test -- --nocapture
 cargo tarpaulin --all-features --workspace
 ```
 
-### System Tests (DAGs)
+### System Tests (DAGs / JSON Graphs)
 
-El motor DAG (`dag_engine`) utiliza ficheros JSON para definir escenarios de prueba completos. Estos tests se encuentran organizados en `tests/dags/` por categoría y proveedor:
+El motor DAG (`dag_engine`) utiliza ficheros JSON para definir escenarios de prueba completos. Los grafos se encuentran en `tests/graphs/` organizados por categoría:
 
-- **`tests/dags/core/`**: Funcionalidades básicas del motor (triggers, logs, llm_calls simples).
-- **`tests/dags/tools/`**: Ejemplos de uso de herramientas (Tool Calling).
-- **`tests/dags/llm_files/`**: Tests de Visión y Documentos (organizados por `openai/` y `gemini/`).
-- **`tests/dags/memory/`**: Tests de persistencia con SQLite y PostgreSQL.
-- **`tests/dags/amadeus/`**: Integraciones específicas con la API de Amadeus.
-- **`tests/dags/media/`**: Activos multimedia (PDFs, imágenes) utilizados por los tests.
+| Categoría | Ruta | Contenido |
+|-----------|------|-----------|
+| **basic** | `tests/graphs/basic/` | Nodos simples: math, log, trigger, loop, suspend |
+| **agents** | `tests/graphs/agents/` | llm_call, tool calling, streaming, extraction, planner |
+| **advanced** | `tests/graphs/advanced/` | Orchestrators, multi-agent, trip planner |
+| **memory** | `tests/graphs/memory/` | Persistencia con SQLite y PostgreSQL |
+| **external** | `tests/graphs/external/` | HTTP requests, Amadeus API |
+| **media** | `tests/graphs/media/` | Archivo multimedia para tests de visión/documentos |
 
-Para ejecutar un test de sistema:
+#### Comando para ejecutar un grafo JSON
+
 ```bash
-cargo run --bin dag_engine -- run tests/dags/[categoria]/[fichero].json
+# Sintaxis base (modo local con test_payload)
+cargo run --bin dag_engine -- run <path/to/graph.json>
+
+# Opciones adicionales
+cargo run --bin dag_engine -- run <file> [--session-id <id>] [--answer <text>] [--include-extra-info]
+
+# Modo servidor (producción)
+cargo run --bin dag_engine -- serve <path/to/graph.json>
 ```
+
+#### Ejemplos concretos por categoría
+
+```bash
+# Básicos
+cargo run --bin dag_engine -- run tests/graphs/basic/trigger.json
+cargo run --bin dag_engine -- run tests/graphs/basic/power.json
+
+# Agentes con LLM
+cargo run --bin dag_engine -- run tests/graphs/agents/llm_call.json
+cargo run --bin dag_engine -- run tests/graphs/agents/agent_with_tools.json
+cargo run --bin dag_engine -- run tests/graphs/agents/http_tool_dynamic_placeholder_test.json
+cargo run --bin dag_engine -- run tests/graphs/agents/extraction_example.json
+
+# Memoria
+cargo run --bin dag_engine -- run tests/graphs/memory/memory_sqlite_example.json
+cargo run --bin dag_engine -- run tests/graphs/memory/memory_postgres_example.json
+
+# HTTP externo
+cargo run --bin dag_engine -- run tests/graphs/external/http_request.json
+```
+
+> [!NOTE]
+> Los grafos que usan `trigger_webhook` pueden ejecutarse en modo `run` gracias al campo `test_payload` en su configuración, que simula el payload de entrada sin necesidad de un servidor HTTP real.
