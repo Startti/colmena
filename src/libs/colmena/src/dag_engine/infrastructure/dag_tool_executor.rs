@@ -128,13 +128,13 @@ impl ToolExecutor for DagToolExecutor {
         let node_type = &tool_call.function.name;
 
         // 1. Check if it's a configured tool or a raw node
-        let (node, fixed_config) = if let Some(config) = self.tool_configurations.get(node_type) {
+        let (node, fixed_config, tool_cfg) = if let Some(config) = self.tool_configurations.get(node_type) {
             let node = self.registry.get_node(&config.node_type).ok_or_else(|| {
                 LlmError::ToolNotFound {
                     name: config.node_type.clone(),
                 }
             })?;
-            (node, Some(config.fixed_config.clone()))
+            (node, Some(config.fixed_config.clone()), Some(config))
         } else {
             let node = self
                 .registry
@@ -142,21 +142,67 @@ impl ToolExecutor for DagToolExecutor {
                 .ok_or_else(|| LlmError::ToolNotFound {
                     name: node_type.clone(),
                 })?;
-            (node, None)
+            (node, None, None)
         };
 
         // 2. Parse arguments
-        let args: HashMap<String, Value> = serde_json::from_str(&tool_call.function.arguments)
+        let mut args: HashMap<String, Value> = serde_json::from_str(&tool_call.function.arguments)
             .map_err(|e| LlmError::InvalidToolCall {
                 reason: format!("Failed to parse arguments for tool {}: {}", node_type, e),
             })?;
 
-        // 3. Execute the node
-        // Merge fixed_config with arguments if present
-        let mut final_args = args;
+        // 3. Apply field_mapping and merge fixed_config
+        let mut final_args: HashMap<String, Value> = HashMap::new();
+
+        // ── Step A: Apply field_mapping ──────────────────────────────────────────
+        // Each mapped param is moved into the named container object.
+        // Unmapped params are kept at top level.
+        if let Some(mapping) = tool_cfg.and_then(|c| c.field_mapping.as_ref()) {
+            for (param_name, dest_field) in mapping {
+                if let Some(value) = args.remove(param_name) {
+                    let container = final_args
+                        .entry(dest_field.clone())
+                        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                    if let Value::Object(map) = container {
+                        map.insert(param_name.clone(), value);
+                    }
+                }
+            }
+        }
+
+        // Remaining unmapped args go to top level
+        for (k, v) in args {
+            final_args.insert(k, v);
+        }
+
+        // ── Step B: Merge/apply fixed_config ─────────────────────────────────────
         if let Some(fixed) = fixed_config {
-            for (k, v) in fixed {
-                final_args.insert(k, v);
+            let mergeable: &[String] = tool_cfg
+                .and_then(|c| c.mergeable_fields.as_deref())
+                .unwrap_or(&[]);
+
+            for (k, fixed_val) in &fixed {
+                if mergeable.contains(k) {
+                    // Merge: fixed is the base, dynamic is the overlay
+                    match (fixed_val, final_args.get(k)) {
+                        (Value::Object(fixed_obj), Some(Value::Object(dyn_obj))) => {
+                            let mut merged = fixed_obj.clone();
+                            for (dk, dv) in dyn_obj {
+                                merged.insert(dk.clone(), dv.clone());
+                            }
+                            final_args.insert(k.clone(), Value::Object(merged));
+                        }
+                        // fixed is object but no dynamic counterpart → use fixed as-is
+                        (_, None) => {
+                            final_args.insert(k.clone(), fixed_val.clone());
+                        }
+                        // non-object types: dynamic already in final_args, fixed ignored
+                        _ => {}
+                    }
+                } else {
+                    // Non-mergeable: always apply fixed (matches previous behaviour)
+                    final_args.insert(k.clone(), fixed_val.clone());
+                }
             }
         }
 
@@ -422,6 +468,8 @@ mod tests {
                 fixed_config,
                 exposed_inputs: None,
                 parameters: None,
+                mergeable_fields: None,
+                field_mapping: None,
             },
         );
 
@@ -441,5 +489,190 @@ mod tests {
 
         // MockNode schema has "a". We fixed it. So properties should be empty.
         assert!(configured_tool.parameters.properties.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_field_mapping_to_body() {
+        // field_mapping: title → body, message → body
+        // LLM args: {title: "T", message: "M"}
+        // Expected: inputs["body"] == {title: "T", message: "M"}
+        let registry = Arc::new(MockRegistry::new());
+        let mut tool_configs = HashMap::new();
+
+        let mut field_mapping = HashMap::new();
+        field_mapping.insert("title".to_string(), "body".to_string());
+        field_mapping.insert("message".to_string(), "body".to_string());
+
+        tool_configs.insert(
+            "test_mapping".to_string(),
+            ToolConfiguration {
+                name: "test_mapping".to_string(),
+                description: "Test field mapping".to_string(),
+                node_type: "mock_tool".to_string(),
+                fixed_config: HashMap::new(),
+                exposed_inputs: None,
+                parameters: None,
+                mergeable_fields: None,
+                field_mapping: Some(field_mapping),
+            },
+        );
+
+        let executor = DagToolExecutor::new(registry, tool_configs);
+
+        let tool_call = ToolCall::new(
+            "call_1".to_string(),
+            FunctionCall::new(
+                "test_mapping".to_string(),
+                r#"{"title": "T", "message": "M"}"#.to_string(),
+            ),
+        );
+
+        let result = executor.execute(&tool_call).await.unwrap();
+        assert!(result.success);
+
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(output["body"]["title"], "T");
+        assert_eq!(output["body"]["message"], "M");
+    }
+
+    #[tokio::test]
+    async fn test_field_mapping_merge_with_fixed_body() {
+        // fixed_config: {body: {name: "Fulanito"}}
+        // mergeable_fields: ["body"]
+        // field_mapping: {message → body}
+        // LLM args: {message: "Hi"}
+        // Expected: inputs["body"] == {name: "Fulanito", message: "Hi"}
+        let registry = Arc::new(MockRegistry::new());
+        let mut tool_configs = HashMap::new();
+
+        let mut fixed_config = HashMap::new();
+        let mut body_fixed = serde_json::Map::new();
+        body_fixed.insert("name".to_string(), serde_json::json!("Fulanito"));
+        fixed_config.insert("body".to_string(), Value::Object(body_fixed));
+
+        let mut field_mapping = HashMap::new();
+        field_mapping.insert("message".to_string(), "body".to_string());
+
+        tool_configs.insert(
+            "test_merge".to_string(),
+            ToolConfiguration {
+                name: "test_merge".to_string(),
+                description: "Test field mapping with merge".to_string(),
+                node_type: "mock_tool".to_string(),
+                fixed_config,
+                exposed_inputs: None,
+                parameters: None,
+                mergeable_fields: Some(vec!["body".to_string()]),
+                field_mapping: Some(field_mapping),
+            },
+        );
+
+        let executor = DagToolExecutor::new(registry, tool_configs);
+
+        let tool_call = ToolCall::new(
+            "call_2".to_string(),
+            FunctionCall::new("test_merge".to_string(), r#"{"message": "Hi"}"#.to_string()),
+        );
+
+        let result = executor.execute(&tool_call).await.unwrap();
+        assert!(result.success);
+
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(output["body"]["name"], "Fulanito");
+        assert_eq!(output["body"]["message"], "Hi");
+    }
+
+    #[tokio::test]
+    async fn test_mergeable_headers() {
+        // fixed_config: {headers: {Authorization: "Bearer x"}}
+        // mergeable_fields: ["headers"]
+        // field_mapping: {x_request_id → headers}
+        // LLM args: {x_request_id: "abc"}
+        // Expected: inputs["headers"] == {Authorization: "Bearer x", x_request_id: "abc"}
+        let registry = Arc::new(MockRegistry::new());
+        let mut tool_configs = HashMap::new();
+
+        let mut fixed_config = HashMap::new();
+        let mut headers_fixed = serde_json::Map::new();
+        headers_fixed.insert(
+            "Authorization".to_string(),
+            serde_json::json!("Bearer x"),
+        );
+        fixed_config.insert("headers".to_string(), Value::Object(headers_fixed));
+
+        let mut field_mapping = HashMap::new();
+        field_mapping.insert("x_request_id".to_string(), "headers".to_string());
+
+        tool_configs.insert(
+            "test_headers".to_string(),
+            ToolConfiguration {
+                name: "test_headers".to_string(),
+                description: "Test headers merge".to_string(),
+                node_type: "mock_tool".to_string(),
+                fixed_config,
+                exposed_inputs: None,
+                parameters: None,
+                mergeable_fields: Some(vec!["headers".to_string()]),
+                field_mapping: Some(field_mapping),
+            },
+        );
+
+        let executor = DagToolExecutor::new(registry, tool_configs);
+
+        let tool_call = ToolCall::new(
+            "call_3".to_string(),
+            FunctionCall::new(
+                "test_headers".to_string(),
+                r#"{"x_request_id": "abc"}"#.to_string(),
+            ),
+        );
+
+        let result = executor.execute(&tool_call).await.unwrap();
+        assert!(result.success);
+
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(output["headers"]["Authorization"], "Bearer x");
+        assert_eq!(output["headers"]["x_request_id"], "abc");
+    }
+
+    #[tokio::test]
+    async fn test_backward_compat_no_mapping() {
+        // No field_mapping, no mergeable_fields
+        // fixed_config: {a: "fixed"}
+        // LLM args: {b: "dynamic"}
+        // Expected: inputs == {a: "fixed", b: "dynamic"} (same as before)
+        let registry = Arc::new(MockRegistry::new());
+        let mut tool_configs = HashMap::new();
+
+        let mut fixed_config = HashMap::new();
+        fixed_config.insert("a".to_string(), serde_json::json!("fixed"));
+
+        tool_configs.insert(
+            "test_compat".to_string(),
+            ToolConfiguration {
+                name: "test_compat".to_string(),
+                description: "Test backward compatibility".to_string(),
+                node_type: "mock_tool".to_string(),
+                fixed_config,
+                exposed_inputs: None,
+                parameters: None,
+                mergeable_fields: None,
+                field_mapping: None,
+            },
+        );
+
+        let executor = DagToolExecutor::new(registry, tool_configs);
+
+        let tool_call = ToolCall::new(
+            "call_4".to_string(),
+            FunctionCall::new("test_compat".to_string(), r#"{"b": "dynamic"}"#.to_string()),
+        );
+
+        let result = executor.execute(&tool_call).await.unwrap();
+        assert!(result.success);
+
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(output["a"], "fixed");
+        assert_eq!(output["b"], "dynamic");
     }
 }

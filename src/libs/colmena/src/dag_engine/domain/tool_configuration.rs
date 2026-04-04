@@ -23,4 +23,18 @@ pub struct ToolConfiguration {
 
     /// Optional JSON Schema for parameters to override node schema
     pub parameters: Option<Value>,
+
+    /// Fields where fixed + dynamic values should be merged (not overridden).
+    /// Example: ["headers", "query_params", "body"]
+    /// When merging a field listed here, the fixed object is the base
+    /// and the dynamic (LLM-provided) object overlays it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mergeable_fields: Option<Vec<String>>,
+
+    /// Maps each LLM parameter to its destination container field.
+    /// The parameter value is moved into that container under its own key.
+    /// Example: {"title" → "body", "x_request_id" → "headers"}
+    /// Parameters not listed in this map are kept at the top level.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub field_mapping: Option<HashMap<String, String>>,
 }
