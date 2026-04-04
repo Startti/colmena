@@ -1,0 +1,53 @@
+{
+  "comment": "Complex smart field extraction with array handling. Demonstrates automatic field matching, nested extraction, and array flattening without explicit field mapping.",
+  "metadata": {
+    "category": "edge_resolution",
+    "features": ["smart_extraction", "array_flattening", "nested_fields", "field_matching"],
+    "difficulty": "advanced",
+    "tests_feature": "Field extraction algorithm with complex nested structures"
+  },
+  "nodes": {
+    "data_source": {
+      "type": "python_script",
+      "config": {
+        "script": "return {'users': [{'id': 1, 'name': 'Alice', 'email': 'alice@example.com'}, {'id': 2, 'name': 'Bob', 'email': 'bob@example.com'}], 'metadata': {'total': 2, 'page': 1}}"
+      }
+    },
+    "email_extractor": {
+      "type": "python_script",
+      "config": {
+        "script": "# Extract emails from users array\nemails = [user['email'] for user in users['users']]\nreturn {'email_list': emails, 'count': len(emails), 'users': users}"
+      }
+    },
+    "name_formatter": {
+      "type": "python_script",
+      "config": {
+        "script": "# Format user names from extracted users\nformatted = [f\"{u['name']} ({u['email']})\" for u in users['users']]\nreturn {'formatted_names': formatted}"
+      }
+    },
+    "log_emails": {
+      "type": "log"
+    },
+    "log_names": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "data_source",
+      "to": "email_extractor"
+    },
+    {
+      "from": "data_source",
+      "to": "name_formatter"
+    },
+    {
+      "from": "email_extractor",
+      "to": "log_emails"
+    },
+    {
+      "from": "name_formatter",
+      "to": "log_names"
+    }
+  ]
+}

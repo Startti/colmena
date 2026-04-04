@@ -1,0 +1,82 @@
+{
+  "comment": "HTTP request with nested $DYNAMIC body values. LLM generates multiple nested object properties like user info, metadata, and content.",
+  "metadata": {
+    "category": "external",
+    "features": ["$DYNAMIC", "nested_objects", "body_merging", "LLM_tool_calling"],
+    "provider": "openai",
+    "difficulty": "advanced",
+    "requires_env": ["OPENAI_API_KEY"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/create-document",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Create a new document with specific metadata and content. Include title, description, tags, and author info."
+        }
+      }
+    },
+    "document_creator_agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o-mini",
+        "system_message": "You are a document management system. Use the create_document tool to create new documents. Always provide: title, description, tags (as array), and nested author object with name and email.",
+        "temperature": 0.5,
+        "enabled_tools": ["create_document"],
+        "tool_configurations": {
+          "create_document": {
+            "name": "create_document",
+            "node_type": "http_request",
+            "description": "Create a new document with metadata. You must provide title, description, tags, and author information.",
+            "fixed_config": {
+              "base_url": "https://api.documents.example.com",
+              "endpoint": "/v1/documents",
+              "method": "POST",
+              "headers": {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer ${DOCUMENT_API_KEY}"
+              },
+              "body": {
+                "status": "draft",
+                "version": 1,
+                "created_by": "system",
+                "title": "$DYNAMIC",
+                "description": "$DYNAMIC",
+                "tags": "$DYNAMIC",
+                "metadata": {
+                  "author": {
+                    "name": "$DYNAMIC",
+                    "email": "$DYNAMIC"
+                  },
+                  "category": "user_generated",
+                  "priority": "$DYNAMIC"
+                },
+                "content": {
+                  "text": "$DYNAMIC",
+                  "format": "markdown"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "log_document": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "document_creator_agent"
+    },
+    {
+      "from": "document_creator_agent",
+      "to": "log_document"
+    }
+  ]
+}

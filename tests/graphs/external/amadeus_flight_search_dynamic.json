@@ -1,0 +1,87 @@
+{
+  "comment": "Amadeus flight search with $DYNAMIC query parameters. LLM generates specific search criteria (origin, destination, date, passengers).",
+  "metadata": {
+    "category": "external",
+    "features": ["$DYNAMIC", "query_params", "OAuth2", "LLM_tool_calling"],
+    "provider": "openai",
+    "difficulty": "advanced",
+    "requires_env": ["OPENAI_API_KEY", "AMADEUS_CLIENT_ID", "AMADEUS_CLIENT_SECRET", "DATABASE_URL"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/search-flights",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Find flights from London to Paris departing tomorrow for 2 passengers."
+        }
+      }
+    },
+    "get_amadeus_token": {
+      "type": "http_request",
+      "config": {
+        "base_url": "https://api.amadeus.com/v1/security/oauth2/token",
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        "body": "grant_type=client_credentials&client_id=${AMADEUS_CLIENT_ID}&client_secret=${AMADEUS_CLIENT_SECRET}"
+      }
+    },
+    "flight_search_agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o-mini",
+        "system_message": "You are a travel assistant. Use the search_flights tool to find flights matching the user's request. Always provide: origin city code (e.g., LON, PAR, CDG), destination city code, departure date (YYYY-MM-DD), and number of adults.",
+        "temperature": 0.1,
+        "session_id": "amadeus_flight_search",
+        "connection_url": "${DATABASE_URL}",
+        "enabled_tools": ["search_flights"],
+        "tool_configurations": {
+          "search_flights": {
+            "name": "search_flights",
+            "node_type": "http_request",
+            "description": "Search for available flight offers. Generates a list of flight options with prices and availability.",
+            "fixed_config": {
+              "base_url": "https://api.amadeus.com",
+              "endpoint": "/v2/shopping/flight-offers",
+              "method": "GET",
+              "bearer_token": "${context.amadeus_token}",
+              "query_params": {
+                "originLocationCode": "$DYNAMIC",
+                "destinationLocationCode": "$DYNAMIC",
+                "departureDate": "$DYNAMIC",
+                "adults": "$DYNAMIC",
+                "max": "5"
+              }
+            }
+          }
+        }
+      }
+    },
+    "log_results": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "get_amadeus_token"
+    },
+    {
+      "from": "trigger",
+      "to": "flight_search_agent"
+    },
+    {
+      "from": "get_amadeus_token.access_token",
+      "to": "flight_search_agent.context.amadeus_token"
+    },
+    {
+      "from": "flight_search_agent",
+      "to": "log_results"
+    }
+  ]
+}

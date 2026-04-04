@@ -1,0 +1,71 @@
+{
+  "comment": "Multi-step workflow using only default ports (no explicit port mapping). Demonstrates implicit port resolution with chained operations.",
+  "metadata": {
+    "category": "edge_resolution",
+    "features": ["default_ports", "implicit_routing", "chained_operations"],
+    "difficulty": "beginner",
+    "tests_feature": "default_input_port and default_output_port"
+  },
+  "nodes": {
+    "input_data": {
+      "type": "input",
+      "config": {
+        "schema": {
+          "type": "object",
+          "properties": {
+            "base_number": {
+              "type": "number"
+            }
+          }
+        }
+      },
+      "default_output_port": "output"
+    },
+    "add_ten": {
+      "type": "add",
+      "config": {
+        "left": 10
+      },
+      "default_input_port": "right",
+      "default_output_port": "result"
+    },
+    "multiply_two": {
+      "type": "multiply",
+      "config": {
+        "left": 2
+      },
+      "default_input_port": "right",
+      "default_output_port": "result"
+    },
+    "subtract_five": {
+      "type": "subtract",
+      "config": {
+        "left": 5
+      },
+      "default_input_port": "right",
+      "default_output_port": "result"
+    },
+    "log_result": {
+      "type": "log",
+      "default_input_port": "input"
+    }
+  },
+  "edges": [
+    {
+      "from": "input_data",
+      "to": "add_ten"
+    },
+    {
+      "from": "add_ten",
+      "to": "multiply_two"
+    },
+    {
+      "from": "multiply_two",
+      "to": "subtract_five"
+    },
+    {
+      "from": "subtract_five",
+      "to": "log_result"
+    }
+  ]
+}

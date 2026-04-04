@@ -1,0 +1,68 @@
+{
+  "comment": "HTTP request with $DYNAMIC headers. LLM generates custom header values like API keys, request IDs, or authentication tokens.",
+  "metadata": {
+    "category": "external",
+    "features": ["$DYNAMIC", "headers", "custom_auth", "LLM_tool_calling"],
+    "provider": "openai",
+    "difficulty": "intermediate",
+    "requires_env": ["OPENAI_API_KEY"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/send-api-request",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Send a request to the external API with a unique request ID and custom authorization header."
+        }
+      }
+    },
+    "api_caller_agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o-mini",
+        "system_message": "You are an API integration specialist. Use the call_external_api tool to make HTTP requests. Generate unique request IDs using format 'REQ-YYYY-MM-DD-HHmmss-XXXX' and provide appropriate custom headers.",
+        "temperature": 0.3,
+        "enabled_tools": ["call_external_api"],
+        "tool_configurations": {
+          "call_external_api": {
+            "name": "call_external_api",
+            "node_type": "http_request",
+            "description": "Make HTTP request to external API with custom headers. You must provide X-Request-ID and X-Custom-Auth values.",
+            "fixed_config": {
+              "base_url": "https://api.example.com",
+              "endpoint": "/data",
+              "method": "POST",
+              "headers": {
+                "Content-Type": "application/json",
+                "X-Request-ID": "$DYNAMIC",
+                "X-Custom-Auth": "$DYNAMIC",
+                "User-Agent": "Colmena/1.0"
+              },
+              "body": {
+                "action": "process",
+                "timestamp": "${now()}"
+              }
+            }
+          }
+        }
+      }
+    },
+    "log_response": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "api_caller_agent"
+    },
+    {
+      "from": "api_caller_agent",
+      "to": "log_response"
+    }
+  ]
+}

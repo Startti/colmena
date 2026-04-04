@@ -1,0 +1,56 @@
+{
+  "comment": "Demonstrates default output ports with named outputs. Single node with multiple outputs, each consumed by different downstream nodes without explicit port specification.",
+  "metadata": {
+    "category": "edge_resolution",
+    "features": ["default_output_ports", "named_outputs", "multiple_consumers"],
+    "difficulty": "beginner",
+    "tests_feature": "default_output_port field with multi-output nodes"
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/process",
+        "method": "POST",
+        "test_payload": {
+          "value": 42
+        }
+      },
+      "default_output_port": "output"
+    },
+    "splitter": {
+      "type": "python_script",
+      "config": {
+        "script": "return {'even': input % 2 == 0, 'doubled': input * 2, 'string': str(input)}"
+      },
+      "default_output_port": "result"
+    },
+    "log_even": {
+      "type": "log"
+    },
+    "log_doubled": {
+      "type": "log"
+    },
+    "log_string": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "splitter"
+    },
+    {
+      "from": "splitter.result.even",
+      "to": "log_even"
+    },
+    {
+      "from": "splitter.result.doubled",
+      "to": "log_doubled"
+    },
+    {
+      "from": "splitter.result.string",
+      "to": "log_string"
+    }
+  ]
+}
