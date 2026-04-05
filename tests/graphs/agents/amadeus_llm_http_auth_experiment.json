@@ -1,0 +1,132 @@
+{
+  "comment": "EXPERIMENT: Can the LLM autonomously handle Amadeus OAuth2 auth + flight search using HTTP tools with Secure Values? The LLM is given TWO tools: (1) get_amadeus_token — returns <value_N> hash, (2) search_flights — receives the hash, auto-injected as real Bearer token. Goal: verify that the model handles the full auth+search flow end-to-end using tools alone.",
+  "metadata": {
+    "category": "agents",
+    "experiment": true,
+    "features": [
+      "LLM-driven auth flow",
+      "secure: true on auth tool",
+      "auto-injection in search tool",
+      "node_schema",
+      "two-step tool chain"
+    ],
+    "requires_env": [
+      "AMADEUS_CLIENT_ID",
+      "AMADEUS_CLIENT_SECRET",
+      "OPENAI_API_KEY",
+      "DATABASE_URL",
+      "SECURE_VALUES_KEY"
+    ]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/amadeus-llm-auth-experiment",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "I need to find flights from Madrid (MAD) to Barcelona (BCN) on May 1st 2026 for 1 adult. First authenticate with the Amadeus API to get a token, then use that token to search for available flights. Return the top 3 cheapest options with price and duration."
+        }
+      }
+    },
+    "travel_agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "api_key": "${OPENAI_API_KEY}",
+        "system_message": "You are a travel agent assistant with access to the Amadeus API. To find flights, you MUST follow this exact sequence:\n1. FIRST call get_amadeus_token to authenticate and obtain an access token. The token returned will appear as a placeholder like <value_1> — this is normal and secure.\n2. THEN call search_flights, passing the token placeholder exactly as returned (e.g., '<value_1>'). The system will automatically inject the real token into the API call.\nAlways complete BOTH steps to search for flights. Never skip authentication.",
+        "temperature": 0.2,
+        "max_tokens": 800,
+        "stream": false,
+        "enabled_tools": [
+          "get_amadeus_token",
+          "search_flights"
+        ],
+        "tool_configurations": {
+          "get_amadeus_token": {
+            "name": "get_amadeus_token",
+            "node_type": "http_request",
+            "description": "Authenticate with the Amadeus API using client credentials. Returns an access_token that you must pass to search_flights. The token will appear as a secure placeholder like <value_1>.",
+            "fixed_config": {
+              "base_url": "https://api.amadeus.com/v1/security/oauth2",
+              "endpoint": "/token",
+              "method": "POST",
+              "headers": {
+                "Content-Type": "application/x-www-form-urlencoded"
+              },
+              "body": "grant_type=client_credentials&client_id=${AMADEUS_CLIENT_ID}&client_secret=${AMADEUS_CLIENT_SECRET}",
+              "secure": true
+            }
+          },
+          "search_flights": {
+            "name": "search_flights",
+            "node_type": "http_request",
+            "description": "Search for flight offers on Amadeus. Requires the access_token obtained from get_amadeus_token. Pass the token placeholder exactly as received (e.g., '<value_1>').",
+            "node_schema": {
+              "base_url": {
+                "type": "string",
+                "fixed": "https://api.amadeus.com"
+              },
+              "endpoint": {
+                "type": "string",
+                "fixed": "/v2/shopping/flight-offers"
+              },
+              "method": {
+                "type": "string",
+                "fixed": "GET"
+              },
+              "bearer_token": {
+                "type": "string",
+                "required": true,
+                "description": "The Amadeus access token obtained from get_amadeus_token. Pass the placeholder exactly as received (e.g., '<value_1>')."
+              },
+              "query_params": {
+                "type": "object",
+                "properties": {
+                  "max": {
+                    "type": "string",
+                    "fixed": "5"
+                  },
+                  "originLocationCode": {
+                    "type": "string",
+                    "required": true,
+                    "description": "IATA origin airport code (e.g., 'MAD' for Madrid)"
+                  },
+                  "destinationLocationCode": {
+                    "type": "string",
+                    "required": true,
+                    "description": "IATA destination airport code (e.g., 'BCN' for Barcelona)"
+                  },
+                  "departureDate": {
+                    "type": "string",
+                    "required": true,
+                    "description": "Departure date in YYYY-MM-DD format"
+                  },
+                  "adults": {
+                    "type": "string",
+                    "required": true,
+                    "description": "Number of adult passengers (1-9)"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger.prompt",
+      "to": "travel_agent.prompt"
+    },
+    {
+      "from": "travel_agent.result",
+      "to": "log_result"
+    }
+  ]
+}

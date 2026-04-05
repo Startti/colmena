@@ -30,115 +30,66 @@ impl ProviderKind {
 Crea un nuevo fichero, por ejemplo `src/llm/infrastructure/mistral_adapter.rs`. Este adaptador debe implementar el trait `LlmRepository`.
 
 ```rust
-// src/llm/infrastructure/mistral_adapter.rs
-use crate::llm::domain::{
-    LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmError,
-};
-use async_trait::async_trait;
-use reqwest::Client;
-
-pub struct MistralAdapter {
-    client: Client,
-    base_url: String,
-}
-
-impl MistralAdapter {
-    pub fn new() -> Self {
-        Self {
-            client: Client::new(),
-            base_url: "https://api.mistral.ai/v1".to_string(),
-        }
-    }
-}
-
 #[async_trait]
 impl LlmRepository for MistralAdapter {
     async fn call(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
-        // 1. Construir el cuerpo de la petición (body) específico para Mistral
-        // 2. Realizar la llamada HTTP con reqwest
-        // 3. Parsear la respuesta del API
-        // 4. Convertir la respuesta a la entidad LlmResponse del dominio
-        todo!("Implementar la llamada para Mistral")
+        // 1. Mapear LlmRequest (incluyendo messages y tools) al formato de Mistral
+        // 2. Realizar POST con reqwest
+        // 3. Convertir respuesta JSON a LlmResponse (mapeando contenido y usage)
+        // 4. SI SOPORTA TOOLS: Mapear tool_calls del API a domain::ToolCall
+        todo!()
     }
 
     async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
-        // Implementar streaming si el API de Mistral lo soporta
-        todo!("Implementar streaming para Mistral")
+        // Es obligatorio implementar streaming. Recomendamos usar `async_stream::try_stream!`
+        // para emitir `LlmStreamChunk` (Content, Usage o ToolCallChunk)
+        todo!()
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {
-        // Implementar una comprobación simple de conectividad
-        todo!("Implementar health check para Mistral")
+        // GET simple a /models o similar para verificar API Key/Conexión
+        todo!()
     }
 
-    fn provider_name(&self) -> &'static str {
-        "mistral"
-    }
+    fn provider_name(&self) -> &'static str { "mistral" }
 }
 ```
+
+### 🧠 Consideraciones Avanzadas (v0.3.0)
+
+#### 1. Soporte Multimedia (Vision & Documents)
+Si el proveedor soporta imágenes o PDFs, debes verificar los archivos en `request.messages()`.
+- Iterar sobre `msg.files()`.
+- Convertir `file.bytes` (Base64) según el esquema del API.
+- Si solo soporta formatos específicos (ej. OpenAI solo imágenes en chat completions), maneja el error o usa "Hybrid Routing" hacia otro endpoint.
+
+#### 2. Tool Calling
+Para proveedores con soporte de funciones:
+- **Request**: Enviar `request.tools()` convertido al formato JSON del proveedor.
+- **Response**: Si el modelo decide usar una herramienta, el adaptador debe devolver un `LlmResponse` donde `tool_calls()` sea `Some(Vec<ToolCall>)`.
+- **Streaming**: Emitir `LlmStreamPart::ToolCallChunk` para cada fragmento de argumentos recibido.
+
+#### 3. Error Mapping
+No devuelvas errores genéricos de `reqwest`. Usa el helper `LlmError` para categorizar:
+- `LlmError::network_error(e)`
+- `LlmError::parsing_error(e)`
+- `LlmError::request_failed(msg)` (para errores 4xx/5xx del API)
 
 ### 3. Registrar en Factory
 
 ```rust
-// src/llm/infrastructure/llm_provider_factory.rs
-use crate::llm::infrastructure::MistralAdapter; // ← Importar nuevo adapter
-
+// src/libs/colmena/src/llm/infrastructure/llm_provider_factory.rs
 impl LlmProviderFactory {
-    pub fn create(provider: ProviderKind) -> Arc<dyn LlmRepository> {
-        match provider {
-            ProviderKind::OpenAi => Arc::new(OpenAiAdapter::new()),
-            ProviderKind::Gemini => Arc::new(GeminiAdapter::new()),
-            ProviderKind::Anthropic => Arc::new(AnthropicAdapter::new()),
-            ProviderKind::Mistral => Arc::new(MistralAdapter::new()), // ← Añadir
+    pub fn create(kind: ProviderKind) -> Arc<dyn LlmRepository> {
+        match kind {
+            // ...
+            ProviderKind::Mistral => Arc::new(MistralAdapter::new()),
         }
     }
 }
 ```
 
-### 4. Añadir a Python Bindings
+### 4. Tests de Integración
 
-```rust
-// src/python_bindings/mod.rs
+Es crítico testear tanto `call` como `stream`. Se recomienda usar el crate `wiremock` para simular las respuestas del API y verificar que el mapeo de `ToolCall` y `Usage` sea correcto.
 
-// No es necesario modificar los bindings si se usa el ServiceContainerFactory,
-// ya que este puede registrar todos los providers disponibles dinámicamente.
-// Si la lógica es manual, se añadiría aquí:
-
-// let provider_kind = ProviderKind::from_str(provider)?;
-// match provider_kind { ... }
-```
-
-### 5. Crear Tests
-
-Añade tests de integración para tu nuevo adaptador en el directorio `tests/`.
-
-```rust
-// tests/mistral_adapter_test.rs
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::llm::domain::*;
-    use crate::llm::infrastructure::MistralAdapter;
-    use wiremock::{MockServer, Mock, ResponseTemplate};
-    use wiremock::matchers::{method, path};
-
-    #[tokio::test]
-    async fn test_mistral_adapter_call_success() {
-        // Iniciar servidor mock con wiremock
-        let server = MockServer::start().await;
-
-        // Configurar una respuesta mock
-        Mock::given(method("POST"))
-            .and(path("/v1/chat/completions")) // Ajustar al endpoint correcto de Mistral
-            .respond_with(ResponseTemplate::new(200).set_body_json(/* ... */))
-            .mount(&server)
-            .await;
-
-        // Crear adaptador apuntando al servidor mock
-        let adapter = MistralAdapter::with_base_url(server.uri());
-
-        // Ejecutar la llamada y verificar el resultado
-        // ...
-    }
-}
-```

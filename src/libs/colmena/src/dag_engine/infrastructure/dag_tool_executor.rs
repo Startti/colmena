@@ -1,4 +1,5 @@
 use crate::dag_engine::application::ports::NodeRegistryPort;
+use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::ExecutableNode;
 use crate::dag_engine::domain::tool_configuration::{ToolConfiguration, DYNAMIC_PLACEHOLDER};
 use crate::llm::domain::{LlmError, ToolCall, ToolExecutor, ToolResult};
@@ -10,6 +11,10 @@ use std::sync::Arc;
 pub struct DagToolExecutor {
     registry: Arc<dyn NodeRegistryPort>,
     tool_configurations: HashMap<String, ToolConfiguration>,
+    /// Optional SecureValueService for decrypting <value_N> placeholders during tool calls.
+    secure_value_service: Option<Arc<SecureValueService>>,
+    /// Session ID used to scope secret lookup.
+    session_id: Option<String>,
 }
 
 impl DagToolExecutor {
@@ -60,7 +65,20 @@ impl DagToolExecutor {
         Self {
             registry,
             tool_configurations,
+            secure_value_service: None,
+            session_id: None,
         }
+    }
+
+    /// Builder: attach a SecureValueService + session_id for secret injection.
+    pub fn with_secure_values(
+        mut self,
+        secure_value_service: Arc<SecureValueService>,
+        session_id: String,
+    ) -> Self {
+        self.secure_value_service = Some(secure_value_service);
+        self.session_id = Some(session_id);
+        self
     }
 
     /// Recursively scan fixed_config for all "$DYNAMIC" placeholders.
@@ -416,20 +434,68 @@ impl ToolExecutor for DagToolExecutor {
         };
 
         // Convert HashMap to NodeInputs (which is just HashMap<String, Value>)
-        let inputs = inputs;
-        let config = serde_json::json!({});
+        // SECURE VALUES: decrypt <value_N> placeholders before sending to the node.
+        let inputs = if let (Some(svc), Some(sid)) = (&self.secure_value_service, &self.session_id) {
+            let mut inputs_val = serde_json::to_value(&inputs)
+                .unwrap_or(Value::Object(Default::default()));
+            if let Err(e) = svc.inject_secrets(&mut inputs_val, sid).await {
+                eprintln!("⚠️ [DagToolExecutor] Failed to inject secrets: {}", e);
+            }
+            serde_json::from_value::<HashMap<String, Value>>(inputs_val)
+                .unwrap_or(inputs)
+        } else {
+            inputs
+        };
+
+        // fixed_config values are already merged into `inputs` by the logic above.
+        // Do NOT pass fixed_config as node config: HttpNode would double-process headers/body
+        // causing conflicts (e.g., duplicate Content-Type → Amadeus 400).
+        let node_exec_config = serde_json::json!({});
+
+        // Read the secure flag directly from tool_cfg — no need to pass it via config.
+        let is_secure = tool_cfg
+            .and_then(|c| c.fixed_config.get("secure"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         let mut state = serde_json::json!({});
 
-        let result = node.execute(&inputs, &config, &mut state, None).await;
+        let result = node.execute(&inputs, &node_exec_config, &mut state, None).await;
 
-        // 4. Return result
+        // 4. Apply Secure Value hashing BEFORE returning to LLM
+        // This is the critical step: if the tool has `secure: true`, all sensitive
+        // values in the response are replaced with <value_N> placeholders so the
+        // LLM never sees the real secret. Real values are encrypted in the DB.
         match result {
-            Ok(value) => Ok(ToolResult {
-                tool_call_id: tool_call.id.clone(),
-                success: true,
-                output: value.to_string(),
-                error: None,
-            }),
+            Ok(value) => {
+                let safe_output = if is_secure {
+                    if let (Some(svc), Some(sid)) = (&self.secure_value_service, &self.session_id) {
+                        let secure_config = serde_json::json!({ "secure": true });
+                        match svc.hash_output(&value, &secure_config, sid, node_type).await {
+                            Ok(hashed) => {
+                                println!("🔒 [DagToolExecutor] Secure tool '{}': output hashed, real values encrypted in DB", node_type);
+                                hashed
+                            }
+                            Err(e) => {
+                                eprintln!("⚠️ [DagToolExecutor] hash_output failed for '{}': {}", node_type, e);
+                                value // fallback: return as-is (still better than crashing)
+                            }
+                        }
+                    } else {
+                        eprintln!("⚠️ [DagToolExecutor] Tool '{}' has secure:true but no SecureValueService attached. Token WILL be visible to LLM.", node_type);
+                        value
+                    }
+                } else {
+                    value
+                };
+
+                Ok(ToolResult {
+                    tool_call_id: tool_call.id.clone(),
+                    success: true,
+                    output: safe_output.to_string(),
+                    error: None,
+                })
+            }
             Err(e) => Ok(ToolResult {
                 tool_call_id: tool_call.id.clone(),
                 success: false,

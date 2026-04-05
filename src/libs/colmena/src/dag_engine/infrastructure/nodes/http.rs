@@ -89,9 +89,7 @@ impl ExecutableNode for HttpNode {
         // Build client forcing HTTP/1.1 to avoid HTTP/2 issues with some APIs
         let client = Client::builder().http1_only().build()?;
 
-        println!("DEBUG: Sending HTTP Request");
-        println!("DEBUG: URL: {}", url);
-        println!("DEBUG: Method: {}", method);
+        println!("[HttpNode] → {} {}", method, url);
 
         let mut request_builder = client.request(method, url);
 
@@ -147,9 +145,11 @@ impl ExecutableNode for HttpNode {
             "method",
             "headers",
             "body",
-            "query_parameters",
+            "query_params",        // correct key used throughout the codebase
+            "query_parameters",    // kept for backward compat
             "bearer_token",
             "authorization",
+            "secure",              // internal Colmena flag — NEVER send to external APIs
             "__colmena_session_id",
             "__node_id",
             "__colmena_resume_answer",
@@ -185,10 +185,10 @@ impl ExecutableNode for HttpNode {
                     Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
                         as Box<dyn StdError + Send + Sync>
                 })?;
-                println!("DEBUG: Request Body: {}", s_resolved);
+                // Never log body contents — may contain credentials or PII
                 request_builder = request_builder.body(s_resolved);
             } else {
-                println!("DEBUG: Request Body: {}", body);
+                // Never log body contents — may contain credentials or PII
                 request_builder = request_builder.json(body);
             }
         }
@@ -199,18 +199,18 @@ impl ExecutableNode for HttpNode {
 
         let response = request_builder.send().await?;
         let status = response.status().as_u16();
-        println!("DEBUG: Response Status: {}", status);
+        println!("[HttpNode] ← {} ({})", status, full_url_str);
 
         // Try to parse response as JSON, fallback to text/string
         let response_body: Value = match response.json::<Value>().await {
             Ok(json) => {
-                println!("DEBUG: Response Body: {}", json);
+                // Never log response body — it may contain tokens, keys, or PII
                 json
             }
             Err(_) => {
-                println!("DEBUG: Response Body is not JSON or empty");
+                println!("[HttpNode] Response body is not JSON or is empty");
                 Value::Null
-            } // Or handle text content if needed
+            }
         };
 
         // 8. Return Output

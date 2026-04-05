@@ -20,117 +20,70 @@ Este directorio contiene los tests automatizados para los bindings de Python.
 
 ### Archivos de Test Actuales:
 
--   `test_complex_scenarios.py`: Contiene tests de integración que validan la lógica de negocio principal. Prueba escenarios como la validación de roles de mensajes (ej. no permitir mensajes consecutivos del mismo rol) y realiza llamadas reales a los proveedores para asegurar la correcta integración.
--   `test_streaming_scenarios.py`: Se enfoca en verificar la funcionalidad de streaming. Asegura que los clientes puedan recibir chunks de respuesta de los proveedores que soportan streaming y que el manejo de errores también funcione en este modo.
-
-## Categorías de Tests
-
-Los tests de Python se centran principalmente en la **integración** y los **escenarios de uso**, ya que la lógica de dominio de bajo nivel es probada exhaustivamente en Rust.
-
-### 1. Tests de Escenarios Complejos
--   Prueban flujos de trabajo y validaciones de la lógica de negocio.
--   Verifican el manejo de errores para entradas inválidas (ej. formato de mensajes incorrecto).
--   Ubicación: `python/tests/test_complex_scenarios.py`
-
-### 2. Tests de Streaming
--   Prueban la funcionalidad de streaming de principio a fin.
--   Aseguran que los datos se reciben correctamente en formato de chunks.
--   Ubicación: `python/tests/test_streaming_scenarios.py`
+-   `test_complex_scenarios.py`: Valida lógica de negocio, validación de roles y llamadas reales.
+-   `test_streaming_scenarios.py`: Verifica la integridad de chunks en flujos de streaming síncronos.
+-   `test_async_mock_streaming.py`: **(Nuevo v0.3.0)** Valida el comportamiento asíncrono (`async for`) de los bindings utilizando proveedores mockeados.
+-   `test_mock_streaming.py`: Versión síncrona de tests con mocks para mayor velocidad en CI.
 
 ## Ejecutar Tests
 
 ### Prerrequisitos
 
-1.  **Instalar en modo de desarrollo**:
+1.  **Recompilar Bindings**:
+    Antes de ejecutar tests, siempre asegúrate de cargar los cambios de Rust en Python:
     ```bash
-    # Desde la raíz del proyecto
-    source .venv/bin/activate
-    uv pip install -e ".[dev]"
+    maturin develop
     ```
 
-2.  **Configurar variables de entorno** (para tests de integración):
-    Crea un fichero `.env` en la raíz del proyecto con tus API keys:
-    ```
-    GEMINI_API_KEY="tu_clave_api_aqui"
-    OPENAI_API_KEY="tu_clave_api_aqui"
-    ANTHROPIC_API_KEY="tu_clave_api_aqui"
-    ```
+2.  **Configurar variables de entorno**:
+    Crea un fichero `.env` en la raíz del proyecto (especialmente para `test_complex_scenarios.py` y `test_streaming_scenarios.py`).
 
 ### Comandos para Ejecutar Tests
 
-Los tests están diseñados para ser ejecutados directamente como scripts, lo que facilita el debugging.
+Aunque los archivos se pueden ejecutar como scripts, recomendamos el uso de **`pytest`** para una mejor visualización y gestión de la suite:
 
 ```bash
-# Ejecutar los tests de escenarios complejos
-python python/tests/test_complex_scenarios.py
+# Ejecutar todos los tests de Python
+pytest python/tests/
 
-# Ejecutar los tests de streaming
-python python/tests/test_streaming_scenarios.py
+# Ejecutar un test específico con pytest
+pytest python/tests/test_async_mock_streaming.py
+
+# Ejecutar con output detallado y ver prints
+pytest -v -s python/tests/test_complex_scenarios.py
 ```
 
-## Escribir Nuevos Tests
+## Escribir Nuevos Tests (Async Support)
 
-Sigue la estructura de los ficheros existentes. Cada fichero de test es un script ejecutable que reporta los resultados.
-
-### Plantilla de Archivo de Test
+Para las funcionalidades de streaming de la v0.3.0, es fundamental usar `async/await`. Aquí tienes una plantilla idiomática:
 
 ```python
-#!/usr/-bin/env python3
-"""
-Descripción del propósito de este fichero de test.
-"""
-import os
-from dotenv import load_dotenv
+import pytest
+import colmena
+import asyncio
 
-load_dotenv()
-
-try:
-    import colmena
-    print("✓ Módulo colmena importado correctamente")
-except ImportError as e:
-    print(f"✗ Error importando colmena: {e}")
-    exit(1)
-
-# --- Configuración de Test ---
-PROVIDER = "gemini"
-MODEL = "gemini-1.5-flash"
-
-# --- Definición de Tests ---
-
-def test_nombre_del_escenario():
-    """Descripción de lo que prueba este test."""
+# Usar decorator si usas pytest-asyncio
+@pytest.mark.asyncio
+async def test_streaming_async():
+    """Prueba el nuevo iterador asíncrono de streaming."""
     llm = colmena.ColmenaLlm()
-    messages = [{"role": "user", "content": "Mensaje de prueba"}]
+    messages = [{"role": "user", "content": "Hola"}]
     
-    try:
-        response = llm.call(messages, provider=PROVIDER, model=MODEL)
-        assert "condicion" in response, "La respuesta no fue la esperada"
-        print("✅ PASSED: El escenario se completó correctamente.")
-        return True
-    except Exception as e:
-        print(f"❌ FAILED: El test falló con un error: {e}")
-        return False
-
-if __name__ == "__main__":
-    print("🧪 Ejecutando tests para Escenario X")
-    print("="*60)
-
-    tests = [test_nombre_del_escenario]
-    passed = sum(1 for test in tests if test())
-    total = len(tests)
-
-    print(f"\n🎯 Resultados: {passed}/{total} tests pasados")
-    print("="*60)
-
-    if passed != total:
-        exit(1)
+    # El iterador soporta 'async for'
+    stream = llm.stream(messages, provider="openai")
+    
+    chunks = []
+    async for chunk in stream:
+        chunks.append(chunk)
+        
+    assert len(chunks) > 0
+    assert "Hola" in "".join(chunks)
 ```
 
 ## Mejores Prácticas
 
-1.  **Independencia**: Cada función de test debe ser independiente.
-2.  **Nombres Claros**: Usa nombres descriptivos que expliquen qué se está probando.
-3.  **Feedback Claro**: Imprime mensajes claros sobre el resultado de cada test (`✅ PASSED` o `❌ FAILED`).
-4.  **API Keys**: No hardcodees API keys. Usa siempre variables de entorno.
-5.  **Salida Anticipada**: Usa `exit(1)` al final del script si algún test falla, para que los sistemas de CI puedan detectar el fallo.
+1.  **Usa Mocks para CI**: Prefiere `test_mock_streaming.py` en entornos de integración continua para no depender de API Keys externas.
+2.  **Maturin Develop**: Siempre corre `maturin develop` después de modificar cualquier archivo `.rs` en `src/`.
+3.  **Resultados Claros**: Si escribes un script manual (sin pytest), asegúrate de usar `exit(1)` en caso de fallo para alertar al sistema de build.
+4.  **Consistencia de Tipos**: Recuerda que los diccionarios de entrada en Python deben cumplir con la estructura `{"role": str, "content": str}` requerida por el dominio de Rust.
 ```

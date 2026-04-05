@@ -65,18 +65,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| anyhow::anyhow!("{:?}", e))?;
 
             // Migrate secure values table
-            let secure_value_repo = colmena::dag_engine::infrastructure::persistence::PostgresSecureValueRepository::new(pool.clone());
+            let secure_value_repo = Arc::new(
+                colmena::dag_engine::infrastructure::persistence::PostgresSecureValueRepository::new(pool.clone())
+            );
             secure_value_repo
                 .migrate()
                 .await
                 .map_err(|e| anyhow::anyhow!("Secure values migration failed: {:?}", e))?;
 
-            let registry = HashMapNodeRegistry::new(
+            let secure_value_service = Arc::new(
+                colmena::dag_engine::application::secure_value_service::SecureValueService::new(
+                    secure_value_repo,
+                ),
+            );
+
+            let registry = HashMapNodeRegistry::new_with_secure_values(
                 repository_factory,
                 Some(state_repo.clone()
                     as Arc<dyn colmena::dag_engine::domain::state::DagTaskMemoryRepository>),
+                Some(secure_value_service.clone()),
             );
-            let run_use_case = DagRunUseCase::with_secure_values(registry, Some(state_repo), pool);
+            let run_use_case = DagRunUseCase::with_secure_values_and_service(registry, Some(state_repo), secure_value_service);
 
             let file_content = tokio::fs::read_to_string(&file_path).await?;
             let graph: colmena::dag_engine::domain::graph::Graph =

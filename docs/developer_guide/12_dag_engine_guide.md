@@ -845,36 +845,65 @@ El nodo `information_extraction` permite tomar texto no estructurado y usar un L
 }
 ```
 
+## 🔐 Secure Values (Valores Seguros)
+
+Colmena v0.3.0 introduce **Secure Values**, un sistema para manejar secretos (API Keys, Tokens, Credenciales) de forma cifrada en la base de datos y memoria, evitando que se filtren en logs o interfaces.
+
+### Conceptos Clave
+- **Cifrado AES-256-GCM**: Todos los valores marcados como sensibles se cifran usando una clave maestra (`SECURE_VALUES_KEY`).
+- **Inyección Automática**: El motor detecta valores cifrados (ej. `<secure_value_8>`) y los descifra justo antes de ejecutar un nodo.
+- **Precedencia de Configuración**: Los valores en `inputs` (provenientes de edges) siempre tienen prioridad sobre los de `config`.
+
+### Uso en el DAG
+Para usar valores seguros, primero deben ser registrados en la base de datos (vía API o CLI). En el JSON del grafo, se referencian por su identificador único o se pasan a través de edges.
+
+```json
+{
+  "from": "get_token.output",
+  "to": "api_call.bearer_token"
+}
+```
+Si `get_token` emite un valor sensible, el motor lo mantendrá cifrado en el estado del grafo y solo lo descifrará para el nodo `api_call`.
+
+### Variable Obligatoria
+Para que el motor arranque, debes definir:
+```bash
+SECURE_VALUES_KEY="tu-clave-base64-de-32-bytes"
+```
+
 ## 🚀 Comandos de Ejecución
 
 ### Run Mode (Local Testing)
+Ejecuta el grafo de forma secuencial y síncrona. Ideal para debugging.
 ```bash
 # Ejecutar un grafo con test_payload
 cargo run --bin dag_engine -- run tests/my_graph.json
 
-# Ver el output completo
-cargo run --bin dag_engine -- run tests/my_graph.json | jq
+# Pasar una respuesta a un nodo suspendido
+cargo run --bin dag_engine -- run tests/my_graph.json --resume-id <ID> --answer "Mi respuesta"
 ```
 
-### Serve Mode (Production)
+### Serve Mode (Producción)
+Levanta un servidor HTTP (Axum) que expone los endpoints definidos en los nodos `trigger_webhook`.
 ```bash
 # Iniciar servidor en puerto 3000 (default)
 cargo run --bin dag_engine -- serve tests/my_graph.json
-
-# Iniciar servidor en puerto custom
-cargo run --bin dag_engine -- serve tests/my_graph.json --port 8080
 ```
 
 ## 🔍 Best Practices
 
 1. **Usa `test_payload` para desarrollo**: Acelera el ciclo de desarrollo evitando levantar servidores.
 2. **Configuración dinámica**: Aprovecha `inputs > config` para crear grafos más flexibles.
-3. **Modularidad**: Crea nodos pequeños y reutilizables.
-4. **Error handling**: Siempre maneja errores apropiadamente en tus nodos.
-5. **Testing**: Prueba con `run` antes de usar `serve`.
+3. **Manejo de Secretos**: Nunca pongas API Keys reales en el JSON. Usa `${VAR_ENV}` o Secure Values.
+4. **Validación de Esquema**: Cada nodo valida sus entradas. Si un nodo falla, revisa que los `edges` estén enviando el tipo de dato correcto (String vs Number).
 
 ## 📚 Más Información
 
 - Ver [USAGE_EXAMPLES.md](../examples/USAGE_EXAMPLES.md) para más ejemplos completos
+- Ver [SECURE_VALUES_IMPLEMENTATION.md](../SECURE_VALUES_IMPLEMENTATION.md) para detalles del cifrado
 - Ver [DAG_ENGINE_DISEÑO.md](../dds/DAG_ENGINE_DISEÑO.md) para detalles de arquitectura
-- Ver [MODULO_LLM_DISEÑO.md](../dds/MODULO_LLM_DISEÑO.md) para integración con LLMs
+
+---
+
+**Última actualización**: 2026-04-05
+**Revisado por**: Auditoría Sistemática v0.3.0

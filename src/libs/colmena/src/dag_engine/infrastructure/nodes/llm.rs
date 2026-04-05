@@ -19,6 +19,8 @@ pub struct LlmNode {
     repository_factory: Arc<ConversationRepositoryFactory>,
     registry: Weak<dyn NodeRegistryPort>,
     task_memory_repo: Option<Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>>,
+    /// Optional SecureValueService — propagated to DagToolExecutor during tool calls.
+    secure_value_service: Option<Arc<crate::dag_engine::application::secure_value_service::SecureValueService>>,
 }
 
 impl LlmNode {
@@ -33,7 +35,17 @@ impl LlmNode {
             repository_factory,
             registry,
             task_memory_repo,
+            secure_value_service: None,
         }
+    }
+
+    /// Builder: attach a SecureValueService so it is forwarded to DagToolExecutor during tool calls.
+    pub fn with_secure_values(
+        mut self,
+        secure_value_service: Arc<crate::dag_engine::application::secure_value_service::SecureValueService>,
+    ) -> Self {
+        self.secure_value_service = Some(secure_value_service);
+        self
     }
 
     fn resolve_env_var(value: &str) -> Result<String, String> {
@@ -468,7 +480,15 @@ impl ExecutableNode for LlmNode {
             }
         }
 
-        let tool_executor = DagToolExecutor::new(registry, tool_configurations);
+        let tool_executor = {
+            let executor = DagToolExecutor::new(registry, tool_configurations);
+            // Propagate SecureValueService + session_id so tool calls decrypt secrets.
+            if let (Some(svc), Some(sid)) = (self.secure_value_service.clone(), session_id) {
+                executor.with_secure_values(svc, sid.to_string())
+            } else {
+                executor
+            }
+        };
 
         // Create AgentService
         // Note: AgentService expects Arc<dyn ConversationRepository>.

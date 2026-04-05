@@ -1,4 +1,5 @@
 use crate::dag_engine::application::ports::NodeRegistryPort;
+use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::ExecutableNode;
 use crate::dag_engine::infrastructure::nodes::{
     debug::*, http::*, input::*, llm::*, math::*, orchestrator::*, output::*, python_node::*,
@@ -22,6 +23,17 @@ impl HashMapNodeRegistry {
         task_memory_repo: Option<
             Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>,
         >,
+    ) -> Arc<Self> {
+        HashMapNodeRegistry::new_with_secure_values(repository_factory, task_memory_repo, None)
+    }
+
+    /// Construye el registro inyectando además un SecureValueService (para Secure Values en Tool Calling).
+    pub fn new_with_secure_values(
+        repository_factory: Arc<ConversationRepositoryFactory>,
+        task_memory_repo: Option<
+            Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>,
+        >,
+        secure_value_service: Option<Arc<SecureValueService>>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|weak_self| {
             let mut nodes: HashMap<String, Arc<dyn ExecutableNode>> = HashMap::new();
@@ -49,13 +61,20 @@ impl HashMapNodeRegistry {
             // --- Registrar Nodos LLM ---
             // Pass the weak reference to the registry to LlmNode
             let registry_weak = weak_self.clone() as Weak<dyn NodeRegistryPort>;
+            let llm_node = LlmNode::new(
+                repository_factory.clone(),
+                registry_weak,
+                task_memory_repo.clone(),
+            );
+            // If a SecureValueService is available, attach it so tool calls can decrypt secrets
+            let llm_node = if let Some(svc) = secure_value_service.clone() {
+                llm_node.with_secure_values(svc)
+            } else {
+                llm_node
+            };
             nodes.insert(
                 "llm_call".to_string(),
-                Arc::new(LlmNode::new(
-                    repository_factory.clone(),
-                    registry_weak,
-                    task_memory_repo.clone(),
-                )),
+                Arc::new(llm_node),
             );
 
             // --- Registrar Nodos Python ---

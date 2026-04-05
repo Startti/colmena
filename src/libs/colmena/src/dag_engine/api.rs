@@ -36,19 +36,25 @@ pub async fn run_dag(
         .await
         .map_err(|e| anyhow::anyhow!("{:?}", e))?;
 
-    // Migrate secure values table
-    let secure_value_repo = crate::dag_engine::infrastructure::persistence::PostgresSecureValueRepository::new(pool.clone());
+    let secure_value_repo = Arc::new(crate::dag_engine::infrastructure::persistence::PostgresSecureValueRepository::new(pool.clone()));
     secure_value_repo
         .migrate()
         .await
         .map_err(|e| anyhow::anyhow!("Secure values migration failed: {:?}", e))?;
 
-    let registry = HashMapNodeRegistry::new(
+    let secure_value_service = Arc::new(
+        crate::dag_engine::application::secure_value_service::SecureValueService::new(
+            secure_value_repo,
+        ),
+    );
+
+    let registry = crate::dag_engine::infrastructure::registry::HashMapNodeRegistry::new_with_secure_values(
         repository_factory,
         Some(state_repo.clone()
             as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),
+        Some(secure_value_service.clone()),
     );
-    let run_use_case = DagRunUseCase::with_secure_values(registry, Some(state_repo), pool);
+    let run_use_case = DagRunUseCase::with_secure_values_and_service(registry, Some(state_repo), secure_value_service);
 
     // Load and execute the graph
     let file_content = tokio::fs::read_to_string(&file_path).await?;
@@ -291,19 +297,25 @@ pub async fn serve_dag(
         .await
         .map_err(|e| anyhow::anyhow!("{:?}", e))?;
 
-    // Migrate secure values table
-    let secure_value_repo = crate::dag_engine::infrastructure::persistence::PostgresSecureValueRepository::new(pool.clone());
+    let secure_value_repo = Arc::new(crate::dag_engine::infrastructure::persistence::PostgresSecureValueRepository::new(pool.clone()));
     secure_value_repo
         .migrate()
         .await
         .map_err(|e| anyhow::anyhow!("Secure values migration failed: {:?}", e))?;
 
-    let registry = HashMapNodeRegistry::new(
+    let secure_value_service = Arc::new(
+        crate::dag_engine::application::secure_value_service::SecureValueService::new(
+            secure_value_repo,
+        ),
+    );
+
+    let registry = HashMapNodeRegistry::new_with_secure_values(
         repository_factory,
         Some(state_repo.clone()
             as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),
+        Some(secure_value_service.clone()),
     );
-    let run_use_case = Arc::new(DagRunUseCase::with_secure_values(registry, Some(state_repo), pool));
+    let run_use_case = Arc::new(DagRunUseCase::with_secure_values_and_service(registry, Some(state_repo), secure_value_service));
 
     // Load the graph
     let file_content = tokio::fs::read_to_string(&file_path).await?;

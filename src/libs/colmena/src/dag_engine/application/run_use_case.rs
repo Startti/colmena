@@ -31,7 +31,7 @@ impl DagRunUseCase {
         }
     }
 
-    /// Creates a new DagRunUseCase with secure values support
+    /// Creates a new DagRunUseCase with secure values support (using an existing pool)
     pub fn with_secure_values(
         registry: Arc<dyn NodeRegistryPort>,
         state_repository: Option<Arc<dyn DagStateRepository>>,
@@ -40,6 +40,22 @@ impl DagRunUseCase {
         let secure_value_repo = Arc::new(PostgresSecureValueRepository::new(pool));
         let secure_value_service = Arc::new(SecureValueService::new(secure_value_repo));
 
+        Self {
+            registry,
+            state_repository,
+            secure_value_service: Some(secure_value_service),
+        }
+    }
+
+    /// Creates a new DagRunUseCase with a pre-built SecureValueService (shared with the registry).
+    ///
+    /// Prefer this over `with_secure_values` when you need the **same service instance** to be
+    /// shared between LlmNode (for tool calling) and DagRunUseCase (for regular node execution).
+    pub fn with_secure_values_and_service(
+        registry: Arc<dyn NodeRegistryPort>,
+        state_repository: Option<Arc<dyn DagStateRepository>>,
+        secure_value_service: Arc<SecureValueService>,
+    ) -> Self {
         Self {
             registry,
             state_repository,

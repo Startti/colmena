@@ -104,4 +104,7 @@ cargo run --bin dag_engine -- serve tests/graphs/agents/llm_call.json
 - `/test_graph` — Run, validate, and debug JSON DAG graph files via the DAG engine CLI
 
 ## Current Status
-- See `docs/PENDING_TASKS.md` for detailed task tracking
+- **Audit v0.3.0**: Systematic audit of docs 01-12 completed.
+- **Critical Finding**: Tool calling with Secure Values is currently broken (see report).
+- **Engineering Report**: See [docs/AUDIT_ENGINEERING_REPORT.md](file:///home/daniel-garcia4/startti/colmena/docs/AUDIT_ENGINEERING_REPORT.md) for detailed gaps and next steps.
+- **Tasks**: See `docs/PENDING_TASKS.md` for overall project tracking.

@@ -99,6 +99,30 @@ pub struct OpenAiAdapter {
 }
 ```
 
+### Manejo de Errores: Domain vs Infrastructure
+
+1. **Domain (`thiserror`)**: Los errores que representan casos de negocio o fallos esperados del dominio deben usar `thiserror`. Deben ser un `enum` con variantes claras y descriptivas.
+2. **Infrastructure (`anyhow`)**: Para fallos técnicos impredecibles en la capa de infraestructura (errores de red, fallos de IO, errores de bases de datos de terceros), se prefiere el uso de `anyhow::Result` o `Box<dyn std::error::Error>` para facilitar la propagación hacia arriba cuando no se requiere un manejo específico de la variante del error.
+
+### DAG Engine: Implementación de Nodos
+
+Al implementar el trait `ExecutableNode`, se deben seguir estas reglas:
+
+1. **Precedencia de Configuración**: La configuración dinámica (`inputs`) siempre tiene prioridad sobre la estática (`config`).
+   ```rust
+   // ✅ Patrón correcto
+   let model = inputs.get("model")
+       .and_then(|v| v.as_str())
+       .or_else(|| config.get("model").and_then(|v| v.as_str()))
+       .map(|s| s.to_string());
+   ```
+2. **Resultados Estructurados**: Todos los nodos deben devolver su resultado principal envuelto en un objeto JSON bajo la clave `"output"`.
+   ```rust
+   // ✅ Convención de salida
+   Ok(json!({ "output": result_value }))
+   ```
+3. **Estado Inmutable**: Los nodos no deben mantener estado interno persistente entre ejecuciones del DAG a menos que utilicen explícitamente el parámetro `state: &mut Value` proporcionado en el método `execute`.
+
 ### Python Bindings
 
 **PyO3 Patterns:**

@@ -309,6 +309,63 @@ dag_engine store-secret \
 
 ---
 
+---
+
+### Strategy 5: LLM-Driven Auth via Secure Tools (NEW — VALIDATED)
+
+**How it works:**
+
+Instead of a separate DAG node for auth, **the LLM decides when to authenticate** using an HTTP tool with `secure: true`. The `DagToolExecutor` applies `hash_output()` before returning the result to the LLM, ensuring the LLM only ever sees `<value_N>` placeholders.
+
+**Key difference from Strategy 2:** Here the LLM orchestrates the auth flow (calls `get_amadeus_token` first, then uses the placeholder in `search_flights`). In Strategy 2, auth is a separate fixed DAG node.
+
+**Flow:**
+```
+LLM receives task: "Find flights MAD→BCN"
+  ↓
+LLM calls tool: get_amadeus_token (fixed_config has secure: true)
+  ↓
+DagToolExecutor → HttpNode → POST oauth2/token → {access_token: "real_xyz"}
+  ↓
+hash_output() → {access_token: "<value_1>"} stored encrypted in DB
+  ↓
+LLM receives: {access_token: "<value_1>"}  ← never sees real token ✅
+  ↓
+LLM calls tool: search_flights with bearer_token: "<value_1>"
+  ↓
+inject_secrets() → bearer_token: "real_xyz" auto-injected
+  ↓
+HttpNode → GET /flight-offers with Authorization: Bearer real_xyz ✅
+  ↓
+LLM receives flight results and responds to user
+```
+
+**Validated graph:** `tests/graphs/agents/amadeus_llm_http_auth_experiment.json`
+
+```bash
+set -a && source .env && set +a
+cargo run --bin dag_engine -- run tests/graphs/agents/amadeus_llm_http_auth_experiment.json
+```
+
+**Pros:**
+- ✅ LLM can autonomously manage multi-step API auth flows
+- ✅ Real tokens NEVER visible to LLM (hash_output applied in DagToolExecutor)
+- ✅ Works with any OAuth2 API that the LLM knows how to sequence
+- ✅ More flexible than fixed DAG auth nodes
+- ✅ Requires only `DATABASE_URL` + `SECURE_VALUES_KEY` (same as Strategy 2)
+
+**Cons:**
+- ❌ LLM must be instructed to follow auth sequence (system_message matters)
+- ❌ LLM could theoretically skip auth (needs max_iterations guard)
+- ❌ Requires DB for secure value storage
+
+**When to Use:**
+- Agentic flows where the LLM orchestrates multi-step API interactions
+- When auth tokens need to be managed dynamically by the agent
+- Chatbots that call authenticated APIs on behalf of users
+
+---
+
 ## Comparison Matrix
 
 | Strategy | Setup | Credentials in Code? | LLM Sees Real Values? | DB Required? | Encryption? | Audit Trail? | Production Ready? |
@@ -317,6 +374,7 @@ dag_engine store-secret \
 | Webhook + Secure | HTTP POST + DB | No | **NO** ✓ | **Yes** | AES-256 | Basic | **Yes** ✓ |
 | Test Payload | Hardcode in JSON | **YES** ⚠️ | **YES** ⚠️ | No | No | No | **No** |
 | DB Query (Future) | `store-secret` CLI | No | No | **Yes** | AES-256 | **Yes** ✓ | Future |
+| LLM-Driven Auth | tool + secure:true | No | **NO** ✓ | **Yes** | AES-256 | Basic | **Yes** ✓ |
 
 ---
 
@@ -448,12 +506,13 @@ Web App → POST /amadeus-search
 
 - ❌ **Hardcode** credentials in graph JSON files
 - ❌ **Commit** test payloads with real credentials to git
-- ❌ **Log** HTTP request/response bodies containing credentials
+- ❌ **Log** HTTP request/response bodies containing credentials *(HttpNode now suppresses all body logging)*
 - ❌ **Share** DAG files or screenshots containing `${ENV_VAR}` values
 - ❌ **Use** Strategy 3 (test payload) in production
 - ❌ **Expose** webhook endpoints without authentication
 - ❌ **Trust** process environment variables alone (use Webhook + Secure instead)
 - ❌ **Assume** HTTP-only TLS is sufficient (use certificate pinning for sensitive APIs)
+- ❌ **Forget** to add internal flags to `reserved_keys` — any unknown primitive in `inputs` gets sent as query param to external APIs
 
 ---
 
@@ -676,6 +735,7 @@ A: For MVP yes (AES-256 via PostgreSQL pgcrypto). For high-security scenarios, i
 
 ---
 
-**Status:** Documentation Complete  
-**Date:** 2026-04-04  
-**Version:** 1.0
+**Status:** Documentation Updated  
+**Date:** 2026-04-05  
+**Version:** 1.1  
+**Changes:** Added Strategy 5 (LLM-Driven Auth via secure tools). Fixed `secure=true` leaking as query param. HttpNode body/query param distinction documented. Debug log security hardening noted.

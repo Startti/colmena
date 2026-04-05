@@ -117,6 +117,7 @@ El motor DAG (`dag_engine`) utiliza ficheros JSON para definir escenarios de pru
 | **memory** | `tests/graphs/memory/` | Persistencia con SQLite y PostgreSQL |
 | **external** | `tests/graphs/external/` | HTTP requests, Amadeus API |
 | **media** | `tests/graphs/media/` | Archivo multimedia para tests de visión/documentos |
+| **security** | `tests/graphs/security/` | Tests de Secure Values, cifrado y auto-inyección de secretos |
 
 #### Comando para ejecutar un grafo JSON
 

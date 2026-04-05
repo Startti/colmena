@@ -140,3 +140,28 @@ async fn process_stream(stream: LlmStream) -> Result<String, LlmError> {
     Ok(buffer)
 }
 ```
+### Rendimiento del Motor DAG
+
+El motor de grafos está diseñado para la confiabilidad y la trazabilidad, lo que introduce ciertas consideraciones de rendimiento:
+
+**1. Ejecución de Nodos:**
+Actualmente, el `DagRunUseCase` ejecuta los nodos de forma **secuencial** siguiendo la cola de activación (`active_queue`).
+- **Optimización**: Los nodos se activan por eventos; un nodo se encola tan pronto como sus dependencias upstream han emitido datos.
+- **Overhead**: La resolución de entradas dinámica mediante JSON Pointers tiene un coste $O(1)$ por arista, minimizado por el uso de `serde_json::Value`.
+
+**2. Impacto de Secure Values:**
+El uso de `secure: true` en la configuración de un nodo añade dos pasos adicionales:
+- **Pre-ejecución**: Inyección de secretos desde PostgreSQL/Vault (latencia de DB).
+- **Post-ejecución**: Cifrado (AES-256-GCM) y hashing del resultado antes de guardarlo en memoria o enviarlo al stream.
+- **Recomendación**: Usa `secure: true` solo en campos estrictamente sensibles para evitar el coste de cifrado en datos públicos.
+
+**3. Persistencia de Estado:**
+Si se utiliza un `state_repository` (SQLite/Postgres), el motor guardará el estado completo del grafo en cada paso de suspensión (`SUSPENDED`) o finalización.
+- El tamaño del estado crece linealmente con el número de nodos y el tamaño de sus outputs.
+- Para grafos masivos, considera usar `strip_extra_info: true` para reducir el payload guardado.
+
+### Mejores Prácticas de Rendimiento
+
+1.  **Pre-allocación**: En nodos personalizados de Rust, pre-alloca buffers si conoces el tamaño aproximado de la respuesta (ej. `String::with_capacity`).
+2.  **Streaming**: Prefiere `execute_stream` sobre `execute` para procesar resultados parciales y reducir la percepción de latencia del usuario final.
+3.  **Lazy Client**: Reutiliza el `reqwest::Client` entre nodos mediante un contenedor de servicios compartido para aprovechar el pooling de conexiones TCP.

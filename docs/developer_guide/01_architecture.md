@@ -9,64 +9,67 @@ Colmena sigue **Arquitectura Hexagonal** (Ports and Adapters) con estos principi
 3. **Testabilidad**: Cada capa es testeable independientemente
 4. **Extensibilidad**: Fácil agregar nuevos proveedores sin cambiar el core
 
-### Estructura Detallada
+### Estructura Detallada (Crate de Rust)
+
+El código fuente principal se encuentra en `src/libs/colmena/src/`.
 
 ```
 src/
-├── lib.rs                          # Entry point, expone módulos públicos
-├── llm/                           # Módulo LLM (core del proyecto)
-│   ├── mod.rs                     # Configuración del módulo
+├── lib.rs                          # Entry point del crate (exports principales)
+├── main.rs                         # Punto de entrada para tests o demos rápidas
+├── llm/                           # 🤖 MÓDULO LLM (Multi-provider)
+│   ├── mod.rs                     # Registro de submódulos
 │   ├── domain/                    # 🏛️ CAPA DE DOMINIO
 │   │   ├── mod.rs                 # Exports del dominio
-│   │   ├── llm_provider.rs        # Enum de proveedores y su configuración
-│   │   ├── llm_config.rs          # Configuración de requests (incluye LlmUsage)
-│   │   ├── llm_request.rs         # Entidad: Request de LLM
-│   │   ├── llm_response.rs        # Entidad: Response de LLM
-│   │   ├── llm_repository.rs      # Port: Interfaz principal
-│   │   ├── llm_error.rs           # Tipos de error del dominio
-│   │   ├── llm_message.rs         # Entidad: Mensaje individual
-│   │   └── value_objects/         # Value Objects del dominio
-│   │       ├── mod.rs
-│   │       ├── llm_request_id.rs  # ID único de requests
-│   │       └── llm_response_id.rs # ID único de responses
+│   │   ├── llm_provider.rs        # Enum de proveedores (OpenAI, Anthropic, Gemini)
+│   │   ├── llm_config.rs          # Configuración: model, temp, tokens, etc.
+│   │   ├── llm_request.rs         # Entidad: Request (mensajes, tools, streaming)
+│   │   ├── llm_response.rs        # Entidad: Response (contenido, usage, tool_calls)
+│   │   ├── llm_repository.rs      # Port: Interfaz del adaptador de LLM
+│   │   ├── llm_error.rs           # Errores técnicos del dominio
+│   │   ├── llm_message.rs         # Entidades de mensajes y contenidos (texto/media)
+│   │   ├── tools.rs               # Definición de herramientas (Tool/Function definition)
+│   │   ├── tool_executor.rs       # Entidad para representar la ejecución de tools
+│   │   ├── memory.rs              # Entidades para persistencia de conversaciones
+│   │   └── value_objects/         # Objetos sin identidad propia (ids)
 │   ├── application/               # 🎯 CAPA DE APLICACIÓN
-│   │   ├── mod.rs                 # Exports de aplicación
-│   │   ├── llm_call_use_case.rs   # Caso de uso: llamada síncrona
-│   │   ├── llm_stream_use_case.rs # Caso de uso: streaming
-│   │   └── llm_health_check_use_case.rs # Caso de uso: health check
+│   │   ├── agent_service.rs       # Servicio de alto nivel (Agentes ReAct)
+│   │   ├── llm_call_use_case.rs   # Orquestador: llamada síncrona
+│   │   ├── llm_stream_use_case.rs # Orquestador: streaming SSE/mensajes
+│   │   └── llm_health_check_use_case.rs # Comprobación de estado de proveedores
 │   └── infrastructure/            # 🔧 CAPA DE INFRAESTRUCTURA
-│       ├── mod.rs                 # Exports de infraestructura
-│       ├── openai_adapter.rs      # Adapter: OpenAI API
-│       ├── gemini_adapter.rs      # Adapter: Gemini API
-│       ├── anthropic_adapter.rs   # Adapter: Anthropic API
-│       └── llm_provider_factory.rs # Factory para crear adapters
+│       ├── openai_adapter.rs      # Adapter: OpenAI con Hybrid routing
+│       ├── gemini_adapter.rs      # Adapter: Google Gemini API
+│       ├── anthropic_adapter.rs   # Adapter: Anthropic Claude API
+│       ├── llm_provider_factory.rs # Factory para resolución de adapters
+│       ├── mock_adapter.rs        # Adapter mockeado para testing sin API
+│       └── persistence/           # DB adapters (SQLite, Postgres)
 ├── dag_engine/                    # 🧠 MOTOR DE EJECUCIÓN DE GRAFOS (DAG)
-│   ├── mod.rs                     # (No presente, pero conceptualmente aquí)
-│   ├── main.rs                    # Entry point del binario del DAG
+│   ├── main.rs                    # Entry point del binario CLI (dag_engine)
+│   ├── api.rs                     # Lógica compartida para REST/Internal API
+│   ├── mod.rs                     # Registro de módulos
 │   ├── domain/                    # 🏛️ CAPA DE DOMINIO DEL DAG
-│   │   ├── mod.rs
-│   │   ├── graph.rs               # Entidades: Graph, NodeConfig, Edge
+│   │   ├── graph.rs               # Estructuras Graph, NodeConfig, Edge
 │   │   ├── node.rs                # Port: Trait ExecutableNode
-│   │   └── error.rs               # Errores de dominio del DAG
+│   │   ├── state.rs               # Gestión de estado mutable en ejecución
+│   │   ├── tool_configuration.rs  # Configuración de herramientas dinámicas
+│   │   └── secure_value_repository.rs # Port: Interfaz para secretos cifrados
 │   ├── application/               # 🎯 CAPA DE APLICACIÓN DEL DAG
-│   │   ├── mod.rs
-│   │   ├── ports.rs               # Port: Trait NodeRegistryPort
-│   │   └── run_use_case.rs        # Caso de uso: ejecutar un grafo
+│   │   ├── run_use_case.rs        # Motor: ordenamiento topológico y ejecución
+│   │   └── secure_value_service.rs # Orquestación de valores sensibles (SecureValue)
 │   └── infrastructure/            # 🔧 CAPA DE INFRAESTRUCTURA DEL DAG
-│       ├── mod.rs
-│       ├── registry.rs            # Adapter: HashMapNodeRegistry
-│       └── nodes/                 # Adapters: Implementaciones de nodos
-│           ├── mod.rs
-│           ├── math.rs
-│           └── debug.rs
+│       ├── registry.rs            # Mapping de tipos de nodo a implementaciones
+│       ├── dag_tool_executor.rs   # Ejecutor de herramientas dentro del grafo
+│       └── nodes/                 # Implementaciones de nodos específicas
+│           ├── llm.rs, http.rs    # Nodos inteligentes/externos
+│           ├── math.rs, debug.rs  # Nodos básicos y de log
+│           └── orchestrator.rs    # Nodos de flujo avanzado
 ├── shared/                        # 🤝 FUNCIONALIDADES COMPARTIDAS
-│   ├── mod.rs
 │   └── infrastructure/
-│       ├── mod.rs
-│       ├── config_resolver.rs     # Resolución de configuración
-│       └── service_container.rs   # Contenedor de servicios
-└── python_bindings/              # 🐍 BINDINGS PARA PYTHON
-    └── mod.rs                     # Wrappers PyO3
+│       ├── config_resolver.rs     # Resolución de variables ${ENV}
+│       └── service_container.rs   # DI Container para servicios críticos
+├── python_bindings/              # 🐍 BINDINGS PyO3 (Python Integration)
+└── node_bindings/                # 📦 BINDINGS Napi-RS (TypeScript/Node)
 ```
 
 ### Flujo de Datos
@@ -79,13 +82,7 @@ Python Response ← PyO3 Bindings ← Domain Response ← Adapter ← HTTP Respo
 
 ### Relación entre Rust y Python
 
-Este proyecto no es una aplicación de Rust pura, sino una **librería de Python acelerada con Rust**.
-
-- **Python es el director de orquesta**: La aplicación final es de Python. Se beneficia de su ecosistema y facilidad de uso para la lógica de alto nivel.
-- **Rust es el motor de alto rendimiento**: Las operaciones computacionalmente intensivas y la lógica de negocio principal se implementan en Rust para obtener la máxima velocidad y seguridad.
-- **PyO3 es el puente**: La librería `pyo3` permite exponer las funciones de Rust a Python de una manera idiomática y eficiente.
-
-El objetivo es combinar la flexibilidad de Python con el rendimiento de Rust, delegando las tareas pesadas al código nativo compilado.
+Colmena es una **librería de Python acelerada con Rust**. Rust implementa el motor de ejecución, la seguridad y el rendimiento, mientras que Python proporciona la flexibilidad necesaria para orquestar la lógica de negocio de alto nivel a través de los bindings en `python_bindings`.
 
 ### Hybrid API Routing (OpenAI)
 

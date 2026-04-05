@@ -1,14 +1,12 @@
 # 🛠️ Uso de Herramientas (Tool Calling)
 
-Colmena permite a los agentes LLM utilizar "herramientas" para interactuar con el mundo exterior. Estas herramientas pueden ser nodos del DAG pre-configurados o funciones nativas.
+Colmena permite a los agentes LLM utilizar "herramientas" para interactuar con el mundo exterior. Estas herramientas son nodos del DAG pre-configurados que el LLM puede invocar dinámicamente.
 
 ## Configuración de Herramientas en el DAG
 
-Puedes exponer nodos del DAG (como `http_request`) como herramientas para el LLM. Esto se hace mediante la configuración `tool_configurations` en el nodo `llm_call`.
+Expones nodos del DAG (como `http_request`) como herramientas para el LLM mediante `tool_configurations` en el nodo `llm_call`.
 
-### Ejemplo: Nodo HTTP como Herramienta
-
-Este ejemplo muestra cómo configurar un nodo HTTP para que el LLM pueda "buscar usuarios" o "crear usuarios" sin conocer los detalles técnicos (URL base, headers, etc.).
+### Ejemplo básico: Nodo HTTP como Herramienta
 
 ```json
 {
@@ -24,13 +22,12 @@ Este ejemplo muestra cómo configurar un nodo HTTP para que el LLM pueda "buscar
         "tool_configurations": {
           "fetch_users": {
             "node_type": "http_request",
-            "description": "Obtener datos de usuarios de la API. Puedes filtrar por estado.",
+            "description": "Obtener datos de usuarios de la API.",
             "fixed_config": {
               "base_url": "https://jsonplaceholder.typicode.com",
               "endpoint": "/users",
               "method": "GET"
-            },
-            "exposed_inputs": ["query_parameters"]
+            }
           },
           "create_user": {
             "node_type": "http_request",
@@ -39,11 +36,8 @@ Este ejemplo muestra cómo configurar un nodo HTTP para que el LLM pueda "buscar
               "base_url": "https://jsonplaceholder.typicode.com",
               "endpoint": "/users",
               "method": "POST",
-              "headers": {
-                "Content-Type": "application/json"
-              }
-            },
-            "exposed_inputs": ["body"]
+              "headers": { "Content-Type": "application/json" }
+            }
           }
         }
       }
@@ -54,21 +48,139 @@ Este ejemplo muestra cómo configurar un nodo HTTP para que el LLM pueda "buscar
 
 ### Cómo Funciona
 
-1.  **Definición**: Defines una herramienta con un nombre (ej. `fetch_users`) y un tipo de nodo subyacente (`http_request`).
-2.  **Configuración Fija (`fixed_config`)**: Estableces parámetros que el LLM no debe ver ni modificar (URL, método, headers de autenticación).
-3.  **Inputs Expuestos (`exposed_inputs`)**: Indicas qué parámetros puede controlar el LLM (ej. `query_parameters`, `body`).
-4.  **Generación de Schema**: Colmena genera automáticamente la definición de la herramienta (JSON Schema) para el LLM, mostrando solo los inputs expuestos y la descripción.
+1. **`fixed_config`** — parámetros que el LLM no ve ni puede modificar (URL, método, credenciales).
+2. **`node_schema`** — forma moderna de definir qué parámetros expone el LLM y cuáles son fijos. Reemplaza `fixed_config` + `exposed_inputs`.
+3. **`DagToolExecutor`** combina los argumentos del LLM con los valores fijos y ejecuta el nodo.
+4. El resultado se devuelve al LLM para que continúe la conversación.
 
-### Ventajas
+---
 
-*   **Seguridad**: El LLM no tiene acceso a credenciales ni URLs base.
-*   **Simplicidad**: El LLM solo ve los parámetros relevantes para su tarea.
-*   **Reutilización**: Puedes usar el mismo tipo de nodo (`http_request`) para múltiples herramientas distintas.
+## 🔒 Herramientas HTTP con Secure Values
+
+Cuando una herramienta HTTP tiene `"secure": true` en su `fixed_config`, **`DagToolExecutor` aplica `hash_output()` ANTES de devolver el resultado al LLM**. Esto garantiza que el LLM nunca vea tokens reales.
+
+### Flujo de seguridad en tools:
+
+```
+LLM llama get_amadeus_token
+  ↓
+HttpNode ejecuta POST → Amadeus responde {access_token: "real_xyz"}
+  ↓
+DagToolExecutor detecta secure: true
+  ↓
+hash_output() → {access_token: "<value_1>"}, encripta real en DB
+  ↓
+LLM recibe {access_token: "<value_1>"} ← nunca ve el token real ✅
+  ↓
+LLM llama search_flights con bearer_token: "<value_1>"
+  ↓
+DagToolExecutor llama inject_secrets() → reemplaza "<value_1>" con token real
+  ↓
+HttpNode ejecuta GET con Authorization: Bearer real_xyz ✅
+```
+
+### Ejemplo completo: LLM controla autenticación + búsqueda (patrón Amadeus)
+
+Este patrón fue validado en `tests/graphs/agents/amadeus_llm_http_auth_experiment.json`:
+
+```json
+{
+  "nodes": {
+    "travel_agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "api_key": "${OPENAI_API_KEY}",
+        "system_message": "Para buscar vuelos: (1) llama get_amadeus_token, (2) usa el placeholder retornado en search_flights.",
+        "enabled_tools": ["get_amadeus_token", "search_flights"],
+        "tool_configurations": {
+          "get_amadeus_token": {
+            "name": "get_amadeus_token",
+            "node_type": "http_request",
+            "description": "Autenticar con Amadeus. Retorna un token como <value_1>.",
+            "fixed_config": {
+              "base_url": "https://api.amadeus.com/v1/security/oauth2",
+              "endpoint": "/token",
+              "method": "POST",
+              "headers": { "Content-Type": "application/x-www-form-urlencoded" },
+              "body": "grant_type=client_credentials&client_id=${AMADEUS_CLIENT_ID}&client_secret=${AMADEUS_CLIENT_SECRET}",
+              "secure": true
+            }
+          },
+          "search_flights": {
+            "name": "search_flights",
+            "node_type": "http_request",
+            "description": "Buscar vuelos. Usar el placeholder del token en bearer_token.",
+            "node_schema": {
+              "base_url": { "type": "string", "fixed": "https://api.amadeus.com" },
+              "endpoint": { "type": "string", "fixed": "/v2/shopping/flight-offers" },
+              "method": { "type": "string", "fixed": "GET" },
+              "bearer_token": {
+                "type": "string",
+                "required": true,
+                "description": "Token obtenido de get_amadeus_token. Pasar el placeholder exacto."
+              },
+              "query_params": {
+                "type": "object",
+                "properties": {
+                  "originLocationCode": { "type": "string", "required": true },
+                  "destinationLocationCode": { "type": "string", "required": true },
+                  "departureDate": { "type": "string", "required": true },
+                  "adults": { "type": "string", "required": true }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+**Requisitos:** `DATABASE_URL`, `SECURE_VALUES_KEY`, `AMADEUS_CLIENT_ID`, `AMADEUS_CLIENT_SECRET`, `OPENAI_API_KEY`.
+
+```bash
+# Ejecutar el experimento
+set -a && source .env && set +a
+cargo run --bin dag_engine -- run tests/graphs/agents/amadeus_llm_http_auth_experiment.json
+```
+
+---
+
+## Tipos de Body en Herramientas HTTP
+
+El `HttpNode` distingue body de query params **por la clave del campo**, no por el método HTTP:
+
+| Clave | Comportamiento | Equivalente curl |
+|---|---|---|
+| `"body": "string"` | Raw text body (URL-encoded, GraphQL, etc.) | `--data-raw "..."` |
+| `"body": { }` | JSON body automático | `-d '{...}'` con `Content-Type: application/json` |
+| `"query_params": { }` | Query parameters en la URL | `?key=val&...` |
+| `"bearer_token": "..."` | Header `Authorization: Bearer ...` | `-H "Authorization: Bearer ..."` |
+| `"headers": { }` | HTTP headers arbitrarios | `-H "Key: Val"` |
+
+> **Importante:** El `Content-Type: application/x-www-form-urlencoded` para OAuth2 debes setearlo explícitamente en `headers`. El nodo no lo infiere del formato del body string.
+
+### Campos internos que NUNCA se envían como query params
+
+La lista `reserved_keys` en `HttpNode` filtra estos campos del mecanismo de `extra_params`:
+
+```
+body, query_params, query_parameters, headers, base_url, endpoint, method,
+bearer_token, authorization, secure, __colmena_session_id, __node_id, __colmena_resume_answer
+```
+
+> **Bug corregido (2026-04-05):** `"secure": true` fue añadido a `reserved_keys`. Antes se filtraba como `?secure=true` a APIs externas causando errores 400.
+
+---
 
 ## Ejecución
 
-Cuando el LLM decide usar una herramienta, Colmena:
-1.  Intercepta la llamada.
-2.  Combina los argumentos del LLM con la `fixed_config`.
-3.  Ejecuta el nodo correspondiente.
-4.  Devuelve el resultado al LLM para que continúe la conversación.
+Cuando el LLM decide usar una herramienta, `DagToolExecutor`:
+1. Combina los argumentos del LLM con `fixed_config` / `node_schema`.
+2. Llama `inject_secrets()` para reemplazar `<value_N>` con valores reales.
+3. Ejecuta el nodo.
+4. Si `secure: true`, llama `hash_output()` — el LLM recibe placeholders, nunca valores reales.
+5. Devuelve el resultado (seguro) al LLM.

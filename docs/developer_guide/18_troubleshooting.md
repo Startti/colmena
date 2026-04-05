@@ -830,3 +830,98 @@ Cualquier información adicional relevante...
 **🐝 Colmena** - *Solucionando problemas juntos*
 
 > 💡 **Tip**: La mayoría de problemas se resuelven limpiando caché (`cargo clean`) y recompilando (`maturin develop --release`)
+
+---
+
+## 🔒 Problemas con Secure Values en HTTP Tools
+
+### HTTP tool con `secure: true` devuelve el token real al LLM
+
+**Síntomas:** El LLM llama una tool de autenticación y en el `tool-output-available` aparece el token real:
+```json
+{"output": {"body": {"access_token": "859Tnd9E7SBSCbnO9E4..."}}}
+```
+
+**Causa:** `DagToolExecutor` no aplicaba `hash_output()` después de ejecutar tools — solo el DAG normal lo hacía.
+
+**Fix aplicado (2026-04-05):** `DagToolExecutor.execute()` ahora detecta `"secure": true` en el `fixed_config` y llama `hash_output()` antes de devolver el resultado al LLM. El LLM recibe `<value_1>` en lugar del token real.
+
+**Verificación:** Busca en el output:
+```
+🔒 [DagToolExecutor] Secure tool 'get_amadeus_token': output hashed, real values encrypted in DB
+```
+
+**Alerta si ves:**
+```
+⚠️ [DagToolExecutor] Tool 'X' has secure:true but no SecureValueService attached. Token WILL be visible to LLM.
+```
+→ El engine no tiene `DATABASE_URL` o `SECURE_VALUES_KEY` configurados.
+
+---
+
+### HTTP tool con `secure: true` retorna 400 a la API externa
+
+**Síntomas:** La llamada a OAuth2 / token endpoint retorna 400 sin motivo aparente (las credenciales son correctas).
+
+**Causa raíz:** El campo `"secure": true` del `fixed_config` se estaba enviando como query param a la API externa (`?secure=true`), ya que `"secure"` no estaba en la lista `reserved_keys` del `HttpNode`.
+
+**Fix aplicado (2026-04-05):** `"secure"` fue añadido a `reserved_keys` en `HttpNode`. Nunca se enviará a APIs externas.
+
+También se encontró y corrigió el typo: `"query_parameters"` → `"query_params"` (la clave correcta en el codebase).
+
+**Si encuentras un campo interno que se filtra como query param**, añádelo a `reserved_keys` en:
+```
+src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs
+```
+
+---
+
+### El output de debug expone tokens y credenciales en logs
+
+**Síntomas:** En el stdout aparecen líneas como:
+```
+DEBUG: Response Body: {"access_token": "real_token_xyz", ...}
+DEBUG: Request Body: grant_type=client_credentials&client_secret=...
+```
+
+**Causa:** `HttpNode` tenía `println!` que imprimían el body de request y response completo.
+
+**Fix aplicado (2026-04-05):** Todos los `println!` de request/response body fueron eliminados. Los logs ahora solo muestran método, URL y status code:
+```
+[HttpNode] → POST https://api.amadeus.com/v1/security/oauth2/token
+[HttpNode] ← 200 (https://api.amadeus.com/v1/security/oauth2/token)
+```
+
+**Regla general:** Nunca loguear `body` en `HttpNode` — puede contener tokens, claves API o PII.
+
+---
+
+### Cómo ejecutar el experimento de autenticación LLM + Amadeus
+
+```bash
+# Configurar variables (usando set -a para exportar a subprocesos)
+set -a && source .env && set +a
+
+# Ejecutar el grafo de experimento
+cargo run --bin dag_engine -- run tests/graphs/agents/amadeus_llm_http_auth_experiment.json
+```
+
+**Qué buscar en el output seguro:**
+```
+[HttpNode] → POST https://api.amadeus.com/v1/security/oauth2/token
+[HttpNode] ← 200 (...)
+🔒 [DagToolExecutor] Secure tool 'get_amadeus_token': output hashed, real values encrypted in DB
+tool-output → {"body": {"access_token": "<value_1>", ...}}   ← ✅ placeholder, no token real
+
+[HttpNode] → GET https://api.amadeus.com/v2/shopping/flight-offers
+[HttpNode] ← 200 (...)   ← ✅ bearer real inyectado, no visible en logs
+```
+
+**Variables requeridas:**
+| Variable | Propósito |
+|---|---|
+| `AMADEUS_CLIENT_ID` | ID de credencial Amadeus (se resuelve por `HttpNode.resolve_env_vars`) |
+| `AMADEUS_CLIENT_SECRET` | Secret de credencial Amadeus |
+| `OPENAI_API_KEY` | API key del LLM |
+| `DATABASE_URL` | PostgreSQL para almacenar `<value_N>` → token encriptado |
+| `SECURE_VALUES_KEY` | Clave AES-256 para encriptar en DB (mínimo 32 chars) |
