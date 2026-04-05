@@ -407,3 +407,303 @@ async fn test_dynamic_with_multiple_containers() {
     assert_eq!(output["endpoint"], "/api/items");
     assert_eq!(output["method"], "POST");
 }
+
+/// Test 1: node_schema generates correct tool definition
+#[tokio::test]
+async fn test_node_schema_tool_definition() {
+    use colmena::dag_engine::domain::tool_configuration::{NodeSchema, NodeSchemaField};
+    use serde_json::json;
+
+    let mut schema = NodeSchema::new();
+    schema.insert(
+        "base_url".to_string(),
+        NodeSchemaField {
+            field_type: "string".to_string(),
+            fixed: Some(json!("https://api.example.com")),
+            required: None,
+            description: None,
+            pattern: None,
+            properties: None,
+        },
+    );
+
+    // query_params container with fixed max and required originLocationCode
+    let mut query_params_props = std::collections::HashMap::new();
+    query_params_props.insert(
+        "max".to_string(),
+        NodeSchemaField {
+            field_type: "string".to_string(),
+            fixed: Some(json!("5")),
+            required: None,
+            description: None,
+            pattern: None,
+            properties: None,
+        },
+    );
+    query_params_props.insert(
+        "originLocationCode".to_string(),
+        NodeSchemaField {
+            field_type: "string".to_string(),
+            fixed: None,
+            required: Some(true),
+            description: Some("Origin IATA code".to_string()),
+            pattern: None,
+            properties: None,
+        },
+    );
+    query_params_props.insert(
+        "children".to_string(),
+        NodeSchemaField {
+            field_type: "string".to_string(),
+            fixed: None,
+            required: Some(false),
+            description: Some("Optional children count".to_string()),
+            pattern: None,
+            properties: None,
+        },
+    );
+
+    schema.insert(
+        "query_params".to_string(),
+        NodeSchemaField {
+            field_type: "object".to_string(),
+            fixed: None,
+            required: None,
+            description: None,
+            pattern: None,
+            properties: Some(query_params_props),
+        },
+    );
+
+    let mut tool_configs = std::collections::HashMap::new();
+    tool_configs.insert(
+        "search_flights".to_string(),
+        ToolConfiguration {
+            name: "search_flights".to_string(),
+            description: "Search for flights".to_string(),
+            node_type: "mock_tool".to_string(),
+            fixed_config: std::collections::HashMap::new(),
+            exposed_inputs: None,
+            parameters: None,
+            mergeable_fields: None,
+            field_mapping: None,
+            node_schema: Some(schema),
+        },
+    );
+
+    let registry = MockRegistry::new();
+    let executor = DagToolExecutor::new(std::sync::Arc::new(registry), tool_configs);
+
+    let tools = executor.available_tools().await;
+    let search_flights = tools.iter().find(|t| t.name == "search_flights").unwrap();
+
+    // Verify fixed fields are NOT in properties
+    assert!(!search_flights.parameters.properties.contains_key("base_url"));
+    assert!(!search_flights.parameters.properties.contains_key("max"));
+
+    // Verify required params are in required array
+    assert!(search_flights.parameters.required.contains(&"originLocationCode".to_string()));
+    assert!(!search_flights.parameters.required.contains(&"children".to_string()));
+
+    // Verify optional param is in properties but not required
+    assert!(search_flights.parameters.properties.contains_key("children"));
+    assert!(!search_flights.parameters.required.contains(&"children".to_string()));
+}
+
+/// Test 2: node_schema merges LLM args correctly into containers
+#[tokio::test]
+async fn test_node_schema_execute_merges_container() {
+    use colmena::dag_engine::domain::tool_configuration::{NodeSchema, NodeSchemaField};
+    use serde_json::json;
+
+    let mut query_params_props = std::collections::HashMap::new();
+    query_params_props.insert(
+        "max".to_string(),
+        NodeSchemaField {
+            field_type: "string".to_string(),
+            fixed: Some(json!("5")),
+            required: None,
+            description: None,
+            pattern: None,
+            properties: None,
+        },
+    );
+    query_params_props.insert(
+        "originLocationCode".to_string(),
+        NodeSchemaField {
+            field_type: "string".to_string(),
+            fixed: None,
+            required: Some(true),
+            description: None,
+            pattern: None,
+            properties: None,
+        },
+    );
+
+    let mut schema = NodeSchema::new();
+    schema.insert(
+        "query_params".to_string(),
+        NodeSchemaField {
+            field_type: "object".to_string(),
+            fixed: None,
+            required: None,
+            description: None,
+            pattern: None,
+            properties: Some(query_params_props),
+        },
+    );
+
+    let mut tool_configs = std::collections::HashMap::new();
+    tool_configs.insert(
+        "test_tool".to_string(),
+        ToolConfiguration {
+            name: "test_tool".to_string(),
+            description: "Test".to_string(),
+            node_type: "mock_tool".to_string(),
+            fixed_config: std::collections::HashMap::new(),
+            exposed_inputs: None,
+            parameters: None,
+            mergeable_fields: None,
+            field_mapping: None,
+            node_schema: Some(schema),
+        },
+    );
+
+    let registry = MockRegistry::new();
+    let executor = DagToolExecutor::new(std::sync::Arc::new(registry), tool_configs);
+
+    let tool_call = ToolCall::new(
+        "call_1".to_string(),
+        FunctionCall {
+            name: "test_tool".to_string(),
+            arguments: r#"{"originLocationCode": "MAD"}"#.to_string(),
+        },
+    );
+
+    let result = executor.execute(&tool_call).await.unwrap();
+    let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+
+    // Verify fixed max=5 is preserved
+    assert_eq!(output["query_params"]["max"], "5");
+
+    // Verify LLM-provided originLocationCode is in query_params
+    assert_eq!(output["query_params"]["originLocationCode"], "MAD");
+}
+
+/// Test 3: node_schema fixed values are immutable
+#[tokio::test]
+async fn test_node_schema_fixed_is_immutable() {
+    use colmena::dag_engine::domain::tool_configuration::{NodeSchema, NodeSchemaField};
+    use serde_json::json;
+
+    let mut query_params_props = std::collections::HashMap::new();
+    query_params_props.insert(
+        "max".to_string(),
+        NodeSchemaField {
+            field_type: "string".to_string(),
+            fixed: Some(json!("5")),
+            required: None,
+            description: None,
+            pattern: None,
+            properties: None,
+        },
+    );
+
+    let mut schema = NodeSchema::new();
+    schema.insert(
+        "query_params".to_string(),
+        NodeSchemaField {
+            field_type: "object".to_string(),
+            fixed: None,
+            required: None,
+            description: None,
+            pattern: None,
+            properties: Some(query_params_props),
+        },
+    );
+
+    let mut tool_configs = std::collections::HashMap::new();
+    tool_configs.insert(
+        "test_tool".to_string(),
+        ToolConfiguration {
+            name: "test_tool".to_string(),
+            description: "Test".to_string(),
+            node_type: "mock_tool".to_string(),
+            fixed_config: std::collections::HashMap::new(),
+            exposed_inputs: None,
+            parameters: None,
+            mergeable_fields: None,
+            field_mapping: None,
+            node_schema: Some(schema),
+        },
+    );
+
+    let registry = MockRegistry::new();
+    let executor = DagToolExecutor::new(std::sync::Arc::new(registry), tool_configs);
+
+    // LLM tries to send max=100
+    let tool_call = ToolCall::new(
+        "call_1".to_string(),
+        FunctionCall {
+            name: "test_tool".to_string(),
+            arguments: r#"{"max": "100"}"#.to_string(),
+        },
+    );
+
+    let result = executor.execute(&tool_call).await.unwrap();
+    let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+
+    // Verify max is still "5", not "100" (LLM cannot override fixed values)
+    assert_eq!(output["query_params"]["max"], "5");
+}
+
+/// Test 4: node_schema takes priority over $DYNAMIC
+#[tokio::test]
+async fn test_node_schema_priority_over_dynamic() {
+    use colmena::dag_engine::domain::tool_configuration::{NodeSchema, NodeSchemaField};
+    use serde_json::json;
+
+    let mut schema = NodeSchema::new();
+    schema.insert(
+        "originLocationCode".to_string(),
+        NodeSchemaField {
+            field_type: "string".to_string(),
+            fixed: None,
+            required: Some(true),
+            description: None,
+            pattern: None,
+            properties: None,
+        },
+    );
+
+    let mut fixed_config = std::collections::HashMap::new();
+    fixed_config.insert("unused_field".to_string(), json!("$DYNAMIC"));
+
+    let mut tool_configs = std::collections::HashMap::new();
+    tool_configs.insert(
+        "test_tool".to_string(),
+        ToolConfiguration {
+            name: "test_tool".to_string(),
+            description: "Test".to_string(),
+            node_type: "mock_tool".to_string(),
+            fixed_config,
+            exposed_inputs: None,
+            parameters: None,
+            mergeable_fields: None,
+            field_mapping: None,
+            node_schema: Some(schema),
+        },
+    );
+
+    let registry = MockRegistry::new();
+    let executor = DagToolExecutor::new(std::sync::Arc::new(registry), tool_configs);
+
+    let tools = executor.available_tools().await;
+    let test_tool = tools.iter().find(|t| t.name == "test_tool").unwrap();
+
+    // Verify node_schema is used (originLocationCode is required)
+    assert!(test_tool.parameters.required.contains(&"originLocationCode".to_string()));
+
+    // Verify $DYNAMIC is NOT processed (unused_field should not be in properties)
+    assert!(!test_tool.parameters.properties.contains_key("unused_field"));
+}
