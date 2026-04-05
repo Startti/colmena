@@ -1,0 +1,30 @@
+{
+  "nodes": {
+    "secure_http": {
+      "node_type": "http",
+      "config": {
+        "base_url": "https://httpbin.org",
+        "endpoint": "/post",
+        "method": "POST",
+        "secure": true,
+        "body": {
+          "secret": "my_api_key_12345",
+          "username": "alice",
+          "data": "sensitive_data_xyz"
+        }
+      }
+    },
+    "output_node": {
+      "node_type": "output",
+      "config": {
+        "message": "Test complete"
+      }
+    }
+  },
+  "edges": [
+    {
+      "from": "secure_http",
+      "to": "output_node"
+    }
+  ]
+}

@@ -1,0 +1,150 @@
+{
+  "comment": "Secure Values + LLM Agent Tools Test: Amadeus API as LLM tools with Secure Values. Demonstrates: (1) HTTP auth node with secure: true, (2) LLM controls tool calls, (3) tools receive real token via auto-injection, (4) LLM sees only hash.",
+  "metadata": {
+    "category": "security",
+    "features": [
+      "secure: true",
+      "LLM tool integration",
+      "auto-injection",
+      "real API endpoint",
+      "agent pattern"
+    ],
+    "provider": "gemini",
+    "requires_env": [
+      "AMADEUS_CLIENT_ID",
+      "AMADEUS_CLIENT_SECRET",
+      "GEMINI_API_KEY",
+      "DATABASE_URL",
+      "SECURE_VALUES_KEY"
+    ]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/travel-agent-secure",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "I want to travel from Madrid (MAD) to Barcelona (BCN) on May 1st 2026 for 1 adult. Please search for flights and recommend the best option based on price and duration. Max 5 results."
+        }
+      }
+    },
+    "get_amadeus_token": {
+      "type": "http_request",
+      "config": {
+        "base_url": "https://api.amadeus.com/v1/security/oauth2",
+        "endpoint": "/token",
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        "body": "grant_type=client_credentials&client_id=${AMADEUS_CLIENT_ID}&client_secret=${AMADEUS_CLIENT_SECRET}",
+        "secure": true,
+        "comment": "secure: true → access_token becomes <value_N> in output and is encrypted in DB"
+      }
+    },
+    "travel_agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "api_key": "${OPENAI_API_KEY}",
+        "system_message": "You are a travel advisor. You MUST use the search_flights tool to find flight offers. Use the tool to search for flights from the origin to destination with the specified dates and number of adults. After getting the results, analyze them and recommend the best option based on price and duration.",
+        "temperature": 0.7,
+        "max_tokens": 500,
+        "stream": false,
+        "enabled_tools": [
+          "search_flights"
+        ],
+        "tool_configurations": {
+          "search_flights": {
+            "name": "search_flights",
+            "node_type": "http_request",
+            "description": "Search for flight offers from origin to destination. You MUST provide originLocationCode, destinationLocationCode, departureDate, and adults.",
+            "node_schema": {
+              "base_url": {
+                "type": "string",
+                "fixed": "https://api.amadeus.com"
+              },
+              "endpoint": {
+                "type": "string",
+                "fixed": "/v2/shopping/flight-offers"
+              },
+              "method": {
+                "type": "string",
+                "fixed": "GET"
+              },
+              "bearer_token": {
+                "type": "string",
+                "fixed": "${context.amadeus_token}"
+              },
+              "query_params": {
+                "type": "object",
+                "properties": {
+                  "max": {
+                    "type": "string",
+                    "fixed": "5"
+                  },
+                  "originLocationCode": {
+                    "type": "string",
+                    "required": true,
+                    "description": "Origin IATA code (e.g., MAD)"
+                  },
+                  "destinationLocationCode": {
+                    "type": "string",
+                    "required": true,
+                    "description": "Destination IATA code (e.g., BCN)"
+                  },
+                  "departureDate": {
+                    "type": "string",
+                    "required": true,
+                    "description": "Departure date (YYYY-MM-DD)",
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+                  },
+                  "adults": {
+                    "type": "string",
+                    "required": true,
+                    "description": "Number of adults (1-9)"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "log_results": {
+      "type": "log",
+      "inputs": {
+        "message": "✅ SECURE AGENT TEST COMPLETE\n\nToken (should be <value_N>): {{amadeus_token}}\nAgent analysis: {{agent_response}}"
+      }
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "get_amadeus_token",
+      "comment": "Fetch token first"
+    },
+    {
+      "from": "trigger.prompt",
+      "to": "travel_agent.prompt",
+      "comment": "Pass prompt to agent"
+    },
+    {
+      "from": "get_amadeus_token.body.access_token",
+      "to": "travel_agent.context.amadeus_token",
+      "comment": "Token injection: hash (<value_N>) goes to LLM context, real token auto-injected to tools"
+    },
+    {
+      "from": "travel_agent.result",
+      "to": "log_results.agent_response",
+      "comment": "Final analysis from agent"
+    },
+    {
+      "from": "get_amadeus_token.body.access_token",
+      "to": "log_results.amadeus_token",
+      "comment": "Log the token hash"
+    }
+  ]
+}

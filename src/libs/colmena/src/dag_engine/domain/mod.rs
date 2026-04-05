@@ -6,3 +6,6 @@ pub mod node;
 pub mod observer;
 pub mod state;
 pub mod tool_configuration;
+pub mod secure_value_repository;
+
+pub use secure_value_repository::SecureValueRepository;

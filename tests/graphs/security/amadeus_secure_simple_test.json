@@ -1,0 +1,54 @@
+{
+  "comment": "Simple Secure Values Test: Verify that HTTP nodes with secure: true hash their outputs, and that bearer_token is auto-injected for subsequent HTTP nodes while LLM nodes see only hashes.",
+  "metadata": {
+    "category": "security",
+    "features": ["secure: true", "LLM isolation", "auto-injection"],
+    "requires_env": ["AMADEUS_CLIENT_ID", "AMADEUS_CLIENT_SECRET", "GEMINI_API_KEY", "DATABASE_URL", "SECURE_VALUES_KEY"]
+  },
+  "nodes": {
+    "fetch_amadeus_token": {
+      "type": "http_request",
+      "config": {
+        "base_url": "https://api.amadeus.com/v1/security/oauth2",
+        "endpoint": "/token",
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        "body": "grant_type=client_credentials&client_id=${AMADEUS_CLIENT_ID}&client_secret=${AMADEUS_CLIENT_SECRET}",
+        "secure": true,
+        "comment": "secure: true → access_token becomes <value_1> in output and is encrypted in DB"
+      }
+    },
+    "search_amadeus_flights": {
+      "type": "http_request",
+      "config": {
+        "base_url": "https://api.amadeus.com/v2/shopping",
+        "endpoint": "/flight-offers",
+        "method": "GET",
+        "query_params": {
+          "originLocationCode": "MAD",
+          "destinationLocationCode": "BCN",
+          "departureDate": "2026-05-01",
+          "adults": "1",
+          "max": "5"
+        },
+        "comment": "This HTTP node will receive bearer_token=<value_1> and get it auto-injected as the real token"
+      }
+    },
+    "verify_security": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "fetch_amadeus_token.body.access_token",
+      "to": "search_amadeus_flights.bearer_token",
+      "comment": "Key: <value_1> auto-injected with real token for HTTP node"
+    },
+    {
+      "from": "search_amadeus_flights",
+      "to": "verify_security"
+    }
+  ]
+}

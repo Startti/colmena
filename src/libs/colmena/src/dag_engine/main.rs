@@ -63,12 +63,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .migrate()
                 .await
                 .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+
+            // Migrate secure values table
+            let secure_value_repo = colmena::dag_engine::infrastructure::persistence::PostgresSecureValueRepository::new(pool.clone());
+            secure_value_repo
+                .migrate()
+                .await
+                .map_err(|e| anyhow::anyhow!("Secure values migration failed: {:?}", e))?;
+
             let registry = HashMapNodeRegistry::new(
                 repository_factory,
                 Some(state_repo.clone()
                     as Arc<dyn colmena::dag_engine::domain::state::DagTaskMemoryRepository>),
             );
-            let run_use_case = DagRunUseCase::new(registry, Some(state_repo));
+            let run_use_case = DagRunUseCase::with_secure_values(registry, Some(state_repo), pool);
 
             let file_content = tokio::fs::read_to_string(&file_path).await?;
             let graph: colmena::dag_engine::domain::graph::Graph =

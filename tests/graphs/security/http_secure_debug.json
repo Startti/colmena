@@ -1,0 +1,27 @@
+{
+  "nodes": {
+    "secure_api_call": {
+      "type": "http_request",
+      "config": {
+        "base_url": "https://httpbin.org",
+        "endpoint": "/post",
+        "method": "POST",
+        "secure": true,
+        "body": {
+          "api_token": "sk_test_12345abcde",
+          "api_secret": "sec_xyz_789_ultra_secret",
+          "user_id": "user_42"
+        }
+      }
+    },
+    "debug_output": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "secure_api_call",
+      "to": "debug_output"
+    }
+  ]
+}

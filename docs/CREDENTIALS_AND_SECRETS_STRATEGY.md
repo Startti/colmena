@@ -1,0 +1,681 @@
+# Credentials & Secrets Strategy in Colmena DAGs
+
+## Overview
+
+This document explains **all available methods** to securely pass credentials into a Colmena DAG, their trade-offs, and recommendations for different scenarios.
+
+---
+
+## Problem Statement
+
+Colmena DAGs need to access external APIs (Amadeus, OpenAI, Anthropic, custom services) that require credentials:
+- API keys (OpenAI, Gemini)
+- OAuth2 tokens (Amadeus)
+- Database credentials
+- Bearer tokens, passwords, encryption keys
+
+**The challenge:** How to get these credentials INTO the DAG without:
+- ❌ Hardcoding them in the graph JSON
+- ❌ Exposing them to LLM nodes
+- ❌ Logging them to console/files
+- ❌ Storing them unencrypted
+
+---
+
+## Available Strategies (TODAY)
+
+### Strategy 1: Environment Variables (Simplest)
+
+**How it works:**
+```bash
+# Before running the DAG
+export AMADEUS_CLIENT_ID="ABC123"
+export AMADEUS_CLIENT_SECRET="XYZ789"
+export GEMINI_API_KEY="sk-..."
+```
+
+**In the graph JSON:**
+```json
+{
+  "type": "http_request",
+  "config": {
+    "base_url": "https://api.amadeus.com/v1/security/oauth2",
+    "endpoint": "/token",
+    "body": "client_id=${AMADEUS_CLIENT_ID}&client_secret=${AMADEUS_CLIENT_SECRET}"
+  }
+}
+```
+
+**Node Types that Support This:**
+- `http_request` — resolves `${VAR}` in: base_url, endpoint, headers, body
+- `llm_call` — resolves `${VAR}` for api_key field only
+
+**Flow:**
+```
+Process environment
+  ↓
+HTTP node: ${AMADEUS_CLIENT_ID} → "ABC123"
+  ↓
+Request body: client_id=ABC123
+  ↓
+Amadeus API returns: {access_token: "real_token_xyz"}
+  ↓
+Next node gets: access_token (real value in plaintext)
+```
+
+**Pros:**
+- ✅ Simple, standard practice
+- ✅ No database required
+- ✅ Works with all node types
+- ✅ Credentials stay in process memory, not in files/DB
+
+**Cons:**
+- ❌ Credentials in plaintext in process memory
+- ❌ Process env vars visible in `ps aux`
+- ❌ One misconfigured log statement exposes secrets
+- ❌ LLM nodes see raw credentials if referenced in prompts
+- ❌ Not suitable when LLM should NOT see credentials
+
+**When to Use:**
+- Development/testing environments
+- When LLM nodes don't process the credentials
+- When process security is guaranteed (Kubernetes, container isolation)
+
+---
+
+### Strategy 2: Trigger Webhook Payload + Secure Flag (RECOMMENDED FOR TESTING)
+
+**How it works:**
+
+1. **Caller sends credentials in HTTP POST body:**
+```bash
+curl -X POST http://localhost:3000/webhook \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "ABC123",
+    "client_secret": "XYZ789"
+  }'
+```
+
+2. **Trigger node passes payload to next nodes:**
+```json
+{
+  "type": "trigger_webhook",
+  "config": {
+    "path": "/webhook"
+  }
+}
+```
+
+3. **HTTP node receives credentials and marks output as secure:**
+```json
+{
+  "type": "http_request",
+  "config": {
+    "endpoint": "/token",
+    "body": {
+      "client_id": "${trigger.client_id}",
+      "client_secret": "${trigger.client_secret}"
+    },
+    "secure": true
+  }
+}
+```
+
+4. **Secure Value Service:**
+   - Response from API: `{access_token: "real_token_xyz"}`
+   - After hashing: `{access_token: "<value_1>"}`
+   - Stored in DB: `<value_1> → AES-256(real_token_xyz)`
+
+5. **LLM node SKIP injection (sees hashes only):**
+```json
+{
+  "type": "llm_call",
+  "inputs": {
+    "user_message": "Token: ${get_amadeus_token.access_token}"
+  }
+}
+```
+Result: `"Token: <value_1>"` ← LLM NEVER sees real token
+
+6. **HTTP node AUTO-INJECT (sees real values):**
+```json
+{
+  "type": "http_request",
+  "inputs": {
+    "bearer_token": "${get_amadeus_token.access_token}"
+  }
+}
+```
+Result: auto-injected with `"Bearer real_token_xyz"` ← HTTP uses real token
+
+**Flow Diagram:**
+```
+HTTP POST /webhook {client_id, client_secret}
+  ↓
+trigger node outputs: {client_id, client_secret}
+  ↓
+HTTP auth node (secure: true):
+  • Calls Amadeus API
+  • Gets {access_token: "real_token_xyz"}
+  • Hashes to {access_token: "<value_1>"}
+  • DB stores: <value_1> → AES(real_token_xyz)
+  ↓
+Output to next nodes: {access_token: "<value_1>"}
+  ├→ LLM node: sees "<value_1>" (SAFE)
+  └→ HTTP node: gets injected with "real_token_xyz" (WORKS)
+  ↓
+DAG ends: DELETE FROM secure_value_mappings (cleanup)
+```
+
+**Pros:**
+- ✅ Credentials NEVER hardcoded in graph
+- ✅ LLM nodes completely isolated from real credentials
+- ✅ Non-LLM HTTP nodes work transparently with real values
+- ✅ Values encrypted at rest (AES-256 in PostgreSQL)
+- ✅ Auto-cleanup on DAG completion
+- ✅ Works with real APIs (Amadeus, OpenAI, etc.)
+
+**Cons:**
+- ❌ Credentials in HTTP request body (protected by TLS only)
+- ❌ Requires PostgreSQL + secure_value_mappings table
+- ❌ Requires SECURE_VALUES_KEY encryption key in environment
+- ❌ Not suitable if caller is untrusted
+
+**When to Use:**
+- Testing real APIs with LLM integration
+- Any scenario where LLM should NOT see raw credentials
+- Production deployments with TLS and authenticated webhook endpoints
+- Multi-tenant systems (each tenant's creds isolated via session_id)
+
+**Example: amadeus_secure_gemini_test.json**
+```json
+{
+  "type": "trigger_webhook",
+  "config": {
+    "path": "/amadeus-secure-test",
+    "test_payload": {
+      "client_id": "${AMADEUS_CLIENT_ID}",
+      "client_secret": "${AMADEUS_CLIENT_SECRET}"
+    }
+  }
+}
+```
+When running with `cargo run ... run amadeus_secure_gemini_test.json`, the trigger uses `test_payload` (Env vars resolved). When running via HTTP POST, trigger uses `__payload__` from the HTTP body.
+
+---
+
+### Strategy 3: Static Test Payload (LOCAL TESTING ONLY)
+
+**How it works:**
+
+Hardcode credentials directly in graph JSON using `trigger.config.test_payload`:
+
+```json
+{
+  "type": "trigger_webhook",
+  "config": {
+    "path": "/amadeus-test",
+    "test_payload": {
+      "client_id": "ABC123_HARDCODED",
+      "client_secret": "XYZ789_HARDCODED"
+    }
+  }
+}
+```
+
+Run with:
+```bash
+cargo run --bin dag_engine -- run tests/graphs/security/amadeus_secure_gemini_test.json
+```
+
+**Pros:**
+- ✅ Zero setup required
+- ✅ No environment variables needed
+- ✅ Works offline
+- ✅ Great for demos and documentation
+
+**Cons:**
+- ❌ **NEVER use in production or commit to git**
+- ❌ Credentials visible in plaintext in the file
+- ❌ Risk of accidental exposure
+
+**When to Use:**
+- Local development/testing only
+- Creating examples and documentation
+- Quick proof-of-concept tests
+- **NEVER** in production or with real API keys
+
+**Note:** The `amadeus_secure_gemini_test.json` uses `test_payload` with `${ENV_VAR}` (env vars get resolved), NOT hardcoded values. This is the safe approach.
+
+---
+
+### Strategy 4: Database Query Node (NOT YET IMPLEMENTED)
+
+**Planned Future Feature**
+
+**How it would work:**
+
+```bash
+# Admin pre-loads credentials into DB
+dag_engine store-secret \
+  --name AMADEUS_CLIENT_ID \
+  --value "ABC123" \
+  --encrypted true
+
+dag_engine store-secret \
+  --name AMADEUS_CLIENT_SECRET \
+  --value "XYZ789" \
+  --encrypted true
+```
+
+**In the graph:**
+```json
+{
+  "type": "db_query",
+  "config": {
+    "table": "credentials",
+    "query": "SELECT value FROM credentials WHERE name = 'AMADEUS_CLIENT_ID'"
+  }
+}
+```
+
+**Result:** Credentials loaded from encrypted DB table
+
+**Pros:**
+- ✅ Credentials never in code, environment, or process memory
+- ✅ Can be rotated without redeploying
+- ✅ Full audit trail of access
+- ✅ Encrypted at rest and in transit
+- ✅ Per-environment credential isolation (dev vs prod)
+
+**Cons:**
+- ❌ Not implemented yet
+- ❌ Adds DB dependency
+- ❌ Requires CLI tool for credential management
+- ❌ Complexity overhead
+
+**When to Use (Future):**
+- Production deployments with strict credential hygiene
+- Multi-tenant systems
+- Highly regulated environments (compliance, security audits)
+- When rotation and audit logging are required
+
+**Effort to Implement:**
+- New `db_query` node type: ~2 hours
+- CLI for credential management: ~2 hours
+- Testing and documentation: ~2 hours
+- **Total: ~1 day**
+
+---
+
+## Comparison Matrix
+
+| Strategy | Setup | Credentials in Code? | LLM Sees Real Values? | DB Required? | Encryption? | Audit Trail? | Production Ready? |
+|----------|-------|----------------------|----------------------|--------------|-------------|--------------|-------------------|
+| Env Vars | `export VAR=...` | No | **YES** ⚠️ | No | No | No | Limited |
+| Webhook + Secure | HTTP POST + DB | No | **NO** ✓ | **Yes** | AES-256 | Basic | **Yes** ✓ |
+| Test Payload | Hardcode in JSON | **YES** ⚠️ | **YES** ⚠️ | No | No | No | **No** |
+| DB Query (Future) | `store-secret` CLI | No | No | **Yes** | AES-256 | **Yes** ✓ | Future |
+
+---
+
+## Decision Flow Chart
+
+```
+Start: Need credentials in DAG?
+  ↓
+Is this local development/testing?
+  ├─ YES → Use Environment Variables (Strategy 1)
+  │         SIMPLE, no DB setup needed
+  │
+  └─ NO → Will LLM nodes see these credentials?
+            ├─ YES → OK if LLM should see them → Use Env Vars (Strategy 1)
+            │         (e.g., LLM analyzing public data)
+            │
+            └─ NO → LLM must NEVER see them
+                     └─ Can you ensure TLS on webhook?
+                        ├─ YES → Use Webhook + Secure (Strategy 2) ✓
+                        │         RECOMMENDED FOR NOW
+                        │
+                        └─ MAYBE → Plan for DB Query (Strategy 4)
+                                   Future: maximum security
+```
+
+---
+
+## Real-World Example: Amadeus Flight Search
+
+### Scenario: Web app needs to search flights via Amadeus without exposing token to Claude LLM
+
+**Architecture:**
+
+```
+Web App → POST /amadeus-search
+           {client_id: "ABC123", client_secret: "XYZ789"}
+          ↓
+  Colmena DAG (runs in backend)
+  ├─ trigger: receives creds from POST body
+  ├─ get_amadeus_token: calls Amadeus with creds (secure: true)
+  │   Response: {access_token: "token_abc_xyz"}
+  │   After hashing: {access_token: "<value_1>"}
+  │   DB stores: <value_1> → AES(token_abc_xyz)
+  │
+  ├─ search_flights: calls Amadeus flight API
+  │   Input: {bearer_token: "<value_1>"}
+  │   Auto-injected: {bearer_token: "token_abc_xyz"}
+  │   Response: {flights: [...]}
+  │
+  └─ analyze_with_claude: LLM analyzes flights
+      Input: {token: "<value_1>", flights: [...]}
+      Claude SEES: <value_1> (opaque hash)
+      Claude NEVER SEES: token_abc_xyz
+      ↓
+      Claude output: "Best option is Flight XYZ..."
+      ↓
+      Web app gets analysis without security breach
+```
+
+**Graph JSON:**
+```json
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {"path": "/amadeus-search"}
+    },
+    "get_amadeus_token": {
+      "type": "http_request",
+      "config": {
+        "endpoint": "/v1/security/oauth2/token",
+        "secure": true,
+        "body": {
+          "client_id": "${trigger.client_id}",
+          "client_secret": "${trigger.client_secret}"
+        }
+      }
+    },
+    "search_flights": {
+      "type": "http_request",
+      "config": {
+        "endpoint": "/v2/shopping/flight-offers",
+        "headers": {
+          "Authorization": "Bearer ${get_amadeus_token.access_token}"
+        }
+      }
+    },
+    "analyze_with_claude": {
+      "type": "llm_call",
+      "config": {
+        "provider": "anthropic",
+        "api_key": "${ANTHROPIC_API_KEY}"
+      },
+      "inputs": {
+        "user_message": "Analyze flights: ${search_flights.body}\nToken: ${get_amadeus_token.access_token}"
+      }
+    }
+  }
+}
+```
+
+**Execution:**
+1. Web app calls: `POST /amadeus-search` with JSON body containing client credentials
+2. Colmena receives creds in trigger node
+3. HTTP node 1 calls Amadeus, gets `access_token: "real_token_xyz"`, hashes it to `<value_1>`
+4. HTTP node 2 (search) auto-injects real token, calls Amadeus for flights
+5. LLM node receives `<value_1>` in its prompt (NEVER sees real token)
+6. LLM analyzes flights and returns recommendation
+7. Database auto-cleans up `<value_1>` mapping after DAG completion
+
+**Result:** ✅ Secure, transparent, works with LLM
+
+---
+
+## Security Best Practices
+
+### DO ✅
+
+- ✅ Use **Webhook + Secure** (Strategy 2) when LLM will process credential-adjacent data
+- ✅ **Enable TLS** on webhook endpoints
+- ✅ **Authenticate** webhook endpoints (API key, OAuth2, etc.)
+- ✅ **Rotate** credentials regularly
+- ✅ **Log** credential access (audit trail)
+- ✅ **Limit DAG runtime** to prevent orphaned database entries
+- ✅ **Use strong SECURE_VALUES_KEY** (32+ characters, random)
+- ✅ **Store SECURE_VALUES_KEY** in secrets manager (not in .env file in git)
+
+### DON'T ❌
+
+- ❌ **Hardcode** credentials in graph JSON files
+- ❌ **Commit** test payloads with real credentials to git
+- ❌ **Log** HTTP request/response bodies containing credentials
+- ❌ **Share** DAG files or screenshots containing `${ENV_VAR}` values
+- ❌ **Use** Strategy 3 (test payload) in production
+- ❌ **Expose** webhook endpoints without authentication
+- ❌ **Trust** process environment variables alone (use Webhook + Secure instead)
+- ❌ **Assume** HTTP-only TLS is sufficient (use certificate pinning for sensitive APIs)
+
+---
+
+## Environment Setup
+
+### For Strategy 1: Environment Variables
+
+```bash
+export AMADEUS_CLIENT_ID="your_client_id"
+export AMADEUS_CLIENT_SECRET="your_client_secret"
+export GEMINI_API_KEY="sk-..."
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+### For Strategy 2: Webhook + Secure
+
+```bash
+# Existing env vars
+export AMADEUS_CLIENT_ID="..."
+export AMADEUS_CLIENT_SECRET="..."
+export GEMINI_API_KEY="..."
+
+# Database setup
+export DATABASE_URL="postgres://user:pass@localhost:5432/colmena"
+
+# Encryption key for secure values (KEEP SECRET!)
+export SECURE_VALUES_KEY="my-super-secret-32-character-minimum-key-12345"
+
+# Pre-migration: enable pgcrypto
+psql -d colmena -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+
+# Create secure_value_mappings table (if not already done)
+sqlx migrate run
+```
+
+### For Strategy 3: Test Payload
+
+```bash
+# NO special setup needed
+# Just run: cargo run --bin dag_engine -- run tests/graphs/security/amadeus_secure_gemini_test.json
+```
+
+---
+
+## Configuring Bearer Tokens with `node_schema` (Recommended)
+
+When using HTTP nodes as LLM tools, the **modern approach** is to use `node_schema` with fixed bearer tokens:
+
+```json
+{
+  "type": "llm_call",
+  "config": {
+    "provider": "gemini",
+    "model": "gemini-2.5-flash",
+    "api_key": "${GEMINI_API_KEY}",
+    "enabled_tools": ["search_flights"],
+    "tool_configurations": {
+      "search_flights": {
+        "name": "search_flights",
+        "node_type": "http_request",
+        "description": "Search for flight offers",
+        "node_schema": {
+          "base_url": {
+            "type": "string",
+            "fixed": "https://api.amadeus.com"
+          },
+          "endpoint": {
+            "type": "string",
+            "fixed": "/v2/shopping/flight-offers"
+          },
+          "method": {
+            "type": "string",
+            "fixed": "GET"
+          },
+          "bearer_token": {
+            "type": "string",
+            "fixed": "${context.amadeus_token}"
+          },
+          "query_params": {
+            "type": "object",
+            "properties": {
+              "max": {
+                "type": "string",
+                "fixed": "5"
+              },
+              "originLocationCode": {
+                "type": "string",
+                "required": true,
+                "description": "Origin IATA code (e.g., MAD)"
+              },
+              "destinationLocationCode": {
+                "type": "string",
+                "required": true,
+                "description": "Destination IATA code (e.g., BCN)"
+              },
+              "departureDate": {
+                "type": "string",
+                "required": true,
+                "description": "Date (YYYY-MM-DD)",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+              },
+              "adults": {
+                "type": "string",
+                "required": true,
+                "description": "Number of adults (1-9)"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+**How it works:**
+1. `bearer_token` is marked `"fixed"` → LLM never sees the real value
+2. When LLM calls the tool, it only provides `originLocationCode`, `destinationLocationCode`, etc.
+3. The executor automatically injects `bearer_token: ${context.amadeus_token}` at runtime
+4. If the token is marked as `secure: true` upstream, the LLM sees `<value_1>` (hash), but HTTP tools get the real token auto-injected
+5. `query_params` with `required: true/false` tells LLM which parameters are mandatory
+
+**Advantages:**
+- ✅ Single source of truth for HTTP tool parameters
+- ✅ LLM never sees real bearer tokens
+- ✅ Pattern validation on dates (e.g., `^\\d{4}-\\d{2}-\\d{2}$`)
+- ✅ Clear documentation of required vs optional parameters
+- ✅ Automatic parameter merging into `query_params` container
+
+---
+
+## Testing the Secure Flow
+
+### Test 1: Verify LLM Sees Hashes, Not Real Tokens
+
+```bash
+export AMADEUS_CLIENT_ID="ABC123"
+export AMADEUS_CLIENT_SECRET="XYZ789"
+export GEMINI_API_KEY="sk-..."
+export DATABASE_URL="postgres://..."
+export SECURE_VALUES_KEY="32-char-key..."
+
+cargo run --bin dag_engine -- run tests/graphs/security/amadeus_secure_gemini_test.json
+```
+
+**Look for in output:**
+```
+✓ get_amadeus_token returns: {access_token: "<value_1>"}
+✓ search_flights receives: bearer_token injected with real token
+✓ analyze_with_gemini LLM prompt contains: "<value_1>" NOT "ABC123"
+✓ Cleanup: 0 rows remaining in secure_value_mappings
+```
+
+### Test 2: Verify HTTP Node Gets Real Token (Auto-Injection)
+
+Check the `search_flights` response. If the HTTP call succeeded with a 200 status, auto-injection worked and Amadeus received the real token.
+
+### Test 3: Verify Database Encryption
+
+```sql
+SELECT * FROM secure_value_mappings;
+-- Should show: encrypted_value as BYTEA (binary), NOT plaintext
+```
+
+---
+
+## Roadmap
+
+### Phase 1: NOW ✅
+- Environment variables (Strategy 1)
+- Webhook + Secure (Strategy 2)
+- Test payloads (Strategy 3)
+
+### Phase 2: SOON
+- [ ] DB Query node (Strategy 4)
+- [ ] CLI tool: `dag_engine store-secret`
+- [ ] Audit logging table
+- [ ] Credential rotation API
+
+### Phase 3: FUTURE
+- [ ] External secrets manager (Vault, AWS Secrets Manager)
+- [ ] Key versioning and rotation
+- [ ] Hardware security module (HSM) integration
+- [ ] Zero-knowledge proofs for credentials
+
+---
+
+## FAQ
+
+**Q: Which strategy should I use for production?**  
+A: **Webhook + Secure (Strategy 2)** today, plan for **DB Query (Strategy 4)** when implemented.
+
+**Q: Can I mix strategies?**  
+A: Yes. E.g., use env vars for LLM API keys, use webhook payload for third-party API credentials, secure-flag the third-party response.
+
+**Q: What if webhook is compromised?**  
+A: TLS encryption protects in-transit. HTTPS + authentication protects the endpoint. Database encryption (AES-256) protects at-rest.
+
+**Q: How long are credentials stored in DB?**  
+A: Automatically deleted when DAG completes (on `dag_end` trigger in `run_use_case.rs`). Fallback timeout: 1 hour.
+
+**Q: Can I audit who accessed which credentials?**  
+A: Currently no. Planned for Phase 2 (audit logging table).
+
+**Q: What about API rate limits and secrets rotation?**  
+A: Outside Colmena's scope. Manage via upstream service (Amadeus, OpenAI, etc.). Use webhook strategy so creds can be updated per-request.
+
+**Q: Is `SECURE_VALUES_KEY` enough to encrypt credentials?**  
+A: For MVP yes (AES-256 via PostgreSQL pgcrypto). For high-security scenarios, integrate with Vault or AWS Secrets Manager (Phase 3).
+
+---
+
+## References
+
+- [Secure Values Design](SECURE_VALUES_DESIGN.md)
+- [Secure Values Implementation](SECURE_VALUES_IMPLEMENTATION.md)
+- [Secure Values Quick Reference](SECURE_VALUES_QUICK_REFERENCE.md)
+- [NODE_CONNECTION_AND_DATA_FLOW.md](NODE_CONNECTION_AND_DATA_FLOW.md)
+- [LLM Node Complete Guide](LLM_NODE_COMPLETE_GUIDE.md)
+
+---
+
+**Status:** Documentation Complete  
+**Date:** 2026-04-04  
+**Version:** 1.0

@@ -35,12 +35,20 @@ pub async fn run_dag(
         .migrate()
         .await
         .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+
+    // Migrate secure values table
+    let secure_value_repo = crate::dag_engine::infrastructure::persistence::PostgresSecureValueRepository::new(pool.clone());
+    secure_value_repo
+        .migrate()
+        .await
+        .map_err(|e| anyhow::anyhow!("Secure values migration failed: {:?}", e))?;
+
     let registry = HashMapNodeRegistry::new(
         repository_factory,
         Some(state_repo.clone()
             as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),
     );
-    let run_use_case = DagRunUseCase::new(registry, Some(state_repo));
+    let run_use_case = DagRunUseCase::with_secure_values(registry, Some(state_repo), pool);
 
     // Load and execute the graph
     let file_content = tokio::fs::read_to_string(&file_path).await?;
@@ -282,12 +290,20 @@ pub async fn serve_dag(
         .migrate()
         .await
         .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+
+    // Migrate secure values table
+    let secure_value_repo = crate::dag_engine::infrastructure::persistence::PostgresSecureValueRepository::new(pool.clone());
+    secure_value_repo
+        .migrate()
+        .await
+        .map_err(|e| anyhow::anyhow!("Secure values migration failed: {:?}", e))?;
+
     let registry = HashMapNodeRegistry::new(
         repository_factory,
         Some(state_repo.clone()
             as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),
     );
-    let run_use_case = Arc::new(DagRunUseCase::new(registry, Some(state_repo)));
+    let run_use_case = Arc::new(DagRunUseCase::with_secure_values(registry, Some(state_repo), pool));
 
     // Load the graph
     let file_content = tokio::fs::read_to_string(&file_path).await?;

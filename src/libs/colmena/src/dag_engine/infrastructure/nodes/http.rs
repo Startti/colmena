@@ -150,6 +150,9 @@ impl ExecutableNode for HttpNode {
             "query_parameters",
             "bearer_token",
             "authorization",
+            "__colmena_session_id",
+            "__node_id",
+            "__colmena_resume_answer",
         ];
         let mut extra_params = std::collections::HashMap::new();
         for (k, v) in inputs {

@@ -1,7 +1,9 @@
 use crate::dag_engine::application::ports::NodeRegistryPort;
+use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::error::DagError;
 use crate::dag_engine::domain::graph::{Edge, Graph};
 use crate::dag_engine::domain::node::NodeInputs;
+use crate::dag_engine::infrastructure::persistence::PostgresSecureValueRepository;
 
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -14,6 +16,7 @@ use crate::dag_engine::domain::state::{DagRunState, DagRunStatus, DagStateReposi
 pub struct DagRunUseCase {
     registry: Arc<dyn NodeRegistryPort>,
     state_repository: Option<Arc<dyn DagStateRepository>>,
+    secure_value_service: Option<Arc<SecureValueService>>,
 }
 
 impl DagRunUseCase {
@@ -24,6 +27,23 @@ impl DagRunUseCase {
         Self {
             registry,
             state_repository,
+            secure_value_service: None,
+        }
+    }
+
+    /// Creates a new DagRunUseCase with secure values support
+    pub fn with_secure_values(
+        registry: Arc<dyn NodeRegistryPort>,
+        state_repository: Option<Arc<dyn DagStateRepository>>,
+        pool: sqlx::PgPool,
+    ) -> Self {
+        let secure_value_repo = Arc::new(PostgresSecureValueRepository::new(pool));
+        let secure_value_service = Arc::new(SecureValueService::new(secure_value_repo));
+
+        Self {
+            registry,
+            state_repository,
+            secure_value_service: Some(secure_value_service),
         }
     }
 
@@ -258,6 +278,20 @@ impl DagRunUseCase {
 
                 let mut inputs = self.build_inputs_for(&node_id, &graph.edges, &all_outputs, &graph)?;
 
+                // STEP 1: Inject secrets for non-LLM nodes (before executing)
+                if node_config.node_type != "llm" {
+                    if let Some(svc) = &self.secure_value_service {
+                        let mut inputs_value = serde_json::to_value(&inputs)
+                            .unwrap_or(Value::Object(Default::default()));
+                        if let Err(e) = svc.inject_secrets(&mut inputs_value, &session_id).await {
+                            eprintln!("⚠️ Failed to inject secrets: {}", e);
+                        }
+                        if let Ok(injected_inputs) = serde_json::from_value::<NodeInputs>(inputs_value) {
+                            inputs = injected_inputs;
+                        }
+                    }
+                }
+
                 if let Some(ans) = &resume_answer {
                     inputs.insert("__colmena_resume_answer".to_string(), Value::String(ans.clone()));
                 }
@@ -309,14 +343,30 @@ impl DagRunUseCase {
                     output_result.map_err(|e| DagError::NodeExecution(e.to_string()))?
                 };
 
+                // STEP 2: Hash output if secure: true (after executing)
+                let mut processed_output = output.clone();
+                if let Some(svc) = &self.secure_value_service {
+                    match svc
+                        .hash_output(&processed_output, &node_config.config, &session_id, &node_id)
+                        .await
+                    {
+                        Ok(hashed) => {
+                            processed_output = hashed;
+                        }
+                        Err(e) => {
+                            eprintln!("⚠️ Failed to hash secure values: {}", e);
+                        }
+                    }
+                }
+
                 yield DagExecutionEvent::NodeFinish {
                     node_id: node_id.clone(),
-                    output: output.clone(),
+                    output: processed_output.clone(),
                 };
 
                 // Handle SUSPENDED
-                if Self::find_status_by_key(&output, "__colmena_status") == Some("SUSPENDED".to_string()) {
-                    let mut final_output = output.clone();
+                if Self::find_status_by_key(&processed_output, "__colmena_status") == Some("SUSPENDED".to_string()) {
+                    let mut final_output = processed_output.clone();
                     if !include_extra_info {
                         Self::strip_extra_info(&mut final_output);
                     }
@@ -350,11 +400,11 @@ impl DagRunUseCase {
                     return;
                 }
 
-                all_outputs.insert(node_id.to_string(), output.clone());
+                all_outputs.insert(node_id.to_string(), processed_output.clone());
 
                 // --- DYNAMICALLY PUSH TO QUEUE BASED ON EDGES ---
                 // If a node emitted Value::Null intentionally (skip stub), do not traverse its descendants
-                if !output.is_null() {
+                if !processed_output.is_null() {
                     let outgoing_edges = graph.edges.iter().filter(|e| e.from.starts_with(&node_id));
                     for edge in outgoing_edges {
 
@@ -364,7 +414,7 @@ impl DagRunUseCase {
                             true // Passing the entire output object
                         } else {
                             let json_pointer = parts_from[1].replace('.', "/");
-                            let ptr_exists = output.pointer(&format!("/{}", json_pointer)).is_some_and(|v| !v.is_null());
+                            let ptr_exists = processed_output.pointer(&format!("/{}", json_pointer)).is_some_and(|v| !v.is_null());
                             println!("DEBUG [Queue Edge]: edge.from='{}' -> pointer='{}' -> has_data={}", edge.from, json_pointer, ptr_exists);
                             ptr_exists
                         };
@@ -412,6 +462,13 @@ impl DagRunUseCase {
             }
             if let Some(obj) = final_aggregated_output.as_object_mut() {
                 obj.insert("__colmena_session_id".to_string(), Value::String(session_id.clone()));
+            }
+
+            // CLEANUP: Delete all secure values for this session
+            if let Some(svc) = &self.secure_value_service {
+                if let Err(e) = svc.cleanup(&session_id).await {
+                    eprintln!("⚠️ Failed to cleanup secure values: {}", e);
+                }
             }
 
             yield DagExecutionEvent::GraphFinish { output: final_aggregated_output.clone() };

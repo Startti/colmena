@@ -1,0 +1,55 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/secure-llm-test",
+        "method": "POST",
+        "test_payload": {
+          "provider": "openai",
+          "model": "gpt-4o-mini",
+          "api_key": "${OPENAI_API_KEY}",
+          "system_message": "You are a security analyst. The data you will receive contains sensitive information that has been replaced with secure hashes like <value_1>, <value_2>, etc."
+        }
+      }
+    },
+    "fetch_sensitive_config": {
+      "type": "http_request",
+      "config": {
+        "base_url": "https://httpbin.org",
+        "endpoint": "/post",
+        "method": "POST",
+        "secure": true,
+        "body": {
+          "api_token": "sk_live_confidential_key_abc123xyz",
+          "database_password": "super_secret_prod_password_99",
+          "encryption_key": "key_encryption_abc_confidential"
+        }
+      }
+    },
+    "analyze_with_llm": {
+      "type": "llm_call",
+      "config": {
+        "provider": "${provider}",
+        "model": "${model}",
+        "api_key": "${api_key}",
+        "system_message": "${system_message}",
+        "stream": true,
+        "instructions": "Look at the sensitive data provided and analyze it. The <value_1>, <value_2>, <value_3> are secure hashes - never try to reverse them or guess what they are. Just describe the structure of the data and what it represents."
+      },
+      "inputs": {
+        "user_message": "Here is my sensitive configuration data:\n\n1. API Token: ${fetch_sensitive_config.body.json.api_token}\n2. Database Password: ${fetch_sensitive_config.body.json.database_password}\n3. Encryption Key: ${fetch_sensitive_config.body.json.encryption_key}\n\nAnalyze this data structure. Note that the values above are secure hashes, not the actual credentials."
+      }
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "fetch_sensitive_config"
+    },
+    {
+      "from": "fetch_sensitive_config",
+      "to": "analyze_with_llm"
+    }
+  ]
+}

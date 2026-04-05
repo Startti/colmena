@@ -1,0 +1,46 @@
+{
+  "nodes": {
+    "fetch_secure_token": {
+      "node_type": "http",
+      "config": {
+        "base_url": "https://httpbin.org",
+        "endpoint": "/post",
+        "method": "POST",
+        "secure": true,
+        "body": {
+          "secret_token": "sk_live_super_secret_xyz789",
+          "client_id": "my_client_12345",
+          "message": "This is sensitive data"
+        }
+      }
+    },
+    "llm_analyze": {
+      "node_type": "llm",
+      "config": {
+        "model": "gpt-4",
+        "stream": true,
+        "temperature": 0.7
+      },
+      "inputs": {
+        "system": "You are a helpful assistant. You have access to a secret token.",
+        "user_message": "I have a secret token: ${fetch_secure_token.body.json.secret_token}\n\nClient ID: ${fetch_secure_token.body.json.client_id}\n\nAnalyze this data and tell me what you see. Do NOT try to extract or reveal the secret token."
+      }
+    },
+    "final_output": {
+      "node_type": "output",
+      "config": {
+        "message": "Test complete"
+      }
+    }
+  },
+  "edges": [
+    {
+      "from": "fetch_secure_token",
+      "to": "llm_analyze"
+    },
+    {
+      "from": "llm_analyze",
+      "to": "final_output"
+    }
+  ]
+}

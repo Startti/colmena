@@ -19,6 +19,7 @@ pub struct ToolConfiguration {
     pub node_type: String,
 
     /// Fixed configuration values (not exposed to LLM)
+    #[serde(default)]
     pub fixed_config: HashMap<String, Value>,
 
     /// Which input parameters to expose to the LLM

@@ -13,6 +13,46 @@ pub struct DagToolExecutor {
 }
 
 impl DagToolExecutor {
+    /// Resolve ${var} and ${context.var} placeholders in a string value
+    /// using values from the inputs HashMap
+    fn resolve_template_string(template: &str, inputs: &HashMap<String, Value>) -> String {
+        use regex::Regex;
+
+        // Pattern: ${context.key} or ${key}
+        let re = Regex::new(r"\$\{(?:context\.)?(\w+)\}").unwrap();
+
+        re.replace_all(template, |caps: &regex::Captures| {
+            let key = &caps[1];
+            inputs
+                .get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or(&caps[0].to_string())
+                .to_string()
+        })
+        .to_string()
+    }
+
+    /// Recursively resolve template strings in a Value
+    fn resolve_value_templates(value: &Value, inputs: &HashMap<String, Value>) -> Value {
+        match value {
+            Value::String(s) => Value::String(Self::resolve_template_string(s, inputs)),
+            Value::Object(obj) => {
+                let mut resolved = serde_json::Map::new();
+                for (k, v) in obj {
+                    resolved.insert(k.clone(), Self::resolve_value_templates(v, inputs));
+                }
+                Value::Object(resolved)
+            }
+            Value::Array(arr) => {
+                let resolved: Vec<Value> = arr
+                    .iter()
+                    .map(|v| Self::resolve_value_templates(v, inputs))
+                    .collect();
+                Value::Array(resolved)
+            }
+            _ => value.clone(),
+        }
+    }
     pub fn new(
         registry: Arc<dyn NodeRegistryPort>,
         tool_configurations: HashMap<String, ToolConfiguration>,
@@ -245,7 +285,7 @@ impl ToolExecutor for DagToolExecutor {
             let parsed = parse_node_schema(schema);
             let mut result: HashMap<String, Value> = HashMap::new();
 
-            // Seed with all fixed values
+            // Seed with all fixed values (will be resolved later)
             for (k, v) in &parsed.fixed_values {
                 result.insert(k.clone(), v.clone());
             }
@@ -266,7 +306,14 @@ impl ToolExecutor for DagToolExecutor {
                 }
             }
 
-            result
+            // Resolve template variables in fixed values using the final inputs
+            // We need to clone to avoid borrow checker issues
+            let resolved_result = result
+                .iter()
+                .map(|(k, v)| (k.clone(), Self::resolve_value_templates(v, &result)))
+                .collect::<HashMap<String, Value>>();
+
+            resolved_result
         } else if let Some(fixed) = fixed_config.as_ref() {
             // Check if using new $DYNAMIC system
             let dynamic_fields = Self::collect_dynamic_fields(fixed);

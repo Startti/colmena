@@ -1,0 +1,44 @@
+{
+  "nodes": {
+    "get_token": {
+      "node_type": "http",
+      "config": {
+        "base_url": "https://httpbin.org",
+        "endpoint": "/post",
+        "method": "POST",
+        "secure": true,
+        "body": {
+          "token": "sk_live_abc123xyz",
+          "client_id": "my_client"
+        }
+      }
+    },
+    "use_token_in_header": {
+      "node_type": "http",
+      "config": {
+        "base_url": "https://httpbin.org",
+        "endpoint": "/headers",
+        "method": "GET",
+        "headers": {
+          "X-Auth-Token": "${get_token.body.json.token}"
+        }
+      }
+    },
+    "output_node": {
+      "node_type": "output",
+      "config": {
+        "message": "Token injection test complete"
+      }
+    }
+  },
+  "edges": [
+    {
+      "from": "get_token",
+      "to": "use_token_in_header"
+    },
+    {
+      "from": "use_token_in_header",
+      "to": "output_node"
+    }
+  ]
+}

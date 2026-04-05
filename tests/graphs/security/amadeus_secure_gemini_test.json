@@ -1,0 +1,90 @@
+{
+  "comment": "Real-world test: Amadeus flight search with Secure Values + Gemini LLM. Demonstrates: (1) secure: true hashes the token, (2) auto-injection for HTTP nodes, (3) LLM isolation (sees only hashes).",
+  "metadata": {
+    "category": "security",
+    "features": ["secure: true", "LLM isolation", "auto-injection", "real API endpoint", "explicit query_params"],
+    "provider": "gemini",
+    "requires_env": ["AMADEUS_CLIENT_ID", "AMADEUS_CLIENT_SECRET", "GEMINI_API_KEY", "DATABASE_URL", "SECURE_VALUES_KEY"]
+  },
+  "nodes": {
+    "get_amadeus_token": {
+      "type": "http_request",
+      "config": {
+        "base_url": "https://api.amadeus.com/v1/security/oauth2",
+        "endpoint": "/token",
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        "body": "grant_type=client_credentials&client_id=${AMADEUS_CLIENT_ID}&client_secret=${AMADEUS_CLIENT_SECRET}",
+        "secure": true
+      }
+    },
+    "search_flights": {
+      "type": "http_request",
+      "config": {
+        "base_url": "https://api.amadeus.com/v2/shopping",
+        "endpoint": "/flight-offers",
+        "method": "GET",
+        "query_params": {
+          "originLocationCode": "MAD",
+          "destinationLocationCode": "BCN",
+          "departureDate": "2026-05-01",
+          "adults": "1",
+          "max": "5"
+        }
+      },
+      "inputs": {
+        "bearer_token": "${get_amadeus_token.body.access_token}"
+      }
+    },
+    "analyze_with_gemini": {
+      "type": "llm_call",
+      "config": {
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "system_message": "You are a travel advisor. Analyze flight data and recommend the best option based on price and duration. Note: fields like <value_1> are secure hashes for credentials.",
+        "temperature": 0.7,
+        "max_tokens": 500,
+        "stream": false
+      },
+      "inputs": {
+        "prompt": "Analyze these flights and recommend the best:\n\nFlights: {{flight_results}}\n\nToken (hashed): {{access_token}}\n\nBased on price and duration, which is the best option?"
+      }
+    },
+    "log_results": {
+      "type": "log",
+      "inputs": {
+        "message": "✅ TEST COMPLETE\n\nToken (should be <value_N>): {{access_token}}\nFlights found: {{flight_count}}\nGemini recommendation: {{analysis}}"
+      }
+    }
+  },
+  "edges": [
+    {
+      "from": "get_amadeus_token.body.access_token",
+      "to": "search_flights.bearer_token"
+    },
+    {
+      "from": "search_flights.body",
+      "to": "analyze_with_gemini.flight_results"
+    },
+    {
+      "from": "search_flights.body.meta.count",
+      "to": "log_results.flight_count"
+    },
+    {
+      "from": "analyze_with_gemini.result",
+      "to": "log_results.analysis"
+    },
+    {
+      "from": "search_flights",
+      "to": "analyze_with_gemini",
+      "comment": "Make LLM wait for search_flights to complete"
+    },
+    {
+      "from": "analyze_with_gemini",
+      "to": "log_results"
+    }
+  ]
+}

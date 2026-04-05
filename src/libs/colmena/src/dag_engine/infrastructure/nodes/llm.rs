@@ -46,20 +46,23 @@ impl LlmNode {
         }
     }
 
+    /// Resolve all ${var} placeholders (context, trigger, node outputs, etc.)
+    /// Matches ${anything.with.dots} and looks it up in inputs
     fn resolve_context_vars(value: &str, inputs: &NodeInputs) -> String {
         let mut result = String::new();
         let mut last_end = 0;
 
-        while let Some(start) = value[last_end..].find("${context.") {
+        // Match any ${...} pattern, not just ${context.*}
+        while let Some(start) = value[last_end..].find("${") {
             let absolute_start = last_end + start;
             result.push_str(&value[last_end..absolute_start]);
 
             if let Some(end) = value[absolute_start..].find('}') {
                 let absolute_end = absolute_start + end;
-                let var_path = &value[absolute_start + 2..absolute_end]; // e.g. "context.amadeus_token"
+                let var_path = &value[absolute_start + 2..absolute_end]; // e.g. "context.amadeus_token", "trigger.data", etc.
 
-                // Look up in inputs
-                // inputs keys are flattened, e.g. "context.amadeus_token"
+                // Look up in inputs with the full path
+                // inputs keys are flattened, e.g. "context.amadeus_token", "trigger.prompt", etc.
                 let val = if let Some(v) = inputs.get(var_path) {
                     match v {
                         Value::String(s) => s.clone(),
@@ -80,6 +83,32 @@ impl LlmNode {
         }
         result.push_str(&value[last_end..]);
         result
+    }
+
+    /// Recursively resolve ${context.var} placeholders in a NodeSchema structure
+    fn resolve_context_in_node_schema(
+        schema: &mut crate::dag_engine::domain::tool_configuration::NodeSchema,
+        inputs: &NodeInputs,
+    ) {
+        for field in schema.values_mut() {
+            // Resolve fixed value if it's a string
+            if let Some(fixed) = field.fixed.as_mut() {
+                if let Value::String(s) = fixed {
+                    *s = Self::resolve_context_vars(s, inputs);
+                }
+            }
+
+            // Recursively resolve in nested properties
+            if let Some(properties) = field.properties.as_mut() {
+                for nested_field in properties.values_mut() {
+                    if let Some(fixed) = nested_field.fixed.as_mut() {
+                        if let Value::String(s) = fixed {
+                            *s = Self::resolve_context_vars(s, inputs);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn resolve_template_vars(value: &str, inputs: &NodeInputs) -> String {
@@ -424,12 +453,18 @@ impl ExecutableNode for LlmNode {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
 
-        // Resolve context variables in fixed_config
-        for config in tool_configurations.values_mut() {
-            for val in config.fixed_config.values_mut() {
+        // Resolve context variables in both fixed_config and node_schema
+        for tool_cfg in tool_configurations.values_mut() {
+            // Legacy: Resolve context variables in fixed_config (deprecated)
+            for val in tool_cfg.fixed_config.values_mut() {
                 if let Value::String(s) = val {
                     *val = Value::String(Self::resolve_context_vars(s, inputs));
                 }
+            }
+
+            // New: Resolve context variables in node_schema fixed values (recursive)
+            if let Some(node_schema) = tool_cfg.node_schema.as_mut() {
+                Self::resolve_context_in_node_schema(node_schema, inputs);
             }
         }
 
