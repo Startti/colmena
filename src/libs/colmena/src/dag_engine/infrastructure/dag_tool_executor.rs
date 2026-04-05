@@ -60,6 +60,21 @@ impl DagToolExecutor {
         node: &Arc<dyn ExecutableNode>,
     ) -> crate::llm::domain::ToolDefinition {
         use crate::llm::domain::{ParameterProperty, ToolDefinition, ToolParameters};
+        use crate::dag_engine::domain::tool_configuration::parse_node_schema;
+
+        // BRANCH 0 (HIGHEST PRIORITY): node_schema
+        if let Some(schema) = &tool_config.node_schema {
+            let parsed = parse_node_schema(schema);
+            return ToolDefinition {
+                name: tool_name.to_string(),
+                description: tool_config.description.clone(),
+                parameters: ToolParameters {
+                    schema_type: "object".to_string(),
+                    properties: parsed.llm_properties,
+                    required: parsed.required_params,
+                },
+            };
+        }
 
         // If parameters are explicitly defined in config, use them
         if let Some(params_value) = &tool_config.parameters {
@@ -97,6 +112,7 @@ impl DagToolExecutor {
                         property_type: "string".to_string(),
                         description,
                         enum_values: None,
+                        pattern: None,
                     },
                 );
                 required.push(param_name.clone());
@@ -162,6 +178,7 @@ impl DagToolExecutor {
                     property_type: prop_type.to_string(),
                     description: desc.to_string(),
                     enum_values: None,
+                    pattern: None,
                 },
             );
 
@@ -220,8 +237,37 @@ impl ToolExecutor for DagToolExecutor {
                 reason: format!("Failed to parse arguments for tool {}: {}", node_type, e),
             })?;
 
-        // 3. Build final_args with $DYNAMIC substitution or legacy field_mapping
-        let inputs = if let Some(fixed) = fixed_config.as_ref() {
+        // 3. Build final_args with node_schema, $DYNAMIC substitution, or legacy field_mapping
+        use crate::dag_engine::domain::tool_configuration::parse_node_schema;
+
+        let inputs = if let Some(schema) = tool_cfg.and_then(|c| c.node_schema.as_ref()) {
+            // PATH 0 (HIGHEST PRIORITY): node_schema
+            let parsed = parse_node_schema(schema);
+            let mut result: HashMap<String, Value> = HashMap::new();
+
+            // Seed with all fixed values
+            for (k, v) in &parsed.fixed_values {
+                result.insert(k.clone(), v.clone());
+            }
+
+            // Place each LLM arg in the correct location
+            for (param_name, param_value) in &args {
+                if let Some(container) = parsed.param_to_container.get(param_name) {
+                    // Merge into container
+                    let entry = result
+                        .entry(container.clone())
+                        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                    if let Value::Object(map) = entry {
+                        map.insert(param_name.clone(), param_value.clone());
+                    }
+                } else {
+                    // Top-level placement
+                    result.insert(param_name.clone(), param_value.clone());
+                }
+            }
+
+            result
+        } else if let Some(fixed) = fixed_config.as_ref() {
             // Check if using new $DYNAMIC system
             let dynamic_fields = Self::collect_dynamic_fields(fixed);
             if !dynamic_fields.is_empty() {
@@ -417,6 +463,7 @@ impl ToolExecutor for DagToolExecutor {
                             property_type: prop_type.to_string(),
                             description: desc.to_string(),
                             enum_values: None, // TODO: Parse enum values if available
+                            pattern: None,
                         },
                     );
 
@@ -586,6 +633,7 @@ mod tests {
                 parameters: None,
                 mergeable_fields: None,
                 field_mapping: None,
+                node_schema: None,
             },
         );
 
@@ -629,6 +677,7 @@ mod tests {
                 exposed_inputs: None,
                 parameters: None,
                 mergeable_fields: None,
+                node_schema: None,
                 field_mapping: Some(field_mapping),
             },
         );
@@ -679,6 +728,7 @@ mod tests {
                 exposed_inputs: None,
                 parameters: None,
                 mergeable_fields: Some(vec!["body".to_string()]),
+                node_schema: None,
                 field_mapping: Some(field_mapping),
             },
         );
@@ -729,6 +779,7 @@ mod tests {
                 exposed_inputs: None,
                 parameters: None,
                 mergeable_fields: Some(vec!["headers".to_string()]),
+                node_schema: None,
                 field_mapping: Some(field_mapping),
             },
         );
@@ -774,6 +825,7 @@ mod tests {
                 parameters: None,
                 mergeable_fields: None,
                 field_mapping: None,
+                node_schema: None,
             },
         );
 
@@ -824,6 +876,7 @@ mod tests {
                 parameters: None,
                 mergeable_fields: None,
                 field_mapping: None,
+                node_schema: None,
             },
         );
 
@@ -886,6 +939,7 @@ mod tests {
                 parameters: None,
                 mergeable_fields: None,
                 field_mapping: None,
+                node_schema: None,
             },
         );
 
@@ -933,6 +987,7 @@ mod tests {
                 parameters: None,
                 mergeable_fields: None,
                 field_mapping: None,
+                node_schema: None,
             },
         );
 
@@ -988,6 +1043,7 @@ mod tests {
                 parameters: None,
                 mergeable_fields: None,
                 field_mapping: None,
+                node_schema: None,
             },
         );
 
@@ -1039,6 +1095,7 @@ mod tests {
                 exposed_inputs: None,
                 parameters: None,
                 mergeable_fields: None,
+                node_schema: None,
                 field_mapping: Some(field_mapping),
             },
         );

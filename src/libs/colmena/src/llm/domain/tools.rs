@@ -144,6 +144,10 @@ pub struct ParameterProperty {
     /// Optional list of allowed values (for enum types)
     #[serde(skip_serializing_if = "Option::is_none", rename = "enum")]
     pub enum_values: Option<Vec<String>>,
+
+    /// Optional regex pattern constraint for string validation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
 }
 
 impl ParameterProperty {
@@ -153,12 +157,19 @@ impl ParameterProperty {
             property_type,
             description,
             enum_values: None,
+            pattern: None,
         }
     }
 
     /// Add enum values to the property
     pub fn with_enum(mut self, values: Vec<String>) -> Self {
         self.enum_values = Some(values);
+        self
+    }
+
+    /// Add a regex pattern constraint to the property
+    pub fn with_pattern(mut self, pattern: String) -> Self {
+        self.pattern = Some(pattern);
         self
     }
 }

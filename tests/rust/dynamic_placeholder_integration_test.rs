@@ -110,6 +110,7 @@ async fn test_dynamic_placeholder_blog_post_creation() {
             parameters: None,
             mergeable_fields: None,
             field_mapping: None,
+            node_schema: None,
         },
     );
 
@@ -183,6 +184,7 @@ async fn test_dynamic_placeholder_with_request_id() {
             parameters: None,
             mergeable_fields: None,
             field_mapping: None,
+            node_schema: None,
         },
     );
 
@@ -239,6 +241,7 @@ async fn test_dynamic_tool_definition_generation() {
             parameters: None,
             mergeable_fields: None,
             field_mapping: None,
+            node_schema: None,
         },
     );
 
@@ -295,6 +298,7 @@ async fn test_dynamic_vs_fixed_security() {
             parameters: None,
             mergeable_fields: None,
             field_mapping: None,
+            node_schema: None,
         },
     );
 
@@ -367,6 +371,7 @@ async fn test_dynamic_with_multiple_containers() {
             parameters: None,
             mergeable_fields: None,
             field_mapping: None,
+            node_schema: None,
         },
     );
 
