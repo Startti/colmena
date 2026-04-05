@@ -1,0 +1,99 @@
+{
+  "comment": "Test graph for node_schema unified tool configuration. Demonstrates single-source-of-truth parameter definition with fixed, required, and optional fields. Uses jsonplaceholder.typicode.com for testing without external dependencies.",
+  "metadata": {
+    "category": "agents",
+    "features": ["node_schema", "http_tool", "llm_call"],
+    "requires_env": ["OPENAI_API_KEY"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/create_post",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Create a blog post about the future of AI with title 'The AI Revolution' and content about machine learning advances"
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o-mini",
+        "system_message": "You are a blog post writer. Use the create_blog_post tool to create posts. The userId and author are always fixed. You provide the title and content. Tags are optional.",
+        "temperature": 0.7,
+        "stream": false,
+        "enabled_tools": ["create_blog_post"],
+        "tool_configurations": {
+          "create_blog_post": {
+            "name": "create_blog_post",
+            "node_type": "http_request",
+            "description": "Create a new blog post. You MUST provide title and content. Tags are optional.",
+            "node_schema": {
+              "base_url": {
+                "type": "string",
+                "fixed": "https://jsonplaceholder.typicode.com"
+              },
+              "endpoint": {
+                "type": "string",
+                "fixed": "/posts"
+              },
+              "method": {
+                "type": "string",
+                "fixed": "POST"
+              },
+              "body": {
+                "type": "object",
+                "properties": {
+                  "userId": {
+                    "type": "string",
+                    "fixed": "1"
+                  },
+                  "author": {
+                    "type": "string",
+                    "fixed": "Fulanito"
+                  },
+                  "title": {
+                    "type": "string",
+                    "required": true,
+                    "description": "Post title (required)"
+                  },
+                  "content": {
+                    "type": "string",
+                    "required": true,
+                    "description": "Post content (required)"
+                  },
+                  "tags": {
+                    "type": "string",
+                    "required": false,
+                    "description": "Comma-separated tags (optional)"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "log": {
+      "type": "log",
+      "inputs": {
+        "message": "✅ Blog Post Created\n\nTitle: {{title}}\nAuthor: {{author}}\nContent: {{content}}\nTags: {{tags}}\nPost ID: {{id}}"
+      }
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "agent",
+      "comment": "Pass the prompt to the LLM agent"
+    },
+    {
+      "from": "agent.result",
+      "to": "log",
+      "comment": "Log the agent's result"
+    }
+  ]
+}
