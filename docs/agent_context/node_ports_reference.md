@@ -84,7 +84,7 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 | `critic` | — | `result` | **Dynamic inputs** — `texts.*` inputs reviewed by LLM |
 | `information_extraction` | — | `result` | **Dynamic inputs** — `texts.*` inputs extracted per schema |
 | `reactor` | — | `result` | **Dynamic inputs** — `texts.*` summarized and reviewed |
-| `orchestrator` | — | `result` | **Dynamic inputs** — full orchestration lifecycle |
+| `orchestrator` | — | `final_response` | **Dynamic inputs** — full multi-agent lifecycle; suspends at `phase_reactor`, `critic`, `final_reactor` |
 | `task_memory_writer` | — | `result` | **Requires explicit fields** for task management |
 | `trigger_webhook` | — | `output` | Webhook trigger — emits payload |
 | `mock_input` | — | — | **Raw output** — emits config as-is, no specific field |
@@ -384,6 +384,309 @@ cargo run --bin dag_engine -- run graph.json --session-id abc123 --answer '{"app
 **Cause:** Session ID from first suspension used for all subsequent ones.
 
 **Solution:** Each `suspend` node generates a **new** `session_id` on resume. Use the latest `session_id` from the latest `finish` event, not the first one.
+
+---
+
+---
+
+## The `orchestrator` Node (In-Depth)
+
+The `orchestrator` node implements a **full multi-agent coordination system** with automatic planning, phased execution, per-task critique, and suspend/resume at three key points. Unlike simpler nodes, the orchestrator runs its entire lifecycle inside a single `execute()` call — it never needs a self-loop edge.
+
+- **Type**: `"orchestrator"`
+- **Location**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/orchestrator.rs`
+- **Requires**: `DATABASE_URL` — all task state and phase summaries are persisted to PostgreSQL
+
+### Orchestrator Lifecycle
+
+```
+INPUT PROMPT
+    │
+    ▼
+1. PLANNER ──► Seeds DB with tasks grouped by phase
+    │
+    ▼ (loop over phases)
+2. EXECUTE tasks in current phase
+   ├─ [parallel] all tasks with parallel=true run together
+   └─ [sequential] one task at a time
+    │
+    ▼
+3. CRITIC (optional, per task) ──► validates result ──► may SUSPEND ⏸
+    │
+    ▼
+4. PHASE REACTOR (optional) ──► summarizes phase ──► may add recovery tasks ──► may SUSPEND ⏸
+    │
+    ▼ (repeat for all phases)
+5. FINAL REACTOR ──► synthesizes all phase summaries into final answer ──► may SUSPEND ⏸
+    │
+    ▼
+OUTPUT: final_response
+```
+
+### Configuration Schema
+
+```json
+{
+  "type": "orchestrator",
+  "config": {
+    "verbose": true,
+    "max_phases": 5,
+    "planner": {
+      "provider": "gemini",
+      "model": "gemini-2.5-flash",
+      "api_key": "${GEMINI_API_KEY}",
+      "system_message": "You are a planner. Decompose the user's request into tasks."
+    },
+    "agents": {
+      "agent_id_1": {
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "system_message": "You are a specialist. Do your task concisely."
+      },
+      "agent_id_2": { "..." : "..." }
+    },
+    "critic": {
+      "provider": "gemini",
+      "model": "gemini-2.5-flash",
+      "api_key": "${GEMINI_API_KEY}",
+      "system_message": "Review the agent result for quality."
+    },
+    "phase_reactor": {
+      "provider": "gemini",
+      "model": "gemini-2.5-flash",
+      "api_key": "${GEMINI_API_KEY}",
+      "system_message": "Summarize this phase and identify any gaps."
+    },
+    "final_reactor": {
+      "provider": "gemini",
+      "model": "gemini-2.5-flash",
+      "api_key": "${GEMINI_API_KEY}",
+      "system_message": "Combine all phase summaries into a final answer."
+    }
+  }
+}
+```
+
+| Config Key | Type | Default | Description |
+|---|---|---|---|
+| `verbose` | bool | `false` | Print detailed input/output for each internal step |
+| `max_phases` | int | `10` | Safety limit: stops execution and finalizes if phase count exceeds this value. Prevents infinite loops from reactor replanning. |
+| `planner` | object | required | LLM config used for auto-planning. Agent names from `agents` are injected automatically. |
+| `agents` | object | required | Map of `agent_id → LLM config`. The planner assigns tasks to these agents by their key name. |
+| `critic` | object | optional | If present, every agent result passes through the critic before being marked complete. |
+| `phase_reactor` | object | optional | If present, runs after every phase completes. Summarizes results and can add recovery tasks or suspend. |
+| `final_reactor` | object | optional | If present, runs once all phases are done. Synthesizes all phase summaries into the final user-facing response. |
+
+### The Three Suspension Points
+
+The orchestrator can suspend at three points, each triggered when the internal LLM node returns `suspend=true` with a `question`:
+
+#### 1. `phase_reactor` — After a phase completes
+
+Triggered when the phase reactor detects ambiguity or missing information in the phase results.
+
+```
+Phase 1 runs → clothing_expert + gear_expert complete
+Phase reactor sees conflicting estimates
+→ suspend=true, question="Which estimate should I use?"
+→ Orchestrator returns SUSPENDED with session_id
+```
+
+On resume: the Q&A is saved as a phase summary (`[USER CLARIFICATION] Q: ... A: ...`) and execution continues to the next phase — the phase reactor for that phase is **not called again**.
+
+#### 2. `critic` — After a specific agent task
+
+Triggered when the critic reviews an agent result and determines user input is needed before approving.
+
+```
+budget_expert completes task
+Critic: "The result seems out of range. Should I accept it?"
+→ suspend=true, question="The budget estimate is $50k. Is that correct?"
+→ agent result is stashed in global_shared_state
+→ Orchestrator returns SUSPENDED with session_id + task_id
+```
+
+On resume: the stashed agent result is retrieved and the task is marked complete without re-running the agent or critic.
+
+#### 3. `final_reactor` — Before the final synthesis
+
+Triggered when the final reactor needs clarification before writing the user-facing answer.
+
+```
+All phases done → final_reactor runs
+"Should I emphasize cost or convenience in the final recommendation?"
+→ suspend=true, question="..."
+→ Orchestrator returns SUSPENDED with session_id
+```
+
+On resume: the Q&A is injected as a `system_message` context into the final reactor, which runs again with the clarification.
+
+### Suspend/Resume Workflow
+
+**Step 1 — Run the orchestrator (may suspend):**
+```bash
+cargo run --bin dag_engine -- run tests/graphs/advanced/my_plan.json
+```
+
+Output when suspended:
+```json
+{
+  "finishReason": "suspended",
+  "result": {
+    "__colmena_status": "SUSPENDED",
+    "question": "Which estimate should we use?",
+    "session_id": "abc-123"
+  }
+}
+```
+
+**Step 2 — Resume with the answer:**
+```bash
+cargo run --bin dag_engine -- run tests/graphs/advanced/my_plan.json \
+  --session-id abc-123 \
+  --answer "Use the clothing expert estimates"
+```
+
+On resume:
+- The orchestrator restores all completed tasks from DB — **nothing re-runs**
+- The answer is injected as `__colmena_resume_answer` by the run_use_case
+- The appropriate guard fires (phase_reactor / critic / final_reactor) to handle the answer
+- Execution continues from exactly where it stopped
+
+### Agent Prompt Structure
+
+Each agent receives an enriched prompt built by `build_enriched_prompt()`:
+
+```
+=== USER CLARIFICATION ===          ← only present on resume with Q&A
+Question: Which estimate to use?
+Answer: Use the clothing expert's.
+
+=== CONTEXTO DE ESTA TAREA ===      ← task context from planner
+The user wants a budget for ski clothing.
+
+=== LO QUE HA OCURRIDO HASTA AHORA ===   ← phase summaries (phase 2+ only)
+Fase 1: Clothing expert recommended X, gear expert recommended Y.
+
+=== LO QUE TIENES QUE HACER AHORA TÚ ===
+Estimate the total budget for clothing items.
+```
+
+### Deduplication & Safety
+
+- **Task deduplication**: Before inserting a recovery task proposed by the reactor, the orchestrator checks if a task with the same `task_name + assigned_to` already exists (completed or pending) in the session. Duplicates are silently discarded.
+- **Agent validation**: Recovery tasks proposing agents not in `config.agents` are discarded with a warning.
+- **max_phases safety net**: If phase number exceeds `max_phases` (default 10), the orchestrator forces finalization immediately. Set lower (e.g. `"max_phases": 5`) in production to catch runaway replanning loops.
+- **Completed task history injection**: The phase reactor's system_message is automatically augmented with the list of already-completed tasks so the LLM avoids re-proposing them.
+
+### Output Structure
+
+```json
+{
+  "final_response": "The complete user-facing answer synthesized by final_reactor.",
+  "all_tasks": [
+    {
+      "id": "uuid",
+      "task_name": "Determine clothing items...",
+      "assigned_to": "clothing_expert",
+      "completed": true,
+      "phase": 1,
+      "parallel": true,
+      "result": { "content": "Ski jacket: $300..." }
+    }
+  ],
+  "extra_info": {
+    "__colmena_loop_status": "FINISHED",
+    "phase_summaries": [
+      { "phase": 1, "summary": "Phase 1 covered clothing and gear..." },
+      { "phase": 2, "summary": "Budget estimate: $650-$1800..." }
+    ]
+  }
+}
+```
+
+### State Persistence (`global_shared_state`)
+
+The orchestrator uses `global_shared_state` (persisted in DB as part of `DagRunState`) to store suspend metadata. These keys are internal and managed automatically:
+
+| Key | Purpose |
+|---|---|
+| `__orchestrator_suspend` | Written on suspend; contains `suspended_at`, `phase`, `task_id`, `question` |
+| `__orchestrator_qa_context` | Written on final_reactor resume; contains `question` + `answer` |
+| `__orch_pending_<task_id>` | Temporary stash of agent result before critic suspend; cleaned up on resume |
+
+### Minimal Example Graph
+
+```json
+{
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": { "prompt": "Plan a ski trip to Aspen." }
+    },
+    "orchestrator_node": {
+      "type": "orchestrator",
+      "config": {
+        "max_phases": 4,
+        "planner": {
+          "provider": "gemini", "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}"
+        },
+        "agents": {
+          "clothing_expert": {
+            "provider": "gemini", "model": "gemini-2.5-flash",
+            "api_key": "${GEMINI_API_KEY}",
+            "system_message": "You are a clothing expert for cold weather trips."
+          },
+          "budget_expert": {
+            "provider": "gemini", "model": "gemini-2.5-flash",
+            "api_key": "${GEMINI_API_KEY}",
+            "system_message": "You are a travel budget estimator."
+          }
+        },
+        "phase_reactor": {
+          "provider": "gemini", "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "system_message": "Summarize this phase and identify any missing coverage."
+        },
+        "final_reactor": {
+          "provider": "gemini", "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "system_message": "Combine all phases into a final 3-4 line trip summary."
+        }
+      }
+    },
+    "final_output": { "type": "output", "trigger_on": "FINISHED" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "orchestrator_node" },
+    { "from": "orchestrator_node", "to": "final_output" }
+  ]
+}
+```
+
+### Troubleshooting the `orchestrator` Node
+
+**"Orchestrator runs forever across many phases"**
+- Cause: `phase_reactor` keeps proposing the same recovery task.
+- Solution: Set `"max_phases": 4` in config. Also check that `insurance_expert` (or whichever agent) is completing tasks — if `completed=true` in DB but the reactor re-proposes it, deduplication should catch it.
+
+**"Resume runs everything from scratch"**
+- Cause: The `session_id` passed to `--session-id` doesn't match the suspended session.
+- Solution: Copy the exact `session_id` from the `SUSPENDED` output (look for `"session_id"` in the terminal output).
+
+**"Phase 2 agents don't see the user's clarification answer"**
+- Cause: The Q&A context is only visible in `=== USER CLARIFICATION ===` when `__orchestrator_qa_context` is set in `global_shared_state`.
+- Solution: The orchestrator sets this automatically on resume from `phase_reactor` suspend. If agents don't see it, verify you are using `--session-id` + `--answer` (not just re-running fresh).
+
+**"Phase reactor was never called"**
+- Cause: `phase_reactor` key is missing in orchestrator config, or all tasks in the phase were already completed (so `handle_phase_completion` was never triggered).
+- Solution: Add `phase_reactor` to the orchestrator config. Check DB to confirm tasks have `completed=true`.
+
+**"final_response is null"**
+- Cause: `final_reactor` is missing from config, or it returned an empty `result`.
+- Solution: Add `final_reactor` config. Verify the final reactor system_message asks it to produce a response.
 
 ---
 

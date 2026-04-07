@@ -110,7 +110,7 @@ Para la lista completa de nodos y sus defaults, ver [`docs/agent_context/node_po
 **Resumen:**
 - Nodos con `default_input`: `llm_call`, `output`, `log`, `suspend`, `loop_controller`, `exponential`
 - Nodos **sin** `default_input` (requieren campos explícitos): `add`, `subtract`, `multiply`, `divide`, `http_request`, `task_memory_writer`
-- Nodos con inputs dinámicos: `python_script`, `planner`, `critic`, `information_extraction`, `reactor`
+- Nodos con inputs dinámicos: `python_script`, `planner`, `critic`, `information_extraction`, `reactor`, `orchestrator`
 
 ### Ejemplos
 
@@ -165,6 +165,12 @@ Para la lista completa de nodos y sus defaults, ver [`docs/agent_context/node_po
 
 ### Nodos LLM
 - `llm_call`: Llama a modelos de lenguaje (OpenAI, Gemini, Anthropic). Soporta **Memoria**, **Streaming** y **Visión/Documentos**.
+
+### Nodos de Orquestación Multi-Agente
+- `planner`: Genera un plan estructurado de tareas a partir de un prompt de usuario usando un LLM.
+- `critic`: Evalúa el resultado de un agente y devuelve `task_ok=true/false`. Puede suspender para pedir confirmación al usuario.
+- `reactor`: Sintetiza resultados de múltiples agentes y decide si la fase está completa o requiere tareas adicionales. Puede suspender para pedir aclaraciones.
+- `orchestrator`: Coordina el ciclo completo Plan → Ejecutar Fases → Reaccionar → Finalizar en una única llamada. Incluye soporte de suspend/resume en tres puntos internos. Ver sección dedicada más abajo.
 
 #### Visión y Soporte de Documentos
 El nodo `llm_call` permite enviar archivos (imágenes y PDFs) a los modelos que lo soportan. Puedes pasar archivos de dos formas: mediante una ruta local o mediante un string Base64.
@@ -871,6 +877,177 @@ Para que el motor arranque, debes definir:
 SECURE_VALUES_KEY="tu-clave-base64-de-32-bytes"
 ```
 
+## 🎭 El Nodo `orchestrator` (Orquestación Multi-Agente)
+
+El nodo `orchestrator` implementa el patrón completo de orquestación de agentes con planificación automática, ejecución por fases, crítica opcional y síntesis final — todo en una única llamada `execute()`, sin necesidad de un self-loop en el grafo.
+
+### Ciclo de Vida Interno
+
+```
+PROMPT DEL USUARIO
+       │
+       ▼
+  1. PLANNER ──► Genera plan con tareas agrupadas por fase y las persiste en DB
+       │
+       ▼  (loop por fases)
+  2. EJECUTAR tareas de la fase actual
+     ├─ [parallel=true] todas las tareas en paralelo
+     └─ [parallel=false] una a una secuencialmente
+       │
+       ▼
+  3. CRITIC (opcional) ──► valida cada resultado ──► puede SUSPENDER ⏸
+       │
+       ▼
+  4. PHASE REACTOR (opcional) ──► resume la fase ──► puede añadir tareas de recovery ──► puede SUSPENDER ⏸
+       │
+       ▼  (repetir para todas las fases)
+  5. FINAL REACTOR ──► sintetiza todos los resúmenes de fase en la respuesta final ──► puede SUSPENDER ⏸
+       │
+       ▼
+  OUTPUT: final_response
+```
+
+### Configuración Mínima
+
+```json
+{
+  "type": "orchestrator",
+  "config": {
+    "max_phases": 5,
+    "planner": {
+      "provider": "gemini",
+      "model": "gemini-2.5-flash",
+      "api_key": "${GEMINI_API_KEY}",
+      "system_message": "Descompón la petición del usuario en tareas específicas."
+    },
+    "agents": {
+      "clothing_expert": {
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "system_message": "Eres un experto en ropa para viajes de invierno."
+      },
+      "budget_expert": {
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "system_message": "Eres un estimador de presupuesto para viajes."
+      }
+    },
+    "phase_reactor": {
+      "provider": "gemini",
+      "model": "gemini-2.5-flash",
+      "api_key": "${GEMINI_API_KEY}",
+      "system_message": "Resume los resultados de esta fase e identifica si falta información."
+    },
+    "final_reactor": {
+      "provider": "gemini",
+      "model": "gemini-2.5-flash",
+      "api_key": "${GEMINI_API_KEY}",
+      "system_message": "Combina todos los resúmenes de fases en una respuesta final clara."
+    }
+  }
+}
+```
+
+### Claves de Configuración
+
+| Clave | Tipo | Default | Descripción |
+|---|---|---|---|
+| `max_phases` | int | `10` | Límite de seguridad: si el número de fase supera este valor, fuerza la finalización. Previene loops infinitos por replanning. |
+| `planner` | object | requerido | Config LLM para el planificador automático. Los nombres de agentes de `agents` se inyectan automáticamente. |
+| `agents` | object | requerido | Mapa de `agent_id → config LLM`. El planificador asigna tareas a estos agentes por su clave. |
+| `critic` | object | opcional | Si presente, cada resultado de agente pasa por el critic antes de marcarse completo. |
+| `phase_reactor` | object | opcional | Si presente, se ejecuta al finalizar cada fase. Puede añadir tareas de recovery o suspender. |
+| `final_reactor` | object | opcional | Si presente, se ejecuta cuando todas las fases terminan. Sintetiza la respuesta final. |
+
+### Suspend/Resume en el Orchestrator
+
+El orchestrator puede suspender en **tres puntos internos**, cada uno activado cuando el LLM interno devuelve `suspend=true` con una `question`:
+
+#### Punto 1: `phase_reactor` — Al final de una fase
+
+Se activa cuando el reactor detecta ambigüedad o información insuficiente en los resultados de la fase.
+
+```bash
+# Primer run — suspende en el phase_reactor de fase 1
+cargo run --bin dag_engine -- run tests/graphs/advanced/mi_plan.json
+# Output: session_id="abc-123", question="¿Qué estimación usar?"
+
+# Resume con la respuesta
+cargo run --bin dag_engine -- run tests/graphs/advanced/mi_plan.json \
+  --session-id abc-123 \
+  --answer "Usa la estimación del clothing_expert"
+```
+
+Al reanudar: el Q&A se guarda como resumen de fase y la ejecución continúa directamente a la siguiente fase — el reactor de esa fase **no se vuelve a llamar**.
+
+#### Punto 2: `critic` — Durante la validación de una tarea
+
+Se activa cuando el critic necesita confirmación del usuario antes de aprobar el resultado de un agente.
+
+Al reanudar: el resultado del agente (stasheado en `global_shared_state`) se recupera y la tarea se marca completa sin re-ejecutar el agente ni el critic.
+
+#### Punto 3: `final_reactor` — Antes de la síntesis final
+
+Se activa cuando el reactor final necesita aclaración antes de escribir la respuesta al usuario.
+
+Al reanudar: el Q&A se inyecta como contexto adicional en el reactor final, que vuelve a ejecutarse con la aclaración incluida.
+
+### Prompt Enriquecido de los Agentes
+
+Cada agente recibe un prompt construido automáticamente con este formato:
+
+```
+=== USER CLARIFICATION ===           ← solo presente al reanudar con Q&A
+Question: ¿Qué estimación usar?
+Answer: Usa la del clothing_expert.
+
+=== CONTEXTO DE ESTA TAREA ===       ← contexto de tarea del planner
+El usuario quiere un presupuesto para ropa de esquí.
+
+=== LO QUE HA OCURRIDO HASTA AHORA ===   ← resúmenes de fases anteriores (fase 2+)
+Fase 1: clothing_expert recomendó X; gear_expert recomendó Y.
+
+=== LO QUE TIENES QUE HACER AHORA TÚ ===
+Estima el presupuesto total para los artículos de ropa.
+```
+
+### Medidas de Seguridad Anti-Loop
+
+- **Deduplicación de tareas**: Si el reactor propone una tarea con el mismo `task_name + assigned_to` que ya existe en la sesión (completada o pendiente), se descarta silenciosamente.
+- **Validación de agentes**: Tareas asignadas a agentes que no existen en `config.agents` se descartan con un aviso.
+- **`max_phases`**: Si la fase actual supera el límite configurado, el orchestrator fuerza la finalización inmediata.
+- **Historial de tareas completadas**: El system_message del `phase_reactor` se enriquece automáticamente con la lista de tareas ya completadas en la sesión.
+
+### Output del Orchestrator
+
+```json
+{
+  "final_response": "La respuesta final sintetizada por el final_reactor.",
+  "all_tasks": [
+    {
+      "id": "uuid",
+      "task_name": "Determine clothing items...",
+      "assigned_to": "clothing_expert",
+      "completed": true,
+      "phase": 1,
+      "parallel": true
+    }
+  ],
+  "extra_info": {
+    "__colmena_loop_status": "FINISHED",
+    "phase_summaries": [
+      { "phase": 1, "summary": "Resumen de fase 1..." }
+    ]
+  }
+}
+```
+
+Para la referencia completa de puertos, configuración y ejemplos de troubleshooting, ver [`docs/agent_context/node_ports_reference.md`](../agent_context/node_ports_reference.md#the-orchestrator-node-in-depth).
+
+---
+
 ## 🚀 Comandos de Ejecución
 
 ### Run Mode (Local Testing)
@@ -886,7 +1063,7 @@ cargo run --bin dag_engine -- run tests/my_graph.json
 
 #### Suspend/Resume Workflow
 
-Si un grafo contiene un nodo `suspend`, la ejecución se pausa y devuelve un `session_id`:
+Si un grafo contiene un nodo `suspend` **o** un nodo `orchestrator` cuyo reactor interno decide suspender, la ejecución se pausa y devuelve un `session_id`:
 
 **Paso 1: Ejecutar el grafo (se suspenderá)**
 ```bash
@@ -913,7 +1090,7 @@ cargo run --bin dag_engine -- run tests/my_graph.json \
   --answer "Sí, aprobado"
 ```
 
-El nodo `suspend` recibe la respuesta como `__colmena_resume_answer` y continúa la ejecución del grafo.
+El nodo `suspend` (o el `orchestrator`) recibe la respuesta como `__colmena_resume_answer` y continúa la ejecución del grafo.
 
 **Nota:** `--resume-id` es un alias de `--session-id`. Ambos funcionan igual.
 
@@ -945,5 +1122,5 @@ cargo run --bin dag_engine -- serve tests/my_graph.json
 
 ---
 
-**Última actualización**: 2026-04-05
-**Revisado por**: Auditoría Sistemática v0.3.0
+**Última actualización**: 2026-04-07
+**Revisado por**: Auditoría Sistemática v0.3.0 + Implementación Suspend/Resume Orchestrator
