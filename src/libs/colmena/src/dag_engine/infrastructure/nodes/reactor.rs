@@ -301,6 +301,10 @@ impl ExecutableNode for ReactorNode {
             clean = clean.trim_end_matches("```");
         }
         let clean = clean.trim();
+        // Some LLMs escape '$' as '\$' inside JSON strings, which is invalid JSON.
+        // Replace all occurrences to avoid parse failures.
+        let clean_owned = clean.replace("\\$", "$");
+        let clean = clean_owned.as_str();
 
         let parsed: Value = serde_json::from_str(clean)
             .map_err(|e| format!("ReactorNode: Failed to parse LLM JSON: {}. Raw: {}", e, raw))?;
@@ -324,46 +328,9 @@ impl ExecutableNode for ReactorNode {
             suspend
         );
 
-        // --- 6. Persist phase summary if this is a FINISHED_PHASE turn ---
-        if task_ok {
-            let session_id = _state
-                .get("session_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            // `phase` comes from edge: orchestrator.output.current_phase → reactor.phase
-            let mut phase_input = inputs
-                .get("phase")
-                .and_then(|v| v.as_i64())
-                .map(|p| p as i32);
-
-            if phase_input.is_none() {
-                for val in inputs.values() {
-                    if let Some(extra) = val.get("extra_info") {
-                        if let Some(p) = extra.get("current_phase").and_then(|v| v.as_i64()) {
-                            phase_input = Some(p as i32);
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if let (Some(phase), Some(repo), true) =
-                (phase_input, &self.task_memory_repo, !session_id.is_empty())
-            {
-                let summary_str = response_text.as_str().unwrap_or("");
-                if !summary_str.is_empty() {
-                    if let Err(e) = repo
-                        .save_phase_summary(&session_id, phase, summary_str)
-                        .await
-                    {
-                        eprintln!("⚠️ [ReactorNode] Failed to save phase summary: {:?}", e);
-                    } else {
-                        println!("💾 [ReactorNode] Phase {} summary saved to DB.", phase);
-                    }
-                }
-            }
-        }
+        // Note: phase summary persistence is handled by the OrchestratorNode when this reactor
+        // is invoked as an internal phase_reactor. When invoked standalone from a DAG graph,
+        // summaries are not automatically saved (use a dedicated save node if needed).
 
         Ok(json!({
             "result":  response_text,

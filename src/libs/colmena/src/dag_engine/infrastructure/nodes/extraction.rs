@@ -272,6 +272,7 @@ impl ExecutableNode for ExtractionNode {
                             result: None,
                             phase: 1,
                             parallel: false,
+                            context: None,
                         };
                         repo.add_task(&new_task).await?;
                     }

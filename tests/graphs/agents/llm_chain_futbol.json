@@ -1,0 +1,42 @@
+{
+  "edges": [
+    {
+      "to": "fa7b90e2-79cc-43b4-bd9c-f5a66c401bbe",
+      "from": "2797921d-4d44-492f-858e-fe2859b4aa6d"
+    },
+    {
+      "to": "2797921d-4d44-492f-858e-fe2859b4aa6d",
+      "from": "75a64733-5339-48bd-984c-87565706b037"
+    }
+  ],
+  "nodes": {
+    "2797921d-4d44-492f-858e-fe2859b4aa6d": {
+      "type": "llm_call",
+      "config": {
+        "model": "gpt-4o",
+        "stream": false,
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "temperature": "0",
+        "system_message": "eres un experto en futbol y al fianl ponle una firm de daniel garcia como author"
+      }
+    },
+    "75a64733-5339-48bd-984c-87565706b037": {
+      "type": "input",
+      "config": {
+        "user_message": "¿Quién es Messi?"
+      }
+    },
+    "fa7b90e2-79cc-43b4-bd9c-f5a66c401bbe": {
+      "type": "llm_call",
+      "config": {
+        "model": "gpt-4o",
+        "stream": false,
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "temperature": "0",
+        "system_message": "eres un experto en hacer publicaciones sobre futbol y me vas a decir quein es el author"
+      }
+    }
+  }
+}

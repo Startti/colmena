@@ -85,6 +85,10 @@ pub struct DagTask {
     pub phase: i32,
     /// If true, this task is dispatched in the same turn as other parallel tasks in the same phase.
     pub parallel: bool,
+    /// Optional context describing why this task exists and what the user's intent is.
+    /// Set by the Planner or Reactor; used to enrich agent prompts with semantic purpose.
+    #[serde(default)]
+    pub context: Option<String>,
 }
 
 /// A summary produced by the ReactorNode at the end of a phase.

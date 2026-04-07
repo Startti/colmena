@@ -7,9 +7,9 @@
       }
     },
     "controller": {
-      "type": "python_script",
+      "type": "suspend",
       "config": {
-        "code": "if '__colmena_resume_answer' in locals():\n    print(f'>>> RESUMEN RECIBIDO: {__colmena_resume_answer}')\n    output = {'status': 'PROCESADO', 'respuesta': __colmena_resume_answer}\nelse:\n    print(f'>>> SUSPENDIENDO: {msg}')\n    output = {'__colmena_status': 'SUSPENDED', 'info': 'Esperando aprobacion'}"
+        "question": "¿Apruebas continuar con el proceso?"
       }
     },
     "final": {

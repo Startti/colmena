@@ -1,7 +1,7 @@
 {
   "nodes": {
     "secure_http": {
-      "node_type": "http",
+      "type": "http_request",
       "config": {
         "base_url": "https://httpbin.org",
         "endpoint": "/post",
@@ -15,7 +15,7 @@
       }
     },
     "output_node": {
-      "node_type": "output",
+      "type": "log",
       "config": {
         "message": "Test complete"
       }

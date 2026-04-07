@@ -1,7 +1,7 @@
 {
   "nodes": {
     "get_token": {
-      "node_type": "http",
+      "type": "http_request",
       "config": {
         "base_url": "https://httpbin.org",
         "endpoint": "/post",
@@ -14,27 +14,21 @@
       }
     },
     "use_token_in_header": {
-      "node_type": "http",
+      "type": "http_request",
       "config": {
         "base_url": "https://httpbin.org",
-        "endpoint": "/headers",
-        "method": "GET",
-        "headers": {
-          "X-Auth-Token": "${get_token.body.json.token}"
-        }
+        "endpoint": "/bearer",
+        "method": "GET"
       }
     },
     "output_node": {
-      "node_type": "output",
-      "config": {
-        "message": "Token injection test complete"
-      }
+      "type": "log"
     }
   },
   "edges": [
     {
-      "from": "get_token",
-      "to": "use_token_in_header"
+      "from": "get_token.body.json.token",
+      "to": "use_token_in_header.bearer_token"
     },
     {
       "from": "use_token_in_header",

@@ -738,7 +738,7 @@ curl -X POST http://localhost:3000/test \
       "type": "llm_call",
       "config": {
         "provider": "openai",
-        "api_key": "sk-...",
+        "api_key": "${OPENAI_API_KEY}",
         "model": "gpt-3.5-turbo",
         "system_message": "You are a helpful programming assistant.",
         "max_tokens": 100
@@ -786,7 +786,7 @@ curl -X POST http://localhost:3000/test \
       "type": "llm_call",
       "config": {
         "provider": "openai",
-        "api_key": "sk-...",
+        "api_key": "${OPENAI_API_KEY}",
         "model": "gpt-3.5-turbo",
         "system_message": "You are a comedy expert. Analyze jokes.",
         "max_tokens": 150
@@ -874,14 +874,54 @@ SECURE_VALUES_KEY="tu-clave-base64-de-32-bytes"
 ## 🚀 Comandos de Ejecución
 
 ### Run Mode (Local Testing)
-Ejecuta el grafo de forma secuencial y síncrona. Ideal para debugging.
-```bash
-# Ejecutar un grafo con test_payload
-cargo run --bin dag_engine -- run tests/my_graph.json
 
-# Pasar una respuesta a un nodo suspendido
-cargo run --bin dag_engine -- run tests/my_graph.json --resume-id <ID> --answer "Mi respuesta"
+Ejecuta el grafo de forma secuencial y síncrona. Ideal para debugging.
+
+#### Basic Execution
+
+```bash
+# Ejecutar un grafo simple
+cargo run --bin dag_engine -- run tests/my_graph.json
 ```
+
+#### Suspend/Resume Workflow
+
+Si un grafo contiene un nodo `suspend`, la ejecución se pausa y devuelve un `session_id`:
+
+**Paso 1: Ejecutar el grafo (se suspenderá)**
+```bash
+cargo run --bin dag_engine -- run tests/my_graph.json
+```
+
+Output:
+```json
+{
+  "type": "finish",
+  "finishReason": "suspended",
+  "output": {
+    "__colmena_status": "SUSPENDED",
+    "question": "¿Apruebas continuar?",
+    "session_id": "6d8928e5-e38c-49c3-a40b-16a1202055f3"
+  }
+}
+```
+
+**Paso 2: Reanudar con respuesta del usuario**
+```bash
+cargo run --bin dag_engine -- run tests/my_graph.json \
+  --session-id 6d8928e5-e38c-49c3-a40b-16a1202055f3 \
+  --answer "Sí, aprobado"
+```
+
+El nodo `suspend` recibe la respuesta como `__colmena_resume_answer` y continúa la ejecución del grafo.
+
+**Nota:** `--resume-id` es un alias de `--session-id`. Ambos funcionan igual.
+
+#### State Persistence
+
+- El estado de ejecución (cola activa, outputs de todos los nodos) se persiste en PostgreSQL
+- El `session_id` del output es tu token para reanudar
+- No hay timeout hardcodeado; el estado persiste indefinidamente hasta que se reanude o se ejecute cleanup
 
 ### Serve Mode (Producción)
 Levanta un servidor HTTP (Axum) que expone los endpoints definidos en los nodos `trigger_webhook`.

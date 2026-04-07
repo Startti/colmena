@@ -33,6 +33,10 @@ enum Commands {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
     println!("DEBUG: DATABASE_URL={:?}", std::env::var("DATABASE_URL"));
+
+    #[cfg(feature = "python")]
+    pyo3::prepare_freethreaded_python();
+
     let cli = Cli::parse();
 
     match cli.command {

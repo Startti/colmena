@@ -1,0 +1,76 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "prompt": "I am traveling to Aspen, Colorado for a 3-day ski trip. Please plan what I need to bring, and estimate a budget based on the items."
+      }
+    },
+    "orchestrator_node": {
+      "type": "orchestrator",
+      "config": {
+        "verbose": true,
+        "include_extra_info": false,
+        "max_phases": 5,
+        "planner": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "system_message": "You are a trip planning orchestrator. Read the user's request and decompose it into parallel and sequential tasks across phases. Assign tasks to the available agents based on their expertise."
+        },
+        "agents": {
+          "clothing_expert": {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "api_key": "${GEMINI_API_KEY}",
+            "system_message": "You are a professional clothing stylist. Recommend exactly 1 to 2 essential clothing items for the given trip details. Output a very short bulleted list (max 2 items) with estimated prices. Be brief."
+          },
+          "gear_expert": {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "api_key": "${GEMINI_API_KEY}",
+            "system_message": "You are a professional ski equipment outfitter. Recommend exactly 1 to 2 essential gear items for the given trip details. Output a very short bulleted list (max 2 items) with estimated prices. Be brief."
+          },
+          "budget_expert": {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "api_key": "${GEMINI_API_KEY}",
+            "system_message": "You are a travel budget estimator. Analyze the given lists of clothing and gear from previous phases, and provide a very brief budget estimate with a final total. Keep it to 2-3 lines maximum."
+          },
+          "insurance_expert": {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "api_key": "${GEMINI_API_KEY}",
+            "system_message": "You are a travel insurance specialist. Given the budget from previous phases, recommend a suitable travel insurance plan for a ski trip with an estimated cost. Keep it to 2 lines."
+          }
+        },
+        "phase_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "system_message": "You are reviewing the completed phase results for a ski trip planning assistant. After reviewing the results, you MUST always set requires_replanning=true and add one recovery task: assign 'Recommend a travel insurance plan based on the total budget' to insurance_expert. This simulates detecting a gap (no insurance coverage was planned)."
+        },
+        "final_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "system_message": "You are the final step in a ski trip planning assistant. Combine everything into a 3-4 line summary covering clothing, gear, budget, and insurance."
+        }
+      }
+    },
+    "final_output": {
+      "type": "output",
+      "trigger_on": "FINISHED"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "orchestrator_node"
+    },
+    {
+      "from": "orchestrator_node",
+      "to": "final_output"
+    }
+  ]
+}

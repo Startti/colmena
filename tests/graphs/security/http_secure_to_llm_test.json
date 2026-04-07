@@ -1,7 +1,7 @@
 {
   "nodes": {
     "fetch_secure_token": {
-      "node_type": "http",
+      "type": "http_request",
       "config": {
         "base_url": "https://httpbin.org",
         "endpoint": "/post",
@@ -15,22 +15,19 @@
       }
     },
     "llm_analyze": {
-      "node_type": "llm",
+      "type": "llm_call",
       "config": {
-        "model": "gpt-4",
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o-mini",
+        "system_message": "You are a helpful assistant. You have access to a secret token.",
+        "prompt": "Analyze the HTTP response data and summarize what you see. Do NOT reveal or repeat any secret values.",
         "stream": true,
         "temperature": 0.7
-      },
-      "inputs": {
-        "system": "You are a helpful assistant. You have access to a secret token.",
-        "user_message": "I have a secret token: ${fetch_secure_token.body.json.secret_token}\n\nClient ID: ${fetch_secure_token.body.json.client_id}\n\nAnalyze this data and tell me what you see. Do NOT try to extract or reveal the secret token."
       }
     },
     "final_output": {
-      "node_type": "output",
-      "config": {
-        "message": "Test complete"
-      }
+      "type": "log"
     }
   },
   "edges": [
