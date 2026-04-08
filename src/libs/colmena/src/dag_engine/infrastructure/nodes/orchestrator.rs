@@ -13,6 +13,18 @@ enum OrchestratorSuspend {
     Suspended(Value),
 }
 
+/// A single question in a multi-question Human-in-the-Loop suspend.
+/// `question_type` is either "open" (free text) or "choice" (predefined options).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct SuspendQuestion {
+    id: String,
+    question: String,
+    #[serde(rename = "type")]
+    question_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<Vec<String>>,
+}
+
 pub struct OrchestratorNode {
     task_memory_repo: Option<Arc<dyn DagTaskMemoryRepository>>,
     registry: Weak<dyn NodeRegistryPort>,
@@ -116,6 +128,34 @@ impl OrchestratorNode {
                 }
             }
 
+            // Inject Q&A from a previous phase_reactor suspend (user answered, reactor re-runs with context)
+            if let Some(qa) = state.get("__orchestrator_phase_reactor_qa") {
+                if let Some(ctx) = qa.get("qa_context").and_then(|v| v.as_str()) {
+                    if let Some(obj) = reactor_cfg_owned.as_object_mut() {
+                        let existing_sm = obj
+                            .get("system_message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        obj.insert(
+                            "system_message".to_string(),
+                            Value::String(format!(
+                                "{}\n\nUSER CLARIFICATION (answer to your previous question):\n{}",
+                                existing_sm, ctx
+                            )),
+                        );
+                    }
+                    println!(
+                        "💬 [OrchestratorNode] Phase {} reactor re-running with user clarification injected.",
+                        phase
+                    );
+                }
+            }
+            // Clean up the stash after injecting
+            if let Some(obj) = state.as_object_mut() {
+                obj.remove("__orchestrator_phase_reactor_qa");
+            }
+
             println!(
                 "📨 [OrchestratorNode] REACTOR INPUTS (phase {}):\n{}\n{}",
                 phase,
@@ -143,7 +183,7 @@ impl OrchestratorNode {
                 .unwrap_or(false);
 
             if reactor_suspended {
-                let question = reactor_res
+                let question_text = reactor_res
                     .get("extra_info")
                     .and_then(|e| e.get("question"))
                     .and_then(|v| v.as_str())
@@ -152,15 +192,25 @@ impl OrchestratorNode {
                     .to_string();
                 println!(
                     "⏸️  [OrchestratorNode] Phase {} reactor suspended. Question: {}",
-                    phase, question
+                    phase, question_text
                 );
-                return Ok(OrchestratorSuspend::Suspended(make_suspend_response(
-                    state,
-                    "phase_reactor",
-                    phase,
-                    None,
-                    &question,
-                )));
+                let questions = vec![SuspendQuestion {
+                    id: "phase_reactor_clarification".to_string(),
+                    question: question_text,
+                    question_type: "open".to_string(),
+                    options: None,
+                }];
+                if allow_suspend_for(reactor_cfg) {
+                    return Ok(OrchestratorSuspend::Suspended(make_suspend_response(
+                        state,
+                        "phase_reactor",
+                        phase,
+                        None,
+                        questions,
+                    )));
+                } else {
+                    debug_print_questions("phase_reactor", &questions);
+                }
             }
 
             // ── Step 2b: Persistir el Summary ────────────────────────────────
@@ -262,6 +312,15 @@ impl OrchestratorNode {
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
 
+                    let is_bridge = task_val
+                        .get("bridge")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+
+                    // Bridge tasks run in the current phase (same phase that just completed)
+                    // so their results are available before the next phase starts.
+                    let task_phase = if is_bridge { phase } else { next_phase };
+
                     let new_task = DagTask {
                         id: uuid::Uuid::new_v4().to_string(),
                         session_id: session_id.to_string(),
@@ -269,17 +328,24 @@ impl OrchestratorNode {
                         assigned_to: assigned_to.clone(),
                         completed: false,
                         result: None,
-                        phase: next_phase,
+                        phase: task_phase,
                         parallel,
                         context,
+                        is_bridge,
                     };
                     repo.add_task(&new_task).await?;
+                    if is_bridge {
+                        println!(
+                            "🌉 [OrchestratorNode] Bridge task '{}' → '{}' seeded in phase {} (runs before phase {}).",
+                            task_name, assigned_to, task_phase, next_phase
+                        );
+                    }
                     sowed += 1;
                 }
 
                 if sowed > 0 {
                     println!(
-                        "🌱 [OrchestratorNode] Sowed {} new recovery tasks into phase {} via Reactor.",
+                        "🌱 [OrchestratorNode] Sowed {} new task(s) via Reactor into phase {}.",
                         sowed, next_phase
                     );
                 }
@@ -357,16 +423,10 @@ impl OrchestratorNode {
 
             // Inject Q&A context from a previous final_reactor suspend if present
             if let Some(qa) = state.get("__orchestrator_qa_context") {
-                if let (Some(q), Some(a)) = (
-                    qa.get("question").and_then(|v| v.as_str()),
-                    qa.get("answer").and_then(|v| v.as_str()),
-                ) {
+                if let Some(ctx) = qa.get("qa_context").and_then(|v| v.as_str()) {
                     reactor_inputs.insert(
                         "system_message".to_string(),
-                        Value::String(format!(
-                            "USER CLARIFICATION — Question: {} Answer: {}",
-                            q, a
-                        )),
+                        Value::String(format!("USER CLARIFICATION — {}", ctx)),
                     );
                 }
             }
@@ -383,7 +443,7 @@ impl OrchestratorNode {
                 .unwrap_or(false);
 
             if reactor_suspended {
-                let question = reactor_res
+                let question_text = reactor_res
                     .get("extra_info")
                     .and_then(|e| e.get("question"))
                     .and_then(|v| v.as_str())
@@ -392,15 +452,25 @@ impl OrchestratorNode {
                     .to_string();
                 println!(
                     "⏸️  [OrchestratorNode] Final reactor suspended. Question: {}",
-                    question
+                    question_text
                 );
-                return Ok(OrchestratorSuspend::Suspended(make_suspend_response(
-                    state,
-                    "final_reactor",
-                    -1,
-                    None,
-                    &question,
-                )));
+                let questions = vec![SuspendQuestion {
+                    id: "final_reactor_clarification".to_string(),
+                    question: question_text,
+                    question_type: "open".to_string(),
+                    options: None,
+                }];
+                if allow_suspend_for(final_reactor_cfg) {
+                    return Ok(OrchestratorSuspend::Suspended(make_suspend_response(
+                        state,
+                        "final_reactor",
+                        -1,
+                        None,
+                        questions,
+                    )));
+                } else {
+                    debug_print_questions("final_reactor", &questions);
+                }
             }
 
             final_response = reactor_res.get("result").cloned().unwrap_or(Value::Null);
@@ -463,21 +533,62 @@ impl ExecutableNode for OrchestratorNode {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let suspend_meta = read_suspend_meta(_state);
+        let mut suspend_meta = read_suspend_meta(_state);
 
-        // If resuming from a final_reactor suspend, inject the Q&A into _state so
-        // finalize_execution() can pass it as context to the reactor, then clear meta.
-        // finalize_execution() will be called naturally when the loop finds all phases done.
-        if let (Some(ref ans), Some((ref sa, _, _, ref q))) = (&resume_answer, &suspend_meta) {
-            if sa == "final_reactor" {
-                println!("▶️  [OrchestratorNode] Resuming from final_reactor suspend. Injecting Q&A context.");
+        // If resuming from a suspend, handle based on where we suspended.
+        if let (Some(ref ans), Some((ref sa, _, _, ref questions))) = (&resume_answer, &suspend_meta) {
+            if sa == "critic" {
+                println!("▶️  [OrchestratorNode] Resuming from critic suspend. Preparing Q&A context for agent re-execution.");
+                // Prepare Q&A context but DO NOT clear suspend_meta — the resuming_critic guard in the task loop will handle the cleanup
+                let qa_str = questions_to_context_string(questions, ans);
                 if let Some(obj) = _state.as_object_mut() {
                     obj.insert(
                         "__orchestrator_qa_context".to_string(),
-                        json!({ "question": q, "answer": ans }),
+                        json!({ "qa_context": qa_str }),
+                    );
+                }
+                // NOTE: Suspend meta cleanup happens in resuming_critic guard, not here
+            } else if sa == "final_reactor" {
+                println!("▶️  [OrchestratorNode] Resuming from final_reactor suspend. Injecting Q&A context.");
+                let qa_str = questions_to_context_string(questions, ans);
+                if let Some(obj) = _state.as_object_mut() {
+                    obj.insert(
+                        "__orchestrator_qa_context".to_string(),
+                        json!({ "qa_context": qa_str }),
                     );
                 }
                 clear_suspend_meta(_state);
+            } else if sa == "planner" {
+                println!("▶️  [OrchestratorNode] Resuming from planner suspend. Injecting Q&A as planner context and phase 0 summary.");
+                let new_qa = questions_to_context_string(questions, ans);
+                // Accumulate with any previous planner Q&A rounds so the planner sees the full history
+                let accumulated_qa = {
+                    let prev = _state
+                        .get("__orchestrator_planner_qa")
+                        .and_then(|v| v.get("qa_context"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if prev.is_empty() {
+                        new_qa.clone()
+                    } else {
+                        format!("{}\n\n---\n\n{}", prev, new_qa)
+                    }
+                };
+                // Save as phase 0 summary so ALL agents in the run can see it
+                if let Some(repo) = &self.task_memory_repo {
+                    if let Err(e) = repo.save_phase_summary(&session_id, 0, &format!("[PLANNER Q&A] {}", accumulated_qa)).await {
+                        println!("⚠️  [OrchestratorNode] Failed to save planner Q&A as phase 0 summary: {}", e);
+                    }
+                }
+                // Stash accumulated Q&A for planner re-injection into system_message
+                if let Some(obj) = _state.as_object_mut() {
+                    obj.insert(
+                        "__orchestrator_planner_qa".to_string(),
+                        json!({ "qa_context": accumulated_qa }),
+                    );
+                }
+                clear_suspend_meta(_state);
+                // NO return — fall-through to re-execute the planner (existing_tasks is still empty)
             }
         }
 
@@ -512,15 +623,32 @@ impl ExecutableNode for OrchestratorNode {
                             a 1-2 sentence explanation of why this task exists and what the user's intent is \
                             (e.g. \"The user wants to know what clothing to pack for a ski trip in cold conditions.\"). \
                             This context will be shown to the agent alongside the task instruction.";
-                        let existing_sm = obj
+                        let mut existing_sm = obj
                             .get("system_message")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
+                        existing_sm.push_str(context_instruction);
+
+                        // Inject Q&A context from a previous planner suspend if present
+                        if let Some(qa) = _state.get("__orchestrator_planner_qa") {
+                            if let Some(ctx) = qa.get("qa_context").and_then(|v| v.as_str()) {
+                                existing_sm.push_str(&format!(
+                                    "\n\nUSER CLARIFICATION BEFORE PLANNING:\n{}",
+                                    ctx
+                                ));
+                            }
+                        }
+
                         obj.insert(
                             "system_message".to_string(),
-                            Value::String(format!("{}{}", existing_sm, context_instruction)),
+                            Value::String(existing_sm),
                         );
+                    }
+
+                    // Clean up planner Q&A stash after injecting into config
+                    if let Some(obj) = _state.as_object_mut() {
+                        obj.remove("__orchestrator_planner_qa");
                     }
 
                     let registry = self.registry.upgrade().ok_or("Registry already dropped")?;
@@ -529,9 +657,34 @@ impl ExecutableNode for OrchestratorNode {
                         .ok_or("Planner node not found")?;
 
                     // Ejecutamos el planner. El PlannerNode escribe el plan en 'state' y retorna { result: { items: [...] } }
+                    // o { result: { questions: [...] } } si necesita clarificación.
                     let planner_result = planner_node
                         .execute(inputs, &internal_planner_cfg, _state, _observer.clone())
                         .await?;
+
+                    // Detectar si el planner quiere suspender para pedir más info
+                    let planner_questions_opt: Option<Vec<SuspendQuestion>> = planner_result
+                        .get("result")
+                        .and_then(|r| r.get("questions"))
+                        .and_then(|q| serde_json::from_value(q.clone()).ok())
+                        .filter(|v: &Vec<SuspendQuestion>| !v.is_empty());
+
+                    if let Some(planner_questions) = planner_questions_opt {
+                        let planner_allow_suspend_default = json!({});
+                        let planner_cfg_raw = config.get("planner").unwrap_or(&planner_allow_suspend_default);
+                        if allow_suspend_for(planner_cfg_raw) {
+                            println!("⏸️  [OrchestratorNode] Planner requested clarification before generating tasks.");
+                            return Ok(make_suspend_response(
+                                _state,
+                                "planner",
+                                0,
+                                None,
+                                planner_questions,
+                            ));
+                        } else {
+                            debug_print_questions("planner", &planner_questions);
+                        }
+                    }
 
                     // Sembrar la DB con el plan obtenido
                     if let Some(items) = planner_result
@@ -574,6 +727,7 @@ impl ExecutableNode for OrchestratorNode {
                                     phase,
                                     parallel,
                                     context,
+                                    is_bridge: false,
                                 };
                                 repo.add_task(&new_task).await?;
                             }
@@ -662,24 +816,80 @@ impl ExecutableNode for OrchestratorNode {
 
                         if incomplete_in_phase.is_empty() {
                             // Guard: si venimos de un suspend de phase_reactor para ESTA fase,
-                            // saltamos el reactor y guardamos el Q&A como summary de fase.
+                            // inyectar Q&A y re-ejecutar el reactor con ese contexto.
                             let resuming_phase_reactor = resume_answer.is_some()
                                 && matches!(&suspend_meta, Some((sa, sp, _, _)) if sa == "phase_reactor" && *sp == current_phase);
 
                             if resuming_phase_reactor {
                                 let ans = resume_answer.as_deref().unwrap();
-                                let q = suspend_meta.as_ref().unwrap().3.clone();
-                                let qa_summary = format!("[USER CLARIFICATION] Q: {} A: {}", q, ans);
-                                repo.save_phase_summary(&session_id, current_phase, &qa_summary).await?;
+                                let questions = suspend_meta.as_ref().unwrap().3.clone();
+                                let ctx_str = questions_to_context_string(&questions, ans);
+                                // Stash Q&A so handle_phase_completion injects it into the reactor's system_message
+                                if let Some(obj) = _state.as_object_mut() {
+                                    obj.insert(
+                                        "__orchestrator_phase_reactor_qa".to_string(),
+                                        json!({ "qa_context": ctx_str }),
+                                    );
+                                }
                                 clear_suspend_meta(_state);
                                 println!(
-                                    "▶️  [OrchestratorNode] Resumed phase {} reactor with user answer. Saved Q&A as phase summary.",
+                                    "▶️  [OrchestratorNode] Resumed phase {} reactor — re-executing reactor with user clarification.",
+                                    current_phase
+                                );
+                                // Fall-through to handle_phase_completion — reactor re-runs with Q&A injected
+                            }
+
+                            // ── Bridge tasks check ───────────────────────────────────────
+                            // If the reactor already ran for this phase (flag set), all remaining
+                            // incomplete tasks were bridge tasks that have now completed.
+                            // Generate the bridge summary and advance without re-running the reactor.
+                            let reactor_done_key = format!("__orch_reactor_done_{}", current_phase);
+                            let reactor_already_ran = _state.get(&reactor_done_key).is_some();
+
+                            if reactor_already_ran {
+                                // Collect completed bridge task results for this phase
+                                let all_phase_tasks = repo.get_tasks_for_run(&session_id).await?;
+                                let bridge_done: Vec<_> = all_phase_tasks
+                                    .iter()
+                                    .filter(|t| t.phase == current_phase && t.is_bridge && t.completed)
+                                    .collect();
+
+                                if !bridge_done.is_empty() {
+                                    let mut parts = Vec::new();
+                                    for t in &bridge_done {
+                                        if let Some(res) = &t.result {
+                                            let text = res.get("result").and_then(|v| v.as_str()).unwrap_or("");
+                                            if !text.is_empty() {
+                                                parts.push(format!("[Bridge — {}]: {}", t.assigned_to, text));
+                                            }
+                                        }
+                                    }
+                                    if !parts.is_empty() {
+                                        let bridge_summary = format!(
+                                            "[BRIDGE RESULTS — phase {}]\n{}",
+                                            current_phase,
+                                            parts.join("\n\n")
+                                        );
+                                        repo.save_phase_summary(&session_id, current_phase, &bridge_summary).await?;
+                                        println!(
+                                            "💾 [OrchestratorNode] Bridge summary saved for phase {} ({} task(s)).",
+                                            current_phase, bridge_done.len()
+                                        );
+                                    }
+                                }
+
+                                // Clear the reactor-done flag and advance to the next phase
+                                if let Some(obj) = _state.as_object_mut() {
+                                    obj.remove(&reactor_done_key);
+                                }
+                                println!(
+                                    "🌉 [OrchestratorNode] Phase {} bridge complete. Advancing to next phase.",
                                     current_phase
                                 );
                                 continue;
                             }
 
-                            // Fase terminada -> Reaccionar y continuar al siguiente ciclo
+                            // ── Normal path: run phase reactor ───────────────────────────
                             match self
                                 .handle_phase_completion(
                                     repo,
@@ -694,7 +904,20 @@ impl ExecutableNode for OrchestratorNode {
                                 OrchestratorSuspend::Suspended(s) => return Ok(s),
                                 OrchestratorSuspend::Done(_) => {}
                             }
-                            // Continuar el loop: puede haber más fases (incluyendo las sembradas por el reactor)
+
+                            // If the reactor seeded bridge tasks in this phase, set the done flag
+                            // so the next iteration (after bridge tasks execute) skips the reactor.
+                            let has_bridge = repo.get_tasks_for_run(&session_id).await?
+                                .into_iter()
+                                .any(|t| t.phase == current_phase && t.is_bridge && !t.completed);
+
+                            if has_bridge {
+                                if let Some(obj) = _state.as_object_mut() {
+                                    obj.insert(reactor_done_key, json!(true));
+                                }
+                            }
+
+                            // Continuar el loop: bridge tasks o siguiente fase
                             continue;
                         }
 
@@ -709,25 +932,110 @@ impl ExecutableNode for OrchestratorNode {
                         let registry = self.registry.upgrade().ok_or("Registry already dropped")?;
 
                         for task in tasks_to_run {
-                            // Guard: si venimos de un suspend del critic para ESTA tarea,
-                            // recuperar el resultado stasheado, marcarlo completo y continuar.
-                            let resuming_critic = resume_answer.is_some()
-                                && matches!(&suspend_meta, Some((sa, _, Some(tid), _)) if sa == "critic" && tid == &task.id);
+                            // Guard: si venimos de un suspend de critic_max_retries para ESTA tarea.
+                            // Debe comprobarse ANTES del guard de "critic".
+                            let resuming_critic_max_retries = resume_answer.is_some()
+                                && matches!(&suspend_meta, Some((sa, _, Some(tid), _)) if sa == "critic_max_retries" && tid == &task.id);
 
-                            if resuming_critic {
-                                let stash_key = format!("__orch_pending_{}", task.id);
-                                if let Some(stashed) = _state.get(&stash_key).cloned() {
+                            if resuming_critic_max_retries {
+                                let ans_raw = resume_answer.as_deref().unwrap();
+                                let ans = ans_raw.to_lowercase();
+                                let questions = suspend_meta.as_ref().unwrap().3.clone();
+                                clear_suspend_meta(_state);
+                                // Consume local variable so subsequent loop iterations don't re-trigger
+                                suspend_meta = None;
+
+                                let accept = ans.contains("accept") || ans.contains("acepta") || ans.contains("aceptar") || ans.contains("aprueba") || ans.contains("aprobar") || ans.contains("ok") || ans.contains("está bien") || ans.contains("esta bien");
+                                let skip   = ans.contains("skip") || ans.contains("continuar") || ans.contains("continue");
+                                let cancel = ans.contains("cancel") || ans.contains("cancelar");
+                                // Default: if not clearly accept/skip/cancel → treat as retry with instructions
+                                let retry  = !accept && !skip && !cancel;
+
+                                if accept {
+                                    // User accepts the result as-is — use the stashed agent result
+                                    let stash_key = format!("__orch_pending_{}", task.id);
+                                    let retry_key = format!("__orch_retries_{}", task.id);
+                                    let stashed = _state.get(&stash_key).cloned().unwrap_or(json!({"result": "[Accepted by user]", "extra_info": {}}));
                                     repo.update_task_result(&task.id, stashed).await?;
                                     if let Some(obj) = _state.as_object_mut() {
                                         obj.remove(&stash_key);
+                                        obj.remove(&retry_key);
                                     }
+                                    println!(
+                                        "✅ [OrchestratorNode] Task '{}' accepted by user. Using existing result.",
+                                        task.task_name
+                                    );
+                                    continue;
+                                }
+
+                                if skip || cancel {
+                                    let note = if cancel {
+                                        "[CANCELLED by user]"
+                                    } else {
+                                        "[SKIPPED by user after max retries]"
+                                    };
+                                    repo.update_task_result(&task.id, json!({ "result": note, "extra_info": {} })).await?;
+                                    let stash_key = format!("__orch_pending_{}", task.id);
+                                    let retry_key = format!("__orch_retries_{}", task.id);
+                                    if let Some(obj) = _state.as_object_mut() {
+                                        obj.remove(&stash_key);
+                                        obj.remove(&retry_key);
+                                    }
+                                    println!(
+                                        "⏭️  [OrchestratorNode] Task '{}' {}. Moving on.",
+                                        task.task_name,
+                                        if cancel { "cancelled" } else { "skipped" }
+                                    );
+                                    continue;
+                                }
+
+                                if retry {
+                                    let retry_key = format!("__orch_retries_{}", task.id);
+                                    if let Some(obj) = _state.as_object_mut() {
+                                        obj.remove(&retry_key);
+                                        let qa_str = questions_to_context_string(&questions, ans_raw);
+                                        obj.insert(
+                                            "__orchestrator_qa_context".to_string(),
+                                            json!({ "qa_context": qa_str }),
+                                        );
+                                    }
+                                    println!(
+                                        "🔄 [OrchestratorNode] Task '{}' retrying with user clarification.",
+                                        task.task_name
+                                    );
+                                    // NO continue — fall-through para re-ejecutar el agente
+                                }
+                            }
+
+                            // Guard: si venimos de un suspend del critic para ESTA tarea,
+                            // descartar el stash y re-ejecutar el agente con el contexto del usuario.
+                            let resuming_critic = resume_answer.is_some()
+                                && !resuming_critic_max_retries
+                                && matches!(&suspend_meta, Some((sa, _, Some(tid), _)) if sa == "critic" && tid == &task.id);
+
+                            if resuming_critic {
+                                let ans = resume_answer.as_deref().unwrap();
+                                let questions = suspend_meta.as_ref().unwrap().3.clone();
+                                // Descartar stash — el agente se re-ejecutará con USER CLARIFICATION
+                                let stash_key = format!("__orch_pending_{}", task.id);
+                                if let Some(obj) = _state.as_object_mut() {
+                                    obj.remove(&stash_key);
+                                    let qa_str = questions_to_context_string(&questions, ans);
+                                    obj.insert(
+                                        "__orchestrator_qa_context".to_string(),
+                                        json!({ "qa_context": qa_str }),
+                                    );
                                 }
                                 clear_suspend_meta(_state);
+                                // Consume the local variable so subsequent loop iterations
+                                // don't re-trigger this guard — without this, every retry
+                                // cycle would wrongly re-inject the same Q&A context.
+                                suspend_meta = None;
                                 println!(
-                                    "▶️  [OrchestratorNode] Resumed critic approval for task '{}'. Marked complete.",
+                                    "▶️  [OrchestratorNode] Resumed critic for task '{}'. Re-running agent with USER CLARIFICATION.",
                                     task.task_name
                                 );
-                                continue;
+                                // NO continue — fall-through para re-ejecutar el agente con contexto
                             }
 
                             println!(
@@ -745,16 +1053,16 @@ impl ExecutableNode for OrchestratorNode {
                             // en fases avanzadas, evitando explotar la ventana de contexto con
                             // resultados crudos de la fase anterior.
                             let phase_summaries_for_ctx = repo.get_phase_summaries(&session_id).await.unwrap_or_default();
-                            let qa_ctx = _state.get("__orchestrator_qa_context").and_then(|v| {
-                                let q = v.get("question")?.as_str()?.to_string();
-                                let a = v.get("answer")?.as_str()?.to_string();
-                                Some((q, a))
-                            });
+                            let qa_ctx: Option<String> = _state
+                                .get("__orchestrator_qa_context")
+                                .and_then(|v| v.get("qa_context"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
                             let enriched_prompt = build_enriched_prompt(
                                 &phase_summaries_for_ctx,
                                 &task.task_name,
                                 task.context.as_deref(),
-                                qa_ctx.as_ref().map(|(q, a)| (q.as_str(), a.as_str())),
+                                qa_ctx.as_deref(),
                             );
 
                             println!(
@@ -797,11 +1105,23 @@ impl ExecutableNode for OrchestratorNode {
                             );
 
                             // ── Crítica ──
+                            let stash_key = format!("__orch_pending_{}", task.id);
                             let mut is_ok = true;
                             if let Some(critic_cfg) = config.get("critic") {
+                                let max_retries: u32 = critic_cfg
+                                    .get("max_retries")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(3) as u32;
+
+                                let retry_key = format!("__orch_retries_{}", task.id);
+                                let current_retries: u32 = _state
+                                    .get(&retry_key)
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0) as u32;
+
                                 println!(
-                                    "🔎 [OrchestratorNode] Internal Critique for task '{}'...",
-                                    task.task_name
+                                    "🔎 [OrchestratorNode] Internal Critique for task '{}' (attempt {}/{})...",
+                                    task.task_name, current_retries + 1, max_retries
                                 );
                                 let critic_node =
                                     registry.get_node("critic").ok_or("critic node not found")?;
@@ -815,7 +1135,6 @@ impl ExecutableNode for OrchestratorNode {
 
                                 // Stash agent_result in _state before calling critic so it
                                 // survives suspension and can be recovered on resume.
-                                let stash_key = format!("__orch_pending_{}", task.id);
                                 if let Some(obj) = _state.as_object_mut() {
                                     obj.insert(stash_key.clone(), agent_result.clone());
                                 }
@@ -832,7 +1151,7 @@ impl ExecutableNode for OrchestratorNode {
                                     .unwrap_or(false);
 
                                 if critic_suspended {
-                                    let question = critic_res
+                                    let question_text = critic_res
                                         .get("extra_info")
                                         .and_then(|e| e.get("question"))
                                         .and_then(|v| v.as_str())
@@ -841,20 +1160,25 @@ impl ExecutableNode for OrchestratorNode {
                                         .to_string();
                                     println!(
                                         "⏸️  [OrchestratorNode] Critic suspended for task '{}'. Question: {}",
-                                        task.task_name, question
+                                        task.task_name, question_text
                                     );
-                                    return Ok(make_suspend_response(
-                                        _state,
-                                        "critic",
-                                        current_phase,
-                                        Some(&task.id),
-                                        &question,
-                                    ));
-                                }
-
-                                // Critic did not suspend — clean up the stash
-                                if let Some(obj) = _state.as_object_mut() {
-                                    obj.remove(&stash_key);
+                                    let critic_questions = vec![SuspendQuestion {
+                                        id: "critic_review".to_string(),
+                                        question: question_text,
+                                        question_type: "open".to_string(),
+                                        options: None,
+                                    }];
+                                    if allow_suspend_for(critic_cfg) {
+                                        return Ok(make_suspend_response(
+                                            _state,
+                                            "critic",
+                                            current_phase,
+                                            Some(&task.id),
+                                            critic_questions,
+                                        ));
+                                    } else {
+                                        debug_print_questions("critic", &critic_questions);
+                                    }
                                 }
 
                                 is_ok = critic_res
@@ -862,10 +1186,64 @@ impl ExecutableNode for OrchestratorNode {
                                     .and_then(|e| e.get("task_ok"))
                                     .and_then(|v| v.as_bool())
                                     .unwrap_or(true);
+
+                                // ── Max Retries suspend ───────────────────────────────────
+                                if !is_ok {
+                                    let new_retries = current_retries + 1;
+                                    if let Some(obj) = _state.as_object_mut() {
+                                        obj.insert(retry_key.clone(), json!(new_retries));
+                                    }
+
+                                    if new_retries >= max_retries && allow_suspend_for(critic_cfg) {
+                                        println!(
+                                            "⏸️  [OrchestratorNode] Task '{}' exceeded max_retries ({}). Suspending for user decision.",
+                                            task.task_name, max_retries
+                                        );
+                                        let max_retry_questions = vec![
+                                            SuspendQuestion {
+                                                id: "action".to_string(),
+                                                question: format!(
+                                                    "El agente para '{}' falló {} veces seguidas. ¿Qué hacemos?",
+                                                    task.task_name, new_retries
+                                                ),
+                                                question_type: "choice".to_string(),
+                                                options: Some(vec![
+                                                    "accept — Aprobar el resultado actual tal como está".to_string(),
+                                                    "skip — Continuar sin esta tarea".to_string(),
+                                                    "retry — Reintentar con instrucciones adicionales (escríbelas a continuación)".to_string(),
+                                                    "cancel — Cancelar esta tarea definitivamente".to_string(),
+                                                ]),
+                                            },
+                                            SuspendQuestion {
+                                                id: "instructions".to_string(),
+                                                question: "Si elegiste 'retry', escribe aquí las instrucciones adicionales para el agente:".to_string(),
+                                                question_type: "open".to_string(),
+                                                options: None,
+                                            },
+                                        ];
+                                        return Ok(make_suspend_response(
+                                            _state,
+                                            "critic_max_retries",
+                                            current_phase,
+                                            Some(&task.id),
+                                            max_retry_questions,
+                                        ));
+                                    }
+                                } else {
+                                    // Task approved — clear retry counter
+                                    if let Some(obj) = _state.as_object_mut() {
+                                        obj.remove(&retry_key);
+                                    }
+                                }
                             }
 
                             if is_ok {
                                 repo.update_task_result(&task.id, agent_result).await?;
+                                // Clean up stash and Q&A context after task approved
+                                if let Some(obj) = _state.as_object_mut() {
+                                    obj.remove(&stash_key);
+                                    obj.remove("__orchestrator_qa_context");
+                                }
                                 println!(
                                     "✅ [OrchestratorNode] Task '{}' completed successfully.",
                                     task.task_name
@@ -875,7 +1253,6 @@ impl ExecutableNode for OrchestratorNode {
                                     "❌ [OrchestratorNode] Task '{}' rejected by critic.",
                                     task.task_name
                                 );
-                                // TODO: Lógica de re-intento o bifurcación. Por ahora solo dejamos incompleta.
                             }
                         }
                         // After running tasks, check if this phase is now fully complete
@@ -998,6 +1375,7 @@ async fn seed_db_manually(
                     phase,
                     parallel,
                     context,
+                    is_bridge: false,
                 };
                 repo.add_task(&new_task).await?;
             }
@@ -1017,17 +1395,16 @@ fn build_enriched_prompt(
     phase_summaries: &[crate::dag_engine::domain::state::DagPhaseSummary],
     task_name: &str,
     task_context: Option<&str>,
-    qa_context: Option<(&str, &str)>,
+    qa_context: Option<&str>,
 ) -> String {
     let mut parts = Vec::new();
 
     // Section 1: User clarification Q&A (highest priority — shown first so the agent
     // can act on the user's answer before processing anything else).
-    if let Some((q, a)) = qa_context {
-        parts.push(format!(
-            "=== USER CLARIFICATION ===\nQuestion: {}\nAnswer: {}",
-            q, a
-        ));
+    if let Some(ctx) = qa_context {
+        if !ctx.is_empty() {
+            parts.push(format!("=== USER CLARIFICATION ===\n{}", ctx));
+        }
     }
 
     // Section 2: task context — personalized intent synthesized by the Planner or Reactor.
@@ -1063,21 +1440,29 @@ fn build_enriched_prompt(
 fn inject_reactor_schema_constraints(reactor_cfg: &mut Value, available_agents: &[String]) {
     let schema_instruction = format!(
         "\n\n---\nIMPORTANT: You MUST respond with valid JSON only. No prose, no markdown fences.\n\
+        You are acting as a PHASE REACTOR (not a final reviewer). Your job is to:\n\
+        1. Write a concise phase summary in 'response'.\n\
+        2. Set 'task_ok' to true if the phase results are complete, false if more work is needed.\n\
+        3. Add follow-up tasks in 'add_tasks' if something is missing (set 'bridge': true for tasks that MUST run before the next phase starts).\n\
+        4. Always set 'suspend' to false unless you truly need user input.\n\
+        \n\
         Required format:\n\
         {{\n\
-          \"summary\": \"<concise summary of this phase's results>\",\n\
-          \"requires_replanning\": <true|false>,\n\
-          \"new_tasks\": [\n\
+          \"task_ok\": <true|false>,\n\
+          \"response\": \"<concise phase summary — what was accomplished, what is still missing>\",\n\
+          \"add_tasks\": [\n\
             {{\n\
               \"task\": \"<specific task instruction for the agent>\",\n\
               \"context\": \"<why this task is needed and what the user's intent is>\",\n\
-              \"assigned_to\": \"<agent_name>\",\n\
-              \"parallel\": <true|false>\n\
+              \"assigned_to\": \"<agent_name from the list below>\",\n\
+              \"parallel\": <true|false>,\n\
+              \"bridge\": <true|false — set true if this task MUST complete BEFORE the next phase starts; its result will be prepended to the next phase's context>\n\
             }}\n\
-          ]\n\
+          ],\n\
+          \"suspend\": false\n\
         }}\n\
-        Available agents for new_tasks (ONLY use these): [{}]\n\
-        If no new tasks are needed, set new_tasks to [].",
+        Available agents for add_tasks (ONLY use these names): [{}]\n\
+        If no new tasks are needed, set add_tasks to [].",
         available_agents.join(", ")
     );
 
@@ -1148,24 +1533,34 @@ fn extract_reactor_output_with_fallback(
 // ── Suspend/Resume helpers ────────────────────────────────────────────────────
 
 /// Reads the orchestrator suspend metadata from `global_shared_state`.
-/// Returns `(suspended_at, phase, task_id, question)` if present.
-fn read_suspend_meta(state: &Value) -> Option<(String, i32, Option<String>, String)> {
+/// Returns `(suspended_at, phase, task_id, questions)` if present.
+fn read_suspend_meta(
+    state: &Value,
+) -> Option<(String, i32, Option<String>, Vec<SuspendQuestion>)> {
     let meta = state.get("__orchestrator_suspend")?.as_object()?;
     let suspended_at = meta.get("suspended_at")?.as_str()?.to_string();
     let phase = meta.get("phase")?.as_i64()? as i32;
-    let task_id = meta.get("task_id").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let question = meta.get("question")?.as_str()?.to_string();
-    Some((suspended_at, phase, task_id, question))
+    let task_id = meta
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let questions: Vec<SuspendQuestion> = meta
+        .get("questions")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    Some((suspended_at, phase, task_id, questions))
 }
 
 /// Writes suspend metadata into `global_shared_state` and returns the SUSPENDED output value.
+/// `questions` is a structured array of questions to show the user.
 fn make_suspend_response(
     state: &mut Value,
     suspended_at: &str,
     phase: i32,
     task_id: Option<&str>,
-    question: &str,
+    questions: Vec<SuspendQuestion>,
 ) -> Value {
+    let qs_val = serde_json::to_value(&questions).unwrap_or(json!([]));
     if let Some(obj) = state.as_object_mut() {
         obj.insert(
             "__orchestrator_suspend".to_string(),
@@ -1173,11 +1568,11 @@ fn make_suspend_response(
                 "suspended_at": suspended_at,
                 "phase": phase,
                 "task_id": task_id,
-                "question": question
+                "questions": qs_val
             }),
         );
     }
-    json!({ "__colmena_status": "SUSPENDED", "question": question })
+    json!({ "__colmena_status": "SUSPENDED", "questions": qs_val })
 }
 
 /// Removes the orchestrator suspend metadata from `global_shared_state` after a successful resume.
@@ -1185,6 +1580,60 @@ fn clear_suspend_meta(state: &mut Value) {
     if let Some(obj) = state.as_object_mut() {
         obj.remove("__orchestrator_suspend");
     }
+}
+
+/// Returns `true` if the given component config allows suspending (default: `true`).
+/// Set `allow_suspend: false` in a component's config to disable Human-in-the-Loop for it.
+fn allow_suspend_for(component_cfg: &Value) -> bool {
+    component_cfg
+        .get("allow_suspend")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+}
+
+/// Prints a debug log when `allow_suspend: false` blocks a suspension.
+fn debug_print_questions(context: &str, questions: &[SuspendQuestion]) {
+    println!(
+        "🚫 [OrchestratorNode] Suspend blocked by allow_suspend=false in '{}'.",
+        context
+    );
+    println!("   Questions that would have been asked:");
+    for q in questions {
+        match q.question_type.as_str() {
+            "choice" => {
+                let opts = q
+                    .options
+                    .as_ref()
+                    .map(|o| o.join(" | "))
+                    .unwrap_or_default();
+                println!("   [{} / choice] {} Options: {}", q.id, q.question, opts);
+            }
+            _ => {
+                println!("   [{} / open] {}", q.id, q.question);
+            }
+        }
+    }
+}
+
+/// Converts a list of `SuspendQuestion`s and a plain-text answer into a single
+/// readable Q&A string for injection into LLM prompts.
+fn questions_to_context_string(questions: &[SuspendQuestion], answer: &str) -> String {
+    let q_lines: Vec<String> = questions
+        .iter()
+        .map(|q| {
+            if let Some(opts) = &q.options {
+                format!(
+                    "Q [{}] (options: {}): {}",
+                    q.id,
+                    opts.join(", "),
+                    q.question
+                )
+            } else {
+                format!("Q [{}]: {}", q.id, q.question)
+            }
+        })
+        .collect();
+    format!("{}\nA: {}", q_lines.join("\n"), answer)
 }
 
 // Helper: convert a Vec<DagTask> to a JSON array with result content

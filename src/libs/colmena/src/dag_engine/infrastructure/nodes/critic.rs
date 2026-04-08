@@ -379,6 +379,7 @@ impl ExecutableNode for CriticNode {
         Ok(json!({
             "result": task_ok,
             "extra_info": {
+                "task_ok":   task_ok,
                 "add_tasks": add_tasks,
                 "suspend":   suspend,
                 "question":  question,

@@ -1,0 +1,79 @@
+{
+  "_comment": "HITL Test 4: allow_suspend=false bloquea suspensions — El critic intenta suspender pero allow_suspend=false lo bloquea. El DAG continua ejecutandose y en stdout aparece el log de debug.",
+  "_test_instructions": [
+    "PASO 1 — Ejecucion unica (no hay suspend, debe completar):",
+    "  cargo run --bin dag_engine -- run tests/graphs/advanced/hitl_allow_suspend_false_test.json",
+    "  ESPERADO en stdout:",
+    "    - '🚫 [OrchestratorNode] Suspend blocked by allow_suspend=false in \\'critic\\'.'",
+    "    - '   Questions that would have been asked:'",
+    "    - '   [reformulate / open] ¿Quieres reformular esta respuesta?'",
+    "  ESPERADO en resultado:",
+    "    - El DAG NO suspende — completa normalmente",
+    "    - La tarea se marca como completada aunque el critic quiso suspender",
+    "    - El final_reactor produce un resumen final",
+    "",
+    "NOTA: Este test verifica que allow_suspend=false en cualquier nodo bloquea el suspend",
+    "      y permite que el DAG continue su ejecucion sin interrupciones al usuario."
+  ],
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "prompt": "Write a brief summary of the benefits of renewable energy."
+      }
+    },
+    "orchestrator_node": {
+      "type": "orchestrator",
+      "config": {
+        "verbose": true,
+        "include_extra_info": false,
+        "max_phases": 2,
+        "planner": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "You are a content orchestrator. Create exactly ONE task: assign 'Write a brief summary of renewable energy benefits' to writer_agent in phase 1. Output ONLY a JSON array."
+        },
+        "agents": {
+          "writer_agent": {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "api_key": "${GEMINI_API_KEY}",
+            "system_message": "You are a technical writer. Write a 4-5 line summary covering 3 key benefits of renewable energy: environmental, economic, and energy independence."
+          }
+        },
+        "critic": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "max_retries": 3,
+          "system_message": "You are a content critic. On first evaluation, you WANT to suspend with the question '¿Quieres reformular esta respuesta?' but since allow_suspend=false, this will be blocked.\n\nFor any task result you receive, output:\n  task_ok: true\n  suspend: true\n  question: '¿Quieres reformular esta respuesta?'\n\nNote: The 'suspend: true' will be blocked by allow_suspend=false in the orchestrator config. The orchestrator should log the blocked questions and approve the task anyway."
+        },
+        "phase_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "Review the phase results. If the writing task is complete, set requires_replanning=false."
+        },
+        "final_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "Present the final renewable energy summary. Add 'Note: Human review was requested but auto-approved due to allow_suspend=false configuration.' at the end."
+        }
+      }
+    },
+    "final_output": {
+      "type": "output",
+      "trigger_on": "FINISHED"
+    }
+  },
+  "edges": [
+    {"from": "trigger", "to": "orchestrator_node"},
+    {"from": "orchestrator_node", "to": "final_output"}
+  ]
+}

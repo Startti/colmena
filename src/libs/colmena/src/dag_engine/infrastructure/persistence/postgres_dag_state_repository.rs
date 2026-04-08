@@ -56,6 +56,13 @@ impl PostgresDagStateRepository {
         .await
         .map_err(|e| DagError::StateError(format!("Migration error (context col): {}", e)))?;
 
+        sqlx::query(
+            "ALTER TABLE dag_task_memory ADD COLUMN IF NOT EXISTS is_bridge BOOLEAN NOT NULL DEFAULT FALSE"
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DagError::StateError(format!("Migration error (is_bridge col): {}", e)))?;
+
         // Create dag_phase_summaries table
         sqlx::query(
             r#"CREATE TABLE IF NOT EXISTS dag_phase_summaries (
@@ -83,6 +90,7 @@ fn row_to_task(row: &sqlx::postgres::PgRow) -> DagTask {
     let phase: i32 = row.try_get("phase").unwrap_or(1);
     let parallel: bool = row.try_get("parallel").unwrap_or(false);
     let context: Option<String> = row.try_get("context").unwrap_or(None);
+    let is_bridge: bool = row.try_get("is_bridge").unwrap_or(false);
 
     DagTask {
         id: id_uuid.to_string(),
@@ -94,6 +102,7 @@ fn row_to_task(row: &sqlx::postgres::PgRow) -> DagTask {
         phase,
         parallel,
         context,
+        is_bridge,
     }
 }
 
@@ -217,8 +226,8 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
             .map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null));
 
         sqlx::query(
-            "INSERT INTO dag_task_memory (id, session_id, task_name, assigned_to, completed, result, phase, parallel, context) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+            "INSERT INTO dag_task_memory (id, session_id, task_name, assigned_to, completed, result, phase, parallel, context, is_bridge) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"
         )
         .bind(id_uuid)
         .bind(&task.session_id)
@@ -229,6 +238,7 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
         .bind(task.phase)
         .bind(task.parallel)
         .bind(task.context.as_deref())
+        .bind(task.is_bridge)
         .execute(&self.pool)
         .await
         .map_err(|e| DagError::StateError(format!("Database error on add_task: {}", e)))?;
@@ -258,7 +268,7 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
 
     async fn get_tasks_for_run(&self, session_id: &str) -> Result<Vec<DagTask>, DagError> {
         let rows = sqlx::query(
-            "SELECT id, session_id, task_name, assigned_to, completed, result, phase, parallel, context \
+            "SELECT id, session_id, task_name, assigned_to, completed, result, phase, parallel, context, is_bridge \
              FROM dag_task_memory WHERE session_id = $1 ORDER BY phase ASC, created_at ASC",
         )
         .bind(session_id)
@@ -274,7 +284,7 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
         session_id: &str,
     ) -> Result<Option<DagTask>, DagError> {
         let row_opt = sqlx::query(
-            "SELECT id, session_id, task_name, assigned_to, completed, result, phase, parallel, context \
+            "SELECT id, session_id, task_name, assigned_to, completed, result, phase, parallel, context, is_bridge \
              FROM dag_task_memory WHERE session_id = $1 AND completed = FALSE \
              ORDER BY phase ASC, created_at ASC LIMIT 1",
         )
@@ -340,7 +350,7 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
         phase: i32,
     ) -> Result<Vec<DagTask>, DagError> {
         let rows = sqlx::query(
-            "SELECT id, session_id, task_name, assigned_to, completed, result, phase, parallel, context \
+            "SELECT id, session_id, task_name, assigned_to, completed, result, phase, parallel, context, is_bridge \
              FROM dag_task_memory WHERE session_id = $1 AND phase = $2 AND completed = FALSE \
              ORDER BY created_at ASC",
         )

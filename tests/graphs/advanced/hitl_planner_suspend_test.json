@@ -1,0 +1,82 @@
+{
+  "_comment": "HITL Test 1: Planner Suspend — El planner suspende ANTES de crear tareas porque el goal es ambiguo.",
+  "_test_instructions": [
+    "PASO 1 — Primera ejecución (goal ambiguo):",
+    "  cargo run --bin dag_engine -- run tests/graphs/advanced/hitl_planner_suspend_test.json",
+    "  ESPERADO: el DAG retorna __colmena_status=SUSPENDED con questions sobre destino/presupuesto/fechas.",
+    "",
+    "PASO 2 — Resume con respuesta del usuario:",
+    "  cargo run --bin dag_engine -- run tests/graphs/advanced/hitl_planner_suspend_test.json \\",
+    "    --session-id <ID_DEL_PASO_1> --answer 'Quiero ir a Paris, presupuesto 1000 euros, del 10 al 20 de mayo'",
+    "  ESPERADO:",
+    "    - El planner re-ejecuta con la respuesta del usuario en su system_message",
+    "    - Se generan tareas concretas (vuelos, hotel, actividades)",
+    "    - El phase 0 summary en BD contiene '[PLANNER Q&A]'",
+    "    - Los agentes de fases posteriores ven la clarificacion en 'LO QUE HA OCURRIDO HASTA AHORA'"
+  ],
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "prompt": "planifica mi viaje"
+      }
+    },
+    "orchestrator_node": {
+      "type": "orchestrator",
+      "config": {
+        "verbose": true,
+        "include_extra_info": false,
+        "max_phases": 3,
+        "planner": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": true,
+          "system_message": "You are a travel planning orchestrator. Decompose the user's travel request into tasks across phases.\n\nIMPORTANT — Two possible response formats:\n1. If you have enough information, respond with a JSON array of tasks.\n2. If the request is ambiguous or missing critical information (destination, budget, dates), respond with:\n   { \"questions\": [ { \"id\": \"...\", \"question\": \"...\", \"type\": \"open|choice\", \"options\": [\"A\",\"B\"] } ] }\n   Only ask questions when truly necessary.\nOutput ONLY valid JSON. Do NOT include markdown or code fences."
+        },
+        "agents": {
+          "flights_expert": {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "api_key": "${GEMINI_API_KEY}",
+            "system_message": "You are a flights expert. Based on the travel details, suggest 2 flight options with estimated prices. Keep it brief (3-4 lines)."
+          },
+          "hotel_expert": {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "api_key": "${GEMINI_API_KEY}",
+            "system_message": "You are a hotel booking expert. Based on the travel details and budget, suggest 2 hotel options with estimated prices per night. Keep it brief (3-4 lines)."
+          },
+          "activities_expert": {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "api_key": "${GEMINI_API_KEY}",
+            "system_message": "You are a travel activities expert. Based on the destination and dates, suggest 3 must-do activities with estimated costs. Keep it brief."
+          }
+        },
+        "phase_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "You are reviewing phase results for a travel plan. If all tasks are complete and reasonable, set requires_replanning=false. If critical info is missing, set requires_replanning=true and add recovery tasks."
+        },
+        "final_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "You are the final step. Combine the flights, hotel, and activities into a concise 4-5 line travel summary."
+        }
+      }
+    },
+    "final_output": {
+      "type": "output",
+      "trigger_on": "FINISHED"
+    }
+  },
+  "edges": [
+    {"from": "trigger", "to": "orchestrator_node"},
+    {"from": "orchestrator_node", "to": "final_output"}
+  ]
+}

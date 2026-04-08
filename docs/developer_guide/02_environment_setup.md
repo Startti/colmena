@@ -75,6 +75,27 @@ Puedes usar este comando para generar una clave válida:
 openssl rand -base64 32
 ```
 
+### 🗄️ Inicialización de la Base de Datos
+
+El framework utiliza PostgreSQL (o SQLite localmente) para persistir la memoria de los LLMs, el historial de corridas y el estado de ejecución de los agentes. Si utilizas PostgreSQL, sigue estos pasos para inicializar tu base de datos desde cero:
+
+1. Asegúrate de tener una instancia de PostgreSQL corriendo.
+2. Configura la variable `DATABASE_URL` en tu `.env`. Ejemplo:
+   ```bash
+   DATABASE_URL="postgres://usuario:password@localhost/colmena"
+   ```
+3. Instala la herramienta de migraciones de `sqlx` (si aún no la tienes):
+   ```bash
+   cargo install sqlx-cli --no-default-features --features rustls,postgres
+   ```
+4. Crea la base de datos y ejecuta la migración inicial:
+   ```bash
+   sqlx database create
+   sqlx migrate run --source src/libs/colmena/migrations/postgres
+   ```
+
+> **Nota:** Todos los esquemas necesarios (`llm_node_history`, `dag_task_memory`, etc.) se encuentran agrupados en un único archivo inicial, por lo que este comando dejará la base de datos completamente configurada para el motor.
+
 ### Scripts de Desarrollo
 
 Para facilitar el ciclo de desarrollo, se recomiendan los siguientes comandos:

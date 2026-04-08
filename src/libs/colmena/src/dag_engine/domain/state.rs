@@ -89,6 +89,12 @@ pub struct DagTask {
     /// Set by the Planner or Reactor; used to enrich agent prompts with semantic purpose.
     #[serde(default)]
     pub context: Option<String>,
+    /// If true, this task was added by the phase_reactor as a prerequisite that must
+    /// complete before the next phase starts. Bridge tasks execute in the same phase
+    /// as the one that spawned them; their results are saved as a bridge summary
+    /// visible to the next phase.
+    #[serde(default)]
+    pub is_bridge: bool,
 }
 
 /// A summary produced by the ReactorNode at the end of a phase.

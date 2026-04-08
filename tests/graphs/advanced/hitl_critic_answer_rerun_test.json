@@ -1,0 +1,85 @@
+{
+  "_comment": "HITL Test 2: Critic Answer Re-executes Agent — El critic suspende exactamente UNA vez pidiendo número de viajeros y moneda. Al responder ambas, el agente SE RE-EJECUTA con USER CLARIFICATION y el critic aprueba.",
+  "_test_instructions": [
+    "PASO 1 — Primera ejecución (critic pide info faltante):",
+    "  cargo run --bin dag_engine -- run tests/graphs/advanced/hitl_critic_answer_rerun_test.json",
+    "  ESPERADO: el DAG suspende con question='Para personalizar el itinerario necesito saber: ¿Cuántas personas viajan? ¿En qué moneda quieres los precios?'",
+    "",
+    "PASO 2 — Resume con la info pedida:",
+    "  cargo run --bin dag_engine -- run tests/graphs/advanced/hitl_critic_answer_rerun_test.json \\",
+    "    --session-id <ID_DEL_PASO_1> \\",
+    "    --answer 'Somos 3 personas, precios en EUR'",
+    "  ESPERADO:",
+    "    - El agente itinerary_agent SE RE-EJECUTA (no se usa la respuesta vieja)",
+    "    - El prompt del agente contiene '=== USER CLARIFICATION ===' con '3 personas' y 'EUR'",
+    "    - El critic ve USER CLARIFICATION y aprueba (task_ok=true) sin volver a suspender",
+    "    - El DAG completa: phase_reactor → final_reactor → FINISHED"
+  ],
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "prompt": "Create a 2-day itinerary for visiting Rome, Italy."
+      }
+    },
+    "orchestrator_node": {
+      "type": "orchestrator",
+      "config": {
+        "verbose": true,
+        "include_extra_info": false,
+        "max_phases": 2,
+        "planner": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "You are a travel planning orchestrator. Decompose the request into a single task: assign 'Create a detailed 2-day Rome itinerary' to itinerary_agent in phase 1. Output ONLY a JSON array."
+        },
+        "agents": {
+          "itinerary_agent": {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "api_key": "${GEMINI_API_KEY}",
+            "system_message": "You are a Rome travel expert. Create a 2-day itinerary for Rome. Include 3-4 attractions per day. Keep it to 6-8 lines total."
+          }
+        },
+        "critic": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": true,
+          "max_retries": 5,
+          "system_message": "You are a strict travel itinerary critic. You need two specific pieces of information before approving any itinerary:\n1. How many people are traveling (number of travelers)\n2. What currency to use for budget/prices\n\nRULES:\n- If the itinerary does NOT specify the number of travelers AND the currency for prices: output task_ok=false, suspend=true, question='Para personalizar el itinerario necesito saber: ¿Cuántas personas viajan? ¿En qué moneda quieres los precios (EUR, USD, etc.)?'\n- If the USER CLARIFICATION section contains both the number of travelers AND the currency: output task_ok=true (approve the itinerary as-is)\n- Never suspend more than once — if USER CLARIFICATION is present, always approve"
+        },
+        "phase_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "Review the phase results. If the itinerary task is complete, set requires_replanning=false."
+        },
+        "final_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "Summarize the final Rome itinerary in 3-4 lines."
+        }
+      }
+    },
+    "final_output": {
+      "type": "output",
+      "trigger_on": "FINISHED"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "orchestrator_node"
+    },
+    {
+      "from": "orchestrator_node",
+      "to": "final_output"
+    }
+  ]
+}

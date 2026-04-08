@@ -72,6 +72,7 @@ impl ExecutableNode for TaskMemoryWriterNode {
                                 phase: 1,
                                 parallel: false,
                                 context: None,
+                                is_bridge: false,
                             };
                             repo.add_task(&new_task).await?;
                         }

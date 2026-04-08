@@ -84,7 +84,7 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 | `critic` | — | `result` | **Dynamic inputs** — `texts.*` inputs reviewed by LLM |
 | `information_extraction` | — | `result` | **Dynamic inputs** — `texts.*` inputs extracted per schema |
 | `reactor` | — | `result` | **Dynamic inputs** — `texts.*` summarized and reviewed |
-| `orchestrator` | — | `final_response` | **Dynamic inputs** — full multi-agent lifecycle; suspends at `phase_reactor`, `critic`, `final_reactor` |
+| `orchestrator` | — | `final_response` | **Dynamic inputs** — full multi-agent lifecycle; suspends at `planner`, `phase_reactor`, `critic`, `critic_max_retries`, `final_reactor`; supports bridge tasks; `allow_suspend` per-component |
 | `task_memory_writer` | — | `result` | **Requires explicit fields** for task management |
 | `trigger_webhook` | — | `output` | Webhook trigger — emits payload |
 | `mock_input` | — | — | **Raw output** — emits config as-is, no specific field |
@@ -391,7 +391,7 @@ cargo run --bin dag_engine -- run graph.json --session-id abc123 --answer '{"app
 
 ## The `orchestrator` Node (In-Depth)
 
-The `orchestrator` node implements a **full multi-agent coordination system** with automatic planning, phased execution, per-task critique, and suspend/resume at three key points. Unlike simpler nodes, the orchestrator runs its entire lifecycle inside a single `execute()` call — it never needs a self-loop edge.
+The `orchestrator` node implements a **full multi-agent coordination system** with automatic planning, phased execution, per-task critique, and suspend/resume at five key points with a system of structured clarifying questions. Unlike simpler nodes, the orchestrator runs its entire lifecycle inside a single `execute()` call — it never needs a self-loop edge.
 
 - **Type**: `"orchestrator"`
 - **Location**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/orchestrator.rs`
@@ -403,6 +403,9 @@ The `orchestrator` node implements a **full multi-agent coordination system** wi
 INPUT PROMPT
     │
     ▼
+0. PLANNER ──► may SUSPEND ⏸ for clarification (`allow_suspend`)
+    │          └── Q&A → phase 0 summary; planner re-runs with injected context
+    ▼
 1. PLANNER ──► Seeds DB with tasks grouped by phase
     │
     ▼ (loop over phases)
@@ -411,13 +414,15 @@ INPUT PROMPT
    └─ [sequential] one task at a time
     │
     ▼
-3. CRITIC (optional, per task) ──► validates result ──► may SUSPEND ⏸
-    │
+3. CRITIC (optional, per task) ──► validates result ──► may SUSPEND ⏸ (`allow_suspend`)
+    │                              └── if fails N times → SUSPEND critic_max_retries ⏸ (choice: accept/skip/retry/cancel)
     ▼
-4. PHASE REACTOR (optional) ──► summarizes phase ──► may add recovery tasks ──► may SUSPEND ⏸
-    │
+4. PHASE REACTOR (optional) ──► summarizes phase ──► may SUSPEND ⏸ (`allow_suspend`)
+    │     └── may propose bridge tasks (`bridge=true`):
+    │          ├─ these run in the CURRENT phase (not the next one)
+    │          └─ their results become a bridge summary before phase N+1 starts
     ▼ (repeat for all phases)
-5. FINAL REACTOR ──► synthesizes all phase summaries into final answer ──► may SUSPEND ⏸
+5. FINAL REACTOR ──► synthesizes all summaries into final answer ──► may SUSPEND ⏸ (`allow_suspend`)
     │
     ▼
 OUTPUT: final_response
@@ -475,52 +480,78 @@ OUTPUT: final_response
 | `planner` | object | required | LLM config used for auto-planning. Agent names from `agents` are injected automatically. |
 | `agents` | object | required | Map of `agent_id → LLM config`. The planner assigns tasks to these agents by their key name. |
 | `critic` | object | optional | If present, every agent result passes through the critic before being marked complete. |
+| `critic.max_retries` | int | `3` | Max consecutive critic failures before suspending to let the user decide. |
 | `phase_reactor` | object | optional | If present, runs after every phase completes. Summarizes results and can add recovery tasks or suspend. |
 | `final_reactor` | object | optional | If present, runs once all phases are done. Synthesizes all phase summaries into the final user-facing response. |
+| `allow_suspend` | bool | `true` | **Per-component** flag (placed inside `planner`, `critic`, `phase_reactor`, or `final_reactor`). If `false`, this component will never suspend — questions are printed to logs and execution proceeds. |
 
-### The Three Suspension Points
+### Human-in-the-Loop (HITL)
 
-The orchestrator can suspend at three points, each triggered when the internal LLM node returns `suspend=true` with a `question`:
+The orchestrator supports HITL by pausing execution and outputting a structured array of questions. The suspension behavior is controlled per-component by `allow_suspend`.
+
+**SuspendQuestion schema:**
+```json
+{
+  "__colmena_status": "SUSPENDED",
+  "questions": [
+    { "id": "action", "question": "What should we do?", "type": "choice", "options": ["accept", "skip"] },
+    { "id": "clarification", "question": "...", "type": "open" }
+  ]
+}
+```
+
+### The Five Suspension Points
+
+The orchestrator can suspend at five distinct points:
+
+#### 0. `planner` — Before planning
+
+Triggered when the planner detects the user request is ambiguous and it cannot create a meaningful plan without more information.
+
+On resume: The Q&A is accumulated and saved as a special **phase 0 summary** visible to all agents. The planner re-runs with `USER CLARIFICATION BEFORE PLANNING` injected into its `system_message`.
 
 #### 1. `phase_reactor` — After a phase completes
 
 Triggered when the phase reactor detects ambiguity or missing information in the phase results.
 
-```
-Phase 1 runs → clothing_expert + gear_expert complete
-Phase reactor sees conflicting estimates
-→ suspend=true, question="Which estimate should I use?"
-→ Orchestrator returns SUSPENDED with session_id
-```
+On resume: The Q&A is injected into the `system_message` of the reactor, which **runs again** for that phase with the fully enriched context.
 
-On resume: the Q&A is saved as a phase summary (`[USER CLARIFICATION] Q: ... A: ...`) and execution continues to the next phase — the phase reactor for that phase is **not called again**.
+#### 2. `critic` — During agent task validation
 
-#### 2. `critic` — After a specific agent task
+Triggered when the critic reviews an agent result and determines user input is needed before approving it.
 
-Triggered when the critic reviews an agent result and determines user input is needed before approving.
+On resume: The agent **runs again** with `USER CLARIFICATION` injected into its enriched prompt.
 
-```
-budget_expert completes task
-Critic: "The result seems out of range. Should I accept it?"
-→ suspend=true, question="The budget estimate is $50k. Is that correct?"
-→ agent result is stashed in global_shared_state
-→ Orchestrator returns SUSPENDED with session_id + task_id
-```
+#### 3. `critic_max_retries` — Fallback after repeated failures
 
-On resume: the stashed agent result is retrieved and the task is marked complete without re-running the agent or critic.
+Triggered when a task fails the critic loop `max_retries` times. Issues choice-based questions. The user can select:
+- `accept`: Use the agent's current result as-is.
+- `skip`: Skip the task (`[SKIPPED by user]`).
+- `retry`: Try again with additional instructions.
+- `cancel`: Cancel effectively stopping the task.
 
-#### 3. `final_reactor` — Before the final synthesis
+#### 4. `final_reactor` — Before the final synthesis
 
 Triggered when the final reactor needs clarification before writing the user-facing answer.
 
-```
-All phases done → final_reactor runs
-"Should I emphasize cost or convenience in the final recommendation?"
-→ suspend=true, question="..."
-→ Orchestrator returns SUSPENDED with session_id
-```
-
 On resume: the Q&A is injected as a `system_message` context into the final reactor, which runs again with the clarification.
+
+### Bridge Tasks
+
+The `phase_reactor` can propose **bridge tasks** marked with `"bridge": true`. Bridge tasks are special because they execute in the **same current phase** (not the next phase) before phase N+1 is allowed to begin.
+
+**Bridge Flow:**
+```
+Phase N completes
+    ↓
+Phase Reactor → proposes add_tasks with bridge=true
+    ↓  (internal flag __orch_reactor_done_N set)
+Bridge tasks execute (same agents, same phase N)
+    ↓
+Bridge summary saved: "[BRIDGE RESULTS — phase N]\n[Bridge — agent]: ..."
+    ↓
+Flag cleared → Phase N closes → Phase N+1 starts with complete context
+```
 
 ### Suspend/Resume Workflow
 
@@ -593,18 +624,23 @@ Estimate the total budget for clothing items.
       "completed": true,
       "phase": 1,
       "parallel": true,
+      "is_bridge": false,
       "result": { "content": "Ski jacket: $300..." }
     }
   ],
   "extra_info": {
     "__colmena_loop_status": "FINISHED",
     "phase_summaries": [
+      { "phase": 0, "summary": "[PLANNER Q&A] Q [scope]: ... A: ..." },
       { "phase": 1, "summary": "Phase 1 covered clothing and gear..." },
-      { "phase": 2, "summary": "Budget estimate: $650-$1800..." }
+      { "phase": 1, "summary": "[BRIDGE RESULTS — phase 1]\n[Bridge — gear_expert]: Helmet costs $100" }
     ]
   }
 }
 ```
+
+> [!NOTE]
+> The `is_bridge` field indicates if the task was proposed as a bridge task by the phase_reactor. Phase 0 summaries contain accumulated Q&A from the planner. Summaries prefixed with `[BRIDGE RESULTS]` correspond to completed bridge tasks (multiple bridge tasks per phase are supported).
 
 ### State Persistence (`global_shared_state`)
 
@@ -612,9 +648,13 @@ The orchestrator uses `global_shared_state` (persisted in DB as part of `DagRunS
 
 | Key | Purpose |
 |---|---|
-| `__orchestrator_suspend` | Written on suspend; contains `suspended_at`, `phase`, `task_id`, `question` |
-| `__orchestrator_qa_context` | Written on final_reactor resume; contains `question` + `answer` |
+| `__orchestrator_suspend` | Written on suspend; contains `suspended_at`, `phase`, `task_id`, `questions` (array) |
+| `__orchestrator_qa_context` | Q&A from critic/final_reactor; injected into the agent prompt on resume |
+| `__orchestrator_phase_reactor_qa` | Q&A from phase_reactor; injected into its `system_message` on resume |
+| `__orchestrator_planner_qa` | Accumulated Q&A from planner; injected into planner on resume |
 | `__orch_pending_<task_id>` | Temporary stash of agent result before critic suspend; cleaned up on resume |
+| `__orch_retries_<task_id>` | Tracks consecutive critic failures for `critic_max_retries` logic |
+| `__orch_reactor_done_<phase>` | Flag tracking that phase reactor already ran; uncompleted tasks are bridge tasks |
 
 ### Minimal Example Graph
 

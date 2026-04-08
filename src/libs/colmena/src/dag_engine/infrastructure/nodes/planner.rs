@@ -57,7 +57,15 @@ For each task you MUST also set:\
 - 'parallel': true if this task can safely run at the same time as other tasks \
   in the same phase, false if it must run alone sequentially.\
 \n\
-Output ONLY valid JSON matching the schema. Do NOT include markdown or code fences.";
+IMPORTANT — Two possible response formats:\n\
+1. If you have enough information to create a complete plan, respond with a JSON ARRAY of tasks.\n\
+2. If the request is ambiguous or missing critical information that would prevent you from \
+creating a useful plan, respond with a JSON object containing 'questions':\n\
+   { \"questions\": [ { \"id\": \"<short_id>\", \"question\": \"<text>\", \"type\": \"open\" | \"choice\", \"options\": [\"A\", \"B\"] } ] }\n\
+   Use type 'open' for free-text answers and 'choice' when there are specific predefined options.\n\
+   Only ask questions when truly necessary — if you can make reasonable assumptions, do so and plan.\n\
+\n\
+Output ONLY valid JSON. Do NOT include markdown or code fences.";
 
 pub struct PlannerNode {
     task_memory_repo: Option<Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>>,
@@ -395,16 +403,42 @@ impl ExecutableNode for PlannerNode {
             )
         })?;
 
-        // --- 6. Return ---
+        // --- 5b. Detect suspend request (questions instead of tasks) ---
+        // The LLM may return { "questions": [...] } when it needs clarification.
+        // Bare arrays are treated as a task list (backward-compatible).
+        let normalized: Value = if parsed.is_array() {
+            // Bare array — wrap as tasks for uniform handling
+            json!({ "tasks": parsed })
+        } else {
+            parsed
+        };
+
+        if let Some(questions) = normalized.get("questions") {
+            if questions.is_array() && !questions.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+                println!("⏸️  [PlannerNode] Planner requested clarification before planning ({} questions).", questions.as_array().map(|a| a.len()).unwrap_or(0));
+                return Ok(json!({
+                    "result": {
+                        "questions": questions
+                    },
+                    "extra_info": {
+                        "raw_response": raw
+                    }
+                }));
+            }
+        }
+
+        // --- 6. Return tasks ---
+        let items = normalized.get("tasks").cloned().unwrap_or(json!([]));
+
         // Write it to global shared state so the Orchestrator can find it natively
         if let Some(state_obj) = state.as_object_mut() {
-            state_obj.insert("plan".to_string(), json!({ "items": parsed.clone() }));
+            state_obj.insert("plan".to_string(), json!({ "items": items.clone() }));
         }
 
         // Return gracefully (it will still be emitted as an output event)
         Ok(json!({
             "result": {
-                "items": parsed
+                "items": items
             },
             "extra_info": {
                 "raw_response": raw

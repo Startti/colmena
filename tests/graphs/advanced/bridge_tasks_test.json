@@ -1,0 +1,86 @@
+{
+  "_comment": "Bridge Tasks Test — El phase_reactor detecta que falta un análisis de costos después de la fase de investigación, lo marca como bridge=true. La tarea bridge se ejecuta en la fase 1 (misma fase) antes de avanzar a la fase 2. La fase 2 ve tanto el summary principal como el bridge summary.",
+  "_test_instructions": [
+    "EJECUCIÓN ÚNICA (debe completar sin interrupciones):",
+    "  cargo run --bin dag_engine -- run tests/graphs/advanced/bridge_tasks_test.json",
+    "",
+    "ESPERADO en stdout:",
+    "  - Phase 1: research_agent ejecuta 'Research top 3 renewable energy sources'",
+    "  - phase_reactor corre y detecta que falta análisis de costos → añade bridge task",
+    "  - '🌉 [OrchestratorNode] Bridge task ... seeded in phase 1 (runs before phase 2).'",
+    "  - bridge_agent ejecuta 'Estimate cost comparison for the researched energy sources'",
+    "  - '💾 [OrchestratorNode] Bridge summary saved for phase 1 (1 task(s)).'",
+    "  - '🌉 [OrchestratorNode] Phase 1 bridge complete. Advancing to next phase.'",
+    "  - Phase 2: writer_agent ejecuta su tarea con contexto de phase 1 + bridge",
+    "  - final_reactor produce resumen final con datos de investigación Y costos",
+    "",
+    "VERIFICAR que el prompt del writer_agent (fase 2) incluye:",
+    "  - El summary de fase 1 (resultados de research_agent)",
+    "  - El bridge summary '[BRIDGE RESULTS — phase 1]' con el análisis de costos"
+  ],
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "prompt": "Research renewable energy sources and write a concise report including cost comparisons."
+      }
+    },
+    "orchestrator_node": {
+      "type": "orchestrator",
+      "config": {
+        "verbose": true,
+        "include_extra_info": false,
+        "max_phases": 3,
+        "planner": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "You are a research orchestrator. Create a 2-phase plan:\n- Phase 1: assign 'Research top 3 renewable energy sources (solar, wind, hydro): brief description and global adoption stats for each' to research_agent\n- Phase 2: assign 'Write a concise 8-10 line report on renewable energy covering the researched sources and their costs' to writer_agent\nOutput ONLY a JSON array with exactly 2 tasks."
+        },
+        "agents": {
+          "research_agent": {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "api_key": "${GEMINI_API_KEY}",
+            "system_message": "You are an energy research analyst. Provide factual, concise information. Keep your response to 6-8 lines."
+          },
+          "bridge_agent": {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "api_key": "${GEMINI_API_KEY}",
+            "system_message": "You are a cost analyst. Given the researched energy sources, provide a brief cost comparison (installation cost per kW and levelized cost of energy). Keep it to 4-6 lines."
+          },
+          "writer_agent": {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "api_key": "${GEMINI_API_KEY}",
+            "system_message": "You are a technical writer. Write a clear, structured report using ALL the provided context (research findings AND cost data). Organize it with brief sections: Overview, Energy Sources, Cost Comparison, Conclusion. Keep it to 12-15 lines total."
+          }
+        },
+        "phase_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "You are a research quality reviewer. After reviewing the phase 1 research results, the research lacks specific installation cost per kW data. You MUST respond with task_ok=false and add EXACTLY ONE task to add_tasks. The task MUST be: {\"task\": \"Estimate cost comparison for the researched energy sources (installation cost per kW and levelized cost of energy for solar, wind, and hydro)\", \"assigned_to\": \"bridge_agent\", \"context\": \"The writer needs cost per kW data before writing the report\", \"parallel\": false, \"bridge\": true}. The 'bridge' field MUST be true — this causes the task to run in the current phase before the next phase starts. Set suspend=false."
+        },
+        "final_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "Summarize the final report outcome in 2-3 lines. Note that the report included both research and cost analysis gathered via a bridge task."
+        }
+      }
+    },
+    "final_output": {
+      "type": "output",
+      "trigger_on": "FINISHED"
+    }
+  },
+  "edges": [
+    {"from": "trigger", "to": "orchestrator_node"},
+    {"from": "orchestrator_node", "to": "final_output"}
+  ]
+}
