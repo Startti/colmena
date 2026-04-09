@@ -57,8 +57,11 @@ impl ConversationRepositoryFactory {
                     message: format!("Failed to connect to Postgres: {}", e),
                 })?;
 
-            // Run migrations
-            sqlx::migrate!("migrations/postgres")
+            // Run migrations (ignore missing: the DB may have old migrations
+            // that no longer exist on disk from previous schema consolidations)
+            let mut migrator = sqlx::migrate!("migrations/postgres");
+            migrator.set_ignore_missing(true);
+            migrator
                 .run(&pool)
                 .await
                 .map_err(|e| LlmError::RequestFailed {
@@ -81,8 +84,10 @@ impl ConversationRepositoryFactory {
                     message: format!("Failed to connect to SQLite: {}", e),
                 })?;
 
-            // Run migrations
-            sqlx::migrate!("migrations/sqlite")
+            // Run migrations (ignore missing for consistency with postgres behavior)
+            let mut migrator = sqlx::migrate!("migrations/sqlite");
+            migrator.set_ignore_missing(true);
+            migrator
                 .run(&pool)
                 .await
                 .map_err(|e| LlmError::RequestFailed {

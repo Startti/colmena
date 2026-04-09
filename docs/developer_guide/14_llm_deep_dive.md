@@ -493,8 +493,18 @@ Focus on: 1) Auth flaws, 2) Input validation, 3) Output encoding. Rate severity.
 - **Verificar:** En la salida del nodo, buscar `<value_N>` en lugar de valores reales
 - **Debug:** Usar `verbose: true` para ver el prompt exacto enviado
 
+### **"Failed to parse arguments for tool: trailing characters" (Gemini)**
+- **Causa:** Bug corregido en v0.3.0 — Gemini enviaba múltiples tool calls en paralelo y el adapter de streaming les asignaba el mismo índice (`0`), causando que `agent_service.rs` concatenara los argumentos JSON de herramientas distintas
+- **Fix:** El adapter de Gemini ahora usa un contador incremental `tool_call_index` para asignar índices únicos a cada tool call chunk
+- **Archivo:** `src/libs/colmena/src/llm/infrastructure/gemini_adapter.rs`
+
+### **"migration was previously applied but is missing" (PostgreSQL)**
+- **Causa:** La tabla `_sqlx_migrations` tiene registros de migraciones que ya no existen en disco (tras consolidación de esquema)
+- **Solución:** `psql $DATABASE_URL -c "DROP TABLE IF EXISTS _sqlx_migrations;"` y re-ejecutar
+- **Protección:** El migrador usa `set_ignore_missing(true)` para tolerar migraciones faltantes sin error
+
 ---
 
-**Versión:** 1.0  
-**Fecha:** 2026-04-04  
+**Versión:** 1.1  
+**Fecha:** 2026-04-08  
 **Status:** ✅ Completo

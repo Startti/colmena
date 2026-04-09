@@ -515,7 +515,7 @@ curl -X POST http://localhost:3000/chat \
 - **Thread IDs únicos**: Usa IDs únicos por conversación (ej: `user_id`, `session_id`)
 - **Seguridad**: Nunca hardcodees credenciales, usa variables de entorno
 - **SQLite Limitations**: SQLite no soporta escrituras concurrentes, usa PostgreSQL para producción
-- **Migraciones**: Se ejecutan automáticamente en la primera conexión (o manualmente usando `sqlx migrate run --source src/libs/colmena/migrations/postgres`)
+- **Migraciones**: Se ejecutan automáticamente en la primera conexión. El migrador usa `set_ignore_missing(true)` para tolerar migraciones previamente aplicadas que ya no existen en disco (por consolidaciones de esquema)
 - **Costos de LLM**: El historial completo se envía en cada llamada, considera el costo de tokens
 
 ### 🐛 Troubleshooting
@@ -533,6 +533,16 @@ curl -X POST http://localhost:3000/chat \
 - Verifica que el archivo `.env` exista en la raíz del proyecto
 - Asegúrate de que la variable esté definida sin espacios: `VAR=value`
 - El archivo `.env` se carga automáticamente al iniciar el DAG engine
+
+**Error: "migration XXXX was previously applied but is missing in the resolved migrations"**
+- Esto ocurre cuando la tabla `_sqlx_migrations` en la base de datos tiene registros de migraciones que ya no existen en disco (por ejemplo, tras consolidar múltiples archivos de migración en uno solo)
+- **Solución rápida**: Eliminar la tabla de tracking: `psql $DATABASE_URL -c "DROP TABLE IF EXISTS _sqlx_migrations;"`
+- La próxima ejecución recreará la tabla y aplicará todas las migraciones desde cero (las tablas usan `CREATE TABLE IF NOT EXISTS`, así que no se pierden datos)
+- El migrador ya tiene `set_ignore_missing(true)` como protección adicional, pero si el checksum de una migración cambió, es necesario limpiar `_sqlx_migrations`
+
+**Error: "migration XXXX was previously applied but has been modified"**
+- Significa que el contenido de un archivo de migración cambió respecto a lo que se aplicó originalmente (checksum distinto)
+- **Solución**: Eliminar `_sqlx_migrations` como se describe arriba
 
 ## 🔐 Variables de Entorno en Configuración
 

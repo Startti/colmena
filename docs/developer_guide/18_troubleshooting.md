@@ -9,6 +9,9 @@ Esta guía te ayudará a resolver los problemas más comunes al compilar, instal
 - [Problemas de Ejecución](#problemas-de-ejecución)
 - [Problemas con API Keys](#problemas-con-api-keys)
 - [Problemas de Performance](#problemas-de-performance)
+- [Problemas con Migraciones de Base de Datos](#-problemas-con-migraciones-de-base-de-datos)
+- [Problemas con Gemini Streaming y Tool Calling](#-problemas-con-gemini-streaming-y-tool-calling)
+- [Problemas con Secure Values en HTTP Tools](#-problemas-con-secure-values-en-http-tools)
 - [Diagnóstico Avanzado](#diagnóstico-avanzado)
 - [Obtener Ayuda](#obtener-ayuda)
 
@@ -830,6 +833,62 @@ Cualquier información adicional relevante...
 **🐝 Colmena** - *Solucionando problemas juntos*
 
 > 💡 **Tip**: La mayoría de problemas se resuelven limpiando caché (`cargo clean`) y recompilando (`maturin develop --release`)
+
+---
+
+## 🗄️ Problemas con Migraciones de Base de Datos
+
+### Error: "migration was previously applied but is missing"
+
+**Síntomas:**
+```
+error: while executing migrations: migration 20260302000000 was previously applied but is missing in the resolved migrations
+```
+
+**Causa:** La tabla `_sqlx_migrations` en PostgreSQL registra cada migración aplicada con su checksum. Si se consolidan archivos de migración (por ejemplo, se unifican varios `.sql` en uno solo), los registros viejos quedan huérfanos.
+
+**Solución:**
+```bash
+# Eliminar la tabla de tracking de migraciones
+psql $DATABASE_URL -c "DROP TABLE IF EXISTS _sqlx_migrations;"
+
+# Re-ejecutar el grafo — las migraciones se aplicarán de nuevo
+cargo run --bin dag_engine -- run <path/to/graph.json>
+```
+
+**Nota:** Las tablas de datos usan `CREATE TABLE IF NOT EXISTS`, por lo que no se pierden datos al limpiar `_sqlx_migrations`. Además, el migrador tiene `set_ignore_missing(true)` como protección para futuras consolidaciones.
+
+---
+
+### Error: "migration was previously applied but has been modified"
+
+**Síntomas:**
+```
+error: while executing migrations: migration 20260302000000 was previously applied but has been modified
+```
+
+**Causa:** El contenido del archivo de migración cambió respecto a lo que fue aplicado originalmente (checksum diferente).
+
+**Solución:** Misma que arriba — eliminar `_sqlx_migrations` y re-ejecutar.
+
+---
+
+## 🤖 Problemas con Gemini Streaming y Tool Calling
+
+### Error: "Failed to parse arguments for tool: trailing characters"
+
+**Síntomas:**
+```
+Failed to parse arguments for tool search_products: trailing characters at line 1 column 74
+```
+
+**Causa:** Cuando Gemini devolvía múltiples tool calls en paralelo (ej. `get_categories` y `search_products`), el adapter de streaming usaba `index: 0` para todos los chunks. El acumulador en `agent_service.rs` concatenaba los argumentos JSON de todas las herramientas en una sola entrada, produciendo JSON malformado como: `{"select":"...","q":"smartphone"}{}`.
+
+**Fix aplicado (2026-04-08):** El adapter de Gemini (`gemini_adapter.rs`) ahora usa un contador `tool_call_index` incremental para asignar un índice único a cada tool call chunk en streaming. Cada herramienta se acumula por separado.
+
+**Verificación:** Si Gemini llama múltiples herramientas en paralelo, cada una debe parsearse correctamente sin errores de "trailing characters".
+
+**Archivo relevante:** `src/libs/colmena/src/llm/infrastructure/gemini_adapter.rs`
 
 ---
 

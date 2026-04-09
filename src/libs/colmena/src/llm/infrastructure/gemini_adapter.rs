@@ -420,6 +420,7 @@ impl LlmRepository for GeminiAdapter {
 
         let json_stream = async_stream::try_stream! {
             let mut latest_usage = None;
+            let mut tool_call_index: usize = 0;
             while let Some(json_bytes_result) = json_parser.next().await {
                 let json_bytes = json_bytes_result?;
                 let chunk_response = serde_json::from_slice::<GeminiResponse>(&json_bytes)
@@ -453,7 +454,7 @@ impl LlmRepository for GeminiAdapter {
                                 let mut chunk = LlmStreamChunk::new(
                                     request_id.clone(),
                                     LlmStreamPart::ToolCallChunk(ToolCallChunk {
-                                        index: 0,
+                                        index: tool_call_index,
                                         id: call_id,
                                         name: fc.name.clone(),
                                         args_chunk: args_str,
@@ -461,6 +462,7 @@ impl LlmRepository for GeminiAdapter {
                                     provider.clone(),
                                     is_final,
                                 );
+                                tool_call_index += 1;
                                 if let Some(reason) = &finish_reason {
                                     chunk = chunk.with_finish_reason(reason.clone());
                                 }

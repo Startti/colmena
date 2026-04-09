@@ -44,20 +44,7 @@ fn critic_schema() -> Value {
 }
 
 /// Default system prompt baked into every CriticNode.
-const DEFAULT_CRITIC_SYSTEM_MSG: &str = "\
-You are a critical reviewer in a multi-agent system. Your role is to evaluate \
-the result produced by a specialist agent for a specific task and decide whether \
-it is complete and satisfactory.\n\
-\n\
-Rules:\n\
-- If the result fully addresses the task, set 'task_ok' to true and leave 'feedback' as empty string.\n\
-- If the result is incomplete or incorrect, set 'task_ok' to false and write a concise, \
-  actionable 'feedback' explaining exactly what was wrong and what the agent must do differently \
-  on the next attempt. Be specific — the agent will receive your feedback directly.\n\
-- If you need more information from the user before deciding, set 'suspend' to true \
-  and provide a clear, concise 'question'.\n\
-- Be strict but fair. Only flag issues that genuinely affect the quality of the result.\n\
-Output ONLY valid JSON matching the schema. Do NOT include markdown or code fences.";
+const DEFAULT_CRITIC_SYSTEM_MSG: &str = include_str!("prompts/critic_system.md");
 
 pub struct CriticNode;
 

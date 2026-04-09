@@ -9,6 +9,10 @@ use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::sync::{Arc, Weak};
 
+/// Template for the phase reactor schema constraints injected by the orchestrator.
+/// Uses `{agents_list}` as a placeholder for the available agents.
+const PHASE_REACTOR_TEMPLATE: &str = include_str!("prompts/orchestrator_phase_reactor.md");
+
 // ── ChildNodeObserver ────────────────────────────────────────────────────────
 // Re-attributes all NodeEvent variants to a specific child node_id and forwards
 // them as SubgraphChildEvent so they appear in the stream under the correct ID
@@ -1593,7 +1597,7 @@ fn build_enriched_prompt(
     // Section 2: task context — personalized intent synthesized by the Planner or Reactor.
     if let Some(ctx) = task_context {
         if !ctx.is_empty() {
-            parts.push(format!("=== CONTEXTO DE ESTA TAREA ===\n{}", ctx));
+            parts.push(format!("=== TASK CONTEXT ===\n{}", ctx));
         }
     }
 
@@ -1601,10 +1605,10 @@ fn build_enriched_prompt(
     if !phase_summaries.is_empty() {
         let summaries_text: Vec<String> = phase_summaries
             .iter()
-            .map(|s| format!("Fase {}: {}", s.phase, s.summary))
+            .map(|s| format!("Phase {}: {}", s.phase, s.summary))
             .collect();
         parts.push(format!(
-            "=== LO QUE HA OCURRIDO HASTA AHORA ===\n{}",
+            "=== WHAT HAS HAPPENED SO FAR ===\n{}",
             summaries_text.join("\n")
         ));
     }
@@ -1613,13 +1617,13 @@ fn build_enriched_prompt(
     // Only present on retries — tells the agent exactly what was wrong so it can correct it.
     if let Some(fb) = critic_feedback {
         if !fb.is_empty() {
-            parts.push(format!("=== INTENTO ANTERIOR — POR QUÉ FALLÓ ===\n{}", fb));
+            parts.push(format!("=== PREVIOUS ATTEMPT — WHY IT FAILED ===\n{}", fb));
         }
     }
 
     // Section 5: current task instruction
     parts.push(format!(
-        "=== LO QUE TIENES QUE HACER AHORA TÚ ===\n{}",
+        "=== YOUR CURRENT TASK ===\n{}",
         task_name
     ));
 
@@ -1635,34 +1639,7 @@ fn inject_reactor_schema_constraints(reactor_cfg: &mut Value, available_agents: 
         .collect::<Vec<_>>()
         .join("\n        ");
 
-    let schema_instruction = format!(
-        "\n\n---\nIMPORTANT: You MUST respond with valid JSON only. No prose, no markdown fences.\n\
-        You are acting as a PHASE REACTOR (not a final reviewer). Your job is to:\n\
-        1. Write a concise phase summary in 'response'.\n\
-        2. Set 'task_ok' to true if the phase results are complete, false if more work is needed.\n\
-        3. Add follow-up tasks in 'add_tasks' if something is missing (set 'bridge': true for tasks that MUST run before the next phase starts).\n\
-        4. Always set 'suspend' to false unless you truly need user input.\n\
-        \n\
-        Required format:\n\
-        {{\n\
-          \"task_ok\": <true|false>,\n\
-          \"response\": \"<concise phase summary — what was accomplished, what is still missing>\",\n\
-          \"add_tasks\": [\n\
-            {{\n\
-              \"task\": \"<specific task instruction for the agent>\",\n\
-              \"context\": \"<why this task is needed and what the user's intent is>\",\n\
-              \"assigned_to\": \"<agent_name from the list below>\",\n\
-              \"parallel\": <true|false>,\n\
-              \"bridge\": <true|false — set true if this task MUST complete BEFORE the next phase starts; its result will be prepended to the next phase's context>\n\
-            }}\n\
-          ],\n\
-          \"suspend\": false\n\
-        }}\n\
-        Available agents for add_tasks (consider their expertise):\n\
-        {}\n\
-        If no new tasks are needed, set add_tasks to [].",
-        agents_list
-    );
+    let schema_instruction = PHASE_REACTOR_TEMPLATE.replace("{agents_list}", &agents_list);
 
     if let Some(obj) = reactor_cfg.as_object_mut() {
         let existing = obj

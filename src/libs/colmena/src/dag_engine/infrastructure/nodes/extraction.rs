@@ -10,6 +10,10 @@ use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, ProviderKind, Sessi
 use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
 use crate::llm::infrastructure::LlmProviderFactory;
 
+/// Default system prompt template for ExtractionNode.
+/// Uses `{user_instructions}` and `{schema}` as placeholders.
+const DEFAULT_EXTRACTION_SYSTEM_MSG: &str = include_str!("prompts/extraction_system.md");
+
 pub struct ExtractionNode {
     task_memory_repo: Option<Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>>,
 }
@@ -91,12 +95,9 @@ impl ExecutableNode for ExtractionNode {
             String::new()
         };
 
-        let system_message = format!(
-            "You are a strict data extraction system. You must extract information from the provided texts and output ONLY valid JSON. \n{} \
-            Do NOT wrap the JSON in markdown blocks (no ```json ... ```). Output exactly the requested JSON object matching this schema:\n{}",
-            user_system_message_section,
-            serde_json::to_string_pretty(schema)?
-        );
+        let system_message = DEFAULT_EXTRACTION_SYSTEM_MSG
+            .replace("{user_instructions}", &user_system_message_section)
+            .replace("{schema}", &serde_json::to_string_pretty(schema)?);
 
         // --- 3. Gather and Format Texts ---
         let mut formatted_texts = String::new();

@@ -1,0 +1,403 @@
+{
+  "comment": "Trip Assistant: Full orchestrated travel planner with flights, hotels, weather/clothing, activities, and budget agents. Uses Amadeus API for real data. All LLMs on Gemini 2.5 Flash.",
+  "metadata": {
+    "category": "advanced",
+    "features": ["orchestrator", "planner", "phase_reactor", "final_reactor", "child_graph_inline", "Amadeus", "multi-agent", "parallel-phases"],
+    "provider": "gemini",
+    "difficulty": "advanced",
+    "requires_env": ["GEMINI_API_KEY", "AMADEUS_CLIENT_ID", "AMADEUS_CLIENT_SECRET"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "prompt": "I want to travel from Bogotá, Colombia (BOG) to Barcelona, Spain (BCN) departing April 20 2026 and returning April 27 2026. I am traveling solo (1 adult). My total budget is $2,000 USD. Please help me plan the full trip: find flights, find hotels, check the weather and what to pack, suggest activities, and tell me if it fits my budget."
+      }
+    },
+    "orchestrator_node": {
+      "type": "orchestrator",
+      "config": {
+        "verbose": true,
+        "include_extra_info": false,
+        "planner": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "system_message": "You are a trip planning coordinator. The user wants to plan a complete trip. Break the request into parallel research tasks for Phase 1, then a budget consolidation in Phase 2.\n\nPhase 1 (all parallel=true, phase=1): Assign one task each to flights_agent, weather_clothing_agent, hotels_agent, activities_agent. Pass the FULL user context (origin, destination, dates, budget, passenger count) in every task instruction.\n\nPhase 2 (parallel=false, phase=2): Assign one task to budget_agent with ALL Phase 1 results included so it can consolidate costs.\n\nAlways pass IATA codes: BOG for Bogotá, BCN for Barcelona."
+        },
+        "agents": {
+          "flights_agent": {
+            "description": "Searches for real flight offers using the Amadeus Flights API. Given origin IATA code, destination IATA code, departure date (YYYY-MM-DD), and number of adults, returns available flight options with prices.",
+            "child_graph_inline": {
+              "nodes": {
+                "in": {
+                  "type": "input",
+                  "config": {}
+                },
+                "get_amadeus_token": {
+                  "type": "http_request",
+                  "config": {
+                    "base_url": "https://api.amadeus.com/v1/security/oauth2/token",
+                    "method": "POST",
+                    "headers": {
+                      "Content-Type": "application/x-www-form-urlencoded"
+                    },
+                    "body": "grant_type=client_credentials&client_id=${AMADEUS_CLIENT_ID}&client_secret=${AMADEUS_CLIENT_SECRET}"
+                  }
+                },
+                "flight_llm": {
+                  "type": "llm_call",
+                  "config": {
+                    "provider": "gemini",
+                    "model": "gemini-2.5-flash",
+                    "api_key": "${GEMINI_API_KEY}",
+                    "system_message": "You are a flight search specialist. Use the search_flights tool to find available flights matching the user's request. Extract origin IATA code, destination IATA code, departure date (YYYY-MM-DD), and number of adults from the task. Return a clear summary of the top 3 flight options found, including airline, departure time, duration, number of stops, and price per person in USD. If no flights are found, say so clearly.",
+                    "temperature": 0.1,
+                    "enabled_tools": ["search_flights"],
+                    "tool_configurations": {
+                      "search_flights": {
+                        "name": "search_flights",
+                        "node_type": "http_request",
+                        "description": "Search for available flight offers on Amadeus. You MUST provide originLocationCode, destinationLocationCode, departureDate, and adults.",
+                        "node_schema": {
+                          "base_url": {
+                            "type": "string",
+                            "fixed": "https://api.amadeus.com"
+                          },
+                          "endpoint": {
+                            "type": "string",
+                            "fixed": "/v2/shopping/flight-offers"
+                          },
+                          "method": {
+                            "type": "string",
+                            "fixed": "GET"
+                          },
+                          "bearer_token": {
+                            "type": "string",
+                            "fixed": "${context.amadeus_token}"
+                          },
+                          "query_params": {
+                            "type": "object",
+                            "properties": {
+                              "originLocationCode": {
+                                "type": "string",
+                                "required": true,
+                                "description": "IATA code of the departure city (e.g. BOG, MAD, LHR)"
+                              },
+                              "destinationLocationCode": {
+                                "type": "string",
+                                "required": true,
+                                "description": "IATA code of the arrival city (e.g. BCN, CDG, JFK)"
+                              },
+                              "departureDate": {
+                                "type": "string",
+                                "required": true,
+                                "description": "Departure date in YYYY-MM-DD format"
+                              },
+                              "adults": {
+                                "type": "string",
+                                "required": true,
+                                "description": "Number of adult passengers (e.g. 1, 2)"
+                              },
+                              "returnDate": {
+                                "type": "string",
+                                "required": false,
+                                "description": "Return date in YYYY-MM-DD format (for round trips)"
+                              },
+                              "travelClass": {
+                                "type": "string",
+                                "required": false,
+                                "description": "Cabin class: ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST"
+                              },
+                              "max": {
+                                "type": "string",
+                                "fixed": "3"
+                              },
+                              "currencyCode": {
+                                "type": "string",
+                                "fixed": "USD"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "out": {
+                  "type": "output",
+                  "config": {}
+                }
+              },
+              "edges": [
+                { "from": "in", "to": "get_amadeus_token" },
+                { "from": "in", "to": "flight_llm" },
+                { "from": "get_amadeus_token.access_token", "to": "flight_llm.context.amadeus_token" },
+                { "from": "flight_llm", "to": "out" }
+              ]
+            }
+          },
+          "weather_clothing_agent": {
+            "description": "Analyzes the weather forecast for the destination city during the travel dates and provides specific clothing recommendations and packing hints. No API key needed — uses LLM knowledge of seasonal patterns.",
+            "child_graph_inline": {
+              "nodes": {
+                "in": {
+                  "type": "input",
+                  "config": {}
+                },
+                "weather_llm": {
+                  "type": "llm_call",
+                  "config": {
+                    "provider": "gemini",
+                    "model": "gemini-2.5-flash",
+                    "api_key": "${GEMINI_API_KEY}",
+                    "system_message": "You are a travel packing and weather expert. Based on the destination city and travel dates provided, give a concise weather forecast (temperature range, typical conditions) for that time of year. Then provide a practical packing list organized by category: clothing essentials, footwear, accessories, and any destination-specific items. Keep the list focused — 10 to 15 items total. Be specific about layers, rain gear, or formal attire if relevant.",
+                    "temperature": 0.3
+                  }
+                },
+                "out": {
+                  "type": "output",
+                  "config": {}
+                }
+              },
+              "edges": [
+                { "from": "in", "to": "weather_llm" },
+                { "from": "weather_llm", "to": "out" }
+              ]
+            }
+          },
+          "hotels_agent": {
+            "description": "Searches for hotels in the destination city using the Amadeus Hotels API. Given a city IATA code, returns a list of available hotels with names and locations.",
+            "child_graph_inline": {
+              "nodes": {
+                "in": {
+                  "type": "input",
+                  "config": {}
+                },
+                "get_amadeus_token": {
+                  "type": "http_request",
+                  "config": {
+                    "base_url": "https://api.amadeus.com/v1/security/oauth2/token",
+                    "method": "POST",
+                    "headers": {
+                      "Content-Type": "application/x-www-form-urlencoded"
+                    },
+                    "body": "grant_type=client_credentials&client_id=${AMADEUS_CLIENT_ID}&client_secret=${AMADEUS_CLIENT_SECRET}"
+                  }
+                },
+                "hotels_llm": {
+                  "type": "llm_call",
+                  "config": {
+                    "provider": "gemini",
+                    "model": "gemini-2.5-flash",
+                    "api_key": "${GEMINI_API_KEY}",
+                    "system_message": "You are a hotel search specialist. Use the search_hotels tool to find hotels in the destination city. Extract the destination city IATA code from the task. After getting the hotel list, select the top 5 most relevant options and present them clearly with hotel name and any available details. Also estimate a typical nightly price range for mid-range hotels in that city based on your knowledge, and calculate the estimated total hotel cost for the stay duration.",
+                    "temperature": 0.1,
+                    "enabled_tools": ["search_hotels"],
+                    "tool_configurations": {
+                      "search_hotels": {
+                        "name": "search_hotels",
+                        "node_type": "http_request",
+                        "description": "Search for hotels in a city using Amadeus. You MUST provide cityCode.",
+                        "node_schema": {
+                          "base_url": {
+                            "type": "string",
+                            "fixed": "https://api.amadeus.com"
+                          },
+                          "endpoint": {
+                            "type": "string",
+                            "fixed": "/v1/reference-data/locations/hotels/by-city"
+                          },
+                          "method": {
+                            "type": "string",
+                            "fixed": "GET"
+                          },
+                          "bearer_token": {
+                            "type": "string",
+                            "fixed": "${context.amadeus_token}"
+                          },
+                          "query_params": {
+                            "type": "object",
+                            "properties": {
+                              "cityCode": {
+                                "type": "string",
+                                "required": true,
+                                "description": "IATA city code of the destination (e.g. BCN for Barcelona, MAD for Madrid)"
+                              },
+                              "radius": {
+                                "type": "string",
+                                "required": false,
+                                "description": "Search radius in KM from city center (default 5)"
+                              },
+                              "ratings": {
+                                "type": "string",
+                                "required": false,
+                                "description": "Hotel star ratings to filter by, comma-separated (e.g. 3,4,5)"
+                              },
+                              "amenities": {
+                                "type": "string",
+                                "required": false,
+                                "description": "Amenities to filter by (e.g. SWIMMING_POOL, WIFI, FITNESS_CENTER)"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "out": {
+                  "type": "output",
+                  "config": {}
+                }
+              },
+              "edges": [
+                { "from": "in", "to": "get_amadeus_token" },
+                { "from": "in", "to": "hotels_llm" },
+                { "from": "get_amadeus_token.access_token", "to": "hotels_llm.context.amadeus_token" },
+                { "from": "hotels_llm", "to": "out" }
+              ]
+            }
+          },
+          "activities_agent": {
+            "description": "Discovers tours and activities available at the destination using the Amadeus Activities API. Uses the destination's geographic coordinates to find curated local experiences, tours, and attractions.",
+            "child_graph_inline": {
+              "nodes": {
+                "in": {
+                  "type": "input",
+                  "config": {}
+                },
+                "get_amadeus_token": {
+                  "type": "http_request",
+                  "config": {
+                    "base_url": "https://api.amadeus.com/v1/security/oauth2/token",
+                    "method": "POST",
+                    "headers": {
+                      "Content-Type": "application/x-www-form-urlencoded"
+                    },
+                    "body": "grant_type=client_credentials&client_id=${AMADEUS_CLIENT_ID}&client_secret=${AMADEUS_CLIENT_SECRET}"
+                  }
+                },
+                "activities_llm": {
+                  "type": "llm_call",
+                  "config": {
+                    "provider": "gemini",
+                    "model": "gemini-2.5-flash",
+                    "api_key": "${GEMINI_API_KEY}",
+                    "system_message": "You are a travel activities specialist. Use the search_activities tool to find tours and activities at the destination. For Barcelona, use latitude=41.3851 and longitude=2.1734. After getting the results, curate a list of the top 5 most interesting activities, including name, description if available, and estimated price. Also add 2-3 free or very cheap activities you know about in that city that complement the paid ones.",
+                    "temperature": 0.3,
+                    "enabled_tools": ["search_activities"],
+                    "tool_configurations": {
+                      "search_activities": {
+                        "name": "search_activities",
+                        "node_type": "http_request",
+                        "description": "Search for tours and activities near a location using Amadeus. You MUST provide latitude and longitude.",
+                        "node_schema": {
+                          "base_url": {
+                            "type": "string",
+                            "fixed": "https://api.amadeus.com"
+                          },
+                          "endpoint": {
+                            "type": "string",
+                            "fixed": "/v1/shopping/activities"
+                          },
+                          "method": {
+                            "type": "string",
+                            "fixed": "GET"
+                          },
+                          "bearer_token": {
+                            "type": "string",
+                            "fixed": "${context.amadeus_token}"
+                          },
+                          "query_params": {
+                            "type": "object",
+                            "properties": {
+                              "latitude": {
+                                "type": "string",
+                                "required": true,
+                                "description": "Latitude of the destination in decimal degrees (e.g. 41.3851 for Barcelona)"
+                              },
+                              "longitude": {
+                                "type": "string",
+                                "required": true,
+                                "description": "Longitude of the destination in decimal degrees (e.g. 2.1734 for Barcelona)"
+                              },
+                              "radius": {
+                                "type": "string",
+                                "required": false,
+                                "description": "Search radius in KM from coordinates (default 1)"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "out": {
+                  "type": "output",
+                  "config": {}
+                }
+              },
+              "edges": [
+                { "from": "in", "to": "get_amadeus_token" },
+                { "from": "in", "to": "activities_llm" },
+                { "from": "get_amadeus_token.access_token", "to": "activities_llm.context.amadeus_token" },
+                { "from": "activities_llm", "to": "out" }
+              ]
+            }
+          },
+          "budget_agent": {
+            "description": "Consolidates all trip costs from flights, hotels, and activities. Creates a detailed budget breakdown and checks if the total fits within the user's stated budget. Suggests optimizations or cheaper alternatives if the trip exceeds budget.",
+            "child_graph_inline": {
+              "nodes": {
+                "in": {
+                  "type": "input",
+                  "config": {}
+                },
+                "budget_llm": {
+                  "type": "llm_call",
+                  "config": {
+                    "provider": "gemini",
+                    "model": "gemini-2.5-flash",
+                    "api_key": "${GEMINI_API_KEY}",
+                    "system_message": "You are a travel budget analyst. You will receive a task containing the results from flights, hotels, and activities research. Create a detailed budget breakdown with the following sections:\n\n1. FLIGHTS: cheapest option found + price\n2. HOTELS: estimated total cost for the stay (nightly rate × number of nights)\n3. ACTIVITIES: total for selected activities\n4. DAILY EXPENSES: estimated food, transport, and incidentals per day × number of days\n5. TOTAL vs BUDGET: sum everything and compare to the user's stated budget\n\nIf the total exceeds the budget, suggest 2-3 specific ways to reduce costs (cheaper flight class, hostel vs hotel, free activities, etc.). If it fits, highlight how much buffer remains. Be precise with numbers in USD.",
+                    "temperature": 0.1
+                  }
+                },
+                "out": {
+                  "type": "output",
+                  "config": {}
+                }
+              },
+              "edges": [
+                { "from": "in", "to": "budget_llm" },
+                { "from": "budget_llm", "to": "out" }
+              ]
+            }
+          }
+        },
+        "phase_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "system_message": "You are reviewing the results of a completed planning phase. Write a concise 2-3 sentence summary of what was accomplished and the key findings. Set task_ok=true unless a critical agent failed to return useful data, in which case you may add one retry task."
+        },
+        "final_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "system_message": "You are the final step of a comprehensive trip planning assistant. Combine all agent results into a beautiful, well-organized trip summary. Structure it with these sections:\n\n✈️ FLIGHTS — top 3 options with prices\n🏨 HOTELS — recommended options and estimated nightly cost\n🌤️ WEATHER & PACKING — forecast and what to bring\n🎯 ACTIVITIES — top experiences with prices\n💰 BUDGET SUMMARY — full breakdown and whether it fits the $2,000 budget\n\nBe practical, specific, and helpful. End with 1-2 personalized travel tips for first-time visitors to Barcelona. Set task_ok=true."
+        }
+      }
+    },
+    "final_output": {
+      "type": "output",
+      "trigger_on": "FINISHED"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "orchestrator_node" },
+    { "from": "orchestrator_node", "to": "final_output" }
+  ]
+}

@@ -1,0 +1,239 @@
+{
+    "comment": "Product Sales Assistant: Conversational agent that helps users browse and find products from the DummyJSON API. Uses tools for listing, searching, getting details, and browsing categories. Supports multi-turn conversations via SQLite memory.\n\nUSO MULTI-TURNO:\n  Turno 1 (primera vez):\n    cargo run --bin dag_engine -- run tests/graphs/external/product_sales_assistant.json\n    → Anota el session_id que aparece en el output (campo __colmena_session_id)\n\n  Turno 2+ (continuación):\n    cargo run --bin dag_engine -- run tests/graphs/external/product_sales_assistant.json \\\n      --session-id <SESSION_ID_DEL_TURNO_1> \\\n      --answer 'Tu siguiente mensaje aquí'\n\n  La memoria se persiste en: product_sales_memory.db (SQLite local)",
+    "metadata": {
+        "category": "external",
+        "features": [
+            "llm_call",
+            "tool_calling",
+            "http_request",
+            "node_schema",
+            "DummyJSON",
+            "sqlite_memory",
+            "multi_turn"
+        ],
+        "provider": "gemini",
+        "difficulty": "intermediate",
+        "requires_env": [
+            "GEMINI_API_KEY"
+        ]
+    },
+    "nodes": {
+        "trigger": {
+            "type": "trigger_webhook",
+            "config": {
+                "test_payload": {
+                    "prompt": "Hola me peudes ofrecer 3 celulares en el rango entre 200 y 500 usd"
+                }
+            }
+        },
+        "sales_agent": {
+            "type": "llm_call",
+            "config": {
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
+                "api_key": "${GEMINI_API_KEY}",
+                "verbose": true,
+                "temperature": 0.4,
+                "connection_url": "${DATABASE_URL}",
+                "system_message": "You are a friendly and persuasive product sales assistant for an online store. Your job is to help customers find the perfect product.\n\nYour approach:\n1. Understand what the customer is looking for\n2. IMMEDIATELY use your tools to search and browse the product catalog — do NOT ask clarifying questions if the customer already told you what they want\n3. Present options in a compelling way with prices, ratings, and key features\n4. Make personalized recommendations based on the customer's needs\n5. If the customer asks about categories, show them what's available\n6. Always mention discounts when available (discountPercentage field)\n\nIMPORTANT: When the customer asks for products, ALWAYS search first and present results. Never respond with only a question — always include product recommendations when possible.\n\nResponse style:\n- Be warm, helpful, and enthusiastic (but not pushy)\n- Format product info clearly: name, price, discount, rating, brand\n- Highlight the best value options\n- Respond in the same language the customer uses",
+                "enabled_tools": [
+                    "list_products",
+                    "search_products",
+                    "get_product",
+                    "get_categories"
+                ],
+                "tool_configurations": {
+                    "list_products": {
+                        "name": "list_products",
+                        "node_type": "http_request",
+                        "description": "List products from the catalog with pagination. Use 'limit' to control how many products to fetch (default 10) and 'skip' to paginate (e.g., skip=10 for page 2). You can also filter by category using select and sortBy for sorting.",
+                        "node_schema": {
+                            "base_url": {
+                                "type": "string",
+                                "fixed": "https://dummyjson.com"
+                            },
+                            "endpoint": {
+                                "type": "string",
+                                "fixed": "/products"
+                            },
+                            "method": {
+                                "type": "string",
+                                "fixed": "GET"
+                            },
+                            "query_params": {
+                                "type": "object",
+                                "properties": {
+                                    "limit": {
+                                        "type": "string",
+                                        "required": false,
+                                        "description": "Number of products to return (default 10, max 100)"
+                                    },
+                                    "skip": {
+                                        "type": "string",
+                                        "required": false,
+                                        "description": "Number of products to skip for pagination (e.g., 0, 10, 20)"
+                                    },
+                                    "select": {
+                                        "type": "string",
+                                        "required": false,
+                                        "description": "Comma-separated fields to select (e.g., 'title,price,rating,brand,discountPercentage')"
+                                    },
+                                    "sortBy": {
+                                        "type": "string",
+                                        "required": false,
+                                        "description": "Field to sort by (e.g., 'price', 'rating', 'title')"
+                                    },
+                                    "order": {
+                                        "type": "string",
+                                        "required": false,
+                                        "description": "Sort order: 'asc' or 'desc'"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "search_products": {
+                        "name": "search_products",
+                        "node_type": "http_request",
+                        "description": "Search products by name or keyword. Use this when the customer is looking for a specific type of product (e.g., 'phone', 'laptop', 'perfume').",
+                        "node_schema": {
+                            "base_url": {
+                                "type": "string",
+                                "fixed": "https://dummyjson.com"
+                            },
+                            "endpoint": {
+                                "type": "string",
+                                "fixed": "/products/search"
+                            },
+                            "method": {
+                                "type": "string",
+                                "fixed": "GET"
+                            },
+                            "query_params": {
+                                "type": "object",
+                                "properties": {
+                                    "q": {
+                                        "type": "string",
+                                        "required": true,
+                                        "description": "Search query keyword (e.g., 'phone', 'laptop', 'samsung', 'beauty')"
+                                    },
+                                    "limit": {
+                                        "type": "string",
+                                        "required": false,
+                                        "description": "Max number of results to return (default 10)"
+                                    },
+                                    "select": {
+                                        "type": "string",
+                                        "required": false,
+                                        "description": "Comma-separated fields to select (e.g., 'title,price,rating,brand,discountPercentage,description')"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "get_product": {
+                        "name": "get_product",
+                        "node_type": "http_request",
+                        "description": "Get full details of a specific product by its ID. Use this when you need complete information about a product (description, images, stock, reviews, dimensions, etc.).",
+                        "node_schema": {
+                            "base_url": {
+                                "type": "string",
+                                "fixed": "https://dummyjson.com"
+                            },
+                            "endpoint": {
+                                "type": "string",
+                                "required": true,
+                                "description": "The product endpoint path. MUST be in format '/products/{id}' where {id} is the numeric product ID (e.g., '/products/1', '/products/42')"
+                            },
+                            "method": {
+                                "type": "string",
+                                "fixed": "GET"
+                            }
+                        }
+                    },
+                    "get_categories": {
+                        "name": "get_categories",
+                        "node_type": "http_request",
+                        "description": "Get the list of all available product categories in the store. Use this when the customer asks what types of products are available or wants to browse by category.",
+                        "node_schema": {
+                            "base_url": {
+                                "type": "string",
+                                "fixed": "https://dummyjson.com"
+                            },
+                            "endpoint": {
+                                "type": "string",
+                                "fixed": "/products/categories"
+                            },
+                            "method": {
+                                "type": "string",
+                                "fixed": "GET"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "parse_cards": {
+            "type": "information_extraction",
+            "config": {
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
+                "api_key": "${GEMINI_API_KEY}",
+                "verbose": true,
+                "system_message": "You are a structured data extractor. Extract product cards and a response message from the sales assistant's reply. If the assistant mentions products, extract each one as a card. If no products are mentioned (e.g., a greeting or general question), return an empty cards array. Always include the full assistant response as the 'response' field.",
+                "schema": {
+                    "response": {
+                        "type": "string",
+                        "description": "The full assistant response text to display to the user"
+                    },
+                    "cards": {
+                        "type": "array",
+                        "description": "List of product cards extracted from the response. Empty array if no products mentioned.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "description": "Product name"
+                                },
+                                "price": {
+                                    "type": "number",
+                                    "description": "Product price in USD"
+                                },
+                                "discount": {
+                                    "type": "number",
+                                    "description": "Discount percentage (0 if no discount)"
+                                },
+                                "brand": {
+                                    "type": "string",
+                                    "description": "Product brand name"
+                                },
+                                "rating": {
+                                    "type": "number",
+                                    "description": "Product rating (0-5)"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "output": {
+            "type": "output"
+        }
+    },
+    "edges": [
+        {
+            "from": "trigger",
+            "to": "sales_agent"
+        },
+        {
+            "from": "sales_agent.result",
+            "to": "parse_cards.texts.sales_response"
+        },
+        {
+            "from": "parse_cards",
+            "to": "output"
+        }
+    ]
+}

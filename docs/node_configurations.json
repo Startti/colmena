@@ -1,0 +1,1629 @@
+{
+  "version": "0.3.0",
+  "description": "Complete configuration reference for all Colmena DAG Engine node types. Each node type documents its config fields, input ports, output ports, defaults, valid values, and validation rules.",
+
+  "common_node_properties": {
+    "type": {
+      "type": "string",
+      "required": true,
+      "default": null,
+      "description": "The node type identifier that determines which execution logic is used. Must match one of the registered node types in the engine (e.g., 'llm_call', 'http_request', 'input'). This field is required for every node and is used by the DAG engine to look up the correct ExecutableNode implementation at runtime.",
+      "valid_values": [
+        "input", "output", "trigger_webhook", "suspend", "loop_controller", "subgraph",
+        "log", "mock_input",
+        "add", "subtract", "multiply", "divide", "exponential",
+        "http_request", "python_script",
+        "llm_call", "information_extraction", "planner", "critic", "reactor",
+        "orchestrator", "task_memory_writer"
+      ],
+      "example": "llm_call"
+    },
+    "config": {
+      "type": "object",
+      "required": false,
+      "default": {},
+      "description": "The node-specific configuration object. Each node type defines its own expected fields inside this object. If omitted, defaults to an empty JSON object {}. The fields available here vary by node type and are documented in each node's 'config_fields' section.",
+      "example": { "provider": "openai", "model": "gpt-4o" }
+    },
+    "trigger_on": {
+      "type": "string",
+      "required": false,
+      "default": null,
+      "description": "An optional condition that controls when this node executes within a looping DAG. The engine compares this value against the current '__colmena_loop_status' in the global state. The node only runs when the global status matches this value. This is essential for building cyclic graphs where certain nodes should only fire on specific loop phases — for example, an output node that only fires when the loop status is 'FINISHED', or a processing node that runs on every 'NEXT_TURN'.",
+      "valid_values": ["FINISHED_PHASE", "NEXT_TURN", "FINISHED", "SUSPENDED"],
+      "example": "FINISHED"
+    },
+    "max_total_calls": {
+      "type": "integer",
+      "required": false,
+      "default": null,
+      "description": "Safety limit: the maximum number of times this node can be executed during a single DAG run, regardless of which node triggered it. Once this limit is reached, the engine will skip this node for the remainder of the run. Use this to prevent infinite loops in cyclic graphs. If null (the default), the node has no execution limit.",
+      "validation": { "min": 1 },
+      "example": 5
+    },
+    "max_calls_from": {
+      "type": "object",
+      "required": false,
+      "default": null,
+      "description": "Fine-grained execution limits per caller node. A map where each key is a node ID and each value is the maximum number of times THIS node can be triggered BY that specific caller. This allows you to limit how many times a particular upstream node can re-trigger this node, while still allowing other callers unlimited access. Useful in complex cyclic graphs where you want to allow a loop to iterate N times from one path but unlimited from another.",
+      "example": { "loop_decision": 3, "manual_trigger": 10 }
+    }
+  },
+
+  "edge_schema": {
+    "from": {
+      "type": "string",
+      "required": true,
+      "description": "The source of the edge. Can be just a node ID (e.g., 'node_a') to use that node's default output, or a dotted path (e.g., 'node_a.result') to select a specific output field. When using dotted paths, the engine extracts the specified field from the node's output JSON. You can use deep paths like 'http_node.body.access_token' to pluck nested values from a node's output.",
+      "example": "llm_node.result"
+    },
+    "to": {
+      "type": "string",
+      "required": true,
+      "description": "The destination of the edge. Can be just a node ID (e.g., 'node_b') to feed into that node's default input, or a dotted path (e.g., 'node_b.prompt') to inject into a specific input port. The engine flattens the dotted path into the node's input map — for example, 'extractor.texts.slack_message' becomes the key 'texts.slack_message' in the extractor node's inputs. This is how you route data to specific named ports like 'a' and 'b' on math nodes, or 'texts.source_name' on extraction/critic nodes.",
+      "example": "extractor.texts.email_body"
+    },
+    "cyclic": {
+      "type": "boolean",
+      "required": false,
+      "default": false,
+      "description": "Set to true to mark this edge as a backward/cyclic edge. In a normal DAG, edges must go forward (no cycles). Cyclic edges are special: they don't block the target node from executing on the first pass — the target node runs without waiting for data from this edge initially. On subsequent passes (loop iterations), the cyclic edge delivers data normally. This is essential for building looping workflows where a downstream node feeds back into an upstream node. Always pair cyclic edges with 'max_total_calls' or 'trigger_on' to prevent infinite loops.",
+      "example": true
+    }
+  },
+
+  "llm_shared_fields": {
+    "description": "These configuration fields are shared across all LLM-powered nodes: llm_call, information_extraction, planner, critic, reactor, and the sub-components of orchestrator (planner, critic, phase_reactor, final_reactor). Each LLM node reads these from its config object.",
+    "fields": {
+      "provider": {
+        "type": "string",
+        "required": true,
+        "default": null,
+        "description": "The LLM provider to use for this node. Determines which API endpoint and protocol will be used to communicate with the language model. Each provider has different model offerings, pricing, and capabilities. The value is case-insensitive.",
+        "valid_values": ["openai", "gemini", "anthropic", "mock"],
+        "provider_details": {
+          "openai": { "default_model": "gpt-4o", "env_var": "OPENAI_API_KEY" },
+          "gemini": { "default_model": "gemini-pro", "env_var": "GEMINI_API_KEY" },
+          "anthropic": { "default_model": "claude-3-sonnet", "env_var": "ANTHROPIC_API_KEY" },
+          "mock": { "default_model": "mock-model", "env_var": "MOCK_API_KEY", "note": "For testing only. Returns predefined responses without making real API calls." }
+        },
+        "example": "openai"
+      },
+      "api_key": {
+        "type": "string",
+        "required": true,
+        "default": null,
+        "description": "The API key used to authenticate with the LLM provider. Can be provided as a literal string or as an environment variable reference using the '${VAR_NAME}' syntax (e.g., '${OPENAI_API_KEY}'). When using the '${...}' syntax, the engine resolves the value from the system environment at runtime. This is the recommended approach for production — never hardcode API keys in graph JSON files. The key must not be empty or whitespace-only.",
+        "supports_env_vars": true,
+        "example": "${OPENAI_API_KEY}"
+      },
+      "model": {
+        "type": "string",
+        "required": false,
+        "default": "Provider-dependent (openai: 'gpt-4o', gemini: 'gemini-pro', anthropic: 'claude-3-sonnet')",
+        "description": "The specific model identifier to use. If omitted, the engine uses the provider's default model. Different models within the same provider offer trade-offs between quality, speed, and cost. For example, 'gpt-4o-mini' is faster and cheaper than 'gpt-4o', while 'gemini-2.5-flash' offers fast inference for Gemini. Check each provider's documentation for available model IDs.",
+        "example": "gpt-4o-mini"
+      },
+      "system_message": {
+        "type": "string",
+        "required": false,
+        "default": null,
+        "description": "An optional system-level instruction sent to the LLM before the user prompt. System messages set the behavior, personality, and constraints for the LLM's responses. For example, 'You are a travel expert who specializes in European destinations.' The system message is only sent on the first turn of a conversation — if conversation history exists (via session_id + connection_url), the system message is skipped to avoid duplication. Supports '{{variable}}' template syntax that resolves against the node's inputs.",
+        "example": "You are a helpful assistant that responds in Spanish."
+      },
+      "verbose": {
+        "type": "boolean",
+        "required": false,
+        "default": false,
+        "description": "When set to true, the node prints detailed debugging information to stdout, including the full system prompt, user prompt, and raw LLM response. Extremely useful during development and debugging to see exactly what's being sent to and received from the LLM. Should be set to false in production to avoid cluttering logs with potentially large prompts and responses.",
+        "example": true
+      }
+    }
+  },
+
+  "node_types": {
+
+    "input": {
+      "name": "Input Node",
+      "description": "Provides static configuration data as output to downstream nodes. Acts as a data source that emits hardcoded values defined in its config. Supports '{{key}}' template syntax to resolve values from the DAG's global state, and allows upstream edge inputs to override individual fields. When config is empty, it acts as a pure passthrough — forwarding all injected inputs directly to its output. This is the primary way to inject initial data, configuration constants, or user parameters into a DAG flow.",
+      "category": "control_flow",
+      "config_fields": {
+        "data": {
+          "type": "any",
+          "required": false,
+          "default": null,
+          "description": "The static data object to output. Can be any valid JSON value: string, number, boolean, object, or array. If present, this is the primary output of the node. Individual fields within this object can be overridden by upstream edge inputs with matching keys. If not provided, the entire config object is treated as the data source. Supports '{{key}}' and '{{key.nested}}' template syntax to dynamically resolve values from the DAG's global state at runtime.",
+          "example": { "question": "What is the capital of France?", "language": "English" }
+        },
+        "__payload__": {
+          "type": "any",
+          "required": false,
+          "default": null,
+          "description": "Internal field automatically injected by the DAG engine during loop iterations or serve mode. When present, it takes absolute priority over all other config fields — the node returns this value directly without any template resolution or merging. You should never set this manually in a graph JSON file; it is managed by the engine's loop and serve mechanisms.",
+          "example": null
+        }
+      },
+      "input_ports": {
+        "<any_key>": {
+          "type": "any",
+          "description": "Any input received via edges can override the corresponding field in the config's data object. For example, if config has {\"name\": \"default\"} and an edge sends a value to 'input_node.name', the edge value replaces 'default'. Null, empty string, and empty object values from inputs are ignored (config value is preserved). Internal keys starting with '__' and 'session_id' are filtered out in passthrough mode."
+        }
+      },
+      "output_ports": {
+        "output": {
+          "type": "any",
+          "description": "The resolved data object. If 'data' was defined in config, it's the data object with templates resolved and input overrides applied. If config was empty, it's all injected inputs (minus internal keys) passed through as-is."
+        }
+      },
+      "default_input": null,
+      "default_output": "output",
+      "requires": [],
+      "supports_env_vars": false,
+      "supports_templates": true
+    },
+
+    "output": {
+      "name": "Output Node",
+      "description": "Marks the terminal/final result of a DAG graph or subgraph. When the DAG engine encounters an output node, it wraps the received input in a standardized structure and flags it with '__colmena_is_output_node: true'. This flag is used by SubGraphNode to identify which node's output should be extracted and returned to the parent graph. Every DAG that needs to return a result should have at least one output node. In orchestrator-managed subgraphs, the output node is what determines the agent's result.",
+      "category": "control_flow",
+      "config_fields": {},
+      "input_ports": {
+        "input": {
+          "type": "any",
+          "description": "The value to capture as the graph's final output. Accepts any JSON value. This is typically connected to the last processing node in your graph (e.g., an llm_call's result or an http_request's body). If no input is received, the output is null."
+        }
+      },
+      "output_ports": {
+        "result": {
+          "type": "any",
+          "description": "The input value wrapped in a standardized structure: { \"result\": <input_value>, \"extra_info\": { \"__colmena_is_output_node\": true } }. The extra_info flag tells the SubGraphNode and DAG engine that this is the designated output."
+        }
+      },
+      "default_input": "input",
+      "default_output": "result",
+      "requires": [],
+      "supports_env_vars": false
+    },
+
+    "trigger_webhook": {
+      "name": "Trigger Webhook",
+      "description": "Entry point for external events in a DAG. In 'serve' mode, the DAG engine's HTTP server receives incoming webhook requests and injects the HTTP request body into this node via the '__payload__' field. In 'run' mode (local testing), the node uses the 'test_payload' defined in config instead. This is the standard way to make a DAG graph respond to external HTTP events. A graph should typically have exactly one trigger node as its starting point.",
+      "category": "control_flow",
+      "config_fields": {
+        "path": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "The HTTP endpoint path that this webhook listens on when the DAG is running in 'serve' mode. For example, '/hello' or '/webhook/process'. The DAG engine's HTTP server routes incoming requests matching this path to this trigger node. If not specified, the serve command uses a default route.",
+          "example": "/hello"
+        },
+        "method": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "The HTTP method this webhook accepts (e.g., 'POST', 'GET'). Defines which HTTP method triggers this webhook endpoint in serve mode. Most webhooks use POST since they receive payload data in the request body.",
+          "valid_values": ["GET", "POST", "PUT", "DELETE", "PATCH"],
+          "example": "POST"
+        },
+        "test_payload": {
+          "type": "any",
+          "required": false,
+          "default": null,
+          "description": "A static payload object used when running the graph locally with the 'run' command (i.e., not in serve mode). This lets you test your graph without needing to send actual HTTP requests. The test_payload simulates what a real webhook request body would contain. Can be any valid JSON structure that your downstream nodes expect.",
+          "example": { "prompt": "Plan a trip to Paris", "budget": 5000 }
+        },
+        "__payload__": {
+          "type": "any",
+          "required": false,
+          "default": null,
+          "description": "Internal field automatically injected by the DAG engine's HTTP server in 'serve' mode. Contains the raw HTTP request body from the incoming webhook call. Takes priority over test_payload. You should never set this manually.",
+          "example": null
+        }
+      },
+      "input_ports": {},
+      "output_ports": {
+        "output": {
+          "type": "any",
+          "description": "The webhook payload, emitted directly. In serve mode, this is the HTTP request body. In run mode, this is the test_payload. The entire payload is auto-flattened, so downstream nodes can access individual fields via dotted edge paths (e.g., 'trigger.prompt')."
+        }
+      },
+      "default_input": null,
+      "default_output": "output",
+      "requires": [],
+      "supports_env_vars": false
+    },
+
+    "suspend": {
+      "name": "Suspend (Human-in-the-Loop)",
+      "description": "Pauses DAG execution and waits for human input before continuing. On first execution, the node returns a SUSPENDED status with a question for the user. The DAG engine persists the entire execution state to the database (PostgreSQL required). When the user provides an answer (via the resume API), the engine restores state and re-executes this node with the answer injected as '__colmena_resume_answer', at which point the node outputs the user's answer and execution continues downstream. This is the core mechanism for building interactive, human-in-the-loop workflows.",
+      "category": "control_flow",
+      "config_fields": {
+        "question": {
+          "type": "string",
+          "required": false,
+          "default": "What is your input?",
+          "description": "The question displayed to the user when execution is suspended. Should be clear and specific about what information is needed to continue. This question is included in the SUSPENDED response so the frontend or API consumer can display it to the user. Can also be provided dynamically via an input edge to the 'question' port.",
+          "example": "Do you approve this flight booking for $450?"
+        }
+      },
+      "input_ports": {
+        "question": {
+          "type": "string",
+          "description": "An optional dynamic question provided via an upstream edge. If provided, overrides the question defined in config. This allows you to generate context-dependent questions based on earlier processing results."
+        },
+        "__colmena_resume_answer": {
+          "type": "any",
+          "description": "Automatically injected by the DAG engine when resuming from a suspended state. Contains the user's answer. You never set this manually — it's managed by the engine's resume mechanism."
+        }
+      },
+      "output_ports": {
+        "answer_received": {
+          "type": "any",
+          "description": "On resume: the user's answer value. On first execution (suspend): not available — the node returns a SUSPENDED status object instead. Downstream nodes should connect to this port to receive the human input."
+        }
+      },
+      "default_input": "question",
+      "default_output": "answer_received",
+      "requires": ["postgres"],
+      "supports_env_vars": false
+    },
+
+    "loop_controller": {
+      "name": "Loop Controller",
+      "description": "Controls the lifecycle of a cyclic/looping DAG by determining whether to continue iterating (NEXT_TURN), stop (FINISHED), or pause for user input (SUSPENDED). This node is the decision point in looping workflows — it reads the current loop status (typically set by a Python script or other logic node) and signals the engine accordingly. The output includes a '__colmena_loop_status' field that the engine reads to decide whether to re-execute the graph from the beginning or terminate. Essential for building multi-turn conversational agents, iterative processing pipelines, and any workflow that needs to repeat.",
+      "category": "control_flow",
+      "config_fields": {
+        "loop_status": {
+          "type": "string",
+          "required": false,
+          "default": "FINISHED",
+          "description": "The loop continuation status. Determines what the DAG engine does after this node executes. 'NEXT_TURN' tells the engine to re-execute the entire graph from the start with updated state (the output of this iteration becomes the input of the next). 'FINISHED' tells the engine the loop is complete and execution should stop. 'SUSPENDED' pauses execution and waits for user input. Can be overridden by the 'loop_status' input port or forced to SUSPENDED by the 'suspend_flag'.",
+          "valid_values": ["NEXT_TURN", "FINISHED", "SUSPENDED"],
+          "example": "NEXT_TURN"
+        },
+        "suspend_flag": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "When set to true, forces the loop status to 'SUSPENDED' regardless of the 'loop_status' value. This is a convenience override — instead of changing the loop_status string, you can set this boolean flag to trigger a suspension. Useful when a downstream critic or reviewer node decides that user input is needed.",
+          "example": true
+        },
+        "question": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "The question to present to the user when the loop is suspended. Only included in the output when the effective status is 'SUSPENDED'. Should clearly communicate what information the user needs to provide for the loop to continue.",
+          "example": "Are you satisfied with the results, or should we refine the search?"
+        },
+        "all_tasks": {
+          "type": "any",
+          "required": false,
+          "default": null,
+          "description": "The final payload to include in the output when the loop status is 'FINISHED'. Typically contains the accumulated results from all loop iterations. This becomes the 'final_result' in the output, allowing downstream nodes (like an output node) to access the complete loop results.",
+          "example": [{"task": "Book flight", "completed": true, "result": "Confirmed"}]
+        }
+      },
+      "input_ports": {
+        "loop_status": {
+          "type": "string",
+          "description": "Dynamic loop status provided by an upstream node. Overrides the config value. Typically set by a Python script or logic node that evaluates whether the loop should continue."
+        },
+        "suspend_flag": {
+          "type": "boolean",
+          "description": "Dynamic suspend flag. When true, overrides loop_status to SUSPENDED."
+        },
+        "question": {
+          "type": "string",
+          "description": "Dynamic question for the SUSPENDED state."
+        },
+        "all_tasks": {
+          "type": "any",
+          "description": "Dynamic final payload for the FINISHED state."
+        }
+      },
+      "output_ports": {
+        "output": {
+          "type": "object",
+          "description": "A JSON object containing: '__colmena_loop_status' (the effective status string), optionally 'question' (when SUSPENDED), and optionally 'final_result' (when FINISHED). The DAG engine reads '__colmena_loop_status' to decide whether to loop again, stop, or suspend."
+        }
+      },
+      "default_input": "loop_status",
+      "default_output": "output",
+      "requires": [],
+      "supports_env_vars": false
+    },
+
+    "subgraph": {
+      "name": "SubGraph",
+      "description": "Executes a child DAG graph in an isolated session. The child graph runs independently with its own session ID (derived from the parent's), its own state, and its own execution lifecycle. All non-internal inputs received by this node are passed to the child graph as its initial state. The child graph's output node result is extracted and returned as this node's output. If the child graph suspends (e.g., via a suspend node), the suspension bubbles up to the parent graph. This is the core building block for the orchestrator's multi-agent architecture — each agent is a subgraph. Can also be used standalone to modularize complex graphs.",
+      "category": "control_flow",
+      "config_fields": {
+        "child_graph_path": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "File system path to a JSON file containing the child graph definition. The file must contain a valid Colmena graph JSON with 'nodes' and 'edges'. The path can be absolute or relative to the working directory. At least one of 'child_graph_path' or 'child_graph_inline' must be provided. Use this when the child graph is stored as a separate file (good for reusability and maintenance).",
+          "example": "tests/graphs/agents/llm_call.json"
+        },
+        "child_graph_inline": {
+          "type": "object",
+          "required": false,
+          "default": null,
+          "description": "An inline child graph definition embedded directly in the config. Must contain 'nodes' and 'edges' keys, just like a standalone graph JSON file. At least one of 'child_graph_path' or 'child_graph_inline' must be provided. Use this when the child graph is simple and tightly coupled to the parent (common in orchestrator agent definitions).",
+          "example": {
+            "nodes": {
+              "in": { "type": "input", "config": {} },
+              "llm": { "type": "llm_call", "config": { "provider": "openai", "api_key": "${OPENAI_API_KEY}", "model": "gpt-4o-mini" } },
+              "out": { "type": "output", "config": {} }
+            },
+            "edges": [
+              { "from": "in", "to": "llm" },
+              { "from": "llm", "to": "out" }
+            ]
+          }
+        },
+        "__agent_name": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Internal field injected by the OrchestratorNode when this subgraph runs as an agent. Contains the agent's name/ID. Used for emitting boundary events in the event stream so the parent can track which agent produced which output. You should never set this manually.",
+          "example": null
+        }
+      },
+      "input_ports": {
+        "<any_key>": {
+          "type": "any",
+          "description": "All non-internal inputs (keys not starting with '__colmena_' or '__node_id') are passed to the child graph as its initial global state. This is how the parent graph injects context, prompts, and configuration into the child graph."
+        }
+      },
+      "output_ports": {
+        "result": {
+          "type": "any",
+          "description": "The child graph's output, extracted from the node flagged with '__colmena_is_output_node: true'. If the child graph suspends, this contains the SUSPENDED status object which bubbles up to the parent."
+        }
+      },
+      "default_input": null,
+      "default_output": "result",
+      "requires": [],
+      "supports_env_vars": false
+    },
+
+    "log": {
+      "name": "Log (Debug)",
+      "description": "A debug/inspection node that prints its input to stdout (console) and passes it through unchanged. Useful for inspecting intermediate values during graph development and debugging. Does not modify the data — whatever goes in comes out exactly the same. Accepts input from common keys ('input', 'result', 'output') or, if none of those are present, aggregates all inputs into a single object for display.",
+      "category": "debug",
+      "config_fields": {},
+      "input_ports": {
+        "input": {
+          "type": "any",
+          "description": "The primary input to log. The node also checks 'result' and 'output' keys as fallbacks. If none of these standard keys are present but other inputs exist, all inputs are combined into a single object and logged together."
+        }
+      },
+      "output_ports": {
+        "output": {
+          "type": "any",
+          "description": "Pass-through of the input value. The exact same value that was logged is emitted as output, allowing you to insert log nodes anywhere in your graph without disrupting data flow."
+        }
+      },
+      "default_input": "input",
+      "default_output": "output",
+      "requires": [],
+      "supports_env_vars": false
+    },
+
+    "mock_input": {
+      "name": "Mock Input",
+      "description": "A test helper node that emits its entire config object as output without any transformation. Unlike the Input node, MockInput ignores all upstream inputs and simply returns whatever is in its config. Useful for unit testing specific parts of a graph by injecting fixed test data. The output is the raw config value — no wrapping in {\"output\": ...}.",
+      "category": "debug",
+      "config_fields": {
+        "<any_key>": {
+          "type": "any",
+          "required": false,
+          "default": null,
+          "description": "Any key-value pair defined in config becomes part of the emitted output. For example, { \"x\": 10, \"y\": 5 } makes the entire object { \"x\": 10, \"y\": 5 } the node's output. Downstream nodes can then access individual fields via dotted edge paths (e.g., 'mock.x').",
+          "example": { "input": 5, "x": 10, "y": 5 }
+        }
+      },
+      "input_ports": {},
+      "output_ports": {
+        "<raw_config>": {
+          "type": "any",
+          "description": "The entire config object emitted as-is. No default_output key — the output is the raw config value directly."
+        }
+      },
+      "default_input": null,
+      "default_output": null,
+      "requires": [],
+      "supports_env_vars": false
+    },
+
+    "add": {
+      "name": "Add",
+      "description": "Performs addition of two numbers (a + b). Both operands must be provided via input edges — this node has no config fields. The inputs must be numeric values (integer or float). Returns the sum in a standardized { \"output\": result } structure.",
+      "category": "math",
+      "config_fields": {},
+      "input_ports": {
+        "a": {
+          "type": "number",
+          "description": "The first operand (addend). Must be a valid JSON number. Connect an upstream node's numeric output to this port using an explicit edge like { \"from\": \"source.value\", \"to\": \"add.a\" }."
+        },
+        "b": {
+          "type": "number",
+          "description": "The second operand (addend). Must be a valid JSON number. Both 'a' and 'b' are required — the node returns an error if either is missing or non-numeric."
+        }
+      },
+      "output_ports": {
+        "output": {
+          "type": "number",
+          "description": "The sum: a + b. Always a JSON number (float64 internally)."
+        }
+      },
+      "default_input": null,
+      "default_output": "output",
+      "requires": [],
+      "supports_env_vars": false
+    },
+
+    "subtract": {
+      "name": "Subtract",
+      "description": "Performs subtraction of two numbers (a - b). Both operands must be provided via input edges. Returns the difference.",
+      "category": "math",
+      "config_fields": {},
+      "input_ports": {
+        "a": {
+          "type": "number",
+          "description": "The minuend (the number being subtracted from). Must be a valid JSON number."
+        },
+        "b": {
+          "type": "number",
+          "description": "The subtrahend (the number to subtract). Must be a valid JSON number."
+        }
+      },
+      "output_ports": {
+        "output": {
+          "type": "number",
+          "description": "The difference: a - b."
+        }
+      },
+      "default_input": null,
+      "default_output": "output",
+      "requires": [],
+      "supports_env_vars": false
+    },
+
+    "multiply": {
+      "name": "Multiply",
+      "description": "Performs multiplication of two numbers (a * b). Both operands must be provided via input edges. Returns the product.",
+      "category": "math",
+      "config_fields": {},
+      "input_ports": {
+        "a": {
+          "type": "number",
+          "description": "The first factor (multiplicand). Must be a valid JSON number."
+        },
+        "b": {
+          "type": "number",
+          "description": "The second factor (multiplier). Must be a valid JSON number."
+        }
+      },
+      "output_ports": {
+        "output": {
+          "type": "number",
+          "description": "The product: a * b."
+        }
+      },
+      "default_input": null,
+      "default_output": "output",
+      "requires": [],
+      "supports_env_vars": false
+    },
+
+    "divide": {
+      "name": "Divide",
+      "description": "Performs division of two numbers (a / b). Both operands must be provided via input edges. Returns an error if b is zero (division by zero is not allowed). Returns the quotient as a floating-point number.",
+      "category": "math",
+      "config_fields": {},
+      "input_ports": {
+        "a": {
+          "type": "number",
+          "description": "The dividend (the number being divided). Must be a valid JSON number."
+        },
+        "b": {
+          "type": "number",
+          "description": "The divisor (the number to divide by). Must be a valid JSON number and must NOT be zero. A division by zero produces a 'DivisionByZero' error."
+        }
+      },
+      "output_ports": {
+        "output": {
+          "type": "number",
+          "description": "The quotient: a / b. Always a float64 value."
+        }
+      },
+      "default_input": null,
+      "default_output": "output",
+      "requires": [],
+      "supports_env_vars": false
+    },
+
+    "exponential": {
+      "name": "Exponential (Power)",
+      "description": "Raises a base number to a given exponent (base^exponent). The base is provided via the 'input' port, and the exponent is defined in config. Uses floating-point exponentiation (powf), so fractional exponents work (e.g., exponent 0.5 computes square root).",
+      "category": "math",
+      "config_fields": {
+        "exponent": {
+          "type": "number",
+          "required": true,
+          "default": null,
+          "description": "The power to raise the input base to. Can be any numeric value: positive integers for standard powers (2 = square, 3 = cube), 0.5 for square root, negative values for reciprocals (e.g., -1 computes 1/base). This is defined in config because the exponent is typically a fixed parameter of the node's role in the graph.",
+          "example": 3
+        }
+      },
+      "input_ports": {
+        "input": {
+          "type": "number",
+          "description": "The base value to raise to the power of 'exponent'. Must be a valid JSON number. Connected via the default input port (e.g., { \"from\": \"source\", \"to\": \"exp\" })."
+        }
+      },
+      "output_ports": {
+        "output": {
+          "type": "number",
+          "description": "The result: input^exponent. A float64 value."
+        }
+      },
+      "default_input": "input",
+      "default_output": "output",
+      "requires": [],
+      "supports_env_vars": false
+    },
+
+    "http_request": {
+      "name": "HTTP Request",
+      "description": "Makes HTTP requests to external APIs and returns the response. Supports GET, POST, PUT, DELETE, and PATCH methods with configurable headers, query parameters, request body, and authentication. All string values in config support '${VAR_NAME}' environment variable resolution — essential for injecting API keys and tokens securely. Input values override config values (inputs take priority). When used as an LLM tool (via tool_configurations), extra non-reserved input keys are automatically added as query parameters, enabling the LLM to control request parameters dynamically.",
+      "category": "integration",
+      "config_fields": {
+        "base_url": {
+          "type": "string",
+          "required": false,
+          "default": "",
+          "description": "The base URL for the HTTP request (protocol + domain + optional base path). For example, 'https://api.example.com' or 'https://test.api.amadeus.com'. Combined with 'endpoint' to form the full URL. Trailing slashes are automatically handled. Supports '${VAR_NAME}' environment variable syntax for dynamic URL resolution.",
+          "supports_env_vars": true,
+          "example": "https://api.example.com"
+        },
+        "endpoint": {
+          "type": "string",
+          "required": false,
+          "default": "",
+          "description": "The URL path appended to base_url. For example, '/v1/shopping/flight-offers' or '/users'. Leading slashes are automatically handled — you can use '/endpoint' or 'endpoint' and both work. The full request URL is constructed as '{base_url}/{endpoint}'. Supports '${VAR_NAME}' environment variable syntax.",
+          "supports_env_vars": true,
+          "example": "/v1/shopping/flight-offers"
+        },
+        "method": {
+          "type": "string",
+          "required": false,
+          "default": "GET",
+          "description": "The HTTP method to use for the request. Determines the type of operation: GET for fetching data, POST for creating resources or sending data, PUT for updating resources, DELETE for removing resources, PATCH for partial updates. The value is case-insensitive internally but conventionally written in uppercase.",
+          "valid_values": ["GET", "POST", "PUT", "DELETE", "PATCH"],
+          "example": "POST"
+        },
+        "headers": {
+          "type": "object",
+          "required": false,
+          "default": {},
+          "description": "Custom HTTP headers to include in the request. A key-value map where keys are header names and values are header values. Header values support '${VAR_NAME}' environment variable syntax. Common headers include 'Content-Type' (usually 'application/json'), 'Accept', and custom API-specific headers. A default 'User-Agent: colmena-http-node/0.1' is always added. Headers from inputs are merged on top of config headers (input headers override config headers with the same key).",
+          "supports_env_vars": true,
+          "example": { "Content-Type": "application/json", "X-Custom-Header": "${MY_HEADER_VALUE}" }
+        },
+        "query_params": {
+          "type": "object",
+          "required": false,
+          "default": null,
+          "description": "Query parameters appended to the URL. A key-value map that gets serialized as URL query string (e.g., '?key=value&key2=value2'). Both config and input query_params are sent (input params are added on top of config params). When this node is used as an LLM tool, any extra non-reserved input keys that are primitive values (string, number, boolean) are also automatically added as query parameters, allowing the LLM to dynamically control the request.",
+          "example": { "max": "5", "currency": "EUR" }
+        },
+        "body": {
+          "type": "any",
+          "required": false,
+          "default": null,
+          "description": "The request body. Can be a JSON object (sent as application/json with automatic serialization) or a string (sent as raw text). Typically used with POST, PUT, and PATCH methods. Input body overrides config body. When used as an LLM tool with the '$DYNAMIC' placeholder system or node_schema, the LLM can generate individual body fields that get merged with fixed values.",
+          "example": { "title": "New Post", "content": "Hello World" }
+        },
+        "bearer_token": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "A convenience field for Bearer token authentication. When provided (typically via an input edge from an auth node), the node automatically sets the 'Authorization: Bearer {token}' header. This saves you from manually constructing the Authorization header. Commonly used with OAuth2 flows where a separate auth node obtains the access token.",
+          "supports_env_vars": false,
+          "example": "eyJhbGciOiJSUzI1NiIs..."
+        },
+        "authorization": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "A custom Authorization header value. Unlike 'bearer_token' which automatically prepends 'Bearer ', this field sets the Authorization header to exactly the value provided. Use this for non-Bearer auth schemes like Basic auth ('Basic base64encoded'), API keys ('ApiKey xyz'), or custom schemes.",
+          "example": "Basic dXNlcjpwYXNz"
+        },
+        "secure": {
+          "type": "boolean",
+          "required": false,
+          "default": null,
+          "description": "Internal Colmena flag used by the Secure Values system. When present, indicates that this request may contain injected secure values. This flag is NEVER sent to external APIs — it's stripped from the request before sending. Used internally to control logging behavior (preventing accidental exposure of credentials in logs).",
+          "example": true
+        }
+      },
+      "input_ports": {
+        "base_url": { "type": "string", "description": "Dynamic base URL. Overrides config." },
+        "endpoint": { "type": "string", "description": "Dynamic endpoint path. Overrides config." },
+        "method": { "type": "string", "description": "Dynamic HTTP method. Overrides config." },
+        "headers": { "type": "object", "description": "Dynamic headers. Merged on top of config headers." },
+        "body": { "type": "any", "description": "Dynamic request body. Overrides config body." },
+        "query_params": { "type": "object", "description": "Dynamic query params. Added on top of config params." },
+        "bearer_token": { "type": "string", "description": "Bearer token for Authorization header." },
+        "authorization": { "type": "string", "description": "Custom Authorization header value." },
+        "<extra_keys>": { "type": "string|number|boolean", "description": "Any non-reserved input keys with primitive values (string, number, boolean) are automatically added as query parameters. This enables LLM tool calling to dynamically control request parameters." }
+      },
+      "output_ports": {
+        "status": {
+          "type": "integer",
+          "description": "The HTTP response status code (e.g., 200, 404, 500). Always present in the output."
+        },
+        "body": {
+          "type": "any",
+          "description": "The HTTP response body, parsed as JSON if possible. If the response is not valid JSON, this is null. This is the default output port — downstream nodes connected without specifying a field get this value."
+        }
+      },
+      "default_input": null,
+      "default_output": "body",
+      "requires": [],
+      "supports_env_vars": true,
+      "reserved_input_keys": ["base_url", "endpoint", "method", "headers", "body", "query_params", "query_parameters", "bearer_token", "authorization", "secure", "__colmena_session_id", "__node_id", "__colmena_resume_answer"]
+    },
+
+    "python_script": {
+      "name": "Python Script",
+      "description": "Executes arbitrary Python code within the DAG. All input values received via edges are injected as global Python variables (e.g., if input has 'x': 10, the Python code can use 'x' directly). The Python script must assign its result to a variable named 'output' — this variable is extracted and returned as the node's output. Supports standard library imports (math, json, etc.). Code can be provided via config or overridden via the 'code' input port. Markdown code block wrappers (```python...```) are automatically stripped, making it safe to receive code from an LLM. Runs in a dedicated thread via PyO3 to ensure GIL safety with the async runtime.",
+      "category": "integration",
+      "config_fields": {
+        "code": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "The Python code to execute. Can be a single expression (e.g., 'output = x * y + 2') or a multi-line script with imports, functions, loops, etc. The code runs in an isolated namespace where all input values are available as variables. You MUST assign the result to a variable called 'output' — this is the convention the node uses to extract the return value. If 'output' is not defined after execution, the node returns null. The code input port takes priority over this config field, allowing LLMs or upstream nodes to dynamically provide code.",
+          "example": "import math\noutput = math.sqrt(x ** 2 + y ** 2)"
+        }
+      },
+      "input_ports": {
+        "code": {
+          "type": "string",
+          "description": "Dynamic Python code that overrides the config code. Useful when the code is generated by an LLM or computed by an upstream node. Markdown code block wrappers are automatically stripped."
+        },
+        "<any_key>": {
+          "type": "any",
+          "description": "Every input key-value pair is injected as a Python variable accessible in the script. For example, if an edge sends 'x': 10, the Python code can reference 'x' directly. Complex JSON objects and arrays are converted to Python dicts and lists respectively."
+        }
+      },
+      "output_ports": {
+        "output": {
+          "type": "any",
+          "description": "The value of the Python 'output' variable after script execution. Can be any JSON-serializable type (number, string, list, dict, boolean, null). If the script doesn't define 'output', returns null."
+        }
+      },
+      "default_input": null,
+      "default_output": "output",
+      "requires": ["python"],
+      "supports_env_vars": false
+    },
+
+    "llm_call": {
+      "name": "LLM Call",
+      "description": "The core AI node — invokes a language model with conversation memory, tool calling, streaming, and multimodal file support. Sends a prompt to the configured LLM provider and returns the response. Supports three providers (OpenAI, Gemini, Anthropic) plus a mock provider for testing. Key capabilities: (1) Conversation memory via session_id + connection_url, allowing multi-turn conversations persisted to PostgreSQL or SQLite. (2) Tool calling via tool_configurations + enabled_tools, letting the LLM invoke other DAG nodes as tools. (3) Streaming via the stream flag, emitting tokens in real-time through the event observer. (4) Multimodal support via the files array, allowing images and PDFs to be sent alongside the prompt. Inputs always take priority over config values, enabling dynamic parameterization from upstream nodes.",
+      "category": "llm",
+      "config_fields": {
+        "provider": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "The LLM provider to use. Determines which API endpoint and protocol is used. See 'llm_shared_fields.provider' for details on each provider.",
+          "valid_values": ["openai", "gemini", "anthropic", "mock"],
+          "example": "openai"
+        },
+        "api_key": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "API key for the LLM provider. Supports '${VAR_NAME}' environment variable syntax. See 'llm_shared_fields.api_key' for details.",
+          "supports_env_vars": true,
+          "example": "${OPENAI_API_KEY}"
+        },
+        "model": {
+          "type": "string",
+          "required": false,
+          "default": "Provider-dependent",
+          "description": "Model identifier. See 'llm_shared_fields.model' for details and defaults.",
+          "example": "gpt-4o-mini"
+        },
+        "prompt": {
+          "type": "any",
+          "required": false,
+          "default": null,
+          "description": "The main prompt to send to the LLM. Can be a string (most common), a JSON array, or a JSON object. Non-string values are automatically serialized to pretty JSON, allowing structured data to be sent as the prompt (useful for the synthesizer pattern where the prompt is an array of task results). Supports '{{variable}}' template syntax resolved against the node's inputs. If the resolved prompt is empty or null, the node is silently skipped (returns null) — this enables conditional execution in multi-turn flows. Falls back to 'task' input/config if 'prompt' is not found.",
+          "example": "What is the capital of France?"
+        },
+        "task": {
+          "type": "any",
+          "required": false,
+          "default": null,
+          "description": "Fallback prompt field. Used when 'prompt' is not available in either inputs or config. This enables the orchestrator pattern where tasks are assigned with a 'task' field rather than a 'prompt' field.",
+          "example": "Find the best hotels in Paris for a family of 4"
+        },
+        "system_message": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "System-level instructions for the LLM. See 'llm_shared_fields.system_message' for details. Supports '{{variable}}' template syntax.",
+          "example": "You are a travel expert specializing in European destinations."
+        },
+        "temperature": {
+          "type": "number",
+          "required": false,
+          "default": null,
+          "description": "Controls randomness/creativity of the LLM's response. Lower values (0.0-0.3) produce more focused, deterministic responses — best for factual tasks, data extraction, and code generation. Higher values (0.7-1.5) produce more creative, varied responses — best for brainstorming and creative writing. Values above 1.5 are very random. Most LLMs default to around 0.7-1.0 when not specified.",
+          "validation": { "min": 0.0, "max": 2.0 },
+          "example": 0.7
+        },
+        "max_tokens": {
+          "type": "integer",
+          "required": false,
+          "default": null,
+          "description": "Maximum number of tokens in the LLM's response. Limits the length of the generated text. One token is roughly 4 characters or 0.75 words in English. If not set, the provider uses its default maximum. Setting this prevents unexpectedly long (and expensive) responses. Must be greater than 0.",
+          "validation": { "min": 1 },
+          "example": 2048
+        },
+        "stream": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "Enables streaming mode. When true, the LLM's response tokens are emitted in real-time through the DAG execution observer as 'LlmToken' events, allowing frontends to display the response as it's generated (typewriter effect). Requires an observer to be configured (automatically available in 'serve' mode). The final result is still returned as a complete string. When false, the node waits for the full response before returning.",
+          "example": true
+        },
+        "enabled_tools": {
+          "type": "string|array",
+          "required": false,
+          "default": null,
+          "description": "Controls which tools are available for the LLM to call. Can be: (1) '*' (wildcard string) — enables ALL tools defined in tool_configurations, (2) An array of specific tool names — enables only those tools, (3) A single tool name string — enables just that one tool, (4) Not specified — no tools available (simple prompt-response mode). The LLM decides when and which tools to call based on the prompt and tool descriptions.",
+          "example": ["search_flights", "get_weather"]
+        },
+        "tool_configurations": {
+          "type": "object",
+          "required": false,
+          "default": {},
+          "description": "Defines DAG nodes that the LLM can invoke as tools. A map where each key is a tool name and each value is a ToolConfiguration object describing the tool. See the 'tool_configuration_schema' section for the complete ToolConfiguration structure. This is how you expose http_request nodes, python_script nodes, or any other node type as callable tools for the LLM agent. The LLM receives the tool descriptions and parameter schemas, generates function calls, and the engine executes the corresponding nodes.",
+          "example": {
+            "get_weather": {
+              "name": "get_weather",
+              "description": "Get current weather for a city",
+              "node_type": "http_request",
+              "fixed_config": {
+                "base_url": "https://api.weather.com",
+                "method": "GET"
+              },
+              "node_schema": {
+                "query_params": {
+                  "type": "object",
+                  "properties": {
+                    "city": { "type": "string", "required": true, "description": "City name" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "session_id": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "A unique identifier for the conversation thread. When provided together with 'connection_url', enables persistent conversation memory — the LLM's message history (system, user, assistant messages) is stored in the database and loaded on subsequent calls with the same session_id. This allows multi-turn conversations where the LLM remembers previous exchanges. If not provided, the node generates a random UUID for a stateless single-turn call. The global '__colmena_session_id' from the DAG state takes highest priority, followed by input override, then config value.",
+          "example": "chat_session_001"
+        },
+        "connection_url": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Database connection URL for persisting conversation memory. Required together with 'session_id' to enable memory. Supports PostgreSQL ('postgres://...' or 'postgresql://...') and SQLite ('sqlite://filename.db' or 'sqlite://:memory:'). The engine uses this URL to create a conversation repository that stores and retrieves message history. Supports '${VAR_NAME}' environment variable syntax. SQLite is good for local development; PostgreSQL for production.",
+          "supports_env_vars": true,
+          "example": "sqlite://colmena_memory.db"
+        },
+        "user_request": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "The original user question or request. When provided, it is prepended to the prompt in the format 'User Request:\\n{user_request}\\n\\n---\\n\\nAgent Results:\\n{prompt}'. This is the synthesizer pattern — the user_request provides context about what was asked, while the prompt contains the collected results from specialist agents. Useful in orchestrator flows where the final synthesis LLM needs both the original question and the gathered data.",
+          "example": "Plan a 7-day trip to Japan in spring"
+        },
+        "verbose": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "When true, prints the full prompt, system message, and raw LLM response to stdout for debugging. See 'llm_shared_fields.verbose' for details.",
+          "example": true
+        },
+        "files": {
+          "type": "array",
+          "required": false,
+          "default": null,
+          "description": "An array of file objects for multimodal LLM input (images, PDFs, documents). Each file can be provided either as a local file path or as base64-encoded inline data. The files are sent alongside the text prompt, enabling vision tasks (describe an image), document analysis (extract data from a PDF), and other multimodal use cases. Each file object requires 'mime_type' and either 'path' or 'data'.",
+          "items_schema": {
+            "mime_type": {
+              "type": "string",
+              "required": true,
+              "description": "The MIME type of the file (e.g., 'image/png', 'image/jpeg', 'application/pdf'). Must accurately reflect the file format for the LLM to process it correctly.",
+              "example": "image/png"
+            },
+            "filename": {
+              "type": "string",
+              "required": false,
+              "description": "A human-readable filename. If using 'path', defaults to the actual filename from the path. If using 'data', defaults to 'upload.file'. Some providers use this for display purposes.",
+              "example": "receipt.pdf"
+            },
+            "path": {
+              "type": "string",
+              "required": false,
+              "description": "Local filesystem path to the file. The engine reads the file contents at runtime. Use either 'path' or 'data', not both.",
+              "example": "tests/graphs/media/test_image.jpg"
+            },
+            "data": {
+              "type": "string",
+              "required": false,
+              "description": "Base64-encoded file content, optionally with a data URI prefix (e.g., 'data:image/png;base64,...'). The prefix is automatically stripped if present. Use either 'data' or 'path', not both.",
+              "example": "JVBERi0xLjMK..."
+            }
+          },
+          "example": [
+            { "mime_type": "image/png", "path": "photo.png" },
+            { "mime_type": "application/pdf", "filename": "doc.pdf", "data": "JVBERi0xLjMK..." }
+          ]
+        },
+        "write_to_memory": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "When true, the node writes its result to the task memory database (PostgreSQL) after execution and returns all current tasks in the 'extra_info.all_tasks' field. This is used in orchestrator-managed agent flows where each agent's result needs to be persisted alongside its assigned task. Requires 'task_id' to identify which task to update, and a configured task_memory_repo (available when DATABASE_URL is set).",
+          "example": true
+        },
+        "task_id": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "The UUID of the task to update in the task memory database. Required when 'write_to_memory' is true. Supports '{{variable}}' template syntax to resolve the task ID dynamically from inputs (e.g., '{{task_id}}'). The node writes its LLM response as the task's result in the database.",
+          "example": "{{task_id}}"
+        }
+      },
+      "input_ports": {
+        "provider": { "type": "string", "description": "Dynamic provider override." },
+        "api_key": { "type": "string", "description": "Dynamic API key override." },
+        "model": { "type": "string", "description": "Dynamic model override." },
+        "prompt": { "type": "any", "description": "Dynamic prompt. Takes priority over config prompt." },
+        "task": { "type": "any", "description": "Fallback if prompt is not available." },
+        "system_message": { "type": "string", "description": "Dynamic system message override." },
+        "temperature": { "type": "number", "description": "Dynamic temperature override." },
+        "max_tokens": { "type": "integer", "description": "Dynamic max_tokens override." },
+        "stream": { "type": "boolean", "description": "Dynamic streaming toggle." },
+        "enabled_tools": { "type": "string|array", "description": "Dynamic tool selection." },
+        "tool_configurations": { "type": "object", "description": "Dynamic tool configurations." },
+        "session_id": { "type": "string", "description": "Dynamic session ID for memory." },
+        "connection_url": { "type": "string", "description": "Dynamic database URL for memory." },
+        "user_request": { "type": "string", "description": "Original user question for synthesizer pattern." },
+        "verbose": { "type": "boolean", "description": "Dynamic verbose toggle." },
+        "files": { "type": "array", "description": "Dynamic file array for multimodal input." },
+        "write_to_memory": { "type": "boolean", "description": "Dynamic memory write toggle." },
+        "task_id": { "type": "string", "description": "Dynamic task ID for memory write." },
+        "context.<key>": { "type": "any", "description": "Context values accessible in tool_configurations via '${context.key}' template syntax. Used to pass dynamic values (like auth tokens) into tool fixed_config." }
+      },
+      "output_ports": {
+        "result": {
+          "type": "string",
+          "description": "The LLM's text response content. This is the primary output — the generated text from the language model after all tool calls are resolved."
+        },
+        "extra_info": {
+          "type": "object",
+          "description": "Metadata about the LLM call including: 'usage' (token counts: prompt_tokens, completion_tokens, total_tokens), 'tool_calls' (array of tool calls made during execution, if any), and optionally 'all_tasks' (when write_to_memory is true)."
+        }
+      },
+      "default_input": "prompt",
+      "default_output": "result",
+      "requires": [],
+      "supports_env_vars": true
+    },
+
+    "information_extraction": {
+      "name": "Information Extraction",
+      "description": "Extracts structured data from unstructured text using an LLM and a user-defined JSON schema. You provide the schema defining what to extract (field names, types, descriptions), and the node instructs the LLM to output valid JSON matching that schema. The temperature is forced to 0.1 for maximum consistency. Text sources are gathered from: (1) input edges using the 'texts.{name}' pattern (e.g., an edge to 'extractor.texts.email_body'), and (2) static texts defined in config. Multiple text sources are concatenated with headers. If no texts are provided, the node is silently skipped. Can also process critic mutations (add_tasks, delete_tasks) for integration with orchestrator flows.",
+      "category": "llm",
+      "config_fields": {
+        "provider": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "The LLM provider to use for extraction. See 'llm_shared_fields.provider'.",
+          "valid_values": ["openai", "gemini", "anthropic"],
+          "example": "openai"
+        },
+        "api_key": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "API key for the provider. Supports '${VAR_NAME}' syntax. See 'llm_shared_fields.api_key'.",
+          "supports_env_vars": true,
+          "example": "${OPENAI_API_KEY}"
+        },
+        "model": {
+          "type": "string",
+          "required": false,
+          "default": "Provider-dependent",
+          "description": "Model identifier. See 'llm_shared_fields.model'.",
+          "example": "gpt-4o"
+        },
+        "schema": {
+          "type": "object",
+          "required": true,
+          "default": null,
+          "description": "A JSON Schema defining the structure of the data to extract. The LLM is instructed to output JSON matching this schema exactly. Supports standard JSON Schema types (string, number, boolean, array, object) with descriptions for each field. The schema is included in the system prompt, so clear field descriptions significantly improve extraction accuracy. This is the most important config field — it defines what the node extracts.",
+          "example": {
+            "people_assigned": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "List of people's names assigned to the project"
+            },
+            "deadline": {
+              "type": "string",
+              "description": "Project deadline in YYYY-MM-DD format"
+            }
+          }
+        },
+        "system_message": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Additional extraction instructions appended to the built-in system prompt. The built-in prompt already instructs the LLM to extract data and output valid JSON. Use this field for domain-specific guidance, like 'Extract dates in ISO 8601 format' or 'If a field is not found, use null instead of guessing'.",
+          "example": "Focus on extracting financial figures. Convert all amounts to USD."
+        },
+        "texts": {
+          "type": "object",
+          "required": false,
+          "default": null,
+          "description": "Static text sources defined directly in config. A map where keys are text source names and values are the text content. Each source is formatted as '# {name}\\n\\n{content}' and concatenated. In most cases, you'll provide texts dynamically via edges (using the 'texts.{name}' port pattern) rather than in config.",
+          "example": { "email": "From: alice@example.com\nSubject: Project Update\n..." }
+        },
+        "verbose": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "When true, prints the system prompt, texts, and parsed output for debugging. See 'llm_shared_fields.verbose'.",
+          "example": true
+        }
+      },
+      "input_ports": {
+        "texts.<name>": {
+          "type": "string|any",
+          "description": "Dynamic text sources for extraction. Use edge paths like { \"from\": \"source.result\", \"to\": \"extractor.texts.email_body\" }. The node collects all inputs with keys starting with 'texts.' and formats them as labeled text sections. Each text source gets a header '# {name}' for the LLM to reference. Non-string values are serialized to JSON strings."
+        },
+        "system_message": {
+          "type": "string",
+          "description": "Dynamic system message override. Appended to the built-in extraction prompt."
+        }
+      },
+      "output_ports": {
+        "result": {
+          "type": "object",
+          "description": "The extracted data as a JSON object matching the provided schema. If the LLM's response contains markdown code blocks, they are automatically stripped before parsing. Returns null if no texts were provided."
+        }
+      },
+      "default_input": null,
+      "default_output": "result",
+      "requires": [],
+      "supports_env_vars": true
+    },
+
+    "planner": {
+      "name": "Planner",
+      "description": "An LLM-powered task planner that breaks down a user request into a structured list of tasks with agent assignments and execution phases. The built-in system prompt instructs the LLM to output a JSON array of task objects, each with: task description, assigned agent, completion status (always false), phase number (for execution ordering), and parallel flag (whether it can run concurrently). Agents can be defined with rich metadata (name + description) or as bare strings referencing graph nodes. The planner can also return clarification questions instead of tasks when the request is ambiguous. If tasks already exist in the database for the current session (Turn 2+), the node is silently skipped to avoid redundant LLM calls.",
+      "category": "llm",
+      "config_fields": {
+        "provider": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "The LLM provider. See 'llm_shared_fields.provider'.",
+          "valid_values": ["openai", "gemini", "anthropic"],
+          "example": "gemini"
+        },
+        "api_key": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "API key. Supports '${VAR_NAME}'. See 'llm_shared_fields.api_key'.",
+          "supports_env_vars": true,
+          "example": "${GEMINI_API_KEY}"
+        },
+        "model": {
+          "type": "string",
+          "required": false,
+          "default": "Provider-dependent",
+          "description": "Model identifier. See 'llm_shared_fields.model'.",
+          "example": "gemini-2.5-flash"
+        },
+        "system_message": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Additional planning instructions appended to the built-in planner system prompt. The built-in prompt already instructs the LLM on task structure, phases, and parallel execution. Use this for domain-specific planning guidance like 'Always include a review task at the end' or 'Prioritize cost-effective options'.",
+          "example": "For travel planning, always assign hotel and flight search to phase 1 (parallel), and final synthesis to phase 2."
+        },
+        "verbose": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "When true, prints the full system prompt, input texts, and raw LLM response. See 'llm_shared_fields.verbose'.",
+          "example": true
+        },
+        "agents": {
+          "type": "array",
+          "required": false,
+          "default": [],
+          "description": "An array of available specialist agents that the planner can assign tasks to. Each element can be either: (1) A rich object with 'name' and 'description' fields — recommended for best results, as the description helps the LLM choose the right agent for each task. (2) A bare string (agent node ID) — the planner looks up the agent's description from '__graph_nodes' in the DAG state. When agents are provided, the 'assigned_to' field in the output is constrained to only these agent names (via JSON Schema enum). If empty, the planner assigns tasks freely without constraints.",
+          "items_schema": {
+            "name": { "type": "string", "description": "The agent's unique identifier (node ID)." },
+            "description": { "type": "string", "description": "What this agent specializes in. The planner uses this to match tasks to agents." }
+          },
+          "example": [
+            { "name": "flights_agent", "description": "Searches for flights and compares prices" },
+            { "name": "hotels_agent", "description": "Finds hotel accommodations based on budget and preferences" }
+          ]
+        }
+      },
+      "input_ports": {
+        "<any_text>": {
+          "type": "string|any",
+          "description": "All non-system_message inputs are treated as text context for the planner. The user's request and any additional context are formatted as labeled sections and sent as the user prompt. Common patterns: a trigger node's output (the user's request), context from previous steps, etc."
+        },
+        "system_message": {
+          "type": "string",
+          "description": "Dynamic additional planning instructions. Appended to the built-in and config system messages."
+        }
+      },
+      "output_ports": {
+        "result": {
+          "type": "object",
+          "description": "Contains either: (1) { \"items\": [...tasks] } — an array of task objects, each with: 'task' (description string), 'assigned_to' (agent name string), 'completed' (always false), 'phase' (integer >= 1), 'parallel' (boolean). Or: (2) { \"questions\": [...] } — when the planner needs clarification, an array of question objects with 'id', 'question', 'type' ('open'|'choice'), and optional 'options'."
+        }
+      },
+      "default_input": null,
+      "default_output": "result",
+      "requires": [],
+      "supports_env_vars": true
+    },
+
+    "critic": {
+      "name": "Critic",
+      "description": "An LLM-powered quality reviewer that evaluates the result of a specialist agent's task and decides whether it is satisfactory. The built-in system prompt instructs the LLM to output a structured JSON decision: task_ok (pass/fail), feedback (when failed — specific, actionable guidance for the agent), and optionally a suspend request with a question for the user. Temperature is forced to 0.1 for consistent evaluations. Text inputs follow the 'texts.{name}' pattern. In orchestrator flows, the critic is called after each agent task, and failed tasks are retried with the critic's feedback injected as context.",
+      "category": "llm",
+      "config_fields": {
+        "provider": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "The LLM provider. See 'llm_shared_fields.provider'.",
+          "valid_values": ["openai", "gemini", "anthropic"],
+          "example": "openai"
+        },
+        "api_key": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "API key. Supports '${VAR_NAME}'. See 'llm_shared_fields.api_key'.",
+          "supports_env_vars": true,
+          "example": "${OPENAI_API_KEY}"
+        },
+        "model": {
+          "type": "string",
+          "required": false,
+          "default": "Provider-dependent",
+          "description": "Model identifier. See 'llm_shared_fields.model'.",
+          "example": "gpt-4o"
+        },
+        "system_message": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Additional review guidelines appended to the built-in critic prompt. Use this for domain-specific quality criteria like 'Results must include prices in EUR' or 'Only approve results with at least 3 options'.",
+          "example": "Focus on data accuracy. Flag any result that doesn't include source citations."
+        },
+        "verbose": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "When true, prints system prompt, context texts, and raw LLM response. See 'llm_shared_fields.verbose'.",
+          "example": true
+        },
+        "texts": {
+          "type": "object",
+          "required": false,
+          "default": null,
+          "description": "Static context texts for the critic. See 'information_extraction.texts' for the pattern. Dynamic texts via 'texts.{name}' input edges are more common.",
+          "example": { "quality_guidelines": "All responses must be factual and cite sources." }
+        }
+      },
+      "input_ports": {
+        "texts.<name>": {
+          "type": "string|any",
+          "description": "Dynamic text inputs for the critic to review. Use edge paths like { \"from\": \"agent.result\", \"to\": \"critic.texts.agent_result\" }. All texts are formatted with headers and sent to the LLM for evaluation."
+        },
+        "system_message": {
+          "type": "string",
+          "description": "Dynamic review guidelines. Appended to the built-in critic prompt."
+        }
+      },
+      "output_ports": {
+        "result": {
+          "type": "boolean",
+          "description": "The task_ok decision (true = pass, false = fail). This is the primary output for branching logic."
+        },
+        "extra_info": {
+          "type": "object",
+          "description": "Detailed review decision: { 'task_ok': boolean, 'feedback': string (actionable when task_ok=false), 'suspend': boolean, 'question': string (when suspend=true), '__colmena_status': 'SUSPENDED'|'OK' }."
+        }
+      },
+      "default_input": null,
+      "default_output": "result",
+      "requires": [],
+      "supports_env_vars": true
+    },
+
+    "reactor": {
+      "name": "Reactor (Final Reviewer)",
+      "description": "The final reviewer and synthesizer in a multi-agent workflow. Unlike the Critic (which reviews individual tasks), the Reactor evaluates the overall synthesis of all agent results and produces the FINAL user-facing response. The built-in system prompt instructs the LLM to: (1) If results are complete — write a polished, user-friendly response and set task_ok=true. (2) If something is missing — set task_ok=false and add follow-up tasks via add_tasks. (3) If user input is needed — set suspend=true with a question. Temperature is 0.2 for balanced quality. In orchestrator flows, the reactor is called both after each phase (phase_reactor) and at the end (final_reactor).",
+      "category": "llm",
+      "config_fields": {
+        "provider": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "The LLM provider. See 'llm_shared_fields.provider'.",
+          "valid_values": ["openai", "gemini", "anthropic"],
+          "example": "gemini"
+        },
+        "api_key": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "API key. Supports '${VAR_NAME}'. See 'llm_shared_fields.api_key'.",
+          "supports_env_vars": true,
+          "example": "${GEMINI_API_KEY}"
+        },
+        "model": {
+          "type": "string",
+          "required": false,
+          "default": "Provider-dependent",
+          "description": "Model identifier. See 'llm_shared_fields.model'.",
+          "example": "gemini-2.5-flash"
+        },
+        "system_message": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Additional synthesis instructions appended to the built-in reactor prompt. Use this for domain-specific formatting requirements like 'Format the response as a travel itinerary with daily sections' or 'Include a summary table of costs at the end'.",
+          "example": "Structure the final response as a day-by-day travel itinerary. Include estimated costs for each activity."
+        },
+        "verbose": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "When true, prints system prompt, context texts, and raw LLM response. See 'llm_shared_fields.verbose'.",
+          "example": true
+        },
+        "texts": {
+          "type": "object",
+          "required": false,
+          "default": null,
+          "description": "Static context texts. See 'information_extraction.texts' pattern.",
+          "example": {}
+        }
+      },
+      "input_ports": {
+        "texts.<name>": {
+          "type": "string|any",
+          "description": "Dynamic text inputs for the reactor to synthesize. Typically receives phase summaries or agent results."
+        },
+        "system_message": {
+          "type": "string",
+          "description": "Dynamic synthesis instructions."
+        }
+      },
+      "output_ports": {
+        "result": {
+          "type": "string|null",
+          "description": "The final user-facing response text (when task_ok=true). Null when task_ok=false."
+        },
+        "extra_info": {
+          "type": "object",
+          "description": "Full reactor decision: { 'task_ok': boolean, 'add_tasks': [{ 'task': string, 'assigned_to': string }], 'suspend': boolean, 'question': string, '__colmena_status': 'SUSPENDED'|'OK' }."
+        }
+      },
+      "default_input": null,
+      "default_output": "result",
+      "requires": [],
+      "supports_env_vars": true
+    },
+
+    "orchestrator": {
+      "name": "Orchestrator",
+      "description": "The master multi-agent coordination node. Manages the full lifecycle of a complex task: planning, agent execution, quality review, phase summarization, dynamic replanning, and final synthesis. Internally orchestrates planner, critic, phase_reactor, and final_reactor components — each an LLM call with its own configuration. Agents are executed as subgraphs (child DAGs). Supports phased execution (tasks in the same phase run in parallel), bridge tasks (immediate follow-ups within a phase), and 5 suspension points for human-in-the-loop interaction. Requires PostgreSQL for task and state persistence (DATABASE_URL environment variable).",
+      "category": "orchestration",
+      "config_fields": {
+        "verbose": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "Enables detailed logging for the entire orchestration process: session ID, inputs, internal component decisions, phase transitions, and task lifecycle events. Essential for debugging complex multi-agent workflows.",
+          "example": true
+        },
+        "max_phases": {
+          "type": "integer",
+          "required": false,
+          "default": 10,
+          "description": "Safety limit on the maximum number of execution phases. Prevents runaway loops where the reactor keeps adding new tasks indefinitely. Each phase executes a group of tasks, and the reactor may add new tasks to the next phase. When this limit is reached, the orchestrator stops and produces a final response with whatever results are available.",
+          "validation": { "min": 1 },
+          "example": 5
+        },
+        "planner": {
+          "type": "object",
+          "required": true,
+          "default": null,
+          "description": "Configuration for the internal planner component. The orchestrator uses this to invoke the PlannerNode, which breaks down the user's request into structured tasks. Contains standard LLM fields (provider, api_key, model, system_message) plus an optional 'allow_suspend' flag. The planner automatically receives agent descriptions from the 'agents' config and constrains task assignments to valid agent names.",
+          "sub_fields": {
+            "provider": { "type": "string", "required": true, "description": "LLM provider for planning." },
+            "api_key": { "type": "string", "required": true, "description": "API key. Supports '${VAR}'.", "supports_env_vars": true },
+            "model": { "type": "string", "required": false, "description": "Model identifier." },
+            "system_message": { "type": "string", "required": false, "description": "Extra planning instructions appended to the built-in planner prompt." },
+            "allow_suspend": { "type": "boolean", "required": false, "default": true, "description": "When true, allows the planner to suspend execution and ask the user clarification questions before generating the task plan. When false, any clarification questions from the planner are logged but execution continues with the LLM's best guess." }
+          },
+          "example": {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "api_key": "${GEMINI_API_KEY}",
+            "allow_suspend": true,
+            "system_message": "Break the trip planning into specialized tasks."
+          }
+        },
+        "agents": {
+          "type": "object",
+          "required": true,
+          "default": null,
+          "description": "A map of available specialist agents. Each key is the agent's unique ID (used in task assignments), and each value defines the agent's capabilities and subgraph. The orchestrator creates a SubGraphNode for each agent and executes it with the task description and context. Each agent entry MUST include either 'child_graph_inline' (embedded graph) or 'child_graph_path' (external file) defining the agent's DAG workflow.",
+          "sub_fields": {
+            "description": { "type": "string", "required": true, "description": "Human-readable description of what this agent specializes in. This is shown to the planner LLM to help it assign tasks to the most appropriate agent." },
+            "child_graph_inline": { "type": "object", "required": false, "description": "Inline child graph definition with 'nodes' and 'edges'. See 'subgraph.child_graph_inline'." },
+            "child_graph_path": { "type": "string", "required": false, "description": "File path to the agent's graph JSON. See 'subgraph.child_graph_path'." }
+          },
+          "example": {
+            "flights_agent": {
+              "description": "Searches for flights using the Amadeus API",
+              "child_graph_inline": {
+                "nodes": {
+                  "in": { "type": "input", "config": {} },
+                  "llm": { "type": "llm_call", "config": {} },
+                  "out": { "type": "output", "config": {} }
+                },
+                "edges": [
+                  { "from": "in", "to": "llm" },
+                  { "from": "llm", "to": "out" }
+                ]
+              }
+            }
+          }
+        },
+        "critic": {
+          "type": "object",
+          "required": false,
+          "default": null,
+          "description": "Configuration for the optional per-task quality reviewer. When configured, the critic is called after each agent task completes to evaluate the result quality. If the critic rejects a task (task_ok=false), the task is retried with the critic's feedback injected as context for the agent. Contains standard LLM fields plus 'max_retries' and 'allow_suspend'.",
+          "sub_fields": {
+            "provider": { "type": "string", "required": true, "description": "LLM provider for review." },
+            "api_key": { "type": "string", "required": true, "description": "API key. Supports '${VAR}'.", "supports_env_vars": true },
+            "model": { "type": "string", "required": false, "description": "Model identifier." },
+            "system_message": { "type": "string", "required": false, "description": "Extra review guidelines." },
+            "max_retries": { "type": "integer", "required": false, "default": 3, "description": "Maximum number of times a task can be retried after critic rejection before the orchestrator either suspends (if allow_suspend=true) or gives up and marks the task as done with the last result." },
+            "allow_suspend": { "type": "boolean", "required": false, "default": true, "description": "When true, if max_retries is exceeded, the orchestrator suspends and asks the user for help. When false, exceeded retries are logged but execution continues." }
+          },
+          "example": {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "api_key": "${GEMINI_API_KEY}",
+            "max_retries": 3,
+            "system_message": "Verify that results include specific data, not generic advice."
+          }
+        },
+        "phase_reactor": {
+          "type": "object",
+          "required": false,
+          "default": null,
+          "description": "Configuration for the optional phase-level reviewer. Called after all tasks in a phase complete. Summarizes phase results, optionally adds follow-up tasks (bridge or next-phase), and can suspend for user input. The summary is stored in the database and made available to subsequent phases and the final reactor. Without a phase_reactor, results are simply concatenated (truncated to 4000 chars).",
+          "sub_fields": {
+            "provider": { "type": "string", "required": true, "description": "LLM provider for phase review." },
+            "api_key": { "type": "string", "required": true, "description": "API key. Supports '${VAR}'.", "supports_env_vars": true },
+            "model": { "type": "string", "required": false, "description": "Model identifier." },
+            "system_message": { "type": "string", "required": false, "description": "Phase review instructions." },
+            "allow_suspend": { "type": "boolean", "required": false, "default": true, "description": "When true, allows the phase reactor to suspend for user clarification after a phase completes." }
+          },
+          "example": {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "api_key": "${GEMINI_API_KEY}",
+            "system_message": "Summarize the results and check for completeness."
+          }
+        },
+        "final_reactor": {
+          "type": "object",
+          "required": true,
+          "default": null,
+          "description": "Configuration for the final synthesis reviewer. Called after all phases complete. Receives all phase summaries and produces the final polished response for the user. This is a REQUIRED component — the orchestrator errors if it's missing because it's responsible for producing the structured final answer. Can add tasks or suspend for user input before producing the response.",
+          "sub_fields": {
+            "provider": { "type": "string", "required": true, "description": "LLM provider for final synthesis." },
+            "api_key": { "type": "string", "required": true, "description": "API key. Supports '${VAR}'.", "supports_env_vars": true },
+            "model": { "type": "string", "required": false, "description": "Model identifier." },
+            "system_message": { "type": "string", "required": false, "description": "Final synthesis instructions." },
+            "allow_suspend": { "type": "boolean", "required": false, "default": true, "description": "When true, allows the final reactor to suspend and ask the user a question before producing the final response." }
+          },
+          "example": {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "api_key": "${GEMINI_API_KEY}",
+            "system_message": "Create a comprehensive travel itinerary based on all the research."
+          }
+        }
+      },
+      "input_ports": {
+        "prompt": {
+          "type": "string|any",
+          "description": "The user's request that kicks off the orchestration. Passed to the internal planner to generate the task plan."
+        },
+        "__colmena_resume_answer": {
+          "type": "string",
+          "description": "User's answer when resuming from a suspended state. Automatically injected by the DAG engine."
+        }
+      },
+      "output_ports": {
+        "final_response": {
+          "type": "string",
+          "description": "The final polished response for the user, produced by the final_reactor."
+        },
+        "extra_info": {
+          "type": "object",
+          "description": "Metadata including: '__colmena_loop_status' ('FINISHED' or 'SUSPENDED'), 'all_tasks' (complete task list with results), 'phase_summaries' (array of phase summary objects)."
+        }
+      },
+      "default_input": null,
+      "default_output": "final_response",
+      "requires": ["postgres"],
+      "supports_env_vars": true
+    },
+
+    "task_memory_writer": {
+      "name": "Task Memory Writer",
+      "description": "Persists task results and critic mutations (add/delete tasks, suspend) to the PostgreSQL task memory database. This is a utility node used in manual orchestration patterns (without the orchestrator node) to manage task state. Updates a specific task's result, adds new tasks proposed by a critic, deletes tasks, and can trigger a DAG suspension. After all operations, returns the complete list of current tasks. Requires a configured task memory repository (DATABASE_URL environment variable).",
+      "category": "orchestration",
+      "config_fields": {
+        "task_id": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "The UUID of the task whose result should be updated. When provided along with a 'result' value, the node writes the result to this task in the database, marking it as completed. Typically received from an upstream task dispatcher.",
+          "example": "550e8400-e29b-41d4-a716-446655440000"
+        },
+        "result": {
+          "type": "any",
+          "required": false,
+          "default": null,
+          "description": "The result value to write to the task identified by 'task_id'. Can be any JSON value — typically the output from the agent that executed the task (e.g., an LLM response, search results, etc.).",
+          "example": { "result": "Found 3 flights from MAD to TYO..." }
+        },
+        "add_tasks": {
+          "type": "array",
+          "required": false,
+          "default": null,
+          "description": "An array of new task objects to add to the database. Each object must have 'task' (description string) and 'assigned_to' (agent name string). New tasks are created with completed=false, phase=1, parallel=false. Typically used when a critic or reactor identifies additional work that needs to be done.",
+          "items_schema": {
+            "task": { "type": "string", "description": "Task description." },
+            "assigned_to": { "type": "string", "description": "Agent name to assign the task to." }
+          },
+          "example": [{ "task": "Search for budget hotels in Shibuya", "assigned_to": "hotels_agent" }]
+        },
+        "delete_tasks": {
+          "type": "array",
+          "required": false,
+          "default": null,
+          "description": "An array of task ID strings to delete from the database. Use this to remove tasks that are no longer relevant (e.g., superseded by updated requirements). Each element should be a valid task UUID string.",
+          "example": ["550e8400-e29b-41d4-a716-446655440000"]
+        },
+        "suspend": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "When true, the node returns a SUSPENDED status after performing all operations. This triggers the DAG engine to persist state and wait for user input. Typically set to true when a critic determines that user clarification is needed before continuing.",
+          "example": true
+        }
+      },
+      "input_ports": {
+        "task_id": { "type": "string", "description": "Dynamic task ID to update." },
+        "result": { "type": "any", "description": "Dynamic result value to store." },
+        "add_tasks": { "type": "array", "description": "Dynamic tasks to add." },
+        "delete_tasks": { "type": "array", "description": "Dynamic task IDs to delete." },
+        "suspend": { "type": "boolean", "description": "Dynamic suspend flag." }
+      },
+      "output_ports": {
+        "result": {
+          "type": "array",
+          "description": "The complete list of all current tasks in the database for this session, including any newly added tasks and reflecting any deletions. Each task object includes: id, task_name, assigned_to, completed, result."
+        }
+      },
+      "default_input": null,
+      "default_output": "result",
+      "requires": ["postgres"],
+      "supports_env_vars": false
+    }
+  },
+
+  "tool_configuration_schema": {
+    "description": "Schema for defining DAG nodes as LLM-callable tools within the llm_call node's 'tool_configurations' field. Each tool maps an LLM function call to a specific node type execution with fixed and dynamic parameters.",
+    "fields": {
+      "name": {
+        "type": "string",
+        "required": true,
+        "description": "The tool name shown to the LLM. Should be descriptive and follow function naming conventions (e.g., 'search_flights', 'get_weather'). The LLM uses this name when generating function calls.",
+        "example": "search_flights"
+      },
+      "description": {
+        "type": "string",
+        "required": true,
+        "description": "A human-readable description of what this tool does. Sent to the LLM as part of the tool definition to help it decide when to use the tool and what parameters to provide. Be specific and include key details about the tool's capabilities and limitations.",
+        "example": "Search for available flight offers between two airports on a given date. Returns up to 5 results with prices and airlines."
+      },
+      "node_type": {
+        "type": "string",
+        "required": true,
+        "description": "The type of DAG node to execute when this tool is called. Must be a valid registered node type (e.g., 'http_request', 'python_script', 'add'). The engine creates a temporary instance of this node type and executes it with the combined fixed + LLM-provided parameters.",
+        "valid_values": ["http_request", "python_script", "add", "subtract", "multiply", "divide", "exponential"],
+        "example": "http_request"
+      },
+      "fixed_config": {
+        "type": "object",
+        "required": false,
+        "default": {},
+        "description": "Configuration values that are always set and never exposed to the LLM. These form the base configuration for the node execution. String values support '${context.key}' template syntax to inject dynamic values from the llm_call node's inputs (e.g., '${context.amadeus_token}' resolves to the 'context.amadeus_token' input). Use this for API endpoints, authentication tokens, fixed headers, and other values the LLM shouldn't control.",
+        "example": {
+          "base_url": "https://test.api.amadeus.com",
+          "endpoint": "/v1/shopping/flight-offers",
+          "method": "GET",
+          "bearer_token": "${context.amadeus_token}",
+          "headers": { "Content-Type": "application/json" }
+        }
+      },
+      "node_schema": {
+        "type": "object",
+        "required": false,
+        "default": null,
+        "description": "The RECOMMENDED way to define tool parameters (replaces deprecated exposed_inputs/parameters/field_mapping/mergeable_fields). A flat map of field names to NodeSchemaField objects. Each field can be: (1) Fixed (hidden from LLM) — has a 'fixed' value. (2) LLM-visible — has 'type', optional 'required', 'description', 'pattern'. (3) Container with nested properties — has 'type': 'object' and 'properties' map, where each child can be fixed or LLM-visible. This allows fine-grained control over what the LLM sees and what's locked down.",
+        "sub_schema": {
+          "NodeSchemaField": {
+            "type": {
+              "type": "string",
+              "required": true,
+              "description": "JSON Schema type: 'string', 'number', 'boolean', 'object', 'array'."
+            },
+            "fixed": {
+              "type": "any",
+              "required": false,
+              "description": "If present, this field is hidden from the LLM and always set to this value. Supports '${context.key}' template syntax for runtime resolution."
+            },
+            "required": {
+              "type": "boolean",
+              "required": false,
+              "default": false,
+              "description": "Whether the LLM must supply this field. Only meaningful when 'fixed' is absent."
+            },
+            "description": {
+              "type": "string",
+              "required": false,
+              "description": "Human-readable description sent to the LLM in the tool definition. Include format expectations and examples for best results."
+            },
+            "pattern": {
+              "type": "string",
+              "required": false,
+              "description": "Regex pattern constraint passed to the LLM's tool schema. Helps the LLM generate correctly formatted values (e.g., '^\\\\d{4}-\\\\d{2}-\\\\d{2}$' for dates)."
+            },
+            "properties": {
+              "type": "object",
+              "required": false,
+              "description": "Nested fields for container types (type='object'). Each child follows the same NodeSchemaField structure. Children with 'fixed' values are hidden from the LLM; others become LLM parameters mapped to this container."
+            }
+          }
+        },
+        "example": {
+          "base_url": { "type": "string", "fixed": "https://test.api.amadeus.com" },
+          "method": { "type": "string", "fixed": "GET" },
+          "bearer_token": { "type": "string", "fixed": "${context.amadeus_token}" },
+          "query_params": {
+            "type": "object",
+            "properties": {
+              "max": { "type": "string", "fixed": "5" },
+              "originLocationCode": { "type": "string", "required": true, "description": "IATA airport code for departure (e.g., 'MAD')" },
+              "destinationLocationCode": { "type": "string", "required": true, "description": "IATA airport code for arrival (e.g., 'TYO')" },
+              "departureDate": { "type": "string", "required": true, "description": "Departure date in YYYY-MM-DD format", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+              "adults": { "type": "string", "required": true, "description": "Number of adult passengers" }
+            }
+          }
+        }
+      },
+      "exposed_inputs": {
+        "type": "array",
+        "required": false,
+        "default": null,
+        "description": "DEPRECATED (use node_schema instead). Array of input parameter names to expose to the LLM.",
+        "deprecated": true
+      },
+      "parameters": {
+        "type": "object",
+        "required": false,
+        "default": null,
+        "description": "DEPRECATED (use node_schema instead). JSON Schema for parameters to override the auto-generated schema.",
+        "deprecated": true
+      },
+      "mergeable_fields": {
+        "type": "array",
+        "required": false,
+        "default": null,
+        "description": "DEPRECATED (use node_schema instead). Fields where fixed + dynamic values are merged (not overridden).",
+        "deprecated": true
+      },
+      "field_mapping": {
+        "type": "object",
+        "required": false,
+        "default": null,
+        "description": "DEPRECATED (use node_schema instead). Maps each LLM parameter to its destination container field.",
+        "deprecated": true
+      }
+    }
+  },
+
+  "categories": {
+    "control_flow": {
+      "name": "Control Flow",
+      "description": "Nodes that manage data flow, graph lifecycle, looping, suspension, and subgraph execution.",
+      "node_types": ["input", "output", "trigger_webhook", "suspend", "loop_controller", "subgraph"]
+    },
+    "debug": {
+      "name": "Debug",
+      "description": "Nodes for testing and debugging: logging, mock data generation.",
+      "node_types": ["log", "mock_input"]
+    },
+    "math": {
+      "name": "Math",
+      "description": "Arithmetic operation nodes. All require numeric inputs via edges.",
+      "node_types": ["add", "subtract", "multiply", "divide", "exponential"]
+    },
+    "integration": {
+      "name": "Integration",
+      "description": "Nodes for external system integration: HTTP APIs and Python scripting.",
+      "node_types": ["http_request", "python_script"]
+    },
+    "llm": {
+      "name": "LLM & AI",
+      "description": "Language model nodes: direct inference, structured extraction, planning, quality review, and synthesis.",
+      "node_types": ["llm_call", "information_extraction", "planner", "critic", "reactor"]
+    },
+    "orchestration": {
+      "name": "Orchestration",
+      "description": "Multi-agent coordination and task memory management.",
+      "node_types": ["orchestrator", "task_memory_writer"]
+    }
+  }
+}

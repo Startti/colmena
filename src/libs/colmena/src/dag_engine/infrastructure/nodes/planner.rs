@@ -45,28 +45,7 @@ fn default_planner_schema() -> Value {
 }
 
 /// The default built-in system message included in every PlannerNode call.
-const DEFAULT_PLANNER_SYSTEM_MSG: &str = "\
-You are an expert task planner. Your role is to analyze the provided input \
-and break it down into a list of clearly defined, non-overlapping tasks. \
-Each task MUST be assigned to the most appropriate specialist agent. \
-Every task MUST start with 'completed' = false. \
-\n\
-For each task you MUST also set:\
-- 'phase': an integer starting at 1. Tasks that can run independently of each other \
-  and have no dependency on other tasks should share the same phase number. \
-  Tasks that depend on the results of a previous phase should be in a higher phase.\
-- 'parallel': true if this task can safely run at the same time as other tasks \
-  in the same phase, false if it must run alone sequentially.\
-\n\
-IMPORTANT — Two possible response formats:\n\
-1. If you have enough information to create a complete plan, respond with a JSON ARRAY of tasks.\n\
-2. If the request is ambiguous or missing critical information that would prevent you from \
-creating a useful plan, respond with a JSON object containing 'questions':\n\
-   { \"questions\": [ { \"id\": \"<short_id>\", \"question\": \"<text>\", \"type\": \"open\" | \"choice\", \"options\": [\"A\", \"B\"] } ] }\n\
-   Use type 'open' for free-text answers and 'choice' when there are specific predefined options.\n\
-   Only ask questions when truly necessary — if you can make reasonable assumptions, do so and plan.\n\
-\n\
-Output ONLY valid JSON. Do NOT include markdown or code fences.";
+const DEFAULT_PLANNER_SYSTEM_MSG: &str = include_str!("prompts/planner_system.md");
 
 pub struct PlannerNode {
     task_memory_repo: Option<Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>>,

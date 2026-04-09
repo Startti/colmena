@@ -68,19 +68,7 @@ fn reactor_schema() -> Value {
 }
 
 /// Default system prompt for every ReactorNode.
-const DEFAULT_REACTOR_SYSTEM_MSG: &str = "\
-You are the final reviewer in a multi-agent workflow. You receive a synthesized \
-response produced by specialist agents and you decide:\n\
-\n\
-1. If it is COMPLETE and CORRECT → set 'task_ok' to true and write the final, \
-   polished, user-facing 'response'. Improve the wording if needed but keep all \
-   the information. Do NOT just say 'looks good' — actually write the full response.\n\
-2. If something is MISSING or INCORRECT → set 'task_ok' to false and add specific \
-   follow-up tasks in 'add_tasks'.\n\
-3. If you need MORE INFORMATION from the user → set 'suspend' to true and provide \
-   a clear 'question'.\n\
-\n\
-Output ONLY valid JSON matching the schema. Do NOT include markdown or code fences.";
+const DEFAULT_REACTOR_SYSTEM_MSG: &str = include_str!("prompts/reactor_system.md");
 
 pub struct ReactorNode {
     #[allow(dead_code)]
