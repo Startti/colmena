@@ -20,28 +20,80 @@
         },
         "agents": {
           "clothing_expert": {
-            "provider": "gemini",
-            "model": "gemini-2.5-flash",
-            "api_key": "${GEMINI_API_KEY}",
-            "system_message": "You are a professional clothing stylist. Recommend exactly 1 to 2 essential clothing items for the given trip details. Output a very short bulleted list (max 2 items) with estimated prices. Be brief."
+            "description": "Recommends clothing items for a given trip.",
+            "child_graph_inline": {
+              "nodes": {
+                "in":  { "type": "input",    "config": {} },
+                "llm": { "type": "llm_call", "config": {
+                  "provider": "gemini",
+                  "model": "gemini-2.5-flash",
+                  "api_key": "${GEMINI_API_KEY}",
+                  "system_message": "You are a professional clothing stylist. Recommend exactly 1 to 2 essential clothing items for the given trip details. Output a very short bulleted list (max 2 items) with estimated prices. Be brief."
+                }},
+                "out": { "type": "output",   "config": {} }
+              },
+              "edges": [
+                { "from": "in",  "to": "llm" },
+                { "from": "llm", "to": "out" }
+              ]
+            }
           },
           "gear_expert": {
-            "provider": "gemini",
-            "model": "gemini-2.5-flash",
-            "api_key": "${GEMINI_API_KEY}",
-            "system_message": "You are a professional ski equipment outfitter. Recommend exactly 1 to 2 essential gear items for the given trip details. Output a very short bulleted list (max 2 items) with estimated prices. Be brief."
+            "description": "Recommends ski equipment for a given trip.",
+            "child_graph_inline": {
+              "nodes": {
+                "in":  { "type": "input",    "config": {} },
+                "llm": { "type": "llm_call", "config": {
+                  "provider": "gemini",
+                  "model": "gemini-2.5-flash",
+                  "api_key": "${GEMINI_API_KEY}",
+                  "system_message": "You are a professional ski equipment outfitter. Recommend exactly 1 to 2 essential gear items for the given trip details. Output a very short bulleted list (max 2 items) with estimated prices. Be brief."
+                }},
+                "out": { "type": "output",   "config": {} }
+              },
+              "edges": [
+                { "from": "in",  "to": "llm" },
+                { "from": "llm", "to": "out" }
+              ]
+            }
           },
           "budget_expert": {
-            "provider": "gemini",
-            "model": "gemini-2.5-flash",
-            "api_key": "${GEMINI_API_KEY}",
-            "system_message": "You are a travel budget estimator. Analyze the given lists of clothing and gear from previous phases, and provide a very brief budget estimate with a final total. Keep it to 2-3 lines maximum."
+            "description": "Estimates trip budget based on clothing and gear lists.",
+            "child_graph_inline": {
+              "nodes": {
+                "in":  { "type": "input",    "config": {} },
+                "llm": { "type": "llm_call", "config": {
+                  "provider": "gemini",
+                  "model": "gemini-2.5-flash",
+                  "api_key": "${GEMINI_API_KEY}",
+                  "system_message": "You are a travel budget estimator. Analyze the given lists of clothing and gear from previous phases, and provide a very brief budget estimate with a final total. Keep it to 2-3 lines maximum."
+                }},
+                "out": { "type": "output",   "config": {} }
+              },
+              "edges": [
+                { "from": "in",  "to": "llm" },
+                { "from": "llm", "to": "out" }
+              ]
+            }
           },
           "insurance_expert": {
-            "provider": "gemini",
-            "model": "gemini-2.5-flash",
-            "api_key": "${GEMINI_API_KEY}",
-            "system_message": "You are a travel insurance specialist. Given the budget from previous phases, recommend a suitable travel insurance plan for a ski trip with an estimated cost. Keep it to 2 lines."
+            "description": "Recommends travel insurance plans based on trip budget.",
+            "child_graph_inline": {
+              "nodes": {
+                "in":  { "type": "input",    "config": {} },
+                "llm": { "type": "llm_call", "config": {
+                  "provider": "gemini",
+                  "model": "gemini-2.5-flash",
+                  "api_key": "${GEMINI_API_KEY}",
+                  "system_message": "You are a travel insurance specialist. Given the budget from previous phases, recommend a suitable travel insurance plan for a ski trip with an estimated cost. Keep it to 2 lines."
+                }},
+                "out": { "type": "output",   "config": {} }
+              },
+              "edges": [
+                { "from": "in",  "to": "llm" },
+                { "from": "llm", "to": "out" }
+              ]
+            }
           }
         },
         "phase_reactor": {

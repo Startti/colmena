@@ -15,3 +15,4 @@ pub mod reactor;
 pub mod suspend;
 pub mod task_memory_writer;
 pub mod trigger;
+pub mod subgraph;

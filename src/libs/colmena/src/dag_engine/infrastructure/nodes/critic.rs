@@ -1,3 +1,4 @@
+use crate::colmena_log;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -12,24 +13,12 @@ use crate::llm::infrastructure::LlmProviderFactory;
 // ---------------------------------------------------------------------------
 // Fixed schema — always the same for every CriticNode.
 // After reviewing the current task's result, the Critic decides:
-//   - task_ok       → result is acceptable, move on
-//   - add_tasks     → add these new tasks to the queue
-//   - suspend       → pause and ask the user a clarifying question
+//   - task_ok   → result is acceptable, move on
+//   - feedback  → when task_ok=false, explains what was wrong and what the agent
+//                 must do differently on the next attempt
+//   - suspend   → pause and ask the user a clarifying question
 // ---------------------------------------------------------------------------
-fn critic_schema(agent_enum: Option<Vec<Value>>) -> Value {
-    let assigned_to_schema = if let Some(values) = agent_enum {
-        json!({
-            "type": "string",
-            "enum": values,
-            "description": "The agent node ID that should handle this task."
-        })
-    } else {
-        json!({
-            "type": "string",
-            "description": "The agent node ID that should handle this task."
-        })
-    };
-
+fn critic_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
@@ -37,20 +26,9 @@ fn critic_schema(agent_enum: Option<Vec<Value>>) -> Value {
                 "type": "boolean",
                 "description": "Set to true if the current task result is satisfactory and no further action is needed for it."
             },
-            "add_tasks": {
-                "type": "array",
-                "description": "List of additional tasks to add to the queue if the result is incomplete or more work is needed.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "task": {
-                            "type": "string",
-                            "description": "A clear, self-contained description of the additional task."
-                        },
-                        "assigned_to": assigned_to_schema
-                    },
-                    "required": ["task", "assigned_to"]
-                }
+            "feedback": {
+                "type": "string",
+                "description": "Only populate when task_ok is false. Write a concise, actionable explanation of what was wrong or missing in the result and exactly what the agent must do differently in the next attempt. Leave empty string when task_ok is true."
             },
             "suspend": {
                 "type": "boolean",
@@ -61,7 +39,7 @@ fn critic_schema(agent_enum: Option<Vec<Value>>) -> Value {
                 "description": "The question to ask the user. Required when suspend is true."
             }
         },
-        "required": ["task_ok", "add_tasks", "suspend"]
+        "required": ["task_ok", "feedback", "suspend"]
     })
 }
 
@@ -69,14 +47,15 @@ fn critic_schema(agent_enum: Option<Vec<Value>>) -> Value {
 const DEFAULT_CRITIC_SYSTEM_MSG: &str = "\
 You are a critical reviewer in a multi-agent system. Your role is to evaluate \
 the result produced by a specialist agent for a specific task and decide whether \
-it is complete and satisfactory. \
+it is complete and satisfactory.\n\
 \n\
 Rules:\n\
-- If the result fully addresses the task, set 'task_ok' to true and 'add_tasks' to [].\n\
-- If the result is incomplete or lacks important details, set 'task_ok' to false \
-  and add specific follow-up tasks in 'add_tasks'.\n\
-- If you need more information from the user to make a decision, set 'suspend' to \
-  true and provide a clear, concise 'question'.\n\
+- If the result fully addresses the task, set 'task_ok' to true and leave 'feedback' as empty string.\n\
+- If the result is incomplete or incorrect, set 'task_ok' to false and write a concise, \
+  actionable 'feedback' explaining exactly what was wrong and what the agent must do differently \
+  on the next attempt. Be specific — the agent will receive your feedback directly.\n\
+- If you need more information from the user before deciding, set 'suspend' to true \
+  and provide a clear, concise 'question'.\n\
 - Be strict but fair. Only flag issues that genuinely affect the quality of the result.\n\
 Output ONLY valid JSON matching the schema. Do NOT include markdown or code fences.";
 
@@ -110,7 +89,7 @@ impl ExecutableNode for CriticNode {
         &self,
         inputs: &NodeInputs,
         config: &Value,
-        state: &mut Value,
+        _state: &mut Value,
         _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         // --- 1. Resolve Provider Configuration ---
@@ -143,42 +122,7 @@ impl ExecutableNode for CriticNode {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        // --- 2. Read available agents (for add_tasks enum constraint) ---
-        // Same format as PlannerNode: array of { name, description } or bare strings.
-        let agents: Vec<(String, String)> = config
-            .get("agents")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| {
-                        if let Some(obj) = v.as_object() {
-                            // Full object: { "name": "...", "description": "..." }
-                            let name = obj.get("name").and_then(|n| n.as_str())?.to_string();
-                            let desc = obj
-                                .get("description")
-                                .and_then(|d| d.as_str())
-                                .unwrap_or("No description provided.")
-                                .to_string();
-                            Some((name, desc))
-                        } else if let Some(node_id) = v.as_str() {
-                            // Bare string: look up description from __graph_nodes in state
-                            let desc = state
-                                .get("__graph_nodes")
-                                .and_then(|g| g.get(node_id))
-                                .and_then(|cfg| cfg.get("description"))
-                                .and_then(|d| d.as_str())
-                                .unwrap_or("No description provided.")
-                                .to_string();
-                            Some((node_id.to_string(), desc))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        // --- 3. Collect input texts ---
+        // --- 2. Collect input texts ---
         // All keys that start with "texts." are treated as context for the Critic.
         let mut formatted_texts = String::new();
         for (key, val) in inputs.iter() {
@@ -209,7 +153,7 @@ impl ExecutableNode for CriticNode {
         }
 
         if formatted_texts.is_empty() {
-            println!("⚠️ [CriticNode] Skipped — no input texts provided.");
+            colmena_log!("⚠️ [CriticNode] Skipped — no input texts provided.");
             return Ok(Value::Null);
         }
 
@@ -220,58 +164,31 @@ impl ExecutableNode for CriticNode {
             .or_else(|| config.get("system_message").and_then(|v| v.as_str()))
             .unwrap_or("");
 
-        // Optional agent catalogue section (so Critic knows which agents it can assign to)
-        let agents_section = if !agents.is_empty() {
-            let lines = agents
-                .iter()
-                .map(|(name, desc)| format!("  - \"{}\": {}", name, desc))
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!(
-                "\n\nAvailable specialist agents (use only these names in 'add_tasks.assigned_to'):\n{}",
-                lines
-            )
-        } else {
-            String::new()
-        };
-
         let extra_section = if !extra_system_msg.is_empty() {
             format!("\n\nAdditional critic guidelines:\n{}", extra_system_msg)
         } else {
             String::new()
         };
 
-        // Build the schema with optional enum constraint on assigned_to
-        let agent_enum = if !agents.is_empty() {
-            Some(
-                agents
-                    .iter()
-                    .map(|(name, _)| Value::String(name.clone()))
-                    .collect(),
-            )
-        } else {
-            None
-        };
-        let schema = critic_schema(agent_enum);
+        let schema = critic_schema();
 
         let system_message = format!(
-            "{}{}{}\n\nYou MUST output JSON matching this schema:\n{}",
+            "{}{}\n\nYou MUST output JSON matching this schema:\n{}",
             DEFAULT_CRITIC_SYSTEM_MSG,
-            agents_section,
             extra_section,
             serde_json::to_string_pretty(&schema)?
         );
 
         if verbose {
-            println!("\n═══════════════════════════════════════");
-            println!("🔎 [CriticNode] VERBOSE — System Prompt:");
-            println!("───────────────────────────────────────");
-            println!("{}", system_message);
-            println!("───────────────────────────────────────");
-            println!("Context Texts:\n{}", formatted_texts);
-            println!("═══════════════════════════════════════\n");
+            colmena_log!("\n═══════════════════════════════════════");
+            colmena_log!("🔎 [CriticNode] VERBOSE — System Prompt:");
+            colmena_log!("───────────────────────────────────────");
+            colmena_log!("{}", system_message);
+            colmena_log!("───────────────────────────────────────");
+            colmena_log!("Context Texts:\n{}", formatted_texts);
+            colmena_log!("═══════════════════════════════════════\n");
         } else {
-            println!("🔎 [CriticNode] Reviewing task result...");
+            colmena_log!("🔎 [CriticNode] Reviewing task result...");
         }
 
         // --- 5. Call LLM ---
@@ -332,11 +249,11 @@ impl ExecutableNode for CriticNode {
         let raw = response.content();
 
         if verbose {
-            println!("\n═══════════════════════════════════════");
-            println!("🔎 [CriticNode] VERBOSE — Raw LLM Response:");
-            println!("───────────────────────────────────────");
-            println!("{}", raw);
-            println!("═══════════════════════════════════════\n");
+            colmena_log!("\n═══════════════════════════════════════");
+            colmena_log!("🔎 [CriticNode] VERBOSE — Raw LLM Response:");
+            colmena_log!("───────────────────────────────────────");
+            colmena_log!("{}", raw);
+            colmena_log!("═══════════════════════════════════════\n");
         }
 
         // --- 6. Parse JSON response ---
@@ -362,27 +279,31 @@ impl ExecutableNode for CriticNode {
             .get("task_ok")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let add_tasks = parsed.get("add_tasks").cloned().unwrap_or(json!([]));
+        let feedback = parsed
+            .get("feedback")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let suspend = parsed
             .get("suspend")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         let question = parsed.get("question").cloned().unwrap_or(Value::Null);
 
-        println!(
-            "🔎 [CriticNode] Decision → task_ok={}, new_tasks={}, suspend={}",
+        colmena_log!(
+            "🔎 [CriticNode] Decision → task_ok={}, has_feedback={}, suspend={}",
             task_ok,
-            add_tasks.as_array().map(|a| a.len()).unwrap_or(0),
+            !feedback.is_empty(),
             suspend
         );
 
         Ok(json!({
             "result": task_ok,
             "extra_info": {
-                "task_ok":   task_ok,
-                "add_tasks": add_tasks,
-                "suspend":   suspend,
-                "question":  question,
+                "task_ok":  task_ok,
+                "feedback": feedback,
+                "suspend":  suspend,
+                "question": question,
                 "__colmena_status": if suspend { "SUSPENDED" } else { "OK" }
             }
         }))
@@ -404,17 +325,16 @@ impl ExecutableNode for CriticNode {
                 "api_key": "string or ${ENV_VAR}",
                 "model": "optional model name",
                 "verbose": "bool (default false)",
-                "agents": "optional array of { name, description } or bare strings",
                 "system_message": "optional extra instructions concatenated with the default prompt"
             },
             "inputs": {
-                "texts.*": "Named text inputs for the Critic to review (e.g. texts.clothing_result, texts.current_task)"
+                "texts.*": "Named text inputs for the Critic to review (e.g. texts.agent_result, texts.current_task)"
             },
             "outputs": {
-                "task_ok":   "bool — true if the result is satisfactory",
-                "add_tasks": "array of { task, assigned_to } to queue",
-                "suspend":   "bool — true if user input is needed",
-                "question":  "string — the question to ask the user when suspend=true",
+                "task_ok":  "bool — true if the result is satisfactory",
+                "feedback": "string — when task_ok=false, explains what was wrong and what to do differently",
+                "suspend":  "bool — true if user input is needed",
+                "question": "string — the question to ask the user when suspend=true",
                 "__colmena_status": "SUSPENDED | OK"
             }
         })

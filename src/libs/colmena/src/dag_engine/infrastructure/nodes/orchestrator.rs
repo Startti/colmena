@@ -1,10 +1,101 @@
+use crate::colmena_log;
 use crate::dag_engine::application::ports::NodeRegistryPort;
+use crate::dag_engine::domain::events::DagExecutionEvent;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
+use crate::dag_engine::domain::observer::{ExecutionObserver, NodeEvent};
 use crate::dag_engine::domain::state::{DagTask, DagTaskMemoryRepository};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::sync::{Arc, Weak};
+
+// ── ChildNodeObserver ────────────────────────────────────────────────────────
+// Re-attributes all NodeEvent variants to a specific child node_id and forwards
+// them as SubgraphChildEvent so they appear in the stream under the correct ID
+// instead of the parent orchestrator's ID.
+
+struct ChildNodeObserver {
+    parent: Arc<dyn ExecutionObserver>,
+    node_id: String,
+}
+
+impl ExecutionObserver for ChildNodeObserver {
+    fn on_event(&self, event: NodeEvent) {
+        let dag_event = match event {
+            NodeEvent::LlmToken { token } =>
+                DagExecutionEvent::LlmToken { node_id: self.node_id.clone(), token },
+            NodeEvent::LlmUsage { prompt_tokens, completion_tokens } =>
+                DagExecutionEvent::LlmUsage { node_id: self.node_id.clone(), prompt_tokens, completion_tokens },
+            NodeEvent::LlmToolCall { tool_id, tool_name, args_chunk } =>
+                DagExecutionEvent::LlmToolCall { node_id: self.node_id.clone(), tool_id, tool_name, args_chunk },
+            NodeEvent::LlmToolCallStart { tool_id, tool_name, tool_args } =>
+                DagExecutionEvent::LlmToolCallStart { node_id: self.node_id.clone(), tool_id, tool_name, tool_args },
+            NodeEvent::LlmToolCallFinish { tool_id, success, output } =>
+                DagExecutionEvent::LlmToolCallFinish { node_id: self.node_id.clone(), tool_id, success, output },
+            NodeEvent::LlmMessageStart =>
+                DagExecutionEvent::LlmMessageStart { node_id: self.node_id.clone() },
+            NodeEvent::LlmMessageFinish(usage) =>
+                DagExecutionEvent::LlmMessageFinish {
+                    node_id: self.node_id.clone(),
+                    usage: usage.as_ref().map(|u| serde_json::to_value(u).unwrap_or(Value::Null)),
+                },
+            NodeEvent::SubgraphChildEvent(raw) => {
+                self.parent.on_event(NodeEvent::SubgraphChildEvent(raw));
+                return;
+            }
+        };
+        if let Ok(raw) = serde_json::to_value(&dag_event) {
+            self.parent.on_event(NodeEvent::SubgraphChildEvent(raw));
+        }
+    }
+}
+
+fn emit_internal_node_start(
+    observer: &Option<Arc<dyn ExecutionObserver>>,
+    node_id: &str,
+    node_type: &str,
+    inputs: Value,
+) {
+    if let Some(obs) = observer {
+        let event = DagExecutionEvent::NodeStart {
+            node_id: node_id.to_string(),
+            node_type: node_type.to_string(),
+            inputs,
+            config: Value::Object(Default::default()),
+        };
+        if let Ok(raw) = serde_json::to_value(&event) {
+            obs.on_event(NodeEvent::SubgraphChildEvent(raw));
+        }
+    }
+}
+
+fn emit_internal_node_finish(
+    observer: &Option<Arc<dyn ExecutionObserver>>,
+    node_id: &str,
+    output: Value,
+) {
+    if let Some(obs) = observer {
+        let event = DagExecutionEvent::NodeFinish {
+            node_id: node_id.to_string(),
+            output,
+        };
+        if let Ok(raw) = serde_json::to_value(&event) {
+            obs.on_event(NodeEvent::SubgraphChildEvent(raw));
+        }
+    }
+}
+
+fn child_observer(
+    observer: &Option<Arc<dyn ExecutionObserver>>,
+    node_id: &str,
+) -> Option<Arc<dyn ExecutionObserver>> {
+    observer.as_ref().map(|obs| {
+        Arc::new(ChildNodeObserver {
+            parent: obs.clone(),
+            node_id: node_id.to_string(),
+        }) as Arc<dyn ExecutionObserver>
+    })
+}
 
 /// Returned by `handle_phase_completion` and `finalize_execution` to signal whether
 /// execution should continue or propagate a suspend to the DAG engine.
@@ -50,7 +141,7 @@ impl OrchestratorNode {
         state: &mut Value,
         observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     ) -> Result<OrchestratorSuspend, Box<dyn StdError + Send + Sync>> {
-        println!(
+        colmena_log!(
             "🏁 [OrchestratorNode] Phase {} complete. Processing reaction...",
             phase
         );
@@ -61,7 +152,7 @@ impl OrchestratorNode {
         let phase_output;
 
         if let Some(reactor_cfg) = config.get("phase_reactor") {
-            println!("⚡ [OrchestratorNode] Internal Phase Reactor starting...");
+            colmena_log!("⚡ [OrchestratorNode] Internal Phase Reactor starting...");
             let registry = self.registry.upgrade().ok_or("Registry already dropped")?;
             let reactor_node = registry
                 .get_node("reactor")
@@ -91,11 +182,13 @@ impl OrchestratorNode {
             // ── Step 2: Forzar Schema del Reactor ────────────────────────────
             // Inyectar en el system_message del reactor las instrucciones de formato
             // y la lista de agentes disponibles para evitar alucinaciones en new_tasks.
-            let available_agents: Vec<String> = config
-                .get("agents")
-                .and_then(|a| a.as_object())
-                .map(|obj| obj.keys().cloned().collect())
-                .unwrap_or_default();
+            let mut available_agents: Vec<(String, String)> = Vec::new();
+            if let Some(agents_obj) = config.get("agents").and_then(|a| a.as_object()) {
+                for (name, props) in agents_obj {
+                    let desc = props.get("description").and_then(|v| v.as_str()).unwrap_or("No description provided");
+                    available_agents.push((name.clone(), desc.to_string()));
+                }
+            }
 
             let mut reactor_cfg_owned = reactor_cfg.clone();
             inject_reactor_schema_constraints(&mut reactor_cfg_owned, &available_agents);
@@ -145,7 +238,7 @@ impl OrchestratorNode {
                             )),
                         );
                     }
-                    println!(
+                    colmena_log!(
                         "💬 [OrchestratorNode] Phase {} reactor re-running with user clarification injected.",
                         phase
                     );
@@ -156,18 +249,25 @@ impl OrchestratorNode {
                 obj.remove("__orchestrator_phase_reactor_qa");
             }
 
-            println!(
+            colmena_log!(
                 "📨 [OrchestratorNode] REACTOR INPUTS (phase {}):\n{}\n{}",
                 phase,
                 "─".repeat(60),
                 serde_json::to_string_pretty(&reactor_inputs).unwrap_or_else(|_| format!("{:?}", reactor_inputs))
             );
 
+            emit_internal_node_start(&observer, "phase_reactor", "reactor", json!({
+                "phase": phase,
+                "model": reactor_cfg_owned.get("model").cloned().unwrap_or(Value::Null),
+                "provider": reactor_cfg_owned.get("provider").cloned().unwrap_or(Value::Null),
+            }));
+            let phase_reactor_obs = child_observer(&observer, "phase_reactor");
             let reactor_res = reactor_node
-                .execute(&reactor_inputs, &reactor_cfg_owned, state, observer.clone())
+                .execute(&reactor_inputs, &reactor_cfg_owned, state, phase_reactor_obs)
                 .await?;
+            emit_internal_node_finish(&observer, "phase_reactor", reactor_res.clone());
 
-            println!(
+            colmena_log!(
                 "📬 [OrchestratorNode] REACTOR RAW RESULT (phase {}):\n{}\n{}\n{}",
                 phase,
                 "─".repeat(60),
@@ -190,7 +290,7 @@ impl OrchestratorNode {
                     .filter(|s| !s.is_empty())
                     .unwrap_or("Please clarify before continuing.")
                     .to_string();
-                println!(
+                colmena_log!(
                     "⏸️  [OrchestratorNode] Phase {} reactor suspended. Question: {}",
                     phase, question_text
                 );
@@ -247,7 +347,7 @@ impl OrchestratorNode {
 
             if !summary_str.trim().is_empty() {
                 repo.save_phase_summary(session_id, phase, &summary_str).await?;
-                println!("💾 [OrchestratorNode] Phase {} summary saved.", phase);
+                colmena_log!("💾 [OrchestratorNode] Phase {} summary saved.", phase);
             }
 
             // ── Step 3: Dynamic Replanning ────────────────────────────────────
@@ -279,8 +379,8 @@ impl OrchestratorNode {
                     }
 
                     // Validar que el agente existe en config["agents"]
-                    if !available_agents.contains(&assigned_to) {
-                        println!(
+                    if !available_agents.iter().any(|(name, _)| name == &assigned_to) {
+                        colmena_log!(
                             "⚠️  [OrchestratorNode] Reactor hallucinated agent '{}' — discarding task '{}'.",
                             assigned_to, task_name
                         );
@@ -294,7 +394,7 @@ impl OrchestratorNode {
                         t.assigned_to == assigned_to && t.task_name == task_name
                     });
                     if already_exists {
-                        println!(
+                        colmena_log!(
                             "⏭️  [OrchestratorNode] Skipping duplicate recovery task '{}' for '{}' — already exists (completed={}).",
                             task_name, assigned_to,
                             existing_tasks.iter().find(|t| t.assigned_to == assigned_to && t.task_name == task_name).map(|t| t.completed).unwrap_or(false)
@@ -335,7 +435,7 @@ impl OrchestratorNode {
                     };
                     repo.add_task(&new_task).await?;
                     if is_bridge {
-                        println!(
+                        colmena_log!(
                             "🌉 [OrchestratorNode] Bridge task '{}' → '{}' seeded in phase {} (runs before phase {}).",
                             task_name, assigned_to, task_phase, next_phase
                         );
@@ -344,7 +444,7 @@ impl OrchestratorNode {
                 }
 
                 if sowed > 0 {
-                    println!(
+                    colmena_log!(
                         "🌱 [OrchestratorNode] Sowed {} new task(s) via Reactor into phase {}.",
                         sowed, next_phase
                     );
@@ -354,8 +454,10 @@ impl OrchestratorNode {
             phase_output = Value::String(summary_str);
         } else {
             // ── Step 4: Fallback sin reactor ─────────────────────────────────
-            println!("🔗 [OrchestratorNode] No reactor found. Concatenating phase results (truncated fallback)...");
-            println!("⚠️  [OrchestratorNode] For production flows, configure 'phase_reactor' to enable context summarization and dynamic replanning.");
+            colmena_log!("🔗 [OrchestratorNode] No reactor found. Concatenating phase results (truncated fallback)...");
+            colmena_log!("⚠️  [OrchestratorNode] For production flows, configure 'phase_reactor' to enable context summarization and dynamic replanning.");
+
+            emit_internal_node_start(&observer, "phase_summary", "phase_summary", json!({"phase": phase}));
 
             let mut results = Vec::new();
             for task in &phase_tasks {
@@ -377,6 +479,7 @@ impl OrchestratorNode {
                 full_concat
             };
 
+            emit_internal_node_finish(&observer, "phase_summary", Value::String(truncated.clone()));
             phase_output = Value::String(truncated);
         }
 
@@ -398,16 +501,20 @@ impl OrchestratorNode {
         state: &mut Value,
         observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     ) -> Result<OrchestratorSuspend, Box<dyn StdError + Send + Sync>> {
-        println!("✅ [OrchestratorNode] All phases complete. Finalizing...");
+        colmena_log!("✅ [OrchestratorNode] All phases complete. Finalizing...");
 
         let all_tasks = repo.get_tasks_for_run(session_id).await?;
         let all_tasks_json = build_tasks_json(all_tasks);
         let phase_summaries = repo.get_phase_summaries(session_id).await?;
 
-        let mut final_response = Value::Null;
+        let final_response;
 
-        if let Some(final_reactor_cfg) = config.get("final_reactor") {
-            println!("⚡ [OrchestratorNode] Internal Final Reactor starting...");
+        let final_reactor_cfg = config
+            .get("final_reactor")
+            .ok_or("OrchestratorNode: 'final_reactor' is required in config. It produces the structured response to the user's initial query.")?;
+
+        {
+            colmena_log!("⚡ [OrchestratorNode] Internal Final Reactor starting...");
             let registry = self.registry.upgrade().ok_or("Registry already dropped")?;
             let reactor_node = registry
                 .get_node("reactor")
@@ -431,9 +538,15 @@ impl OrchestratorNode {
                 }
             }
 
+            emit_internal_node_start(&observer, "final_reactor", "reactor", json!({
+                "model": final_reactor_cfg.get("model").cloned().unwrap_or(Value::Null),
+                "provider": final_reactor_cfg.get("provider").cloned().unwrap_or(Value::Null),
+            }));
+            let final_reactor_obs = child_observer(&observer, "final_reactor");
             let reactor_res = reactor_node
-                .execute(&reactor_inputs, final_reactor_cfg, state, observer)
+                .execute(&reactor_inputs, final_reactor_cfg, state, final_reactor_obs)
                 .await?;
+            emit_internal_node_finish(&observer, "final_reactor", reactor_res.clone());
 
             // ── Suspend check ─────────────────────────────────────────────────
             let reactor_suspended = reactor_res
@@ -450,7 +563,7 @@ impl OrchestratorNode {
                     .filter(|s| !s.is_empty())
                     .unwrap_or("Please clarify before producing the final response.")
                     .to_string();
-                println!(
+                colmena_log!(
                     "⏸️  [OrchestratorNode] Final reactor suspended. Question: {}",
                     question_text
                 );
@@ -517,11 +630,11 @@ impl ExecutableNode for OrchestratorNode {
             .unwrap_or(false);
 
         if verbose {
-            println!("\n═══════════════════════════════════════");
-            println!("🚦 [OrchestratorNode] VERBOSE — session_id: {}", session_id);
-            println!("───────────────────────────────────────");
-            println!("Inputs: {:?}", inputs);
-            println!("═══════════════════════════════════════\n");
+            colmena_log!("\n═══════════════════════════════════════");
+            colmena_log!("🚦 [OrchestratorNode] VERBOSE — session_id: {}", session_id);
+            colmena_log!("───────────────────────────────────────");
+            colmena_log!("Inputs: {:?}", inputs);
+            colmena_log!("═══════════════════════════════════════\n");
         }
 
         // ── Detect resume context ─────────────────────────────────────────────
@@ -538,7 +651,7 @@ impl ExecutableNode for OrchestratorNode {
         // If resuming from a suspend, handle based on where we suspended.
         if let (Some(ref ans), Some((ref sa, _, _, ref questions))) = (&resume_answer, &suspend_meta) {
             if sa == "critic" {
-                println!("▶️  [OrchestratorNode] Resuming from critic suspend. Preparing Q&A context for agent re-execution.");
+                colmena_log!("▶️  [OrchestratorNode] Resuming from critic suspend. Preparing Q&A context for agent re-execution.");
                 // Prepare Q&A context but DO NOT clear suspend_meta — the resuming_critic guard in the task loop will handle the cleanup
                 let qa_str = questions_to_context_string(questions, ans);
                 if let Some(obj) = _state.as_object_mut() {
@@ -549,7 +662,7 @@ impl ExecutableNode for OrchestratorNode {
                 }
                 // NOTE: Suspend meta cleanup happens in resuming_critic guard, not here
             } else if sa == "final_reactor" {
-                println!("▶️  [OrchestratorNode] Resuming from final_reactor suspend. Injecting Q&A context.");
+                colmena_log!("▶️  [OrchestratorNode] Resuming from final_reactor suspend. Injecting Q&A context.");
                 let qa_str = questions_to_context_string(questions, ans);
                 if let Some(obj) = _state.as_object_mut() {
                     obj.insert(
@@ -559,7 +672,7 @@ impl ExecutableNode for OrchestratorNode {
                 }
                 clear_suspend_meta(_state);
             } else if sa == "planner" {
-                println!("▶️  [OrchestratorNode] Resuming from planner suspend. Injecting Q&A as planner context and phase 0 summary.");
+                colmena_log!("▶️  [OrchestratorNode] Resuming from planner suspend. Injecting Q&A as planner context and phase 0 summary.");
                 let new_qa = questions_to_context_string(questions, ans);
                 // Accumulate with any previous planner Q&A rounds so the planner sees the full history
                 let accumulated_qa = {
@@ -577,7 +690,7 @@ impl ExecutableNode for OrchestratorNode {
                 // Save as phase 0 summary so ALL agents in the run can see it
                 if let Some(repo) = &self.task_memory_repo {
                     if let Err(e) = repo.save_phase_summary(&session_id, 0, &format!("[PLANNER Q&A] {}", accumulated_qa)).await {
-                        println!("⚠️  [OrchestratorNode] Failed to save planner Q&A as phase 0 summary: {}", e);
+                        colmena_log!("⚠️  [OrchestratorNode] Failed to save planner Q&A as phase 0 summary: {}", e);
                     }
                 }
                 // Stash accumulated Q&A for planner re-injection into system_message
@@ -598,13 +711,16 @@ impl ExecutableNode for OrchestratorNode {
             if let Some(planner_cfg) = config.get("planner") {
                 let existing_tasks = repo.get_tasks_for_run(&session_id).await?;
                 if existing_tasks.is_empty() {
-                    println!("🗂️ [OrchestratorNode] Internal Planning started...");
+                    colmena_log!("🗂️ [OrchestratorNode] Internal Planning started...");
 
-                    // Derivar agentes automáticamente de config["agents"]
+                    // Derivar agentes automáticamente de config["agents"] y recolectar descripciones
                     let mut agent_names = Vec::new();
+                    let mut agent_descriptions = String::new();
                     if let Some(agents_obj) = config.get("agents").and_then(|a| a.as_object()) {
-                        for name in agents_obj.keys() {
+                        for (name, props) in agents_obj {
                             agent_names.push(Value::String(name.clone()));
+                            let desc = props.get("description").and_then(|v| v.as_str()).unwrap_or("No description provided");
+                            agent_descriptions.push_str(&format!("- {}: {}\n", name, desc));
                         }
                     }
 
@@ -618,17 +734,18 @@ impl ExecutableNode for OrchestratorNode {
                             }
                         }
                         // Añadir instrucción para que cada tarea incluya un campo "context"
-                        // que describe por qué existe la tarea y cuál es la intención del usuario.
-                        let context_instruction = "\n\nFor each task in your plan, you MUST include a \"context\" field: \
+                        // y alimentar las descripciones
+                        let context_instruction = format!("\n\nAVAILABLE AGENTS (Use these assignments and consider their expertise):\n{}\n\n\
+                            For each task in your plan, you MUST include a \"context\" field: \
                             a 1-2 sentence explanation of why this task exists and what the user's intent is \
                             (e.g. \"The user wants to know what clothing to pack for a ski trip in cold conditions.\"). \
-                            This context will be shown to the agent alongside the task instruction.";
+                            This context will be shown to the agent alongside the task instruction.", agent_descriptions);
                         let mut existing_sm = obj
                             .get("system_message")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        existing_sm.push_str(context_instruction);
+                        existing_sm.push_str(&context_instruction);
 
                         // Inject Q&A context from a previous planner suspend if present
                         if let Some(qa) = _state.get("__orchestrator_planner_qa") {
@@ -658,9 +775,16 @@ impl ExecutableNode for OrchestratorNode {
 
                     // Ejecutamos el planner. El PlannerNode escribe el plan en 'state' y retorna { result: { items: [...] } }
                     // o { result: { questions: [...] } } si necesita clarificación.
+                    emit_internal_node_start(&_observer, "planner", "planner", json!({
+                        "prompt": inputs.get("prompt").cloned().unwrap_or(Value::Null),
+                        "model": internal_planner_cfg.get("model").cloned().unwrap_or(Value::Null),
+                        "provider": internal_planner_cfg.get("provider").cloned().unwrap_or(Value::Null),
+                    }));
+                    let planner_obs = child_observer(&_observer, "planner");
                     let planner_result = planner_node
-                        .execute(inputs, &internal_planner_cfg, _state, _observer.clone())
+                        .execute(inputs, &internal_planner_cfg, _state, planner_obs)
                         .await?;
+                    emit_internal_node_finish(&_observer, "planner", planner_result.clone());
 
                     // Detectar si el planner quiere suspender para pedir más info
                     let planner_questions_opt: Option<Vec<SuspendQuestion>> = planner_result
@@ -673,7 +797,7 @@ impl ExecutableNode for OrchestratorNode {
                         let planner_allow_suspend_default = json!({});
                         let planner_cfg_raw = config.get("planner").unwrap_or(&planner_allow_suspend_default);
                         if allow_suspend_for(planner_cfg_raw) {
-                            println!("⏸️  [OrchestratorNode] Planner requested clarification before generating tasks.");
+                            colmena_log!("⏸️  [OrchestratorNode] Planner requested clarification before generating tasks.");
                             return Ok(make_suspend_response(
                                 _state,
                                 "planner",
@@ -733,9 +857,9 @@ impl ExecutableNode for OrchestratorNode {
                             }
                         }
                         // Print plan in human-readable format for debugging
-                        println!("💾 [OrchestratorNode] DB seeded with {} tasks from internal planner.", items.len());
-                        println!("📋 [OrchestratorNode] PLAN:");
-                        println!("{}", "─".repeat(60));
+                        colmena_log!("💾 [OrchestratorNode] DB seeded with {} tasks from internal planner.", items.len());
+                        colmena_log!("📋 [OrchestratorNode] PLAN:");
+                        colmena_log!("{}", "─".repeat(60));
                         let mut phase_map: std::collections::BTreeMap<i64, Vec<String>> = std::collections::BTreeMap::new();
                         for task_val in items {
                             let phase_num = task_val.get("phase").and_then(|v| v.as_i64()).unwrap_or(1);
@@ -748,10 +872,10 @@ impl ExecutableNode for OrchestratorNode {
                             phase_map.entry(phase_num).or_default().push(entry);
                         }
                         for (ph, tasks) in &phase_map {
-                            println!("Phase {}:", ph);
+                            colmena_log!("Phase {}:", ph);
                             for t in tasks { println!("{}", t); }
                         }
-                        println!("{}", "─".repeat(60));
+                        colmena_log!("{}", "─".repeat(60));
                     }
                 }
             } else {
@@ -797,7 +921,7 @@ impl ExecutableNode for OrchestratorNode {
                         // Safety net: si se supera el límite de fases, forzar finalización.
                         // Evita loops infinitos cuando el reactor propone tareas indefinidamente.
                         if current_phase > max_phases {
-                            println!(
+                            colmena_log!(
                                 "⚠️  [OrchestratorNode] max_phases ({}) reached at phase {}. Forcing finalization.",
                                 max_phases, current_phase
                             );
@@ -832,7 +956,7 @@ impl ExecutableNode for OrchestratorNode {
                                     );
                                 }
                                 clear_suspend_meta(_state);
-                                println!(
+                                colmena_log!(
                                     "▶️  [OrchestratorNode] Resumed phase {} reactor — re-executing reactor with user clarification.",
                                     current_phase
                                 );
@@ -871,7 +995,7 @@ impl ExecutableNode for OrchestratorNode {
                                             parts.join("\n\n")
                                         );
                                         repo.save_phase_summary(&session_id, current_phase, &bridge_summary).await?;
-                                        println!(
+                                        colmena_log!(
                                             "💾 [OrchestratorNode] Bridge summary saved for phase {} ({} task(s)).",
                                             current_phase, bridge_done.len()
                                         );
@@ -882,7 +1006,7 @@ impl ExecutableNode for OrchestratorNode {
                                 if let Some(obj) = _state.as_object_mut() {
                                     obj.remove(&reactor_done_key);
                                 }
-                                println!(
+                                colmena_log!(
                                     "🌉 [OrchestratorNode] Phase {} bridge complete. Advancing to next phase.",
                                     current_phase
                                 );
@@ -955,13 +1079,15 @@ impl ExecutableNode for OrchestratorNode {
                                     // User accepts the result as-is — use the stashed agent result
                                     let stash_key = format!("__orch_pending_{}", task.id);
                                     let retry_key = format!("__orch_retries_{}", task.id);
+                                    let feedback_key = format!("__orch_critic_feedback_{}", task.id);
                                     let stashed = _state.get(&stash_key).cloned().unwrap_or(json!({"result": "[Accepted by user]", "extra_info": {}}));
                                     repo.update_task_result(&task.id, stashed).await?;
                                     if let Some(obj) = _state.as_object_mut() {
                                         obj.remove(&stash_key);
                                         obj.remove(&retry_key);
+                                        obj.remove(&feedback_key);
                                     }
-                                    println!(
+                                    colmena_log!(
                                         "✅ [OrchestratorNode] Task '{}' accepted by user. Using existing result.",
                                         task.task_name
                                     );
@@ -977,11 +1103,13 @@ impl ExecutableNode for OrchestratorNode {
                                     repo.update_task_result(&task.id, json!({ "result": note, "extra_info": {} })).await?;
                                     let stash_key = format!("__orch_pending_{}", task.id);
                                     let retry_key = format!("__orch_retries_{}", task.id);
+                                    let feedback_key = format!("__orch_critic_feedback_{}", task.id);
                                     if let Some(obj) = _state.as_object_mut() {
                                         obj.remove(&stash_key);
                                         obj.remove(&retry_key);
+                                        obj.remove(&feedback_key);
                                     }
-                                    println!(
+                                    colmena_log!(
                                         "⏭️  [OrchestratorNode] Task '{}' {}. Moving on.",
                                         task.task_name,
                                         if cancel { "cancelled" } else { "skipped" }
@@ -999,7 +1127,7 @@ impl ExecutableNode for OrchestratorNode {
                                             json!({ "qa_context": qa_str }),
                                         );
                                     }
-                                    println!(
+                                    colmena_log!(
                                         "🔄 [OrchestratorNode] Task '{}' retrying with user clarification.",
                                         task.task_name
                                     );
@@ -1031,50 +1159,54 @@ impl ExecutableNode for OrchestratorNode {
                                 // don't re-trigger this guard — without this, every retry
                                 // cycle would wrongly re-inject the same Q&A context.
                                 suspend_meta = None;
-                                println!(
+                                colmena_log!(
                                     "▶️  [OrchestratorNode] Resumed critic for task '{}'. Re-running agent with USER CLARIFICATION.",
                                     task.task_name
                                 );
                                 // NO continue — fall-through para re-ejecutar el agente con contexto
                             }
 
-                            println!(
+                            colmena_log!(
                                 "🚀 [OrchestratorNode] Internal Execution: Task '{}' -> Agent '{}'",
                                 task.task_name, task.assigned_to
                             );
 
-                            // Preparar inputs para el agente
+                            // Build the single prompt text that the agent receives.
+                            // task + context are combined here — the agent only needs `prompt`.
                             let mut task_inputs = inputs.clone();
-                            task_inputs
-                                .insert("task".to_string(), Value::String(task.task_name.clone()));
-
-                            // ── Context Builder ──────────────────────────────────────
-                            // Construir un prompt enriquecido con contexto histórico para agentes
-                            // en fases avanzadas, evitando explotar la ventana de contexto con
-                            // resultados crudos de la fase anterior.
+                            // Unique __node_id per agent so SubGraphNode generates distinct
+                            // child_session_ids: "{session_id}_sub_{agent_name}"
+                            task_inputs.insert("__node_id".to_string(), Value::String(task.assigned_to.clone()));
                             let phase_summaries_for_ctx = repo.get_phase_summaries(&session_id).await.unwrap_or_default();
                             let qa_ctx: Option<String> = _state
                                 .get("__orchestrator_qa_context")
                                 .and_then(|v| v.get("qa_context"))
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string());
-                            let enriched_prompt = build_enriched_prompt(
+                            let critic_feedback_ctx: Option<String> = {
+                                let feedback_key = format!("__orch_critic_feedback_{}", task.id);
+                                _state
+                                    .get(&feedback_key)
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                            };
+                            let prompt = build_enriched_prompt(
                                 &phase_summaries_for_ctx,
                                 &task.task_name,
                                 task.context.as_deref(),
                                 qa_ctx.as_deref(),
+                                critic_feedback_ctx.as_deref(),
                             );
 
-                            println!(
+                            colmena_log!(
                                 "📨 [OrchestratorNode] PROMPT → agent '{}' | task '{}'\n{}\n{}",
                                 task.assigned_to,
                                 task.task_name,
                                 "─".repeat(60),
-                                enriched_prompt
+                                prompt
                             );
 
-                            task_inputs
-                                .insert("prompt".to_string(), Value::String(enriched_prompt));
+                            task_inputs.insert("prompt".to_string(), Value::String(prompt));
 
                             // Obtener config del agente del bloque 'agents'
                             let agent_node_cfg = config
@@ -1087,15 +1219,40 @@ impl ExecutableNode for OrchestratorNode {
                                     )
                                 })?;
 
-                            // Ejecutar Agente (LlmNode)
-                            let llm_node = registry
-                                .get_node("llm_call")
-                                .ok_or("llm_call node not found")?;
-                            let agent_result = llm_node
-                                .execute(&task_inputs, agent_node_cfg, _state, _observer.clone())
+                            // Agents must be subgraphs (child_graph_path or child_graph_inline).
+                            // Direct LLM agent configs are no longer supported — use child_graph_inline
+                            // with a minimal `in → llm_call → out` graph instead.
+                            if agent_node_cfg.get("child_graph_path").is_none()
+                                && agent_node_cfg.get("child_graph_inline").is_none()
+                            {
+                                return Err(format!(
+                                    "Agent '{}' must be a subgraph: add 'child_graph_path' or \
+                                     'child_graph_inline' to its config. Direct LLM agent configs \
+                                     are no longer supported.",
+                                    task.assigned_to
+                                )
+                                .into());
+                            }
+
+                            colmena_log!(
+                                "🗺️  [OrchestratorNode] Agent '{}' delegating to SubGraphNode.",
+                                task.assigned_to
+                            );
+
+                            let mut subgraph_cfg = agent_node_cfg.clone();
+                            if let Some(obj) = subgraph_cfg.as_object_mut() {
+                                obj.insert("__agent_name".to_string(), Value::String(task.assigned_to.clone()));
+                            }
+
+                            let subgraph_node = registry
+                                .get_node("subgraph")
+                                .ok_or("subgraph node not found")?;
+
+                            let agent_result = subgraph_node
+                                .execute(&task_inputs, &subgraph_cfg, _state, _observer.clone())
                                 .await?;
 
-                            println!(
+                            colmena_log!(
                                 "📬 [OrchestratorNode] RAW RESULT ← agent '{}' | task '{}'\n{}\n{}\n{}",
                                 task.assigned_to,
                                 task.task_name,
@@ -1119,7 +1276,7 @@ impl ExecutableNode for OrchestratorNode {
                                     .and_then(|v| v.as_u64())
                                     .unwrap_or(0) as u32;
 
-                                println!(
+                                colmena_log!(
                                     "🔎 [OrchestratorNode] Internal Critique for task '{}' (attempt {}/{})...",
                                     task.task_name, current_retries + 1, max_retries
                                 );
@@ -1139,9 +1296,17 @@ impl ExecutableNode for OrchestratorNode {
                                     obj.insert(stash_key.clone(), agent_result.clone());
                                 }
 
+                                let critic_node_id = format!("critic_{}", task.assigned_to);
+                                emit_internal_node_start(&_observer, &critic_node_id, "critic", json!({
+                                    "task": task.task_name,
+                                    "model": critic_cfg.get("model").cloned().unwrap_or(Value::Null),
+                                    "provider": critic_cfg.get("provider").cloned().unwrap_or(Value::Null),
+                                }));
+                                let critic_obs = child_observer(&_observer, &critic_node_id);
                                 let critic_res = critic_node
-                                    .execute(&critic_inputs, critic_cfg, _state, _observer.clone())
+                                    .execute(&critic_inputs, critic_cfg, _state, critic_obs)
                                     .await?;
+                                emit_internal_node_finish(&_observer, &critic_node_id, critic_res.clone());
 
                                 // Check if critic wants to suspend and ask the user
                                 let critic_suspended = critic_res
@@ -1158,7 +1323,7 @@ impl ExecutableNode for OrchestratorNode {
                                         .filter(|s| !s.is_empty())
                                         .unwrap_or("Please review and confirm the agent result.")
                                         .to_string();
-                                    println!(
+                                    colmena_log!(
                                         "⏸️  [OrchestratorNode] Critic suspended for task '{}'. Question: {}",
                                         task.task_name, question_text
                                     );
@@ -1187,6 +1352,22 @@ impl ExecutableNode for OrchestratorNode {
                                     .and_then(|v| v.as_bool())
                                     .unwrap_or(true);
 
+                                // ── Capture Critic feedback for next agent attempt ────────
+                                if !is_ok {
+                                    let critic_feedback = critic_res
+                                        .get("extra_info")
+                                        .and_then(|e| e.get("feedback"))
+                                        .and_then(|v| v.as_str())
+                                        .filter(|s| !s.is_empty())
+                                        .map(|s| s.to_string());
+                                    if let Some(fb) = critic_feedback {
+                                        let feedback_key = format!("__orch_critic_feedback_{}", task.id);
+                                        if let Some(obj) = _state.as_object_mut() {
+                                            obj.insert(feedback_key, Value::String(fb));
+                                        }
+                                    }
+                                }
+
                                 // ── Max Retries suspend ───────────────────────────────────
                                 if !is_ok {
                                     let new_retries = current_retries + 1;
@@ -1195,7 +1376,7 @@ impl ExecutableNode for OrchestratorNode {
                                     }
 
                                     if new_retries >= max_retries && allow_suspend_for(critic_cfg) {
-                                        println!(
+                                        colmena_log!(
                                             "⏸️  [OrchestratorNode] Task '{}' exceeded max_retries ({}). Suspending for user decision.",
                                             task.task_name, max_retries
                                         );
@@ -1239,17 +1420,18 @@ impl ExecutableNode for OrchestratorNode {
 
                             if is_ok {
                                 repo.update_task_result(&task.id, agent_result).await?;
-                                // Clean up stash and Q&A context after task approved
+                                // Clean up stash, Q&A context and critic feedback after task approved
                                 if let Some(obj) = _state.as_object_mut() {
                                     obj.remove(&stash_key);
                                     obj.remove("__orchestrator_qa_context");
+                                    obj.remove(&format!("__orch_critic_feedback_{}", task.id));
                                 }
-                                println!(
+                                colmena_log!(
                                     "✅ [OrchestratorNode] Task '{}' completed successfully.",
                                     task.task_name
                                 );
                             } else {
-                                println!(
+                                colmena_log!(
                                     "❌ [OrchestratorNode] Task '{}' rejected by critic.",
                                     task.task_name
                                 );
@@ -1396,6 +1578,7 @@ fn build_enriched_prompt(
     task_name: &str,
     task_context: Option<&str>,
     qa_context: Option<&str>,
+    critic_feedback: Option<&str>,
 ) -> String {
     let mut parts = Vec::new();
 
@@ -1426,7 +1609,15 @@ fn build_enriched_prompt(
         ));
     }
 
-    // Section 4: current task instruction
+    // Section 4: Critic feedback from previous failed attempt.
+    // Only present on retries — tells the agent exactly what was wrong so it can correct it.
+    if let Some(fb) = critic_feedback {
+        if !fb.is_empty() {
+            parts.push(format!("=== INTENTO ANTERIOR — POR QUÉ FALLÓ ===\n{}", fb));
+        }
+    }
+
+    // Section 5: current task instruction
     parts.push(format!(
         "=== LO QUE TIENES QUE HACER AHORA TÚ ===\n{}",
         task_name
@@ -1437,7 +1628,13 @@ fn build_enriched_prompt(
 
 /// Injects schema constraints into a reactor config's system_message so the LLM
 /// knows the required output format and which agents are valid for new_tasks.
-fn inject_reactor_schema_constraints(reactor_cfg: &mut Value, available_agents: &[String]) {
+fn inject_reactor_schema_constraints(reactor_cfg: &mut Value, available_agents: &[(String, String)]) {
+    let agents_list = available_agents
+        .iter()
+        .map(|(n, d)| format!("- {}: {}", n, d))
+        .collect::<Vec<_>>()
+        .join("\n        ");
+
     let schema_instruction = format!(
         "\n\n---\nIMPORTANT: You MUST respond with valid JSON only. No prose, no markdown fences.\n\
         You are acting as a PHASE REACTOR (not a final reviewer). Your job is to:\n\
@@ -1461,9 +1658,10 @@ fn inject_reactor_schema_constraints(reactor_cfg: &mut Value, available_agents: 
           ],\n\
           \"suspend\": false\n\
         }}\n\
-        Available agents for add_tasks (ONLY use these names): [{}]\n\
+        Available agents for add_tasks (consider their expertise):\n\
+        {}\n\
         If no new tasks are needed, set add_tasks to [].",
-        available_agents.join(", ")
+        agents_list
     );
 
     if let Some(obj) = reactor_cfg.as_object_mut() {
@@ -1526,7 +1724,7 @@ fn extract_reactor_output_with_fallback(
     }
 
     // Case 3: Null or unexpected shape
-    println!("⚠️  [OrchestratorNode] Reactor returned null/unexpected result. No summary or new_tasks.");
+    colmena_log!("⚠️  [OrchestratorNode] Reactor returned null/unexpected result. No summary or new_tasks.");
     (String::new(), fallback_add_tasks)
 }
 
@@ -1593,11 +1791,11 @@ fn allow_suspend_for(component_cfg: &Value) -> bool {
 
 /// Prints a debug log when `allow_suspend: false` blocks a suspension.
 fn debug_print_questions(context: &str, questions: &[SuspendQuestion]) {
-    println!(
+    colmena_log!(
         "🚫 [OrchestratorNode] Suspend blocked by allow_suspend=false in '{}'.",
         context
     );
-    println!("   Questions that would have been asked:");
+    colmena_log!("   Questions that would have been asked:");
     for q in questions {
         match q.question_type.as_str() {
             "choice" => {
@@ -1606,10 +1804,10 @@ fn debug_print_questions(context: &str, questions: &[SuspendQuestion]) {
                     .as_ref()
                     .map(|o| o.join(" | "))
                     .unwrap_or_default();
-                println!("   [{} / choice] {} Options: {}", q.id, q.question, opts);
+                colmena_log!("   [{} / choice] {} Options: {}", q.id, q.question, opts);
             }
             _ => {
-                println!("   [{} / open] {}", q.id, q.question);
+                colmena_log!("   [{} / open] {}", q.id, q.question);
             }
         }
     }

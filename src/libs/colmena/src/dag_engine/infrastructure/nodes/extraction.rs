@@ -1,3 +1,4 @@
+use crate::colmena_log;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -131,20 +132,20 @@ impl ExecutableNode for ExtractionNode {
         }
 
         if formatted_texts.is_empty() {
-            println!(
+            colmena_log!(
                 "⚠️ [ExtractionNode] Skipped execution because 'texts' input was missing or empty."
             );
             return Ok(Value::Null);
         }
 
         if verbose {
-            println!("\n═══════════════════════════════════════");
-            println!("🔍 [ExtractionNode] VERBOSE — System Prompt:");
-            println!("───────────────────────────────────────");
-            println!("{}", system_message);
-            println!("───────────────────────────────────────");
-            println!("Texts:\n{}", formatted_texts);
-            println!("═══════════════════════════════════════\n");
+            colmena_log!("\n═══════════════════════════════════════");
+            colmena_log!("🔍 [ExtractionNode] VERBOSE — System Prompt:");
+            colmena_log!("───────────────────────────────────────");
+            colmena_log!("{}", system_message);
+            colmena_log!("───────────────────────────────────────");
+            colmena_log!("Texts:\n{}", formatted_texts);
+            colmena_log!("═══════════════════════════════════════\n");
         }
 
         // --- 4. Call LLM using AgentService ---
@@ -231,14 +232,14 @@ impl ExecutableNode for ExtractionNode {
         })?;
 
         if verbose {
-            println!("\n═══════════════════════════════════════");
-            println!("🔍 [ExtractionNode] VERBOSE — Parsed Output:");
-            println!("───────────────────────────────────────");
-            println!(
+            colmena_log!("\n═══════════════════════════════════════");
+            colmena_log!("🔍 [ExtractionNode] VERBOSE — Parsed Output:");
+            colmena_log!("───────────────────────────────────────");
+            colmena_log!(
                 "{}",
                 serde_json::to_string_pretty(&parsed_json).unwrap_or_default()
             );
-            println!("═══════════════════════════════════════\n");
+            colmena_log!("═══════════════════════════════════════\n");
         }
 
         let session_id = _state

@@ -1,11 +1,12 @@
-use crate::dag_engine::application::ports::NodeRegistryPort;
+use crate::colmena_log;
+use crate::dag_engine::application::ports::{NodeRegistryPort, SubGraphExecutorPort};
 use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::error::DagError;
 use crate::dag_engine::domain::graph::{Edge, Graph};
 use crate::dag_engine::domain::node::NodeInputs;
 use crate::dag_engine::infrastructure::persistence::PostgresSecureValueRepository;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
@@ -219,6 +220,12 @@ impl DagRunUseCase {
 
             let mut current_caller: Option<String> = None;
 
+            // Usage tracking: accumulate token counts and model/provider per node_id.
+            // node_meta: node_id → (model, provider, node_type)
+            // usage_accumulator: node_id → (prompt_tokens, completion_tokens)
+            let mut node_meta: HashMap<String, (Option<String>, Option<String>, String)> = HashMap::new();
+            let mut usage_accumulator: HashMap<String, (u32, u32)> = HashMap::new();
+
             // Start cyclic execution loop
             while let Some(node_id) = active_queue.pop_front() {
 
@@ -260,7 +267,7 @@ impl DagRunUseCase {
                     if upstream_running {
                         active_queue.push_back(node_id.clone());
                     } else {
-                        println!("⚠️ [RunUseCase] Dropping node '{}' from queue because its upstream dependencies never fired.", node_id);
+                        colmena_log!("⚠️ [RunUseCase] Dropping node '{}' from queue because its upstream dependencies never fired.", node_id);
                     }
                     continue;
                 }
@@ -273,7 +280,7 @@ impl DagRunUseCase {
                 // (trigger_on legacy skipping logic has been natively replaced by dynamic active_queue routing)
                 // Check Call Limits
                 if let Err(e) = Self::check_limits(&node_id, current_caller.as_deref(), &graph, &mut global_calls, &mut caller_specific_calls) {
-                    println!("🚨 [RunUseCase] Execution limit reached: {}", e);
+                    colmena_log!("🚨 [RunUseCase] Execution limit reached: {}", e);
                     break;
                 }
 
@@ -314,6 +321,32 @@ impl DagRunUseCase {
                 inputs.insert("__colmena_session_id".to_string(), Value::String(session_id.clone()));
                 inputs.insert("__node_id".to_string(), Value::String(node_id.clone()));
 
+                // INJECT GLOBAL SHARED STATE (so nodes can use {{key}} out of the box).
+                // We override None, Null, AND empty objects — the latter arise when an
+                // InputNode with an empty config outputs `{}` and build_inputs_for assigns
+                // that empty object to a default_input field (e.g. "prompt"), which would
+                // otherwise block injection of the real value from global state.
+                if let Some(obj) = global_shared_state.as_object() {
+                    for (k, v) in obj {
+                        let should_inject = match inputs.get(k) {
+                            None => true,
+                            Some(Value::Null) => true,
+                            Some(Value::Object(o)) if o.is_empty() => true,
+                            _ => false,
+                        };
+                        if should_inject {
+                            inputs.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+
+                // Record model/provider for usage summary
+                {
+                    let model = node_config.config.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let provider = node_config.config.get("provider").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    node_meta.insert(node_id.clone(), (model, provider, node_config.node_type.clone()));
+                }
+
                 yield DagExecutionEvent::NodeStart {
                     node_id: node_id.clone(),
                     node_type: node_config.node_type.clone(),
@@ -340,11 +373,46 @@ impl DagRunUseCase {
                                         match event {
                                             NodeEvent::LlmToken { token } => yield DagExecutionEvent::LlmToken { node_id: node_id.clone(), token },
                                             NodeEvent::LlmToolCall { tool_id, tool_name, args_chunk } => yield DagExecutionEvent::LlmToolCall { node_id: node_id.clone(), tool_id, tool_name, args_chunk },
-                                            NodeEvent::LlmUsage { prompt_tokens, completion_tokens } => yield DagExecutionEvent::LlmUsage { node_id: node_id.clone(), prompt_tokens, completion_tokens },
+                                            NodeEvent::LlmUsage { prompt_tokens, completion_tokens } => {
+                                                let entry = usage_accumulator.entry(node_id.clone()).or_insert((0, 0));
+                                                entry.0 += prompt_tokens;
+                                                entry.1 += completion_tokens;
+                                                yield DagExecutionEvent::LlmUsage { node_id: node_id.clone(), prompt_tokens, completion_tokens };
+                                            }
                                             NodeEvent::LlmToolCallStart { tool_id, tool_name, tool_args } => yield DagExecutionEvent::LlmToolCallStart { node_id: node_id.clone(), tool_id, tool_name, tool_args },
                                             NodeEvent::LlmToolCallFinish { tool_id, success, output } => yield DagExecutionEvent::LlmToolCallFinish { node_id: node_id.clone(), tool_id, success, output },
                                             NodeEvent::LlmMessageStart => yield DagExecutionEvent::LlmMessageStart { node_id: node_id.clone() },
                                             NodeEvent::LlmMessageFinish(usage) => yield DagExecutionEvent::LlmMessageFinish { node_id: node_id.clone(), usage: usage.map(|u| serde_json::json!(u)) },
+                                            NodeEvent::SubgraphChildEvent(raw) => {
+                                                // Re-yield child events preserving their original node IDs.
+                                                // GraphFinish is suppressed — SubgraphNodeFinish (below) serves that role.
+                                                // Also intercept NodeStart and LlmUsage to populate tracking maps.
+                                                if let Ok(child_event) = serde_json::from_value::<DagExecutionEvent>(raw) {
+                                                    // Extract tracking data before moving child_event into yield
+                                                    match &child_event {
+                                                        DagExecutionEvent::NodeStart { node_id: cid, node_type: ctype, inputs, config } => {
+                                                            let model = inputs.get("model").or_else(|| config.get("model"))
+                                                                .and_then(|v| v.as_str()).map(|s| s.to_string());
+                                                            let provider = inputs.get("provider").or_else(|| config.get("provider"))
+                                                                .and_then(|v| v.as_str()).map(|s| s.to_string());
+                                                            node_meta.insert(cid.clone(), (model, provider, ctype.clone()));
+                                                        }
+                                                        DagExecutionEvent::LlmUsage { node_id: cid, prompt_tokens, completion_tokens } => {
+                                                            let entry = usage_accumulator.entry(cid.clone()).or_insert((0, 0));
+                                                            entry.0 += prompt_tokens;
+                                                            entry.1 += completion_tokens;
+                                                        }
+                                                        DagExecutionEvent::GraphFinish { .. } => {
+                                                            // suppressed
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                    match child_event {
+                                                        DagExecutionEvent::GraphFinish { .. } => {}
+                                                        other => yield other,
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                     None => break,
@@ -375,10 +443,17 @@ impl DagRunUseCase {
                     }
                 }
 
-                yield DagExecutionEvent::NodeFinish {
-                    node_id: node_id.clone(),
-                    output: processed_output.clone(),
-                };
+                if node_config.node_type == "subgraph" {
+                    yield DagExecutionEvent::SubgraphNodeFinish {
+                        node_id: node_id.clone(),
+                        output: processed_output.clone(),
+                    };
+                } else {
+                    yield DagExecutionEvent::NodeFinish {
+                        node_id: node_id.clone(),
+                        output: processed_output.clone(),
+                    };
+                }
 
                 // Handle SUSPENDED
                 if Self::find_status_by_key(&processed_output, "__colmena_status") == Some("SUSPENDED".to_string()) {
@@ -431,7 +506,7 @@ impl DagRunUseCase {
                         } else {
                             let json_pointer = parts_from[1].replace('.', "/");
                             let ptr_exists = processed_output.pointer(&format!("/{}", json_pointer)).is_some_and(|v| !v.is_null());
-                            println!("DEBUG [Queue Edge]: edge.from='{}' -> pointer='{}' -> has_data={}", edge.from, json_pointer, ptr_exists);
+                            colmena_log!("DEBUG [Queue Edge]: edge.from='{}' -> pointer='{}' -> has_data={}", edge.from, json_pointer, ptr_exists);
                             ptr_exists
                         };
 
@@ -439,7 +514,7 @@ impl DagRunUseCase {
                             let target_node_id = edge.to.split('.').next().unwrap_or("");
                             if graph.nodes.contains_key(target_node_id)
                                 && !active_queue.contains(&target_node_id.to_string()) {
-                                    println!("DEBUG [Queue Push]: Enqueuing {} -> {}", node_id, target_node_id);
+                                    colmena_log!("DEBUG [Queue Push]: Enqueuing {} -> {}", node_id, target_node_id);
                                     active_queue.push_back(target_node_id.to_string());
                                 }
                         }
@@ -485,6 +560,25 @@ impl DagRunUseCase {
                 if let Err(e) = svc.cleanup(&session_id).await {
                     eprintln!("⚠️ Failed to cleanup secure values: {}", e);
                 }
+            }
+
+            // Emit per-node usage summary before finishing
+            if !usage_accumulator.is_empty() {
+                let entries: Vec<Value> = usage_accumulator.iter().map(|(nid, (pt, ct))| {
+                    let (model, provider, ntype) = node_meta.get(nid)
+                        .map(|(m, p, t)| (m.clone(), p.clone(), t.clone()))
+                        .unwrap_or((None, None, String::new()));
+                    json!({
+                        "node_id": nid,
+                        "node_type": ntype,
+                        "model": model,
+                        "provider": provider,
+                        "prompt_tokens": pt,
+                        "completion_tokens": ct,
+                        "total_tokens": pt + ct
+                    })
+                }).collect();
+                yield DagExecutionEvent::GraphUsageSummary { entries };
             }
 
             yield DagExecutionEvent::GraphFinish { output: final_aggregated_output.clone() };
@@ -584,10 +678,11 @@ impl DagRunUseCase {
                 let inserted = if let Some(target_node_cfg) = graph.nodes.get(current_node_id) {
                     if let Some(target_node_impl) = self.registry.get_node(&target_node_cfg.node_type) {
                         if let Some(field) = target_node_impl.default_input() {
-                            // Smart extraction: if no explicit source field and target has default_input,
-                            // try to extract that field from the source object
-                            let val_to_insert = if source_field_opt.is_none() && value_to_pass.is_object() {
-                                // Try to extract the target field from the source object
+                            // Smart extraction: if the source value is an object and the target
+                            // has a default_input that matches a key in that object, extract it
+                            // directly. This allows simple edges (e.g. "start_trigger → llm_call")
+                            // to work without needing explicit field notation.
+                            let val_to_insert = if value_to_pass.is_object() {
                                 value_to_pass
                                     .get(field)
                                     .cloned()
@@ -631,5 +726,86 @@ struct ChannelObserver {
 impl crate::dag_engine::domain::observer::ExecutionObserver for ChannelObserver {
     fn on_event(&self, event: crate::dag_engine::domain::observer::NodeEvent) {
         let _ = self.tx.send(event);
+    }
+}
+
+#[async_trait::async_trait]
+impl SubGraphExecutorPort for DagRunUseCase {
+    async fn run_subgraph(
+        &self,
+        session_id: &str,
+        graph_json: Value,
+        global_state: Value,
+        observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+    ) -> Result<Value, DagError> {
+        let graph: Graph = serde_json::from_value(graph_json.clone())
+            .map_err(|e| DagError::NodeExecution(format!("Invalid sub-graph JSON: {}", e)))?;
+
+        // Mapear globales del hijo a la tabla para el inicio
+        if let Some(repo) = &self.state_repository {
+            let initial_state = DagRunState {
+                session_id: session_id.to_string(),
+                graph_json: graph_json,
+                all_outputs: HashMap::new(),
+                global_shared_state: global_state,
+                execution_history: Vec::new(),
+                global_calls: HashMap::new(),
+                caller_specific_calls: HashMap::new(),
+                active_queue: VecDeque::new(),
+                status: DagRunStatus::Running,
+            };
+            repo.save(&initial_state).await?;
+        }
+
+        use futures::StreamExt;
+        let mut stream = Box::pin(self.clone().execute_stream(graph, Some(session_id.to_string()), None, true));
+
+        let mut final_out = Value::Null;
+        while let Some(res) = stream.next().await {
+            let event = res?;
+            if let crate::dag_engine::domain::events::DagExecutionEvent::GraphFinish { ref output } = event {
+                final_out = output.clone();
+            } else if let Some(obs) = &observer {
+                if let Ok(raw) = serde_json::to_value(&event) {
+                    obs.on_event(crate::dag_engine::domain::observer::NodeEvent::SubgraphChildEvent(raw));
+                }
+            }
+        }
+
+        Ok(final_out)
+    }
+
+    async fn resume_subgraph(
+        &self,
+        session_id: &str,
+        answer: String,
+        observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+    ) -> Result<Value, DagError> {
+        let state = if let Some(repo) = &self.state_repository {
+            repo.get_by_id(session_id).await?
+                .ok_or_else(|| DagError::NodeExecution(format!("Child session {} not found for resume", session_id)))?
+        } else {
+            return Err(DagError::NodeExecution("State repository missing for resume".to_string()));
+        };
+
+        let graph: Graph = serde_json::from_value(state.graph_json)
+            .map_err(|e| DagError::NodeExecution(format!("Invalid sub-graph state JSON: {}", e)))?;
+
+        use futures::StreamExt;
+        let mut stream = Box::pin(self.clone().execute_stream(graph, Some(session_id.to_string()), Some(answer), true));
+
+        let mut final_out = Value::Null;
+        while let Some(res) = stream.next().await {
+            let event = res?;
+            if let crate::dag_engine::domain::events::DagExecutionEvent::GraphFinish { ref output } = event {
+                final_out = output.clone();
+            } else if let Some(obs) = &observer {
+                if let Ok(raw) = serde_json::to_value(&event) {
+                    obs.on_event(crate::dag_engine::domain::observer::NodeEvent::SubgraphChildEvent(raw));
+                }
+            }
+        }
+
+        Ok(final_out)
     }
 }

@@ -46,6 +46,7 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 | **information_extraction** | Schema-based extraction | LLM extracts structured data per schema |
 | **reactor** | Summarization & review | LLM summarizes and reviews outputs |
 | **orchestrator** | Multi-agent coordination | Manages teams of sub-agents; full lifecycle control |
+| **subgraph** | Nested Execution | Encapsulates a child DAG into an isolated execution; supports Human-In-The-Loop suspension bubbling |
 
 ### **Integration Nodes**
 
@@ -85,6 +86,7 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 | `information_extraction` | — | `result` | **Dynamic inputs** — `texts.*` inputs extracted per schema |
 | `reactor` | — | `result` | **Dynamic inputs** — `texts.*` summarized and reviewed |
 | `orchestrator` | — | `final_response` | **Dynamic inputs** — full multi-agent lifecycle; suspends at `planner`, `phase_reactor`, `critic`, `critic_max_retries`, `final_reactor`; supports bridge tasks; `allow_suspend` per-component |
+| `subgraph` | — | `result` | **Dynamic inputs** — Executes a child execution with isolated session_id. Inputs are injected into child globals. |
 | `task_memory_writer` | — | `result` | **Requires explicit fields** for task management |
 | `trigger_webhook` | — | `output` | Webhook trigger — emits payload |
 | `mock_input` | — | — | **Raw output** — emits config as-is, no specific field |

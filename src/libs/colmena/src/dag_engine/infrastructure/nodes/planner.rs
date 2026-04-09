@@ -1,3 +1,4 @@
+use crate::colmena_log;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -112,7 +113,7 @@ impl ExecutableNode for PlannerNode {
             if let Some(repo) = &self.task_memory_repo {
                 let existing = repo.get_tasks_for_run(&session_id).await?;
                 if !existing.is_empty() {
-                    println!("⏭️  [PlannerNode] Plan already exists in DB ({} tasks) — skipping LLM call.", existing.len());
+                    colmena_log!("⏭️  [PlannerNode] Plan already exists in DB ({} tasks) — skipping LLM call.", existing.len());
                     return Ok(Value::Null);
                 }
             }
@@ -186,7 +187,7 @@ impl ExecutableNode for PlannerNode {
             .unwrap_or_default();
 
         if agents.is_empty() {
-            println!("⚠️ [PlannerNode] No 'agents' field found in config. The LLM will assign tasks freely without agent constraints.");
+            colmena_log!("⚠️ [PlannerNode] No 'agents' field found in config. The LLM will assign tasks freely without agent constraints.");
         }
 
         // --- 3. Compose System Message ---
@@ -298,21 +299,21 @@ impl ExecutableNode for PlannerNode {
         }
 
         if formatted_texts.is_empty() {
-            println!("⚠️ [PlannerNode] Skipped execution because no input text was provided.");
+            colmena_log!("⚠️ [PlannerNode] Skipped execution because no input text was provided.");
             return Ok(Value::Null);
         }
 
         if verbose {
-            println!("\n═══════════════════════════════════════");
-            println!("🗂️  [PlannerNode] VERBOSE — System Prompt Sent:");
-            println!("───────────────────────────────────────");
-            println!("{}", system_message);
-            println!("───────────────────────────────────────");
-            println!("📥 User Input Texts:");
-            println!("{}", formatted_texts);
-            println!("═══════════════════════════════════════\n");
+            colmena_log!("\n═══════════════════════════════════════");
+            colmena_log!("🗂️  [PlannerNode] VERBOSE — System Prompt Sent:");
+            colmena_log!("───────────────────────────────────────");
+            colmena_log!("{}", system_message);
+            colmena_log!("───────────────────────────────────────");
+            colmena_log!("📥 User Input Texts:");
+            colmena_log!("{}", formatted_texts);
+            colmena_log!("═══════════════════════════════════════\n");
         } else {
-            println!(
+            colmena_log!(
                 "🗂️ [PlannerNode] Planning tasks (set verbose=true in config to see full prompt)"
             );
         }
@@ -377,11 +378,11 @@ impl ExecutableNode for PlannerNode {
         let raw = response.content();
 
         if verbose {
-            println!("\n═══════════════════════════════════════");
-            println!("🗂️  [PlannerNode] VERBOSE — Raw LLM Response:");
-            println!("───────────────────────────────────────");
-            println!("{}", raw);
-            println!("═══════════════════════════════════════\n");
+            colmena_log!("\n═══════════════════════════════════════");
+            colmena_log!("🗂️  [PlannerNode] VERBOSE — Raw LLM Response:");
+            colmena_log!("───────────────────────────────────────");
+            colmena_log!("{}", raw);
+            colmena_log!("═══════════════════════════════════════\n");
         }
 
         // --- 5. Parse JSON Response ---
@@ -415,7 +416,7 @@ impl ExecutableNode for PlannerNode {
 
         if let Some(questions) = normalized.get("questions") {
             if questions.is_array() && !questions.as_array().map(|a| a.is_empty()).unwrap_or(true) {
-                println!("⏸️  [PlannerNode] Planner requested clarification before planning ({} questions).", questions.as_array().map(|a| a.len()).unwrap_or(0));
+                colmena_log!("⏸️  [PlannerNode] Planner requested clarification before planning ({} questions).", questions.as_array().map(|a| a.len()).unwrap_or(0));
                 return Ok(json!({
                     "result": {
                         "questions": questions

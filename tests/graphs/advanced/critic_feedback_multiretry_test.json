@@ -1,0 +1,90 @@
+{
+  "_comment": "Critic Feedback Test 2: Multi-retry — Verifica que el feedback NO se acumula entre reintentos (el último feedback sobreescribe el anterior). El agente va corrigiendo gradualmente hasta pasar todos los criterios.",
+  "_test_instructions": [
+    "Ejecutar:",
+    "  cargo run --bin dag_engine -- run tests/graphs/advanced/critic_feedback_multiretry_test.json",
+    "",
+    "Qué verificar en los logs (verbose: true):",
+    "  1. Primer intento: sin sección '=== INTENTO ANTERIOR'.",
+    "  2. Cada intento sucesivo: la sección '=== INTENTO ANTERIOR — POR QUÉ FALLÓ ===' contiene",
+    "     solo el feedback del ÚLTIMO critic (no concatenados).",
+    "  3. El feedback cambia entre intentos a medida que el agente va corrigiendo cosas.",
+    "  4. En algún intento el agente pasa todos los criterios y el Critic aprueba.",
+    "",
+    "Resultado esperado: El grafo termina con FINISHED tras varios reintentos con feedback incremental."
+  ],
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "prompt": "Analyze the performance of Tesla stock in 2024."
+      }
+    },
+    "orchestrator_node": {
+      "type": "orchestrator",
+      "config": {
+        "verbose": true,
+        "include_extra_info": false,
+        "max_phases": 3,
+        "planner": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "Create exactly ONE task: assign 'Analyze Tesla stock performance in 2024' to analyst_agent in phase 1. Output ONLY a JSON array with one item."
+        },
+        "agents": {
+          "analyst_agent": {
+            "description": "Analyzes financial stock performance for a given company and year.",
+            "child_graph_inline": {
+              "nodes": {
+                "in":  { "type": "input",    "config": {} },
+                "llm": { "type": "llm_call", "config": {
+                  "provider": "gemini",
+                  "model": "gemini-2.5-flash",
+                  "api_key": "${GEMINI_API_KEY}",
+                  "system_message": "You are a financial analyst. Analyze Tesla stock in 2024. Write 3-4 sentences. Start with a qualitative overview. If previous feedback instructs you to include specific data (prices, percentages, quarterly references), you MUST include them in your response."
+                }},
+                "out": { "type": "output",   "config": {} }
+              },
+              "edges": [
+                { "from": "in",  "to": "llm" },
+                { "from": "llm", "to": "out" }
+              ]
+            }
+          }
+        },
+        "critic": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "max_retries": 5,
+          "system_message": "You are a strict financial data critic. Accept a stock analysis ONLY if it contains ALL of:\n1. At least one specific price figure (e.g. \"$200\", \"$180.50\")\n2. At least one percentage change (e.g. \"+15%\", \"-8.3%\")\n3. The word \"Q1\", \"Q2\", \"Q3\", or \"Q4\" referencing a specific quarter\n\nFor each missing element, list it explicitly in feedback. For example:\n- \"Missing: specific price figure. Include the stock price at start or end of 2024.\"\n- \"Missing: percentage change. Include the annual gain or loss as a percentage.\"\n- \"Missing: quarterly reference. Mention at least one specific quarter.\"\n\nSet task_ok=false, suspend=false when anything is missing.\nSet task_ok=true, feedback=\"\" only when ALL three are present."
+        },
+        "phase_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "Review the phase results. If the stock analysis task is complete, set requires_replanning=false."
+        },
+        "final_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "Summarize the final stock analysis outcome in 2-3 lines."
+        }
+      }
+    },
+    "final_output": {
+      "type": "output",
+      "trigger_on": "FINISHED"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "orchestrator_node" },
+    { "from": "orchestrator_node", "to": "final_output" }
+  ]
+}

@@ -37,10 +37,23 @@
         },
         "agents": {
           "itinerary_agent": {
-            "provider": "gemini",
-            "model": "gemini-2.5-flash",
-            "api_key": "${GEMINI_API_KEY}",
-            "system_message": "You are a Rome travel expert. Create a 2-day itinerary for Rome. Include 3-4 attractions per day. Keep it to 6-8 lines total."
+            "description": "Creates a detailed travel itinerary for a given city.",
+            "child_graph_inline": {
+              "nodes": {
+                "in":  { "type": "input",    "config": {} },
+                "llm": { "type": "llm_call", "config": {
+                  "provider": "gemini",
+                  "model": "gemini-2.5-flash",
+                  "api_key": "${GEMINI_API_KEY}",
+                  "system_message": "You are a Rome travel expert. Create a 2-day itinerary for Rome. Include 3-4 attractions per day. Keep it to 6-8 lines total."
+                }},
+                "out": { "type": "output",   "config": {} }
+              },
+              "edges": [
+                { "from": "in",  "to": "llm" },
+                { "from": "llm", "to": "out" }
+              ]
+            }
           }
         },
         "critic": {

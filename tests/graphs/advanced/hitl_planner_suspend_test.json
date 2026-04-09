@@ -36,22 +36,61 @@
         },
         "agents": {
           "flights_expert": {
-            "provider": "gemini",
-            "model": "gemini-2.5-flash",
-            "api_key": "${GEMINI_API_KEY}",
-            "system_message": "You are a flights expert. Based on the travel details, suggest 2 flight options with estimated prices. Keep it brief (3-4 lines)."
+            "description": "Suggests flight options for a given destination and budget.",
+            "child_graph_inline": {
+              "nodes": {
+                "in":  { "type": "input",    "config": {} },
+                "llm": { "type": "llm_call", "config": {
+                  "provider": "gemini",
+                  "model": "gemini-2.5-flash",
+                  "api_key": "${GEMINI_API_KEY}",
+                  "system_message": "You are a flights expert. Based on the travel details, suggest 2 flight options with estimated prices. Keep it brief (3-4 lines)."
+                }},
+                "out": { "type": "output",   "config": {} }
+              },
+              "edges": [
+                { "from": "in",  "to": "llm" },
+                { "from": "llm", "to": "out" }
+              ]
+            }
           },
           "hotel_expert": {
-            "provider": "gemini",
-            "model": "gemini-2.5-flash",
-            "api_key": "${GEMINI_API_KEY}",
-            "system_message": "You are a hotel booking expert. Based on the travel details and budget, suggest 2 hotel options with estimated prices per night. Keep it brief (3-4 lines)."
+            "description": "Recommends hotel options for a given destination and budget.",
+            "child_graph_inline": {
+              "nodes": {
+                "in":  { "type": "input",    "config": {} },
+                "llm": { "type": "llm_call", "config": {
+                  "provider": "gemini",
+                  "model": "gemini-2.5-flash",
+                  "api_key": "${GEMINI_API_KEY}",
+                  "system_message": "You are a hotel booking expert. Based on the travel details and budget, suggest 2 hotel options with estimated prices per night. Keep it brief (3-4 lines)."
+                }},
+                "out": { "type": "output",   "config": {} }
+              },
+              "edges": [
+                { "from": "in",  "to": "llm" },
+                { "from": "llm", "to": "out" }
+              ]
+            }
           },
           "activities_expert": {
-            "provider": "gemini",
-            "model": "gemini-2.5-flash",
-            "api_key": "${GEMINI_API_KEY}",
-            "system_message": "You are a travel activities expert. Based on the destination and dates, suggest 3 must-do activities with estimated costs. Keep it brief."
+            "description": "Suggests activities and experiences for a given destination.",
+            "child_graph_inline": {
+              "nodes": {
+                "in":  { "type": "input",    "config": {} },
+                "llm": { "type": "llm_call", "config": {
+                  "provider": "gemini",
+                  "model": "gemini-2.5-flash",
+                  "api_key": "${GEMINI_API_KEY}",
+                  "system_message": "You are a travel activities expert. Based on the destination and dates, suggest 3 must-do activities with estimated costs. Keep it brief."
+                }},
+                "out": { "type": "output",   "config": {} }
+              },
+              "edges": [
+                { "from": "in",  "to": "llm" },
+                { "from": "llm", "to": "out" }
+              ]
+            }
           }
         },
         "phase_reactor": {

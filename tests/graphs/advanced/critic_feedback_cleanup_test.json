@@ -1,0 +1,109 @@
+{
+  "_comment": "Critic Feedback Test 4: Cleanup — Verifica que el feedback_key se limpia del state cuando la tarea es resuelta manualmente (accept / skip / cancel / retry tras max_retries). Igual que Test 2 pero con max_retries=2 para forzar la suspensión rápidamente.",
+  "_test_instructions": [
+    "PASO 1 — Ejecutar hasta max_retries (critic rechaza 2 veces, suspende con elección):",
+    "  cargo run --bin dag_engine -- run tests/graphs/advanced/critic_feedback_cleanup_test.json",
+    "  ESPERADO: DAG suspende ofreciendo opciones: accept / skip / retry / cancel",
+    "",
+    "OPCION A — Accept (aprobar el resultado actual tal como está):",
+    "  cargo run --bin dag_engine -- run tests/graphs/advanced/critic_feedback_cleanup_test.json \\",
+    "    --session-id <ID> --answer 'accept'",
+    "  VERIFICAR: el grafo termina con FINISHED. El feedback_key fue limpiado del state.",
+    "             En los prompts de tareas subsiguientes NO aparece '=== INTENTO ANTERIOR ==='.",
+    "",
+    "OPCION B — Skip (continuar sin la tarea):",
+    "  cargo run --bin dag_engine -- run tests/graphs/advanced/critic_feedback_cleanup_test.json \\",
+    "    --session-id <ID> --answer 'skip'",
+    "  VERIFICAR: tarea marcada como '[SKIPPED by user after max retries]', DAG termina con FINISHED.",
+    "             El feedback_key fue limpiado.",
+    "",
+    "OPCION C — Cancel (cancelar definitivamente):",
+    "  cargo run --bin dag_engine -- run tests/graphs/advanced/critic_feedback_cleanup_test.json \\",
+    "    --session-id <ID> --answer 'cancel'",
+    "  VERIFICAR: tarea marcada como '[CANCELLED by user]', DAG termina con FINISHED.",
+    "             El feedback_key fue limpiado.",
+    "",
+    "OPCION D — Retry con instrucciones del usuario:",
+    "  cargo run --bin dag_engine -- run tests/graphs/advanced/critic_feedback_cleanup_test.json \\",
+    "    --session-id <ID> --answer 'retry Include specific Q1 2024 opening price of $248 and the annual drop of -50%'",
+    "  VERIFICAR: El agente recibe '=== USER CLARIFICATION ===' con las instrucciones del usuario.",
+    "             El '=== INTENTO ANTERIOR ===' del critic previo NO aparece (fue limpiado al hacer retry).",
+    "             El contador de reintentos se resetea.",
+    "",
+    "Usar --include-extra-info para ver el state completo y verificar la limpieza del feedback_key."
+  ],
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "prompt": "Analyze the performance of Tesla stock in 2024."
+      }
+    },
+    "orchestrator_node": {
+      "type": "orchestrator",
+      "config": {
+        "verbose": true,
+        "include_extra_info": false,
+        "max_phases": 3,
+        "planner": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "Create exactly ONE task: assign 'Analyze Tesla stock performance in 2024' to analyst_agent in phase 1. Output ONLY a JSON array with one item."
+        },
+        "agents": {
+          "analyst_agent": {
+            "description": "Analyzes financial stock performance for a given company and year.",
+            "child_graph_inline": {
+              "nodes": {
+                "in":  { "type": "input",    "config": {} },
+                "llm": { "type": "llm_call", "config": {
+                  "provider": "gemini",
+                  "model": "gemini-2.5-flash",
+                  "api_key": "${GEMINI_API_KEY}",
+                  "system_message": "You are a financial analyst. Analyze Tesla stock in 2024. Write 3-4 sentences. Focus on qualitative trends, not specific numbers."
+                }},
+                "out": { "type": "output",   "config": {} }
+              },
+              "edges": [
+                { "from": "in",  "to": "llm" },
+                { "from": "llm", "to": "out" }
+              ]
+            }
+          }
+        },
+        "critic": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": true,
+          "max_retries": 2,
+          "system_message": "You are a strict financial data critic. Accept a stock analysis ONLY if it contains ALL of:\n1. At least one specific price figure (e.g. \"$200\", \"$180.50\")\n2. At least one percentage change (e.g. \"+15%\", \"-8.3%\")\n3. The word \"Q1\", \"Q2\", \"Q3\", or \"Q4\" referencing a specific quarter\n\nFor each missing element, list it explicitly in feedback. For example:\n- \"Missing: specific price figure. Include the stock price at start or end of 2024.\"\n- \"Missing: percentage change. Include the annual gain or loss as a percentage.\"\n- \"Missing: quarterly reference. Mention at least one specific quarter.\"\n\nSet task_ok=false, suspend=false when anything is missing.\nSet task_ok=true, feedback=\"\" only when ALL three are present."
+        },
+        "phase_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "Review completed phase results. If all tasks are done (including SKIPPED/CANCELLED ones), set requires_replanning=false."
+        },
+        "final_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "Summarize the final stock analysis outcome in 2-3 lines. Note any tasks that were skipped or cancelled."
+        }
+      }
+    },
+    "final_output": {
+      "type": "output",
+      "trigger_on": "FINISHED"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "orchestrator_node" },
+    { "from": "orchestrator_node", "to": "final_output" }
+  ]
+}

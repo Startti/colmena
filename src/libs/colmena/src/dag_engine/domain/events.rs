@@ -56,4 +56,12 @@ pub enum DagExecutionEvent {
     /// Emitted at the beginning of each loop turn
     #[serde(rename = "turn_start")]
     TurnStart { turn: u32 },
+    /// Emitted when a subgraph node completes. Carries `node_type: "subgraph"` so the
+    /// data-stream protocol can distinguish it from a regular NodeFinish.
+    #[serde(rename = "subgraph_node_finish")]
+    SubgraphNodeFinish { node_id: String, output: Value },
+    /// Emitted just before GraphFinish. Summarises token usage per node with model and
+    /// provider names for cost/audit visibility.
+    #[serde(rename = "graph_usage_summary")]
+    GraphUsageSummary { entries: Vec<Value> },
 }

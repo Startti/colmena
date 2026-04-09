@@ -171,6 +171,7 @@ Para la lista completa de nodos y sus defaults, ver [`docs/agent_context/node_po
 - `critic`: Evalúa el resultado de un agente y devuelve `task_ok=true/false`. Puede suspender para pedir confirmación al usuario.
 - `reactor`: Sintetiza resultados de múltiples agentes y decide si la fase está completa o requiere tareas adicionales. Puede suspender para pedir aclaraciones.
 - `orchestrator`: Coordina el ciclo completo Plan → Ejecutar Fases → Reaccionar → Finalizar en una única llamada. Incluye **Human-in-the-Loop (HITL)** con suspend/resume en cinco puntos internos (`planner`, `critic`, `critic_max_retries`, `phase_reactor`, `final_reactor`), controlado por `allow_suspend` por componente. Soporta **bridge tasks** para ejecutar tareas de corrección dentro de la fase actual. Ver sección dedicada más abajo.
+- `subgraph`: Ejecuta un DAG hijo en un entorno aislado con su propio Session ID, soportando propagación de suspensión al padre (Human-in-the-loop bubble-up). Ideal para agentes anidados.
 
 #### Visión y Soporte de Documentos
 El nodo `llm_call` permite enviar archivos (imágenes y PDFs) a los modelos que lo soportan. Puedes pasar archivos de dos formas: mediante una ruta local o mediante un string Base64.
@@ -1229,11 +1230,12 @@ cargo run --bin dag_engine -- serve tests/my_graph.json
 
 ## 📚 Más Información
 
+- **[20_orchestrator_architecture.md](./20_orchestrator_architecture.md)** — Guía completa del orchestrator: HITL, bridge tasks, fases, critic feedback loop y replanning dinámico con diagramas Mermaid
+- **[19_nested_agents_and_subgraphs.md](./19_nested_agents_and_subgraphs.md)** — Cómo usar el nodo `subgraph` y propagación de suspensión HITL
 - Ver [USAGE_EXAMPLES.md](../examples/USAGE_EXAMPLES.md) para más ejemplos completos
-- Ver [SECURE_VALUES_IMPLEMENTATION.md](../SECURE_VALUES_IMPLEMENTATION.md) para detalles del cifrado
 - Ver [DAG_ENGINE_DISEÑO.md](../dds/DAG_ENGINE_DISEÑO.md) para detalles de arquitectura
 
 ---
 
-**Última actualización**: 2026-04-07
+**Última actualización**: 2026-04-08
 **Revisado por**: Auditoría Sistemática v0.3.0 + Implementación Suspend/Resume Orchestrator

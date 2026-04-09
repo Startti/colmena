@@ -40,22 +40,61 @@
         },
         "agents": {
           "research_agent": {
-            "provider": "gemini",
-            "model": "gemini-2.5-flash",
-            "api_key": "${GEMINI_API_KEY}",
-            "system_message": "You are an energy research analyst. Provide factual, concise information. Keep your response to 6-8 lines."
+            "description": "Researches renewable energy sources and provides factual summaries.",
+            "child_graph_inline": {
+              "nodes": {
+                "in":  { "type": "input",    "config": {} },
+                "llm": { "type": "llm_call", "config": {
+                  "provider": "gemini",
+                  "model": "gemini-2.5-flash",
+                  "api_key": "${GEMINI_API_KEY}",
+                  "system_message": "You are an energy research analyst. Provide factual, concise information. Keep your response to 6-8 lines."
+                }},
+                "out": { "type": "output",   "config": {} }
+              },
+              "edges": [
+                { "from": "in",  "to": "llm" },
+                { "from": "llm", "to": "out" }
+              ]
+            }
           },
           "bridge_agent": {
-            "provider": "gemini",
-            "model": "gemini-2.5-flash",
-            "api_key": "${GEMINI_API_KEY}",
-            "system_message": "You are a cost analyst. Given the researched energy sources, provide a brief cost comparison (installation cost per kW and levelized cost of energy). Keep it to 4-6 lines."
+            "description": "Performs cost analysis and comparison for energy sources.",
+            "child_graph_inline": {
+              "nodes": {
+                "in":  { "type": "input",    "config": {} },
+                "llm": { "type": "llm_call", "config": {
+                  "provider": "gemini",
+                  "model": "gemini-2.5-flash",
+                  "api_key": "${GEMINI_API_KEY}",
+                  "system_message": "You are a cost analyst. Given the researched energy sources, provide a brief cost comparison (installation cost per kW and levelized cost of energy). Keep it to 4-6 lines."
+                }},
+                "out": { "type": "output",   "config": {} }
+              },
+              "edges": [
+                { "from": "in",  "to": "llm" },
+                { "from": "llm", "to": "out" }
+              ]
+            }
           },
           "writer_agent": {
-            "provider": "gemini",
-            "model": "gemini-2.5-flash",
-            "api_key": "${GEMINI_API_KEY}",
-            "system_message": "You are a technical writer. Write a clear, structured report using ALL the provided context (research findings AND cost data). Organize it with brief sections: Overview, Energy Sources, Cost Comparison, Conclusion. Keep it to 12-15 lines total."
+            "description": "Writes structured reports based on research and cost data.",
+            "child_graph_inline": {
+              "nodes": {
+                "in":  { "type": "input",    "config": {} },
+                "llm": { "type": "llm_call", "config": {
+                  "provider": "gemini",
+                  "model": "gemini-2.5-flash",
+                  "api_key": "${GEMINI_API_KEY}",
+                  "system_message": "You are a technical writer. Write a clear, structured report using ALL the provided context (research findings AND cost data). Organize it with brief sections: Overview, Energy Sources, Cost Comparison, Conclusion. Keep it to 12-15 lines total."
+                }},
+                "out": { "type": "output",   "config": {} }
+              },
+              "edges": [
+                { "from": "in",  "to": "llm" },
+                { "from": "llm", "to": "out" }
+              ]
+            }
           }
         },
         "phase_reactor": {

@@ -1,0 +1,74 @@
+{
+  "nodes": {
+    "start_trigger": {
+      "type": "input",
+      "config": {}
+    },
+    "llm_specialist": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o",
+        "stream": false,
+        "system_message": "You are a weather assistant. Use the get_weather tool to fetch real-time weather data. Always call the tool when asked about current weather conditions.",
+        "enabled_tools": [
+          "get_weather"
+        ],
+        "tool_configurations": {
+          "get_weather": {
+            "name": "get_weather",
+            "node_type": "http_request",
+            "description": "Fetches current weather data from the Open-Meteo API for a given latitude and longitude.",
+            "node_schema": {
+              "base_url": {
+                "type": "string",
+                "fixed": "https://api.open-meteo.com"
+              },
+              "endpoint": {
+                "type": "string",
+                "fixed": "/v1/forecast"
+              },
+              "method": {
+                "type": "string",
+                "fixed": "GET"
+              },
+              "query_params": {
+                "type": "object",
+                "properties": {
+                  "current_weather": {
+                    "type": "string",
+                    "fixed": "true"
+                  },
+                  "latitude": {
+                    "type": "number",
+                    "required": true,
+                    "description": "Latitude of the location (e.g. 40.4168 for Madrid)"
+                  },
+                  "longitude": {
+                    "type": "number",
+                    "required": true,
+                    "description": "Longitude of the location (e.g. -3.7038 for Madrid)"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "output": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    {
+      "from": "start_trigger",
+      "to": "llm_specialist"
+    },
+    {
+      "from": "llm_specialist",
+      "to": "output"
+    }
+  ]
+}

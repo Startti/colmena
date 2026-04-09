@@ -1,0 +1,57 @@
+{
+  "nodes": {
+    "start": {
+      "type": "input",
+      "config": {
+        "prompt": "Utiliza el agente weather_expert para verificar el clima actual en Madrid y determinar si necesito chaqueta."
+      }
+    },
+    "manager": {
+      "type": "orchestrator",
+      "config": {
+        "planner": {
+          "provider": "openai",
+          "model": "gpt-4o",
+          "api_key": "${OPENAI_API_KEY}"
+        },
+        "final_reactor": {
+          "provider": "openai",
+          "model": "gpt-4o",
+          "api_key": "${OPENAI_API_KEY}"
+        },
+        "agents": {
+          "weather_expert": {
+            "description": "Busca el tiempo o el clima de la localización utilizando APIs de meteorología.",
+            "child_graph_path": "tests/graphs/advanced/nested_agents/weather_child_agent.json"
+          }
+        },
+        "phase_reactor": {
+          "provider": "openai",
+          "model": "gpt-4o",
+          "api_key": "${OPENAI_API_KEY}",
+          "system_message": "You are summarizing the results of a completed phase. Write a single sentence summary of what was accomplished. Set task_ok=true."
+        },
+        "final_reactor": {
+          "provider": "openai",
+          "model": "gpt-4o",
+          "api_key": "${OPENAI_API_KEY}",
+          "system_message": "You are giving a final answer to the user based on the weather data collected. Synthesize the information and clearly answer whether the user needs a jacket. Be concise (2-3 sentences). Set task_ok=true."
+        }
+      }
+    },
+    "output": {
+      "type": "output",
+      "config": {}
+    }
+  },
+  "edges": [
+    {
+      "from": "start",
+      "to": "manager"
+    },
+    {
+      "from": "manager",
+      "to": "output"
+    }
+  ]
+}

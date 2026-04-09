@@ -37,10 +37,23 @@
         },
         "agents": {
           "writer_agent": {
-            "provider": "gemini",
-            "model": "gemini-2.5-flash",
-            "api_key": "${GEMINI_API_KEY}",
-            "system_message": "You are a technical writer. Write a 4-5 line summary covering 3 key benefits of renewable energy: environmental, economic, and energy independence."
+            "description": "Writes a concise summary on a given topic.",
+            "child_graph_inline": {
+              "nodes": {
+                "in":  { "type": "input",    "config": {} },
+                "llm": { "type": "llm_call", "config": {
+                  "provider": "gemini",
+                  "model": "gemini-2.5-flash",
+                  "api_key": "${GEMINI_API_KEY}",
+                  "system_message": "You are a technical writer. Write a 4-5 line summary covering 3 key benefits of renewable energy: environmental, economic, and energy independence."
+                }},
+                "out": { "type": "output",   "config": {} }
+              },
+              "edges": [
+                { "from": "in",  "to": "llm" },
+                { "from": "llm", "to": "out" }
+              ]
+            }
           }
         },
         "critic": {

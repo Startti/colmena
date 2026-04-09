@@ -1,9 +1,10 @@
 use crate::dag_engine::application::ports::NodeRegistryPort;
+use crate::dag_engine::application::ports::SubGraphExecutorPort;
 use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::ExecutableNode;
 use crate::dag_engine::infrastructure::nodes::{
     debug::*, http::*, input::*, llm::*, math::*, orchestrator::*, output::*, python_node::*,
-    task_memory_writer::*, trigger::*,
+    task_memory_writer::*, trigger::*, subgraph::*,
 }; // Importa nuestros nodos
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -12,6 +13,7 @@ use std::sync::{Arc, Weak};
 /// Utiliza un `HashMap` para almacenar instancias de todos los nodos disponibles.
 pub struct HashMapNodeRegistry {
     nodes: HashMap<String, Arc<dyn ExecutableNode>>,
+    subgraph_node: Option<Arc<SubGraphNode>>,
 }
 
 use crate::llm::infrastructure::ConversationRepositoryFactory;
@@ -143,8 +145,23 @@ impl HashMapNodeRegistry {
                 ),
             );
 
-            Self { nodes }
+            // --- Registrar SubGraph ---
+            let sub_node = Arc::new(SubGraphNode::new());
+            nodes.insert(
+                "subgraph".to_string(),
+                sub_node.clone() as Arc<dyn ExecutableNode>,
+            );
+
+            Self { nodes, subgraph_node: Some(sub_node) }
         })
+    }
+}
+
+impl HashMapNodeRegistry {
+    pub fn set_subgraph_executor(&self, executor: Arc<dyn SubGraphExecutorPort>) {
+        if let Some(sub) = &self.subgraph_node {
+            let _ = sub.executor.set(executor);
+        }
     }
 }
 

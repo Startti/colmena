@@ -1,3 +1,4 @@
+use crate::colmena_log;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
 use crate::llm::domain::{
@@ -240,7 +241,7 @@ impl ExecutableNode for LlmNode {
                             .get("__node_id")
                             .and_then(|v| v.as_str())
                             .unwrap_or("(unknown)");
-                        println!(
+                        colmena_log!(
                             "⚠️ [LlmNode] Skipped (prompt resolved to empty) — node: \"{}\"",
                             node_name
                         );
@@ -253,7 +254,7 @@ impl ExecutableNode for LlmNode {
                         .get("__node_id")
                         .and_then(|v| v.as_str())
                         .unwrap_or("(unknown)");
-                    println!(
+                    colmena_log!(
                         "⚠️ [LlmNode] Skipped (not active this turn) — node: \"{}\"",
                         node_name
                     );
@@ -408,7 +409,7 @@ impl ExecutableNode for LlmNode {
                                     bytes,
                                 });
                             } else {
-                                println!("WARN: Failed to decode base64 file data");
+                                colmena_log!("WARN: Failed to decode base64 file data");
                             }
                         } else if let Some(path_str) = obj.get("path").and_then(|v| v.as_str()) {
                             let filename = obj
@@ -431,7 +432,7 @@ impl ExecutableNode for LlmNode {
                                     bytes,
                                 });
                             } else {
-                                println!("WARN: Failed to read file from path: {}", path_str);
+                                colmena_log!("WARN: Failed to read file from path: {}", path_str);
                             }
                         }
                     }
@@ -652,15 +653,15 @@ impl ExecutableNode for LlmNode {
         };
 
         if verbose {
-            println!("\n═══════════════════════════════════════");
-            println!("🤖 [LlmNode] VERBOSE — Request:");
-            println!("───────────────────────────────────────");
+            colmena_log!("\n═══════════════════════════════════════");
+            colmena_log!("🤖 [LlmNode] VERBOSE — Request:");
+            colmena_log!("───────────────────────────────────────");
             if let Some(sys) = system_message {
-                println!("System: {}", sys);
-                println!("───────────────────────────────────────");
+                colmena_log!("System: {}", sys);
+                colmena_log!("───────────────────────────────────────");
             }
-            println!("Prompt: {}", prompt);
-            println!("═══════════════════════════════════════\n");
+            colmena_log!("Prompt: {}", prompt);
+            colmena_log!("═══════════════════════════════════════\n");
         }
 
         let response = agent_service.run(params).await?;
@@ -677,11 +678,11 @@ impl ExecutableNode for LlmNode {
         }
 
         if verbose {
-            println!("\n═══════════════════════════════════════");
-            println!("🤖 [LlmNode] VERBOSE — Response:");
-            println!("───────────────────────────────────────");
-            println!("{}", response.content());
-            println!("═══════════════════════════════════════\n");
+            colmena_log!("\n═══════════════════════════════════════");
+            colmena_log!("🤖 [LlmNode] VERBOSE — Response:");
+            colmena_log!("───────────────────────────────────────");
+            colmena_log!("{}", response.content());
+            colmena_log!("═══════════════════════════════════════\n");
         }
 
         // Format result json in standardized structure

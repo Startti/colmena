@@ -1,3 +1,4 @@
+use crate::colmena_log;
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::ExecutableNode;
@@ -111,6 +112,7 @@ impl DagToolExecutor {
     }
 
     /// Generate ToolDefinition from node with partial configuration
+    #[allow(deprecated)]
     fn generate_tool_definition(
         &self,
         tool_name: &str,
@@ -143,7 +145,7 @@ impl DagToolExecutor {
                     parameters: params,
                 };
             } else {
-                println!(
+                colmena_log!(
                     "WARN: Failed to parse custom parameters for tool {}",
                     tool_name
                 );
@@ -268,6 +270,7 @@ impl DagToolExecutor {
 
 #[async_trait]
 impl ToolExecutor for DagToolExecutor {
+    #[allow(deprecated)]
     async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, LlmError> {
         let node_type = &tool_call.function.name;
 
@@ -473,7 +476,7 @@ impl ToolExecutor for DagToolExecutor {
                         let secure_config = serde_json::json!({ "secure": true });
                         match svc.hash_output(&value, &secure_config, sid, node_type).await {
                             Ok(hashed) => {
-                                println!("🔒 [DagToolExecutor] Secure tool '{}': output hashed, real values encrypted in DB", node_type);
+                                colmena_log!("🔒 [DagToolExecutor] Secure tool '{}': output hashed, real values encrypted in DB", node_type);
                                 hashed
                             }
                             Err(e) => {

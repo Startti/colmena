@@ -26,3 +26,5 @@ Esta guía se ha dividido en varias secciones para facilitar su consulta.
 18. [**Flujo de Datos y Conexiones**](./developer_guide/16_data_flow_guide.md): Detalles sobre cómo se pasan y transforman los datos entre nodos.
 19. [**Referencia Técnica**](./developer_guide/17_technical_reference.md): Esquemas JSON y tipos de datos del sistema.
 20. [**Troubleshooting y Errores Comunes**](./developer_guide/18_troubleshooting.md): Guía para resolver fallos típicos en el engine y bindings.
+21. [**Agentes Anidados y Sub-Grafos**](./developer_guide/19_nested_agents_and_subgraphs.md): El nodo `subgraph`, aislamiento de sesión, propagación HITL y composición modular de agentes.
+22. [**Arquitectura del Orchestrator**](./developer_guide/20_orchestrator_architecture.md): Guía completa del nodo `orchestrator`: fases, bridge tasks, HITL suspend/resume, critic feedback loop y replanning dinámico.

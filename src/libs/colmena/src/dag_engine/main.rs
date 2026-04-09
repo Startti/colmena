@@ -19,6 +19,9 @@ enum Commands {
         answer: Option<String>,
         #[arg(long, default_value_t = false)]
         include_extra_info: bool,
+        /// Enable verbose internal debug output (also set via COLMENA_VERBOSE=1)
+        #[arg(long, default_value_t = false)]
+        verbose: bool,
     },
     Serve {
         file_path: String,
@@ -26,13 +29,15 @@ enum Commands {
         host: String,
         #[arg(long, default_value_t = 3000)]
         port: u16,
+        /// Enable verbose internal debug output (also set via COLMENA_VERBOSE=1)
+        #[arg(long, default_value_t = false)]
+        verbose: bool,
     },
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
-    println!("DEBUG: DATABASE_URL={:?}", std::env::var("DATABASE_URL"));
 
     #[cfg(feature = "python")]
     pyo3::prepare_freethreaded_python();
@@ -45,6 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             session_id,
             answer,
             include_extra_info,
+            verbose,
         } => {
             use colmena::dag_engine::application::run_use_case::DagRunUseCase;
             use colmena::dag_engine::domain::events::DagExecutionEvent;
@@ -52,6 +58,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             use colmena::llm::infrastructure::ConversationRepositoryFactory;
             use futures::StreamExt;
             use std::sync::Arc;
+
+            // Enable verbose mode via flag or env var
+            let verbose_env = std::env::var("COLMENA_VERBOSE").map(|v| v == "1" || v == "true").unwrap_or(false);
+            colmena::dag_engine::verbose::set_verbose(verbose || verbose_env);
 
             println!("🚀 Ejecutando grafo: {}", file_path);
 
@@ -89,7 +99,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     as Arc<dyn colmena::dag_engine::domain::state::DagTaskMemoryRepository>),
                 Some(secure_value_service.clone()),
             );
-            let run_use_case = DagRunUseCase::with_secure_values_and_service(registry, Some(state_repo), secure_value_service);
+            let run_use_case = DagRunUseCase::with_secure_values_and_service(registry.clone(), Some(state_repo), secure_value_service);
+            registry.set_subgraph_executor(Arc::new(run_use_case.clone()));
 
             let file_content = tokio::fs::read_to_string(&file_path).await?;
             let graph: colmena::dag_engine::domain::graph::Graph =
@@ -100,6 +111,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::collections::HashMap::new();
             let mut total_prompt_tokens: u32 = 0;
             let mut total_completion_tokens: u32 = 0;
+            // Track node_type per node_id so we can include it in node-end events
+            let mut node_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
             // The new active_queue engine natively handles both linear and cyclic graphs
             let s =
@@ -132,7 +145,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             text_block_ids.insert(node_id.clone(), part_id);
                         }
                     }
-                    DagExecutionEvent::NodeFinish { node_id, .. } => {
+                    DagExecutionEvent::NodeFinish { node_id, .. }
+                    | DagExecutionEvent::SubgraphNodeFinish { node_id, .. } => {
                         if let Some(part_id) = text_block_ids.remove(node_id) {
                             println!(
                                 "data: {}\n",
@@ -157,26 +171,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         node_id,
                         config,
                         node_type,
-                        ..
-                    } => Some(serde_json::json!({
-                        "type": "node-start",
-                        "node_id": node_id,
-                        "node_type": node_type,
-                        "config": config
-                    })),
+                        inputs,
+                    } => {
+                        // Record type so node-end can echo it back
+                        node_types.insert(node_id.clone(), node_type.clone());
+                        // Strip internal engine keys — keep only user-meaningful fields
+                        let clean_inputs = if let Some(obj) = inputs.as_object() {
+                            serde_json::Value::Object(
+                                obj.iter()
+                                    .filter(|(k, _)| !k.starts_with("__") && k.as_str() != "session_id")
+                                    .map(|(k, v)| (k.clone(), v.clone()))
+                                    .collect(),
+                            )
+                        } else {
+                            inputs.clone()
+                        };
+                        Some(serde_json::json!({
+                            "type": "node-start",
+                            "node_id": node_id,
+                            "node_type": node_type,
+                            "config": config,
+                            "inputs": clean_inputs
+                        }))
+                    }
                     DagExecutionEvent::TurnStart { turn } => {
                         println!("🔄 [Engine] Starting Turn {}", turn);
                         None
                     }
-                    DagExecutionEvent::NodeFinish { node_id, output } => Some(serde_json::json!({
+                    DagExecutionEvent::NodeFinish { node_id, output } => {
+                        let ntype = node_types.get(node_id).cloned().unwrap_or_default();
+                        Some(serde_json::json!({
+                            "type": "node-end",
+                            "node_id": node_id,
+                            "node_type": ntype,
+                            "output": output
+                        }))
+                    }
+                    DagExecutionEvent::SubgraphNodeFinish { node_id, output } => Some(serde_json::json!({
                         "type": "node-end",
                         "node_id": node_id,
+                        "node_type": "subgraph",
                         "output": output
                     })),
                     DagExecutionEvent::LlmToken { node_id, token } => Some(
                         serde_json::json!({ "type": "node-delta", "node_id": node_id, "delta": token }),
                     ),
                     DagExecutionEvent::LlmUsage { .. } => None,
+                    DagExecutionEvent::GraphUsageSummary { entries } => Some(serde_json::json!({
+                        "type": "usage-summary",
+                        "nodes": entries
+                    })),
                     DagExecutionEvent::LlmToolCall {
                         tool_id,
                         args_chunk,
@@ -226,22 +270,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "output": output
                         }))
                     }
-                    DagExecutionEvent::LlmMessageStart { node_id } => Some(serde_json::json!({
-                        "type": "node-start",
-                        "node_id": node_id,
-                        "node_type": "llm_message",
-                        "config": null
-                    })),
-                    DagExecutionEvent::LlmMessageFinish { node_id, usage } => {
-                        Some(serde_json::json!({
-                            "type": "node-end",
-                            "node_id": node_id,
-                            "output": null,
-                            "extra_info": {
-                                "usage": usage,
-                                "finishReason": "stop"
-                            }
-                        }))
+                    DagExecutionEvent::LlmMessageStart { .. } => {
+                        // Suppressed — llm_call node-start/-end already wraps the full lifecycle.
+                        // Individual API-call steps are visible via tool-input/output events.
+                        None
+                    }
+                    DagExecutionEvent::LlmMessageFinish { .. } => {
+                        // Intermediate per-message finish (tool-call step) — suppressed.
+                        // The final NodeFinish carries the real output and usage.
+                        None
                     }
                     DagExecutionEvent::Error { message } => Some(serde_json::json!({
                         "type": "error", "errorText": message
@@ -267,7 +304,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             file_path,
             host,
             port,
+            verbose,
         } => {
+            let verbose_env = std::env::var("COLMENA_VERBOSE").map(|v| v == "1" || v == "true").unwrap_or(false);
+            colmena::dag_engine::verbose::set_verbose(verbose || verbose_env);
             println!("🌐 Modo Serve: Iniciando...");
             api::serve_dag(file_path, host, port).await?;
         }

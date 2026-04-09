@@ -1,3 +1,4 @@
+use crate::colmena_log;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -82,6 +83,7 @@ response produced by specialist agents and you decide:\n\
 Output ONLY valid JSON matching the schema. Do NOT include markdown or code fences.";
 
 pub struct ReactorNode {
+    #[allow(dead_code)]
     task_memory_repo: Option<Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>>,
 }
 
@@ -182,12 +184,12 @@ impl ExecutableNode for ReactorNode {
         });
 
         if !has_synthesis {
-            println!("⏩ [ReactorNode] Skipped — no synthesis to review yet.");
+            colmena_log!("⏩ [ReactorNode] Skipped — no synthesis to review yet.");
             return Ok(Value::Null);
         }
 
         if formatted_texts.is_empty() {
-            println!("⚠️ [ReactorNode] Skipped — no input texts provided.");
+            colmena_log!("⚠️ [ReactorNode] Skipped — no input texts provided.");
             return Ok(Value::Null);
         }
 
@@ -214,15 +216,15 @@ impl ExecutableNode for ReactorNode {
         );
 
         if verbose {
-            println!("\n═══════════════════════════════════════");
-            println!("⚡ [ReactorNode] VERBOSE — System Prompt:");
-            println!("───────────────────────────────────────");
-            println!("{}", system_message);
-            println!("───────────────────────────────────────");
-            println!("Context Texts:\n{}", formatted_texts);
-            println!("═══════════════════════════════════════\n");
+            colmena_log!("\n═══════════════════════════════════════");
+            colmena_log!("⚡ [ReactorNode] VERBOSE — System Prompt:");
+            colmena_log!("───────────────────────────────────────");
+            colmena_log!("{}", system_message);
+            colmena_log!("───────────────────────────────────────");
+            colmena_log!("Context Texts:\n{}", formatted_texts);
+            colmena_log!("═══════════════════════════════════════\n");
         } else {
-            println!("⚡ [ReactorNode] Reviewing synthesis and producing final response...");
+            colmena_log!("⚡ [ReactorNode] Reviewing synthesis and producing final response...");
         }
 
         // --- 4. Call LLM ---
@@ -283,11 +285,11 @@ impl ExecutableNode for ReactorNode {
         let raw = response.content();
 
         if verbose {
-            println!("\n═══════════════════════════════════════");
-            println!("⚡ [ReactorNode] VERBOSE — Raw LLM Response:");
-            println!("───────────────────────────────────────");
-            println!("{}", raw);
-            println!("═══════════════════════════════════════\n");
+            colmena_log!("\n═══════════════════════════════════════");
+            colmena_log!("⚡ [ReactorNode] VERBOSE — Raw LLM Response:");
+            colmena_log!("───────────────────────────────────────");
+            colmena_log!("{}", raw);
+            colmena_log!("═══════════════════════════════════════\n");
         }
 
         // --- 5. Parse and return ---
@@ -321,7 +323,7 @@ impl ExecutableNode for ReactorNode {
             .unwrap_or(false);
         let question = parsed.get("question").cloned().unwrap_or(Value::Null);
 
-        println!(
+        colmena_log!(
             "⚡ [ReactorNode] Decision → task_ok={}, new_tasks={}, suspend={}",
             task_ok,
             add_tasks.as_array().map(|a| a.len()).unwrap_or(0),

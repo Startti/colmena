@@ -26,6 +26,9 @@ pub enum NodeEvent {
     },
     LlmMessageStart,
     LlmMessageFinish(Option<crate::llm::domain::LlmUsage>),
+    /// Raw DagExecutionEvent from a child subgraph execution.
+    /// Child node IDs are preserved so the parent stream can re-yield them as-is.
+    SubgraphChildEvent(serde_json::Value),
 }
 
 pub trait ExecutionObserver: Send + Sync {

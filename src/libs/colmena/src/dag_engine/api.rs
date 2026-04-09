@@ -54,7 +54,9 @@ pub async fn run_dag(
             as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),
         Some(secure_value_service.clone()),
     );
-    let run_use_case = DagRunUseCase::with_secure_values_and_service(registry, Some(state_repo), secure_value_service);
+    let run_use_case_arc = Arc::new(DagRunUseCase::with_secure_values_and_service(registry.clone(), Some(state_repo.clone()), secure_value_service.clone()));
+    registry.set_subgraph_executor(run_use_case_arc.clone());
+    let run_use_case = (*run_use_case_arc).clone();
 
     // Load and execute the graph
     let file_content = tokio::fs::read_to_string(&file_path).await?;
@@ -140,7 +142,8 @@ pub async fn run_dag(
                         text_block_uuids.insert(node_id.clone(), part_id);
                     }
                 }
-                DagExecutionEvent::NodeFinish { node_id, .. } => {
+                DagExecutionEvent::NodeFinish { node_id, .. }
+                | DagExecutionEvent::SubgraphNodeFinish { node_id, .. } => {
                     if let Some(part_id) = text_block_uuids.remove(node_id) {
                         println!(
                             "data: {}\n",
@@ -221,6 +224,10 @@ pub async fn run_dag(
                     "output": serde_json::from_str::<serde_json::Value>(&output).unwrap_or(serde_json::Value::String(output))
                 })),
                 DagExecutionEvent::LlmUsage { .. } => None,
+                DagExecutionEvent::GraphUsageSummary { entries } => Some(serde_json::json!({
+                    "type": "usage-summary",
+                    "nodes": entries
+                })),
                 DagExecutionEvent::NodeFinish { node_id, .. } => {
                     text_block_uuids.get(&node_id).map(|part_id| {
                         serde_json::json!({
@@ -232,6 +239,14 @@ pub async fn run_dag(
                             }
                         })
                     })
+                }
+                DagExecutionEvent::SubgraphNodeFinish { node_id, output } => {
+                    Some(serde_json::json!({
+                        "type": "node-end",
+                        "node_id": node_id,
+                        "node_type": "subgraph",
+                        "output": output
+                    }))
                 }
                 DagExecutionEvent::GraphFinish { .. } => Some(serde_json::json!({
                     "type": "finish",
@@ -315,7 +330,8 @@ pub async fn serve_dag(
             as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),
         Some(secure_value_service.clone()),
     );
-    let run_use_case = Arc::new(DagRunUseCase::with_secure_values_and_service(registry, Some(state_repo), secure_value_service));
+    let run_use_case = Arc::new(DagRunUseCase::with_secure_values_and_service(registry.clone(), Some(state_repo.clone()), secure_value_service.clone()));
+    registry.set_subgraph_executor(run_use_case.clone());
 
     // Load the graph
     let file_content = tokio::fs::read_to_string(&file_path).await?;
@@ -443,6 +459,7 @@ async fn handler_webhook(
                 let mut seen_tool_ids = std::collections::HashSet::new();
                 let mut total_prompt_tokens = 0;
                 let mut total_completion_tokens = 0;
+                let mut node_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
                 // Emitting custom event to show turn change in UI
                 if is_loop {
@@ -513,26 +530,40 @@ async fn handler_webhook(
 
                     // Map to official Data Stream Protocol JSON
                     let protocol_json = match &event {
-                        DagExecutionEvent::NodeStart { node_id, config, node_type, .. } => Some(serde_json::json!({
-                            "type": "node-start",
-                            "node_id": node_id,
-                            "node_type": node_type,
-                            "config": config
-                        })),
-                        DagExecutionEvent::NodeFinish { node_id, output } => Some(serde_json::json!({
-                            "type": "node-end",
-                            "node_id": node_id,
-                            "output": output
-                        })),
-                        DagExecutionEvent::LlmMessageFinish { node_id, usage } => Some(serde_json::json!({
-                            "type": "node-end",
-                            "node_id": node_id,
-                            "output": null,
-                            "extra_info": {
-                                "usage": usage,
-                                "finishReason": "stop"
-                            }
-                        })),
+                        DagExecutionEvent::NodeStart { node_id, config, node_type, inputs } => {
+                            node_types.insert(node_id.clone(), node_type.clone());
+                            let clean_inputs = if let Some(obj) = inputs.as_object() {
+                                serde_json::Value::Object(
+                                    obj.iter()
+                                        .filter(|(k, _)| !k.starts_with("__") && k.as_str() != "session_id")
+                                        .map(|(k, v)| (k.clone(), v.clone()))
+                                        .collect(),
+                                )
+                            } else {
+                                inputs.clone()
+                            };
+                            Some(serde_json::json!({
+                                "type": "node-start",
+                                "node_id": node_id,
+                                "node_type": node_type,
+                                "config": config,
+                                "inputs": clean_inputs
+                            }))
+                        },
+                        DagExecutionEvent::NodeFinish { node_id, output } => {
+                            let ntype = node_types.get(node_id).cloned().unwrap_or_default();
+                            Some(serde_json::json!({
+                                "type": "node-end",
+                                "node_id": node_id,
+                                "node_type": ntype,
+                                "output": output
+                            }))
+                        },
+                        DagExecutionEvent::LlmMessageFinish { .. } => {
+                            // Intermediate per-message finish (tool-call step) — suppressed.
+                            // The final NodeFinish carries the real output and usage.
+                            None
+                        },
                         DagExecutionEvent::LlmToken { node_id, token } => {
                             Some(serde_json::json!({
                                 "type": "node-delta",
@@ -557,6 +588,10 @@ async fn handler_webhook(
                             "output": serde_json::from_str::<serde_json::Value>(output).unwrap_or(serde_json::Value::String(output.clone()))
                         })),
                         DagExecutionEvent::LlmUsage { .. } => None,
+                        DagExecutionEvent::GraphUsageSummary { entries } => Some(serde_json::json!({
+                            "type": "usage-summary",
+                            "nodes": entries
+                        })),
                         DagExecutionEvent::GraphFinish { .. } => Some(serde_json::json!({
                             "type": "finish",
                             "finishReason": "stop",

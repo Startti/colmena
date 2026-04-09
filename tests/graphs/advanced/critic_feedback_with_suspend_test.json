@@ -1,0 +1,100 @@
+{
+  "_comment": "Critic Feedback Test 3: Feedback + Suspend coexistence — Verifica que '=== INTENTO ANTERIOR ===' y '=== USER CLARIFICATION ===' coexisten en el mismo prompt cuando el Critic rechaza primero y luego suspende.",
+  "_test_instructions": [
+    "PASO 1 — Primera ejecución:",
+    "  cargo run --bin dag_engine -- run tests/graphs/advanced/critic_feedback_with_suspend_test.json",
+    "  ESPERADO: Critic rechaza (task_ok=false, feedback sobre los 3 elementos faltantes).",
+    "            En el segundo intento el agente recibe '=== INTENTO ANTERIOR ===' con el feedback.",
+    "            Si el agente no mejora suficiente, el Critic suspende con pregunta sobre budget vs luxury.",
+    "",
+    "PASO 2 — Si suspende con pregunta sobre budget vs luxury:",
+    "  cargo run --bin dag_engine -- run tests/graphs/advanced/critic_feedback_with_suspend_test.json \\",
+    "    --session-id <SESSION_ID_DEL_PASO_1> \\",
+    "    --answer 'Focus on budget travelers, daily budget around 80-100 USD'",
+    "  ESPERADO: El siguiente prompt del agente contiene AMBAS secciones:",
+    "    - '=== USER CLARIFICATION ===' con la respuesta del usuario",
+    "    - '=== INTENTO ANTERIOR — POR QUÉ FALLÓ ===' con el último feedback del Critic",
+    "    El Critic aprueba y el grafo termina con FINISHED.",
+    "",
+    "Flujo esperado:",
+    "  1. Intento 1 → Critic rechaza (task_ok=false, feedback sobre los 3 elementos faltantes)",
+    "  2. Intento 2 → agente recibe '=== INTENTO ANTERIOR ===' → puede mejorar o no",
+    "  3. Si no mejora suficiente → Critic suspende con pregunta al usuario",
+    "  4. Usuario responde → agente recibe '=== USER CLARIFICATION ===' + '=== INTENTO ANTERIOR ==='",
+    "  5. Intento final → Critic aprueba"
+  ],
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "prompt": "Write a travel guide for Tokyo."
+      }
+    },
+    "orchestrator_node": {
+      "type": "orchestrator",
+      "config": {
+        "verbose": true,
+        "include_extra_info": false,
+        "max_phases": 3,
+        "planner": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "Create exactly ONE task: assign 'Write a travel guide for Tokyo' to travel_agent in phase 1. Output ONLY a JSON array with one item."
+        },
+        "agents": {
+          "travel_agent": {
+            "description": "Writes a travel guide for a given destination.",
+            "child_graph_inline": {
+              "nodes": {
+                "in":  { "type": "input",    "config": {} },
+                "llm": { "type": "llm_call", "config": {
+                  "provider": "gemini",
+                  "model": "gemini-2.5-flash",
+                  "api_key": "${GEMINI_API_KEY}",
+                  "system_message": "You are a travel writer. Write a brief travel guide for Tokyo in 4-5 sentences. Do not ask about traveler preferences unless specifically instructed."
+                }},
+                "out": { "type": "output",   "config": {} }
+              },
+              "edges": [
+                { "from": "in",  "to": "llm" },
+                { "from": "llm", "to": "out" }
+              ]
+            }
+          }
+        },
+        "critic": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": true,
+          "max_retries": 5,
+          "system_message": "You are a travel guide critic. Follow these rules in order:\n\nRULE 1 — First review (no USER CLARIFICATION section present in the agent output being reviewed):\n  Always reject the first attempt. Set task_ok=false, suspend=false.\n  feedback=\"Your guide must include: (1) the best time of year to visit Tokyo in months, (2) at least one specific neighborhood name, (3) estimated daily budget in USD. Add these to your next attempt.\"\n\nRULE 2 — Second review (USER CLARIFICATION section IS present in the agent output being reviewed):\n  Set task_ok=true, feedback=\"\". Approve regardless of content.\n\nRULE 3 — If the guide includes all three elements from RULE 1 (months, neighborhood, USD budget):\n  Set task_ok=true, feedback=\"\".\n\nUse suspend=true ONLY if you need to ask the user something before continuing.\nFor this test: after the first rejection, if the agent still does not include the required elements, set suspend=true with question=\"The travel agent needs guidance: should the guide focus on budget travelers or luxury travelers? This will determine the recommended budget range.\""
+        },
+        "phase_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "Review the phase results. If the travel guide task is complete, set requires_replanning=false."
+        },
+        "final_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "Summarize the final travel guide outcome in 2-3 lines."
+        }
+      }
+    },
+    "final_output": {
+      "type": "output",
+      "trigger_on": "FINISHED"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "orchestrator_node" },
+    { "from": "orchestrator_node", "to": "final_output" }
+  ]
+}

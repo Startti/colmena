@@ -54,10 +54,23 @@
         },
         "agents": {
           "research_agent": {
-            "provider": "gemini",
-            "model": "gemini-2.5-flash",
-            "api_key": "${GEMINI_API_KEY}",
-            "system_message": "You are an AI research analyst. List the top 5 AI breakthroughs of 2024. For each: name, brief description, and impact. Keep it to 8-10 lines total."
+            "description": "Researches and summarizes AI breakthroughs for a given year.",
+            "child_graph_inline": {
+              "nodes": {
+                "in":  { "type": "input",    "config": {} },
+                "llm": { "type": "llm_call", "config": {
+                  "provider": "gemini",
+                  "model": "gemini-2.5-flash",
+                  "api_key": "${GEMINI_API_KEY}",
+                  "system_message": "You are an AI research analyst. List the top 5 AI breakthroughs of 2024. For each: name, brief description, and impact. Keep it to 8-10 lines total."
+                }},
+                "out": { "type": "output",   "config": {} }
+              },
+              "edges": [
+                { "from": "in",  "to": "llm" },
+                { "from": "llm", "to": "out" }
+              ]
+            }
           }
         },
         "critic": {
