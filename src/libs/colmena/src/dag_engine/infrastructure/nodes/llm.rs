@@ -365,14 +365,7 @@ impl ExecutableNode for LlmNode {
             history_exists = !conversation.messages.is_empty();
         }
 
-        // 2.2 Add System Message if present and history is empty
-        if let Some(sys_msg) = system_message {
-            if !history_exists {
-                messages.push(LlmMessage::system(sys_msg.to_string())?);
-            }
-        }
-
-        // 2.3 Add User Prompt
+        // 2.2 Add User Prompt (system message is pushed after tools are resolved — see below)
         let mut resolved_files = Vec::new();
 
         // Check if there are any files passed in the node inputs
@@ -579,6 +572,25 @@ impl ExecutableNode for LlmNode {
             // No tools enabled
             Vec::new()
         };
+
+        // 2.2 Add System Message if present and history is empty.
+        // When tools are enabled, append a pre-baked tool-use instruction block so the user
+        // doesn't have to include these instructions manually in every graph.
+        if let Some(sys_msg) = system_message {
+            if !history_exists {
+                let final_system_message = if !tools.is_empty() {
+                    let tool_names: Vec<String> = tools.iter().map(|t| format!("- {}", t.name)).collect();
+                    format!(
+                        "{}\n\n---\n## Tool Use Instructions\nYou have access to the following tools:\n{}\n\nRules:\n- ALWAYS use the available tools to answer questions that require real or live data. Never answer from your own knowledge when a tool can provide the data.\n- Call the most relevant tool before responding. Do not skip tool calls.\n- If a tool call fails, report the error clearly instead of guessing an answer.\n- Only respond without a tool call when the user's request is purely conversational and no tool is needed.",
+                        sys_msg,
+                        tool_names.join("\n")
+                    )
+                } else {
+                    sys_msg.to_string()
+                };
+                messages.push(LlmMessage::system(final_system_message)?);
+            }
+        }
 
         // Use provided session_id or generate unique one for stateless calls
         let tid = session_id

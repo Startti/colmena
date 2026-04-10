@@ -1,3 +1,27 @@
+//! Tool executor that bridges LLM tool calls to DAG node execution.
+//!
+//! [`DagToolExecutor`] implements [`ToolExecutor`]. When the LLM invokes a tool:
+//! 1. The tool configuration is looked up by name.
+//! 2. LLM arguments are merged with fixed values using one of three strategies (see below).
+//! 3. `inject_secrets()` replaces `<value_N>` placeholders with real secret values.
+//! 4. The DAG node is executed.
+//! 5. If `secure: true` is set in `fixed_config`, `hash_output()` is called — the LLM
+//!    receives opaque placeholders (`<value_1>`, `<value_2>`, …) and never sees real secrets.
+//!
+//! ## Merge strategies (in priority order)
+//!
+//! 1. **`node_schema`** — Full declarative control. Fixed values are seeded first; LLM args
+//!    are placed into their target containers based on `param_to_container` from
+//!    [`parse_node_schema`]. Use this for all non-trivial tools.
+//!
+//! 2. **`$DYNAMIC` placeholders** — Simpler alternative. The executor scans `fixed_config` for
+//!    [`DYNAMIC_PLACEHOLDER`] string values and replaces each one with the LLM-provided value.
+//!    Works one level deep inside container objects (e.g. `body.title`), but NOT for deeper
+//!    nesting (e.g. `body.metadata.author.name` is NOT detected). Use only for simple cases.
+//!
+//! 3. **Deprecated fallback** — `field_mapping` + `mergeable_fields` + `exposed_inputs`.
+//!    Executed for backward compatibility only. Not used when `node_schema` or `$DYNAMIC` is present.
+
 use crate::colmena_log;
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::application::secure_value_service::SecureValueService;
@@ -9,6 +33,11 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Executes DAG nodes on behalf of LLM tool calls.
+///
+/// Constructed via [`DagToolExecutor::new`] and optionally configured with
+/// [`DagToolExecutor::with_secure_values`] for encrypted secret injection.
+/// See module-level docs for the three merge strategies and the secure values flow.
 pub struct DagToolExecutor {
     registry: Arc<dyn NodeRegistryPort>,
     tool_configurations: HashMap<String, ToolConfiguration>,
@@ -19,8 +48,12 @@ pub struct DagToolExecutor {
 }
 
 impl DagToolExecutor {
-    /// Resolve ${var} and ${context.var} placeholders in a string value
-    /// using values from the inputs HashMap
+    /// Resolve `${var}` and `${context.var}` placeholders in a string value
+    /// using values from the inputs map. Only resolves keys present in `inputs`;
+    /// unrecognized placeholders are left as-is.
+    /// Note: this is a shallow template resolution for `fixed_config` string fields.
+    /// Full node-output path resolution (e.g. `${node_name.field.path}`) happens
+    /// upstream in the DAG engine before the tool executor is called.
     fn resolve_template_string(template: &str, inputs: &HashMap<String, Value>) -> String {
         use regex::Regex;
 
@@ -59,6 +92,10 @@ impl DagToolExecutor {
             _ => value.clone(),
         }
     }
+    /// Create a new executor with the given node registry and tool configurations.
+    ///
+    /// Call [`with_secure_values`](Self::with_secure_values) afterward if any tool uses
+    /// `"secure": true` in its `fixed_config` (OAuth tokens, API keys, etc.).
     pub fn new(
         registry: Arc<dyn NodeRegistryPort>,
         tool_configurations: HashMap<String, ToolConfiguration>,
@@ -122,11 +159,19 @@ impl DagToolExecutor {
         use crate::llm::domain::{ParameterProperty, ToolDefinition, ToolParameters};
         use crate::dag_engine::domain::tool_configuration::parse_node_schema;
 
+        // Use tool_config.name if non-empty (e.g. when the map key is a UUID from the frontend),
+        // otherwise fall back to the map key so existing graphs are unaffected.
+        let effective_name = if !tool_config.name.is_empty() {
+            tool_config.name.as_str()
+        } else {
+            tool_name
+        };
+
         // BRANCH 0 (HIGHEST PRIORITY): node_schema
         if let Some(schema) = &tool_config.node_schema {
             let parsed = parse_node_schema(schema);
             return ToolDefinition {
-                name: tool_name.to_string(),
+                name: effective_name.to_string(),
                 description: tool_config.description.clone(),
                 parameters: ToolParameters {
                     schema_type: "object".to_string(),
@@ -140,14 +185,14 @@ impl DagToolExecutor {
         if let Some(params_value) = &tool_config.parameters {
             if let Ok(params) = serde_json::from_value::<ToolParameters>(params_value.clone()) {
                 return ToolDefinition {
-                    name: tool_name.to_string(),
+                    name: effective_name.to_string(),
                     description: tool_config.description.clone(),
                     parameters: params,
                 };
             } else {
                 colmena_log!(
                     "WARN: Failed to parse custom parameters for tool {}",
-                    tool_name
+                    effective_name
                 );
                 // Fallback to default generation? or error?
                 // Let's fallback but maybe log.
@@ -179,7 +224,7 @@ impl DagToolExecutor {
             }
 
             return ToolDefinition {
-                name: tool_name.to_string(),
+                name: effective_name.to_string(),
                 description: if !tool_config.description.is_empty() {
                     tool_config.description.clone()
                 } else {
@@ -257,7 +302,7 @@ impl DagToolExecutor {
         };
 
         ToolDefinition {
-            name: tool_name.to_string(),
+            name: effective_name.to_string(),
             description,
             parameters: ToolParameters {
                 schema_type: "object".to_string(),
@@ -274,8 +319,17 @@ impl ToolExecutor for DagToolExecutor {
     async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, LlmError> {
         let node_type = &tool_call.function.name;
 
-        // 1. Check if it's a configured tool or a raw node
+        // 1. Check if it's a configured tool or a raw node.
+        //    First try by map key (fast path), then by config.name (handles UUID keys from frontend).
         let (node, fixed_config, tool_cfg) = if let Some(config) = self.tool_configurations.get(node_type) {
+            let node = self.registry.get_node(&config.node_type).ok_or_else(|| {
+                LlmError::ToolNotFound {
+                    name: config.node_type.clone(),
+                }
+            })?;
+            (node, Some(config.fixed_config.clone()), Some(config))
+        } else if let Some(config) = self.tool_configurations.values().find(|c| c.name == *node_type) {
+            // Fallback: LLM used the semantic name but the map key is a UUID
             let node = self.registry.get_node(&config.node_type).ok_or_else(|| {
                 LlmError::ToolNotFound {
                     name: config.node_type.clone(),
@@ -769,6 +823,77 @@ mod tests {
 
         // MockNode schema has "a". We fixed it. So properties should be empty.
         assert!(configured_tool.parameters.properties.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_tool_name_from_config_name_when_key_is_uuid() {
+        // When the map key is a UUID but config.name is a semantic name,
+        // generate_tool_definition should use config.name so the LLM sees a meaningful name.
+        let registry = Arc::new(MockRegistry::new());
+        let mut tool_configs = HashMap::new();
+
+        tool_configs.insert(
+            "0618e7a1-2d50-4c7d-9244-52f2b504a3ca".to_string(),
+            ToolConfiguration {
+                name: "list_products".to_string(),
+                description: "List products from the catalog".to_string(),
+                node_type: "mock_tool".to_string(),
+                fixed_config: HashMap::new(),
+                exposed_inputs: None,
+                parameters: None,
+                mergeable_fields: None,
+                field_mapping: None,
+                node_schema: None,
+            },
+        );
+
+        let executor = DagToolExecutor::new(registry, tool_configs);
+        let tools = executor.available_tools().await;
+
+        // Should use config.name, not the UUID key
+        let tool = tools.iter().find(|t| t.name == "list_products")
+            .expect("tool named 'list_products' not found — UUID key leaked as name");
+        assert_eq!(tool.description, "List products from the catalog");
+
+        // UUID should NOT appear as a tool name
+        assert!(!tools.iter().any(|t| t.name == "0618e7a1-2d50-4c7d-9244-52f2b504a3ca"),
+            "UUID key leaked as tool name");
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_by_config_name_when_key_is_uuid() {
+        // When the map key is a UUID but config.name is semantic,
+        // execute() should resolve the tool correctly when the LLM calls it by semantic name.
+        let registry = Arc::new(MockRegistry::new());
+        let mut tool_configs = HashMap::new();
+
+        tool_configs.insert(
+            "0618e7a1-2d50-4c7d-9244-52f2b504a3ca".to_string(),
+            ToolConfiguration {
+                name: "list_products".to_string(),
+                description: "List products from the catalog".to_string(),
+                node_type: "mock_tool".to_string(),
+                fixed_config: HashMap::new(),
+                exposed_inputs: None,
+                parameters: None,
+                mergeable_fields: None,
+                field_mapping: None,
+                node_schema: None,
+            },
+        );
+
+        let executor = DagToolExecutor::new(registry, tool_configs);
+
+        // LLM calls the tool using the semantic name (not the UUID key)
+        let tool_call = ToolCall::new(
+            "call_1".to_string(),
+            FunctionCall::new("list_products".to_string(), r#"{"a": "test"}"#.to_string()),
+        );
+
+        let result = executor.execute(&tool_call).await;
+        assert!(result.is_ok(), "execute should resolve tool by config.name: {:?}", result.err());
+        let result = result.unwrap();
+        assert!(result.success);
     }
 
     #[tokio::test]

@@ -1,4 +1,10 @@
 {
+  "comment": "HTTP tools with node_schema. Two tools: fetch_users (GET with optional query params) and create_user (POST with dynamic body). Migrated from exposed_inputs (deprecated) to node_schema.",
+  "metadata": {
+    "category": "external",
+    "features": ["node_schema", "http_tool", "llm_call"],
+    "requires_env": ["OPENAI_API_KEY"]
+  },
   "nodes": {
     "trigger": {
       "type": "trigger_webhook",
@@ -6,7 +12,7 @@
         "path": "/agent",
         "method": "POST",
         "test_payload": {
-          "prompt": "Get all active users"
+          "prompt": "Get all active users and then create a new user named Alice with email alice@example.com and phone 123-456-7890"
         }
       }
     },
@@ -16,7 +22,7 @@
         "provider": "openai",
         "api_key": "${OPENAI_API_KEY}",
         "model": "gpt-4o-mini",
-        "system_message": "You are a helpful API assistant. Use the available tools to fetch data.",
+        "system_message": "You are a helpful API assistant. Use the available tools to fetch and create users.",
         "enabled_tools": [
           "fetch_users",
           "create_user"
@@ -25,31 +31,38 @@
           "fetch_users": {
             "name": "fetch_users",
             "node_type": "http_request",
-            "description": "Fetch user data from the API. You can filter by status (active/inactive) and limit the number of results returned.",
-            "fixed_config": {
-              "base_url": "https://jsonplaceholder.typicode.com",
-              "endpoint": "/users",
-              "method": "GET"
-            },
-            "exposed_inputs": [
-              "query_parameters"
-            ]
+            "description": "Fetch user data from the API. Optionally filter by providing query parameters.",
+            "node_schema": {
+              "base_url":  { "type": "string", "fixed": "https://jsonplaceholder.typicode.com" },
+              "endpoint":  { "type": "string", "fixed": "/users" },
+              "method":    { "type": "string", "fixed": "GET" },
+              "query_params": {
+                "type": "object",
+                "properties": {
+                  "id":       { "type": "string", "required": false, "description": "Filter by user ID" },
+                  "username": { "type": "string", "required": false, "description": "Filter by username" }
+                }
+              }
+            }
           },
           "create_user": {
             "name": "create_user",
             "node_type": "http_request",
-            "description": "Create a new user in the system. Provide name, email, and phone.",
-            "fixed_config": {
-              "base_url": "https://jsonplaceholder.typicode.com",
-              "endpoint": "/users",
-              "method": "POST",
-              "headers": {
-                "Content-Type": "application/json"
+            "description": "Create a new user. Provide name, email, and phone.",
+            "node_schema": {
+              "base_url": { "type": "string", "fixed": "https://jsonplaceholder.typicode.com" },
+              "endpoint": { "type": "string", "fixed": "/users" },
+              "method":   { "type": "string", "fixed": "POST" },
+              "headers":  { "type": "object", "fixed": { "Content-Type": "application/json" } },
+              "body": {
+                "type": "object",
+                "properties": {
+                  "name":  { "type": "string", "required": true,  "description": "Full name of the user" },
+                  "email": { "type": "string", "required": true,  "description": "Email address" },
+                  "phone": { "type": "string", "required": false, "description": "Phone number (optional)" }
+                }
               }
-            },
-            "exposed_inputs": [
-              "body"
-            ]
+            }
           }
         }
       }

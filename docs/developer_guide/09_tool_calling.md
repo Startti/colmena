@@ -1,57 +1,159 @@
-# 🛠️ Uso de Herramientas (Tool Calling)
+# Herramientas HTTP para agentes LLM
 
-Colmena permite a los agentes LLM utilizar "herramientas" para interactuar con el mundo exterior. Estas herramientas son nodos del DAG pre-configurados que el LLM puede invocar dinámicamente.
+Los nodos `http_request` se pueden exponer como herramientas llamables por un agente LLM. El agente decide cuándo llamarlas y qué parámetros pasar.
 
-## Configuración de Herramientas en el DAG
+## Comportamiento automático del engine al activar tools
 
-Expones nodos del DAG (como `http_request`) como herramientas para el LLM mediante `tool_configurations` en el nodo `llm_call`.
+Cuando se definen `enabled_tools` en un nodo `llm_call`, el engine inyecta automáticamente un bloque de instrucciones al final del `system_message` del usuario. Esto asegura que el LLM use las herramientas correctamente **sin que el usuario tenga que incluir estas instrucciones manualmente**.
 
-### Ejemplo básico: Nodo HTTP como Herramienta
+El bloque inyectado tiene esta forma:
+
+```
+---
+## Tool Use Instructions
+You have access to the following tools:
+- list_products
+- search_products
+
+Rules:
+- ALWAYS use the available tools to answer questions that require real or live data. Never answer from your own knowledge when a tool can provide the data.
+- Call the most relevant tool before responding. Do not skip tool calls.
+- If a tool call fails, report the error clearly instead of guessing an answer.
+- Only respond without a tool call when the user's request is purely conversational and no tool is needed.
+```
+
+**Implicaciones para el diseño de grafos:**
+- El `system_message` del nodo solo necesita describir el rol y comportamiento del agente.
+- La `description` de cada tool solo necesita explicar **qué hace** — el engine ya se encarga de cuándo y cómo usarla.
+- Las instrucciones manuales como "ALWAYS call this tool" o "NEVER answer from memory" son redundantes y pueden omitirse.
+
+---
+
+## Regla de oro: ¿qué enfoque usar?
+
+```
+¿Necesitas campos opcionales, tipos no-string, o body con objetos anidados?
+  → USA node_schema  (el default para todo caso nuevo)
+
+¿Son todos los campos planos, string, y obligatorios? ¿Son 1-5 campos máximo? ¿Sin body anidado?
+  → PUEDES usar $DYNAMIC  (más simple de escribir, pero NO soporta nesting)
+```
+
+**En la duda: usa `node_schema`.** Es más explícito, soporta todos los casos, y es el estándar del proyecto.
+
+---
+
+## Enfoque 1: `node_schema` (default recomendado)
+
+Un mapa plano donde cada clave es un campo del nodo (e.g. `base_url`, `method`, `query_params`, `body`, `bearer_token`). Cada entrada puede ser:
+
+- **Fixed** (`"fixed": value`) — oculto al LLM, siempre aplicado tal cual.
+- **LLM-visible** (sin `fixed`) — expuesto al LLM con tipo, descripción, y restricciones opcionales.
+- **Contenedor** (`"type": "object"` + `"properties"`) — objeto con hijos que pueden ser fixed o LLM-visible individualmente.
+
+### Ejemplo: GET con query params dinámicos
 
 ```json
-{
-  "nodes": {
-    "agent": {
-      "type": "llm_call",
-      "config": {
-        "provider": "openai",
-        "api_key": "${OPENAI_API_KEY}",
-        "model": "gpt-4o-mini",
-        "system_message": "Eres un asistente útil. Usa las herramientas disponibles.",
-        "enabled_tools": ["fetch_users", "create_user"],
-        "tool_configurations": {
-          "fetch_users": {
-            "node_type": "http_request",
-            "description": "Obtener datos de usuarios de la API.",
-            "fixed_config": {
-              "base_url": "https://jsonplaceholder.typicode.com",
-              "endpoint": "/users",
-              "method": "GET"
-            }
-          },
-          "create_user": {
-            "node_type": "http_request",
-            "description": "Crear un nuevo usuario. Proporciona nombre, email y teléfono.",
-            "fixed_config": {
-              "base_url": "https://jsonplaceholder.typicode.com",
-              "endpoint": "/users",
-              "method": "POST",
-              "headers": { "Content-Type": "application/json" }
-            }
-          }
-        }
+"search_products": {
+  "name": "search_products",
+  "node_type": "http_request",
+  "description": "Buscar productos por nombre y categoría.",
+  "node_schema": {
+    "base_url": { "type": "string", "fixed": "https://dummyjson.com" },
+    "endpoint": { "type": "string", "fixed": "/products/search" },
+    "method":   { "type": "string", "fixed": "GET" },
+    "query_params": {
+      "type": "object",
+      "properties": {
+        "q":     { "type": "string", "required": true,  "description": "Término de búsqueda" },
+        "limit": { "type": "string", "required": false, "description": "Número máximo de resultados (default 10)" },
+        "skip":  { "type": "string", "required": false, "description": "Offset para paginación" }
       }
     }
   }
 }
 ```
 
-### Cómo Funciona
+### Ejemplo: POST con body dinámico
 
-1. **`fixed_config`** — parámetros que el LLM no ve ni puede modificar (URL, método, credenciales).
-2. **`node_schema`** — forma moderna de definir qué parámetros expone el LLM y cuáles son fijos. Reemplaza `fixed_config` + `exposed_inputs`.
-3. **`DagToolExecutor`** combina los argumentos del LLM con los valores fijos y ejecuta el nodo.
-4. El resultado se devuelve al LLM para que continúe la conversación.
+```json
+"create_post": {
+  "name": "create_post",
+  "node_type": "http_request",
+  "description": "Crear un nuevo post. Proporciona título y contenido.",
+  "node_schema": {
+    "base_url":  { "type": "string", "fixed": "https://jsonplaceholder.typicode.com" },
+    "endpoint":  { "type": "string", "fixed": "/posts" },
+    "method":    { "type": "string", "fixed": "POST" },
+    "headers":   { "type": "object", "fixed": { "Content-Type": "application/json" } },
+    "body": {
+      "type": "object",
+      "properties": {
+        "userId":  { "type": "string", "fixed": "1" },
+        "title":   { "type": "string", "required": true,  "description": "Título del post" },
+        "content": { "type": "string", "required": true,  "description": "Contenido del post" },
+        "tags":    { "type": "string", "required": false, "description": "Etiquetas separadas por coma" }
+      }
+    }
+  }
+}
+```
+
+**Grafos de referencia ejecutables:**
+- `tests/graphs/agents/http_tool_node_schema_test.json` — GET + POST con body dinámico
+- `tests/graphs/external/http_tool_configured.json` — GET con query params opcionales + POST con body
+- `tests/graphs/external/product_sales_assistant.json` — agente completo con múltiples tools (multi-turno con SQLite)
+- `tests/graphs/external/product_sales_dummyjson.json` — agente simple con una tool, demuestra inyección automática de instrucciones
+
+---
+
+## Enfoque 2: `$DYNAMIC` (solo casos muy simples)
+
+> **`$DYNAMIC` NO soporta body anidado.** Si el body tiene objetos dentro de objetos (e.g. `body.metadata.author`), usa `node_schema`. `$DYNAMIC` solo escanea un nivel de profundidad.
+
+> **Antes de usar `$DYNAMIC`, confirma que se cumplen TODAS estas condiciones:**
+> - Todos los campos que el LLM debe rellenar son `string`
+> - Todos son obligatorios (no hay opcionales)
+> - El body es plano — ningún campo está dentro de un objeto anidado
+> - Son 5 campos o menos
+>
+> Si falla cualquiera → usa `node_schema`.
+
+Usa `fixed_config` normalmente pero marca valores específicos con el literal `"$DYNAMIC"`. El ejecutor detecta estos marcadores y los expone automáticamente como parámetros requeridos de tipo `string` para el LLM.
+
+```json
+"create_blog_post": {
+  "name": "create_blog_post",
+  "node_type": "http_request",
+  "description": "Crear un post. Proporciona título y contenido.",
+  "fixed_config": {
+    "base_url": "https://jsonplaceholder.typicode.com",
+    "endpoint": "/posts",
+    "method": "POST",
+    "headers": { "Content-Type": "application/json" },
+    "body": {
+      "userId": 1,
+      "author": "Fulanito",
+      "title": "$DYNAMIC",
+      "content": "$DYNAMIC"
+    }
+  }
+}
+```
+
+### ⚠️ Limitaciones de `$DYNAMIC`
+
+| Limitación | Detalle |
+|---|---|
+| **Solo string, siempre requerido** | Todos los campos `$DYNAMIC` se exponen como `string` y se marcan `required`. No puedes tener campos opcionales ni de otro tipo. |
+| **Solo 1 nivel de profundidad** | `body.title` funciona ✅. `body.metadata.author.name` NO funciona ❌ — el ejecutor solo escanea un nivel dentro de un contenedor. |
+| **Sin patrones ni descripciones** | No puedes añadir restricciones de formato ni descripciones por campo. |
+
+**Cuándo usar `$DYNAMIC`:** cuando tienes 1-5 campos planos y simples que el LLM debe rellenar, sin necesidad de tipos especiales, opcionales o anidamiento. Para todo lo demás, usa `node_schema`.
+
+**Grafos de referencia ejecutables:**
+- `tests/graphs/agents/http_tool_dynamic_placeholder_test.json`
+- `tests/graphs/external/http_headers_dynamic.json`
 
 ---
 
@@ -124,10 +226,10 @@ Este patrón fue validado en `tests/graphs/agents/amadeus_llm_http_auth_experime
               "query_params": {
                 "type": "object",
                 "properties": {
-                  "originLocationCode": { "type": "string", "required": true },
+                  "originLocationCode":      { "type": "string", "required": true },
                   "destinationLocationCode": { "type": "string", "required": true },
-                  "departureDate": { "type": "string", "required": true },
-                  "adults": { "type": "string", "required": true }
+                  "departureDate":           { "type": "string", "required": true },
+                  "adults":                  { "type": "string", "required": true }
                 }
               }
             }
@@ -142,7 +244,6 @@ Este patrón fue validado en `tests/graphs/agents/amadeus_llm_http_auth_experime
 **Requisitos:** `DATABASE_URL`, `SECURE_VALUES_KEY`, `AMADEUS_CLIENT_ID`, `AMADEUS_CLIENT_SECRET`, `OPENAI_API_KEY`.
 
 ```bash
-# Ejecutar el experimento
 set -a && source .env && set +a
 cargo run --bin dag_engine -- run tests/graphs/agents/amadeus_llm_http_auth_experiment.json
 ```
@@ -176,11 +277,55 @@ bearer_token, authorization, secure, __colmena_session_id, __node_id, __colmena_
 
 ---
 
+## Compatibilidad con frontends que generan UUIDs como keys
+
+Los frontends suelen generar grafos donde el identificador de cada tool en `tool_configurations` y `enabled_tools` es un **UUID** en lugar del nombre semántico. El campo `name` dentro del objeto sí contiene el nombre legible.
+
+El engine resuelve esto automáticamente en dos lugares:
+
+**1. Generación del nombre de la tool para el LLM (`generate_tool_definition`):**
+```
+effective_name = tool_config.name  (si no está vacío)
+             ↓ fallback
+effective_name = key del mapa       (si name está vacío)
+```
+El LLM siempre recibe el nombre semántico (`"list_products"`), nunca el UUID.
+
+**2. Resolución al ejecutar (`execute`):**
+Cuando el LLM llama `"list_products"`, el engine busca primero por key del mapa y luego por `config.name`. Así el lookup funciona aunque la key sea un UUID.
+
+**Resultado:** ambos formatos funcionan sin cambios:
+
+```json
+// Formato frontend (UUID como key) — funciona ✅
+"enabled_tools": ["0618e7a1-2d50-4c7d-9244-52f2b504a3ca"],
+"tool_configurations": {
+  "0618e7a1-2d50-4c7d-9244-52f2b504a3ca": {
+    "name": "list_products",
+    ...
+  }
+}
+
+// Formato manual (nombre semántico como key) — sigue funcionando ✅
+"enabled_tools": ["list_products"],
+"tool_configurations": {
+  "list_products": {
+    "name": "list_products",
+    ...
+  }
+}
+```
+
+---
+
 ## Ejecución
 
 Cuando el LLM decide usar una herramienta, `DagToolExecutor`:
-1. Combina los argumentos del LLM con `fixed_config` / `node_schema`.
-2. Llama `inject_secrets()` para reemplazar `<value_N>` con valores reales.
-3. Ejecuta el nodo.
-4. Si `secure: true`, llama `hash_output()` — el LLM recibe placeholders, nunca valores reales.
-5. Devuelve el resultado (seguro) al LLM.
+1. Selecciona la estrategia: `node_schema` (si presente) → `$DYNAMIC` (si hay marcadores en `fixed_config`) → fallback deprecado.
+2. Resuelve el nombre efectivo: usa `tool_config.name` si no está vacío, fallback a la key del mapa.
+3. Mezcla los argumentos del LLM con los valores fijos según la estrategia seleccionada.
+4. Llama `inject_secrets()` para reemplazar `<value_N>` con valores reales (si hay `SecureValueService`).
+5. Ejecuta el nodo.
+6. Si `secure: true`, llama `hash_output()` — el LLM recibe placeholders, nunca valores reales.
+7. Devuelve el resultado (seguro) al LLM.
+

@@ -1,0 +1,92 @@
+{
+  "comment": "Product Sales Assistant (dummyjson.com): Conversational agent that helps users browse and find products. Uses tool list_products with node_schema.\n\nUSO:\n  cargo run --bin dag_engine -- run tests/graphs/external/product_sales_dummyjson.json\n\nRequiere: GEMINI_API_KEY",
+  "metadata": {
+    "category": "external",
+    "features": ["llm_call", "tool_calling", "http_request", "node_schema", "DummyJSON"],
+    "provider": "gemini",
+    "requires_env": ["GEMINI_API_KEY"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "test_payload": {
+          "prompt": "List me 5 products sorted by rating descending. Show title, price, rating and discount."
+        }
+      }
+    },
+    "sales_agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "stream": true,
+        "max_steps": 10,
+        "temperature": 0.4,
+        "system_message": "You are a friendly and persuasive product sales assistant for an online store. Your job is to help customers find the perfect product.\n\nYour approach:\n1. Understand what the customer is looking for\n2. Use your tools to search and browse the product catalog\n3. Present options in a compelling way with prices, ratings, and key features\n4. Make personalized recommendations based on the customer's needs\n5. If the customer asks about categories, show them what's available\n6. Always mention discounts when available (discountPercentage field)\n\nResponse style:\n- Be warm, helpful, and enthusiastic (but not pushy)\n- Format product info clearly: name, price, discount, rating, brand\n- Highlight the best value options\n- Respond in the same language the customer uses",
+        "enabled_tools": [
+          "list_products"
+        ],
+        "tool_configurations": {
+          "list_products": {
+            "name": "list_products",
+            "node_type": "http_request",
+            "description": "Fetch live products from the store catalog. Use when the user wants to see, list, browse, or find products. Supports pagination (limit, skip), sorting (sortBy, order) and field selection (select).",
+            "node_schema": {
+              "base_url": {
+                "type": "string",
+                "fixed": "https://dummyjson.com"
+              },
+              "endpoint": {
+                "type": "string",
+                "fixed": "/products"
+              },
+              "method": {
+                "type": "string",
+                "fixed": "GET"
+              },
+              "query_params": {
+                "type": "object",
+                "properties": {
+                  "skip": {
+                    "type": "string",
+                    "required": false,
+                    "description": "Number of products to skip for pagination (e.g., 0, 10, 20)"
+                  },
+                  "limit": {
+                    "type": "string",
+                    "required": false,
+                    "description": "Number of products to return (default 10, max 100)"
+                  },
+                  "order": {
+                    "type": "string",
+                    "required": false,
+                    "description": "Sort order: 'asc' or 'desc'"
+                  },
+                  "select": {
+                    "type": "string",
+                    "required": false,
+                    "description": "Comma-separated fields to select (e.g., 'title,price,rating,brand,discountPercentage')"
+                  },
+                  "sortBy": {
+                    "type": "string",
+                    "required": false,
+                    "description": "Field to sort by (e.g., 'price', 'rating', 'title')"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "output": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "sales_agent" },
+    { "from": "sales_agent", "to": "output" }
+  ]
+}

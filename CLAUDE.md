@@ -22,10 +22,43 @@
 - `python/tests/` — Python test scripts
 - `tests/` — Rust integration tests
 - `tests/graphs/` — JSON DAG test graphs (basic/, agents/, advanced/, memory/, media/)
-- `docs/` — Project documentation
-  - `dds/` — 5 design documents (architecture, DAG, agents, LLM, RAG)
-  - `developer_guide/` — 12 guides (01_architecture through 12_dag_engine_guide)
-  - `agent_context/` — nodes_documentation.md, connections_documentation.md
+- `docs/` — Project documentation (start here before searching the repo)
+  - `DEVELOPER_GUIDE.md` — **Main index** of all developer guides (22 sections)
+  - `node_configurations.json` — **Canonical config schema** for every node type (fields, types, defaults)
+  - `agent_context/node_ports_reference.md` — Ports & outputs per node type
+  - `developer_guide/` — 20 guides:
+    - `01_architecture.md` — Hexagonal architecture, layers, data flow
+    - `05_testing.md` — Test strategy, mocking, commands
+    - `09_tool_calling.md` — Tool calling setup and usage in DAG
+    - `12_dag_engine_guide.md` — DAG engine technical details
+    - `13_security_strategy.md` — Secure Values, AES-256-GCM secrets
+    - `14_llm_deep_dive.md` — LLM node advanced parameters
+    - `15_memory_guide.md` — SQLite/PostgreSQL persistence
+    - `16_data_flow_guide.md` — Data passing and transforms between nodes
+    - `17_technical_reference.md` — JSON schemas and data types
+    - `18_troubleshooting.md` — Common errors and fixes
+    - `19_nested_agents_and_subgraphs.md` — Subgraph node, HITL propagation
+    - `20_orchestrator_architecture.md` — Orchestrator: phases, bridge tasks, HITL, critic loop
+  - `dds/` — Design documents:
+    - `ARQUITECTURA_HEXAGONAL_GUIA.md`, `DAG_ENGINE_DISEÑO.md`, `DISEÑO_AGENTES_Y_TOOLS.md`
+    - `MODULO_LLM_DISEÑO.md`, `RAG_DISEÑO.md`
+    - `SECURE_VALUES_DISEÑO.md` — Security design
+    - `VARIABLE_RESOLUTION_DISEÑO.md` — Variable resolution ($ref, $DYNAMIC, secure_values)
+  - `examples/` — `USAGE_EXAMPLES.md`, `amadeus_test.md`, `python_usage.md`
+  - `testing/` — `critic_feedback_test_plan.md`
+  - `history/` — Past implementation notes (superseded, for historical context only)
+  - `AUDIT_ENGINEERING_REPORT.md` — Audit findings and gaps
+
+## Node Documentation — Where to Look
+When you need to understand or modify any node (HTTP, LLM, orchestrator, etc.):
+1. **Config fields**: `docs/node_configurations.json` — start here, canonical schema for all nodes
+2. **Ports & outputs**: `docs/agent_context/node_ports_reference.md`
+3. **Developer guide**: `docs/DEVELOPER_GUIDE.md` → pick the relevant section
+4. **Design intent**: `docs/dds/` for architecture decisions
+5. **Rust source**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/` — one file per node
+6. **Test graphs**: `tests/graphs/` organized by category (external/ for HTTP, agents/ for tool calling)
+
+**Do NOT search the whole repo** — the answer is almost always in `docs/`.
 
 ## Build Commands
 - **Rust**: `cargo check`, `cargo build`, `cargo test`, `cargo clippy`, `cargo fmt`

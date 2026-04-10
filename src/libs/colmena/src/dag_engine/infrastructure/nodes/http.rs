@@ -1,3 +1,21 @@
+//! HTTP request node — makes outbound HTTP calls from a DAG.
+//!
+//! ## Standalone use
+//! Configure via `config`: `base_url`, `endpoint`, `method`, `headers`, `query_params`,
+//! `body`, `bearer_token`, `authorization`. All string values support `${ENV_VAR}` resolution.
+//! Input edges override config values (inputs take priority over config).
+//!
+//! ## As an LLM tool (via `tool_configurations`)
+//! When invoked by `DagToolExecutor`, extra non-reserved input keys with primitive values
+//! (string, number, boolean) are automatically appended as URL query parameters.
+//! This is the mechanism that allows `node_schema` container children and `$DYNAMIC`
+//! top-level fields to reach the node as flat inputs.
+//!
+//! ## Outputs
+//! Always returns `{ "status": u16, "body": Value }`.
+//! `body` is parsed as JSON; if the response is not valid JSON, `body` is `null`.
+//! The default output port is `body`.
+
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use reqwest::{Client, Method, Url};
 use serde_json::{json, Value};
@@ -5,6 +23,8 @@ use std::error::Error as StdError;
 use std::str::FromStr;
 use std::sync::Arc;
 
+/// Executes HTTP requests. Implements [`ExecutableNode`]. Stateless — all configuration
+/// comes from `inputs` (highest priority) and `config`.
 pub struct HttpNode;
 
 impl HttpNode {
@@ -36,6 +56,25 @@ impl HttpNode {
 
 #[async_trait::async_trait]
 impl ExecutableNode for HttpNode {
+    /// Execute an HTTP request.
+    ///
+    /// # Priority
+    /// For every field (`base_url`, `endpoint`, `method`, `headers`, `query_params`, `body`,
+    /// `bearer_token`, `authorization`), the value from `inputs` takes priority over `config`.
+    ///
+    /// # Env var resolution
+    /// All string values in `config` (and input headers) support `${VAR_NAME}` syntax, resolved
+    /// via `std::env::var` at call time. This is the primary mechanism for injecting API keys.
+    ///
+    /// # Extra query params
+    /// Any input key not in `reserved_keys` that holds a primitive value (string, number, bool)
+    /// is automatically appended as a URL query parameter. When called as an LLM tool, the
+    /// executor passes `node_schema` child fields and `$DYNAMIC` replacements as flat inputs,
+    /// which this mechanism then routes to query params or body as appropriate.
+    ///
+    /// # Outputs
+    /// Returns `{"status": <u16>, "body": <json_value_or_null>}`. The `body` is the default
+    /// output port — downstream nodes without a field selector receive it directly.
     async fn execute(
         &self,
         inputs: &NodeInputs,
@@ -220,14 +259,17 @@ impl ExecutableNode for HttpNode {
         }))
     }
 
+    /// Human-readable description of this node type, used in LLM tool definitions.
     fn description(&self) -> Option<&str> {
         Some("Make HTTP requests to external APIs. Supports GET, POST, PUT, DELETE methods with custom headers and query parameters.")
     }
 
+    /// The default output port is `body` — the parsed JSON response body.
     fn default_output(&self) -> Option<&str> {
         Some("body")
     }
 
+    /// JSON schema describing the node's config and input/output ports.
     fn schema(&self) -> Value {
         json!({
             "type": "http_request",
