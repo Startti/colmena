@@ -53,6 +53,7 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 | Node | Purpose | Key Behavior |
 |---|---|---|
 | **http_request** | HTTP calls | GET/POST/PUT/DELETE to external APIs; supports auth, body, headers |
+| **socketio_request** | Socket.IO events | Connects to Socket.IO server, emits events, receives ack or wait-event responses |
 | **python_script** | Arbitrary code | Executes Python code; injects inputs as variables; requires feature `python` |
 | **task_memory_writer** | Persistence | Writes task state to PostgreSQL; for agent memory |
 
@@ -80,6 +81,7 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 | **divide** | — | `output` | **Requires explicit `a`, `b` fields** |
 | `exponential` | `input` | `output` | Power function — single numeric input |
 | **http_request** | — | `body` | **Requires explicit `url`, `method`, etc.** |
+| **socketio_request** | — | `response` | **Requires explicit `url`, `event`, etc.** |
 | `python_script` | — | `output` | **Dynamic inputs** — all inputs flattened as Python variables |
 | `planner` | — | `result` | **Dynamic inputs** — any input is treated as text for planning |
 | `critic` | — | `result` | **Dynamic inputs** — `texts.*` inputs reviewed by LLM |

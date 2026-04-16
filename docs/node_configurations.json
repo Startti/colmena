@@ -12,7 +12,7 @@
         "input", "output", "trigger_webhook", "suspend", "loop_controller", "subgraph",
         "log", "mock_input",
         "add", "subtract", "multiply", "divide", "exponential",
-        "http_request", "python_script",
+        "http_request", "socketio_request", "python_script",
         "llm_call", "information_extraction", "planner", "critic", "reactor",
         "orchestrator", "task_memory_writer"
       ],
@@ -676,6 +676,121 @@
       "requires": [],
       "supports_env_vars": true,
       "reserved_input_keys": ["base_url", "endpoint", "method", "headers", "body", "query_params", "query_parameters", "bearer_token", "authorization", "secure", "__colmena_session_id", "__node_id", "__colmena_resume_answer"]
+    },
+
+    "socketio_request": {
+      "name": "Socket.IO Request",
+      "description": "Connects to a Socket.IO server, emits an event with a JSON payload, and receives the response via acknowledgment callback or a separate server event. Supports two response patterns: ack mode (default — server responds via Socket.IO acknowledgment callback) and wait-event mode (set 'wait_event' to listen for a named server event instead). Supports namespaces, cookie-based authentication, custom headers, and configurable transport (WebSocket, polling, or auto). All string values in config support '${VAR_NAME}' environment variable resolution — essential for injecting API URLs and tokens securely. Input values override config values (inputs take priority). Each execution creates a fresh connection, emits the event, collects the response, and disconnects.",
+      "category": "integration",
+      "config_fields": {
+        "url": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "The Socket.IO server URL (protocol + domain + optional path). For example, 'https://api.example.com' or 'http://localhost:3000'. The client connects to this URL and performs the Socket.IO handshake. Supports '${VAR_NAME}' environment variable syntax.",
+          "supports_env_vars": true,
+          "example": "${API_URL}"
+        },
+        "namespace": {
+          "type": "string",
+          "required": false,
+          "default": "/",
+          "description": "The Socket.IO namespace to connect to. Namespaces allow multiplexing multiple communication channels over a single connection. The default namespace is '/'. Common examples: '/canvas', '/chat', '/notifications'. Supports '${VAR_NAME}' environment variable syntax.",
+          "supports_env_vars": true,
+          "example": "/canvas"
+        },
+        "event": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "The event name to emit to the server. This is the Socket.IO event identifier that the server listens for. For example, 'load_canvas_state', 'create_node', 'ping'. The value is sent as-is to the server.",
+          "example": "load_canvas_state"
+        },
+        "payload": {
+          "type": "any",
+          "required": false,
+          "default": {},
+          "description": "The JSON payload sent along with the event. Can be any valid JSON value (object, array, string, number, boolean, null). All string values within the payload are recursively resolved for '${VAR_NAME}' environment variable references. If omitted, an empty object {} is sent. Input payload overrides config payload entirely (no merging).",
+          "supports_env_vars": true,
+          "example": { "environmentId": "${ENVIRONMENT_ID}", "data": { "label": "My Node" } }
+        },
+        "headers": {
+          "type": "object",
+          "required": false,
+          "default": {},
+          "description": "Custom HTTP headers sent as opening headers during the Socket.IO handshake. A key-value map where keys are header names and values are header values. Header values support '${VAR_NAME}' environment variable syntax. These are passed via the underlying HTTP upgrade request. Input headers override config headers with the same key.",
+          "supports_env_vars": true,
+          "example": { "X-Custom-Header": "${MY_HEADER_VALUE}" }
+        },
+        "cookies": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Cookie string sent as the 'Cookie' opening header during the Socket.IO handshake. This is a convenience field — equivalent to setting headers: { \"Cookie\": \"...\" } but shorter. Commonly used for session-based authentication. Supports '${VAR_NAME}' environment variable syntax.",
+          "supports_env_vars": true,
+          "example": "__Secure-better-auth.session_token=${SESSION_TOKEN}"
+        },
+        "wait_event": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "When set, the node switches from ack mode to wait-event mode. Instead of using the Socket.IO acknowledgment callback for the response, the node listens for this named server event. This is useful when the server responds by broadcasting a separate event rather than acknowledging the original emit. For example, setting wait_event='canvas_state_loaded' will emit the event and then wait for a 'canvas_state_loaded' event from the server.",
+          "example": "canvas_state_loaded"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "required": false,
+          "default": 10000,
+          "description": "Timeout in milliseconds for the response (ack callback or wait_event). If the server does not respond within this time, the node returns an error envelope: { success: false, event, error: 'Timeout...' }. Default is 10000 (10 seconds). Increase for slow operations or large data transfers.",
+          "validation": { "min": 1 },
+          "example": 15000
+        },
+        "transport": {
+          "type": "string",
+          "required": false,
+          "default": "any",
+          "description": "The transport type for the Socket.IO connection. 'any' (default) lets the client choose automatically (usually starts with polling, upgrades to WebSocket). 'websocket' forces WebSocket-only. 'polling' forces HTTP long-polling only.",
+          "valid_values": ["any", "websocket", "polling"],
+          "example": "websocket"
+        }
+      },
+      "input_ports": {
+        "url": { "type": "string", "description": "Dynamic server URL. Overrides config." },
+        "namespace": { "type": "string", "description": "Dynamic namespace. Overrides config." },
+        "event": { "type": "string", "description": "Dynamic event name. Overrides config." },
+        "payload": { "type": "any", "description": "Dynamic payload. Overrides config entirely." },
+        "headers": { "type": "object", "description": "Dynamic headers. Overrides config headers." },
+        "cookies": { "type": "string", "description": "Dynamic cookie string. Overrides config." },
+        "wait_event": { "type": "string", "description": "Dynamic wait_event. Overrides config." },
+        "timeout_ms": { "type": "integer", "description": "Dynamic timeout in ms. Overrides config." }
+      },
+      "output_ports": {
+        "success": {
+          "type": "boolean",
+          "description": "Whether the request completed successfully. True when the server responded via ack or wait_event. False on timeout, server exception, or channel error."
+        },
+        "event": {
+          "type": "string",
+          "description": "The event name that was emitted. Echoed back for identification when multiple socket tools are in use."
+        },
+        "response": {
+          "type": "any",
+          "description": "The server response data. In ack mode, this is the acknowledgment payload. In wait-event mode, this is the data from the waited event. This is the default output port — downstream nodes connected without specifying a field get this value. On error, this field is absent and 'error' contains the error message."
+        }
+      },
+      "error_envelope": {
+        "description": "On failure (timeout, server exception, channel error), the node returns an error envelope instead of throwing. This allows downstream nodes to handle errors gracefully.",
+        "schema": {
+          "success": false,
+          "event": "string (the emitted event name)",
+          "error": "string (human-readable error message)",
+          "exception": "any (optional, present only for server-side exceptions caught via the 'exception' event)"
+        }
+      },
+      "default_input": null,
+      "default_output": "response",
+      "requires": [],
+      "supports_env_vars": true
     },
 
     "python_script": {
