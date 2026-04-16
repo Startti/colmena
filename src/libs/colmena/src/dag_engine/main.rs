@@ -216,6 +216,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     DagExecutionEvent::LlmToken { node_id, token } => Some(
                         serde_json::json!({ "type": "node-delta", "node_id": node_id, "delta": token }),
                     ),
+                    DagExecutionEvent::ThinkingToken { node_id, token } => Some(
+                        serde_json::json!({ "type": "thinking-delta", "node_id": node_id, "delta": token }),
+                    ),
                     DagExecutionEvent::LlmUsage { .. } => None,
                     DagExecutionEvent::GraphUsageSummary { entries } => Some(serde_json::json!({
                         "type": "usage-summary",

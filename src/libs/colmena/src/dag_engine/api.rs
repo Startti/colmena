@@ -196,6 +196,13 @@ pub async fn run_dag(
                         "delta": token
                     }))
                 }
+                DagExecutionEvent::ThinkingToken { node_id, token } => {
+                    Some(serde_json::json!({
+                        "type": "thinking-delta",
+                        "node_id": node_id,
+                        "delta": token
+                    }))
+                }
                 DagExecutionEvent::LlmToolCall {
                     tool_id,
                     args_chunk,
@@ -567,6 +574,13 @@ async fn handler_webhook(
                         DagExecutionEvent::LlmToken { node_id, token } => {
                             Some(serde_json::json!({
                                 "type": "node-delta",
+                                "node_id": node_id,
+                                "delta": token
+                            }))
+                        },
+                        DagExecutionEvent::ThinkingToken { node_id, token } => {
+                            Some(serde_json::json!({
+                                "type": "thinking-delta",
                                 "node_id": node_id,
                                 "delta": token
                             }))

@@ -1,0 +1,76 @@
+{
+  "comment": "Debug test: load canvas, update ONE field, load again to compare",
+  "metadata": {
+    "category": "external",
+    "requires_env": ["GEMINI_API_KEY", "ADP_API_URL", "ADP_SESSION_TOKEN", "ADP_ENVIRONMENT_ID"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "prompt": "First, load the canvas state. Then pick any existing node and update ONLY its label to 'TEST_LABEL_CHANGE'. Do NOT change position, type, category, or any other field. After the update, load the canvas state again and compare the node before and after — tell me exactly which fields changed."
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "You are a debugging agent. Your job is to test canvas operations carefully. When updating a node, send ONLY the fields you intend to change in the updates object. After each operation, load the canvas again and compare the full node state before and after to detect any unintended side effects. Report every field that changed, even if you didn't ask for it to change.",
+        "temperature": 0.0,
+        "stream": false,
+        "enabled_tools": ["load_canvas", "update_canvas_node"],
+        "tool_configurations": {
+          "load_canvas": {
+            "name": "load_canvas",
+            "node_type": "socketio_request",
+            "description": "Load the current canvas state. Returns all nodes with their full properties.",
+            "node_schema": {
+              "url": { "type": "string", "fixed": "${ADP_API_URL}" },
+              "namespace": { "type": "string", "fixed": "/canvas" },
+              "event": { "type": "string", "fixed": "load_canvas_state" },
+              "wait_event": { "type": "string", "fixed": "canvas_state_loaded" },
+              "cookies": { "type": "string", "fixed": "__Secure-better-auth.session_token=${ADP_SESSION_TOKEN}" },
+              "timeout_ms": { "type": "integer", "fixed": 15000 },
+              "payload": {
+                "type": "object",
+                "properties": {
+                  "environmentId": { "type": "string", "fixed": "${ADP_ENVIRONMENT_ID}" }
+                }
+              }
+            }
+          },
+          "update_canvas_node": {
+            "name": "update_canvas_node",
+            "node_type": "socketio_request",
+            "description": "Update an existing node. Send ONLY the fields to change in the 'updates' object. For example, to change only the label: {\"data\": {\"label\": \"new label\"}}",
+            "node_schema": {
+              "url": { "type": "string", "fixed": "${ADP_API_URL}" },
+              "namespace": { "type": "string", "fixed": "/canvas" },
+              "event": { "type": "string", "fixed": "update_node" },
+              "cookies": { "type": "string", "fixed": "__Secure-better-auth.session_token=${ADP_SESSION_TOKEN}" },
+              "timeout_ms": { "type": "integer", "fixed": 15000 },
+              "payload": {
+                "type": "object",
+                "properties": {
+                  "environmentId": { "type": "string", "fixed": "${ADP_ENVIRONMENT_ID}" },
+                  "id": { "type": "string", "required": true, "description": "The ID of the node to update" },
+                  "updates": { "type": "object", "required": true, "description": "Object with ONLY the fields to change. Example: {\"data\": {\"label\": \"new name\"}}" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent.result", "to": "log_result" }
+  ]
+}

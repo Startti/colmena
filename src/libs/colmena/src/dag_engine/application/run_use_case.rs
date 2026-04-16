@@ -372,6 +372,7 @@ impl DagRunUseCase {
                                     Some(event) => {
                                         match event {
                                             NodeEvent::LlmToken { token } => yield DagExecutionEvent::LlmToken { node_id: node_id.clone(), token },
+                                            NodeEvent::ThinkingToken { token } => yield DagExecutionEvent::ThinkingToken { node_id: node_id.clone(), token },
                                             NodeEvent::LlmToolCall { tool_id, tool_name, args_chunk } => yield DagExecutionEvent::LlmToolCall { node_id: node_id.clone(), tool_id, tool_name, args_chunk },
                                             NodeEvent::LlmUsage { prompt_tokens, completion_tokens } => {
                                                 let entry = usage_accumulator.entry(node_id.clone()).or_insert((0, 0));

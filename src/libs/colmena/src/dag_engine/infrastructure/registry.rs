@@ -4,7 +4,7 @@ use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::ExecutableNode;
 use crate::dag_engine::infrastructure::nodes::{
     debug::*, http::*, input::*, llm::*, math::*, orchestrator::*, output::*, python_node::*,
-    task_memory_writer::*, trigger::*, subgraph::*,
+    socketio::*, task_memory_writer::*, trigger::*, subgraph::*,
 }; // Importa nuestros nodos
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -59,6 +59,9 @@ impl HashMapNodeRegistry {
 
             // --- Registrar Nodos HTTP ---
             nodes.insert("http_request".to_string(), Arc::new(HttpNode));
+
+            // --- Registrar Nodos Socket.IO ---
+            nodes.insert("socketio_request".to_string(), Arc::new(SocketIoNode));
 
             // --- Registrar Nodos LLM ---
             // Pass the weak reference to the registry to LlmNode

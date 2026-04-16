@@ -3,37 +3,53 @@
     "trigger": {
       "type": "input",
       "config": {
-        "prompt": "I am traveling to Aspen, Colorado for a 3-day ski trip. Please plan what I need to bring, and estimate a budget based on the items."
+        "prompt": "Hola"
       }
     },
-    "orchestrator_node": {
+    "aewrxhj7wd1k7bhsp8gbe8p8": {
       "type": "orchestrator",
       "config": {
         "verbose": false,
         "include_extra_info": false,
+        "max_phases": 10,
         "planner": {
           "provider": "gemini",
           "model": "gemini-2.5-flash",
-          "api_key": "${GEMINI_API_KEY}",
-          "system_message": "Read the user's trip request and break it down into tasks. Create one task for clothing_expert and one for gear_expert (these should be in phase 1, parallel=true). Then, create a third task for budget_expert that depends on the clothing and gear tasks to calculate the total cost (this MUST be in a higher phase, parallel=false)."
+          "api_key": "***REDACTED_GEMINI_KEY***",
+          "system_message": "Read the user's trip request and break it down into tasks. using the agent you have"
         },
         "agents": {
-          "clothing_expert": {
-            "description": "Recommends clothing items for a given trip.",
+          "budget_expert": {
+            "description": "Estimates trip budget based on clothing and gear lists.",
             "child_graph_inline": {
               "nodes": {
-                "in":  { "type": "input",    "config": {} },
-                "llm": { "type": "llm_call", "config": {
-                  "provider": "gemini",
-                  "model": "gemini-2.5-flash",
-                  "api_key": "${GEMINI_API_KEY}",
-                  "system_message": "You are a professional clothing stylist. Recommend exactly 1 to 2 essential clothing items for the given trip details. Output a very short bulleted list (max 2 items) with estimated prices. Be brief."
-                }},
-                "out": { "type": "output",   "config": {} }
+                "lq20gdgzoddrvje8x0hhop8n_in": {
+                  "type": "input",
+                  "config": {}
+                },
+                "lq20gdgzoddrvje8x0hhop8n": {
+                  "type": "llm_call",
+                  "config": {
+                    "provider": "gemini",
+                    "model": "gemini-2.5-flash",
+                    "api_key": "***REDACTED_GEMINI_KEY***",
+                    "system_message": "You are a travel budget estimator. Analyze the given lists of clothing and gear, and provide a very brief budget estimate with a final total."
+                  }
+                },
+                "lq20gdgzoddrvje8x0hhop8n_out": {
+                  "type": "output",
+                  "config": {}
+                }
               },
               "edges": [
-                { "from": "in",  "to": "llm" },
-                { "from": "llm", "to": "out" }
+                {
+                  "from": "lq20gdgzoddrvje8x0hhop8n_in",
+                  "to": "lq20gdgzoddrvje8x0hhop8n"
+                },
+                {
+                  "from": "lq20gdgzoddrvje8x0hhop8n",
+                  "to": "lq20gdgzoddrvje8x0hhop8n_out"
+                }
               ]
             }
           },
@@ -41,37 +57,69 @@
             "description": "Recommends ski equipment for a given trip.",
             "child_graph_inline": {
               "nodes": {
-                "in":  { "type": "input",    "config": {} },
-                "llm": { "type": "llm_call", "config": {
-                  "provider": "gemini",
-                  "model": "gemini-2.5-flash",
-                  "api_key": "${GEMINI_API_KEY}",
-                  "system_message": "You are a professional ski equipment outfitter. Recommend exactly 1 to 2 essential gear items for the given trip details. Output a very short bulleted list (max 2 items) with estimated prices. Be brief."
-                }},
-                "out": { "type": "output",   "config": {} }
+                "qja9kes5o4j3m9bdqw8efkoq_in": {
+                  "type": "input",
+                  "config": {}
+                },
+                "qja9kes5o4j3m9bdqw8efkoq": {
+                  "type": "llm_call",
+                  "config": {
+                    "provider": "gemini",
+                    "stream": true,
+                    "model": "gemini-2.5-flash",
+                    "api_key": "***REDACTED_GEMINI_KEY***",
+                    "system_message": "You are a professional ski equipment outfitter. Output a very short bulleted list with estimated prices. Be brief."
+                  }
+                },
+                "qja9kes5o4j3m9bdqw8efkoq_out": {
+                  "type": "output",
+                  "config": {}
+                }
               },
               "edges": [
-                { "from": "in",  "to": "llm" },
-                { "from": "llm", "to": "out" }
+                {
+                  "from": "qja9kes5o4j3m9bdqw8efkoq_in",
+                  "to": "qja9kes5o4j3m9bdqw8efkoq"
+                },
+                {
+                  "from": "qja9kes5o4j3m9bdqw8efkoq",
+                  "to": "qja9kes5o4j3m9bdqw8efkoq_out"
+                }
               ]
             }
           },
-          "budget_expert": {
-            "description": "Estimates trip budget based on clothing and gear lists.",
+          "clothing_expert": {
+            "description": "Recommends clothing items for a given trip.",
             "child_graph_inline": {
               "nodes": {
-                "in":  { "type": "input",    "config": {} },
-                "llm": { "type": "llm_call", "config": {
-                  "provider": "gemini",
-                  "model": "gemini-2.5-flash",
-                  "api_key": "${GEMINI_API_KEY}",
-                  "system_message": "You are a travel budget estimator. Analyze the given lists of clothing and gear, and provide a very brief budget estimate with a final total. Keep it to 2-3 lines maximum."
-                }},
-                "out": { "type": "output",   "config": {} }
+                "twh0v7v43ngzolws9w9naq4s_in": {
+                  "type": "input",
+                  "config": {}
+                },
+                "twh0v7v43ngzolws9w9naq4s": {
+                  "type": "llm_call",
+                  "config": {
+                    "provider": "gemini",
+                    "model": "gemini-2.5-flash",
+                    "stream": true,
+                    "api_key": "***REDACTED_GEMINI_KEY***",
+                    "system_message": "You are a professional clothing stylist. Recommend exactly 1 to 2 essential clothing items for the given trip details. Output a very short bulleted list (max 2 items) with estimated prices. Be brief."
+                  }
+                },
+                "twh0v7v43ngzolws9w9naq4s_out": {
+                  "type": "output",
+                  "config": {}
+                }
               },
               "edges": [
-                { "from": "in",  "to": "llm" },
-                { "from": "llm", "to": "out" }
+                {
+                  "from": "twh0v7v43ngzolws9w9naq4s_in",
+                  "to": "twh0v7v43ngzolws9w9naq4s"
+                },
+                {
+                  "from": "twh0v7v43ngzolws9w9naq4s",
+                  "to": "twh0v7v43ngzolws9w9naq4s_out"
+                }
               ]
             }
           }
@@ -79,36 +127,29 @@
         "critic": {
           "provider": "gemini",
           "model": "gemini-2.5-flash",
-          "api_key": "${GEMINI_API_KEY}",
-          "system_message": "You are reviewing results for a ski trip packing assistant. Be very brief. If the results look reasonable, set task_ok=true and add_tasks=[]. Only add 1 task at most if something critical is missing."
+          "api_key": "***REDACTED_GEMINI_KEY***",
+          "system_message": "You are reviewing results for a ski trip packing assistant. Be very brief. If the results look reasonable, set task_ok=true and add_tasks=[].",
+          "max_retries": 3
         },
         "phase_reactor": {
           "provider": "gemini",
           "model": "gemini-2.5-flash",
-          "api_key": "${GEMINI_API_KEY}",
+          "api_key": "***REDACTED_GEMINI_KEY***",
           "system_message": "You are summarizing the results of a completed phase. Write a single sentence summary. Set task_ok=true."
         },
         "final_reactor": {
           "provider": "gemini",
           "model": "gemini-2.5-flash",
-          "api_key": "${GEMINI_API_KEY}",
-          "system_message": "You are the final step in a ski trip planning assistant. Combine everything into a 2-3 line summary covering clothing, gear, and budget. Set task_ok=true."
+          "api_key": "***REDACTED_GEMINI_KEY***",
+          "system_message": "You are the final step in a ski trip planning assistant. Combine everything into a summary covering clothing, gear, and budget"
         }
       }
-    },
-    "final_output": {
-      "type": "output",
-      "trigger_on": "FINISHED"
     }
   },
   "edges": [
     {
       "from": "trigger",
-      "to": "orchestrator_node"
-    },
-    {
-      "from": "orchestrator_node",
-      "to": "final_output"
+      "to": "aewrxhj7wd1k7bhsp8gbe8p8"
     }
   ]
 }

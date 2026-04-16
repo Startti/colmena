@@ -602,7 +602,7 @@ impl ExecutableNode for LlmNode {
             .get("stream")
             .and_then(|v| v.as_bool())
             .or_else(|| config.get("stream").and_then(|v| v.as_bool()))
-            .unwrap_or(false);
+            .unwrap_or(true);
 
         // Define on_token callback if streaming is enabled and observer is present
         let observer_for_stream = _observer.clone();

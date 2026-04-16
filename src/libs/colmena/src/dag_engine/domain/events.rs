@@ -49,6 +49,9 @@ pub enum DagExecutionEvent {
         node_id: String,
         usage: Option<Value>,
     },
+    /// Streaming token from an internal "thinking" LLM call (planner, critic, reactor, agent subgraphs).
+    #[serde(rename = "thinking_token")]
+    ThinkingToken { node_id: String, token: String },
     #[serde(rename = "graph_finish")]
     GraphFinish { output: Value },
     #[serde(rename = "error")]

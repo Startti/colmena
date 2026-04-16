@@ -43,6 +43,8 @@ impl ExecutionObserver for ChildNodeObserver {
                     node_id: self.node_id.clone(),
                     usage: usage.as_ref().map(|u| serde_json::to_value(u).unwrap_or(Value::Null)),
                 },
+            NodeEvent::ThinkingToken { token } =>
+                DagExecutionEvent::ThinkingToken { node_id: self.node_id.clone(), token },
             NodeEvent::SubgraphChildEvent(raw) => {
                 self.parent.on_event(NodeEvent::SubgraphChildEvent(raw));
                 return;
@@ -52,6 +54,44 @@ impl ExecutionObserver for ChildNodeObserver {
             self.parent.on_event(NodeEvent::SubgraphChildEvent(raw));
         }
     }
+}
+
+// ── ThinkingNodeObserver ─────────────────────────────────────────────────────
+// Wraps another observer and converts LlmToken → ThinkingToken so the frontend
+// can distinguish "thinking" activity (planner, critic, phase_reactor, agents)
+// from the final user-facing response (final_reactor).
+// Also rewrites `llm_token` events inside SubgraphChildEvent JSON payloads.
+
+struct ThinkingNodeObserver {
+    inner: Arc<dyn ExecutionObserver>,
+}
+
+impl ExecutionObserver for ThinkingNodeObserver {
+    fn on_event(&self, event: NodeEvent) {
+        match event {
+            NodeEvent::LlmToken { token } => {
+                self.inner.on_event(NodeEvent::ThinkingToken { token });
+            }
+            NodeEvent::SubgraphChildEvent(raw) => {
+                let rewritten = rewrite_llm_to_thinking(raw);
+                self.inner.on_event(NodeEvent::SubgraphChildEvent(rewritten));
+            }
+            other => self.inner.on_event(other),
+        }
+    }
+}
+
+/// Rewrites `"event":"llm_token"` → `"event":"thinking_token"` inside serialized
+/// SubgraphChildEvent JSON so agent subgraph tokens surface as thinking events.
+fn rewrite_llm_to_thinking(mut raw: Value) -> Value {
+    if let Some(event_name) = raw.get("event").and_then(|v| v.as_str()) {
+        if event_name == "llm_token" {
+            if let Some(obj) = raw.as_object_mut() {
+                obj.insert("event".to_string(), Value::String("thinking_token".to_string()));
+            }
+        }
+    }
+    raw
 }
 
 fn emit_internal_node_start(
@@ -98,6 +138,17 @@ fn child_observer(
             parent: obs.clone(),
             node_id: node_id.to_string(),
         }) as Arc<dyn ExecutionObserver>
+    })
+}
+
+/// Like `child_observer` but wraps with `ThinkingNodeObserver` so all LlmToken
+/// events (direct and from subgraph children) are converted to ThinkingToken.
+fn thinking_child_observer(
+    observer: &Option<Arc<dyn ExecutionObserver>>,
+    node_id: &str,
+) -> Option<Arc<dyn ExecutionObserver>> {
+    child_observer(observer, node_id).map(|child_obs| {
+        Arc::new(ThinkingNodeObserver { inner: child_obs }) as Arc<dyn ExecutionObserver>
     })
 }
 
@@ -265,7 +316,7 @@ impl OrchestratorNode {
                 "model": reactor_cfg_owned.get("model").cloned().unwrap_or(Value::Null),
                 "provider": reactor_cfg_owned.get("provider").cloned().unwrap_or(Value::Null),
             }));
-            let phase_reactor_obs = child_observer(&observer, "phase_reactor");
+            let phase_reactor_obs = thinking_child_observer(&observer, "phase_reactor");
             let reactor_res = reactor_node
                 .execute(&reactor_inputs, &reactor_cfg_owned, state, phase_reactor_obs)
                 .await?;
@@ -502,8 +553,9 @@ impl OrchestratorNode {
         repo: &Arc<dyn DagTaskMemoryRepository>,
         session_id: &str,
         config: &Value,
-        state: &mut Value,
+        _state: &mut Value,
         observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+        inputs: &NodeInputs,
     ) -> Result<OrchestratorSuspend, Box<dyn StdError + Send + Sync>> {
         colmena_log!("✅ [OrchestratorNode] All phases complete. Finalizing...");
 
@@ -511,87 +563,146 @@ impl OrchestratorNode {
         let all_tasks_json = build_tasks_json(all_tasks);
         let phase_summaries = repo.get_phase_summaries(session_id).await?;
 
-        let final_response;
-
         let final_reactor_cfg = config
             .get("final_reactor")
-            .ok_or("OrchestratorNode: 'final_reactor' is required in config. It produces the structured response to the user's initial query.")?;
+            .ok_or("OrchestratorNode: 'final_reactor' is required in config. It produces the final response to the user's query.")?;
 
-        {
-            colmena_log!("⚡ [OrchestratorNode] Internal Final Reactor starting...");
-            let registry = self.registry.upgrade().ok_or("Registry already dropped")?;
-            let reactor_node = registry
-                .get_node("reactor")
-                .ok_or("Reactor node not found")?;
+        // ── Direct LLM call (plain text, no JSON schema) ────────────────────
+        colmena_log!("⚡ [OrchestratorNode] Internal Final LLM starting...");
 
-            let mut reactor_inputs = HashMap::new();
-            for summary in &phase_summaries {
-                reactor_inputs.insert(
-                    format!("texts.phase_{}", summary.phase),
-                    Value::String(summary.summary.clone()),
-                );
-            }
+        let provider_str = final_reactor_cfg
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .ok_or("final_reactor: missing 'provider' in config")?;
+        let provider_kind = match provider_str.to_lowercase().as_str() {
+            "openai" => crate::llm::domain::ProviderKind::OpenAi,
+            "gemini" => crate::llm::domain::ProviderKind::Gemini,
+            "anthropic" => crate::llm::domain::ProviderKind::Anthropic,
+            _ => return Err(format!("final_reactor: invalid provider '{}'", provider_str).into()),
+        };
+        let api_key_raw = final_reactor_cfg
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .ok_or("final_reactor: missing 'api_key' in config")?;
+        let api_key = resolve_env_var(api_key_raw)?;
+        let model = final_reactor_cfg
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
-            // Inject Q&A context from a previous final_reactor suspend if present
-            if let Some(qa) = state.get("__orchestrator_qa_context") {
-                if let Some(ctx) = qa.get("qa_context").and_then(|v| v.as_str()) {
-                    reactor_inputs.insert(
-                        "system_message".to_string(),
-                        Value::String(format!("USER CLARIFICATION — {}", ctx)),
-                    );
-                }
-            }
+        // System message
+        let system_msg = final_reactor_cfg
+            .get("system_message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("You are a helpful assistant. Using the context provided, write a clear and complete response to the user's original question.");
 
-            emit_internal_node_start(&observer, "final_reactor", "reactor", json!({
-                "model": final_reactor_cfg.get("model").cloned().unwrap_or(Value::Null),
-                "provider": final_reactor_cfg.get("provider").cloned().unwrap_or(Value::Null),
-            }));
-            let final_reactor_obs = child_observer(&observer, "final_reactor");
-            let reactor_res = reactor_node
-                .execute(&reactor_inputs, final_reactor_cfg, state, final_reactor_obs)
-                .await?;
-            emit_internal_node_finish(&observer, "final_reactor", reactor_res.clone());
-
-            // ── Suspend check ─────────────────────────────────────────────────
-            let reactor_suspended = reactor_res
-                .get("extra_info")
-                .and_then(|e| e.get("suspend"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            if reactor_suspended {
-                let question_text = reactor_res
-                    .get("extra_info")
-                    .and_then(|e| e.get("question"))
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("Please clarify before producing the final response.")
-                    .to_string();
-                colmena_log!(
-                    "⏸️  [OrchestratorNode] Final reactor suspended. Question: {}",
-                    question_text
-                );
-                let questions = vec![SuspendQuestion {
-                    id: "final_reactor_clarification".to_string(),
-                    question: question_text,
-                    question_type: "open".to_string(),
-                    options: None,
-                }];
-                if allow_suspend_for(final_reactor_cfg) {
-                    return Ok(OrchestratorSuspend::Suspended(make_suspend_response(
-                        state,
-                        "final_reactor",
-                        -1,
-                        None,
-                        questions,
-                    )));
-                } else {
-                    debug_print_questions("final_reactor", &questions);
-                }
-            }
-
-            final_response = reactor_res.get("result").cloned().unwrap_or(Value::Null);
+        // Build user message: original prompt + phase summaries
+        let mut context_parts = Vec::new();
+        let user_prompt = inputs
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !user_prompt.is_empty() {
+            context_parts.push(format!("# User's Original Question\n\n{}", user_prompt));
         }
+        for summary in &phase_summaries {
+            context_parts.push(format!(
+                "# Phase {} Results\n\n{}",
+                summary.phase, summary.summary
+            ));
+        }
+        let user_message = context_parts.join("\n\n---\n\n");
+
+        // Configure LLM
+        let provider =
+            crate::llm::domain::LlmProvider::new(provider_kind.clone(), api_key, model)?;
+        let mut llm_config = crate::llm::domain::LlmConfig::new(provider);
+        if let Some(temp) = final_reactor_cfg
+            .get("temperature")
+            .and_then(|v| v.as_f64())
+        {
+            llm_config = llm_config.with_temperature(temp as f32)?;
+        }
+
+        let llm_repo = crate::llm::infrastructure::LlmProviderFactory::create(provider_kind);
+        let conversation_repo = Arc::new(
+            crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository::new(),
+        );
+        let agent_service = crate::llm::application::AgentService::new(llm_repo, conversation_repo);
+        let tid = crate::llm::domain::SessionId(uuid::Uuid::new_v4().to_string());
+
+        let messages = vec![
+            crate::llm::domain::LlmMessage::system(system_msg.to_string())?,
+            crate::llm::domain::LlmMessage::user(user_message)?,
+        ];
+
+        // Streaming callback — always stream, emits llm_token (user-facing response)
+        let final_obs = child_observer(&observer, "final_reactor");
+        let on_token: Option<Box<dyn Fn(crate::llm::domain::LlmStreamPart) + Send + Sync>> =
+            if let Some(obs) = final_obs {
+                Some(Box::new(move |part: crate::llm::domain::LlmStreamPart| {
+                    match part {
+                        crate::llm::domain::LlmStreamPart::Content(token) => {
+                            obs.on_event(NodeEvent::LlmToken { token })
+                        }
+                        crate::llm::domain::LlmStreamPart::Usage(usage) => {
+                            obs.on_event(NodeEvent::LlmUsage {
+                                prompt_tokens: usage.prompt_tokens,
+                                completion_tokens: usage.completion_tokens,
+                            })
+                        }
+                        crate::llm::domain::LlmStreamPart::LlmMessageStart => {
+                            obs.on_event(NodeEvent::LlmMessageStart)
+                        }
+                        crate::llm::domain::LlmStreamPart::LlmMessageFinish(usage) => {
+                            obs.on_event(NodeEvent::LlmMessageFinish(usage))
+                        }
+                        _ => {}
+                    }
+                }))
+            } else {
+                None
+            };
+
+        // Empty tool executor (no tools for final response)
+        struct FinalEmptyToolExecutor;
+        #[async_trait::async_trait]
+        impl crate::llm::domain::ToolExecutor for FinalEmptyToolExecutor {
+            async fn execute(
+                &self,
+                _tc: &crate::llm::domain::ToolCall,
+            ) -> Result<crate::llm::domain::ToolResult, crate::llm::domain::LlmError> {
+                Err(crate::llm::domain::LlmError::ToolExecutionFailed {
+                    message: "No tools".into(),
+                })
+            }
+            async fn available_tools(&self) -> Vec<crate::llm::domain::ToolDefinition> {
+                vec![]
+            }
+        }
+
+        emit_internal_node_start(&observer, "final_reactor", "llm_call", json!({
+            "model": final_reactor_cfg.get("model").cloned().unwrap_or(Value::Null),
+            "provider": final_reactor_cfg.get("provider").cloned().unwrap_or(Value::Null),
+        }));
+
+        let params = crate::llm::application::AgentRunParams {
+            session_id: &tid,
+            prompt: String::new(),
+            messages: Some(messages),
+            config: llm_config,
+            tools: vec![],
+            tool_executor: &FinalEmptyToolExecutor,
+            max_iterations: Some(1),
+            on_token,
+        };
+
+        let response = agent_service.run(params).await?;
+        let final_text = response.content().to_string();
+
+        emit_internal_node_finish(&observer, "final_reactor", json!({ "result": final_text }));
+
+        colmena_log!("✅ [OrchestratorNode] Final response generated ({} chars).", final_text.len());
 
         let phase_summaries_json: Vec<Value> = phase_summaries
             .iter()
@@ -605,7 +716,7 @@ impl OrchestratorNode {
 
         Ok(OrchestratorSuspend::Done(json!({
             "all_tasks": all_tasks_json,
-            "final_response": final_response,
+            "final_response": final_text,
             "extra_info": {
                 "__colmena_loop_status": "FINISHED",
                 "phase_summaries": phase_summaries_json
@@ -665,16 +776,6 @@ impl ExecutableNode for OrchestratorNode {
                     );
                 }
                 // NOTE: Suspend meta cleanup happens in resuming_critic guard, not here
-            } else if sa == "final_reactor" {
-                colmena_log!("▶️  [OrchestratorNode] Resuming from final_reactor suspend. Injecting Q&A context.");
-                let qa_str = questions_to_context_string(questions, ans);
-                if let Some(obj) = _state.as_object_mut() {
-                    obj.insert(
-                        "__orchestrator_qa_context".to_string(),
-                        json!({ "qa_context": qa_str }),
-                    );
-                }
-                clear_suspend_meta(_state);
             } else if sa == "planner" {
                 colmena_log!("▶️  [OrchestratorNode] Resuming from planner suspend. Injecting Q&A as planner context and phase 0 summary.");
                 let new_qa = questions_to_context_string(questions, ans);
@@ -784,7 +885,7 @@ impl ExecutableNode for OrchestratorNode {
                         "model": internal_planner_cfg.get("model").cloned().unwrap_or(Value::Null),
                         "provider": internal_planner_cfg.get("provider").cloned().unwrap_or(Value::Null),
                     }));
-                    let planner_obs = child_observer(&_observer, "planner");
+                    let planner_obs = thinking_child_observer(&_observer, "planner");
                     let planner_result = planner_node
                         .execute(inputs, &internal_planner_cfg, _state, planner_obs)
                         .await?;
@@ -913,7 +1014,7 @@ impl ExecutableNode for OrchestratorNode {
                     None => {
                         // Todas las fases terminadas
                         match self
-                            .finalize_execution(repo, &session_id, config, _state, _observer)
+                            .finalize_execution(repo, &session_id, config, _state, _observer, inputs)
                             .await?
                         {
                             OrchestratorSuspend::Suspended(s) => return Ok(s),
@@ -930,7 +1031,7 @@ impl ExecutableNode for OrchestratorNode {
                                 max_phases, current_phase
                             );
                             match self
-                                .finalize_execution(repo, &session_id, config, _state, _observer)
+                                .finalize_execution(repo, &session_id, config, _state, _observer, inputs)
                                 .await?
                             {
                                 OrchestratorSuspend::Suspended(s) => return Ok(s),
@@ -1256,8 +1357,11 @@ impl ExecutableNode for OrchestratorNode {
                                 .get_node("subgraph")
                                 .ok_or("subgraph node not found")?;
 
+                            let agent_obs: Option<Arc<dyn ExecutionObserver>> = _observer.as_ref().map(|obs| {
+                                Arc::new(ThinkingNodeObserver { inner: obs.clone() }) as Arc<dyn ExecutionObserver>
+                            });
                             let agent_result = subgraph_node
-                                .execute(&task_inputs, &subgraph_cfg, _state, _observer.clone())
+                                .execute(&task_inputs, &subgraph_cfg, _state, agent_obs)
                                 .await?;
 
                             colmena_log!(
@@ -1310,7 +1414,7 @@ impl ExecutableNode for OrchestratorNode {
                                     "model": critic_cfg.get("model").cloned().unwrap_or(Value::Null),
                                     "provider": critic_cfg.get("provider").cloned().unwrap_or(Value::Null),
                                 }));
-                                let critic_obs = child_observer(&_observer, &critic_node_id);
+                                let critic_obs = thinking_child_observer(&_observer, &critic_node_id);
                                 let critic_res = critic_node
                                     .execute(&critic_inputs, critic_cfg, _state, critic_obs)
                                     .await?;
@@ -1572,6 +1676,17 @@ async fn seed_db_manually(
         }
     }
     Ok(())
+}
+
+/// Resolves environment variable references in the form `${VAR_NAME}`.
+fn resolve_env_var(value: &str) -> Result<String, String> {
+    if value.starts_with("${") && value.ends_with('}') {
+        let var_name = &value[2..value.len() - 1];
+        std::env::var(var_name)
+            .map_err(|_| format!("OrchestratorNode: Environment variable '{}' not found", var_name))
+    } else {
+        Ok(value.to_string())
+    }
 }
 
 /// Builds an enriched prompt for an agent that includes:

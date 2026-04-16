@@ -641,8 +641,25 @@ where
             if let Some(start_index) = self.buffer.iter().position(|&b| b == b'{') {
                 let mut brace_count = 0;
                 let mut end_index = None;
+                let mut in_string = false;
+                let mut escape_next = false;
 
                 for (i, &byte) in self.buffer.iter().enumerate().skip(start_index) {
+                    if escape_next {
+                        escape_next = false;
+                        continue;
+                    }
+                    if byte == b'\\' && in_string {
+                        escape_next = true;
+                        continue;
+                    }
+                    if byte == b'"' {
+                        in_string = !in_string;
+                        continue;
+                    }
+                    if in_string {
+                        continue;
+                    }
                     if byte == b'{' {
                         brace_count += 1;
                     } else if byte == b'}' {

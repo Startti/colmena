@@ -6,7 +6,7 @@ use std::error::Error;
 use std::sync::Arc;
 
 use crate::llm::application::AgentService;
-use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, ProviderKind, SessionId};
+use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, LlmStreamPart, ProviderKind, SessionId};
 use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
 use crate::llm::infrastructure::LlmProviderFactory;
 
@@ -209,6 +209,35 @@ impl ExecutableNode for CriticNode {
             }
         }
 
+        // Build streaming callback — only when streaming is explicitly enabled in config
+        let streaming = config
+            .get("streaming")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let observer_for_stream = _observer.clone();
+        let on_token: Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>> =
+            if streaming {
+                if let Some(obs) = observer_for_stream {
+                    Some(Box::new(move |part: LlmStreamPart| {
+                        use crate::dag_engine::domain::observer::NodeEvent;
+                        match part {
+                            LlmStreamPart::Content(token) => obs.on_event(NodeEvent::LlmToken { token }),
+                            LlmStreamPart::Usage(usage) => obs.on_event(NodeEvent::LlmUsage {
+                                prompt_tokens: usage.prompt_tokens,
+                                completion_tokens: usage.completion_tokens,
+                            }),
+                            LlmStreamPart::LlmMessageStart => obs.on_event(NodeEvent::LlmMessageStart),
+                            LlmStreamPart::LlmMessageFinish(usage) => obs.on_event(NodeEvent::LlmMessageFinish(usage)),
+                            _ => {}
+                        }
+                    }))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
         let params = crate::llm::application::AgentRunParams {
             session_id: &tid,
             prompt: String::new(),
@@ -217,21 +246,10 @@ impl ExecutableNode for CriticNode {
             tools: vec![],
             tool_executor: &EmptyToolExecutor,
             max_iterations: Some(1),
-            on_token: None,
+            on_token,
         };
 
         let response = agent_service.run(params).await?;
-
-        // Notify observer of usage
-        if let Some(obs) = _observer {
-            if let Some(usage) = response.usage() {
-                use crate::dag_engine::domain::observer::NodeEvent;
-                obs.on_event(NodeEvent::LlmUsage {
-                    prompt_tokens: usage.prompt_tokens,
-                    completion_tokens: usage.completion_tokens,
-                });
-            }
-        }
 
         let raw = response.content();
 

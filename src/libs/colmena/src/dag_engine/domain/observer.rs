@@ -26,6 +26,11 @@ pub enum NodeEvent {
     },
     LlmMessageStart,
     LlmMessageFinish(Option<crate::llm::domain::LlmUsage>),
+    /// Streaming token from an internal "thinking" LLM call (planner, critic, reactor, agent subgraphs).
+    /// Distinct from LlmToken so the frontend can separate thinking activity from the final response.
+    ThinkingToken {
+        token: String,
+    },
     /// Raw DagExecutionEvent from a child subgraph execution.
     /// Child node IDs are preserved so the parent stream can re-yield them as-is.
     SubgraphChildEvent(serde_json::Value),
