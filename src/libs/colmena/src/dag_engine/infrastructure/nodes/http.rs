@@ -52,6 +52,26 @@ impl HttpNode {
         result.push_str(&input[last_end..]);
         Ok(result)
     }
+
+    /// Resolve `${ENV_VAR}` in all string values within a JSON Value (recursive).
+    fn resolve_env_vars_in_value(val: &Value) -> Value {
+        match val {
+            Value::String(s) => {
+                Value::String(Self::resolve_env_vars(s).unwrap_or_else(|_| s.clone()))
+            }
+            Value::Object(map) => {
+                let mut out = serde_json::Map::new();
+                for (k, v) in map {
+                    out.insert(k.clone(), Self::resolve_env_vars_in_value(v));
+                }
+                Value::Object(out)
+            }
+            Value::Array(arr) => {
+                Value::Array(arr.iter().map(Self::resolve_env_vars_in_value).collect())
+            }
+            other => other.clone(),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -169,11 +189,39 @@ impl ExecutableNode for HttpNode {
             request_builder = request_builder.header("Authorization", auth);
         }
 
-        // 5. Query Params (Config + Inputs)
-        if let Some(params) = config.get("query_params") {
+        // 5. Query Params (Config + Inputs) — resolve ${ENV_VAR} in values
+        if let Some(params) = config.get("query_params").and_then(|v| v.as_object()) {
+            let mut resolved = serde_json::Map::new();
+            for (k, v) in params {
+                if let Some(s) = v.as_str() {
+                    let s_resolved = Self::resolve_env_vars(s).map_err(|e| {
+                        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                            as Box<dyn StdError + Send + Sync>
+                    })?;
+                    resolved.insert(k.clone(), Value::String(s_resolved));
+                } else {
+                    resolved.insert(k.clone(), v.clone());
+                }
+            }
+            request_builder = request_builder.query(&resolved);
+        } else if let Some(params) = config.get("query_params") {
             request_builder = request_builder.query(params);
         }
-        if let Some(params) = inputs.get("query_params") {
+        if let Some(params) = inputs.get("query_params").and_then(|v| v.as_object()) {
+            let mut resolved = serde_json::Map::new();
+            for (k, v) in params {
+                if let Some(s) = v.as_str() {
+                    let s_resolved = Self::resolve_env_vars(s).map_err(|e| {
+                        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                            as Box<dyn StdError + Send + Sync>
+                    })?;
+                    resolved.insert(k.clone(), Value::String(s_resolved));
+                } else {
+                    resolved.insert(k.clone(), v.clone());
+                }
+            }
+            request_builder = request_builder.query(&resolved);
+        } else if let Some(params) = inputs.get("query_params") {
             request_builder = request_builder.query(params);
         }
 
@@ -227,8 +275,10 @@ impl ExecutableNode for HttpNode {
                 // Never log body contents — may contain credentials or PII
                 request_builder = request_builder.body(s_resolved);
             } else {
+                // Resolve ${ENV_VAR} in body object string values before sending
+                let resolved_body = Self::resolve_env_vars_in_value(body);
                 // Never log body contents — may contain credentials or PII
-                request_builder = request_builder.json(body);
+                request_builder = request_builder.json(&resolved_body);
             }
         }
 

@@ -26,7 +26,10 @@ pub async fn run_dag(
 
     // Initialize Database Pool
     let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool = sqlx::PgPool::connect(&db_url).await?;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(3)
+        .connect(&db_url)
+        .await?;
 
     // Initialize Repository Factory and State Repo
     let repository_factory = Arc::new(ConversationRepositoryFactory::new());
@@ -309,7 +312,10 @@ pub async fn serve_dag(
 
     // Initialize Database Pool
     let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool = sqlx::PgPool::connect(&db_url).await?;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(3)
+        .connect(&db_url)
+        .await?;
 
     // Initialize Repository Factory and State Repo
     let repository_factory = Arc::new(ConversationRepositoryFactory::new());

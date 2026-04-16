@@ -1,5 +1,5 @@
 {
-  "comment": "Test: LLM agent interacting with ADP canvas via Socket.IO tools",
+  "comment": "Test: LLM agent interacting with ADP canvas via Socket.IO tools (nodes + edges)",
   "metadata": {
     "category": "external",
     "features": [
@@ -11,14 +11,15 @@
       "GEMINI_API_KEY",
       "ADP_API_URL",
       "ADP_SESSION_TOKEN",
-      "ADP_ENVIRONMENT_ID"
+      "ADP_ENVIRONMENT_ID",
+      "ADP_WORKSPACE_ID"
     ]
   },
   "nodes": {
     "trigger": {
       "type": "input",
       "config": {
-        "prompt": "peudes agregar otro nodo pegado al orchestador que me ayude a bsucar hoteles para el viaje"
+        "prompt": "quiero crear un agente con un ndoo input y un nodo llm que me permita crear correos electornicos automaticos en cualquier idioma. verifica primeor si existe un nodo input y un nodo llm y si no existe crealos y conectalos cada vez que crees un ndoo verifica que fue creado con el load canvas para tmabein verificar el handler que se va usar para conectar los nodos"
       }
     },
     "agent": {
@@ -28,20 +29,25 @@
         "model": "gemini-2.5-flash",
         "api_key": "${GEMINI_API_KEY}",
         "connection_url": "${DATABASE_URL}",
-        "system_message": "You are a canvas automation agent. You can load the canvas state and create/update/delete nodes on a visual canvas. Always load the canvas state first to understand the current layout before making changes.",
+        "system_message": "You are a canvas automation agent for the ADP platform. You manage nodes and edges on a visual workflow canvas.\n\nWORKFLOW:\n1. Always call load_canvas first to see existing nodes, edges, and groups.\n2. To add a node: use create_canvas_node with the correct type and category (see the tool description for the full type reference).\n3. To connect nodes: use create_edge with source and target node IDs. Edges auto-create groups.\n4. Position new nodes near related nodes. Use the existing layout as reference.\n\nEDGE CREATION RULES:\n- The create_edge payload has { environmentId, edge: { id, source, target, type, animated, environmentId, sourceHandle?, targetHandle? } }.\n- type='default', animated=true, and both environmentId fields are auto-filled. You must provide: id (random 24-char alphanumeric), source, target, and optionally sourceHandle/targetHandle.\n- For vertical layouts: use sourceHandle='bottom', targetHandle='top'.\n- For condition nodes: use sourceHandle='true' or sourceHandle='false' to specify the branch.\n- You can omit handles entirely and the system will auto-assign them.\n\nHANDLE TYPES BY NODE:\n- Trigger nodes (chatInput, webhook, schedule): output-only handles (bottom, right, left)\n- AI nodes (llmCall, agent): initially all input handles; after first connection, remaining become output\n- Tool/Memory/Output nodes: input-only (cannot be edge sources)\n- Condition: inputs on top/left/right, outputs named 'true' and 'false'\n\nAPI KEY WORKFLOW (for AI nodes like llmCall, agent, planner, orchestrator, agentTeam):\n- Before creating any AI node, call list_api_keys to see available provider keys.\n- Present the available keys to the user and ask which one to use for the new node.\n- If no suitable key exists, ask the user if they want to create a new one. To create a key, you MUST ask the user for the secret key value — never guess or fabricate API keys.\n- Set the chosen API key's 'id' as the 'apiKeyId' field in the node's data.config.\n\nIMPORTANT:\n- Every node needs a type AND a matching category (e.g., type: \"llmCall\", category: \"ai\").\n- After creating a node, use the returned node ID to create edges connecting it to other nodes.\n- The canvas has groups that are managed automatically when edges are created/deleted.\n- When updating node data, send the COMPLETE data object because the backend replaces it entirely (does not deep merge).",
         "temperature": 0.0,
         "stream": false,
         "enabled_tools": [
           "load_canvas",
           "create_canvas_node",
           "update_canvas_node",
-          "delete_canvas_node"
+          "delete_canvas_node",
+          "create_edge",
+          "update_edge",
+          "delete_edge",
+          "list_api_keys",
+          "create_api_key"
         ],
         "tool_configurations": {
           "load_canvas": {
             "name": "load_canvas",
             "node_type": "socketio_request",
-            "description": "Load the current canvas state for the environment. Returns all existing nodes, edges, and groups.",
+            "description": "Load the current canvas state for the environment. Returns all existing nodes, edges, and groups. Always call this first to understand the current layout before making changes.",
             "node_schema": {
               "url": {
                 "type": "string",
@@ -81,7 +87,7 @@
           "create_canvas_node": {
             "name": "create_canvas_node",
             "node_type": "socketio_request",
-            "description": "Create a new node on the canvas. The 'node' parameter must be a JSON object with: type (string, e.g. 'chatInput', 'llmCall'), category (string, e.g. 'trigger', 'ai', 'tools', 'logic', 'output'), position ({x: number, y: number}), and data ({label: string, config?: object}).",
+            "description": "Create a new node on the canvas. Returns the created node with its generated ID.\n\nPAYLOAD: { environmentId (auto), node: { type, category, position: {x, y}, data: { label, config? }, measured?: {width, height}, groupId?: string|null, sortIndex?: number } }\n\nTYPE-TO-CATEGORY MAPPING (category is required and must match the type):\n- trigger: chatInput, webhook, schedule\n- ai: llmCall, agent, planner, orchestrator, agentTeam\n- tools: webSearch, databaseQuery, fileSearch, apiCall, runCode\n- condition: condition (NOTE: category is 'condition', NOT 'logic')\n- logic: memory, humanInTheLoop, parser\n- output: chatOutput, fileOutput, objectOutput\n\nCONNECTION RULES (for planning edge creation after node creation):\n- trigger -> ai only\n- ai -> ai, condition, logic, output\n- tools -> input-only (connect TO ai nodes as tools, cannot be an edge source)\n- condition -> anything except trigger (has true/false output paths)\n- memory -> input-only (connect TO ai nodes)\n- parser, humanInTheLoop -> anything except trigger\n- output -> terminal (cannot connect further)\n\n=== COMPLETE NODE CONFIGS (data.config for each type) ===\n\n[TRIGGER NODES]\nchatInput: { \"variableName\": \"user_message\", \"inputType\": \"Text\" }\nwebhook: { \"endpointPath\": \"/webhook\", \"method\": \"POST\", \"authEnabled\": false, \"authSecret\": \"\", \"schemaValidation\": \"\" }\nschedule: { \"cronExpression\": \"0 0 * * *\", \"timezone\": \"UTC\", \"repeatNumber\": 1, \"repeatUnit\": \"days\", \"weekDays\": [], \"startDate\": \"\", \"endDate\": \"\" }\n\n[AI NODES]\nllmCall: { \"model\": \"gemini-2.5-flash\", \"systemPrompt\": \"\", \"temperature\": 0.5, \"enableMemory\": true }\nagent: { \"model\": \"gemini-2.5-flash\", \"description\": \"\", \"systemPrompt\": \"\", \"temperature\": 0.5, \"memoryWindow\": \"\", \"maxSteps\": 10, \"enableMemory\": true }\nplanner: { \"model\": \"gemini-2.5-flash\", \"objectivePrompt\": \"\", \"allowSuspend\": true } (only accepts connections FROM orchestrator/agentTeam)\norchestrator / agentTeam (same config): { \"model\": \"gemini-2.5-flash\", \"maxPhases\": 10, \"includeExtraInfo\": true, \"enableCritic\": false, \"criticApiKeyId\": \"\", \"criticModel\": \"\", \"criticSystemPrompt\": \"\", \"criticMaxRetries\": 3, \"criticAllowSuspend\": true, \"enablePhaseReactor\": false, \"phaseReactorApiKeyId\": \"\", \"phaseReactorModel\": \"\", \"phaseReactorSystemPrompt\": \"\", \"phaseReactorAllowSuspend\": true, \"enableFinalReactor\": false, \"finalReactorApiKeyId\": \"\", \"finalReactorModel\": \"\", \"finalReactorSystemPrompt\": \"\", \"finalReactorAllowSuspend\": true }\n\n[TOOL NODES] (input-only, connect TO ai nodes)\nwebSearch: { \"query\": \"\", \"provider\": \"google\", \"maxResults\": 5 }\ndatabaseQuery: { \"connectionId\": \"\", \"queryType\": \"sql\", \"query\": \"\", \"parameters\": \"\" }\nfileSearch: { \"knowledgeBaseId\": \"\", \"strategy\": \"semantic\", \"searchQuery\": \"\", \"topK\": 5, \"minScore\": 0.7 }\napiCall: { \"url\": \"\", \"endpoint\": \"\", \"method\": \"GET\", \"headers\": \"\", \"body\": \"\", \"queryParameters\": \"\", \"timeout\": 5000, \"description\": \"\" }\nrunCode: { \"runtime\": \"python3.10\", \"code\": \"\", \"inputVariables\": \"\", \"outputVariables\": \"\" }\n\n[LOGIC NODES]\ncondition (category: 'condition'): { \"conditionType\": \"basic\", \"model\": \"gemini-2.5-flash\", \"evaluationPrompt\": \"\", \"contextVariables\": [], \"variable\": \"\", \"operator\": \"equals\", \"value\": \"\" } (conditionType can be 'basic' or 'ai')\nmemory (input-only): { \"memoryType\": \"longTerm\", \"action\": \"retrieve\", \"retrievalStrategy\": \"similarity\", \"key\": \"\", \"content\": \"\" }\nhumanInTheLoop: { \"interactionType\": \"approval\", \"timeout\": 24, \"onTimeout\": \"approve\" }\nparser: { \"model\": \"gemini-2.5-flash\", \"prompt\": \"\", \"schema\": \"\", \"temperature\": 0.5 }\n\n[OUTPUT NODES] (terminal, cannot connect further)\nchatOutput: { \"apiKeyId\": \"\", \"model\": \"\", \"messageType\": [\"text\"], \"instructions\": \"\", \"enableSummary\": true, \"outputVariables\": [] }\nfileOutput: { \"fileName\": \"user_output\", \"mimeType\": \"text/plain\", \"action\": \"download\", \"content\": \"\" }\nobjectOutput: { \"model\": \"gemini-2.5-flash\", \"prompt\": \"\", \"schema\": \"\", \"temperature\": 0.5 }",
             "node_schema": {
               "url": {
                 "type": "string",
@@ -113,7 +119,7 @@
                   "node": {
                     "type": "object",
                     "required": true,
-                    "description": "Node definition: {type: string, category: string, position: {x: number, y: number}, data: {label: string, config?: object}}"
+                    "description": "Node object: { type: string, category: string, position: { x: number, y: number }, data: { label: string, config?: object }, measured?: { width: number, height: number }, groupId?: string | null, sortIndex?: number }"
                   }
                 }
               }
@@ -122,7 +128,7 @@
           "update_canvas_node": {
             "name": "update_canvas_node",
             "node_type": "socketio_request",
-            "description": "Update an existing node on the canvas. Provide the node ID and an updates object with the fields to change.",
+            "description": "Update an existing node on the canvas. Provide the node ID and an updates object with the fields to change. WARNING: The backend replaces the entire 'data' object instead of deep merging. If you need to update data.label or data.config, send the COMPLETE data object including all existing fields, not just the changed ones.",
             "node_schema": {
               "url": {
                 "type": "string",
@@ -159,7 +165,7 @@
                   "updates": {
                     "type": "object",
                     "required": true,
-                    "description": "Object with the fields to update on the node"
+                    "description": "Object with the fields to update. For position: { position: { x, y } }. For data: send the COMPLETE data object { data: { label, config, ... } } because it replaces entirely."
                   }
                 }
               }
@@ -168,7 +174,7 @@
           "delete_canvas_node": {
             "name": "delete_canvas_node",
             "node_type": "socketio_request",
-            "description": "Delete a node from the canvas by its ID.",
+            "description": "Delete a node from the canvas by its ID. Also removes any edges connected to this node and resolves groups automatically.",
             "node_schema": {
               "url": {
                 "type": "string",
@@ -201,6 +207,264 @@
                     "type": "string",
                     "required": true,
                     "description": "The ID of the node to delete"
+                  }
+                }
+              }
+            }
+          },
+          "create_edge": {
+            "name": "create_edge",
+            "node_type": "socketio_request",
+            "description": "Create an edge (connection) between two nodes. Provide an 'edge' object with the connection details. The fields type='default', animated=true, and environmentId are auto-filled into the edge.\n\nEDGE OBJECT FIELDS:\n- id: generate a random 24-char alphanumeric string (REQUIRED)\n- source: source node ID (REQUIRED)\n- target: target node ID (REQUIRED)\n- sourceHandle: output handle on source node (OPTIONAL)\n- targetHandle: input handle on target node (OPTIONAL)\n- type, animated, environmentId: AUTO-FILLED — do not include\n\nHANDLE BEHAVIOR BY NODE TYPE:\n- TRIGGER nodes (chatInput, webhook, schedule): output-only handles (bottom, right, left)\n- LLM/Agent nodes (llmCall, agent): initially all input; after first connection, remaining become output\n- Tool nodes (webSearch, apiCall, etc.): input-only (connect TO ai nodes)\n- Condition: inputs (top, left, right) + outputs named 'true' and 'false'\n- Output nodes (chatOutput, etc.): input-only (terminal)\n\nRECOMMENDED HANDLES:\n- trigger -> ai: sourceHandle='bottom', targetHandle='top'\n- ai -> output: sourceHandle='bottom', targetHandle='top'\n- ai -> tool: sourceHandle='left'/'right', targetHandle='right'/'left'",
+            "node_schema": {
+              "url": {
+                "type": "string",
+                "fixed": "${ADP_API_URL}"
+              },
+              "namespace": {
+                "type": "string",
+                "fixed": "/canvas"
+              },
+              "event": {
+                "type": "string",
+                "fixed": "create_edge"
+              },
+              "cookies": {
+                "type": "string",
+                "fixed": "__Secure-better-auth.session_token=${ADP_SESSION_TOKEN}"
+              },
+              "timeout_ms": {
+                "type": "integer",
+                "fixed": 15000
+              },
+              "payload": {
+                "type": "object",
+                "properties": {
+                  "environmentId": {
+                    "type": "string",
+                    "fixed": "${ADP_ENVIRONMENT_ID}"
+                  },
+                  "edge": {
+                    "type": "object",
+                    "required": true,
+                    "description": "Edge object with all edge fields.",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "required": true,
+                        "description": "Unique edge ID. Generate a random 24-character lowercase alphanumeric string."
+                      },
+                      "source": {
+                        "type": "string",
+                        "required": true,
+                        "description": "Source node ID (the node the edge comes FROM)"
+                      },
+                      "target": {
+                        "type": "string",
+                        "required": true,
+                        "description": "Target node ID (the node the edge goes TO)"
+                      },
+                      "type": {
+                        "type": "string",
+                        "fixed": "default"
+                      },
+                      "environmentId": {
+                        "type": "string",
+                        "fixed": "${ADP_ENVIRONMENT_ID}"
+                      },
+                      "animated": {
+                        "type": "boolean",
+                        "fixed": true
+                      },
+                      "sourceHandle": {
+                        "type": "string",
+                        "description": "Output handle on source node. Recommended: 'bottom' for vertical flow."
+                      },
+                      "targetHandle": {
+                        "type": "string",
+                        "description": "Input handle on target node. Recommended: 'top' for vertical flow."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "update_edge": {
+            "name": "update_edge",
+            "node_type": "socketio_request",
+            "description": "Update an existing edge by its ID. You can change source, target, sourceHandle, targetHandle, or type.",
+            "node_schema": {
+              "url": {
+                "type": "string",
+                "fixed": "${ADP_API_URL}"
+              },
+              "namespace": {
+                "type": "string",
+                "fixed": "/canvas"
+              },
+              "event": {
+                "type": "string",
+                "fixed": "update_edge"
+              },
+              "cookies": {
+                "type": "string",
+                "fixed": "__Secure-better-auth.session_token=${ADP_SESSION_TOKEN}"
+              },
+              "timeout_ms": {
+                "type": "integer",
+                "fixed": 15000
+              },
+              "payload": {
+                "type": "object",
+                "properties": {
+                  "environmentId": {
+                    "type": "string",
+                    "fixed": "${ADP_ENVIRONMENT_ID}"
+                  },
+                  "id": {
+                    "type": "string",
+                    "required": true,
+                    "description": "The ID of the edge to update"
+                  },
+                  "updates": {
+                    "type": "object",
+                    "required": true,
+                    "description": "Fields to update on the edge (e.g., source, target, type)"
+                  }
+                }
+              }
+            }
+          },
+          "delete_edge": {
+            "name": "delete_edge",
+            "node_type": "socketio_request",
+            "description": "Delete an edge from the canvas by its ID. This may cause group splits if the removed edge disconnects nodes within a group.",
+            "node_schema": {
+              "url": {
+                "type": "string",
+                "fixed": "${ADP_API_URL}"
+              },
+              "namespace": {
+                "type": "string",
+                "fixed": "/canvas"
+              },
+              "event": {
+                "type": "string",
+                "fixed": "delete_edge"
+              },
+              "cookies": {
+                "type": "string",
+                "fixed": "__Secure-better-auth.session_token=${ADP_SESSION_TOKEN}"
+              },
+              "timeout_ms": {
+                "type": "integer",
+                "fixed": 15000
+              },
+              "payload": {
+                "type": "object",
+                "properties": {
+                  "environmentId": {
+                    "type": "string",
+                    "fixed": "${ADP_ENVIRONMENT_ID}"
+                  },
+                  "edgeId": {
+                    "type": "string",
+                    "required": true,
+                    "description": "The ID of the edge to delete"
+                  }
+                }
+              }
+            }
+          },
+          "list_api_keys": {
+            "name": "list_api_keys",
+            "node_type": "http_request",
+            "description": "List all API keys (provider keys) for the workspace. Returns an array of API key objects with id, name, provider, textSecret (masked), permission, workspaceId, etc. Use this to check which API keys are already available before creating LLM nodes. The 'id' field from the response is the apiKeyId you need when configuring AI nodes.",
+            "node_schema": {
+              "base_url": {
+                "type": "string",
+                "fixed": "${ADP_API_URL}"
+              },
+              "endpoint": {
+                "type": "string",
+                "fixed": "/api-keys"
+              },
+              "method": {
+                "type": "string",
+                "fixed": "GET"
+              },
+              "headers": {
+                "type": "object",
+                "fixed": {
+                  "Cookie": "__Secure-better-auth.session_token=${ADP_SESSION_TOKEN}",
+                  "Content-Type": "application/json"
+                }
+              },
+              "query_params": {
+                "type": "object",
+                "fixed": {
+                  "workspaceId": "${ADP_WORKSPACE_ID}"
+                }
+              }
+            }
+          },
+          "create_api_key": {
+            "name": "create_api_key",
+            "node_type": "http_request",
+            "description": "Create a new API key (provider key) in the workspace. IMPORTANT: Before calling this tool, you MUST ask the user for the secret key value — never guess or fabricate API keys. Use suspend/HITL to ask the user.\n\nRequired fields in the body:\n- name: Display name for the key (e.g., 'My OpenAI Key')\n- provider: One of 'openai', 'google', 'anthropic'\n- secretKey: The actual API key (ask the user for this!)\n- permission: 'WORKSPACE' or 'PROJECT'\n- workspaceId: Auto-filled\n\nOptional:\n- projectId: Required only if permission is 'PROJECT'\n\nReturns the created API key object with its 'id' which can be used as apiKeyId in AI node configs.",
+            "node_schema": {
+              "base_url": {
+                "type": "string",
+                "fixed": "${ADP_API_URL}"
+              },
+              "endpoint": {
+                "type": "string",
+                "fixed": "/api-keys"
+              },
+              "method": {
+                "type": "string",
+                "fixed": "POST"
+              },
+              "headers": {
+                "type": "object",
+                "fixed": {
+                  "Cookie": "__Secure-better-auth.session_token=${ADP_SESSION_TOKEN}",
+                  "Content-Type": "application/json"
+                }
+              },
+              "body": {
+                "type": "object",
+                "required": true,
+                "description": "API key creation payload",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "required": true,
+                    "description": "Display name for the API key (e.g., 'My Gemini Key')"
+                  },
+                  "provider": {
+                    "type": "string",
+                    "required": true,
+                    "description": "Provider: 'openai', 'google', or 'anthropic'"
+                  },
+                  "secretKey": {
+                    "type": "string",
+                    "required": true,
+                    "description": "The actual API key value. MUST be provided by the user — never fabricate this."
+                  },
+                  "permission": {
+                    "type": "string",
+                    "required": true,
+                    "description": "'WORKSPACE' or 'PROJECT'"
+                  },
+                  "workspaceId": {
+                    "type": "string",
+                    "fixed": "${ADP_WORKSPACE_ID}"
+                  },
+                  "projectId": {
+                    "type": "string",
+                    "description": "Required only if permission is 'PROJECT'"
                   }
                 }
               }

@@ -373,7 +373,20 @@ impl ToolExecutor for DagToolExecutor {
                         .entry(container.clone())
                         .or_insert_with(|| Value::Object(serde_json::Map::new()));
                     if let Value::Object(map) = entry {
-                        map.insert(param_name.clone(), param_value.clone());
+                        // Deep-merge: if the container already has a fixed object for this key
+                        // (e.g., edge with {type, animated, environmentId}), merge the LLM-provided
+                        // object into it rather than overwriting.
+                        if let (Some(Value::Object(existing)), Value::Object(incoming)) =
+                            (map.get(param_name), param_value)
+                        {
+                            let mut merged = existing.clone();
+                            for (k, v) in incoming {
+                                merged.insert(k.clone(), v.clone());
+                            }
+                            map.insert(param_name.clone(), Value::Object(merged));
+                        } else {
+                            map.insert(param_name.clone(), param_value.clone());
+                        }
                     }
                 } else {
                     // Top-level placement

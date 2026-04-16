@@ -45,7 +45,7 @@
           "update_canvas_node": {
             "name": "update_canvas_node",
             "node_type": "socketio_request",
-            "description": "Update an existing node. Send ONLY the fields to change in the 'updates' object. For example, to change only the label: {\"data\": {\"label\": \"new label\"}}",
+            "description": "Update an existing node. WARNING: The backend REPLACES the entire 'data' object instead of deep merging. If you update data.label, you must send the COMPLETE data object including all existing fields (label, config, groupLabel, etc.), otherwise those fields will be lost. For non-data fields like position, you can send just the changed field: { \"position\": { \"x\": 100, \"y\": 200 } }.",
             "node_schema": {
               "url": { "type": "string", "fixed": "${ADP_API_URL}" },
               "namespace": { "type": "string", "fixed": "/canvas" },

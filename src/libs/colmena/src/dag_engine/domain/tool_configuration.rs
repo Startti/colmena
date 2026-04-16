@@ -206,6 +206,35 @@ pub fn parse_node_schema(schema: &NodeSchema) -> ParsedNodeSchema {
                 if let Some(fixed_val) = &child_field.fixed {
                     // Child has fixed value
                     container_fixed.insert(child_key.clone(), fixed_val.clone());
+                } else if let Some(nested_properties) = &child_field.properties {
+                    // Child is a nested container (e.g., "edge" inside "payload").
+                    // Collect its fixed sub-properties into a fixed sub-object so the
+                    // executor can deep-merge them with the LLM-provided object.
+                    let mut nested_fixed: serde_json::Map<String, Value> = serde_json::Map::new();
+                    for (nested_key, nested_field) in nested_properties {
+                        if let Some(fixed_val) = &nested_field.fixed {
+                            nested_fixed.insert(nested_key.clone(), fixed_val.clone());
+                        }
+                        // LLM-visible nested sub-properties are not individually exposed;
+                        // the LLM provides them as part of the child object.
+                    }
+                    if !nested_fixed.is_empty() {
+                        container_fixed.insert(child_key.clone(), Value::Object(nested_fixed));
+                    }
+
+                    // Expose the child as an LLM-visible object parameter mapped to this container
+                    let mut prop = ParameterProperty::new(
+                        child_field.field_type.clone(),
+                        child_field.description.clone().unwrap_or_default(),
+                    );
+                    if let Some(pattern) = &child_field.pattern {
+                        prop = prop.with_pattern(pattern.clone());
+                    }
+                    llm_properties.insert(child_key.clone(), prop);
+                    if child_field.required == Some(true) {
+                        required_params.push(child_key.clone());
+                    }
+                    param_to_container.insert(child_key.clone(), top_key.clone());
                 } else {
                     // Child is LLM-visible
                     let mut prop = ParameterProperty::new(
@@ -402,5 +431,63 @@ mod tests {
         assert_eq!(parsed.llm_properties.len(), 1);
         let prop = parsed.llm_properties.get("departureDate").unwrap();
         assert_eq!(prop.pattern.as_deref(), Some("^\\d{4}-\\d{2}-\\d{2}$"));
+    }
+
+    #[test]
+    fn test_parse_node_schema_deeply_nested_container() {
+        // Simulates the create_edge payload structure:
+        // payload.properties.environmentId (fixed) + payload.properties.edge (nested container
+        // with its own fixed and LLM-visible sub-properties).
+        let schema = serde_json::from_value::<NodeSchema>(json!({
+            "url": { "type": "string", "fixed": "https://api.example.com" },
+            "payload": {
+                "type": "object",
+                "properties": {
+                    "environmentId": { "type": "string", "fixed": "env-123" },
+                    "edge": {
+                        "type": "object",
+                        "required": true,
+                        "description": "Edge object",
+                        "properties": {
+                            "id": { "type": "string", "required": true, "description": "Edge ID" },
+                            "source": { "type": "string", "required": true, "description": "Source node" },
+                            "target": { "type": "string", "required": true, "description": "Target node" },
+                            "type": { "type": "string", "fixed": "default" },
+                            "animated": { "type": "boolean", "fixed": true },
+                            "environmentId": { "type": "string", "fixed": "env-123" }
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let parsed = parse_node_schema(&schema);
+
+        // url is fixed at top level
+        assert!(parsed.fixed_values.contains_key("url"));
+
+        // payload should contain fixed values for both environmentId and edge
+        assert!(parsed.fixed_values.contains_key("payload"));
+        let payload = parsed.fixed_values.get("payload").unwrap();
+        assert_eq!(payload.get("environmentId").unwrap(), "env-123");
+
+        // edge's fixed sub-properties should be collected
+        let edge_fixed = payload.get("edge").unwrap();
+        assert!(edge_fixed.is_object());
+        assert_eq!(edge_fixed.get("type").unwrap(), "default");
+        assert_eq!(edge_fixed.get("animated").unwrap(), true);
+        assert_eq!(edge_fixed.get("environmentId").unwrap(), "env-123");
+
+        // edge should be exposed as an LLM-visible object parameter mapped to payload
+        assert!(parsed.llm_properties.contains_key("edge"));
+        assert!(parsed.required_params.contains(&"edge".to_string()));
+        assert_eq!(parsed.param_to_container.get("edge"), Some(&"payload".to_string()));
+
+        // The LLM-visible sub-properties (id, source, target) should NOT be individually
+        // exposed — the LLM provides them as part of the edge object
+        assert!(!parsed.llm_properties.contains_key("id"));
+        assert!(!parsed.llm_properties.contains_key("source"));
+        assert!(!parsed.llm_properties.contains_key("target"));
     }
 }

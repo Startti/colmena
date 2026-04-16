@@ -15,7 +15,7 @@
         "planner": {
           "provider": "gemini",
           "model": "gemini-2.5-flash",
-          "api_key": "***REDACTED_GEMINI_KEY***",
+          "api_key": "${GEMINI_API_KEY}",
           "system_message": "Read the user's trip request and break it down into tasks. using the agent you have"
         },
         "agents": {
@@ -32,7 +32,7 @@
                   "config": {
                     "provider": "gemini",
                     "model": "gemini-2.5-flash",
-                    "api_key": "***REDACTED_GEMINI_KEY***",
+                    "api_key": "${GEMINI_API_KEY}",
                     "system_message": "You are a travel budget estimator. Analyze the given lists of clothing and gear, and provide a very brief budget estimate with a final total."
                   }
                 },
@@ -67,7 +67,7 @@
                     "provider": "gemini",
                     "stream": true,
                     "model": "gemini-2.5-flash",
-                    "api_key": "***REDACTED_GEMINI_KEY***",
+                    "api_key": "${GEMINI_API_KEY}",
                     "system_message": "You are a professional ski equipment outfitter. Output a very short bulleted list with estimated prices. Be brief."
                   }
                 },
@@ -102,7 +102,7 @@
                     "provider": "gemini",
                     "model": "gemini-2.5-flash",
                     "stream": true,
-                    "api_key": "***REDACTED_GEMINI_KEY***",
+                    "api_key": "${GEMINI_API_KEY}",
                     "system_message": "You are a professional clothing stylist. Recommend exactly 1 to 2 essential clothing items for the given trip details. Output a very short bulleted list (max 2 items) with estimated prices. Be brief."
                   }
                 },
@@ -127,20 +127,20 @@
         "critic": {
           "provider": "gemini",
           "model": "gemini-2.5-flash",
-          "api_key": "***REDACTED_GEMINI_KEY***",
+          "api_key": "${GEMINI_API_KEY}",
           "system_message": "You are reviewing results for a ski trip packing assistant. Be very brief. If the results look reasonable, set task_ok=true and add_tasks=[].",
           "max_retries": 3
         },
         "phase_reactor": {
           "provider": "gemini",
           "model": "gemini-2.5-flash",
-          "api_key": "***REDACTED_GEMINI_KEY***",
+          "api_key": "${GEMINI_API_KEY}",
           "system_message": "You are summarizing the results of a completed phase. Write a single sentence summary. Set task_ok=true."
         },
         "final_reactor": {
           "provider": "gemini",
           "model": "gemini-2.5-flash",
-          "api_key": "***REDACTED_GEMINI_KEY***",
+          "api_key": "${GEMINI_API_KEY}",
           "system_message": "You are the final step in a ski trip planning assistant. Combine everything into a summary covering clothing, gear, and budget"
         }
       }

@@ -224,7 +224,26 @@ impl ExecutableNode for SocketIoNode {
             .boxed()
         });
 
-        // 4. Set up wait_event listener if needed
+        // 4. Exception handler — catch server-side errors and fail fast
+        let (exc_tx, exc_rx) = tokio::sync::oneshot::channel::<Value>();
+        let exc_tx = Arc::new(Mutex::new(Some(exc_tx)));
+        builder = builder.on("exception", move |payload, _client| {
+            let exc_tx = exc_tx.clone();
+            async move {
+                let val = Self::payload_to_value(payload);
+                println!(
+                    "[SocketIoNode] ⚠ exception: {}",
+                    serde_json::to_string(&val).unwrap_or_else(|_| format!("{:?}", val))
+                );
+                if let Some(sender) = exc_tx.lock().await.take() {
+                    let _ = sender.send(val);
+                }
+            }
+            .boxed()
+        });
+        let exc_rx = Arc::new(Mutex::new(Some(exc_rx)));
+
+        // 5. Set up wait_event listener if needed
         let response_rx = if let Some(ref wait_ev) = wait_event {
             let (tx, rx) = tokio::sync::oneshot::channel::<Value>();
             let tx = Arc::new(Mutex::new(Some(tx)));
@@ -252,7 +271,7 @@ impl ExecutableNode for SocketIoNode {
                 let preview = match &payload {
                     Payload::Text(vals) => {
                         let s = format!("{:?}", vals);
-                        if s.len() > 300 { format!("{}…", &s[..300]) } else { s }
+                        if s.len() > 500 { format!("{}…", &s[..500]) } else { s }
                     }
                     _ => format!("{:?}", payload),
                 };
@@ -261,7 +280,7 @@ impl ExecutableNode for SocketIoNode {
             .boxed()
         });
 
-        // 5. Connect
+        // 6. Connect
         let client = builder.connect().await.map_err(|e| {
             format!(
                 "socketio_request: failed to connect to {} (namespace {}): {}",
@@ -272,12 +291,12 @@ impl ExecutableNode for SocketIoNode {
         // Small delay to let the connection fully establish
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // 5. Emit and wait for response
+        // 7. Emit and wait for response (racing against exception channel)
         let timeout_dur = Duration::from_millis(timeout_ms);
         let event_name_clone = event_name.clone();
 
         let result: Result<Value, Box<dyn StdError + Send + Sync>> = if let Some(rx) = response_rx {
-            // Wait-event mode: emit, then wait for the separate server event
+            // Wait-event mode: emit, then race wait_event vs exception vs timeout
             client
                 .emit(event_name.clone(), payload_val)
                 .await
@@ -285,25 +304,71 @@ impl ExecutableNode for SocketIoNode {
                     format!("socketio_request: failed to emit '{}': {}", event_name, e)
                 })?;
 
-            match tokio::time::timeout(timeout_dur, rx).await {
-                Ok(Ok(val)) => Ok(val),
-                Ok(Err(_)) => Ok(json!({
-                    "success": false,
-                    "event": event_name_clone,
-                    "error": "wait_event channel closed unexpectedly"
-                })),
-                Err(_) => Ok(json!({
-                    "success": false,
-                    "event": event_name_clone,
-                    "error": format!(
-                        "Timeout waiting for '{}' after {}ms",
-                        wait_event.as_deref().unwrap_or("?"),
-                        timeout_ms
-                    )
-                })),
+            let exc_rx_opt = exc_rx.lock().await.take();
+            if let Some(exc_rx_inner) = exc_rx_opt {
+                tokio::select! {
+                    response = rx => {
+                        match response {
+                            Ok(val) => Ok(val),
+                            Err(_) => Ok(json!({
+                                "success": false,
+                                "event": event_name_clone,
+                                "error": "wait_event channel closed unexpectedly"
+                            })),
+                        }
+                    }
+                    exception = exc_rx_inner => {
+                        match exception {
+                            Ok(val) => {
+                                let msg = val.get("message").and_then(|m| m.as_str())
+                                    .unwrap_or("Server exception");
+                                Ok(json!({
+                                    "success": false,
+                                    "event": event_name_clone,
+                                    "error": msg,
+                                    "exception": val
+                                }))
+                            }
+                            Err(_) => Ok(json!({
+                                "success": false,
+                                "event": event_name_clone,
+                                "error": "exception channel closed unexpectedly"
+                            })),
+                        }
+                    }
+                    _ = tokio::time::sleep(timeout_dur) => {
+                        Ok(json!({
+                            "success": false,
+                            "event": event_name_clone,
+                            "error": format!(
+                                "Timeout waiting for '{}' after {}ms",
+                                wait_event.as_deref().unwrap_or("?"),
+                                timeout_ms
+                            )
+                        }))
+                    }
+                }
+            } else {
+                match tokio::time::timeout(timeout_dur, rx).await {
+                    Ok(Ok(val)) => Ok(val),
+                    Ok(Err(_)) => Ok(json!({
+                        "success": false,
+                        "event": event_name_clone,
+                        "error": "wait_event channel closed unexpectedly"
+                    })),
+                    Err(_) => Ok(json!({
+                        "success": false,
+                        "event": event_name_clone,
+                        "error": format!(
+                            "Timeout waiting for '{}' after {}ms",
+                            wait_event.as_deref().unwrap_or("?"),
+                            timeout_ms
+                        )
+                    })),
+                }
             }
         } else {
-            // Ack mode: use emit_with_ack
+            // Ack mode: emit_with_ack, race ack vs exception vs timeout
             let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<Value>();
             let ack_tx = Arc::new(Mutex::new(Some(ack_tx)));
 
@@ -328,18 +393,60 @@ impl ExecutableNode for SocketIoNode {
                     format!("socketio_request: failed to emit_with_ack '{}': {}", event_name, e)
                 })?;
 
-            match tokio::time::timeout(timeout_dur, ack_rx).await {
-                Ok(Ok(val)) => Ok(val),
-                Ok(Err(_)) => Ok(json!({
-                    "success": false,
-                    "event": event_name_clone,
-                    "error": "ack channel closed unexpectedly"
-                })),
-                Err(_) => Ok(json!({
-                    "success": false,
-                    "event": event_name_clone,
-                    "error": format!("Timeout waiting for ack on '{}' after {}ms", event_name_clone, timeout_ms)
-                })),
+            let exc_rx_opt = exc_rx.lock().await.take();
+            if let Some(exc_rx_inner) = exc_rx_opt {
+                tokio::select! {
+                    ack = ack_rx => {
+                        match ack {
+                            Ok(val) => Ok(val),
+                            Err(_) => Ok(json!({
+                                "success": false,
+                                "event": event_name_clone,
+                                "error": "ack channel closed unexpectedly"
+                            })),
+                        }
+                    }
+                    exception = exc_rx_inner => {
+                        match exception {
+                            Ok(val) => {
+                                let msg = val.get("message").and_then(|m| m.as_str())
+                                    .unwrap_or("Server exception");
+                                Ok(json!({
+                                    "success": false,
+                                    "event": event_name_clone,
+                                    "error": msg,
+                                    "exception": val
+                                }))
+                            }
+                            Err(_) => Ok(json!({
+                                "success": false,
+                                "event": event_name_clone,
+                                "error": "exception channel closed unexpectedly"
+                            })),
+                        }
+                    }
+                    _ = tokio::time::sleep(timeout_dur) => {
+                        Ok(json!({
+                            "success": false,
+                            "event": event_name_clone,
+                            "error": format!("Timeout waiting for ack on '{}' after {}ms", event_name_clone, timeout_ms)
+                        }))
+                    }
+                }
+            } else {
+                match tokio::time::timeout(timeout_dur, ack_rx).await {
+                    Ok(Ok(val)) => Ok(val),
+                    Ok(Err(_)) => Ok(json!({
+                        "success": false,
+                        "event": event_name_clone,
+                        "error": "ack channel closed unexpectedly"
+                    })),
+                    Err(_) => Ok(json!({
+                        "success": false,
+                        "event": event_name_clone,
+                        "error": format!("Timeout waiting for ack on '{}' after {}ms", event_name_clone, timeout_ms)
+                    })),
+                }
             }
         };
 

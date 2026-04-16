@@ -50,7 +50,7 @@ impl ConversationRepositoryFactory {
             || connection_url.starts_with("postgresql://")
         {
             let pool = PgPoolOptions::new()
-                .max_connections(5)
+                .max_connections(3)
                 .connect(connection_url)
                 .await
                 .map_err(|e| LlmError::RequestFailed {
