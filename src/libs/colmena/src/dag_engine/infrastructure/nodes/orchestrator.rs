@@ -1178,6 +1178,10 @@ impl ExecutableNode for OrchestratorNode {
                             // Build the single prompt text that the agent receives.
                             // task + context are combined here — the agent only needs `prompt`.
                             let mut task_inputs = inputs.clone();
+                            // Strip __colmena_resume_answer so subgraph agents being executed
+                            // for the first time don't mistakenly try to resume a non-existent
+                            // child session. The orchestrator already consumed this key above.
+                            task_inputs.remove("__colmena_resume_answer");
                             // Unique __node_id per agent so SubGraphNode generates distinct
                             // child_session_ids: "{session_id}_sub_{agent_name}"
                             task_inputs.insert("__node_id".to_string(), Value::String(task.assigned_to.clone()));

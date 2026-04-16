@@ -496,7 +496,7 @@ impl DagRunUseCase {
                 // --- DYNAMICALLY PUSH TO QUEUE BASED ON EDGES ---
                 // If a node emitted Value::Null intentionally (skip stub), do not traverse its descendants
                 if !processed_output.is_null() {
-                    let outgoing_edges = graph.edges.iter().filter(|e| e.from.starts_with(&node_id));
+                    let outgoing_edges = graph.edges.iter().filter(|e| e.from == node_id || e.from.starts_with(&format!("{}.", node_id)));
                     for edge in outgoing_edges {
 
                         // Check if the specific JSON path exists in the emitted output
