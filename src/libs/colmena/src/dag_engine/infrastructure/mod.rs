@@ -2,4 +2,7 @@ pub mod dag_tool_executor;
 pub mod nodes;
 pub mod persistence;
 pub mod registry;
+pub mod sql_function_registry;
+pub mod sql_llm_critic;
+pub mod sql_pool_adapter;
 pub mod sql_static_validator;
