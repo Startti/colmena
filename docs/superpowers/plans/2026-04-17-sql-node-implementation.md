@@ -1490,31 +1490,26 @@ git commit -m "feat(sql_node): implement PgRegistryAdapter for sandbox function 
 //!
 //! Sends SQL queries to a secondary LLM for security and optimization analysis.
 //! Activated only when `guardrail_llm.enabled: true` in the node config.
+//!
+//! Uses `LlmProviderFactory` to create a provider adapter and `LlmRepository::call()`
+//! to make a single non-streaming request. No conversation persistence needed.
 
 use crate::dag_engine::domain::sql_errors::SqlNodeError;
 use crate::dag_engine::domain::sql_ports::{CriticResult, SqlCriticPort};
-use crate::llm::application::LlmCallUseCase;
-use crate::llm::domain::{LlmConfig, LlmMessage, SessionId};
-use crate::llm::infrastructure::ConversationRepositoryFactory;
-use std::sync::Arc;
+use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind};
+use crate::llm::infrastructure::LlmProviderFactory;
+use std::str::FromStr;
 
 /// Adapter that uses an LLM to analyze SQL queries for security and optimization.
 pub struct LlmCriticAdapter {
-    repository_factory: Arc<ConversationRepositoryFactory>,
     provider: String,
     model: String,
     api_key: String,
 }
 
 impl LlmCriticAdapter {
-    pub fn new(
-        repository_factory: Arc<ConversationRepositoryFactory>,
-        provider: String,
-        model: String,
-        api_key: String,
-    ) -> Self {
+    pub fn new(provider: String, model: String, api_key: String) -> Self {
         Self {
-            repository_factory,
             provider,
             model,
             api_key,
@@ -1557,17 +1552,20 @@ impl SqlCriticPort for LlmCriticAdapter {
             schema_context, query
         );
 
-        let llm_repo = self
-            .repository_factory
-            .create_repository(&self.provider, &self.api_key, &self.model)
-            .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to create LLM repo for critic: {}", e)))?;
+        // Create provider and config
+        let provider_kind = ProviderKind::from_str(&self.provider)
+            .map_err(|e| SqlNodeError::ConfigError(format!("Invalid critic provider: {}", e)))?;
 
-        let config = LlmConfig {
-            temperature: Some(0.0),
-            max_tokens: Some(500),
-            ..Default::default()
-        };
+        let llm_provider = LlmProvider::new(provider_kind.clone(), self.api_key.clone(), Some(self.model.clone()))
+            .map_err(|e| SqlNodeError::ConfigError(format!("Invalid critic LLM config: {}", e)))?;
 
+        let config = LlmConfig::new(llm_provider)
+            .with_temperature(0.0)
+            .map_err(|e| SqlNodeError::ConfigError(format!("{}", e)))?
+            .with_max_tokens(500)
+            .map_err(|e| SqlNodeError::ConfigError(format!("{}", e)))?;
+
+        // Build messages
         let messages = vec![
             LlmMessage::system(CRITIC_SYSTEM_PROMPT.to_string())
                 .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to create system message: {}", e)))?,
@@ -1575,15 +1573,19 @@ impl SqlCriticPort for LlmCriticAdapter {
                 .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to create user message: {}", e)))?,
         ];
 
-        let session_id = SessionId(format!("sql_critic_{}", uuid::Uuid::new_v4()));
+        // Build and send request
+        let request = LlmRequest::new(messages, config, false)
+            .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to create LLM request: {}", e)))?;
+
+        let llm_repo = LlmProviderFactory::create(provider_kind);
 
         let response = llm_repo
-            .send_message(&session_id, messages, &config, None, None)
+            .call(request)
             .await
             .map_err(|e| SqlNodeError::ExecutionError(format!("LLM critic call failed: {}", e)))?;
 
         // Parse the JSON response
-        let content = response.content.trim();
+        let content = response.content().trim();
         let parsed: serde_json::Value = serde_json::from_str(content).unwrap_or_else(|_| {
             // If parsing fails, assume OK (fail-open for critic)
             serde_json::json!({
@@ -1885,6 +1887,7 @@ use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::sql_permissions::SqlPermissions;
 use crate::dag_engine::domain::sql_ports::{FunctionInfo, TableInfo};
 use crate::dag_engine::infrastructure::sql_function_registry::PgRegistryAdapter;
+use crate::dag_engine::infrastructure::sql_llm_critic::LlmCriticAdapter;
 use crate::dag_engine::infrastructure::sql_pool_adapter::PgPoolAdapter;
 use crate::dag_engine::infrastructure::sql_static_validator::StaticRuleValidator;
 use serde_json::{json, Value};
@@ -2090,19 +2093,19 @@ impl ExecutableNode for SqlNode {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        // For v1, critic is optional — build it only if enabled and configured
+        // Build LLM critic if enabled and configured
         let critic: Option<Arc<dyn crate::dag_engine::domain::sql_ports::SqlCriticPort>> = if critic_enabled {
             let guardrail_cfg = config.get("guardrail_llm").unwrap();
-            let provider = guardrail_cfg.get("provider").and_then(|v| v.as_str()).unwrap_or("openai");
-            let model = guardrail_cfg.get("model").and_then(|v| v.as_str()).unwrap_or("gpt-4o-mini");
+            let provider = guardrail_cfg.get("provider").and_then(|v| v.as_str()).unwrap_or("openai").to_string();
+            let model = guardrail_cfg.get("model").and_then(|v| v.as_str()).unwrap_or("gpt-4o-mini").to_string();
             let api_key_raw = guardrail_cfg.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
             let api_key = Self::resolve_env_vars(api_key_raw).unwrap_or_default();
 
-            // LlmCriticAdapter requires a ConversationRepositoryFactory — which SqlNode
-            // doesn't currently hold. For v1, the critic is disabled at the node level;
-            // it will be wired when SqlNode receives the factory via constructor injection.
-            // This is a known limitation documented in the spec.
-            None
+            Some(Arc::new(LlmCriticAdapter::new(
+                provider,
+                model,
+                api_key,
+            )) as Arc<dyn crate::dag_engine::domain::sql_ports::SqlCriticPort>)
         } else {
             None
         };
