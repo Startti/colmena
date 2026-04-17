@@ -1,0 +1,287 @@
+//! Granular permission model for the SQL node.
+//!
+//! Permissions are configured via presets (`read_only`, `read_write`, `full`) with an
+//! optional `deny` list for fine-tuning. When no permissions config is provided, defaults
+//! to `read_only` (principle of least privilege).
+
+use serde_json::Value;
+use std::collections::HashSet;
+
+/// SQL operations that can be allowed or denied.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SqlOperation {
+    Select,
+    Insert,
+    Update,
+    Delete,
+    CreateFunction,
+    /// Always blocked — no preset enables this.
+    Truncate,
+    /// Always blocked on protected schemas.
+    Drop,
+    /// Always blocked on protected schemas.
+    Alter,
+}
+
+impl SqlOperation {
+    /// Parse an operation name from a string (used for `deny` list parsing).
+    pub fn from_str_loose(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "select" => Some(Self::Select),
+            "insert" => Some(Self::Insert),
+            "update" => Some(Self::Update),
+            "delete" => Some(Self::Delete),
+            "create_function" => Some(Self::CreateFunction),
+            "truncate" => Some(Self::Truncate),
+            "drop" => Some(Self::Drop),
+            "alter" => Some(Self::Alter),
+            _ => None,
+        }
+    }
+}
+
+/// Permission presets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionPreset {
+    ReadOnly,
+    ReadWrite,
+    Full,
+}
+
+impl PermissionPreset {
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.to_lowercase().as_str() {
+            "read_only" => Ok(Self::ReadOnly),
+            "read_write" => Ok(Self::ReadWrite),
+            "full" => Ok(Self::Full),
+            other => Err(format!("Unknown permission preset: '{}'", other)),
+        }
+    }
+
+    fn allowed_operations(&self) -> HashSet<SqlOperation> {
+        match self {
+            Self::ReadOnly => {
+                let mut set = HashSet::new();
+                set.insert(SqlOperation::Select);
+                set
+            }
+            Self::ReadWrite => {
+                let mut set = HashSet::new();
+                set.insert(SqlOperation::Select);
+                set.insert(SqlOperation::Insert);
+                set.insert(SqlOperation::Update);
+                set
+            }
+            Self::Full => {
+                let mut set = HashSet::new();
+                set.insert(SqlOperation::Select);
+                set.insert(SqlOperation::Insert);
+                set.insert(SqlOperation::Update);
+                set.insert(SqlOperation::Delete);
+                set.insert(SqlOperation::CreateFunction);
+                set
+            }
+        }
+    }
+}
+
+/// Resolved permissions for a SQL node instance.
+#[derive(Debug, Clone)]
+pub struct SqlPermissions {
+    allowed_ops: HashSet<SqlOperation>,
+    allowed_schemas: HashSet<String>,
+    sandbox_schema: String,
+}
+
+/// Schemas that are always accessible for introspection (not configurable).
+const INTROSPECTION_SCHEMAS: &[&str] = &["information_schema", "pg_catalog"];
+
+impl SqlPermissions {
+    /// Build permissions from the JSON config `permissions` object.
+    /// If `config` is `None`, defaults to `read_only` with no schema restrictions.
+    pub fn from_config(config: Option<&Value>) -> Result<Self, String> {
+        let config = match config {
+            Some(c) => c,
+            None => {
+                return Ok(Self {
+                    allowed_ops: PermissionPreset::ReadOnly.allowed_operations(),
+                    allowed_schemas: HashSet::new(),
+                    sandbox_schema: "sandbox".to_string(),
+                });
+            }
+        };
+
+        // Parse preset (default: read_only)
+        let preset_str = config
+            .get("preset")
+            .and_then(|v| v.as_str())
+            .unwrap_or("read_only");
+        let preset = PermissionPreset::from_str(preset_str)?;
+        let mut allowed_ops = preset.allowed_operations();
+
+        // Apply deny list
+        if let Some(deny_arr) = config.get("deny").and_then(|v| v.as_array()) {
+            for deny_val in deny_arr {
+                if let Some(deny_str) = deny_val.as_str() {
+                    if let Some(op) = SqlOperation::from_str_loose(deny_str) {
+                        allowed_ops.remove(&op);
+                    }
+                }
+            }
+        }
+
+        // Parse allowed_schemas
+        let allowed_schemas: HashSet<String> = config
+            .get("allowed_schemas")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Parse sandbox_schema (default: "sandbox")
+        let sandbox_schema = config
+            .get("sandbox_schema")
+            .and_then(|v| v.as_str())
+            .unwrap_or("sandbox")
+            .to_string();
+
+        Ok(Self {
+            allowed_ops,
+            allowed_schemas,
+            sandbox_schema,
+        })
+    }
+
+    /// Check if an operation is allowed.
+    pub fn is_allowed(&self, op: &SqlOperation) -> bool {
+        // Truncate, Drop, Alter are never directly allowed via presets
+        match op {
+            SqlOperation::Truncate => false,
+            _ => self.allowed_ops.contains(op),
+        }
+    }
+
+    /// Check if a schema is accessible.
+    /// Introspection schemas (information_schema, pg_catalog) are always allowed.
+    /// If `allowed_schemas` is empty, all schemas are allowed (no restriction).
+    pub fn is_schema_allowed(&self, schema: &str) -> bool {
+        if INTROSPECTION_SCHEMAS.contains(&schema) {
+            return true;
+        }
+        if self.allowed_schemas.is_empty() {
+            return true;
+        }
+        self.allowed_schemas.contains(schema)
+    }
+
+    /// The sandbox schema name where the agent can create functions/tables.
+    pub fn sandbox_schema(&self) -> &str {
+        &self.sandbox_schema
+    }
+
+    /// Return a human-readable summary for LLM context injection.
+    pub fn describe_for_llm(&self) -> String {
+        let ops: Vec<&str> = [
+            (SqlOperation::Select, "SELECT"),
+            (SqlOperation::Insert, "INSERT"),
+            (SqlOperation::Update, "UPDATE"),
+            (SqlOperation::Delete, "DELETE"),
+            (SqlOperation::CreateFunction, "CREATE FUNCTION"),
+        ]
+        .iter()
+        .filter(|(op, _)| self.allowed_ops.contains(op))
+        .map(|(_, name)| *name)
+        .collect();
+
+        format!("Permissions: {} | Schemas: {}",
+            ops.join(", "),
+            if self.allowed_schemas.is_empty() {
+                "all".to_string()
+            } else {
+                self.allowed_schemas.iter().cloned().collect::<Vec<_>>().join(", ")
+            }
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_read_only_preset() {
+        let perms = SqlPermissions::from_config(None).unwrap();
+        assert!(perms.is_allowed(&SqlOperation::Select));
+        assert!(!perms.is_allowed(&SqlOperation::Insert));
+        assert!(!perms.is_allowed(&SqlOperation::Update));
+        assert!(!perms.is_allowed(&SqlOperation::Delete));
+        assert!(!perms.is_allowed(&SqlOperation::CreateFunction));
+    }
+
+    #[test]
+    fn test_read_write_preset() {
+        let config = serde_json::json!({ "preset": "read_write" });
+        let perms = SqlPermissions::from_config(Some(&config)).unwrap();
+        assert!(perms.is_allowed(&SqlOperation::Select));
+        assert!(perms.is_allowed(&SqlOperation::Insert));
+        assert!(perms.is_allowed(&SqlOperation::Update));
+        assert!(!perms.is_allowed(&SqlOperation::Delete));
+        assert!(!perms.is_allowed(&SqlOperation::CreateFunction));
+    }
+
+    #[test]
+    fn test_full_preset_with_deny() {
+        let config = serde_json::json!({
+            "preset": "full",
+            "deny": ["delete"]
+        });
+        let perms = SqlPermissions::from_config(Some(&config)).unwrap();
+        assert!(perms.is_allowed(&SqlOperation::Select));
+        assert!(perms.is_allowed(&SqlOperation::Insert));
+        assert!(perms.is_allowed(&SqlOperation::Update));
+        assert!(!perms.is_allowed(&SqlOperation::Delete));
+        assert!(perms.is_allowed(&SqlOperation::CreateFunction));
+    }
+
+    #[test]
+    fn test_truncate_always_blocked() {
+        let config = serde_json::json!({ "preset": "full" });
+        let perms = SqlPermissions::from_config(Some(&config)).unwrap();
+        assert!(!perms.is_allowed(&SqlOperation::Truncate));
+    }
+
+    #[test]
+    fn test_allowed_schemas() {
+        let config = serde_json::json!({
+            "preset": "read_only",
+            "allowed_schemas": ["production", "analytics"]
+        });
+        let perms = SqlPermissions::from_config(Some(&config)).unwrap();
+        assert!(perms.is_schema_allowed("production"));
+        assert!(perms.is_schema_allowed("analytics"));
+        assert!(!perms.is_schema_allowed("secret_data"));
+        // information_schema and pg_catalog always allowed (introspection)
+        assert!(perms.is_schema_allowed("information_schema"));
+        assert!(perms.is_schema_allowed("pg_catalog"));
+    }
+
+    #[test]
+    fn test_sandbox_schema_defaults() {
+        let config = serde_json::json!({
+            "preset": "full",
+            "allowed_schemas": ["production", "sandbox"]
+        });
+        let perms = SqlPermissions::from_config(Some(&config)).unwrap();
+        assert_eq!(perms.sandbox_schema(), "sandbox");
+    }
+
+    #[test]
+    fn test_no_config_defaults_read_only() {
+        let perms = SqlPermissions::from_config(None).unwrap();
+        assert!(perms.is_allowed(&SqlOperation::Select));
+        assert!(!perms.is_allowed(&SqlOperation::Insert));
+    }
+}
