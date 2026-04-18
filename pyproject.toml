@@ -51,6 +51,9 @@ Issues = "https://github.com/Startti/colmena/issues"
 module-name = "colmena"
 features = ["pyo3/extension-module", "python"]
 
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
 [tool.black]
 line-length = 88
 target-version = ['py38']

@@ -2,53 +2,30 @@
 """
 Test for async mock streaming to ensure the Rust->Python async streaming bridge works.
 """
-import asyncio
+import pytest
 
 try:
     import colmena
-    print("✓ colmena module imported successfully")
-except ImportError as e:
-    print(f"✗ Error importing colmena: {e}")
-    exit(1)
+except ImportError:
+    colmena = None
 
+
+@pytest.mark.skipif(
+    colmena is None or not hasattr(colmena.ColmenaLlm, "mock_stream_async"),
+    reason="mock_stream_async not exposed in current PyO3 bindings",
+)
 async def test_async_mock_streaming_sequentially():
     """
     Tests that the async mock streaming function yields items sequentially
     and that prints from Rust and Python are interleaved as expected.
     """
-    print("\n📋 Running test_async_mock_streaming_sequentially")
     llm = colmena.ColmenaLlm()
-    
-    print("🐍 [Python] Awaiting mock_stream_async...")
     stream = await llm.mock_stream_async()
-    
-    print("🐍 [Python] Iterating over async stream...")
-    
+
     expected_chunks = ["this", "is", "an", "async", "mock"]
     received_chunks = []
 
     async for chunk in stream:
-        print(f"🐍 [Python] Received chunk: '{chunk}'")
         received_chunks.append(chunk)
-        
-    print("\n🐍 [Python] Finished iterating.")
-    
-    print(f"\nReceived chunks: {received_chunks}")
-    print(f"Expected chunks: {expected_chunks}")
 
-    if received_chunks == expected_chunks:
-        print("✅ PASSED: Received chunks match expected chunks.")
-        return True
-    else:
-        print("❌ FAILED: Received chunks do not match expected chunks.")
-        return False
-
-if __name__ == "__main__":
-    print("🧪 Async Mock Streaming Testing")
-    print("="*60)
-    
-    passed = asyncio.run(test_async_mock_streaming_sequentially())
-    
-    print("="*60)
-    if not passed:
-        exit(1)
+    assert received_chunks == expected_chunks

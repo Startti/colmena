@@ -70,6 +70,13 @@ When you need to understand or modify any node (HTTP, LLM, orchestrator, etc.):
 - **DAG Engine CLI (serve)**: `cargo run --bin dag_engine -- serve <path/to/graph.json>`
 - **Docs**: `cargo doc --no-deps --open`
 
+**IMPORTANT — Python virtual environment:** Always use the project's `.venv` for Python commands:
+```bash
+.venv/bin/pip install ...           # Install packages
+.venv/bin/pytest python/ -v         # Run Python tests
+```
+Or activate it first: `source .venv/bin/activate`
+
 **IMPORTANT — Cargo package name:** The crate is named `colmena_dag_engine` (NOT `colmena`). When running tests for a specific module use:
 ```bash
 cargo test --lib <module_name>                    # Run all tests matching module
