@@ -15,6 +15,7 @@ pub enum SqlOperation {
     Update,
     Delete,
     CreateFunction,
+    CreateTable,
     /// Always blocked — no preset enables this.
     Truncate,
     /// Always blocked on protected schemas.
@@ -32,6 +33,7 @@ impl SqlOperation {
             "update" => Some(Self::Update),
             "delete" => Some(Self::Delete),
             "create_function" => Some(Self::CreateFunction),
+            "create_table" => Some(Self::CreateTable),
             "truncate" => Some(Self::Truncate),
             "drop" => Some(Self::Drop),
             "alter" => Some(Self::Alter),
@@ -79,6 +81,7 @@ impl PermissionPreset {
                 set.insert(SqlOperation::Update);
                 set.insert(SqlOperation::Delete);
                 set.insert(SqlOperation::CreateFunction);
+                set.insert(SqlOperation::CreateTable);
                 set
             }
         }
@@ -230,6 +233,7 @@ impl SqlPermissions {
             (SqlOperation::Update, "UPDATE"),
             (SqlOperation::Delete, "DELETE"),
             (SqlOperation::CreateFunction, "CREATE FUNCTION"),
+            (SqlOperation::CreateTable, "CREATE TABLE"),
         ]
         .iter()
         .filter(|(op, _)| self.allowed_ops.contains(op))
@@ -369,5 +373,19 @@ mod tests {
         assert_eq!(perms.tenant_user_id(), None);
         assert_eq!(perms.tenant_column(), "user_id");
         assert!(!perms.auto_rls());
+    }
+
+    #[test]
+    fn test_full_preset_includes_create_table() {
+        let config = serde_json::json!({ "preset": "full" });
+        let perms = SqlPermissions::from_config(Some(&config)).unwrap();
+        assert!(perms.is_allowed(&SqlOperation::CreateTable));
+    }
+
+    #[test]
+    fn test_read_write_no_create_table() {
+        let config = serde_json::json!({ "preset": "read_write" });
+        let perms = SqlPermissions::from_config(Some(&config)).unwrap();
+        assert!(!perms.is_allowed(&SqlOperation::CreateTable));
     }
 }

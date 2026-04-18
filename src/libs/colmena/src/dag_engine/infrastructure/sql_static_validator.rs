@@ -23,6 +23,8 @@ impl StaticRuleValidator {
             Some(SqlOperation::Update)
         } else if upper.starts_with("DELETE") {
             Some(SqlOperation::Delete)
+        } else if upper.starts_with("CREATE TABLE") {
+            Some(SqlOperation::CreateTable)
         } else if upper.starts_with("CREATE FUNCTION") || upper.starts_with("CREATE OR REPLACE FUNCTION") {
             Some(SqlOperation::CreateFunction)
         } else if upper.starts_with("TRUNCATE") {
@@ -192,7 +194,7 @@ mod tests {
     fn full_perms() -> SqlPermissions {
         SqlPermissions::from_config(Some(&serde_json::json!({
             "preset": "full",
-            "allowed_schemas": ["production", "sandbox"],
+            "allowed_schemas": ["production", "sandbox", "public"],
             "sandbox_schema": "sandbox"
         }))).unwrap()
     }
@@ -294,5 +296,19 @@ mod tests {
         let query = "CREATE FUNCTION sandbox.my_func() RETURNS void AS $$ BEGIN END; $$ LANGUAGE plpgsql; COMMENT ON FUNCTION sandbox.my_func() IS 'Does something'";
         let r = v.validate(query, &full_perms());
         assert!(r.allowed);
+    }
+
+    #[test]
+    fn test_create_table_allowed_full() {
+        let v = StaticRuleValidator;
+        let r = v.validate("CREATE TABLE public.todos (id SERIAL, title TEXT)", &full_perms());
+        assert!(r.allowed);
+    }
+
+    #[test]
+    fn test_create_table_blocked_read_only() {
+        let v = StaticRuleValidator;
+        let r = v.validate("CREATE TABLE public.todos (id SERIAL)", &read_only_perms());
+        assert!(!r.allowed);
     }
 }
