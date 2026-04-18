@@ -141,18 +141,18 @@ pub async fn run_dag(
 
             // Protocol State Management
             match &event {
-                DagExecutionEvent::LlmToken { node_id, .. } => {
-                    if !text_block_uuids.contains_key(node_id) {
-                        let part_id = format!("txt_{}", uuid::Uuid::new_v4());
-                        println!(
-                            "data: {}\n",
-                            serde_json::json!({
-                                "type": "text-start",
-                                "id": part_id
-                            })
-                        );
-                        text_block_uuids.insert(node_id.clone(), part_id);
-                    }
+                DagExecutionEvent::LlmToken { node_id, .. }
+                    if !text_block_uuids.contains_key(node_id) =>
+                {
+                    let part_id = format!("txt_{}", uuid::Uuid::new_v4());
+                    println!(
+                        "data: {}\n",
+                        serde_json::json!({
+                            "type": "text-start",
+                            "id": part_id
+                        })
+                    );
+                    text_block_uuids.insert(node_id.clone(), part_id);
                 }
                 DagExecutionEvent::NodeFinish { node_id, .. }
                 | DagExecutionEvent::SubgraphNodeFinish { node_id, .. } => {
@@ -176,18 +176,16 @@ pub async fn run_dag(
                 }
                 DagExecutionEvent::LlmToolCall {
                     tool_id, tool_name, ..
-                } => {
-                    if !seen_tool_ids.contains(tool_id) {
-                        seen_tool_ids.insert(tool_id.clone());
-                        println!(
-                            "data: {}\n",
-                            serde_json::json!({
-                                "type": "tool-input-start",
-                                "toolCallId": tool_id,
-                                "toolName": tool_name
-                            })
-                        );
-                    }
+                } if !seen_tool_ids.contains(tool_id) => {
+                    seen_tool_ids.insert(tool_id.clone());
+                    println!(
+                        "data: {}\n",
+                        serde_json::json!({
+                            "type": "tool-input-start",
+                            "toolCallId": tool_id,
+                            "toolName": tool_name
+                        })
+                    );
                 }
                 DagExecutionEvent::GraphFinish { output } => {
                     final_output = output.clone();
@@ -518,15 +516,15 @@ async fn handler_webhook(
 
                     // Protocol State Management
                     match &event {
-                        DagExecutionEvent::LlmToken { node_id, .. } => {
-                            if !text_block_uuids.contains_key(node_id) {
-                                let part_id = format!("txt_{}", uuid::Uuid::new_v4());
-                                yield Ok(Event::default().json_data(serde_json::json!({
-                                    "type": "text-start",
-                                    "id": part_id
-                                })).expect("json_data"));
-                                text_block_uuids.insert(node_id.clone(), part_id);
-                            }
+                        DagExecutionEvent::LlmToken { node_id, .. }
+                            if !text_block_uuids.contains_key(node_id) =>
+                        {
+                            let part_id = format!("txt_{}", uuid::Uuid::new_v4());
+                            yield Ok(Event::default().json_data(serde_json::json!({
+                                "type": "text-start",
+                                "id": part_id
+                            })).expect("json_data"));
+                            text_block_uuids.insert(node_id.clone(), part_id);
                         },
                         DagExecutionEvent::NodeFinish { node_id, .. } => {
                             if let Some(part_id) = text_block_uuids.remove(node_id) {
@@ -540,15 +538,15 @@ async fn handler_webhook(
                             total_prompt_tokens += prompt_tokens;
                             total_completion_tokens += completion_tokens;
                         },
-                        DagExecutionEvent::LlmToolCall { tool_id, tool_name, .. } => {
-                            if !seen_tool_ids.contains(tool_id) {
-                                seen_tool_ids.insert(tool_id.clone());
-                                yield Ok(Event::default().json_data(serde_json::json!({
-                                    "type": "tool-input-start",
-                                    "toolCallId": tool_id,
-                                    "toolName": tool_name
-                                })).expect("json_data"));
-                            }
+                        DagExecutionEvent::LlmToolCall { tool_id, tool_name, .. }
+                            if !seen_tool_ids.contains(tool_id) =>
+                        {
+                            seen_tool_ids.insert(tool_id.clone());
+                            yield Ok(Event::default().json_data(serde_json::json!({
+                                "type": "tool-input-start",
+                                "toolCallId": tool_id,
+                                "toolName": tool_name
+                            })).expect("json_data"));
                         },
                         DagExecutionEvent::GraphFinish { output } => {
                             final_output_value = Some(output.clone());
