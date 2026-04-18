@@ -205,19 +205,32 @@ impl ExecutableNode for SqlNode {
     async fn execute(
         &self,
         inputs: &NodeInputs,
-        config: &Value,
+        _config: &Value,
         _state: &mut Value,
         observer: Option<Arc<dyn ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+        // NOTE: When used as a tool via DagToolExecutor, all node_schema fixed values
+        // arrive in `inputs` (not `config`, which is always `{}`). We read everything
+        // from `inputs` to be compatible with both tool-call and direct-execution modes.
+        let effective_config = serde_json::to_value(inputs)
+            .unwrap_or_else(|_| json!({}));
+
         let query = inputs
             .get("query")
             .and_then(|v| v.as_str())
             .ok_or("sql_query node requires 'query' input")?;
 
-        let permissions = SqlPermissions::from_config(config.get("permissions"))
+        // Lazy initialization: connect on first call if not already initialized
+        if !*self.initialized.read().await {
+            println!("[SqlNode] First call — initializing connection pool...");
+            self.initialize(&effective_config).await
+                .map_err(|e| format!("SqlNode initialization failed: {}", e))?;
+        }
+
+        let permissions = SqlPermissions::from_config(effective_config.get("permissions"))
             .map_err(|e| format!("Invalid permissions: {}", e))?;
 
-        let runtime_limits = config.get("runtime_limits");
+        let runtime_limits = effective_config.get("runtime_limits");
         let max_rows = runtime_limits
             .and_then(|r| r.get("max_rows"))
             .and_then(|v| v.as_u64())
@@ -225,14 +238,14 @@ impl ExecutableNode for SqlNode {
 
         let validator = Arc::new(StaticRuleValidator) as Arc<dyn crate::dag_engine::domain::sql_ports::SqlValidatorPort>;
 
-        let critic_enabled = config
+        let critic_enabled = effective_config
             .get("guardrail_llm")
             .and_then(|g| g.get("enabled"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
         let critic: Option<Arc<dyn crate::dag_engine::domain::sql_ports::SqlCriticPort>> = if critic_enabled {
-            let guardrail_cfg = config.get("guardrail_llm").unwrap();
+            let guardrail_cfg = effective_config.get("guardrail_llm").unwrap();
             let provider = guardrail_cfg.get("provider").and_then(|v| v.as_str()).unwrap_or("openai").to_string();
             let model = guardrail_cfg.get("model").and_then(|v| v.as_str()).unwrap_or("gpt-4o-mini").to_string();
             let api_key_raw = guardrail_cfg.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
