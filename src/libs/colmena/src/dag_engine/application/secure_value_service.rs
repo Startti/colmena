@@ -130,9 +130,7 @@ impl SecureValueService {
                     self.collect_placeholders(v, placeholders);
                 }
             }
-            Value::String(s)
-                if s.starts_with('<') && s.ends_with('>') && s.len() > 2 =>
-            {
+            Value::String(s) if s.starts_with('<') && s.ends_with('>') && s.len() > 2 => {
                 placeholders.push(s.clone());
             }
             _ => {}
