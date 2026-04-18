@@ -47,6 +47,212 @@ impl Default for PgPoolAdapter {
     }
 }
 
+impl PgPoolAdapter {
+    /// Check if RLS is enabled on a table.
+    pub async fn is_rls_enabled(&self, schema: &str, table: &str) -> Result<bool, SqlNodeError> {
+        let pool = self.get_pool().await?;
+        let row = sqlx::query(
+            "SELECT c.relrowsecurity \
+             FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = $2",
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| {
+            SqlNodeError::ExecutionError(format!("Failed to check RLS status: {}", e))
+        })?;
+
+        Ok(row
+            .map(|r| r.try_get::<bool, _>("relrowsecurity").unwrap_or(false))
+            .unwrap_or(false))
+    }
+
+    /// Check if a column exists in a table.
+    pub async fn has_column(
+        &self,
+        schema: &str,
+        table: &str,
+        column: &str,
+    ) -> Result<bool, SqlNodeError> {
+        let pool = self.get_pool().await?;
+        let row = sqlx::query(
+            "SELECT 1 FROM information_schema.columns \
+             WHERE table_schema = $1 AND table_name = $2 AND column_name = $3",
+        )
+        .bind(schema)
+        .bind(table)
+        .bind(column)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to check column: {}", e)))?;
+
+        Ok(row.is_some())
+    }
+
+    /// Check if a specific RLS policy exists on a table.
+    async fn has_policy(
+        &self,
+        schema: &str,
+        table: &str,
+        policy_name: &str,
+    ) -> Result<bool, SqlNodeError> {
+        let pool = self.get_pool().await?;
+        let row = sqlx::query(
+            "SELECT 1 FROM pg_policies \
+             WHERE schemaname = $1 AND tablename = $2 AND policyname = $3",
+        )
+        .bind(schema)
+        .bind(table)
+        .bind(policy_name)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to check policy: {}", e)))?;
+
+        Ok(row.is_some())
+    }
+
+    /// Add the tenant column to a table if it doesn't exist.
+    pub async fn add_tenant_column(
+        &self,
+        schema: &str,
+        table: &str,
+        tenant_column: &str,
+    ) -> Result<(), SqlNodeError> {
+        let pool = self.get_pool().await?;
+        let sql = format!(
+            "ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS {} TEXT DEFAULT current_setting('app.current_user_id')",
+            schema, table, tenant_column
+        );
+        sqlx::query(&sql)
+            .execute(&pool)
+            .await
+            .map_err(|e| {
+                SqlNodeError::ExecutionError(format!("Failed to add tenant column: {}", e))
+            })?;
+        Ok(())
+    }
+
+    /// Set up RLS for a single table. Called during initialize() and after CREATE TABLE.
+    ///
+    /// - If table has `tenant_column`: enables RLS + tenant isolation policy + DEFAULT on column.
+    /// - If table lacks `tenant_column`: enables RLS + read-only policy (SELECT only).
+    pub async fn setup_rls_for_table(
+        &self,
+        schema: &str,
+        table: &str,
+        tenant_column: &str,
+    ) -> Result<(), SqlNodeError> {
+        if self.is_rls_enabled(schema, table).await? {
+            println!("[RLS] {}.{} — already enabled, skipping", schema, table);
+            return Ok(());
+        }
+
+        let pool = self.get_pool().await?;
+        let has_tenant_col = self.has_column(schema, table, tenant_column).await?;
+
+        let enable_sql = format!(
+            "ALTER TABLE {}.{} ENABLE ROW LEVEL SECURITY",
+            schema, table
+        );
+        sqlx::query(&enable_sql)
+            .execute(&pool)
+            .await
+            .map_err(|e| {
+                SqlNodeError::ExecutionError(format!(
+                    "Failed to enable RLS on {}.{}: {}",
+                    schema, table, e
+                ))
+            })?;
+
+        if has_tenant_col {
+            let policy_name = "colmena_tenant_isolation";
+            if !self.has_policy(schema, table, policy_name).await? {
+                let policy_sql = format!(
+                    "CREATE POLICY {} ON {}.{} \
+                     USING ({} = current_setting('app.current_user_id')) \
+                     WITH CHECK ({} = current_setting('app.current_user_id'))",
+                    policy_name, schema, table, tenant_column, tenant_column
+                );
+                sqlx::query(&policy_sql)
+                    .execute(&pool)
+                    .await
+                    .map_err(|e| {
+                        SqlNodeError::ExecutionError(format!(
+                            "Failed to create tenant policy on {}.{}: {}",
+                            schema, table, e
+                        ))
+                    })?;
+            }
+
+            let default_sql = format!(
+                "ALTER TABLE {}.{} ALTER COLUMN {} SET DEFAULT current_setting('app.current_user_id')",
+                schema, table, tenant_column
+            );
+            sqlx::query(&default_sql)
+                .execute(&pool)
+                .await
+                .map_err(|e| {
+                    SqlNodeError::ExecutionError(format!(
+                        "Failed to set default on {}.{}.{}: {}",
+                        schema, table, tenant_column, e
+                    ))
+                })?;
+
+            println!(
+                "[RLS] {}.{} — tenant isolation enabled (column: {})",
+                schema, table, tenant_column
+            );
+        } else {
+            let policy_name = "colmena_shared_read";
+            if !self.has_policy(schema, table, policy_name).await? {
+                let policy_sql = format!(
+                    "CREATE POLICY {} ON {}.{} FOR SELECT USING (true)",
+                    policy_name, schema, table
+                );
+                sqlx::query(&policy_sql)
+                    .execute(&pool)
+                    .await
+                    .map_err(|e| {
+                        SqlNodeError::ExecutionError(format!(
+                            "Failed to create read-only policy on {}.{}: {}",
+                            schema, table, e
+                        ))
+                    })?;
+            }
+
+            println!(
+                "[RLS] {}.{} — read-only (no {} column)",
+                schema, table, tenant_column
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Set up RLS for a newly created table. Auto-adds tenant column if missing.
+    pub async fn setup_rls_for_new_table(
+        &self,
+        schema: &str,
+        table: &str,
+        tenant_column: &str,
+    ) -> Result<(), SqlNodeError> {
+        let has_tenant_col = self.has_column(schema, table, tenant_column).await?;
+
+        if !has_tenant_col {
+            self.add_tenant_column(schema, table, tenant_column).await?;
+            println!(
+                "[RLS] {}.{} — auto-added column '{}'",
+                schema, table, tenant_column
+            );
+        }
+
+        self.setup_rls_for_table(schema, table, tenant_column).await
+    }
+}
+
 #[async_trait::async_trait]
 impl SqlConnectionPort for PgPoolAdapter {
     async fn connect(
@@ -86,6 +292,7 @@ impl SqlConnectionPort for PgPoolAdapter {
         &self,
         query: &str,
         max_rows: u64,
+        tenant_user_id: Option<&str>,
     ) -> Result<QueryResult, SqlNodeError> {
         let pool = self.get_pool().await?;
         let timeout_ms = *self.statement_timeout_ms.read().await;
@@ -94,31 +301,39 @@ impl SqlConnectionPort for PgPoolAdapter {
         let trimmed = query.trim_start().to_uppercase();
         let is_select = trimmed.starts_with("SELECT") || trimmed.starts_with("WITH");
 
+        // All queries now use transactions so we can SET LOCAL tenant context
+        let mut tx = pool.begin().await.map_err(|e| {
+            SqlNodeError::ExecutionError(format!("Failed to begin transaction: {}", e))
+        })?;
+
+        // Apply runtime limits
+        sqlx::query(&format!("SET LOCAL statement_timeout = {}", timeout_ms))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SqlNodeError::ExecutionError(format!("{}", e)))?;
+
+        sqlx::query(&format!("SET LOCAL work_mem = '{}MB'", work_mem))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SqlNodeError::ExecutionError(format!("{}", e)))?;
+
+        // Set tenant context if multi-tenancy is active
+        if let Some(uid) = tenant_user_id {
+            sqlx::query("SELECT set_config('app.current_user_id', $1, true)")
+                .bind(uid)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| {
+                    SqlNodeError::ExecutionError(format!("Failed to set tenant context: {}", e))
+                })?;
+        }
+
         if is_select {
-            // For SELECT: add LIMIT to enforce max_rows
             let limited_query = if max_rows > 0 && !trimmed.contains("LIMIT") {
                 format!("{} LIMIT {}", query.trim_end_matches(';'), max_rows + 1)
             } else {
                 query.to_string()
             };
-
-            // Apply runtime limits per-transaction and execute
-            let mut tx = pool.begin().await.map_err(|e| {
-                SqlNodeError::ExecutionError(format!("Failed to begin transaction: {}", e))
-            })?;
-
-            sqlx::query(&format!(
-                "SET LOCAL statement_timeout = {}",
-                timeout_ms
-            ))
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SqlNodeError::ExecutionError(format!("{}", e)))?;
-
-            sqlx::query(&format!("SET LOCAL work_mem = '{}MB'", work_mem))
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| SqlNodeError::ExecutionError(format!("{}", e)))?;
 
             let rows = sqlx::query(&limited_query)
                 .fetch_all(&mut *tx)
@@ -170,11 +385,14 @@ impl SqlConnectionPort for PgPoolAdapter {
                 truncated,
             })
         } else {
-            // For mutations: execute and return rows_affected
             let result = sqlx::query(query)
-                .execute(&pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| SqlNodeError::ExecutionError(format!("{}", e)))?;
+
+            tx.commit().await.map_err(|e| {
+                SqlNodeError::ExecutionError(format!("Failed to commit: {}", e))
+            })?;
 
             let rows_affected = result.rows_affected();
 
@@ -183,6 +401,12 @@ impl SqlConnectionPort for PgPoolAdapter {
             {
                 Ok(QueryResult {
                     output: json!({ "created": true }),
+                    row_count: 0,
+                    truncated: false,
+                })
+            } else if trimmed.starts_with("CREATE TABLE") {
+                Ok(QueryResult {
+                    output: json!({ "created": true, "type": "table" }),
                     row_count: 0,
                     truncated: false,
                 })

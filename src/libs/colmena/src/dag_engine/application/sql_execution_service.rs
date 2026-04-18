@@ -72,6 +72,7 @@ impl SqlExecutionService {
         max_rows: u64,
         session_id: &str,
         schema_context: &str,
+        tenant_user_id: Option<&str>,
     ) -> Result<SqlExecutionResult, SqlNodeError> {
         // Stage 1: Static validation
         let validation = self.validator.validate(query, permissions);
@@ -121,7 +122,7 @@ impl SqlExecutionService {
         }
 
         // Stage 3: Execute
-        let result = self.connection.execute_query(query, max_rows).await?;
+        let result = self.connection.execute_query(query, max_rows, tenant_user_id).await?;
 
         // Stage 4: Post-execution
         // Record warnings and optimization hints as feedback

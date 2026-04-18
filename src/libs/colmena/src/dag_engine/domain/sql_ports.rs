@@ -59,10 +59,12 @@ pub trait SqlConnectionPort: Send + Sync {
     ) -> Result<(), SqlNodeError>;
 
     /// Execute a SQL query and return results as JSON.
+    /// If `tenant_user_id` is Some, runs `SET LOCAL app.current_user_id` in the same transaction.
     async fn execute_query(
         &self,
         query: &str,
         max_rows: u64,
+        tenant_user_id: Option<&str>,
     ) -> Result<QueryResult, SqlNodeError>;
 
     /// Load table metadata (names + comments) for the given schemas.
