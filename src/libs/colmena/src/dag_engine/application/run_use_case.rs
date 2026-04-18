@@ -631,7 +631,9 @@ impl DagRunUseCase {
             let source_field_opt = if parts_from.len() == 1 {
                 // Check if source node has a default_output
                 if let Some(source_node_cfg) = graph.nodes.get(source_node_id) {
-                    if let Some(source_node_impl) = self.registry.get_node(&source_node_cfg.node_type) {
+                    if let Some(source_node_impl) =
+                        self.registry.get_node(&source_node_cfg.node_type)
+                    {
                         source_node_impl.default_output().map(|s| s.to_string())
                     } else {
                         None
@@ -677,7 +679,9 @@ impl DagRunUseCase {
             } else {
                 // No explicit field — check for default_input
                 let inserted = if let Some(target_node_cfg) = graph.nodes.get(current_node_id) {
-                    if let Some(target_node_impl) = self.registry.get_node(&target_node_cfg.node_type) {
+                    if let Some(target_node_impl) =
+                        self.registry.get_node(&target_node_cfg.node_type)
+                    {
                         if let Some(field) = target_node_impl.default_input() {
                             // Smart extraction: if the source value is an object and the target
                             // has a default_input that matches a key in that object, extract it
@@ -746,7 +750,7 @@ impl SubGraphExecutorPort for DagRunUseCase {
         if let Some(repo) = &self.state_repository {
             let initial_state = DagRunState {
                 session_id: session_id.to_string(),
-                graph_json: graph_json,
+                graph_json,
                 all_outputs: HashMap::new(),
                 global_shared_state: global_state,
                 execution_history: Vec::new(),
@@ -759,16 +763,25 @@ impl SubGraphExecutorPort for DagRunUseCase {
         }
 
         use futures::StreamExt;
-        let mut stream = Box::pin(self.clone().execute_stream(graph, Some(session_id.to_string()), None, true));
+        let mut stream =
+            Box::pin(
+                self.clone()
+                    .execute_stream(graph, Some(session_id.to_string()), None, true),
+            );
 
         let mut final_out = Value::Null;
         while let Some(res) = stream.next().await {
             let event = res?;
-            if let crate::dag_engine::domain::events::DagExecutionEvent::GraphFinish { ref output } = event {
+            if let crate::dag_engine::domain::events::DagExecutionEvent::GraphFinish {
+                ref output,
+            } = event
+            {
                 final_out = output.clone();
             } else if let Some(obs) = &observer {
                 if let Ok(raw) = serde_json::to_value(&event) {
-                    obs.on_event(crate::dag_engine::domain::observer::NodeEvent::SubgraphChildEvent(raw));
+                    obs.on_event(
+                        crate::dag_engine::domain::observer::NodeEvent::SubgraphChildEvent(raw),
+                    );
                 }
             }
         }
@@ -783,26 +796,42 @@ impl SubGraphExecutorPort for DagRunUseCase {
         observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     ) -> Result<Value, DagError> {
         let state = if let Some(repo) = &self.state_repository {
-            repo.get_by_id(session_id).await?
-                .ok_or_else(|| DagError::NodeExecution(format!("Child session {} not found for resume", session_id)))?
+            repo.get_by_id(session_id).await?.ok_or_else(|| {
+                DagError::NodeExecution(format!(
+                    "Child session {} not found for resume",
+                    session_id
+                ))
+            })?
         } else {
-            return Err(DagError::NodeExecution("State repository missing for resume".to_string()));
+            return Err(DagError::NodeExecution(
+                "State repository missing for resume".to_string(),
+            ));
         };
 
         let graph: Graph = serde_json::from_value(state.graph_json)
             .map_err(|e| DagError::NodeExecution(format!("Invalid sub-graph state JSON: {}", e)))?;
 
         use futures::StreamExt;
-        let mut stream = Box::pin(self.clone().execute_stream(graph, Some(session_id.to_string()), Some(answer), true));
+        let mut stream = Box::pin(self.clone().execute_stream(
+            graph,
+            Some(session_id.to_string()),
+            Some(answer),
+            true,
+        ));
 
         let mut final_out = Value::Null;
         while let Some(res) = stream.next().await {
             let event = res?;
-            if let crate::dag_engine::domain::events::DagExecutionEvent::GraphFinish { ref output } = event {
+            if let crate::dag_engine::domain::events::DagExecutionEvent::GraphFinish {
+                ref output,
+            } = event
+            {
                 final_out = output.clone();
             } else if let Some(obs) = &observer {
                 if let Ok(raw) = serde_json::to_value(&event) {
-                    obs.on_event(crate::dag_engine::domain::observer::NodeEvent::SubgraphChildEvent(raw));
+                    obs.on_event(
+                        crate::dag_engine::domain::observer::NodeEvent::SubgraphChildEvent(raw),
+                    );
                 }
             }
         }

@@ -12,10 +12,11 @@ fn resolve_templates(value: Value, state: &Value) -> Value {
         Value::String(s) => {
             let mut result = s.clone();
             let mut search_from = 0;
-            loop {
-                let Some(start) = result[search_from..].find("{{") else { break };
+            while let Some(start) = result[search_from..].find("{{") {
                 let abs_start = search_from + start;
-                let Some(end) = result[abs_start..].find("}}") else { break };
+                let Some(end) = result[abs_start..].find("}}") else {
+                    break;
+                };
                 let abs_end = abs_start + end;
                 let key = result[abs_start + 2..abs_end].trim();
                 let replacement = state
@@ -35,7 +36,11 @@ fn resolve_templates(value: Value, state: &Value) -> Value {
                 .map(|(k, v)| (k, resolve_templates(v, state)))
                 .collect(),
         ),
-        Value::Array(arr) => Value::Array(arr.into_iter().map(|v| resolve_templates(v, state)).collect()),
+        Value::Array(arr) => Value::Array(
+            arr.into_iter()
+                .map(|v| resolve_templates(v, state))
+                .collect(),
+        ),
         other => other,
     }
 }

@@ -62,11 +62,10 @@ impl DagToolExecutor {
 
         re.replace_all(template, |caps: &regex::Captures| {
             let key = &caps[1];
-            inputs
-                .get(key)
-                .and_then(|v| v.as_str())
-                .unwrap_or(&caps[0].to_string())
-                .to_string()
+            match inputs.get(key).and_then(|v| v.as_str()) {
+                Some(resolved) => resolved.to_string(),
+                None => caps[0].to_string(),
+            }
         })
         .to_string()
     }
@@ -123,7 +122,9 @@ impl DagToolExecutor {
     /// Returns Vec of (param_name, container_field) tuples.
     /// - For nested: (field_key, Some(container_key)) e.g. ("title", Some("body"))
     /// - For top-level: (container_key, None) e.g. ("endpoint", None)
-    fn collect_dynamic_fields(fixed_config: &HashMap<String, Value>) -> Vec<(String, Option<String>)> {
+    fn collect_dynamic_fields(
+        fixed_config: &HashMap<String, Value>,
+    ) -> Vec<(String, Option<String>)> {
         let mut dynamic_fields = Vec::new();
 
         for (container_key, container_val) in fixed_config {
@@ -156,8 +157,8 @@ impl DagToolExecutor {
         tool_config: &ToolConfiguration,
         node: &Arc<dyn ExecutableNode>,
     ) -> crate::llm::domain::ToolDefinition {
-        use crate::llm::domain::{ParameterProperty, ToolDefinition, ToolParameters};
         use crate::dag_engine::domain::tool_configuration::parse_node_schema;
+        use crate::llm::domain::{ParameterProperty, ToolDefinition, ToolParameters};
 
         // Use tool_config.name if non-empty (e.g. when the map key is a UUID from the frontend),
         // otherwise fall back to the map key so existing graphs are unaffected.
@@ -321,30 +322,35 @@ impl ToolExecutor for DagToolExecutor {
 
         // 1. Check if it's a configured tool or a raw node.
         //    First try by map key (fast path), then by config.name (handles UUID keys from frontend).
-        let (node, fixed_config, tool_cfg) = if let Some(config) = self.tool_configurations.get(node_type) {
-            let node = self.registry.get_node(&config.node_type).ok_or_else(|| {
-                LlmError::ToolNotFound {
-                    name: config.node_type.clone(),
-                }
-            })?;
-            (node, Some(config.fixed_config.clone()), Some(config))
-        } else if let Some(config) = self.tool_configurations.values().find(|c| c.name == *node_type) {
-            // Fallback: LLM used the semantic name but the map key is a UUID
-            let node = self.registry.get_node(&config.node_type).ok_or_else(|| {
-                LlmError::ToolNotFound {
-                    name: config.node_type.clone(),
-                }
-            })?;
-            (node, Some(config.fixed_config.clone()), Some(config))
-        } else {
-            let node = self
-                .registry
-                .get_node(node_type)
-                .ok_or_else(|| LlmError::ToolNotFound {
-                    name: node_type.clone(),
+        let (node, fixed_config, tool_cfg) =
+            if let Some(config) = self.tool_configurations.get(node_type) {
+                let node = self.registry.get_node(&config.node_type).ok_or_else(|| {
+                    LlmError::ToolNotFound {
+                        name: config.node_type.clone(),
+                    }
                 })?;
-            (node, None, None)
-        };
+                (node, Some(config.fixed_config.clone()), Some(config))
+            } else if let Some(config) = self
+                .tool_configurations
+                .values()
+                .find(|c| c.name == *node_type)
+            {
+                // Fallback: LLM used the semantic name but the map key is a UUID
+                let node = self.registry.get_node(&config.node_type).ok_or_else(|| {
+                    LlmError::ToolNotFound {
+                        name: config.node_type.clone(),
+                    }
+                })?;
+                (node, Some(config.fixed_config.clone()), Some(config))
+            } else {
+                let node =
+                    self.registry
+                        .get_node(node_type)
+                        .ok_or_else(|| LlmError::ToolNotFound {
+                            name: node_type.clone(),
+                        })?;
+                (node, None, None)
+            };
 
         // 2. Parse arguments
         let args: HashMap<String, Value> = serde_json::from_str(&tool_call.function.arguments)
@@ -514,14 +520,14 @@ impl ToolExecutor for DagToolExecutor {
 
         // Convert HashMap to NodeInputs (which is just HashMap<String, Value>)
         // SECURE VALUES: decrypt <value_N> placeholders before sending to the node.
-        let inputs = if let (Some(svc), Some(sid)) = (&self.secure_value_service, &self.session_id) {
-            let mut inputs_val = serde_json::to_value(&inputs)
-                .unwrap_or(Value::Object(Default::default()));
+        let inputs = if let (Some(svc), Some(sid)) = (&self.secure_value_service, &self.session_id)
+        {
+            let mut inputs_val =
+                serde_json::to_value(&inputs).unwrap_or(Value::Object(Default::default()));
             if let Err(e) = svc.inject_secrets(&mut inputs_val, sid).await {
                 eprintln!("⚠️ [DagToolExecutor] Failed to inject secrets: {}", e);
             }
-            serde_json::from_value::<HashMap<String, Value>>(inputs_val)
-                .unwrap_or(inputs)
+            serde_json::from_value::<HashMap<String, Value>>(inputs_val).unwrap_or(inputs)
         } else {
             inputs
         };
@@ -539,7 +545,9 @@ impl ToolExecutor for DagToolExecutor {
 
         let mut state = serde_json::json!({});
 
-        let result = node.execute(&inputs, &node_exec_config, &mut state, None).await;
+        let result = node
+            .execute(&inputs, &node_exec_config, &mut state, None)
+            .await;
 
         // 4. Apply Secure Value hashing BEFORE returning to LLM
         // This is the critical step: if the tool has `secure: true`, all sensitive
@@ -550,13 +558,19 @@ impl ToolExecutor for DagToolExecutor {
                 let safe_output = if is_secure {
                     if let (Some(svc), Some(sid)) = (&self.secure_value_service, &self.session_id) {
                         let secure_config = serde_json::json!({ "secure": true });
-                        match svc.hash_output(&value, &secure_config, sid, node_type).await {
+                        match svc
+                            .hash_output(&value, &secure_config, sid, node_type)
+                            .await
+                        {
                             Ok(hashed) => {
                                 colmena_log!("🔒 [DagToolExecutor] Secure tool '{}': output hashed, real values encrypted in DB", node_type);
                                 hashed
                             }
                             Err(e) => {
-                                eprintln!("⚠️ [DagToolExecutor] hash_output failed for '{}': {}", node_type, e);
+                                eprintln!(
+                                    "⚠️ [DagToolExecutor] hash_output failed for '{}': {}",
+                                    node_type, e
+                                );
                                 value // fallback: return as-is (still better than crashing)
                             }
                         }
@@ -873,13 +887,19 @@ mod tests {
         let tools = executor.available_tools().await;
 
         // Should use config.name, not the UUID key
-        let tool = tools.iter().find(|t| t.name == "list_products")
+        let tool = tools
+            .iter()
+            .find(|t| t.name == "list_products")
             .expect("tool named 'list_products' not found — UUID key leaked as name");
         assert_eq!(tool.description, "List products from the catalog");
 
         // UUID should NOT appear as a tool name
-        assert!(!tools.iter().any(|t| t.name == "0618e7a1-2d50-4c7d-9244-52f2b504a3ca"),
-            "UUID key leaked as tool name");
+        assert!(
+            !tools
+                .iter()
+                .any(|t| t.name == "0618e7a1-2d50-4c7d-9244-52f2b504a3ca"),
+            "UUID key leaked as tool name"
+        );
     }
 
     #[tokio::test]
@@ -913,7 +933,11 @@ mod tests {
         );
 
         let result = executor.execute(&tool_call).await;
-        assert!(result.is_ok(), "execute should resolve tool by config.name: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "execute should resolve tool by config.name: {:?}",
+            result.err()
+        );
         let result = result.unwrap();
         assert!(result.success);
     }
@@ -1023,10 +1047,7 @@ mod tests {
 
         let mut fixed_config = HashMap::new();
         let mut headers_fixed = serde_json::Map::new();
-        headers_fixed.insert(
-            "Authorization".to_string(),
-            serde_json::json!("Bearer x"),
-        );
+        headers_fixed.insert("Authorization".to_string(), serde_json::json!("Bearer x"));
         fixed_config.insert("headers".to_string(), Value::Object(headers_fixed));
 
         let mut field_mapping = HashMap::new();
@@ -1123,7 +1144,10 @@ mod tests {
         body_fixed.insert("userId".to_string(), serde_json::json!(1));
         body_fixed.insert("author".to_string(), serde_json::json!("Fulanito"));
         body_fixed.insert("title".to_string(), serde_json::json!(DYNAMIC_PLACEHOLDER));
-        body_fixed.insert("content".to_string(), serde_json::json!(DYNAMIC_PLACEHOLDER));
+        body_fixed.insert(
+            "content".to_string(),
+            serde_json::json!(DYNAMIC_PLACEHOLDER),
+        );
 
         let mut fixed_config = HashMap::new();
         fixed_config.insert("body".to_string(), Value::Object(body_fixed));
@@ -1181,7 +1205,10 @@ mod tests {
             "Authorization".to_string(),
             serde_json::json!("Bearer secret"),
         );
-        headers_fixed.insert("X-Request-ID".to_string(), serde_json::json!(DYNAMIC_PLACEHOLDER));
+        headers_fixed.insert(
+            "X-Request-ID".to_string(),
+            serde_json::json!(DYNAMIC_PLACEHOLDER),
+        );
 
         let mut body_fixed = serde_json::Map::new();
         body_fixed.insert("userId".to_string(), serde_json::json!(1));
@@ -1235,8 +1262,14 @@ mod tests {
         let mut tool_configs = HashMap::new();
 
         let mut fixed_config = HashMap::new();
-        fixed_config.insert("base_url".to_string(), serde_json::json!("https://example.com"));
-        fixed_config.insert("endpoint".to_string(), serde_json::json!(DYNAMIC_PLACEHOLDER));
+        fixed_config.insert(
+            "base_url".to_string(),
+            serde_json::json!("https://example.com"),
+        );
+        fixed_config.insert(
+            "endpoint".to_string(),
+            serde_json::json!(DYNAMIC_PLACEHOLDER),
+        );
         fixed_config.insert("method".to_string(), serde_json::json!("POST"));
 
         tool_configs.insert(
@@ -1282,14 +1315,20 @@ mod tests {
         let mut body_fixed = serde_json::Map::new();
         body_fixed.insert("userId".to_string(), serde_json::json!(1));
         body_fixed.insert("title".to_string(), serde_json::json!(DYNAMIC_PLACEHOLDER));
-        body_fixed.insert("content".to_string(), serde_json::json!(DYNAMIC_PLACEHOLDER));
+        body_fixed.insert(
+            "content".to_string(),
+            serde_json::json!(DYNAMIC_PLACEHOLDER),
+        );
 
         let mut headers_fixed = serde_json::Map::new();
         headers_fixed.insert(
             "Authorization".to_string(),
             serde_json::json!("Bearer secret"),
         );
-        headers_fixed.insert("X-Request-ID".to_string(), serde_json::json!(DYNAMIC_PLACEHOLDER));
+        headers_fixed.insert(
+            "X-Request-ID".to_string(),
+            serde_json::json!(DYNAMIC_PLACEHOLDER),
+        );
 
         let mut fixed_config = HashMap::new();
         fixed_config.insert("body".to_string(), Value::Object(body_fixed));

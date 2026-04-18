@@ -18,6 +18,7 @@ use std::collections::HashMap;
 ///         property_type: "number".to_string(),
 ///         description: "First number".to_string(),
 ///         enum_values: None,
+///         pattern: None,
 ///     }
 /// );
 ///

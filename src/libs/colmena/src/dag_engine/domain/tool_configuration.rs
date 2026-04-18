@@ -6,8 +6,8 @@
 //!    each key is a node field (e.g. `base_url`, `query_params`, `body`). Values can be:
 //!    - `fixed`: hidden from the LLM, always applied as-is.
 //!    - LLM-visible: typed, optionally required, with description and pattern constraints.
-//!    Container fields (e.g. `body`, `query_params`) support nested `properties`, allowing
-//!    mixed fixed/dynamic sub-fields. Use this for all non-trivial tool configurations.
+//!      Container fields (e.g. `body`, `query_params`) support nested `properties`, allowing
+//!      mixed fixed/dynamic sub-fields. Use this for all non-trivial tool configurations.
 //!
 //! 2. **`$DYNAMIC` placeholders** — Simpler alternative. Use `fixed_config` with specific
 //!    values set to the string literal `"$DYNAMIC"` (see [`DYNAMIC_PLACEHOLDER`]).
@@ -22,10 +22,10 @@
 //!
 //! The execution priority in `DagToolExecutor` is: `node_schema` → `$DYNAMIC` → deprecated.
 
+use crate::llm::domain::ParameterProperty;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use crate::llm::domain::ParameterProperty;
 
 /// Marker string used as a placeholder value in `fixed_config` to indicate that a field
 /// should be provided by the LLM at call time.
@@ -385,13 +385,19 @@ mod tests {
         // LLM properties should include the 3 non-fixed children
         assert_eq!(parsed.llm_properties.len(), 3);
         assert!(parsed.llm_properties.contains_key("originLocationCode"));
-        assert!(parsed.llm_properties.contains_key("destinationLocationCode"));
+        assert!(parsed
+            .llm_properties
+            .contains_key("destinationLocationCode"));
         assert!(parsed.llm_properties.contains_key("children"));
 
         // Required params check
         assert_eq!(parsed.required_params.len(), 2);
-        assert!(parsed.required_params.contains(&"originLocationCode".to_string()));
-        assert!(parsed.required_params.contains(&"destinationLocationCode".to_string()));
+        assert!(parsed
+            .required_params
+            .contains(&"originLocationCode".to_string()));
+        assert!(parsed
+            .required_params
+            .contains(&"destinationLocationCode".to_string()));
 
         // Param to container mapping
         assert_eq!(
@@ -432,9 +438,18 @@ mod tests {
         assert_eq!(parsed.required_params.len(), 2); // title and content
 
         // All should map to body container
-        assert_eq!(parsed.param_to_container.get("title"), Some(&"body".to_string()));
-        assert_eq!(parsed.param_to_container.get("content"), Some(&"body".to_string()));
-        assert_eq!(parsed.param_to_container.get("tags"), Some(&"body".to_string()));
+        assert_eq!(
+            parsed.param_to_container.get("title"),
+            Some(&"body".to_string())
+        );
+        assert_eq!(
+            parsed.param_to_container.get("content"),
+            Some(&"body".to_string())
+        );
+        assert_eq!(
+            parsed.param_to_container.get("tags"),
+            Some(&"body".to_string())
+        );
     }
 
     #[test]
@@ -505,7 +520,10 @@ mod tests {
         // edge should be exposed as an LLM-visible object parameter mapped to payload
         assert!(parsed.llm_properties.contains_key("edge"));
         assert!(parsed.required_params.contains(&"edge".to_string()));
-        assert_eq!(parsed.param_to_container.get("edge"), Some(&"payload".to_string()));
+        assert_eq!(
+            parsed.param_to_container.get("edge"),
+            Some(&"payload".to_string())
+        );
 
         // The LLM-visible sub-properties (id, source, target) should NOT be individually
         // exposed — the LLM provides them as part of the edge object
@@ -571,11 +589,19 @@ mod tests {
 
         // Required: source_params.name, source_params.id, target_params.name (3 total)
         assert_eq!(parsed.required_params.len(), 3);
-        assert!(parsed.required_params.contains(&"source_params.name".to_string()));
-        assert!(parsed.required_params.contains(&"source_params.id".to_string()));
-        assert!(parsed.required_params.contains(&"target_params.name".to_string()));
+        assert!(parsed
+            .required_params
+            .contains(&"source_params.name".to_string()));
+        assert!(parsed
+            .required_params
+            .contains(&"source_params.id".to_string()));
+        assert!(parsed
+            .required_params
+            .contains(&"target_params.name".to_string()));
         // target_params.id is NOT required
-        assert!(!parsed.required_params.contains(&"target_params.id".to_string()));
+        assert!(!parsed
+            .required_params
+            .contains(&"target_params.id".to_string()));
     }
 
     #[test]
@@ -611,7 +637,13 @@ mod tests {
         assert!(!parsed.llm_properties.contains_key("headers.x_request_id"));
 
         // Container mappings
-        assert_eq!(parsed.param_to_container.get("city"), Some(&"query_params".to_string()));
-        assert_eq!(parsed.param_to_container.get("x_request_id"), Some(&"headers".to_string()));
+        assert_eq!(
+            parsed.param_to_container.get("city"),
+            Some(&"query_params".to_string())
+        );
+        assert_eq!(
+            parsed.param_to_container.get("x_request_id"),
+            Some(&"headers".to_string())
+        );
     }
 }

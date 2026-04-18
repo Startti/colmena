@@ -21,7 +21,8 @@ pub struct LlmNode {
     registry: Weak<dyn NodeRegistryPort>,
     task_memory_repo: Option<Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>>,
     /// Optional SecureValueService — propagated to DagToolExecutor during tool calls.
-    secure_value_service: Option<Arc<crate::dag_engine::application::secure_value_service::SecureValueService>>,
+    secure_value_service:
+        Option<Arc<crate::dag_engine::application::secure_value_service::SecureValueService>>,
 }
 
 impl LlmNode {
@@ -43,7 +44,9 @@ impl LlmNode {
     /// Builder: attach a SecureValueService so it is forwarded to DagToolExecutor during tool calls.
     pub fn with_secure_values(
         mut self,
-        secure_value_service: Arc<crate::dag_engine::application::secure_value_service::SecureValueService>,
+        secure_value_service: Arc<
+            crate::dag_engine::application::secure_value_service::SecureValueService,
+        >,
     ) -> Self {
         self.secure_value_service = Some(secure_value_service);
         self
@@ -105,19 +108,15 @@ impl LlmNode {
     ) {
         for field in schema.values_mut() {
             // Resolve fixed value if it's a string
-            if let Some(fixed) = field.fixed.as_mut() {
-                if let Value::String(s) = fixed {
-                    *s = Self::resolve_context_vars(s, inputs);
-                }
+            if let Some(Value::String(s)) = field.fixed.as_mut() {
+                *s = Self::resolve_context_vars(s, inputs);
             }
 
             // Recursively resolve in nested properties
             if let Some(properties) = field.properties.as_mut() {
                 for nested_field in properties.values_mut() {
-                    if let Some(fixed) = nested_field.fixed.as_mut() {
-                        if let Value::String(s) = fixed {
-                            *s = Self::resolve_context_vars(s, inputs);
-                        }
+                    if let Some(Value::String(s)) = nested_field.fixed.as_mut() {
+                        *s = Self::resolve_context_vars(s, inputs);
                     }
                 }
             }
@@ -579,7 +578,8 @@ impl ExecutableNode for LlmNode {
         if let Some(sys_msg) = system_message {
             if !history_exists {
                 let final_system_message = if !tools.is_empty() {
-                    let tool_names: Vec<String> = tools.iter().map(|t| format!("- {}", t.name)).collect();
+                    let tool_names: Vec<String> =
+                        tools.iter().map(|t| format!("- {}", t.name)).collect();
                     format!(
                         "{}\n\n---\n## Tool Use Instructions\nYou have access to the following tools:\n{}\n\nRules:\n- ALWAYS use the available tools to answer questions that require real or live data. Never answer from your own knowledge when a tool can provide the data.\n- Call the most relevant tool before responding. Do not skip tool calls.\n- If a tool call fails, report the error clearly instead of guessing an answer.\n- Only respond without a tool call when the user's request is purely conversational and no tool is needed.",
                         sys_msg,

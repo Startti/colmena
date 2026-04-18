@@ -12,9 +12,17 @@ pub struct SubGraphNode {
     pub executor: Arc<OnceLock<Arc<dyn SubGraphExecutorPort>>>,
 }
 
+impl Default for SubGraphNode {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SubGraphNode {
     pub fn new() -> Self {
-        Self { executor: Arc::new(OnceLock::new()) }
+        Self {
+            executor: Arc::new(OnceLock::new()),
+        }
     }
 }
 
@@ -48,14 +56,25 @@ impl ExecutableNode for SubGraphNode {
 
         // --- 1. RESUME PROPAGATION ---
         // If the parent was suspended in this node, it receives __colmena_resume_answer
-        if let Some(resume_answer) = inputs.get("__colmena_resume_answer").and_then(|v| v.as_str()) {
-            colmena_log!("▶️ [SubGraphNode] Resuming child graph {} with answer...", child_session_id);
-            let result = self.executor
+        if let Some(resume_answer) = inputs
+            .get("__colmena_resume_answer")
+            .and_then(|v| v.as_str())
+        {
+            colmena_log!(
+                "▶️ [SubGraphNode] Resuming child graph {} with answer...",
+                child_session_id
+            );
+            let result = self
+                .executor
                 .get()
                 .ok_or("SubGraphExecutorPort not initialized in SubGraphNode")?
-                .resume_subgraph(&child_session_id, resume_answer.to_string(), _observer.clone())
+                .resume_subgraph(
+                    &child_session_id,
+                    resume_answer.to_string(),
+                    _observer.clone(),
+                )
                 .await?;
-            
+
             // Check if the child suspended AGAIN
             if result.get("__colmena_status").and_then(|v| v.as_str()) == Some("SUSPENDED") {
                 // Bubble up
@@ -75,13 +94,18 @@ impl ExecutableNode for SubGraphNode {
             let contents = fs::read_to_string(path).await?;
             serde_json::from_str(&contents)?
         } else {
-            return Err("SubGraphNode requires 'child_graph_inline' or 'child_graph_path' in config".into());
+            return Err(
+                "SubGraphNode requires 'child_graph_inline' or 'child_graph_path' in config".into(),
+            );
         };
 
         // Agent name is injected by OrchestratorNode when this subgraph is called as an agent.
         // When present, we emit boundary node-start / node-end events so the parent stream
         // shows a clear subgraph boundary around the child events.
-        let agent_name = config.get("__agent_name").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let agent_name = config
+            .get("__agent_name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         // --- 3. STATE MAPPING (IN) ---
         // We pass the resolved `inputs` to the child graph as its initial global_state
@@ -106,12 +130,21 @@ impl ExecutableNode for SubGraphNode {
             }
         }
 
-        colmena_log!("🔄 [SubGraphNode] Running SubGraph in isolated session: {}", child_session_id);
+        colmena_log!(
+            "🔄 [SubGraphNode] Running SubGraph in isolated session: {}",
+            child_session_id
+        );
 
-        let result = self.executor
+        let result = self
+            .executor
             .get()
             .ok_or("SubGraphExecutorPort not initialized in SubGraphNode")?
-            .run_subgraph(&child_session_id, graph_json, child_state, _observer.clone())
+            .run_subgraph(
+                &child_session_id,
+                graph_json,
+                child_state,
+                _observer.clone(),
+            )
             .await?;
 
         // --- 4. SUSPEND BUBBLE-UP ---
