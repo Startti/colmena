@@ -107,9 +107,13 @@ impl SqlNode {
     /// Extract schema and table name from a CREATE TABLE statement.
     /// Returns (schema, table). If no schema is specified, defaults to "public".
     fn extract_create_table_name(query: &str) -> Option<(String, String)> {
-        let re = regex::Regex::new(
-            r"(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(\w+)\.)?(\w+)\s*\("
-        ).ok()?;
+        use std::sync::OnceLock;
+        static RE: OnceLock<regex::Regex> = OnceLock::new();
+        let re = RE.get_or_init(|| {
+            regex::Regex::new(
+                r"(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(\w+)\.)?(\w+)\s*\("
+            ).expect("valid regex")
+        });
         let caps = re.captures(query)?;
         let schema = caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_else(|| "public".to_string());
         let table = caps.get(2)?.as_str().to_string();
@@ -204,12 +208,9 @@ impl InitializableNode for SqlNode {
         let supplement = Self::build_description_supplement(&tables, &functions, &permissions, max_rows);
 
         // Auto-RLS setup if enabled
-        let permissions_for_rls = SqlPermissions::from_config(config.get("permissions"))
-            .map_err(|e| format!("Invalid permissions config: {}", e))?;
-
-        if permissions_for_rls.auto_rls() {
+        if permissions.auto_rls() {
             println!("[SqlNode] auto_rls enabled — setting up RLS policies...");
-            let tenant_col = permissions_for_rls.tenant_column();
+            let tenant_col = permissions.tenant_column();
             for table in &tables {
                 if let Err(e) = self.pool_adapter.setup_rls_for_table(
                     &table.schema_name,

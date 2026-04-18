@@ -19,6 +19,11 @@ pub struct PgPoolAdapter {
 }
 
 impl PgPoolAdapter {
+    /// Quote a SQL identifier to prevent injection (equivalent to PostgreSQL's quote_ident).
+    fn quote_ident(s: &str) -> String {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    }
+
     pub fn new() -> Self {
         Self {
             pool: Arc::new(RwLock::new(None)),
@@ -124,7 +129,7 @@ impl PgPoolAdapter {
         let pool = self.get_pool().await?;
         let sql = format!(
             "ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS {} TEXT DEFAULT current_setting('app.current_user_id')",
-            schema, table, tenant_column
+            Self::quote_ident(schema), Self::quote_ident(table), Self::quote_ident(tenant_column)
         );
         sqlx::query(&sql)
             .execute(&pool)
@@ -145,17 +150,13 @@ impl PgPoolAdapter {
         table: &str,
         tenant_column: &str,
     ) -> Result<(), SqlNodeError> {
-        if self.is_rls_enabled(schema, table).await? {
-            println!("[RLS] {}.{} — already enabled, skipping", schema, table);
-            return Ok(());
-        }
-
         let pool = self.get_pool().await?;
         let has_tenant_col = self.has_column(schema, table, tenant_column).await?;
 
+        // Enable RLS (idempotent — Postgres ignores if already enabled)
         let enable_sql = format!(
             "ALTER TABLE {}.{} ENABLE ROW LEVEL SECURITY",
-            schema, table
+            Self::quote_ident(schema), Self::quote_ident(table)
         );
         sqlx::query(&enable_sql)
             .execute(&pool)
@@ -174,7 +175,11 @@ impl PgPoolAdapter {
                     "CREATE POLICY {} ON {}.{} \
                      USING ({} = current_setting('app.current_user_id')) \
                      WITH CHECK ({} = current_setting('app.current_user_id'))",
-                    policy_name, schema, table, tenant_column, tenant_column
+                    policy_name,
+                    Self::quote_ident(schema),
+                    Self::quote_ident(table),
+                    Self::quote_ident(tenant_column),
+                    Self::quote_ident(tenant_column)
                 );
                 sqlx::query(&policy_sql)
                     .execute(&pool)
@@ -189,7 +194,7 @@ impl PgPoolAdapter {
 
             let default_sql = format!(
                 "ALTER TABLE {}.{} ALTER COLUMN {} SET DEFAULT current_setting('app.current_user_id')",
-                schema, table, tenant_column
+                Self::quote_ident(schema), Self::quote_ident(table), Self::quote_ident(tenant_column)
             );
             sqlx::query(&default_sql)
                 .execute(&pool)
@@ -210,7 +215,7 @@ impl PgPoolAdapter {
             if !self.has_policy(schema, table, policy_name).await? {
                 let policy_sql = format!(
                     "CREATE POLICY {} ON {}.{} FOR SELECT USING (true)",
-                    policy_name, schema, table
+                    policy_name, Self::quote_ident(schema), Self::quote_ident(table)
                 );
                 sqlx::query(&policy_sql)
                     .execute(&pool)
