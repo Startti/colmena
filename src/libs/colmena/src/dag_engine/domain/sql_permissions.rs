@@ -91,6 +91,9 @@ pub struct SqlPermissions {
     allowed_ops: HashSet<SqlOperation>,
     allowed_schemas: HashSet<String>,
     sandbox_schema: String,
+    tenant_user_id: Option<String>,
+    tenant_column: String,
+    auto_rls: bool,
 }
 
 /// Schemas that are always accessible for introspection (not configurable).
@@ -107,6 +110,9 @@ impl SqlPermissions {
                     allowed_ops: PermissionPreset::ReadOnly.allowed_operations(),
                     allowed_schemas: HashSet::new(),
                     sandbox_schema: "sandbox".to_string(),
+                    tenant_user_id: None,
+                    tenant_column: "user_id".to_string(),
+                    auto_rls: false,
                 });
             }
         };
@@ -148,10 +154,29 @@ impl SqlPermissions {
             .unwrap_or("sandbox")
             .to_string();
 
+        let tenant_user_id = config
+            .get("tenant_user_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let tenant_column = config
+            .get("tenant_column")
+            .and_then(|v| v.as_str())
+            .unwrap_or("user_id")
+            .to_string();
+
+        let auto_rls = config
+            .get("auto_rls")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         Ok(Self {
             allowed_ops,
             allowed_schemas,
             sandbox_schema,
+            tenant_user_id,
+            tenant_column,
+            auto_rls,
         })
     }
 
@@ -180,6 +205,21 @@ impl SqlPermissions {
     /// The sandbox schema name where the agent can create functions/tables.
     pub fn sandbox_schema(&self) -> &str {
         &self.sandbox_schema
+    }
+
+    /// The tenant user ID for RLS isolation. None means no multi-tenancy.
+    pub fn tenant_user_id(&self) -> Option<&str> {
+        self.tenant_user_id.as_deref()
+    }
+
+    /// The column name used for tenant isolation (default: "user_id").
+    pub fn tenant_column(&self) -> &str {
+        &self.tenant_column
+    }
+
+    /// Whether to auto-create RLS policies during initialization.
+    pub fn auto_rls(&self) -> bool {
+        self.auto_rls
     }
 
     /// Return a human-readable summary for LLM context injection.
@@ -283,5 +323,51 @@ mod tests {
         let perms = SqlPermissions::from_config(None).unwrap();
         assert!(perms.is_allowed(&SqlOperation::Select));
         assert!(!perms.is_allowed(&SqlOperation::Insert));
+    }
+
+    #[test]
+    fn test_tenant_fields_parsed() {
+        let config = serde_json::json!({
+            "preset": "read_write",
+            "allowed_schemas": ["public"],
+            "tenant_user_id": "user-abc-123",
+            "tenant_column": "owner_id",
+            "auto_rls": true
+        });
+        let perms = SqlPermissions::from_config(Some(&config)).unwrap();
+        assert_eq!(perms.tenant_user_id(), Some("user-abc-123"));
+        assert_eq!(perms.tenant_column(), "owner_id");
+        assert!(perms.auto_rls());
+    }
+
+    #[test]
+    fn test_tenant_defaults() {
+        let config = serde_json::json!({
+            "preset": "read_only",
+            "tenant_user_id": "user-123"
+        });
+        let perms = SqlPermissions::from_config(Some(&config)).unwrap();
+        assert_eq!(perms.tenant_user_id(), Some("user-123"));
+        assert_eq!(perms.tenant_column(), "user_id");
+        assert!(!perms.auto_rls());
+    }
+
+    #[test]
+    fn test_no_tenant_backwards_compatible() {
+        let config = serde_json::json!({
+            "preset": "read_only",
+            "allowed_schemas": ["public"]
+        });
+        let perms = SqlPermissions::from_config(Some(&config)).unwrap();
+        assert_eq!(perms.tenant_user_id(), None);
+        assert!(!perms.auto_rls());
+    }
+
+    #[test]
+    fn test_none_config_no_tenant() {
+        let perms = SqlPermissions::from_config(None).unwrap();
+        assert_eq!(perms.tenant_user_id(), None);
+        assert_eq!(perms.tenant_column(), "user_id");
+        assert!(!perms.auto_rls());
     }
 }
