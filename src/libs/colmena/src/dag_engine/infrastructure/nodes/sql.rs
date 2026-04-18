@@ -104,6 +104,18 @@ impl SqlNode {
         lines.join("\n")
     }
 
+    /// Extract schema and table name from a CREATE TABLE statement.
+    /// Returns (schema, table). If no schema is specified, defaults to "public".
+    fn extract_create_table_name(query: &str) -> Option<(String, String)> {
+        let re = regex::Regex::new(
+            r"(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(\w+)\.)?(\w+)\s*\("
+        ).ok()?;
+        let caps = re.captures(query)?;
+        let schema = caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_else(|| "public".to_string());
+        let table = caps.get(2)?.as_str().to_string();
+        Some((schema, table))
+    }
+
     /// Generate a simple session ID using a timestamp.
     fn new_session_id() -> String {
         let ts = SystemTime::now()
@@ -191,6 +203,24 @@ impl InitializableNode for SqlNode {
 
         let supplement = Self::build_description_supplement(&tables, &functions, &permissions, max_rows);
 
+        // Auto-RLS setup if enabled
+        let permissions_for_rls = SqlPermissions::from_config(config.get("permissions"))
+            .map_err(|e| format!("Invalid permissions config: {}", e))?;
+
+        if permissions_for_rls.auto_rls() {
+            println!("[SqlNode] auto_rls enabled — setting up RLS policies...");
+            let tenant_col = permissions_for_rls.tenant_column();
+            for table in &tables {
+                if let Err(e) = self.pool_adapter.setup_rls_for_table(
+                    &table.schema_name,
+                    &table.table_name,
+                    tenant_col,
+                ).await {
+                    println!("[SqlNode] RLS setup warning for {}.{}: {}", table.schema_name, table.table_name, e);
+                }
+            }
+        }
+
         *self.cached_description.write().await = Some(supplement.clone());
         *self.initialized.write().await = true;
 
@@ -229,6 +259,14 @@ impl ExecutableNode for SqlNode {
 
         let permissions = SqlPermissions::from_config(effective_config.get("permissions"))
             .map_err(|e| format!("Invalid permissions: {}", e))?;
+
+        // Resolve tenant_user_id (may contain ${ENV_VAR})
+        let tenant_user_id: Option<String> = permissions.tenant_user_id().map(|raw| {
+            Self::resolve_env_vars(raw).unwrap_or_else(|e| {
+                println!("[SqlNode] Warning: failed to resolve tenant_user_id: {}", e);
+                raw.to_string()
+            })
+        });
 
         let runtime_limits = effective_config.get("runtime_limits");
         let max_rows = runtime_limits
@@ -282,9 +320,24 @@ impl ExecutableNode for SqlNode {
 
         println!("[SqlNode] Executing: {}", &query[..query.len().min(100)]);
 
-        match service.execute(query, &permissions, max_rows, &session_id, &schema_context).await {
+        match service.execute(query, &permissions, max_rows, &session_id, &schema_context, tenant_user_id.as_deref()).await {
             Ok(result) => {
                 println!("[SqlNode] {} rows, truncated: {}", result.row_count, result.truncated);
+
+                // Post-CREATE TABLE: apply RLS to the new table
+                let trimmed_upper = query.trim_start().to_uppercase();
+                if trimmed_upper.starts_with("CREATE TABLE") && permissions.auto_rls() {
+                    if let Some((schema, table)) = Self::extract_create_table_name(query) {
+                        println!("[SqlNode] CREATE TABLE detected — applying RLS to {}.{}", schema, table);
+                        if let Err(e) = self.pool_adapter.setup_rls_for_new_table(
+                            &schema,
+                            &table,
+                            permissions.tenant_column(),
+                        ).await {
+                            println!("[SqlNode] RLS setup warning for new table {}.{}: {}", schema, table, e);
+                        }
+                    }
+                }
 
                 if let Some(obs) = &observer {
                     for warning in &result.warnings {
