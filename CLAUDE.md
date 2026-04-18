@@ -41,6 +41,7 @@
     - `20_orchestrator_architecture.md` — Orchestrator: phases, bridge tasks, HITL, critic loop
     - `21_socketio_node.md` — Socket.IO node: config, ack/wait-event modes, LLM tool examples
     - `22_tool_execution_flow.md` — End-to-end tool call lifecycle: node_schema → merge → execution
+    - `23_sql_node.md` — SQL node: permissions, validation pipeline, RLS, sandbox, LLM tool examples
   - `dds/` — Design documents:
     - `ARQUITECTURA_HEXAGONAL_GUIA.md`, `DAG_ENGINE_DISEÑO.md`, `DISEÑO_AGENTES_Y_TOOLS.md`
     - `MODULO_LLM_DISEÑO.md`, `RAG_DISEÑO.md`
