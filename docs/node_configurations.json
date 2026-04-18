@@ -12,7 +12,7 @@
         "input", "output", "trigger_webhook", "suspend", "loop_controller", "subgraph",
         "log", "mock_input",
         "add", "subtract", "multiply", "divide", "exponential",
-        "http_request", "socketio_request", "python_script",
+        "http_request", "socketio_request", "sql_query", "python_script",
         "llm_call", "information_extraction", "planner", "critic", "reactor",
         "orchestrator", "task_memory_writer"
       ],
@@ -790,6 +790,125 @@
       "default_input": null,
       "default_output": "response",
       "requires": [],
+      "supports_env_vars": true
+    },
+
+    "sql_query": {
+      "name": "SQL Query",
+      "description": "Executes PostgreSQL queries with granular permission control and a hybrid validation pipeline (static rules + optional LLM critic). Designed primarily as an LLM tool: configure connection, permissions, and guardrails as fixed values in node_schema, exposing only the 'query' parameter to the LLM. Supports SELECT, INSERT, UPDATE, DELETE, and CREATE FUNCTION operations, controlled via permission presets (read_only, read_write, full) with an optional deny list. Features automatic schema introspection for LLM context injection, a sandbox schema for agent-created functions, and runtime limits (statement_timeout, work_mem, max_rows).",
+      "category": "integration",
+      "config_fields": {
+        "connection_url": {
+          "type": "string",
+          "required": true,
+          "description": "PostgreSQL connection URL. Supports ${ENV_VAR} syntax for environment variable resolution.",
+          "example": "${DATABASE_URL}"
+        },
+        "permissions": {
+          "type": "object",
+          "required": false,
+          "description": "Permission configuration controlling what SQL operations the agent can perform. Defaults to read_only if omitted.",
+          "properties": {
+            "preset": {
+              "type": "string",
+              "description": "Permission preset: 'read_only' (SELECT only), 'read_write' (SELECT/INSERT/UPDATE), 'full' (all including DELETE and CREATE FUNCTION).",
+              "valid_values": ["read_only", "read_write", "full"],
+              "default": "read_only"
+            },
+            "deny": {
+              "type": "array",
+              "description": "Operations to deny from the preset (e.g., ['delete'] with read_write preset).",
+              "example": ["delete"]
+            },
+            "allowed_schemas": {
+              "type": "array",
+              "required": true,
+              "description": "List of PostgreSQL schemas the agent can access. Operations against other schemas are blocked.",
+              "example": ["public", "sandbox"]
+            },
+            "sandbox_schema": {
+              "type": "string",
+              "description": "Schema where the agent can create functions and temporary tables. Must be in allowed_schemas.",
+              "default": "sandbox"
+            }
+          }
+        },
+        "runtime_limits": {
+          "type": "object",
+          "required": false,
+          "description": "Runtime limits applied to each query execution.",
+          "properties": {
+            "max_rows": {
+              "type": "integer",
+              "description": "Maximum number of rows returned by SELECT queries. Results exceeding this are truncated.",
+              "default": 100
+            },
+            "statement_timeout_ms": {
+              "type": "integer",
+              "description": "Maximum query execution time in milliseconds.",
+              "default": 30000
+            },
+            "work_mem_mb": {
+              "type": "integer",
+              "description": "PostgreSQL work_mem setting in MB for sort/hash operations.",
+              "default": 64
+            }
+          }
+        },
+        "guardrail_enabled": {
+          "type": "boolean",
+          "required": false,
+          "description": "Enable static validation rules (always recommended). Checks for dangerous patterns like DELETE without WHERE, unauthorized operations, etc.",
+          "default": true
+        },
+        "guardrail_llm": {
+          "type": "object",
+          "required": false,
+          "description": "Optional LLM critic configuration. When enabled, a second LLM reviews each query for security risks and optimization opportunities before execution.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Whether to activate the LLM critic.",
+              "default": false
+            },
+            "provider": {
+              "type": "string",
+              "description": "LLM provider for the critic.",
+              "valid_values": ["openai", "gemini", "anthropic"],
+              "example": "openai"
+            },
+            "model": {
+              "type": "string",
+              "description": "Model to use for the critic.",
+              "example": "gpt-4o-mini"
+            },
+            "api_key": {
+              "type": "string",
+              "description": "API key for the critic LLM. Supports ${ENV_VAR} syntax.",
+              "example": "${OPENAI_API_KEY}"
+            }
+          }
+        },
+        "query": {
+          "type": "string",
+          "required": true,
+          "description": "The SQL query to execute. When used as an LLM tool, this is the parameter the LLM provides."
+        }
+      },
+      "input_ports": {
+        "query": { "type": "string", "description": "SQL query to execute." }
+      },
+      "output_ports": {
+        "output": {
+          "type": "any",
+          "description": "For SELECT: array of row objects. For mutations: { rows_affected: N }. For CREATE FUNCTION: { created: true, name, schema }."
+        },
+        "row_count": { "type": "integer", "description": "Number of rows returned or affected." },
+        "truncated": { "type": "boolean", "description": "Whether results were truncated due to max_rows limit." }
+      },
+      "default_input": "query",
+      "default_output": "output",
+      "requires": ["sqlx"],
       "supports_env_vars": true
     },
 
@@ -1606,7 +1725,7 @@
         "type": "string",
         "required": true,
         "description": "The type of DAG node to execute when this tool is called. Must be a valid registered node type (e.g., 'http_request', 'python_script', 'add'). The engine creates a temporary instance of this node type and executes it with the combined fixed + LLM-provided parameters.",
-        "valid_values": ["http_request", "python_script", "add", "subtract", "multiply", "divide", "exponential"],
+        "valid_values": ["http_request", "sql_query", "python_script", "add", "subtract", "multiply", "divide", "exponential"],
         "example": "http_request"
       },
       "node_schema": {
