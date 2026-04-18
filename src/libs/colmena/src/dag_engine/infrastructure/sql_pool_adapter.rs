@@ -168,6 +168,22 @@ impl PgPoolAdapter {
                 ))
             })?;
 
+        // Force RLS on the table owner too — without this, the user that
+        // created the table (typically our connection role) bypasses RLS.
+        let force_sql = format!(
+            "ALTER TABLE {}.{} FORCE ROW LEVEL SECURITY",
+            Self::quote_ident(schema), Self::quote_ident(table)
+        );
+        sqlx::query(&force_sql)
+            .execute(&pool)
+            .await
+            .map_err(|e| {
+                SqlNodeError::ExecutionError(format!(
+                    "Failed to force RLS on {}.{}: {}",
+                    schema, table, e
+                ))
+            })?;
+
         if has_tenant_col {
             let policy_name = "colmena_tenant_isolation";
             if !self.has_policy(schema, table, policy_name).await? {
