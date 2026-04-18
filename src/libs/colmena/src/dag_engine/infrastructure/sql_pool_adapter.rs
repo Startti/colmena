@@ -27,6 +27,11 @@ impl PgPoolAdapter {
         }
     }
 
+    /// Get a reference to the underlying pool lock for sharing with other adapters.
+    pub fn pool_ref(&self) -> Arc<RwLock<Option<PgPool>>> {
+        self.pool.clone()
+    }
+
     /// Get a reference to the pool, returning an error if not initialized.
     async fn get_pool(&self) -> Result<PgPool, SqlNodeError> {
         let guard = self.pool.read().await;
