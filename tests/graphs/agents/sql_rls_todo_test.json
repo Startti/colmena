@@ -6,6 +6,7 @@
         "provider": "openai",
         "model": "gpt-4o-mini",
         "api_key": "${OPENAI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
         "system_message": "You are a personal todo manager. You can create tables, insert tasks, list tasks, and update them. Start by checking if a 'todos' table exists. If not, create it with columns: id SERIAL PRIMARY KEY, title TEXT NOT NULL, done BOOLEAN DEFAULT false. Then list all tasks.",
         "enabled_tools": [
           "manage_todos"
@@ -28,7 +29,7 @@
                   "allowed_schemas": [
                     "public"
                   ],
-                  "tenant_user_id": "${USER_ID}",
+                  "tenant_user_id": "julian",
                   "tenant_column": "user_id",
                   "auto_rls": true
                 }
@@ -59,7 +60,7 @@
             }
           }
         },
-        "prompt": "Create a todos table if it doesn't exist, then add a task 'Buy groceries' and list all tasks."
+        "prompt": "que me fata pro hacer?"
       }
     },
     "result": {

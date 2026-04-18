@@ -1,0 +1,12 @@
+{"type":"click","text":"R\n      \n        SELECT (Lectura)\n        Consultas de lectura. El caso más común y más seguro.","choice":"select","id":null,"timestamp":1776450933604}
+{"type":"click","text":"C\n      \n        INSERT (Creación)\n        Crear nuevos registros en tablas existentes.","choice":"insert","id":null,"timestamp":1776450934600}
+{"type":"click","text":"U\n      \n        UPDATE (Modificación)\n        Modificar registros existentes. Requiere WHERE obligatorio?","choice":"update","id":null,"timestamp":1776450935165}
+{"type":"click","text":"D\n      \n        DELETE (Borrado)\n        Eliminar registros. ¿Requiere WHERE obligatorio? ¿Límite de filas?","choice":"delete","id":null,"timestamp":1776450935692}
+{"type":"click","text":"+T\n      \n        CREATE TABLE\n        Crear tablas nuevas. Caso raro pero útil para agentes que gestionan su propio esquema.","choice":"create_table","id":null,"timestamp":1776450939178}
+{"type":"click","text":"~T\n      \n        ALTER TABLE\n        Modificar estructura de tablas existentes. Alto riesgo — puede romper aplicaciones.","choice":"alter_table","id":null,"timestamp":1776450939791}
+{"type":"click","text":"-T\n      \n        DROP TABLE\n        Eliminar tablas completas. Destructivo e irreversible.","choice":"drop_table","id":null,"timestamp":1776450940375}
+{"type":"click","text":"IX\n      \n        CREATE/DROP INDEX\n        Gestionar índices. Menos destructivo pero puede afectar rendimiento.","choice":"create_index","id":null,"timestamp":1776450941075}
+{"type":"click","text":"LT\n      \n        Listar Tablas\n        Ver qué tablas existen. Esencial para que el LLM sepa dónde buscar.","choice":"list_tables","id":null,"timestamp":1776450944275}
+{"type":"click","text":"DT\n      \n        Describir Tabla (columnas, tipos)\n        Ver estructura de una tabla específica. Necesario para generar SQL correcto.","choice":"describe_table","id":null,"timestamp":1776450945294}
+{"type":"click","text":"LS\n      \n        Listar Schemas\n        Ver schemas disponibles (public, analytics, etc.).","choice":"list_schemas","id":null,"timestamp":1776450946106}
+{"type":"click","text":"EX\n      \n        EXPLAIN (plan de ejecución)\n        Ver cómo PostgreSQL ejecutará una query. Útil para optimización.","choice":"explain","id":null,"timestamp":1776450946926}

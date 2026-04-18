@@ -373,19 +373,28 @@ impl ToolExecutor for DagToolExecutor {
                         .entry(container.clone())
                         .or_insert_with(|| Value::Object(serde_json::Map::new()));
                     if let Value::Object(map) = entry {
+                        // Strip dot-prefix if present (collision-prefixed keys use
+                        // "container.child" format, but the real key inside the container
+                        // is just "child").
+                        let real_key = if let Some(dot_pos) = param_name.find('.') {
+                            &param_name[dot_pos + 1..]
+                        } else {
+                            param_name.as_str()
+                        };
+
                         // Deep-merge: if the container already has a fixed object for this key
                         // (e.g., edge with {type, animated, environmentId}), merge the LLM-provided
                         // object into it rather than overwriting.
                         if let (Some(Value::Object(existing)), Value::Object(incoming)) =
-                            (map.get(param_name), param_value)
+                            (map.get(real_key), param_value)
                         {
                             let mut merged = existing.clone();
                             for (k, v) in incoming {
                                 merged.insert(k.clone(), v.clone());
                             }
-                            map.insert(param_name.clone(), Value::Object(merged));
+                            map.insert(real_key.to_string(), Value::Object(merged));
                         } else {
-                            map.insert(param_name.clone(), param_value.clone());
+                            map.insert(real_key.to_string(), param_value.clone());
                         }
                     }
                 } else {

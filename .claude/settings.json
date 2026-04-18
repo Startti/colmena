@@ -3,5 +3,8 @@
     "allow": [
       "Bash(cargo run:*)"
     ]
+  },
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true
   }
 }

@@ -1,0 +1,113 @@
+<h2>Modelo de Permisos Granulares para SQL Node</h2>
+<p class="subtitle">¿Qué nivel de granularidad necesitamos? Revisa las 3 capas propuestas y dime si sobra o falta algo.</p>
+
+<div class="section">
+  <h3>Capa 1: Operaciones (qué tipo de SQL puede ejecutar)</h3>
+  <div class="options" data-multiselect>
+    <div class="option" data-choice="select" onclick="toggleSelect(this)">
+      <div class="letter">R</div>
+      <div class="content">
+        <h3>SELECT (Lectura)</h3>
+        <p>Consultas de lectura. El caso más común y más seguro.</p>
+      </div>
+    </div>
+    <div class="option" data-choice="insert" onclick="toggleSelect(this)">
+      <div class="letter">C</div>
+      <div class="content">
+        <h3>INSERT (Creación)</h3>
+        <p>Crear nuevos registros en tablas existentes.</p>
+      </div>
+    </div>
+    <div class="option" data-choice="update" onclick="toggleSelect(this)">
+      <div class="letter">U</div>
+      <div class="content">
+        <h3>UPDATE (Modificación)</h3>
+        <p>Modificar registros existentes. Requiere WHERE obligatorio?</p>
+      </div>
+    </div>
+    <div class="option" data-choice="delete" onclick="toggleSelect(this)">
+      <div class="letter">D</div>
+      <div class="content">
+        <h3>DELETE (Borrado)</h3>
+        <p>Eliminar registros. ¿Requiere WHERE obligatorio? ¿Límite de filas?</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Capa 2: Operaciones DDL (estructura de la BD)</h3>
+  <div class="options" data-multiselect>
+    <div class="option" data-choice="create_table" onclick="toggleSelect(this)">
+      <div class="letter">+T</div>
+      <div class="content">
+        <h3>CREATE TABLE</h3>
+        <p>Crear tablas nuevas. Caso raro pero útil para agentes que gestionan su propio esquema.</p>
+      </div>
+    </div>
+    <div class="option" data-choice="alter_table" onclick="toggleSelect(this)">
+      <div class="letter">~T</div>
+      <div class="content">
+        <h3>ALTER TABLE</h3>
+        <p>Modificar estructura de tablas existentes. <strong>Alto riesgo</strong> — puede romper aplicaciones.</p>
+      </div>
+    </div>
+    <div class="option" data-choice="drop_table" onclick="toggleSelect(this)">
+      <div class="letter">-T</div>
+      <div class="content">
+        <h3>DROP TABLE</h3>
+        <p>Eliminar tablas completas. <strong>Destructivo e irreversible</strong>.</p>
+      </div>
+    </div>
+    <div class="option" data-choice="create_index" onclick="toggleSelect(this)">
+      <div class="letter">IX</div>
+      <div class="content">
+        <h3>CREATE/DROP INDEX</h3>
+        <p>Gestionar índices. Menos destructivo pero puede afectar rendimiento.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Capa 3: Introspección (leer la estructura de la BD)</h3>
+  <div class="options" data-multiselect>
+    <div class="option" data-choice="list_tables" onclick="toggleSelect(this)">
+      <div class="letter">LT</div>
+      <div class="content">
+        <h3>Listar Tablas</h3>
+        <p>Ver qué tablas existen. Esencial para que el LLM sepa dónde buscar.</p>
+      </div>
+    </div>
+    <div class="option" data-choice="describe_table" onclick="toggleSelect(this)">
+      <div class="letter">DT</div>
+      <div class="content">
+        <h3>Describir Tabla (columnas, tipos)</h3>
+        <p>Ver estructura de una tabla específica. Necesario para generar SQL correcto.</p>
+      </div>
+    </div>
+    <div class="option" data-choice="list_schemas" onclick="toggleSelect(this)">
+      <div class="letter">LS</div>
+      <div class="content">
+        <h3>Listar Schemas</h3>
+        <p>Ver schemas disponibles (public, analytics, etc.).</p>
+      </div>
+    </div>
+    <div class="option" data-choice="explain" onclick="toggleSelect(this)">
+      <div class="letter">EX</div>
+      <div class="content">
+        <h3>EXPLAIN (plan de ejecución)</h3>
+        <p>Ver cómo PostgreSQL ejecutará una query. Útil para optimización.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="background: #1a1a2e; border: 1px solid #444; border-radius: 8px; padding: 20px; margin-top: 24px;">
+  <h3 style="color: #e0e0e0;">💡 Pregunta clave</h3>
+  <p style="color: #b0b0b0; line-height: 1.6;">
+    Selecciona en cada capa los permisos que crees que <strong>deben existir como opciones configurables</strong> (no cuáles estarían activos por defecto — eso lo decidimos después).
+    <br><br>
+    ¿Falta algún permiso que no esté aquí? ¿Sobra alguno que sea innecesario?
+  </p>
+</div>

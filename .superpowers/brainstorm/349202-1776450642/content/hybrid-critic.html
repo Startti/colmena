@@ -1,0 +1,139 @@
+<h2>Critic Híbrido: Reglas Estáticas + LLM</h2>
+<p class="subtitle">Cómo funcionan las dos capas en conjunto — ejemplos reales con PostgreSQL</p>
+
+<div class="section">
+  <h3>Capa 1: Reglas Estáticas (siempre activas, instantáneas, gratis)</h3>
+  <p style="color: #999; margin-bottom: 16px;">Análisis de texto/patrones sobre el SQL. No necesita LLM. Responde en &lt;1ms.</p>
+
+  <div class="mockup">
+    <div class="mockup-header">Ejemplo 1 — BLOQUEADO por regla estática</div>
+    <div class="mockup-body" style="font-family: monospace; font-size: 13px; line-height: 1.8;">
+      <div style="color: #ff6b6b;">Agente genera →</div>
+      <div style="background: #1a1a2e; padding: 12px; border-radius: 4px; margin: 8px 0;">
+        DELETE FROM production.orders
+      </div>
+      <div style="color: #ff6b6b; margin-top: 12px;">❌ Regla: "DELETE sin WHERE" → BLOQUEADO</div>
+      <div style="color: #999; margin-top: 4px;">Respuesta al agente: "DELETE requires a WHERE clause. Reformulate your query specifying which rows to delete."</div>
+    </div>
+  </div>
+
+  <div class="mockup" style="margin-top: 16px;">
+    <div class="mockup-header">Ejemplo 2 — BLOQUEADO por regla estática</div>
+    <div class="mockup-body" style="font-family: monospace; font-size: 13px; line-height: 1.8;">
+      <div style="color: #ff6b6b;">Agente genera →</div>
+      <div style="background: #1a1a2e; padding: 12px; border-radius: 4px; margin: 8px 0;">
+        DROP TABLE production.users CASCADE
+      </div>
+      <div style="color: #ff6b6b; margin-top: 12px;">❌ Regla: "DROP TABLE no permitido" → BLOQUEADO</div>
+      <div style="color: #999; margin-top: 4px;">Respuesta al agente: "DROP TABLE is not allowed. You can only create/drop objects in the sandbox schema."</div>
+    </div>
+  </div>
+
+  <div class="mockup" style="margin-top: 16px;">
+    <div class="mockup-header">Ejemplo 3 — ADVERTENCIA por regla estática</div>
+    <div class="mockup-body" style="font-family: monospace; font-size: 13px; line-height: 1.8;">
+      <div style="color: #ffd93d;">Agente genera →</div>
+      <div style="background: #1a1a2e; padding: 12px; border-radius: 4px; margin: 8px 0;">
+        SELECT * FROM production.orders WHERE status = 'pending'
+      </div>
+      <div style="color: #ffd93d; margin-top: 12px;">⚠️ Regla: "SELECT * detectado" → EJECUTA con advertencia</div>
+      <div style="color: #999; margin-top: 4px;">Feedback al agente: "Prefer selecting specific columns (id, total, status) instead of * to reduce data transfer."</div>
+    </div>
+  </div>
+
+  <div style="background: #1a2a1a; border: 1px solid #3a5a3a; border-radius: 8px; padding: 16px; margin-top: 16px;">
+    <strong style="color: #7ddf7d;">Reglas incluidas:</strong>
+    <ul style="color: #b0d0b0; margin-top: 8px; line-height: 2;">
+      <li>DELETE / UPDATE sin WHERE → bloqueo</li>
+      <li>DROP / TRUNCATE / ALTER en schema protegido → bloqueo</li>
+      <li>SELECT * → advertencia</li>
+      <li>Queries con más de N JOINs → advertencia</li>
+      <li>Operación no permitida por config de permisos → bloqueo</li>
+      <li>Acceso a schema no autorizado → bloqueo</li>
+    </ul>
+  </div>
+</div>
+
+<div class="section" style="margin-top: 32px;">
+  <h3>Capa 2: Critic LLM (opcional, configurable, ~1-3s extra)</h3>
+  <p style="color: #999; margin-bottom: 16px;">Un segundo LLM analiza el query DESPUÉS de pasar las reglas estáticas. Solo se activa si <code>guardrail_llm: true</code>.</p>
+
+  <div class="mockup">
+    <div class="mockup-header">Ejemplo 4 — Query pasa reglas estáticas pero el LLM detecta problemas</div>
+    <div class="mockup-body" style="font-family: monospace; font-size: 13px; line-height: 1.8;">
+      <div style="color: #ffd93d;">Agente genera →</div>
+      <div style="background: #1a1a2e; padding: 12px; border-radius: 4px; margin: 8px 0;">
+        SELECT o.id, o.total, c.name, c.email<br>
+        FROM production.orders o<br>
+        JOIN production.customers c ON c.id = o.customer_id<br>
+        WHERE o.created_at > '2024-01-01'<br>
+        ORDER BY o.total DESC
+      </div>
+      <div style="color: #4ecdc4; margin-top: 12px;">✅ Reglas estáticas: OK (columnas específicas, tiene WHERE, schema permitido)</div>
+      <div style="color: #ffd93d; margin-top: 8px;">⚠️ Critic LLM dice:</div>
+      <div style="background: #2a2a1e; padding: 12px; border-radius: 4px; margin: 8px 0; color: #e0d0a0; line-height: 1.8;">
+        <strong>Seguridad:</strong> ✅ OK — solo lectura, schemas permitidos<br>
+        <strong>Optimización:</strong><br>
+        • Añade LIMIT — sin él puede retornar millones de filas<br>
+        • La columna orders.created_at debería tener un índice para este filtro<br>
+        • Considera añadir un índice parcial: CREATE INDEX idx_orders_recent ON orders(created_at) WHERE created_at > '2024-01-01'
+      </div>
+      <div style="color: #4ecdc4; margin-top: 8px;">→ EJECUTA con feedback de optimización adjunto</div>
+    </div>
+  </div>
+
+  <div class="mockup" style="margin-top: 16px;">
+    <div class="mockup-header">Ejemplo 5 — Query pasa reglas pero LLM detecta riesgo sutil</div>
+    <div class="mockup-body" style="font-family: monospace; font-size: 13px; line-height: 1.8;">
+      <div style="color: #ffd93d;">Agente genera →</div>
+      <div style="background: #1a1a2e; padding: 12px; border-radius: 4px; margin: 8px 0;">
+        UPDATE production.orders<br>
+        SET status = 'cancelled'<br>
+        WHERE customer_id IN (<br>
+        &nbsp;&nbsp;SELECT id FROM production.customers<br>
+        &nbsp;&nbsp;WHERE last_login < '2020-01-01'<br>
+        )
+      </div>
+      <div style="color: #4ecdc4; margin-top: 12px;">✅ Reglas estáticas: OK (UPDATE tiene WHERE, schema permitido, UPDATE habilitado)</div>
+      <div style="color: #ff6b6b; margin-top: 8px;">❌ Critic LLM dice:</div>
+      <div style="background: #2a1a1a; padding: 12px; border-radius: 4px; margin: 8px 0; color: #e0a0a0; line-height: 1.8;">
+        <strong>Seguridad:</strong> ❌ RIESGO ALTO<br>
+        • Este UPDATE afecta potencialmente miles de filas en producción<br>
+        • Cancelar pedidos por inactividad del cliente es una decisión de negocio que necesita revisión humana<br>
+        • Recomendación: ejecutar primero como SELECT COUNT(*) para ver cuántas filas se afectarían
+      </div>
+      <div style="color: #ff6b6b; margin-top: 8px;">→ BLOQUEADO — el critic tiene poder de veto sobre seguridad</div>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top: 32px;">
+  <h3>Flujo completo</h3>
+  <div class="mockup">
+    <div class="mockup-header">Pipeline de validación</div>
+    <div class="mockup-body" style="font-family: monospace; font-size: 14px; text-align: center; padding: 24px;">
+      <div style="display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap;">
+        <div style="background: #1a1a2e; padding: 12px 20px; border-radius: 8px; border: 1px solid #444;">
+          SQL del agente
+        </div>
+        <div style="color: #666;">→</div>
+        <div style="background: #1a2a1a; padding: 12px 20px; border-radius: 8px; border: 1px solid #3a5a3a;">
+          Reglas estáticas<br><span style="font-size: 11px; color: #7ddf7d;">siempre activo, &lt;1ms</span>
+        </div>
+        <div style="color: #666;">→</div>
+        <div style="background: #2a2a1e; padding: 12px 20px; border-radius: 8px; border: 1px solid #5a5a3a;">
+          Critic LLM<br><span style="font-size: 11px; color: #ffd93d;">si guardrail_llm=true</span>
+        </div>
+        <div style="color: #666;">→</div>
+        <div style="background: #1a1a2e; padding: 12px 20px; border-radius: 8px; border: 1px solid #444;">
+          PostgreSQL<br><span style="font-size: 11px; color: #4ecdc4;">ejecuta</span>
+        </div>
+      </div>
+      <div style="margin-top: 24px; color: #999; font-size: 12px; line-height: 1.8;">
+        Bloqueo en cualquier etapa → el agente recibe feedback y reformula<br>
+        Advertencia → se ejecuta, feedback se guarda en sandbox.query_feedback<br>
+        OK → se ejecuta directamente
+      </div>
+    </div>
+  </div>
+</div>

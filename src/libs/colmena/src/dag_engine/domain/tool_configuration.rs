@@ -193,6 +193,10 @@ pub fn parse_node_schema(schema: &NodeSchema) -> ParsedNodeSchema {
     let mut required_params: Vec<String> = Vec::new();
     let mut param_to_container: HashMap<String, String> = HashMap::new();
 
+    // Collected LLM-visible children from containers (for two-pass collision detection).
+    // Each entry: (child_key, container_key, ParameterProperty, is_required)
+    let mut container_children: Vec<(String, String, ParameterProperty, bool)> = Vec::new();
+
     for (top_key, top_field) in schema {
         // Case 1: Top-level field with fixed value
         if let Some(fixed_val) = &top_field.fixed {
@@ -222,7 +226,7 @@ pub fn parse_node_schema(schema: &NodeSchema) -> ParsedNodeSchema {
                         container_fixed.insert(child_key.clone(), Value::Object(nested_fixed));
                     }
 
-                    // Expose the child as an LLM-visible object parameter mapped to this container
+                    // Collect as LLM-visible (deferred to pass 2 for collision detection)
                     let mut prop = ParameterProperty::new(
                         child_field.field_type.clone(),
                         child_field.description.clone().unwrap_or_default(),
@@ -230,13 +234,14 @@ pub fn parse_node_schema(schema: &NodeSchema) -> ParsedNodeSchema {
                     if let Some(pattern) = &child_field.pattern {
                         prop = prop.with_pattern(pattern.clone());
                     }
-                    llm_properties.insert(child_key.clone(), prop);
-                    if child_field.required == Some(true) {
-                        required_params.push(child_key.clone());
-                    }
-                    param_to_container.insert(child_key.clone(), top_key.clone());
+                    container_children.push((
+                        child_key.clone(),
+                        top_key.clone(),
+                        prop,
+                        child_field.required == Some(true),
+                    ));
                 } else {
-                    // Child is LLM-visible
+                    // Child is LLM-visible (deferred to pass 2 for collision detection)
                     let mut prop = ParameterProperty::new(
                         child_field.field_type.clone(),
                         child_field.description.clone().unwrap_or_default(),
@@ -246,15 +251,12 @@ pub fn parse_node_schema(schema: &NodeSchema) -> ParsedNodeSchema {
                         prop = prop.with_pattern(pattern.clone());
                     }
 
-                    llm_properties.insert(child_key.clone(), prop);
-
-                    // Check if required
-                    if child_field.required == Some(true) {
-                        required_params.push(child_key.clone());
-                    }
-
-                    // Map this param to the container
-                    param_to_container.insert(child_key.clone(), top_key.clone());
+                    container_children.push((
+                        child_key.clone(),
+                        top_key.clone(),
+                        prop,
+                        child_field.required == Some(true),
+                    ));
                 }
             }
 
@@ -281,6 +283,27 @@ pub fn parse_node_schema(schema: &NodeSchema) -> ParsedNodeSchema {
                 required_params.push(top_key.clone());
             }
         }
+    }
+
+    // Pass 2: Detect collisions and insert container children with conditional dot-prefix.
+    // Count how many containers each child_key appears in.
+    let mut key_count: HashMap<String, usize> = HashMap::new();
+    for (child_key, _, _, _) in &container_children {
+        *key_count.entry(child_key.clone()).or_insert(0) += 1;
+    }
+
+    for (child_key, container_key, prop, is_required) in container_children {
+        let effective_key = if key_count.get(&child_key).copied().unwrap_or(0) > 1 {
+            format!("{}.{}", container_key, child_key)
+        } else {
+            child_key
+        };
+
+        llm_properties.insert(effective_key.clone(), prop);
+        if is_required {
+            required_params.push(effective_key.clone());
+        }
+        param_to_container.insert(effective_key, container_key);
     }
 
     ParsedNodeSchema {
@@ -489,5 +512,106 @@ mod tests {
         assert!(!parsed.llm_properties.contains_key("id"));
         assert!(!parsed.llm_properties.contains_key("source"));
         assert!(!parsed.llm_properties.contains_key("target"));
+    }
+
+    #[test]
+    fn test_parse_node_schema_collision_prefixed() {
+        // Two containers with children that share the same key names ("name", "id").
+        // The parser should prefix them as "source_params.name", "target_params.name", etc.
+        let schema = serde_json::from_value::<NodeSchema>(json!({
+            "source_params": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "required": true, "description": "Source name" },
+                    "id": { "type": "string", "required": true, "description": "Source ID" }
+                }
+            },
+            "target_params": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "required": true, "description": "Target name" },
+                    "id": { "type": "string", "description": "Target ID" }
+                }
+            }
+        }))
+        .unwrap();
+
+        let parsed = parse_node_schema(&schema);
+
+        // All 4 children should be present (no overwrites)
+        assert_eq!(parsed.llm_properties.len(), 4);
+
+        // Keys should be dot-prefixed
+        assert!(parsed.llm_properties.contains_key("source_params.name"));
+        assert!(parsed.llm_properties.contains_key("source_params.id"));
+        assert!(parsed.llm_properties.contains_key("target_params.name"));
+        assert!(parsed.llm_properties.contains_key("target_params.id"));
+
+        // Original un-prefixed keys should NOT be present
+        assert!(!parsed.llm_properties.contains_key("name"));
+        assert!(!parsed.llm_properties.contains_key("id"));
+
+        // param_to_container should map prefixed keys to the correct container
+        assert_eq!(
+            parsed.param_to_container.get("source_params.name"),
+            Some(&"source_params".to_string())
+        );
+        assert_eq!(
+            parsed.param_to_container.get("target_params.name"),
+            Some(&"target_params".to_string())
+        );
+        assert_eq!(
+            parsed.param_to_container.get("source_params.id"),
+            Some(&"source_params".to_string())
+        );
+        assert_eq!(
+            parsed.param_to_container.get("target_params.id"),
+            Some(&"target_params".to_string())
+        );
+
+        // Required: source_params.name, source_params.id, target_params.name (3 total)
+        assert_eq!(parsed.required_params.len(), 3);
+        assert!(parsed.required_params.contains(&"source_params.name".to_string()));
+        assert!(parsed.required_params.contains(&"source_params.id".to_string()));
+        assert!(parsed.required_params.contains(&"target_params.name".to_string()));
+        // target_params.id is NOT required
+        assert!(!parsed.required_params.contains(&"target_params.id".to_string()));
+    }
+
+    #[test]
+    fn test_parse_node_schema_no_collision_no_prefix() {
+        // Two containers with unique child names — no collision, no prefix needed.
+        let schema = serde_json::from_value::<NodeSchema>(json!({
+            "query_params": {
+                "type": "object",
+                "properties": {
+                    "city": { "type": "string", "required": true, "description": "City name" },
+                    "limit": { "type": "string", "description": "Result limit" }
+                }
+            },
+            "headers": {
+                "type": "object",
+                "properties": {
+                    "x_request_id": { "type": "string", "description": "Request ID" }
+                }
+            }
+        }))
+        .unwrap();
+
+        let parsed = parse_node_schema(&schema);
+
+        // Keys should remain flat (no dot prefix)
+        assert_eq!(parsed.llm_properties.len(), 3);
+        assert!(parsed.llm_properties.contains_key("city"));
+        assert!(parsed.llm_properties.contains_key("limit"));
+        assert!(parsed.llm_properties.contains_key("x_request_id"));
+
+        // No dotted keys should exist
+        assert!(!parsed.llm_properties.contains_key("query_params.city"));
+        assert!(!parsed.llm_properties.contains_key("headers.x_request_id"));
+
+        // Container mappings
+        assert_eq!(parsed.param_to_container.get("city"), Some(&"query_params".to_string()));
+        assert_eq!(parsed.param_to_container.get("x_request_id"), Some(&"headers".to_string()));
     }
 }

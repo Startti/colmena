@@ -39,6 +39,8 @@
     - `18_troubleshooting.md` — Common errors and fixes
     - `19_nested_agents_and_subgraphs.md` — Subgraph node, HITL propagation
     - `20_orchestrator_architecture.md` — Orchestrator: phases, bridge tasks, HITL, critic loop
+    - `21_socketio_node.md` — Socket.IO node: config, ack/wait-event modes, LLM tool examples
+    - `22_tool_execution_flow.md` — End-to-end tool call lifecycle: node_schema → merge → execution
   - `dds/` — Design documents:
     - `ARQUITECTURA_HEXAGONAL_GUIA.md`, `DAG_ENGINE_DISEÑO.md`, `DISEÑO_AGENTES_Y_TOOLS.md`
     - `MODULO_LLM_DISEÑO.md`, `RAG_DISEÑO.md`
@@ -67,6 +69,14 @@ When you need to understand or modify any node (HTTP, LLM, orchestrator, etc.):
 - **DAG Engine CLI (run)**: `cargo run --bin dag_engine -- run <path/to/graph.json>`
 - **DAG Engine CLI (serve)**: `cargo run --bin dag_engine -- serve <path/to/graph.json>`
 - **Docs**: `cargo doc --no-deps --open`
+
+**IMPORTANT — Cargo package name:** The crate is named `colmena_dag_engine` (NOT `colmena`). When running tests for a specific module use:
+```bash
+cargo test --lib <module_name>                    # Run all tests matching module
+cargo test --lib tool_configuration               # Example: tool_configuration tests
+cargo test -p colmena_dag_engine --lib <module>   # Explicit package (same result)
+```
+Do NOT use `cargo test -p colmena` — that package does not exist and will error.
 
 ## Running JSON DAG Graphs
 

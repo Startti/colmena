@@ -1,0 +1,121 @@
+<h2>Arquitectura del SQL Node — 3 Enfoques</h2>
+<p class="subtitle">Cómo estructurar el nodo, sus servicios y su integración con el DAG engine</p>
+
+<div class="section">
+  <div class="options">
+
+    <div class="option" data-choice="a" onclick="toggleSelect(this)">
+      <div class="letter">A</div>
+      <div class="content">
+        <h3>Nodo Monolítico</h3>
+        <p>Un solo archivo <code>sql.rs</code> que maneja todo: conexión, validación, critic, ejecución, inventario de funciones.</p>
+        <div class="pros-cons">
+          <div class="pros">
+            <h4>Pros</h4>
+            <ul>
+              <li>Simple de implementar inicialmente</li>
+              <li>Un solo archivo para entender todo el flujo</li>
+              <li>Menos indirección</li>
+            </ul>
+          </div>
+          <div class="cons">
+            <h4>Cons</h4>
+            <ul>
+              <li>Archivo enorme (~800+ líneas) — difícil de mantener</li>
+              <li>Rompe la arquitectura hexagonal del proyecto</li>
+              <li>No se puede testear el critic sin la BD, ni la validación sin el critic</li>
+              <li>El pool de conexiones queda atado al nodo</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="option" data-choice="b" onclick="toggleSelect(this)" style="border-color: #4ecdc4;">
+      <div class="letter" style="background: #4ecdc4; color: #000;">B</div>
+      <div class="content">
+        <h3>Nodo Delgado + Servicios (Hexagonal) ⭐ Recomendado</h3>
+        <p>El nodo <code>SqlNode</code> es un orquestador delgado que delega a servicios especializados a través de traits (ports).</p>
+        <div style="background: #1a1a2e; padding: 16px; border-radius: 8px; margin: 12px 0; font-family: monospace; font-size: 12px; line-height: 2;">
+          <span style="color: #4ecdc4;">SqlNode</span> (infrastructure/nodes/sql.rs)<br>
+          &nbsp;&nbsp;├── <span style="color: #ffd93d;">SqlConnectionPort</span> (domain/trait) → PgPoolAdapter<br>
+          &nbsp;&nbsp;├── <span style="color: #ffd93d;">SqlValidatorPort</span> (domain/trait) → StaticRuleValidator<br>
+          &nbsp;&nbsp;├── <span style="color: #ffd93d;">SqlCriticPort</span> (domain/trait) → LlmCriticAdapter<br>
+          &nbsp;&nbsp;└── <span style="color: #ffd93d;">FunctionRegistryPort</span> (domain/trait) → PgRegistryAdapter
+        </div>
+        <div class="pros-cons">
+          <div class="pros">
+            <h4>Pros</h4>
+            <ul>
+              <li>Sigue la arquitectura hexagonal existente</li>
+              <li>Cada servicio se testea independientemente con mocks</li>
+              <li>El pool se comparte via Arc — inyectado al crear el nodo</li>
+              <li>El critic LLM se puede mockear en tests</li>
+              <li>Fácil añadir drivers (MySQL) después — solo nuevo adapter</li>
+            </ul>
+          </div>
+          <div class="cons">
+            <h4>Cons</h4>
+            <ul>
+              <li>Más archivos iniciales (~5-6 archivos)</li>
+              <li>Más indirección — hay que navegar entre capas</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="option" data-choice="c" onclick="toggleSelect(this)">
+      <div class="letter">C</div>
+      <div class="content">
+        <h3>Múltiples Tipos de Nodo</h3>
+        <p>Nodos separados: <code>sql_select</code>, <code>sql_mutate</code>, <code>sql_introspect</code>, <code>sql_function</code>. Cada uno es más simple pero se configuran por separado.</p>
+        <div class="pros-cons">
+          <div class="pros">
+            <h4>Pros</h4>
+            <ul>
+              <li>Cada nodo es pequeño y enfocado</li>
+              <li>Permisos implícitos por tipo de nodo</li>
+              <li>Fácil de entender cada uno individualmente</li>
+            </ul>
+          </div>
+          <div class="cons">
+            <h4>Cons</h4>
+            <ul>
+              <li>El usuario configura 4 tools en vez de 1 — más verboso</li>
+              <li>Duplicación de lógica (conexión, validación) entre nodos</li>
+              <li>No mapea bien al modelo de permisos granulares — los permisos están en el tipo, no en la config</li>
+              <li>El LLM necesita decidir qué nodo usar además de qué SQL escribir</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="section" style="margin-top: 24px;">
+  <h3>Opción B — Estructura de archivos</h3>
+  <div class="mockup">
+    <div class="mockup-header">Archivos a crear/modificar</div>
+    <div class="mockup-body" style="font-family: monospace; font-size: 12px; line-height: 2.2;">
+      <span style="color: #666;">src/libs/colmena/src/dag_engine/</span><br>
+      <br>
+      <span style="color: #4ecdc4;">domain/</span><br>
+      &nbsp;&nbsp;├── sql_ports.rs <span style="color: #666;">← traits: SqlConnectionPort, SqlValidatorPort, SqlCriticPort, FunctionRegistryPort</span><br>
+      &nbsp;&nbsp;├── sql_permissions.rs <span style="color: #666;">← SqlPermissions struct, enums de operaciones permitidas</span><br>
+      &nbsp;&nbsp;└── sql_errors.rs <span style="color: #666;">← SqlError enum (Blocked, ValidationFailed, ConnectionError...)</span><br>
+      <br>
+      <span style="color: #ffd93d;">application/</span><br>
+      &nbsp;&nbsp;└── sql_execution_service.rs <span style="color: #666;">← orquesta: validate → critic → execute → feedback</span><br>
+      <br>
+      <span style="color: #ff6b6b;">infrastructure/</span><br>
+      &nbsp;&nbsp;├── nodes/sql.rs <span style="color: #666;">← SqlNode impl ExecutableNode (delgado, delega al service)</span><br>
+      &nbsp;&nbsp;├── sql_pool_adapter.rs <span style="color: #666;">← PgPool via sqlx, statement_timeout, work_mem</span><br>
+      &nbsp;&nbsp;├── sql_static_validator.rs <span style="color: #666;">← reglas estáticas (regex/pattern matching)</span><br>
+      &nbsp;&nbsp;├── sql_llm_critic.rs <span style="color: #666;">← adapter que usa LlmCallUseCase para evaluar SQL</span><br>
+      &nbsp;&nbsp;└── sql_function_registry.rs <span style="color: #666;">← CRUD sobre sandbox.function_registry</span><br>
+    </div>
+  </div>
+</div>
