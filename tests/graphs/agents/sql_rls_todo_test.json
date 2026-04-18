@@ -1,0 +1,78 @@
+{
+  "nodes": {
+    "todo_agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "api_key": "${OPENAI_API_KEY}",
+        "system_message": "You are a personal todo manager. You can create tables, insert tasks, list tasks, and update them. Start by checking if a 'todos' table exists. If not, create it with columns: id SERIAL PRIMARY KEY, title TEXT NOT NULL, done BOOLEAN DEFAULT false. Then list all tasks.",
+        "enabled_tools": [
+          "manage_todos"
+        ],
+        "stream": false,
+        "tool_configurations": {
+          "manage_todos": {
+            "name": "manage_todos",
+            "node_type": "sql_query",
+            "description": "Manage the user's todo list in the database.",
+            "node_schema": {
+              "connection_url": {
+                "type": "string",
+                "fixed": "${DATABASE_URL_GRAPHS}"
+              },
+              "permissions": {
+                "type": "object",
+                "fixed": {
+                  "preset": "full",
+                  "allowed_schemas": [
+                    "public"
+                  ],
+                  "tenant_user_id": "${USER_ID}",
+                  "tenant_column": "user_id",
+                  "auto_rls": true
+                }
+              },
+              "runtime_limits": {
+                "type": "object",
+                "fixed": {
+                  "max_rows": 100,
+                  "statement_timeout_ms": 15000,
+                  "work_mem_mb": 32
+                }
+              },
+              "guardrail_enabled": {
+                "type": "boolean",
+                "fixed": true
+              },
+              "guardrail_llm": {
+                "type": "object",
+                "fixed": {
+                  "enabled": false
+                }
+              },
+              "query": {
+                "type": "string",
+                "required": true,
+                "description": "SQL query to manage the user's todo list. You can CREATE TABLE, INSERT, SELECT, UPDATE, and DELETE."
+              }
+            }
+          }
+        },
+        "prompt": "Create a todos table if it doesn't exist, then add a task 'Buy groceries' and list all tasks."
+      }
+    },
+    "result": {
+      "type": "output",
+      "config": {
+        "label": "Todo Agent Result"
+      }
+    }
+  },
+  "edges": [
+    {
+      "from": "todo_agent",
+      "to": "result"
+    }
+  ]
+}

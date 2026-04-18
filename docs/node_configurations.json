@@ -795,7 +795,7 @@
 
     "sql_query": {
       "name": "SQL Query",
-      "description": "Executes PostgreSQL queries with granular permission control and a hybrid validation pipeline (static rules + optional LLM critic). Designed primarily as an LLM tool: configure connection, permissions, and guardrails as fixed values in node_schema, exposing only the 'query' parameter to the LLM. Supports SELECT, INSERT, UPDATE, DELETE, and CREATE FUNCTION operations, controlled via permission presets (read_only, read_write, full) with an optional deny list. Features automatic schema introspection for LLM context injection, a sandbox schema for agent-created functions, and runtime limits (statement_timeout, work_mem, max_rows).",
+      "description": "Executes PostgreSQL queries with granular permission control and a hybrid validation pipeline (static rules + optional LLM critic). Designed primarily as an LLM tool: configure connection, permissions, and guardrails as fixed values in node_schema, exposing only the 'query' parameter to the LLM. Supports SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, and CREATE FUNCTION operations, controlled via permission presets (read_only, read_write, full) with an optional deny list. Features automatic schema introspection for LLM context injection, a sandbox schema for agent-created functions, runtime limits (statement_timeout, work_mem, max_rows), and multi-tenant Row-Level Security (RLS) via tenant_user_id, tenant_column, and auto_rls fields.",
       "category": "integration",
       "config_fields": {
         "connection_url": {
@@ -830,6 +830,24 @@
               "type": "string",
               "description": "Schema where the agent can create functions and temporary tables. Must be in allowed_schemas.",
               "default": "sandbox"
+            },
+            "tenant_user_id": {
+              "type": "string",
+              "required": false,
+              "description": "User ID for RLS multi-tenancy. Supports ${ENV_VAR} resolution. When set, runs SET app.current_user_id before every query.",
+              "example": "${USER_ID}"
+            },
+            "tenant_column": {
+              "type": "string",
+              "required": false,
+              "default": "user_id",
+              "description": "Column name used for tenant isolation in RLS policies."
+            },
+            "auto_rls": {
+              "type": "boolean",
+              "required": false,
+              "default": false,
+              "description": "When true, auto-creates RLS policies during initialization and after CREATE TABLE. Tables with tenant_column get tenant isolation; tables without get read-only."
             }
           }
         },
