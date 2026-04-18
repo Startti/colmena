@@ -1,0 +1,57 @@
+{
+  "nodes": {
+    "sql_agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "api_key": "${OPENAI_API_KEY}",
+        "system_message": "You are a helpful data analyst. Use the query_database tool to answer questions about the database. Always start by listing available tables.",
+        "enabled_tools": ["query_database"],
+        "tool_configurations": {
+          "query_database": {
+            "name": "query_database",
+            "node_type": "sql_query",
+            "description": "Query the production database.",
+            "node_schema": {
+              "connection_url": { "type": "string", "fixed": "${DATABASE_URL}" },
+              "permissions": {
+                "type": "object",
+                "fixed": {
+                  "preset": "read_only",
+                  "allowed_schemas": ["public"]
+                }
+              },
+              "runtime_limits": {
+                "type": "object",
+                "fixed": {
+                  "max_rows": 50,
+                  "statement_timeout_ms": 15000,
+                  "work_mem_mb": 32
+                }
+              },
+              "guardrail_enabled": { "type": "boolean", "fixed": true },
+              "guardrail_llm": {
+                "type": "object",
+                "fixed": { "enabled": false }
+              },
+              "query": {
+                "type": "string",
+                "required": true,
+                "description": "SQL SELECT query to execute against the PostgreSQL database."
+              }
+            }
+          }
+        },
+        "prompt": "What tables are available in the database? List them."
+      }
+    },
+    "result": {
+      "type": "output",
+      "config": { "label": "SQL Agent Result" }
+    }
+  },
+  "edges": [
+    { "from": "sql_agent", "to": "result" }
+  ]
+}
