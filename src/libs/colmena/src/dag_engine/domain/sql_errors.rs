@@ -6,14 +6,9 @@ use std::fmt;
 #[derive(Debug)]
 pub enum SqlNodeError {
     /// Query blocked by static validator rules.
-    Blocked {
-        rule: String,
-        message: String,
-    },
+    Blocked { rule: String, message: String },
     /// Query blocked by LLM critic (security concern).
-    CriticRejected {
-        reason: String,
-    },
+    CriticRejected { reason: String },
     /// Could not connect to PostgreSQL or pool creation failed.
     ConnectionError(String),
     /// Query execution failed at the PostgreSQL level.

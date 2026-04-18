@@ -49,12 +49,10 @@ impl PostgresDagStateRepository {
         .await
         .map_err(|e| DagError::StateError(format!("Migration error (parallel col): {}", e)))?;
 
-        sqlx::query(
-            "ALTER TABLE dag_task_memory ADD COLUMN IF NOT EXISTS context TEXT"
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| DagError::StateError(format!("Migration error (context col): {}", e)))?;
+        sqlx::query("ALTER TABLE dag_task_memory ADD COLUMN IF NOT EXISTS context TEXT")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DagError::StateError(format!("Migration error (context col): {}", e)))?;
 
         sqlx::query(
             "ALTER TABLE dag_task_memory ADD COLUMN IF NOT EXISTS is_bridge BOOLEAN NOT NULL DEFAULT FALSE"

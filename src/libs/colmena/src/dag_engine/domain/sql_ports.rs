@@ -68,10 +68,8 @@ pub trait SqlConnectionPort: Send + Sync {
     ) -> Result<QueryResult, SqlNodeError>;
 
     /// Load table metadata (names + comments) for the given schemas.
-    async fn load_table_metadata(
-        &self,
-        schemas: &[String],
-    ) -> Result<Vec<TableInfo>, SqlNodeError>;
+    async fn load_table_metadata(&self, schemas: &[String])
+        -> Result<Vec<TableInfo>, SqlNodeError>;
 
     /// Check if the pool is connected and ready.
     fn is_connected(&self) -> bool;
@@ -91,11 +89,7 @@ pub struct QueryResult {
 /// Port for static SQL validation rules.
 pub trait SqlValidatorPort: Send + Sync {
     /// Validate a SQL query against static rules and permissions.
-    fn validate(
-        &self,
-        query: &str,
-        permissions: &SqlPermissions,
-    ) -> ValidationResult;
+    fn validate(&self, query: &str, permissions: &SqlPermissions) -> ValidationResult;
 }
 
 /// Port for LLM-based SQL critic (optional, activated by config flag).

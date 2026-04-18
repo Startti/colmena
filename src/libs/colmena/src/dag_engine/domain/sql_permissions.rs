@@ -240,12 +240,17 @@ impl SqlPermissions {
         .map(|(_, name)| *name)
         .collect();
 
-        format!("Permissions: {} | Schemas: {}",
+        format!(
+            "Permissions: {} | Schemas: {}",
             ops.join(", "),
             if self.allowed_schemas.is_empty() {
                 "all".to_string()
             } else {
-                self.allowed_schemas.iter().cloned().collect::<Vec<_>>().join(", ")
+                self.allowed_schemas
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             }
         )
     }

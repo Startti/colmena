@@ -26,25 +26,61 @@ struct ChildNodeObserver {
 impl ExecutionObserver for ChildNodeObserver {
     fn on_event(&self, event: NodeEvent) {
         let dag_event = match event {
-            NodeEvent::LlmToken { token } =>
-                DagExecutionEvent::LlmToken { node_id: self.node_id.clone(), token },
-            NodeEvent::LlmUsage { prompt_tokens, completion_tokens } =>
-                DagExecutionEvent::LlmUsage { node_id: self.node_id.clone(), prompt_tokens, completion_tokens },
-            NodeEvent::LlmToolCall { tool_id, tool_name, args_chunk } =>
-                DagExecutionEvent::LlmToolCall { node_id: self.node_id.clone(), tool_id, tool_name, args_chunk },
-            NodeEvent::LlmToolCallStart { tool_id, tool_name, tool_args } =>
-                DagExecutionEvent::LlmToolCallStart { node_id: self.node_id.clone(), tool_id, tool_name, tool_args },
-            NodeEvent::LlmToolCallFinish { tool_id, success, output } =>
-                DagExecutionEvent::LlmToolCallFinish { node_id: self.node_id.clone(), tool_id, success, output },
-            NodeEvent::LlmMessageStart =>
-                DagExecutionEvent::LlmMessageStart { node_id: self.node_id.clone() },
-            NodeEvent::LlmMessageFinish(usage) =>
-                DagExecutionEvent::LlmMessageFinish {
-                    node_id: self.node_id.clone(),
-                    usage: usage.as_ref().map(|u| serde_json::to_value(u).unwrap_or(Value::Null)),
-                },
-            NodeEvent::ThinkingToken { token } =>
-                DagExecutionEvent::ThinkingToken { node_id: self.node_id.clone(), token },
+            NodeEvent::LlmToken { token } => DagExecutionEvent::LlmToken {
+                node_id: self.node_id.clone(),
+                token,
+            },
+            NodeEvent::LlmUsage {
+                prompt_tokens,
+                completion_tokens,
+            } => DagExecutionEvent::LlmUsage {
+                node_id: self.node_id.clone(),
+                prompt_tokens,
+                completion_tokens,
+            },
+            NodeEvent::LlmToolCall {
+                tool_id,
+                tool_name,
+                args_chunk,
+            } => DagExecutionEvent::LlmToolCall {
+                node_id: self.node_id.clone(),
+                tool_id,
+                tool_name,
+                args_chunk,
+            },
+            NodeEvent::LlmToolCallStart {
+                tool_id,
+                tool_name,
+                tool_args,
+            } => DagExecutionEvent::LlmToolCallStart {
+                node_id: self.node_id.clone(),
+                tool_id,
+                tool_name,
+                tool_args,
+            },
+            NodeEvent::LlmToolCallFinish {
+                tool_id,
+                success,
+                output,
+            } => DagExecutionEvent::LlmToolCallFinish {
+                node_id: self.node_id.clone(),
+                tool_id,
+                success,
+                output,
+            },
+            NodeEvent::LlmMessageStart => DagExecutionEvent::LlmMessageStart {
+                node_id: self.node_id.clone(),
+            },
+            NodeEvent::LlmMessageFinish(usage) => DagExecutionEvent::LlmMessageFinish {
+                node_id: self.node_id.clone(),
+                usage: usage
+                    .as_ref()
+                    .map(|u| serde_json::to_value(u).unwrap_or(Value::Null)),
+            },
+            NodeEvent::ThinkingToken { token } => DagExecutionEvent::ThinkingToken {
+                node_id: self.node_id.clone(),
+                token,
+            },
             NodeEvent::SubgraphChildEvent(raw) => {
                 self.parent.on_event(NodeEvent::SubgraphChildEvent(raw));
                 return;
@@ -74,7 +110,8 @@ impl ExecutionObserver for ThinkingNodeObserver {
             }
             NodeEvent::SubgraphChildEvent(raw) => {
                 let rewritten = rewrite_llm_to_thinking(raw);
-                self.inner.on_event(NodeEvent::SubgraphChildEvent(rewritten));
+                self.inner
+                    .on_event(NodeEvent::SubgraphChildEvent(rewritten));
             }
             other => self.inner.on_event(other),
         }
@@ -87,7 +124,10 @@ fn rewrite_llm_to_thinking(mut raw: Value) -> Value {
     if let Some(event_name) = raw.get("event").and_then(|v| v.as_str()) {
         if event_name == "llm_token" {
             if let Some(obj) = raw.as_object_mut() {
-                obj.insert("event".to_string(), Value::String("thinking_token".to_string()));
+                obj.insert(
+                    "event".to_string(),
+                    Value::String("thinking_token".to_string()),
+                );
             }
         }
     }
@@ -240,7 +280,10 @@ impl OrchestratorNode {
             let mut available_agents: Vec<(String, String)> = Vec::new();
             if let Some(agents_obj) = config.get("agents").and_then(|a| a.as_object()) {
                 for (name, props) in agents_obj {
-                    let desc = props.get("description").and_then(|v| v.as_str()).unwrap_or("No description provided");
+                    let desc = props
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("No description provided");
                     available_agents.push((name.clone(), desc.to_string()));
                 }
             }
@@ -255,7 +298,12 @@ impl OrchestratorNode {
             let completed_history: Vec<String> = all_tasks_so_far
                 .iter()
                 .filter(|t| t.completed)
-                .map(|t| format!("- {} (agent: {}, phase: {})", t.task_name, t.assigned_to, t.phase))
+                .map(|t| {
+                    format!(
+                        "- {} (agent: {}, phase: {})",
+                        t.task_name, t.assigned_to, t.phase
+                    )
+                })
                 .collect();
 
             if !completed_history.is_empty() {
@@ -308,17 +356,28 @@ impl OrchestratorNode {
                 "📨 [OrchestratorNode] REACTOR INPUTS (phase {}):\n{}\n{}",
                 phase,
                 "─".repeat(60),
-                serde_json::to_string_pretty(&reactor_inputs).unwrap_or_else(|_| format!("{:?}", reactor_inputs))
+                serde_json::to_string_pretty(&reactor_inputs)
+                    .unwrap_or_else(|_| format!("{:?}", reactor_inputs))
             );
 
-            emit_internal_node_start(&observer, "phase_reactor", "reactor", json!({
-                "phase": phase,
-                "model": reactor_cfg_owned.get("model").cloned().unwrap_or(Value::Null),
-                "provider": reactor_cfg_owned.get("provider").cloned().unwrap_or(Value::Null),
-            }));
+            emit_internal_node_start(
+                &observer,
+                "phase_reactor",
+                "reactor",
+                json!({
+                    "phase": phase,
+                    "model": reactor_cfg_owned.get("model").cloned().unwrap_or(Value::Null),
+                    "provider": reactor_cfg_owned.get("provider").cloned().unwrap_or(Value::Null),
+                }),
+            );
             let phase_reactor_obs = thinking_child_observer(&observer, "phase_reactor");
             let reactor_res = reactor_node
-                .execute(&reactor_inputs, &reactor_cfg_owned, state, phase_reactor_obs)
+                .execute(
+                    &reactor_inputs,
+                    &reactor_cfg_owned,
+                    state,
+                    phase_reactor_obs,
+                )
                 .await?;
             emit_internal_node_finish(&observer, "phase_reactor", reactor_res.clone());
 
@@ -326,7 +385,8 @@ impl OrchestratorNode {
                 "📬 [OrchestratorNode] REACTOR RAW RESULT (phase {}):\n{}\n{}\n{}",
                 phase,
                 "─".repeat(60),
-                serde_json::to_string_pretty(&reactor_res).unwrap_or_else(|_| format!("{:?}", reactor_res)),
+                serde_json::to_string_pretty(&reactor_res)
+                    .unwrap_or_else(|_| format!("{:?}", reactor_res)),
                 "─".repeat(60)
             );
 
@@ -347,7 +407,8 @@ impl OrchestratorNode {
                     .to_string();
                 colmena_log!(
                     "⏸️  [OrchestratorNode] Phase {} reactor suspended. Question: {}",
-                    phase, question_text
+                    phase,
+                    question_text
                 );
                 let questions = vec![SuspendQuestion {
                     id: "phase_reactor_clarification".to_string(),
@@ -381,7 +442,8 @@ impl OrchestratorNode {
                 .and_then(|e| e.get("add_tasks"))
                 .cloned();
 
-            let (mut summary_str, new_tasks_val) = extract_reactor_output_with_fallback(&reactor_result, reactor_add_tasks);
+            let (mut summary_str, new_tasks_val) =
+                extract_reactor_output_with_fallback(&reactor_result, reactor_add_tasks);
 
             // If the reactor returned an empty summary (e.g. task_ok=false with no response text),
             // build a minimal summary from the phase task results so context is not lost.
@@ -401,7 +463,8 @@ impl OrchestratorNode {
             }
 
             if !summary_str.trim().is_empty() {
-                repo.save_phase_summary(session_id, phase, &summary_str).await?;
+                repo.save_phase_summary(session_id, phase, &summary_str)
+                    .await?;
                 colmena_log!("💾 [OrchestratorNode] Phase {} summary saved.", phase);
             }
 
@@ -434,7 +497,10 @@ impl OrchestratorNode {
                     }
 
                     // Validar que el agente existe en config["agents"]
-                    if !available_agents.iter().any(|(name, _)| name == &assigned_to) {
+                    if !available_agents
+                        .iter()
+                        .any(|(name, _)| name == &assigned_to)
+                    {
                         colmena_log!(
                             "⚠️  [OrchestratorNode] Reactor hallucinated agent '{}' — discarding task '{}'.",
                             assigned_to, task_name
@@ -445,9 +511,9 @@ impl OrchestratorNode {
                     // Deduplicar: si ya existe una tarea (completada o no) con el mismo
                     // nombre y agente, no insertar. Esto evita loops donde el reactor
                     // propone la misma tarea que ya fue ejecutada en una fase anterior.
-                    let already_exists = existing_tasks.iter().any(|t| {
-                        t.assigned_to == assigned_to && t.task_name == task_name
-                    });
+                    let already_exists = existing_tasks
+                        .iter()
+                        .any(|t| t.assigned_to == assigned_to && t.task_name == task_name);
                     if already_exists {
                         colmena_log!(
                             "⏭️  [OrchestratorNode] Skipping duplicate recovery task '{}' for '{}' — already exists (completed={}).",
@@ -501,7 +567,8 @@ impl OrchestratorNode {
                 if sowed > 0 {
                     colmena_log!(
                         "🌱 [OrchestratorNode] Sowed {} new task(s) via Reactor into phase {}.",
-                        sowed, next_phase
+                        sowed,
+                        next_phase
                     );
                 }
             }
@@ -512,7 +579,12 @@ impl OrchestratorNode {
             colmena_log!("🔗 [OrchestratorNode] No reactor found. Concatenating phase results (truncated fallback)...");
             colmena_log!("⚠️  [OrchestratorNode] For production flows, configure 'phase_reactor' to enable context summarization and dynamic replanning.");
 
-            emit_internal_node_start(&observer, "phase_summary", "phase_summary", json!({"phase": phase}));
+            emit_internal_node_start(
+                &observer,
+                "phase_summary",
+                "phase_summary",
+                json!({"phase": phase}),
+            );
 
             let mut results = Vec::new();
             for task in &phase_tasks {
@@ -529,7 +601,10 @@ impl OrchestratorNode {
             const FALLBACK_TRUNCATION_LIMIT: usize = 4000;
             let truncated = if full_concat.len() > FALLBACK_TRUNCATION_LIMIT {
                 let cut = &full_concat[..FALLBACK_TRUNCATION_LIMIT];
-                format!("{}\n\n[...truncated — configure phase_reactor for full context]", cut)
+                format!(
+                    "{}\n\n[...truncated — configure phase_reactor for full context]",
+                    cut
+                )
             } else {
                 full_concat
             };
@@ -598,10 +673,7 @@ impl OrchestratorNode {
 
         // Build user message: original prompt + phase summaries
         let mut context_parts = Vec::new();
-        let user_prompt = inputs
-            .get("prompt")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let user_prompt = inputs.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
         if !user_prompt.is_empty() {
             context_parts.push(format!("# User's Original Question\n\n{}", user_prompt));
         }
@@ -614,8 +686,7 @@ impl OrchestratorNode {
         let user_message = context_parts.join("\n\n---\n\n");
 
         // Configure LLM
-        let provider =
-            crate::llm::domain::LlmProvider::new(provider_kind.clone(), api_key, model)?;
+        let provider = crate::llm::domain::LlmProvider::new(provider_kind.clone(), api_key, model)?;
         let mut llm_config = crate::llm::domain::LlmConfig::new(provider);
         if let Some(temp) = final_reactor_cfg
             .get("temperature")
@@ -640,8 +711,8 @@ impl OrchestratorNode {
         let final_obs = child_observer(&observer, "final_reactor");
         let on_token: Option<Box<dyn Fn(crate::llm::domain::LlmStreamPart) + Send + Sync>> =
             if let Some(obs) = final_obs {
-                Some(Box::new(move |part: crate::llm::domain::LlmStreamPart| {
-                    match part {
+                Some(Box::new(
+                    move |part: crate::llm::domain::LlmStreamPart| match part {
                         crate::llm::domain::LlmStreamPart::Content(token) => {
                             obs.on_event(NodeEvent::LlmToken { token })
                         }
@@ -658,8 +729,8 @@ impl OrchestratorNode {
                             obs.on_event(NodeEvent::LlmMessageFinish(usage))
                         }
                         _ => {}
-                    }
-                }))
+                    },
+                ))
             } else {
                 None
             };
@@ -681,10 +752,15 @@ impl OrchestratorNode {
             }
         }
 
-        emit_internal_node_start(&observer, "final_reactor", "llm_call", json!({
-            "model": final_reactor_cfg.get("model").cloned().unwrap_or(Value::Null),
-            "provider": final_reactor_cfg.get("provider").cloned().unwrap_or(Value::Null),
-        }));
+        emit_internal_node_start(
+            &observer,
+            "final_reactor",
+            "llm_call",
+            json!({
+                "model": final_reactor_cfg.get("model").cloned().unwrap_or(Value::Null),
+                "provider": final_reactor_cfg.get("provider").cloned().unwrap_or(Value::Null),
+            }),
+        );
 
         let params = crate::llm::application::AgentRunParams {
             session_id: &tid,
@@ -702,7 +778,10 @@ impl OrchestratorNode {
 
         emit_internal_node_finish(&observer, "final_reactor", json!({ "result": final_text }));
 
-        colmena_log!("✅ [OrchestratorNode] Final response generated ({} chars).", final_text.len());
+        colmena_log!(
+            "✅ [OrchestratorNode] Final response generated ({} chars).",
+            final_text.len()
+        );
 
         let phase_summaries_json: Vec<Value> = phase_summaries
             .iter()
@@ -764,7 +843,9 @@ impl ExecutableNode for OrchestratorNode {
         let mut suspend_meta = read_suspend_meta(_state);
 
         // If resuming from a suspend, handle based on where we suspended.
-        if let (Some(ref ans), Some((ref sa, _, _, ref questions))) = (&resume_answer, &suspend_meta) {
+        if let (Some(ref ans), Some((ref sa, _, _, ref questions))) =
+            (&resume_answer, &suspend_meta)
+        {
             if sa == "critic" {
                 colmena_log!("▶️  [OrchestratorNode] Resuming from critic suspend. Preparing Q&A context for agent re-execution.");
                 // Prepare Q&A context but DO NOT clear suspend_meta — the resuming_critic guard in the task loop will handle the cleanup
@@ -794,7 +875,14 @@ impl ExecutableNode for OrchestratorNode {
                 };
                 // Save as phase 0 summary so ALL agents in the run can see it
                 if let Some(repo) = &self.task_memory_repo {
-                    if let Err(e) = repo.save_phase_summary(&session_id, 0, &format!("[PLANNER Q&A] {}", accumulated_qa)).await {
+                    if let Err(e) = repo
+                        .save_phase_summary(
+                            &session_id,
+                            0,
+                            &format!("[PLANNER Q&A] {}", accumulated_qa),
+                        )
+                        .await
+                    {
                         colmena_log!("⚠️  [OrchestratorNode] Failed to save planner Q&A as phase 0 summary: {}", e);
                     }
                 }
@@ -824,7 +912,10 @@ impl ExecutableNode for OrchestratorNode {
                     if let Some(agents_obj) = config.get("agents").and_then(|a| a.as_object()) {
                         for (name, props) in agents_obj {
                             agent_names.push(Value::String(name.clone()));
-                            let desc = props.get("description").and_then(|v| v.as_str()).unwrap_or("No description provided");
+                            let desc = props
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("No description provided");
                             agent_descriptions.push_str(&format!("- {}: {}\n", name, desc));
                         }
                     }
@@ -862,10 +953,7 @@ impl ExecutableNode for OrchestratorNode {
                             }
                         }
 
-                        obj.insert(
-                            "system_message".to_string(),
-                            Value::String(existing_sm),
-                        );
+                        obj.insert("system_message".to_string(), Value::String(existing_sm));
                     }
 
                     // Clean up planner Q&A stash after injecting into config
@@ -880,11 +968,16 @@ impl ExecutableNode for OrchestratorNode {
 
                     // Ejecutamos el planner. El PlannerNode escribe el plan en 'state' y retorna { result: { items: [...] } }
                     // o { result: { questions: [...] } } si necesita clarificación.
-                    emit_internal_node_start(&_observer, "planner", "planner", json!({
-                        "prompt": inputs.get("prompt").cloned().unwrap_or(Value::Null),
-                        "model": internal_planner_cfg.get("model").cloned().unwrap_or(Value::Null),
-                        "provider": internal_planner_cfg.get("provider").cloned().unwrap_or(Value::Null),
-                    }));
+                    emit_internal_node_start(
+                        &_observer,
+                        "planner",
+                        "planner",
+                        json!({
+                            "prompt": inputs.get("prompt").cloned().unwrap_or(Value::Null),
+                            "model": internal_planner_cfg.get("model").cloned().unwrap_or(Value::Null),
+                            "provider": internal_planner_cfg.get("provider").cloned().unwrap_or(Value::Null),
+                        }),
+                    );
                     let planner_obs = thinking_child_observer(&_observer, "planner");
                     let planner_result = planner_node
                         .execute(inputs, &internal_planner_cfg, _state, planner_obs)
@@ -900,7 +993,9 @@ impl ExecutableNode for OrchestratorNode {
 
                     if let Some(planner_questions) = planner_questions_opt {
                         let planner_allow_suspend_default = json!({});
-                        let planner_cfg_raw = config.get("planner").unwrap_or(&planner_allow_suspend_default);
+                        let planner_cfg_raw = config
+                            .get("planner")
+                            .unwrap_or(&planner_allow_suspend_default);
                         if allow_suspend_for(planner_cfg_raw) {
                             colmena_log!("⏸️  [OrchestratorNode] Planner requested clarification before generating tasks.");
                             return Ok(make_suspend_response(
@@ -962,23 +1057,41 @@ impl ExecutableNode for OrchestratorNode {
                             }
                         }
                         // Print plan in human-readable format for debugging
-                        colmena_log!("💾 [OrchestratorNode] DB seeded with {} tasks from internal planner.", items.len());
+                        colmena_log!(
+                            "💾 [OrchestratorNode] DB seeded with {} tasks from internal planner.",
+                            items.len()
+                        );
                         colmena_log!("📋 [OrchestratorNode] PLAN:");
                         colmena_log!("{}", "─".repeat(60));
-                        let mut phase_map: std::collections::BTreeMap<i64, Vec<String>> = std::collections::BTreeMap::new();
+                        let mut phase_map: std::collections::BTreeMap<i64, Vec<String>> =
+                            std::collections::BTreeMap::new();
                         for task_val in items {
-                            let phase_num = task_val.get("phase").and_then(|v| v.as_i64()).unwrap_or(1);
-                            let task_name = task_val.get("task").and_then(|v| v.as_str()).unwrap_or("?");
-                            let agent = task_val.get("assigned_to").and_then(|v| v.as_str()).unwrap_or("?");
-                            let parallel = task_val.get("parallel").and_then(|v| v.as_bool()).unwrap_or(false);
-                            let ctx = task_val.get("context").and_then(|v| v.as_str()).unwrap_or("");
+                            let phase_num =
+                                task_val.get("phase").and_then(|v| v.as_i64()).unwrap_or(1);
+                            let task_name =
+                                task_val.get("task").and_then(|v| v.as_str()).unwrap_or("?");
+                            let agent = task_val
+                                .get("assigned_to")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?");
+                            let parallel = task_val
+                                .get("parallel")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            let ctx = task_val
+                                .get("context")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
                             let parallel_tag = if parallel { " [parallel]" } else { "" };
-                            let entry = format!("  [{agent}]{parallel_tag}: {task_name}\n    → {ctx}");
+                            let entry =
+                                format!("  [{agent}]{parallel_tag}: {task_name}\n    → {ctx}");
                             phase_map.entry(phase_num).or_default().push(entry);
                         }
                         for (ph, tasks) in &phase_map {
                             colmena_log!("Phase {}:", ph);
-                            for t in tasks { println!("{}", t); }
+                            for t in tasks {
+                                println!("{}", t);
+                            }
                         }
                         colmena_log!("{}", "─".repeat(60));
                     }
@@ -1014,7 +1127,14 @@ impl ExecutableNode for OrchestratorNode {
                     None => {
                         // Todas las fases terminadas
                         match self
-                            .finalize_execution(repo, &session_id, config, _state, _observer, inputs)
+                            .finalize_execution(
+                                repo,
+                                &session_id,
+                                config,
+                                _state,
+                                _observer,
+                                inputs,
+                            )
                             .await?
                         {
                             OrchestratorSuspend::Suspended(s) => return Ok(s),
@@ -1031,7 +1151,14 @@ impl ExecutableNode for OrchestratorNode {
                                 max_phases, current_phase
                             );
                             match self
-                                .finalize_execution(repo, &session_id, config, _state, _observer, inputs)
+                                .finalize_execution(
+                                    repo,
+                                    &session_id,
+                                    config,
+                                    _state,
+                                    _observer,
+                                    inputs,
+                                )
                                 .await?
                             {
                                 OrchestratorSuspend::Suspended(s) => return Ok(s),
@@ -1080,16 +1207,24 @@ impl ExecutableNode for OrchestratorNode {
                                 let all_phase_tasks = repo.get_tasks_for_run(&session_id).await?;
                                 let bridge_done: Vec<_> = all_phase_tasks
                                     .iter()
-                                    .filter(|t| t.phase == current_phase && t.is_bridge && t.completed)
+                                    .filter(|t| {
+                                        t.phase == current_phase && t.is_bridge && t.completed
+                                    })
                                     .collect();
 
                                 if !bridge_done.is_empty() {
                                     let mut parts = Vec::new();
                                     for t in &bridge_done {
                                         if let Some(res) = &t.result {
-                                            let text = res.get("result").and_then(|v| v.as_str()).unwrap_or("");
+                                            let text = res
+                                                .get("result")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
                                             if !text.is_empty() {
-                                                parts.push(format!("[Bridge — {}]: {}", t.assigned_to, text));
+                                                parts.push(format!(
+                                                    "[Bridge — {}]: {}",
+                                                    t.assigned_to, text
+                                                ));
                                             }
                                         }
                                     }
@@ -1099,7 +1234,12 @@ impl ExecutableNode for OrchestratorNode {
                                             current_phase,
                                             parts.join("\n\n")
                                         );
-                                        repo.save_phase_summary(&session_id, current_phase, &bridge_summary).await?;
+                                        repo.save_phase_summary(
+                                            &session_id,
+                                            current_phase,
+                                            &bridge_summary,
+                                        )
+                                        .await?;
                                         colmena_log!(
                                             "💾 [OrchestratorNode] Bridge summary saved for phase {} ({} task(s)).",
                                             current_phase, bridge_done.len()
@@ -1136,7 +1276,9 @@ impl ExecutableNode for OrchestratorNode {
 
                             // If the reactor seeded bridge tasks in this phase, set the done flag
                             // so the next iteration (after bridge tasks execute) skips the reactor.
-                            let has_bridge = repo.get_tasks_for_run(&session_id).await?
+                            let has_bridge = repo
+                                .get_tasks_for_run(&session_id)
+                                .await?
                                 .into_iter()
                                 .any(|t| t.phase == current_phase && t.is_bridge && !t.completed);
 
@@ -1174,18 +1316,30 @@ impl ExecutableNode for OrchestratorNode {
                                 // Consume local variable so subsequent loop iterations don't re-trigger
                                 suspend_meta = None;
 
-                                let accept = ans.contains("accept") || ans.contains("acepta") || ans.contains("aceptar") || ans.contains("aprueba") || ans.contains("aprobar") || ans.contains("ok") || ans.contains("está bien") || ans.contains("esta bien");
-                                let skip   = ans.contains("skip") || ans.contains("continuar") || ans.contains("continue");
+                                let accept = ans.contains("accept")
+                                    || ans.contains("acepta")
+                                    || ans.contains("aceptar")
+                                    || ans.contains("aprueba")
+                                    || ans.contains("aprobar")
+                                    || ans.contains("ok")
+                                    || ans.contains("está bien")
+                                    || ans.contains("esta bien");
+                                let skip = ans.contains("skip")
+                                    || ans.contains("continuar")
+                                    || ans.contains("continue");
                                 let cancel = ans.contains("cancel") || ans.contains("cancelar");
                                 // Default: if not clearly accept/skip/cancel → treat as retry with instructions
-                                let retry  = !accept && !skip && !cancel;
+                                let retry = !accept && !skip && !cancel;
 
                                 if accept {
                                     // User accepts the result as-is — use the stashed agent result
                                     let stash_key = format!("__orch_pending_{}", task.id);
                                     let retry_key = format!("__orch_retries_{}", task.id);
-                                    let feedback_key = format!("__orch_critic_feedback_{}", task.id);
-                                    let stashed = _state.get(&stash_key).cloned().unwrap_or(json!({"result": "[Accepted by user]", "extra_info": {}}));
+                                    let feedback_key =
+                                        format!("__orch_critic_feedback_{}", task.id);
+                                    let stashed = _state.get(&stash_key).cloned().unwrap_or(
+                                        json!({"result": "[Accepted by user]", "extra_info": {}}),
+                                    );
                                     repo.update_task_result(&task.id, stashed).await?;
                                     if let Some(obj) = _state.as_object_mut() {
                                         obj.remove(&stash_key);
@@ -1205,10 +1359,15 @@ impl ExecutableNode for OrchestratorNode {
                                     } else {
                                         "[SKIPPED by user after max retries]"
                                     };
-                                    repo.update_task_result(&task.id, json!({ "result": note, "extra_info": {} })).await?;
+                                    repo.update_task_result(
+                                        &task.id,
+                                        json!({ "result": note, "extra_info": {} }),
+                                    )
+                                    .await?;
                                     let stash_key = format!("__orch_pending_{}", task.id);
                                     let retry_key = format!("__orch_retries_{}", task.id);
-                                    let feedback_key = format!("__orch_critic_feedback_{}", task.id);
+                                    let feedback_key =
+                                        format!("__orch_critic_feedback_{}", task.id);
                                     if let Some(obj) = _state.as_object_mut() {
                                         obj.remove(&stash_key);
                                         obj.remove(&retry_key);
@@ -1226,7 +1385,8 @@ impl ExecutableNode for OrchestratorNode {
                                     let retry_key = format!("__orch_retries_{}", task.id);
                                     if let Some(obj) = _state.as_object_mut() {
                                         obj.remove(&retry_key);
-                                        let qa_str = questions_to_context_string(&questions, ans_raw);
+                                        let qa_str =
+                                            questions_to_context_string(&questions, ans_raw);
                                         obj.insert(
                                             "__orchestrator_qa_context".to_string(),
                                             json!({ "qa_context": qa_str }),
@@ -1273,7 +1433,8 @@ impl ExecutableNode for OrchestratorNode {
 
                             colmena_log!(
                                 "🚀 [OrchestratorNode] Internal Execution: Task '{}' -> Agent '{}'",
-                                task.task_name, task.assigned_to
+                                task.task_name,
+                                task.assigned_to
                             );
 
                             // Build the single prompt text that the agent receives.
@@ -1285,8 +1446,14 @@ impl ExecutableNode for OrchestratorNode {
                             task_inputs.remove("__colmena_resume_answer");
                             // Unique __node_id per agent so SubGraphNode generates distinct
                             // child_session_ids: "{session_id}_sub_{agent_name}"
-                            task_inputs.insert("__node_id".to_string(), Value::String(task.assigned_to.clone()));
-                            let phase_summaries_for_ctx = repo.get_phase_summaries(&session_id).await.unwrap_or_default();
+                            task_inputs.insert(
+                                "__node_id".to_string(),
+                                Value::String(task.assigned_to.clone()),
+                            );
+                            let phase_summaries_for_ctx = repo
+                                .get_phase_summaries(&session_id)
+                                .await
+                                .unwrap_or_default();
                             let qa_ctx: Option<String> = _state
                                 .get("__orchestrator_qa_context")
                                 .and_then(|v| v.get("qa_context"))
@@ -1350,16 +1517,21 @@ impl ExecutableNode for OrchestratorNode {
 
                             let mut subgraph_cfg = agent_node_cfg.clone();
                             if let Some(obj) = subgraph_cfg.as_object_mut() {
-                                obj.insert("__agent_name".to_string(), Value::String(task.assigned_to.clone()));
+                                obj.insert(
+                                    "__agent_name".to_string(),
+                                    Value::String(task.assigned_to.clone()),
+                                );
                             }
 
                             let subgraph_node = registry
                                 .get_node("subgraph")
                                 .ok_or("subgraph node not found")?;
 
-                            let agent_obs: Option<Arc<dyn ExecutionObserver>> = _observer.as_ref().map(|obs| {
-                                Arc::new(ThinkingNodeObserver { inner: obs.clone() }) as Arc<dyn ExecutionObserver>
-                            });
+                            let agent_obs: Option<Arc<dyn ExecutionObserver>> =
+                                _observer.as_ref().map(|obs| {
+                                    Arc::new(ThinkingNodeObserver { inner: obs.clone() })
+                                        as Arc<dyn ExecutionObserver>
+                                });
                             let agent_result = subgraph_node
                                 .execute(&task_inputs, &subgraph_cfg, _state, agent_obs)
                                 .await?;
@@ -1380,13 +1552,13 @@ impl ExecutableNode for OrchestratorNode {
                                 let max_retries: u32 = critic_cfg
                                     .get("max_retries")
                                     .and_then(|v| v.as_u64())
-                                    .unwrap_or(3) as u32;
+                                    .unwrap_or(3)
+                                    as u32;
 
                                 let retry_key = format!("__orch_retries_{}", task.id);
-                                let current_retries: u32 = _state
-                                    .get(&retry_key)
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0) as u32;
+                                let current_retries: u32 =
+                                    _state.get(&retry_key).and_then(|v| v.as_u64()).unwrap_or(0)
+                                        as u32;
 
                                 colmena_log!(
                                     "🔎 [OrchestratorNode] Internal Critique for task '{}' (attempt {}/{})...",
@@ -1396,7 +1568,8 @@ impl ExecutableNode for OrchestratorNode {
                                     registry.get_node("critic").ok_or("critic node not found")?;
 
                                 let mut critic_inputs = task_inputs.clone();
-                                critic_inputs.insert("agent_result".to_string(), agent_result.clone());
+                                critic_inputs
+                                    .insert("agent_result".to_string(), agent_result.clone());
                                 critic_inputs.insert(
                                     format!("texts.{}", task.assigned_to),
                                     agent_result.clone(),
@@ -1409,16 +1582,26 @@ impl ExecutableNode for OrchestratorNode {
                                 }
 
                                 let critic_node_id = format!("critic_{}", task.assigned_to);
-                                emit_internal_node_start(&_observer, &critic_node_id, "critic", json!({
-                                    "task": task.task_name,
-                                    "model": critic_cfg.get("model").cloned().unwrap_or(Value::Null),
-                                    "provider": critic_cfg.get("provider").cloned().unwrap_or(Value::Null),
-                                }));
-                                let critic_obs = thinking_child_observer(&_observer, &critic_node_id);
+                                emit_internal_node_start(
+                                    &_observer,
+                                    &critic_node_id,
+                                    "critic",
+                                    json!({
+                                        "task": task.task_name,
+                                        "model": critic_cfg.get("model").cloned().unwrap_or(Value::Null),
+                                        "provider": critic_cfg.get("provider").cloned().unwrap_or(Value::Null),
+                                    }),
+                                );
+                                let critic_obs =
+                                    thinking_child_observer(&_observer, &critic_node_id);
                                 let critic_res = critic_node
                                     .execute(&critic_inputs, critic_cfg, _state, critic_obs)
                                     .await?;
-                                emit_internal_node_finish(&_observer, &critic_node_id, critic_res.clone());
+                                emit_internal_node_finish(
+                                    &_observer,
+                                    &critic_node_id,
+                                    critic_res.clone(),
+                                );
 
                                 // Check if critic wants to suspend and ask the user
                                 let critic_suspended = critic_res
@@ -1473,7 +1656,8 @@ impl ExecutableNode for OrchestratorNode {
                                         .filter(|s| !s.is_empty())
                                         .map(|s| s.to_string());
                                     if let Some(fb) = critic_feedback {
-                                        let feedback_key = format!("__orch_critic_feedback_{}", task.id);
+                                        let feedback_key =
+                                            format!("__orch_critic_feedback_{}", task.id);
                                         if let Some(obj) = _state.as_object_mut() {
                                             obj.insert(feedback_key, Value::String(fb));
                                         }
@@ -1682,8 +1866,12 @@ async fn seed_db_manually(
 fn resolve_env_var(value: &str) -> Result<String, String> {
     if value.starts_with("${") && value.ends_with('}') {
         let var_name = &value[2..value.len() - 1];
-        std::env::var(var_name)
-            .map_err(|_| format!("OrchestratorNode: Environment variable '{}' not found", var_name))
+        std::env::var(var_name).map_err(|_| {
+            format!(
+                "OrchestratorNode: Environment variable '{}' not found",
+                var_name
+            )
+        })
     } else {
         Ok(value.to_string())
     }
@@ -1741,17 +1929,17 @@ fn build_enriched_prompt(
     }
 
     // Section 5: current task instruction
-    parts.push(format!(
-        "=== YOUR CURRENT TASK ===\n{}",
-        task_name
-    ));
+    parts.push(format!("=== YOUR CURRENT TASK ===\n{}", task_name));
 
     parts.join("\n\n")
 }
 
 /// Injects schema constraints into a reactor config's system_message so the LLM
 /// knows the required output format and which agents are valid for new_tasks.
-fn inject_reactor_schema_constraints(reactor_cfg: &mut Value, available_agents: &[(String, String)]) {
+fn inject_reactor_schema_constraints(
+    reactor_cfg: &mut Value,
+    available_agents: &[(String, String)],
+) {
     let agents_list = available_agents
         .iter()
         .map(|(n, d)| format!("- {}: {}", n, d))
@@ -1797,10 +1985,7 @@ fn extract_reactor_output_with_fallback(
                     .unwrap_or(raw_str)
                     .to_string();
                 // Prefer new_tasks from the parsed JSON; fall back to add_tasks from extra_info
-                let new_tasks = obj
-                    .get("new_tasks")
-                    .cloned()
-                    .or(fallback_add_tasks);
+                let new_tasks = obj.get("new_tasks").cloned().or(fallback_add_tasks);
                 return (summary, new_tasks);
             }
         }
@@ -1820,7 +2005,9 @@ fn extract_reactor_output_with_fallback(
     }
 
     // Case 3: Null or unexpected shape
-    colmena_log!("⚠️  [OrchestratorNode] Reactor returned null/unexpected result. No summary or new_tasks.");
+    colmena_log!(
+        "⚠️  [OrchestratorNode] Reactor returned null/unexpected result. No summary or new_tasks."
+    );
     (String::new(), fallback_add_tasks)
 }
 
@@ -1828,9 +2015,7 @@ fn extract_reactor_output_with_fallback(
 
 /// Reads the orchestrator suspend metadata from `global_shared_state`.
 /// Returns `(suspended_at, phase, task_id, questions)` if present.
-fn read_suspend_meta(
-    state: &Value,
-) -> Option<(String, i32, Option<String>, Vec<SuspendQuestion>)> {
+fn read_suspend_meta(state: &Value) -> Option<(String, i32, Option<String>, Vec<SuspendQuestion>)> {
     let meta = state.get("__orchestrator_suspend")?.as_object()?;
     let suspended_at = meta.get("suspended_at")?.as_str()?.to_string();
     let phase = meta.get("phase")?.as_i64()? as i32;

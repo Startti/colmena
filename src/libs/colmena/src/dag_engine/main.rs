@@ -60,7 +60,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             use std::sync::Arc;
 
             // Enable verbose mode via flag or env var
-            let verbose_env = std::env::var("COLMENA_VERBOSE").map(|v| v == "1" || v == "true").unwrap_or(false);
+            let verbose_env = std::env::var("COLMENA_VERBOSE")
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false);
             colmena::dag_engine::verbose::set_verbose(verbose || verbose_env);
 
             println!("🚀 Ejecutando grafo: {}", file_path);
@@ -323,7 +325,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             port,
             verbose,
         } => {
-            let verbose_env = std::env::var("COLMENA_VERBOSE").map(|v| v == "1" || v == "true").unwrap_or(false);
+            let verbose_env = std::env::var("COLMENA_VERBOSE")
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false);
             colmena::dag_engine::verbose::set_verbose(verbose || verbose_env);
             println!("🌐 Modo Serve: Iniciando...");
             api::serve_dag(file_path, host, port).await?;

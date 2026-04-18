@@ -25,7 +25,9 @@ impl StaticRuleValidator {
             Some(SqlOperation::Delete)
         } else if upper.starts_with("CREATE TABLE") {
             Some(SqlOperation::CreateTable)
-        } else if upper.starts_with("CREATE FUNCTION") || upper.starts_with("CREATE OR REPLACE FUNCTION") {
+        } else if upper.starts_with("CREATE FUNCTION")
+            || upper.starts_with("CREATE OR REPLACE FUNCTION")
+        {
             Some(SqlOperation::CreateFunction)
         } else if upper.starts_with("TRUNCATE") {
             Some(SqlOperation::Truncate)
@@ -65,11 +67,7 @@ impl StaticRuleValidator {
 }
 
 impl SqlValidatorPort for StaticRuleValidator {
-    fn validate(
-        &self,
-        query: &str,
-        permissions: &SqlPermissions,
-    ) -> ValidationResult {
+    fn validate(&self, query: &str, permissions: &SqlPermissions) -> ValidationResult {
         let mut warnings: Vec<String> = Vec::new();
 
         // 1. Detect operation
@@ -89,14 +87,20 @@ impl SqlValidatorPort for StaticRuleValidator {
             SqlOperation::Truncate => {
                 return ValidationResult {
                     allowed: false,
-                    block_reason: Some("TRUNCATE is not allowed. Use DELETE with a WHERE clause instead.".to_string()),
+                    block_reason: Some(
+                        "TRUNCATE is not allowed. Use DELETE with a WHERE clause instead."
+                            .to_string(),
+                    ),
                     warnings: vec![],
                 };
             }
             SqlOperation::Drop => {
                 return ValidationResult {
                     allowed: false,
-                    block_reason: Some("DROP is not allowed. You can only create objects in the sandbox schema.".to_string()),
+                    block_reason: Some(
+                        "DROP is not allowed. You can only create objects in the sandbox schema."
+                            .to_string(),
+                    ),
                     warnings: vec![],
                 };
             }
@@ -188,7 +192,8 @@ mod tests {
         SqlPermissions::from_config(Some(&serde_json::json!({
             "preset": "read_only",
             "allowed_schemas": ["production"]
-        }))).unwrap()
+        })))
+        .unwrap()
     }
 
     fn full_perms() -> SqlPermissions {
@@ -196,13 +201,17 @@ mod tests {
             "preset": "full",
             "allowed_schemas": ["production", "sandbox", "public"],
             "sandbox_schema": "sandbox"
-        }))).unwrap()
+        })))
+        .unwrap()
     }
 
     #[test]
     fn test_select_allowed() {
         let v = StaticRuleValidator;
-        let r = v.validate("SELECT id, name FROM production.users WHERE id = 1", &read_only_perms());
+        let r = v.validate(
+            "SELECT id, name FROM production.users WHERE id = 1",
+            &read_only_perms(),
+        );
         assert!(r.allowed);
         assert!(r.warnings.is_empty());
     }
@@ -210,7 +219,10 @@ mod tests {
     #[test]
     fn test_select_star_warns() {
         let v = StaticRuleValidator;
-        let r = v.validate("SELECT * FROM production.users WHERE id = 1", &read_only_perms());
+        let r = v.validate(
+            "SELECT * FROM production.users WHERE id = 1",
+            &read_only_perms(),
+        );
         assert!(r.allowed);
         assert!(r.warnings.iter().any(|w| w.contains("SELECT *")));
     }
@@ -218,7 +230,10 @@ mod tests {
     #[test]
     fn test_insert_blocked_on_read_only() {
         let v = StaticRuleValidator;
-        let r = v.validate("INSERT INTO production.users (name) VALUES ('test')", &read_only_perms());
+        let r = v.validate(
+            "INSERT INTO production.users (name) VALUES ('test')",
+            &read_only_perms(),
+        );
         assert!(!r.allowed);
         assert!(r.block_reason.unwrap().contains("Insert"));
     }
@@ -241,7 +256,10 @@ mod tests {
     #[test]
     fn test_update_without_where_blocked() {
         let v = StaticRuleValidator;
-        let r = v.validate("UPDATE production.orders SET status = 'done'", &full_perms());
+        let r = v.validate(
+            "UPDATE production.orders SET status = 'done'",
+            &full_perms(),
+        );
         assert!(!r.allowed);
         assert!(r.block_reason.unwrap().contains("WHERE"));
     }
@@ -301,7 +319,10 @@ mod tests {
     #[test]
     fn test_create_table_allowed_full() {
         let v = StaticRuleValidator;
-        let r = v.validate("CREATE TABLE public.todos (id SERIAL, title TEXT)", &full_perms());
+        let r = v.validate(
+            "CREATE TABLE public.todos (id SERIAL, title TEXT)",
+            &full_perms(),
+        );
         assert!(r.allowed);
     }
 

@@ -10,7 +10,9 @@ use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use crate::dag_engine::domain::sql_errors::SqlNodeError;
 use crate::dag_engine::domain::sql_permissions::SqlPermissions;
-use crate::dag_engine::domain::sql_ports::{FunctionInfo, FunctionRegistryPort, SqlConnectionPort, TableInfo};
+use crate::dag_engine::domain::sql_ports::{
+    FunctionInfo, FunctionRegistryPort, SqlConnectionPort, TableInfo,
+};
 use crate::dag_engine::infrastructure::sql_function_registry::PgRegistryAdapter;
 use crate::dag_engine::infrastructure::sql_llm_critic::LlmCriticAdapter;
 use crate::dag_engine::infrastructure::sql_pool_adapter::PgPoolAdapter;
@@ -98,7 +100,11 @@ impl SqlNode {
         }
 
         lines.push(String::new());
-        lines.push(format!("{} | Max rows: {}", permissions.describe_for_llm(), max_rows));
+        lines.push(format!(
+            "{} | Max rows: {}",
+            permissions.describe_for_llm(),
+            max_rows
+        ));
         lines.push("Use introspection queries to discover column details when needed.".to_string());
 
         lines.join("\n")
@@ -111,11 +117,15 @@ impl SqlNode {
         static RE: OnceLock<regex::Regex> = OnceLock::new();
         let re = RE.get_or_init(|| {
             regex::Regex::new(
-                r"(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(\w+)\.)?(\w+)\s*\("
-            ).expect("valid regex")
+                r"(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(\w+)\.)?(\w+)\s*\(",
+            )
+            .expect("valid regex")
         });
         let caps = re.captures(query)?;
-        let schema = caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_else(|| "public".to_string());
+        let schema = caps
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_else(|| "public".to_string());
         let table = caps.get(2)?.as_str().to_string();
         Some((schema, table))
     }
@@ -190,7 +200,11 @@ impl InitializableNode for SqlNode {
             .get("permissions")
             .and_then(|p| p.get("allowed_schemas"))
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let tables: Vec<TableInfo> = {
@@ -205,19 +219,23 @@ impl InitializableNode for SqlNode {
             reg.list_functions().await.unwrap_or_default()
         };
 
-        let supplement = Self::build_description_supplement(&tables, &functions, &permissions, max_rows);
+        let supplement =
+            Self::build_description_supplement(&tables, &functions, &permissions, max_rows);
 
         // Auto-RLS setup if enabled
         if permissions.auto_rls() {
             println!("[SqlNode] auto_rls enabled — setting up RLS policies...");
             let tenant_col = permissions.tenant_column();
             for table in &tables {
-                if let Err(e) = self.pool_adapter.setup_rls_for_table(
-                    &table.schema_name,
-                    &table.table_name,
-                    tenant_col,
-                ).await {
-                    println!("[SqlNode] RLS setup warning for {}.{}: {}", table.schema_name, table.table_name, e);
+                if let Err(e) = self
+                    .pool_adapter
+                    .setup_rls_for_table(&table.schema_name, &table.table_name, tenant_col)
+                    .await
+                {
+                    println!(
+                        "[SqlNode] RLS setup warning for {}.{}: {}",
+                        table.schema_name, table.table_name, e
+                    );
                 }
             }
         }
@@ -243,8 +261,7 @@ impl ExecutableNode for SqlNode {
         // NOTE: When used as a tool via DagToolExecutor, all node_schema fixed values
         // arrive in `inputs` (not `config`, which is always `{}`). We read everything
         // from `inputs` to be compatible with both tool-call and direct-execution modes.
-        let effective_config = serde_json::to_value(inputs)
-            .unwrap_or_else(|_| json!({}));
+        let effective_config = serde_json::to_value(inputs).unwrap_or_else(|_| json!({}));
 
         let query = inputs
             .get("query")
@@ -254,7 +271,8 @@ impl ExecutableNode for SqlNode {
         // Lazy initialization: connect on first call if not already initialized
         if !*self.initialized.read().await {
             println!("[SqlNode] First call — initializing connection pool...");
-            self.initialize(&effective_config).await
+            self.initialize(&effective_config)
+                .await
                 .map_err(|e| format!("SqlNode initialization failed: {}", e))?;
         }
 
@@ -275,7 +293,8 @@ impl ExecutableNode for SqlNode {
             .and_then(|v| v.as_u64())
             .unwrap_or(100);
 
-        let validator = Arc::new(StaticRuleValidator) as Arc<dyn crate::dag_engine::domain::sql_ports::SqlValidatorPort>;
+        let validator = Arc::new(StaticRuleValidator)
+            as Arc<dyn crate::dag_engine::domain::sql_ports::SqlValidatorPort>;
 
         let critic_enabled = effective_config
             .get("guardrail_llm")
@@ -283,21 +302,32 @@ impl ExecutableNode for SqlNode {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let critic: Option<Arc<dyn crate::dag_engine::domain::sql_ports::SqlCriticPort>> = if critic_enabled {
-            let guardrail_cfg = effective_config.get("guardrail_llm").unwrap();
-            let provider = guardrail_cfg.get("provider").and_then(|v| v.as_str()).unwrap_or("openai").to_string();
-            let model = guardrail_cfg.get("model").and_then(|v| v.as_str()).unwrap_or("gpt-4o-mini").to_string();
-            let api_key_raw = guardrail_cfg.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
-            let api_key = Self::resolve_env_vars(api_key_raw).unwrap_or_default();
+        let critic: Option<Arc<dyn crate::dag_engine::domain::sql_ports::SqlCriticPort>> =
+            if critic_enabled {
+                let guardrail_cfg = effective_config.get("guardrail_llm").unwrap();
+                let provider = guardrail_cfg
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("openai")
+                    .to_string();
+                let model = guardrail_cfg
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("gpt-4o-mini")
+                    .to_string();
+                let api_key_raw = guardrail_cfg
+                    .get("api_key")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let api_key = Self::resolve_env_vars(api_key_raw).unwrap_or_default();
 
-            Some(Arc::new(LlmCriticAdapter::new(
-                provider,
-                model,
-                api_key,
-            )) as Arc<dyn crate::dag_engine::domain::sql_ports::SqlCriticPort>)
-        } else {
-            None
-        };
+                Some(Arc::new(LlmCriticAdapter::new(provider, model, api_key))
+                    as Arc<
+                        dyn crate::dag_engine::domain::sql_ports::SqlCriticPort,
+                    >)
+            } else {
+                None
+            };
 
         let sandbox_schema = permissions.sandbox_schema().to_string();
         let pool_ref = self.pool_adapter.pool_ref();
@@ -305,7 +335,8 @@ impl ExecutableNode for SqlNode {
             as Arc<dyn crate::dag_engine::domain::sql_ports::FunctionRegistryPort>;
 
         let service = SqlExecutionService::new(
-            self.pool_adapter.clone() as Arc<dyn crate::dag_engine::domain::sql_ports::SqlConnectionPort>,
+            self.pool_adapter.clone()
+                as Arc<dyn crate::dag_engine::domain::sql_ports::SqlConnectionPort>,
             validator,
             critic,
             registry,
@@ -321,21 +352,40 @@ impl ExecutableNode for SqlNode {
 
         println!("[SqlNode] Executing: {}", &query[..query.len().min(100)]);
 
-        match service.execute(query, &permissions, max_rows, &session_id, &schema_context, tenant_user_id.as_deref()).await {
+        match service
+            .execute(
+                query,
+                &permissions,
+                max_rows,
+                &session_id,
+                &schema_context,
+                tenant_user_id.as_deref(),
+            )
+            .await
+        {
             Ok(result) => {
-                println!("[SqlNode] {} rows, truncated: {}", result.row_count, result.truncated);
+                println!(
+                    "[SqlNode] {} rows, truncated: {}",
+                    result.row_count, result.truncated
+                );
 
                 // Post-CREATE TABLE: apply RLS to the new table
                 let trimmed_upper = query.trim_start().to_uppercase();
                 if trimmed_upper.starts_with("CREATE TABLE") && permissions.auto_rls() {
                     if let Some((schema, table)) = Self::extract_create_table_name(query) {
-                        println!("[SqlNode] CREATE TABLE detected — applying RLS to {}.{}", schema, table);
-                        if let Err(e) = self.pool_adapter.setup_rls_for_new_table(
-                            &schema,
-                            &table,
-                            permissions.tenant_column(),
-                        ).await {
-                            println!("[SqlNode] RLS setup warning for new table {}.{}: {}", schema, table, e);
+                        println!(
+                            "[SqlNode] CREATE TABLE detected — applying RLS to {}.{}",
+                            schema, table
+                        );
+                        if let Err(e) = self
+                            .pool_adapter
+                            .setup_rls_for_new_table(&schema, &table, permissions.tenant_column())
+                            .await
+                        {
+                            println!(
+                                "[SqlNode] RLS setup warning for new table {}.{}: {}",
+                                schema, table, e
+                            );
                         }
                     }
                 }

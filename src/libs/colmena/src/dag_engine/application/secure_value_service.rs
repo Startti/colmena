@@ -1,7 +1,4 @@
-use crate::dag_engine::domain::{
-    error::DagError,
-    secure_value_repository::SecureValueRepository,
-};
+use crate::dag_engine::domain::{error::DagError, secure_value_repository::SecureValueRepository};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -41,13 +38,7 @@ impl SecureValueService {
         // Persist all mappings to database
         for (hash_key, real_value) in to_persist {
             self.repo
-                .persist(
-                    session_id,
-                    source_node_id,
-                    &hash_key,
-                    &real_value,
-                    "value",
-                )
+                .persist(session_id, source_node_id, &hash_key, &real_value, "value")
                 .await?;
         }
 

@@ -92,9 +92,7 @@ impl SocketIoNode {
                 json!({ "__binary": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes) })
             }
             #[allow(deprecated)]
-            Payload::String(s) => {
-                serde_json::from_str(&s).unwrap_or(Value::String(s))
-            }
+            Payload::String(s) => serde_json::from_str(&s).unwrap_or(Value::String(s)),
         }
     }
 
@@ -125,8 +123,8 @@ impl ExecutableNode for SocketIoNode {
         _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
         // 1. Resolve configuration (inputs > config)
-        let url_raw = Self::get_str(inputs, config, "url")
-            .ok_or("socketio_request: 'url' is required")?;
+        let url_raw =
+            Self::get_str(inputs, config, "url").ok_or("socketio_request: 'url' is required")?;
         let url = Self::resolve_env_vars(url_raw).map_err(|e| {
             Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
                 as Box<dyn StdError + Send + Sync>
@@ -164,7 +162,8 @@ impl ExecutableNode for SocketIoNode {
         // Debug: log the full payload being sent
         println!(
             "[SocketIoNode] 📤 payload: {}",
-            serde_json::to_string_pretty(&payload_val).unwrap_or_else(|_| format!("{:?}", payload_val))
+            serde_json::to_string_pretty(&payload_val)
+                .unwrap_or_else(|_| format!("{:?}", payload_val))
         );
 
         // 2. Build client
@@ -189,9 +188,7 @@ impl ExecutableNode for SocketIoNode {
         }
 
         // Apply custom headers
-        let headers_val = inputs
-            .get("headers")
-            .or_else(|| config.get("headers"));
+        let headers_val = inputs.get("headers").or_else(|| config.get("headers"));
         if let Some(headers) = headers_val.and_then(|v| v.as_object()) {
             for (k, v) in headers {
                 if let Some(v_str) = v.as_str() {
@@ -271,7 +268,11 @@ impl ExecutableNode for SocketIoNode {
                 let preview = match &payload {
                     Payload::Text(vals) => {
                         let s = format!("{:?}", vals);
-                        if s.len() > 500 { format!("{}…", &s[..500]) } else { s }
+                        if s.len() > 500 {
+                            format!("{}…", &s[..500])
+                        } else {
+                            s
+                        }
                     }
                     _ => format!("{:?}", payload),
                 };
@@ -300,9 +301,7 @@ impl ExecutableNode for SocketIoNode {
             client
                 .emit(event_name.clone(), payload_val)
                 .await
-                .map_err(|e| {
-                    format!("socketio_request: failed to emit '{}': {}", event_name, e)
-                })?;
+                .map_err(|e| format!("socketio_request: failed to emit '{}': {}", event_name, e))?;
 
             let exc_rx_opt = exc_rx.lock().await.take();
             if let Some(exc_rx_inner) = exc_rx_opt {
@@ -390,7 +389,10 @@ impl ExecutableNode for SocketIoNode {
                 )
                 .await
                 .map_err(|e| {
-                    format!("socketio_request: failed to emit_with_ack '{}': {}", event_name, e)
+                    format!(
+                        "socketio_request: failed to emit_with_ack '{}': {}",
+                        event_name, e
+                    )
                 })?;
 
             let exc_rx_opt = exc_rx.lock().await.take();
@@ -460,11 +462,16 @@ impl ExecutableNode for SocketIoNode {
                 if val.get("success").and_then(|v| v.as_bool()) == Some(false) {
                     println!(
                         "[SocketIoNode] ← error: {}",
-                        val.get("error").and_then(|v| v.as_str()).unwrap_or("unknown")
+                        val.get("error")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
                     );
                     Ok(val)
                 } else {
-                    println!("[SocketIoNode] ← response received for '{}'", event_name_clone);
+                    println!(
+                        "[SocketIoNode] ← response received for '{}'",
+                        event_name_clone
+                    );
                     Ok(json!({
                         "success": true,
                         "event": event_name_clone,

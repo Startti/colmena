@@ -66,9 +66,7 @@ impl PgPoolAdapter {
         .bind(table)
         .fetch_optional(&pool)
         .await
-        .map_err(|e| {
-            SqlNodeError::ExecutionError(format!("Failed to check RLS status: {}", e))
-        })?;
+        .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to check RLS status: {}", e)))?;
 
         Ok(row
             .map(|r| r.try_get::<bool, _>("relrowsecurity").unwrap_or(false))
@@ -131,12 +129,9 @@ impl PgPoolAdapter {
             "ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS {} TEXT DEFAULT current_setting('app.current_user_id')",
             Self::quote_ident(schema), Self::quote_ident(table), Self::quote_ident(tenant_column)
         );
-        sqlx::query(&sql)
-            .execute(&pool)
-            .await
-            .map_err(|e| {
-                SqlNodeError::ExecutionError(format!("Failed to add tenant column: {}", e))
-            })?;
+        sqlx::query(&sql).execute(&pool).await.map_err(|e| {
+            SqlNodeError::ExecutionError(format!("Failed to add tenant column: {}", e))
+        })?;
         Ok(())
     }
 
@@ -156,33 +151,29 @@ impl PgPoolAdapter {
         // Enable RLS (idempotent — Postgres ignores if already enabled)
         let enable_sql = format!(
             "ALTER TABLE {}.{} ENABLE ROW LEVEL SECURITY",
-            Self::quote_ident(schema), Self::quote_ident(table)
+            Self::quote_ident(schema),
+            Self::quote_ident(table)
         );
-        sqlx::query(&enable_sql)
-            .execute(&pool)
-            .await
-            .map_err(|e| {
-                SqlNodeError::ExecutionError(format!(
-                    "Failed to enable RLS on {}.{}: {}",
-                    schema, table, e
-                ))
-            })?;
+        sqlx::query(&enable_sql).execute(&pool).await.map_err(|e| {
+            SqlNodeError::ExecutionError(format!(
+                "Failed to enable RLS on {}.{}: {}",
+                schema, table, e
+            ))
+        })?;
 
         // Force RLS on the table owner too — without this, the user that
         // created the table (typically our connection role) bypasses RLS.
         let force_sql = format!(
             "ALTER TABLE {}.{} FORCE ROW LEVEL SECURITY",
-            Self::quote_ident(schema), Self::quote_ident(table)
+            Self::quote_ident(schema),
+            Self::quote_ident(table)
         );
-        sqlx::query(&force_sql)
-            .execute(&pool)
-            .await
-            .map_err(|e| {
-                SqlNodeError::ExecutionError(format!(
-                    "Failed to force RLS on {}.{}: {}",
-                    schema, table, e
-                ))
-            })?;
+        sqlx::query(&force_sql).execute(&pool).await.map_err(|e| {
+            SqlNodeError::ExecutionError(format!(
+                "Failed to force RLS on {}.{}: {}",
+                schema, table, e
+            ))
+        })?;
 
         if has_tenant_col {
             let policy_name = "colmena_tenant_isolation";
@@ -197,15 +188,12 @@ impl PgPoolAdapter {
                     Self::quote_ident(tenant_column),
                     Self::quote_ident(tenant_column)
                 );
-                sqlx::query(&policy_sql)
-                    .execute(&pool)
-                    .await
-                    .map_err(|e| {
-                        SqlNodeError::ExecutionError(format!(
-                            "Failed to create tenant policy on {}.{}: {}",
-                            schema, table, e
-                        ))
-                    })?;
+                sqlx::query(&policy_sql).execute(&pool).await.map_err(|e| {
+                    SqlNodeError::ExecutionError(format!(
+                        "Failed to create tenant policy on {}.{}: {}",
+                        schema, table, e
+                    ))
+                })?;
             }
 
             let default_sql = format!(
@@ -231,17 +219,16 @@ impl PgPoolAdapter {
             if !self.has_policy(schema, table, policy_name).await? {
                 let policy_sql = format!(
                     "CREATE POLICY {} ON {}.{} FOR SELECT USING (true)",
-                    policy_name, Self::quote_ident(schema), Self::quote_ident(table)
+                    policy_name,
+                    Self::quote_ident(schema),
+                    Self::quote_ident(table)
                 );
-                sqlx::query(&policy_sql)
-                    .execute(&pool)
-                    .await
-                    .map_err(|e| {
-                        SqlNodeError::ExecutionError(format!(
-                            "Failed to create read-only policy on {}.{}: {}",
-                            schema, table, e
-                        ))
-                    })?;
+                sqlx::query(&policy_sql).execute(&pool).await.map_err(|e| {
+                    SqlNodeError::ExecutionError(format!(
+                        "Failed to create read-only policy on {}.{}: {}",
+                        schema, table, e
+                    ))
+                })?;
             }
 
             println!(
@@ -299,9 +286,7 @@ impl SqlConnectionPort for PgPoolAdapter {
         sqlx::query(&format!("SET work_mem = '{}MB'", work_mem_mb))
             .execute(&pool)
             .await
-            .map_err(|e| {
-                SqlNodeError::ConnectionError(format!("Failed to set work_mem: {}", e))
-            })?;
+            .map_err(|e| SqlNodeError::ConnectionError(format!("Failed to set work_mem: {}", e)))?;
 
         *self.pool.write().await = Some(pool);
         *self.statement_timeout_ms.write().await = statement_timeout_ms;
@@ -361,9 +346,9 @@ impl SqlConnectionPort for PgPoolAdapter {
                 .await
                 .map_err(|e| SqlNodeError::ExecutionError(format!("{}", e)))?;
 
-            tx.commit().await.map_err(|e| {
-                SqlNodeError::ExecutionError(format!("Failed to commit: {}", e))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to commit: {}", e)))?;
 
             let mut json_rows: Vec<Value> = Vec::new();
             for row in &rows {
@@ -419,9 +404,9 @@ impl SqlConnectionPort for PgPoolAdapter {
                 .await
                 .map_err(|e| SqlNodeError::ExecutionError(format!("{}", e)))?;
 
-            tx.commit().await.map_err(|e| {
-                SqlNodeError::ExecutionError(format!("Failed to commit: {}", e))
-            })?;
+            tx.commit()
+                .await
+                .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to commit: {}", e)))?;
 
             let rows_affected = result.rows_affected();
 

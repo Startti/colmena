@@ -24,11 +24,7 @@ pub trait SecureValueRepository: Send + Sync {
 
     /// Retrieve and decrypt a value by its hash key
     /// Returns None if the hash key doesn't exist
-    async fn decrypt(
-        &self,
-        session_id: &str,
-        hash_key: &str,
-    ) -> Result<Option<String>, DagError>;
+    async fn decrypt(&self, session_id: &str, hash_key: &str) -> Result<Option<String>, DagError>;
 
     /// Delete all secure values for a session (cleanup after DAG)
     async fn cleanup(&self, session_id: &str) -> Result<(), DagError>;

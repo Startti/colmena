@@ -75,7 +75,7 @@ impl ExecutableNode for MockInputNode {
     }
 
     fn default_output(&self) -> Option<&str> {
-        None  // Emits raw config, no specific output field
+        None // Emits raw config, no specific output field
     }
 
     fn schema(&self) -> Value {

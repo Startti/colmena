@@ -25,9 +25,9 @@ impl PgRegistryAdapter {
 
     async fn get_pool(&self) -> Result<PgPool, SqlNodeError> {
         let guard = self.pool.read().await;
-        guard.clone().ok_or_else(|| {
-            SqlNodeError::ConnectionError("Pool not initialized.".to_string())
-        })
+        guard
+            .clone()
+            .ok_or_else(|| SqlNodeError::ConnectionError("Pool not initialized.".to_string()))
     }
 }
 
@@ -42,9 +42,7 @@ impl FunctionRegistryPort for PgRegistryAdapter {
         sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {}", schema))
             .execute(&pool)
             .await
-            .map_err(|e| {
-                SqlNodeError::ExecutionError(format!("Failed to create schema: {}", e))
-            })?;
+            .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to create schema: {}", e)))?;
 
         sqlx::query(&format!(
             "CREATE TABLE IF NOT EXISTS {schema}.function_registry (
@@ -76,10 +74,7 @@ impl FunctionRegistryPort for PgRegistryAdapter {
         .execute(&pool)
         .await
         .map_err(|e| {
-            SqlNodeError::ExecutionError(format!(
-                "Failed to comment on function_registry: {}",
-                e
-            ))
+            SqlNodeError::ExecutionError(format!("Failed to comment on function_registry: {}", e))
         })?;
 
         sqlx::query(&format!(
@@ -157,9 +152,7 @@ impl FunctionRegistryPort for PgRegistryAdapter {
         ))
         .fetch_all(&pool)
         .await
-        .map_err(|e| {
-            SqlNodeError::ExecutionError(format!("Failed to list functions: {}", e))
-        })?;
+        .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to list functions: {}", e)))?;
 
         let mut functions = Vec::new();
         for row in rows {
@@ -198,9 +191,7 @@ impl FunctionRegistryPort for PgRegistryAdapter {
         .bind(message)
         .execute(&pool)
         .await
-        .map_err(|e| {
-            SqlNodeError::ExecutionError(format!("Failed to record feedback: {}", e))
-        })?;
+        .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to record feedback: {}", e)))?;
 
         Ok(())
     }

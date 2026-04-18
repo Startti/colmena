@@ -1,7 +1,4 @@
-use crate::dag_engine::domain::{
-    error::DagError,
-    secure_value_repository::SecureValueRepository,
-};
+use crate::dag_engine::domain::{error::DagError, secure_value_repository::SecureValueRepository};
 use async_trait::async_trait;
 use sqlx::{PgPool, Row};
 
@@ -21,9 +18,7 @@ impl PostgresSecureValueRepository {
         sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")
             .execute(&self.pool)
             .await
-            .map_err(|e| {
-                DagError::StateError(format!("Failed to enable pgcrypto: {}", e))
-            })?;
+            .map_err(|e| DagError::StateError(format!("Failed to enable pgcrypto: {}", e)))?;
 
         // Create table
         sqlx::query(
@@ -44,19 +39,22 @@ impl PostgresSecureValueRepository {
         .execute(&self.pool)
         .await
         .map_err(|e| {
-            DagError::StateError(format!("Failed to create secure_value_mappings table: {}", e))
+            DagError::StateError(format!(
+                "Failed to create secure_value_mappings table: {}",
+                e
+            ))
         })?;
 
         // Create indexes separately
         sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_secure_session_id ON secure_value_mappings(session_id)"
+            "CREATE INDEX IF NOT EXISTS idx_secure_session_id ON secure_value_mappings(session_id)",
         )
         .execute(&self.pool)
         .await
         .ok(); // Ignore if already exists
 
         sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_secure_expires_at ON secure_value_mappings(expires_at)"
+            "CREATE INDEX IF NOT EXISTS idx_secure_expires_at ON secure_value_mappings(expires_at)",
         )
         .execute(&self.pool)
         .await
@@ -97,18 +95,12 @@ impl SecureValueRepository for PostgresSecureValueRepository {
         .bind(field_name)
         .execute(&self.pool)
         .await
-        .map_err(|e| {
-            DagError::StateError(format!("Failed to persist secure value: {}", e))
-        })?;
+        .map_err(|e| DagError::StateError(format!("Failed to persist secure value: {}", e)))?;
 
         Ok(())
     }
 
-    async fn decrypt(
-        &self,
-        session_id: &str,
-        hash_key: &str,
-    ) -> Result<Option<String>, DagError> {
+    async fn decrypt(&self, session_id: &str, hash_key: &str) -> Result<Option<String>, DagError> {
         let encryption_key =
             std::env::var("SECURE_VALUES_KEY").unwrap_or_else(|_| "default-key".to_string());
 
@@ -124,9 +116,7 @@ impl SecureValueRepository for PostgresSecureValueRepository {
         .bind(hash_key)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| {
-            DagError::StateError(format!("Failed to decrypt value: {}", e))
-        })?;
+        .map_err(|e| DagError::StateError(format!("Failed to decrypt value: {}", e)))?;
 
         Ok(row.map(|r| r.get::<String, _>("decrypted")))
     }

@@ -69,11 +69,12 @@ impl SqlCriticPort for LlmCriticAdapter {
             .map_err(|e| SqlNodeError::ConfigError(format!("Invalid critic provider: {}", e)))?;
 
         // Build LlmProvider (holds api_key + model)
-        let llm_provider =
-            LlmProvider::new(provider_kind.clone(), self.api_key.clone(), Some(self.model.clone()))
-                .map_err(|e| {
-                    SqlNodeError::ConfigError(format!("Invalid critic LLM config: {}", e))
-                })?;
+        let llm_provider = LlmProvider::new(
+            provider_kind.clone(),
+            self.api_key.clone(),
+            Some(self.model.clone()),
+        )
+        .map_err(|e| SqlNodeError::ConfigError(format!("Invalid critic LLM config: {}", e)))?;
 
         // Build LlmConfig with low temperature for deterministic responses
         let config = LlmConfig::new(llm_provider)

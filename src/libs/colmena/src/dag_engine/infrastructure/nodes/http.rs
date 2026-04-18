@@ -232,11 +232,11 @@ impl ExecutableNode for HttpNode {
             "method",
             "headers",
             "body",
-            "query_params",        // correct key used throughout the codebase
-            "query_parameters",    // kept for backward compat
+            "query_params",     // correct key used throughout the codebase
+            "query_parameters", // kept for backward compat
             "bearer_token",
             "authorization",
-            "secure",              // internal Colmena flag — NEVER send to external APIs
+            "secure", // internal Colmena flag — NEVER send to external APIs
             "__colmena_session_id",
             "__node_id",
             "__colmena_resume_answer",

@@ -80,13 +80,10 @@ impl SqlExecutionService {
         if !validation.allowed {
             let reason = validation.block_reason.unwrap_or_default();
             // Record the blocked query as feedback
-            let _ = self.registry.record_feedback(
-                session_id,
-                query,
-                "blocked",
-                "static_validator",
-                &reason,
-            ).await;
+            let _ = self
+                .registry
+                .record_feedback(session_id, query, "blocked", "static_validator", &reason)
+                .await;
 
             return Err(SqlNodeError::Blocked {
                 rule: "static_validator".to_string(),
@@ -103,17 +100,14 @@ impl SqlExecutionService {
             let critic_result = critic.analyze(query, schema_context).await?;
 
             if !critic_result.security_ok {
-                let reason = critic_result.security_reason.unwrap_or_else(|| {
-                    "Query blocked by LLM security review.".to_string()
-                });
+                let reason = critic_result
+                    .security_reason
+                    .unwrap_or_else(|| "Query blocked by LLM security review.".to_string());
 
-                let _ = self.registry.record_feedback(
-                    session_id,
-                    query,
-                    "blocked",
-                    "llm_critic",
-                    &reason,
-                ).await;
+                let _ = self
+                    .registry
+                    .record_feedback(session_id, query, "blocked", "llm_critic", &reason)
+                    .await;
 
                 return Err(SqlNodeError::CriticRejected { reason });
             }
@@ -122,32 +116,31 @@ impl SqlExecutionService {
         }
 
         // Stage 3: Execute
-        let result = self.connection.execute_query(query, max_rows, tenant_user_id).await?;
+        let result = self
+            .connection
+            .execute_query(query, max_rows, tenant_user_id)
+            .await?;
 
         // Stage 4: Post-execution
         // Record warnings and optimization hints as feedback
         for warning in &all_warnings {
-            let _ = self.registry.record_feedback(
-                session_id,
-                query,
-                "warning",
-                "static_validator",
-                warning,
-            ).await;
+            let _ = self
+                .registry
+                .record_feedback(session_id, query, "warning", "static_validator", warning)
+                .await;
         }
         for hint in &optimization_hints {
-            let _ = self.registry.record_feedback(
-                session_id,
-                query,
-                "optimization",
-                "llm_critic",
-                hint,
-            ).await;
+            let _ = self
+                .registry
+                .record_feedback(session_id, query, "optimization", "llm_critic", hint)
+                .await;
         }
 
         // If CREATE FUNCTION, register in the function registry
         let trimmed = query.trim_start().to_uppercase();
-        if trimmed.starts_with("CREATE FUNCTION") || trimmed.starts_with("CREATE OR REPLACE FUNCTION") {
+        if trimmed.starts_with("CREATE FUNCTION")
+            || trimmed.starts_with("CREATE OR REPLACE FUNCTION")
+        {
             // Extract function name from query (basic heuristic)
             if let Some(func_name) = Self::extract_function_name(query) {
                 let comment = Self::extract_comment(query).unwrap_or_default();
@@ -173,7 +166,8 @@ impl SqlExecutionService {
 
     /// Extract function name from a CREATE FUNCTION statement (basic heuristic).
     fn extract_function_name(query: &str) -> Option<String> {
-        let re = regex::Regex::new(r"(?i)CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(\S+)\s*\(").ok()?;
+        let re =
+            regex::Regex::new(r"(?i)CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(\S+)\s*\(").ok()?;
         re.captures(query)
             .and_then(|caps| caps.get(1))
             .map(|m| m.as_str().to_string())

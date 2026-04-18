@@ -4,7 +4,7 @@ use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::ExecutableNode;
 use crate::dag_engine::infrastructure::nodes::{
     debug::*, http::*, input::*, llm::*, math::*, orchestrator::*, output::*, python_node::*,
-    socketio::*, sql::*, task_memory_writer::*, trigger::*, subgraph::*,
+    socketio::*, sql::*, subgraph::*, task_memory_writer::*, trigger::*,
 }; // Importa nuestros nodos
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -80,10 +80,7 @@ impl HashMapNodeRegistry {
             } else {
                 llm_node
             };
-            nodes.insert(
-                "llm_call".to_string(),
-                Arc::new(llm_node),
-            );
+            nodes.insert("llm_call".to_string(), Arc::new(llm_node));
 
             // --- Registrar Nodos Python ---
             nodes.insert("python_script".to_string(), Arc::new(PythonNode));
@@ -158,7 +155,10 @@ impl HashMapNodeRegistry {
                 sub_node.clone() as Arc<dyn ExecutableNode>,
             );
 
-            Self { nodes, subgraph_node: Some(sub_node) }
+            Self {
+                nodes,
+                subgraph_node: Some(sub_node),
+            }
         })
     }
 }

@@ -39,7 +39,11 @@ pub async fn run_dag(
         .await
         .map_err(|e| anyhow::anyhow!("{:?}", e))?;
 
-    let secure_value_repo = Arc::new(crate::dag_engine::infrastructure::persistence::PostgresSecureValueRepository::new(pool.clone()));
+    let secure_value_repo = Arc::new(
+        crate::dag_engine::infrastructure::persistence::PostgresSecureValueRepository::new(
+            pool.clone(),
+        ),
+    );
     secure_value_repo
         .migrate()
         .await
@@ -51,13 +55,18 @@ pub async fn run_dag(
         ),
     );
 
-    let registry = crate::dag_engine::infrastructure::registry::HashMapNodeRegistry::new_with_secure_values(
-        repository_factory,
-        Some(state_repo.clone()
-            as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),
-        Some(secure_value_service.clone()),
-    );
-    let run_use_case_arc = Arc::new(DagRunUseCase::with_secure_values_and_service(registry.clone(), Some(state_repo.clone()), secure_value_service.clone()));
+    let registry =
+        crate::dag_engine::infrastructure::registry::HashMapNodeRegistry::new_with_secure_values(
+            repository_factory,
+            Some(state_repo.clone()
+                as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),
+            Some(secure_value_service.clone()),
+        );
+    let run_use_case_arc = Arc::new(DagRunUseCase::with_secure_values_and_service(
+        registry.clone(),
+        Some(state_repo.clone()),
+        secure_value_service.clone(),
+    ));
     registry.set_subgraph_executor(run_use_case_arc.clone());
     let run_use_case = (*run_use_case_arc).clone();
 
@@ -199,13 +208,11 @@ pub async fn run_dag(
                         "delta": token
                     }))
                 }
-                DagExecutionEvent::ThinkingToken { node_id, token } => {
-                    Some(serde_json::json!({
-                        "type": "thinking-delta",
-                        "node_id": node_id,
-                        "delta": token
-                    }))
-                }
+                DagExecutionEvent::ThinkingToken { node_id, token } => Some(serde_json::json!({
+                    "type": "thinking-delta",
+                    "node_id": node_id,
+                    "delta": token
+                })),
                 DagExecutionEvent::LlmToolCall {
                     tool_id,
                     args_chunk,
@@ -325,7 +332,11 @@ pub async fn serve_dag(
         .await
         .map_err(|e| anyhow::anyhow!("{:?}", e))?;
 
-    let secure_value_repo = Arc::new(crate::dag_engine::infrastructure::persistence::PostgresSecureValueRepository::new(pool.clone()));
+    let secure_value_repo = Arc::new(
+        crate::dag_engine::infrastructure::persistence::PostgresSecureValueRepository::new(
+            pool.clone(),
+        ),
+    );
     secure_value_repo
         .migrate()
         .await
@@ -343,7 +354,11 @@ pub async fn serve_dag(
             as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),
         Some(secure_value_service.clone()),
     );
-    let run_use_case = Arc::new(DagRunUseCase::with_secure_values_and_service(registry.clone(), Some(state_repo.clone()), secure_value_service.clone()));
+    let run_use_case = Arc::new(DagRunUseCase::with_secure_values_and_service(
+        registry.clone(),
+        Some(state_repo.clone()),
+        secure_value_service.clone(),
+    ));
     registry.set_subgraph_executor(run_use_case.clone());
 
     // Load the graph
