@@ -372,9 +372,17 @@ impl SqlConnectionPort for PgPoolAdapter {
                     let name = col.name();
                     let type_name = col.type_info().name();
                     let val: Value = match type_name {
-                        "INT4" | "INT8" | "INT2" | "OID" => row
+                        "INT8" => row
                             .try_get::<i64, _>(name)
                             .map(|v| json!(v))
+                            .unwrap_or(Value::Null),
+                        "INT4" | "OID" => row
+                            .try_get::<i32, _>(name)
+                            .map(|v| json!(v as i64))
+                            .unwrap_or(Value::Null),
+                        "INT2" => row
+                            .try_get::<i16, _>(name)
+                            .map(|v| json!(v as i64))
                             .unwrap_or(Value::Null),
                         "FLOAT4" | "FLOAT8" | "NUMERIC" => row
                             .try_get::<f64, _>(name)
