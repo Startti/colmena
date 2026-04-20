@@ -22,7 +22,6 @@ use crate::skills::infrastructure::{
 use std::path::PathBuf;
 use std::sync::Weak;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct SkillLoadedLogEntry {
     skill_name: String,
@@ -871,6 +870,49 @@ impl ExecutableNode for LlmNode {
 
         if write_to_memory && !output_tasks.is_empty() {
             extra_info["all_tasks"] = json!(output_tasks);
+        }
+
+        let skills_used_summary: Option<Value> = {
+            let log = skills_used_log.lock().ok();
+            log.and_then(|entries| {
+                if entries.is_empty() {
+                    None
+                } else {
+                    use std::collections::BTreeMap;
+                    #[derive(Default)]
+                    struct Agg {
+                        source: String,
+                        references_loaded: Vec<String>,
+                        load_count: u32,
+                    }
+                    let mut agg: BTreeMap<String, Agg> = BTreeMap::new();
+                    for e in entries.iter() {
+                        let a = agg.entry(e.skill_name.clone()).or_default();
+                        a.source = e.source.clone();
+                        a.load_count += 1;
+                        if let Some(r) = &e.reference {
+                            if !a.references_loaded.contains(r) {
+                                a.references_loaded.push(r.clone());
+                            }
+                        }
+                    }
+                    let arr: Vec<Value> = agg
+                        .into_iter()
+                        .map(|(name, a)| {
+                            json!({
+                                "name": name,
+                                "source": a.source,
+                                "references_loaded": a.references_loaded,
+                                "load_count": a.load_count,
+                            })
+                        })
+                        .collect();
+                    Some(Value::Array(arr))
+                }
+            })
+        };
+        if let Some(skills_used) = skills_used_summary {
+            extra_info["skills_used"] = skills_used;
         }
 
         // Output format
