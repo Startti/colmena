@@ -74,6 +74,10 @@ base64 = "0.22.1"
 # Template resolution
 regex = "1.10"
 
+# Skills: YAML frontmatter + compile-in built-in skills
+serde_yaml = "0.9"
+include_dir = "0.7"
+
 # Socket.IO client
 rust_socketio = { version = "0.6", features = ["async"] }
 

@@ -1,5 +1,6 @@
 pub mod dag_engine;
 pub mod llm;
+pub mod skills;
 
 /// Print a debug/verbose message. No-op unless verbose mode is enabled via
 /// `--verbose` CLI flag or `COLMENA_VERBOSE=1` env variable.
