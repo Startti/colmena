@@ -102,6 +102,10 @@ Level 3 (Default): Environment variables o valores por defecto
   }
   ```
 
+#### `skills` (on-demand knowledge loading)
+
+The LLM node supports an optional `skills` config field that exposes built-in and/or user-provided markdown skill packages via a synthetic `load_skill` tool. The LLM decides at runtime which skills to activate. See [24_skills.md](24_skills.md) for the full guide.
+
 #### `instructions`
 - **Tipo:** `string` (opcional)
 - **Fuente:** `config.instructions`

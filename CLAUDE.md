@@ -42,6 +42,7 @@
     - `21_socketio_node.md` — Socket.IO node: config, ack/wait-event modes, LLM tool examples
     - `22_tool_execution_flow.md` — End-to-end tool call lifecycle: node_schema → merge → execution
     - `23_sql_node.md` — SQL node: permissions, validation pipeline, RLS, sandbox, LLM tool examples
+    - `24_skills.md` — Skills feature: built-in + user-provided markdown packages loaded on-demand via `load_skill` tool
   - `dds/` — Design documents:
     - `ARQUITECTURA_HEXAGONAL_GUIA.md`, `DAG_ENGINE_DISEÑO.md`, `DISEÑO_AGENTES_Y_TOOLS.md`
     - `MODULO_LLM_DISEÑO.md`, `RAG_DISEÑO.md`

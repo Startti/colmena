@@ -1069,6 +1069,23 @@
             }
           }
         },
+        "skills": {
+          "type": "object",
+          "required": false,
+          "description": "On-demand markdown skills. Each configured source may be empty. See developer_guide/24_skills.md.",
+          "properties": {
+            "builtin": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Names of built-in skills compiled into the crate (e.g. 'python-expert')."
+            },
+            "paths": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Paths to skill directories; relative paths resolve against the graph JSON directory, subject to the COLMENA_SKILLS_ALLOWED_DIRS whitelist."
+            }
+          }
+        },
         "session_id": {
           "type": "string",
           "required": false,
