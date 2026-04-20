@@ -197,4 +197,13 @@ mod tests {
         let names = BuiltinSkillRepository::all_available_names();
         assert!(!names.contains(&"_placeholder".to_string()));
     }
+
+    #[tokio::test]
+    async fn python_expert_is_loadable() {
+        let repo = BuiltinSkillRepository::new(&["python-expert".to_string()]).unwrap();
+        let skill = repo.load_skill("python-expert").await.unwrap();
+        assert_eq!(skill.name, "python-expert");
+        assert!(skill.body.contains("Typing"));
+        assert_eq!(skill.references.len(), 1);
+    }
 }
