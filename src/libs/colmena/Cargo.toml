@@ -74,6 +74,11 @@ base64 = "0.22.1"
 # Template resolution
 regex = "1.10"
 
+# Shared connection-pool registry (see docs/superpowers/specs/2026-04-20-connection-pool-management-design.md)
+dashmap = "6"
+lru = "0.12"
+sha2 = "0.10"
+
 # Skills: YAML frontmatter + compile-in built-in skills
 serde_yaml = "0.9"
 include_dir = "0.7"
@@ -96,5 +101,6 @@ wiremock = "0.5"
 serde_json = { version = "1.0", features = ["preserve_order"] }
 derivative = "2.2"
 tempfile = "3.10"
+serial_test = "3"
 
 
