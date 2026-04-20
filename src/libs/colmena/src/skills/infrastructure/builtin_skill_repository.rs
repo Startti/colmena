@@ -206,4 +206,24 @@ mod tests {
         assert!(skill.body.contains("Typing"));
         assert_eq!(skill.references.len(), 1);
     }
+
+    #[tokio::test]
+    async fn sql_optimizer_is_loadable() {
+        let repo = BuiltinSkillRepository::new(&["sql-optimizer".to_string()]).unwrap();
+        let skill = repo.load_skill("sql-optimizer").await.unwrap();
+        assert_eq!(skill.name, "sql-optimizer");
+        assert!(skill.body.contains("Indexes"));
+    }
+
+    #[tokio::test]
+    async fn both_builtins_can_coexist() {
+        let repo = BuiltinSkillRepository::new(&[
+            "python-expert".to_string(),
+            "sql-optimizer".to_string(),
+        ])
+        .unwrap();
+        let listed: Vec<String> = repo.list_available().into_iter().map(|e| e.name).collect();
+        assert!(listed.contains(&"python-expert".to_string()));
+        assert!(listed.contains(&"sql-optimizer".to_string()));
+    }
 }
