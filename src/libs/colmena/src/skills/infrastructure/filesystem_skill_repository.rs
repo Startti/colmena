@@ -59,13 +59,10 @@ impl FilesystemSkillRepository {
                 graph_dir.join(raw_path)
             };
 
-            let canonical =
-                path_buf
-                    .canonicalize()
-                    .map_err(|e| SkillError::Io {
-                        path: path_buf.display().to_string(),
-                        source: e,
-                    })?;
+            let canonical = path_buf.canonicalize().map_err(|e| SkillError::Io {
+                path: path_buf.display().to_string(),
+                source: e,
+            })?;
 
             // Check it's inside at least one allowed dir.
             let is_allowed = allowed.iter().any(|root| canonical.starts_with(root));
@@ -96,12 +93,11 @@ impl FilesystemSkillRepository {
                 });
             }
 
-            let md_content = std::fs::read_to_string(&skill_md_path).map_err(|e| {
-                SkillError::Io {
+            let md_content =
+                std::fs::read_to_string(&skill_md_path).map_err(|e| SkillError::Io {
                     path: skill_md_path.display().to_string(),
                     source: e,
-                }
-            })?;
+                })?;
             let parsed = parse_skill_md(&md_content, &skill_md_path.display().to_string())?;
 
             // Validate: frontmatter name must match the directory name.
@@ -143,9 +139,7 @@ impl FilesystemSkillRepository {
             }
 
             if skills.contains_key(&parsed.name) {
-                return Err(SkillError::SkillNameCollision {
-                    name: parsed.name,
-                });
+                return Err(SkillError::SkillNameCollision { name: parsed.name });
             }
 
             skills.insert(
@@ -267,12 +261,9 @@ mod tests {
         let skill_dir = graph_dir.join("my-skill");
         write(&skill_dir.join("SKILL.md"), &valid_skill_md("my-skill"));
 
-        let repo = FilesystemSkillRepository::from_paths(
-            &["./my-skill".to_string()],
-            graph_dir,
-            &[],
-        )
-        .unwrap();
+        let repo =
+            FilesystemSkillRepository::from_paths(&["./my-skill".to_string()], graph_dir, &[])
+                .unwrap();
 
         assert_eq!(repo.list_available().len(), 1);
         let skill = repo.load_skill("my-skill").await.unwrap();
@@ -319,12 +310,9 @@ mod tests {
         let skill_dir = tmp.path().join("empty-skill");
         fs::create_dir_all(&skill_dir).unwrap();
 
-        let err = FilesystemSkillRepository::from_paths(
-            &["./empty-skill".to_string()],
-            tmp.path(),
-            &[],
-        )
-        .unwrap_err();
+        let err =
+            FilesystemSkillRepository::from_paths(&["./empty-skill".to_string()], tmp.path(), &[])
+                .unwrap_err();
         assert!(matches!(err, SkillError::SkillMdMissing(_)));
     }
 
@@ -332,17 +320,11 @@ mod tests {
     async fn rejects_name_mismatch() {
         let tmp = TempDir::new().unwrap();
         let skill_dir = tmp.path().join("actual-name");
-        write(
-            &skill_dir.join("SKILL.md"),
-            &valid_skill_md("wrong-name"),
-        );
+        write(&skill_dir.join("SKILL.md"), &valid_skill_md("wrong-name"));
 
-        let err = FilesystemSkillRepository::from_paths(
-            &["./actual-name".to_string()],
-            tmp.path(),
-            &[],
-        )
-        .unwrap_err();
+        let err =
+            FilesystemSkillRepository::from_paths(&["./actual-name".to_string()], tmp.path(), &[])
+                .unwrap_err();
         assert!(matches!(err, SkillError::NameMismatch { .. }));
     }
 
@@ -393,12 +375,9 @@ mod tests {
         let skill_dir = tmp.path().join("my-skill");
         write(&skill_dir.join("SKILL.md"), &valid_skill_md("my-skill"));
 
-        let repo = FilesystemSkillRepository::from_paths(
-            &["./my-skill".to_string()],
-            tmp.path(),
-            &[],
-        )
-        .unwrap();
+        let repo =
+            FilesystemSkillRepository::from_paths(&["./my-skill".to_string()], tmp.path(), &[])
+                .unwrap();
 
         let err = repo
             .load_reference("my-skill", "whatever")
@@ -418,12 +397,9 @@ mod tests {
         );
         write(&skill_dir.join("SKILL.md"), &md);
 
-        let err = FilesystemSkillRepository::from_paths(
-            &["./big-skill".to_string()],
-            tmp.path(),
-            &[],
-        )
-        .unwrap_err();
+        let err =
+            FilesystemSkillRepository::from_paths(&["./big-skill".to_string()], tmp.path(), &[])
+                .unwrap_err();
         assert!(matches!(err, SkillError::FileTooLarge { .. }));
     }
 
@@ -433,12 +409,9 @@ mod tests {
         let file_path = tmp.path().join("not-a-dir.md");
         fs::write(&file_path, "stuff").unwrap();
 
-        let err = FilesystemSkillRepository::from_paths(
-            &["./not-a-dir.md".to_string()],
-            tmp.path(),
-            &[],
-        )
-        .unwrap_err();
+        let err =
+            FilesystemSkillRepository::from_paths(&["./not-a-dir.md".to_string()], tmp.path(), &[])
+                .unwrap_err();
         // Could fail with NotADirectory or SkillMdMissing depending on canonicalize behavior.
         // We just verify it fails.
         assert!(matches!(

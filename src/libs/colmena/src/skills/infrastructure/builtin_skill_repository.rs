@@ -44,12 +44,13 @@ impl BuiltinSkillRepository {
                 .get_file(format!("{}/SKILL.md", name))
                 .ok_or_else(|| SkillError::SkillMdMissing(name.clone()))?;
 
-            let content = skill_md.contents_utf8().ok_or_else(|| {
-                SkillError::InvalidFrontmatter {
-                    path: format!("builtin:{}/SKILL.md", name),
-                    reason: "file is not valid UTF-8".to_string(),
-                }
-            })?;
+            let content =
+                skill_md
+                    .contents_utf8()
+                    .ok_or_else(|| SkillError::InvalidFrontmatter {
+                        path: format!("builtin:{}/SKILL.md", name),
+                        reason: "file is not valid UTF-8".to_string(),
+                    })?;
 
             let path_for_errors = format!("builtin:{}/SKILL.md", name);
             let parsed = parse_skill_md(content, &path_for_errors)?;
@@ -66,12 +67,12 @@ impl BuiltinSkillRepository {
             let mut reference_bodies: HashMap<String, String> = HashMap::new();
             for r in &parsed.references {
                 let ref_path = format!("{}/references/{}.md", name, r.name);
-                let file = dir.get_file(&ref_path).ok_or_else(|| {
-                    SkillError::ReferenceFileMissing {
-                        skill: name.clone(),
-                        path: format!("builtin:{}", ref_path),
-                    }
-                })?;
+                let file =
+                    dir.get_file(&ref_path)
+                        .ok_or_else(|| SkillError::ReferenceFileMissing {
+                            skill: name.clone(),
+                            path: format!("builtin:{}", ref_path),
+                        })?;
                 let body = file
                     .contents_utf8()
                     .ok_or_else(|| SkillError::InvalidFrontmatter {

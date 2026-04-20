@@ -1,11 +1,11 @@
 // Hacemos públicos los módulos de nodos
 pub mod critic;
-pub mod llm_synthetic_tools;
 pub mod debug;
 pub mod extraction;
 pub mod http;
 pub mod input;
 pub mod llm;
+pub mod llm_synthetic_tools;
 pub mod loop_controller;
 pub mod math;
 pub mod orchestrator;

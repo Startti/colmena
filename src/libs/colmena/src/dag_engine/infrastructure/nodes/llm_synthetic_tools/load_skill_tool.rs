@@ -12,9 +12,7 @@ pub const LOAD_SKILL_TOOL_NAME: &str = "load_skill";
 /// Build the `ToolDefinition` for `load_skill`. The catalog (skill names +
 /// descriptions) is embedded directly in the tool description and the `name`
 /// parameter's `enum`, keeping the system_message untouched.
-pub fn build_load_skill_tool_definition(
-    repository: &Arc<dyn SkillRepository>,
-) -> ToolDefinition {
+pub fn build_load_skill_tool_definition(repository: &Arc<dyn SkillRepository>) -> ToolDefinition {
     let catalog = repository.list_available();
 
     let mut names: Vec<String> = catalog.iter().map(|e| e.name.clone()).collect();
@@ -89,17 +87,19 @@ pub async fn dispatch_load_skill(
     tool_call: &ToolCall,
     repository: &Arc<dyn SkillRepository>,
 ) -> Result<LoadSkillDispatchResult, LlmError> {
-    let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)
-        .map_err(|e| LlmError::InvalidToolCall {
-            reason: format!("load_skill: invalid arguments JSON: {}", e),
+    let args: serde_json::Value =
+        serde_json::from_str(&tool_call.function.arguments).map_err(|e| {
+            LlmError::InvalidToolCall {
+                reason: format!("load_skill: invalid arguments JSON: {}", e),
+            }
         })?;
 
-    let name = args
-        .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| LlmError::InvalidToolCall {
-            reason: "load_skill: missing required parameter 'name'".to_string(),
-        })?;
+    let name =
+        args.get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| LlmError::InvalidToolCall {
+                reason: "load_skill: missing required parameter 'name'".to_string(),
+            })?;
     let reference = args
         .get("reference")
         .and_then(|v| v.as_str())
@@ -187,10 +187,10 @@ pub fn into_tool_result(call_id: &str, r: &LoadSkillDispatchResult) -> ToolResul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::domain::tools::{FunctionCall, ToolCall};
     use crate::skills::domain::{
         Skill, SkillCatalogEntry, SkillError, SkillReference, SkillReferenceMeta, SkillSource,
     };
-    use crate::llm::domain::tools::{FunctionCall, ToolCall};
     use async_trait::async_trait;
 
     struct FakeRepo;

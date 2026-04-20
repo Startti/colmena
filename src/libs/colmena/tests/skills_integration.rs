@@ -44,12 +44,8 @@ async fn mixing_builtin_and_path_skills_works() {
     let builtin: Arc<dyn SkillRepository> =
         Arc::new(BuiltinSkillRepository::new(&["python-expert".to_string()]).unwrap());
     let filesystem: Arc<dyn SkillRepository> = Arc::new(
-        FilesystemSkillRepository::from_paths(
-            &["./company-context".to_string()],
-            tmp.path(),
-            &[],
-        )
-        .unwrap(),
+        FilesystemSkillRepository::from_paths(&["./company-context".to_string()], tmp.path(), &[])
+            .unwrap(),
     );
     let composite = CompositeSkillRepository::new(builtin, filesystem).unwrap();
 
@@ -79,12 +75,8 @@ async fn colliding_names_in_builtin_and_path_fails_at_construction() {
     let builtin: Arc<dyn SkillRepository> =
         Arc::new(BuiltinSkillRepository::new(&["python-expert".to_string()]).unwrap());
     let filesystem: Arc<dyn SkillRepository> = Arc::new(
-        FilesystemSkillRepository::from_paths(
-            &["./python-expert".to_string()],
-            tmp.path(),
-            &[],
-        )
-        .unwrap(),
+        FilesystemSkillRepository::from_paths(&["./python-expert".to_string()], tmp.path(), &[])
+            .unwrap(),
     );
 
     let err = CompositeSkillRepository::new(builtin, filesystem).unwrap_err();

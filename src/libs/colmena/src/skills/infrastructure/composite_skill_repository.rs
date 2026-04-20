@@ -46,7 +46,7 @@ impl CompositeSkillRepository {
             .collect();
 
         // Detect collisions between builtin and filesystem.
-        for name in builtin_names.intersection(&filesystem_names) {
+        if let Some(name) = builtin_names.intersection(&filesystem_names).next() {
             return Err(SkillError::SkillNameCollision { name: name.clone() });
         }
 
@@ -91,7 +91,9 @@ impl SkillRepository for CompositeSkillRepository {
         reference_name: &str,
     ) -> Result<SkillReference, SkillError> {
         if self.builtin_names.contains(skill_name) {
-            self.builtin.load_reference(skill_name, reference_name).await
+            self.builtin
+                .load_reference(skill_name, reference_name)
+                .await
         } else if self.filesystem_names.contains(skill_name) {
             self.filesystem
                 .load_reference(skill_name, reference_name)
@@ -201,7 +203,13 @@ mod tests {
         let b = Arc::new(FakeRepo { entries: b_entries });
         let f = Arc::new(FakeRepo { entries: f_entries });
         let err = CompositeSkillRepository::new(b, f).unwrap_err();
-        assert!(matches!(err, SkillError::TooManySkills { count: 60, limit: 50 }));
+        assert!(matches!(
+            err,
+            SkillError::TooManySkills {
+                count: 60,
+                limit: 50
+            }
+        ));
     }
 
     #[tokio::test]

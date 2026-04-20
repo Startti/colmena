@@ -19,11 +19,7 @@ pub enum SkillError {
     SkillMdMissing(String),
 
     #[error("file too large: {path} ({size} bytes, limit {limit})")]
-    FileTooLarge {
-        path: String,
-        size: u64,
-        limit: u64,
-    },
+    FileTooLarge { path: String, size: u64, limit: u64 },
 
     #[error("invalid frontmatter in {path}: {reason}")]
     InvalidFrontmatter { path: String, reason: String },

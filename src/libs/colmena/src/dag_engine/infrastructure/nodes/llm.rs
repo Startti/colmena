@@ -95,9 +95,7 @@ impl LlmNode {
         config: &Value,
         inputs: &NodeInputs,
     ) -> Result<Option<Arc<dyn SkillRepository>>, String> {
-        let raw_val = inputs
-            .get("skills")
-            .or_else(|| config.get("skills"));
+        let raw_val = inputs.get("skills").or_else(|| config.get("skills"));
         let raw_val = match raw_val {
             Some(v) => v,
             None => return Ok(None),

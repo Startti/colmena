@@ -43,11 +43,9 @@ pub fn parse_skill_md(content: &str, path: &str) -> Result<ParsedSkillMd, SkillE
 
     // Find the closing "---" line. We search for a line that is exactly "---".
     // Strategy: skip the first "---\n", then look for "\n---\n" (or "\n---" at EOF).
-    let after_first = if content.starts_with("---\r\n") {
-        &content[5..]
-    } else {
-        &content[4..]
-    };
+    let after_first = content
+        .strip_prefix("---\r\n")
+        .unwrap_or_else(|| &content[4..]);
 
     // Locate end-of-frontmatter: look for a line containing only "---".
     let mut end_idx: Option<usize> = None;

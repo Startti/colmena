@@ -33,6 +33,14 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Callback fired when a `load_skill` tool call succeeds, carrying the dispatched
+/// skill payload so the enclosing LLM node can emit observability events.
+pub type SkillObserver = Arc<
+    dyn Fn(&crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::LoadSkillDispatchResult)
+        + Send
+        + Sync,
+>;
+
 /// Executes DAG nodes on behalf of LLM tool calls.
 ///
 /// Constructed via [`DagToolExecutor::new`] and optionally configured with
@@ -50,7 +58,7 @@ pub struct DagToolExecutor {
     /// tool-configuration path. An optional observer callback receives SkillLoaded
     /// metadata so the enclosing LlmNode can emit SSE events.
     skill_repository: Option<Arc<dyn crate::skills::domain::SkillRepository>>,
-    skill_observer: Option<Arc<dyn Fn(&crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::LoadSkillDispatchResult) + Send + Sync>>,
+    skill_observer: Option<SkillObserver>,
 }
 
 impl DagToolExecutor {
@@ -136,10 +144,7 @@ impl DagToolExecutor {
     }
 
     /// Attach an observer callback that fires after a successful `load_skill` dispatch.
-    pub fn with_skill_observer(
-        mut self,
-        cb: Arc<dyn Fn(&crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::LoadSkillDispatchResult) + Send + Sync>,
-    ) -> Self {
+    pub fn with_skill_observer(mut self, cb: SkillObserver) -> Self {
         self.skill_observer = Some(cb);
         self
     }
@@ -349,11 +354,12 @@ impl ToolExecutor for DagToolExecutor {
         };
 
         if tool_call.function.name == LOAD_SKILL_TOOL_NAME {
-            let repo = self.skill_repository.as_ref().ok_or_else(|| {
-                LlmError::ToolNotFound {
+            let repo = self
+                .skill_repository
+                .as_ref()
+                .ok_or_else(|| LlmError::ToolNotFound {
                     name: LOAD_SKILL_TOOL_NAME.to_string(),
-                }
-            })?;
+                })?;
             let result = dispatch_load_skill(tool_call, repo).await?;
             if let Some(obs) = &self.skill_observer {
                 obs(&result);
@@ -1441,25 +1447,18 @@ mod tests {
                     source: SkillSource::Builtin,
                 })
             }
-            async fn load_reference(
-                &self,
-                _: &str,
-                _: &str,
-            ) -> Result<SkillReference, SkillError> {
+            async fn load_reference(&self, _: &str, _: &str) -> Result<SkillReference, SkillError> {
                 Err(SkillError::SkillNotFound("x".into()))
             }
         }
 
         let registry = Arc::new(MockRegistry::new());
-        let executor = DagToolExecutor::new(registry, HashMap::new())
-            .with_skills(Arc::new(TinyRepo));
+        let executor =
+            DagToolExecutor::new(registry, HashMap::new()).with_skills(Arc::new(TinyRepo));
 
         let call = ToolCall::new(
             "c1".to_string(),
-            FunctionCall::new(
-                "load_skill".to_string(),
-                r#"{"name":"x"}"#.to_string(),
-            ),
+            FunctionCall::new("load_skill".to_string(), r#"{"name":"x"}"#.to_string()),
         );
 
         let result = executor.execute(&call).await.unwrap();
