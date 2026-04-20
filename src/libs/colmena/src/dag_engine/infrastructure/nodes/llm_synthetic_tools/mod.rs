@@ -5,5 +5,6 @@
 pub mod load_skill_tool;
 
 pub use load_skill_tool::{
-    build_load_skill_tool_definition, dispatch_load_skill, LOAD_SKILL_TOOL_NAME,
+    build_load_skill_tool_definition, dispatch_load_skill, into_tool_result,
+    LoadSkillDispatchResult, LOAD_SKILL_TOOL_NAME,
 };

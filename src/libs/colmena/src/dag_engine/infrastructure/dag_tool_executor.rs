@@ -45,6 +45,12 @@ pub struct DagToolExecutor {
     secure_value_service: Option<Arc<SecureValueService>>,
     /// Session ID used to scope secret lookup.
     session_id: Option<String>,
+    /// Optional skill repository. When present, the executor intercepts `load_skill`
+    /// tool calls and dispatches them to this repository instead of the normal
+    /// tool-configuration path. An optional observer callback receives SkillLoaded
+    /// metadata so the enclosing LlmNode can emit SSE events.
+    skill_repository: Option<Arc<dyn crate::skills::domain::SkillRepository>>,
+    skill_observer: Option<Arc<dyn Fn(&crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::LoadSkillDispatchResult) + Send + Sync>>,
 }
 
 impl DagToolExecutor {
@@ -104,6 +110,8 @@ impl DagToolExecutor {
             tool_configurations,
             secure_value_service: None,
             session_id: None,
+            skill_repository: None,
+            skill_observer: None,
         }
     }
 
@@ -115,6 +123,24 @@ impl DagToolExecutor {
     ) -> Self {
         self.secure_value_service = Some(secure_value_service);
         self.session_id = Some(session_id);
+        self
+    }
+
+    /// Attach a SkillRepository so `load_skill` tool calls are handled.
+    pub fn with_skills(
+        mut self,
+        repository: Arc<dyn crate::skills::domain::SkillRepository>,
+    ) -> Self {
+        self.skill_repository = Some(repository);
+        self
+    }
+
+    /// Attach an observer callback that fires after a successful `load_skill` dispatch.
+    pub fn with_skill_observer(
+        mut self,
+        cb: Arc<dyn Fn(&crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::LoadSkillDispatchResult) + Send + Sync>,
+    ) -> Self {
+        self.skill_observer = Some(cb);
         self
     }
 
@@ -318,6 +344,23 @@ impl DagToolExecutor {
 impl ToolExecutor for DagToolExecutor {
     #[allow(deprecated)]
     async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, LlmError> {
+        use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
+            dispatch_load_skill, into_tool_result, LOAD_SKILL_TOOL_NAME,
+        };
+
+        if tool_call.function.name == LOAD_SKILL_TOOL_NAME {
+            let repo = self.skill_repository.as_ref().ok_or_else(|| {
+                LlmError::ToolNotFound {
+                    name: LOAD_SKILL_TOOL_NAME.to_string(),
+                }
+            })?;
+            let result = dispatch_load_skill(tool_call, repo).await?;
+            if let Some(obs) = &self.skill_observer {
+                obs(&result);
+            }
+            return Ok(into_tool_result(&tool_call.id, &result));
+        }
+
         let node_type = &tool_call.function.name;
 
         // 1. Check if it's a configured tool or a raw node.
@@ -1370,6 +1413,58 @@ mod tests {
 
         let x_request_prop = &tool_def.parameters.properties["X-Request-ID"];
         assert!(x_request_prop.description.contains("headers"));
+    }
+
+    #[tokio::test]
+    async fn intercepts_load_skill_when_repository_attached() {
+        use crate::skills::domain::{
+            Skill, SkillCatalogEntry, SkillError, SkillReference, SkillRepository, SkillSource,
+        };
+        use async_trait::async_trait;
+
+        struct TinyRepo;
+        #[async_trait]
+        impl SkillRepository for TinyRepo {
+            fn list_available(&self) -> Vec<SkillCatalogEntry> {
+                vec![SkillCatalogEntry {
+                    name: "x".into(),
+                    description: "d".into(),
+                    source: SkillSource::Builtin,
+                }]
+            }
+            async fn load_skill(&self, name: &str) -> Result<Skill, SkillError> {
+                Ok(Skill {
+                    name: name.into(),
+                    description: "d".into(),
+                    body: "BODY".into(),
+                    references: vec![],
+                    source: SkillSource::Builtin,
+                })
+            }
+            async fn load_reference(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<SkillReference, SkillError> {
+                Err(SkillError::SkillNotFound("x".into()))
+            }
+        }
+
+        let registry = Arc::new(MockRegistry::new());
+        let executor = DagToolExecutor::new(registry, HashMap::new())
+            .with_skills(Arc::new(TinyRepo));
+
+        let call = ToolCall::new(
+            "c1".to_string(),
+            FunctionCall::new(
+                "load_skill".to_string(),
+                r#"{"name":"x"}"#.to_string(),
+            ),
+        );
+
+        let result = executor.execute(&call).await.unwrap();
+        assert!(result.output.contains("BODY"));
+        assert!(result.success);
     }
 
     #[tokio::test]
