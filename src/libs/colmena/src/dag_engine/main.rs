@@ -294,6 +294,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         DagExecutionEvent::Error { message } => Some(serde_json::json!({
                             "type": "error", "errorText": message
                         })),
+                        DagExecutionEvent::SkillLoaded {
+                            node_id,
+                            tool_id,
+                            skill_name,
+                            reference,
+                            source,
+                            size_bytes,
+                        } => Some(serde_json::json!({
+                            "type": "skill-loaded",
+                            "nodeId": node_id,
+                            "toolCallId": tool_id,
+                            "skillName": skill_name,
+                            "reference": reference,
+                            "source": source,
+                            "sizeBytes": size_bytes,
+                        })),
                     };
 
                     if let Some(line) = protocol_line {
