@@ -78,6 +78,8 @@ When you need to understand or modify any node (HTTP, LLM, orchestrator, etc.):
 ```
 Or activate it first: `source .venv/bin/activate`
 
+**IMPORTANT — LLM API keys:** The project `.env` at repo root contains API keys for OpenAI, Anthropic, and Gemini (env vars: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`). Source it (`source .env` or `set -a; source .env; set +a`) before running graphs that hit real providers, e.g. `tests/graphs/agents/llm_call.json`. Do NOT commit or print the key values.
+
 **IMPORTANT — Cargo package name:** The crate is named `colmena_dag_engine` (NOT `colmena`). When running tests for a specific module use:
 ```bash
 cargo test --lib <module_name>                    # Run all tests matching module
