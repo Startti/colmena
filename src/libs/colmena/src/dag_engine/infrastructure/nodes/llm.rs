@@ -13,8 +13,22 @@ use std::sync::Arc;
 
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
+use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::build_load_skill_tool_definition;
 use crate::llm::application::AgentService;
+use crate::skills::domain::{SkillRepository, SkillsConfig};
+use crate::skills::infrastructure::{
+    BuiltinSkillRepository, CompositeSkillRepository, FilesystemSkillRepository,
+};
+use std::path::PathBuf;
 use std::sync::Weak;
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct SkillLoadedLogEntry {
+    skill_name: String,
+    reference: Option<String>,
+    source: String,
+}
 
 pub struct LlmNode {
     repository_factory: Arc<ConversationRepositoryFactory>,
@@ -60,6 +74,65 @@ impl LlmNode {
         } else {
             Ok(value.to_string())
         }
+    }
+
+    /// Parse `COLMENA_SKILLS_ALLOWED_DIRS` env var into a list of PathBufs.
+    /// Separator: `:` on Unix, `;` on Windows. Missing env var → empty list.
+    fn parse_allowed_dirs_env() -> Vec<PathBuf> {
+        let raw = match std::env::var("COLMENA_SKILLS_ALLOWED_DIRS") {
+            Ok(v) => v,
+            Err(_) => return Vec::new(),
+        };
+        let separator = if cfg!(windows) { ';' } else { ':' };
+        raw.split(separator)
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .collect()
+    }
+
+    /// Build a SkillRepository from the parsed config. Returns `None` if no skills are configured.
+    /// Returns `Err(String)` on any validation failure — this must abort graph execution.
+    fn build_skill_repository_from_config(
+        config: &Value,
+        inputs: &NodeInputs,
+    ) -> Result<Option<Arc<dyn SkillRepository>>, String> {
+        let raw_val = inputs
+            .get("skills")
+            .or_else(|| config.get("skills"));
+        let raw_val = match raw_val {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let skills_config = SkillsConfig::from_value(raw_val)
+            .map_err(|e| format!("invalid 'skills' config: {}", e))?;
+        if !skills_config.has_any() {
+            return Ok(None);
+        }
+
+        // Determine graph directory.
+        // Prefer __colmena_graph_path from inputs (injected upstream by the runner);
+        // fall back to current working directory.
+        let graph_dir: PathBuf = inputs
+            .get("__colmena_graph_path")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+        let allowed = Self::parse_allowed_dirs_env();
+
+        let builtin: Arc<dyn SkillRepository> = Arc::new(
+            BuiltinSkillRepository::new(&skills_config.builtin)
+                .map_err(|e| format!("loading builtin skills: {}", e))?,
+        );
+        let filesystem: Arc<dyn SkillRepository> = Arc::new(
+            FilesystemSkillRepository::from_paths(&skills_config.paths, &graph_dir, &allowed)
+                .map_err(|e| format!("loading filesystem skills: {}", e))?,
+        );
+        let composite = CompositeSkillRepository::new(builtin, filesystem)
+            .map_err(|e| format!("composing skill repositories: {}", e))?;
+        Ok(Some(Arc::new(composite)))
     }
 
     /// Resolve all ${var} placeholders (context, trigger, node outputs, etc.)
@@ -473,14 +546,55 @@ impl ExecutableNode for LlmNode {
             }
         }
 
+        // Build skill repository (if configured).
+        let skill_repo: Option<Arc<dyn SkillRepository>> =
+            Self::build_skill_repository_from_config(config, inputs)?;
+
+        // Track skills loaded across the entire node execution (for summary).
+        let skills_used_log: Arc<std::sync::Mutex<Vec<SkillLoadedLogEntry>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+
         let tool_executor = {
-            let executor = DagToolExecutor::new(registry, tool_configurations);
+            let mut executor = DagToolExecutor::new(registry, tool_configurations);
             // Propagate SecureValueService + session_id so tool calls decrypt secrets.
             if let (Some(svc), Some(sid)) = (self.secure_value_service.clone(), session_id) {
-                executor.with_secure_values(svc, sid.to_string())
-            } else {
-                executor
+                executor = executor.with_secure_values(svc, sid.to_string());
             }
+            if let Some(repo) = skill_repo.clone() {
+                executor = executor.with_skills(repo.clone());
+
+                let log_clone = skills_used_log.clone();
+                let observer_clone = _observer.clone();
+                executor = executor.with_skill_observer(Arc::new(
+                    move |result: &crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::LoadSkillDispatchResult| {
+                        if let Ok(mut log) = log_clone.lock() {
+                            log.push(SkillLoadedLogEntry {
+                                skill_name: result.skill_name.clone(),
+                                reference: result.reference.clone(),
+                                source: match result.source {
+                                    crate::skills::domain::SkillSource::Builtin => "builtin".to_string(),
+                                    crate::skills::domain::SkillSource::Path => "path".to_string(),
+                                },
+                            });
+                        }
+                        if let Some(obs) = &observer_clone {
+                            obs.on_event(
+                                crate::dag_engine::domain::observer::NodeEvent::SkillLoaded {
+                                    tool_id: String::new(),
+                                    skill_name: result.skill_name.clone(),
+                                    reference: result.reference.clone(),
+                                    source: match result.source {
+                                        crate::skills::domain::SkillSource::Builtin => "builtin".to_string(),
+                                        crate::skills::domain::SkillSource::Path => "path".to_string(),
+                                    },
+                                    size_bytes: result.size_bytes,
+                                },
+                            );
+                        }
+                    },
+                ));
+            }
+            executor
         };
 
         // Create AgentService
@@ -539,7 +653,7 @@ impl ExecutableNode for LlmNode {
             .get("enabled_tools")
             .or_else(|| config.get("enabled_tools"));
 
-        let tools = if let Some(enabled) = enabled_tools_config {
+        let mut tools = if let Some(enabled) = enabled_tools_config {
             // Get all available tools from the executor
             let all_tools = tool_executor.available_tools().await;
             if let Some(wildcard) = enabled.as_str() {
@@ -571,6 +685,10 @@ impl ExecutableNode for LlmNode {
             // No tools enabled
             Vec::new()
         };
+
+        if let Some(repo) = skill_repo.as_ref() {
+            tools.push(build_load_skill_tool_definition(repo));
+        }
 
         // 2.2 Add System Message if present and history is empty.
         // When tools are enabled, append a pre-baked tool-use instruction block so the user
