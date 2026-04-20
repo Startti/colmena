@@ -67,4 +67,15 @@ pub enum DagExecutionEvent {
     /// provider names for cost/audit visibility.
     #[serde(rename = "graph_usage_summary")]
     GraphUsageSummary { entries: Vec<Value> },
+    /// Emitted when the load_skill synthetic tool successfully loads a skill or reference.
+    /// Fires alongside llm_tool_call_start/finish so frontends can render a skill-specific UI.
+    #[serde(rename = "skill_loaded")]
+    SkillLoaded {
+        node_id: String,
+        tool_id: String,
+        skill_name: String,
+        reference: Option<String>,
+        source: String,
+        size_bytes: usize,
+    },
 }

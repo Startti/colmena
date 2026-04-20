@@ -24,6 +24,15 @@ pub enum NodeEvent {
         success: bool,
         output: String,
     },
+    /// Emitted when the load_skill synthetic tool successfully loads a skill or reference.
+    /// Fires in addition to LlmToolCallStart/Finish so frontends can render a skill-specific UI.
+    SkillLoaded {
+        tool_id: String,
+        skill_name: String,
+        reference: Option<String>,
+        source: String, // "builtin" | "path"
+        size_bytes: usize,
+    },
     LlmMessageStart,
     LlmMessageFinish(Option<crate::llm::domain::LlmUsage>),
     /// Streaming token from an internal "thinking" LLM call (planner, critic, reactor, agent subgraphs).
@@ -38,4 +47,26 @@ pub enum NodeEvent {
 
 pub trait ExecutionObserver: Send + Sync {
     fn on_event(&self, event: NodeEvent);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skill_loaded_variant_constructible() {
+        let ev = NodeEvent::SkillLoaded {
+            tool_id: "call_1".to_string(),
+            skill_name: "python-expert".to_string(),
+            reference: None,
+            source: "builtin".to_string(),
+            size_bytes: 1024,
+        };
+        match ev {
+            NodeEvent::SkillLoaded { skill_name, .. } => {
+                assert_eq!(skill_name, "python-expert");
+            }
+            _ => panic!("expected SkillLoaded"),
+        }
+    }
 }

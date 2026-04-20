@@ -81,6 +81,20 @@ impl ExecutionObserver for ChildNodeObserver {
                 node_id: self.node_id.clone(),
                 token,
             },
+            NodeEvent::SkillLoaded {
+                tool_id,
+                skill_name,
+                reference,
+                source,
+                size_bytes,
+            } => DagExecutionEvent::SkillLoaded {
+                node_id: self.node_id.clone(),
+                tool_id,
+                skill_name,
+                reference,
+                source,
+                size_bytes,
+            },
             NodeEvent::SubgraphChildEvent(raw) => {
                 self.parent.on_event(NodeEvent::SubgraphChildEvent(raw));
                 return;
