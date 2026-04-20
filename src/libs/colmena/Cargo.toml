@@ -95,5 +95,6 @@ mockall = "0.11"
 wiremock = "0.5"
 serde_json = { version = "1.0", features = ["preserve_order"] }
 derivative = "2.2"
+tempfile = "3.10"
 
 
