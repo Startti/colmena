@@ -14,18 +14,30 @@
       "type": "llm_call",
       "config": {
         "provider": "openai",
+        "stream": false,
         "api_key": "${OPENAI_API_KEY}",
         "model": "gpt-4o-mini",
         "system_message": "You are a helpful coding assistant. Use skills when relevant.",
         "skills": {
-          "builtin": ["python-expert", "sql-optimizer"]
+          "builtin": [
+            "python-expert",
+            "sql-optimizer"
+          ]
         }
       }
     },
-    "log": { "type": "log" }
+    "log": {
+      "type": "log"
+    }
   },
   "edges": [
-    {"from": "trigger", "to": "agent"},
-    {"from": "agent", "to": "log"}
+    {
+      "from": "trigger",
+      "to": "agent"
+    },
+    {
+      "from": "agent",
+      "to": "log"
+    }
   ]
 }
