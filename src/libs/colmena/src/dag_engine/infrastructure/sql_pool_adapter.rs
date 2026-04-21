@@ -1,61 +1,52 @@
 //! PostgreSQL connection pool adapter.
 //!
-//! Wraps `sqlx::PgPool` and implements `SqlConnectionPort`. Manages connection pooling,
-//! runtime limits (`statement_timeout`, `work_mem`), and query execution with row capping.
+//! Adapter that wraps a PostgreSQL connection pool with per-query runtime limits.
+//!
+//! Does NOT own pool creation. The caller (normally `SqlPortFactory`) must pass
+//! an `Arc<PgPool>` obtained from the shared `PgPoolRegistry`. Per-query
+//! `statement_timeout` and `work_mem` are applied via `SET LOCAL` inside every
+//! transaction, so multiple adapters can safely share a pool.
 
 use crate::dag_engine::domain::sql_errors::SqlNodeError;
 use crate::dag_engine::domain::sql_ports::{QueryResult, SqlConnectionPort, TableInfo};
 use serde_json::{json, Value};
-use sqlx::postgres::PgPoolOptions;
 use sqlx::{Column, PgPool, Row, TypeInfo};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
-/// Adapter that manages a PostgreSQL connection pool.
+/// Adapter that wraps a PostgreSQL connection pool with per-query runtime limits.
+///
+/// Does NOT own pool creation. The caller (normally `SqlPortFactory`) must pass
+/// an `Arc<PgPool>` obtained from the shared `PgPoolRegistry`. Per-query
+/// `statement_timeout` and `work_mem` are applied via `SET LOCAL` inside every
+/// transaction, so multiple adapters can safely share a pool.
 pub struct PgPoolAdapter {
-    pool: Arc<RwLock<Option<PgPool>>>,
-    statement_timeout_ms: Arc<RwLock<u64>>,
-    work_mem_mb: Arc<RwLock<u64>>,
+    pool: Arc<PgPool>,
+    statement_timeout_ms: u64,
+    work_mem_mb: u64,
 }
 
 impl PgPoolAdapter {
+    pub fn new(pool: Arc<PgPool>, statement_timeout_ms: u64, work_mem_mb: u64) -> Self {
+        Self {
+            pool,
+            statement_timeout_ms,
+            work_mem_mb,
+        }
+    }
+
+    /// Shared reference to the underlying pool — used by `PgRegistryAdapter`
+    /// (sandbox function registry) to reuse the same connections.
+    pub fn pool(&self) -> Arc<PgPool> {
+        self.pool.clone()
+    }
+
     /// Quote a SQL identifier to prevent injection (equivalent to PostgreSQL's quote_ident).
     fn quote_ident(s: &str) -> String {
         format!("\"{}\"", s.replace('"', "\"\""))
     }
 
-    pub fn new() -> Self {
-        Self {
-            pool: Arc::new(RwLock::new(None)),
-            statement_timeout_ms: Arc::new(RwLock::new(30_000)),
-            work_mem_mb: Arc::new(RwLock::new(64)),
-        }
-    }
-
-    /// Get a reference to the underlying pool lock for sharing with other adapters.
-    pub fn pool_ref(&self) -> Arc<RwLock<Option<PgPool>>> {
-        self.pool.clone()
-    }
-
-    /// Get a reference to the pool, returning an error if not initialized.
-    async fn get_pool(&self) -> Result<PgPool, SqlNodeError> {
-        let guard = self.pool.read().await;
-        guard.clone().ok_or_else(|| {
-            SqlNodeError::ConnectionError("Pool not initialized. Call connect() first.".to_string())
-        })
-    }
-}
-
-impl Default for PgPoolAdapter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PgPoolAdapter {
     /// Check if RLS is enabled on a table.
     pub async fn is_rls_enabled(&self, schema: &str, table: &str) -> Result<bool, SqlNodeError> {
-        let pool = self.get_pool().await?;
         let row = sqlx::query(
             "SELECT c.relrowsecurity \
              FROM pg_catalog.pg_class c \
@@ -64,7 +55,7 @@ impl PgPoolAdapter {
         )
         .bind(schema)
         .bind(table)
-        .fetch_optional(&pool)
+        .fetch_optional(&*self.pool)
         .await
         .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to check RLS status: {}", e)))?;
 
@@ -80,7 +71,6 @@ impl PgPoolAdapter {
         table: &str,
         column: &str,
     ) -> Result<bool, SqlNodeError> {
-        let pool = self.get_pool().await?;
         let row = sqlx::query(
             "SELECT 1 FROM information_schema.columns \
              WHERE table_schema = $1 AND table_name = $2 AND column_name = $3",
@@ -88,7 +78,7 @@ impl PgPoolAdapter {
         .bind(schema)
         .bind(table)
         .bind(column)
-        .fetch_optional(&pool)
+        .fetch_optional(&*self.pool)
         .await
         .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to check column: {}", e)))?;
 
@@ -102,7 +92,6 @@ impl PgPoolAdapter {
         table: &str,
         policy_name: &str,
     ) -> Result<bool, SqlNodeError> {
-        let pool = self.get_pool().await?;
         let row = sqlx::query(
             "SELECT 1 FROM pg_policies \
              WHERE schemaname = $1 AND tablename = $2 AND policyname = $3",
@@ -110,7 +99,7 @@ impl PgPoolAdapter {
         .bind(schema)
         .bind(table)
         .bind(policy_name)
-        .fetch_optional(&pool)
+        .fetch_optional(&*self.pool)
         .await
         .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to check policy: {}", e)))?;
 
@@ -124,12 +113,11 @@ impl PgPoolAdapter {
         table: &str,
         tenant_column: &str,
     ) -> Result<(), SqlNodeError> {
-        let pool = self.get_pool().await?;
         let sql = format!(
             "ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS {} TEXT DEFAULT current_setting('app.current_user_id')",
             Self::quote_ident(schema), Self::quote_ident(table), Self::quote_ident(tenant_column)
         );
-        sqlx::query(&sql).execute(&pool).await.map_err(|e| {
+        sqlx::query(&sql).execute(&*self.pool).await.map_err(|e| {
             SqlNodeError::ExecutionError(format!("Failed to add tenant column: {}", e))
         })?;
         Ok(())
@@ -145,7 +133,6 @@ impl PgPoolAdapter {
         table: &str,
         tenant_column: &str,
     ) -> Result<(), SqlNodeError> {
-        let pool = self.get_pool().await?;
         let has_tenant_col = self.has_column(schema, table, tenant_column).await?;
 
         // Enable RLS (idempotent — Postgres ignores if already enabled)
@@ -154,12 +141,15 @@ impl PgPoolAdapter {
             Self::quote_ident(schema),
             Self::quote_ident(table)
         );
-        sqlx::query(&enable_sql).execute(&pool).await.map_err(|e| {
-            SqlNodeError::ExecutionError(format!(
-                "Failed to enable RLS on {}.{}: {}",
-                schema, table, e
-            ))
-        })?;
+        sqlx::query(&enable_sql)
+            .execute(&*self.pool)
+            .await
+            .map_err(|e| {
+                SqlNodeError::ExecutionError(format!(
+                    "Failed to enable RLS on {}.{}: {}",
+                    schema, table, e
+                ))
+            })?;
 
         // Force RLS on the table owner too — without this, the user that
         // created the table (typically our connection role) bypasses RLS.
@@ -168,12 +158,15 @@ impl PgPoolAdapter {
             Self::quote_ident(schema),
             Self::quote_ident(table)
         );
-        sqlx::query(&force_sql).execute(&pool).await.map_err(|e| {
-            SqlNodeError::ExecutionError(format!(
-                "Failed to force RLS on {}.{}: {}",
-                schema, table, e
-            ))
-        })?;
+        sqlx::query(&force_sql)
+            .execute(&*self.pool)
+            .await
+            .map_err(|e| {
+                SqlNodeError::ExecutionError(format!(
+                    "Failed to force RLS on {}.{}: {}",
+                    schema, table, e
+                ))
+            })?;
 
         if has_tenant_col {
             let policy_name = "colmena_tenant_isolation";
@@ -188,12 +181,15 @@ impl PgPoolAdapter {
                     Self::quote_ident(tenant_column),
                     Self::quote_ident(tenant_column)
                 );
-                sqlx::query(&policy_sql).execute(&pool).await.map_err(|e| {
-                    SqlNodeError::ExecutionError(format!(
-                        "Failed to create tenant policy on {}.{}: {}",
-                        schema, table, e
-                    ))
-                })?;
+                sqlx::query(&policy_sql)
+                    .execute(&*self.pool)
+                    .await
+                    .map_err(|e| {
+                        SqlNodeError::ExecutionError(format!(
+                            "Failed to create tenant policy on {}.{}: {}",
+                            schema, table, e
+                        ))
+                    })?;
             }
 
             let default_sql = format!(
@@ -201,7 +197,7 @@ impl PgPoolAdapter {
                 Self::quote_ident(schema), Self::quote_ident(table), Self::quote_ident(tenant_column)
             );
             sqlx::query(&default_sql)
-                .execute(&pool)
+                .execute(&*self.pool)
                 .await
                 .map_err(|e| {
                     SqlNodeError::ExecutionError(format!(
@@ -223,12 +219,15 @@ impl PgPoolAdapter {
                     Self::quote_ident(schema),
                     Self::quote_ident(table)
                 );
-                sqlx::query(&policy_sql).execute(&pool).await.map_err(|e| {
-                    SqlNodeError::ExecutionError(format!(
-                        "Failed to create read-only policy on {}.{}: {}",
-                        schema, table, e
-                    ))
-                })?;
+                sqlx::query(&policy_sql)
+                    .execute(&*self.pool)
+                    .await
+                    .map_err(|e| {
+                        SqlNodeError::ExecutionError(format!(
+                            "Failed to create read-only policy on {}.{}: {}",
+                            schema, table, e
+                        ))
+                    })?;
             }
 
             println!(
@@ -263,46 +262,15 @@ impl PgPoolAdapter {
 
 #[async_trait::async_trait]
 impl SqlConnectionPort for PgPoolAdapter {
-    async fn connect(
-        &self,
-        connection_url: &str,
-        statement_timeout_ms: u64,
-        work_mem_mb: u64,
-    ) -> Result<(), SqlNodeError> {
-        let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .connect(connection_url)
-            .await
-            .map_err(|e| SqlNodeError::ConnectionError(format!("Failed to create pool: {}", e)))?;
-
-        // Apply runtime limits to verify connectivity
-        sqlx::query(&format!("SET statement_timeout = {}", statement_timeout_ms))
-            .execute(&pool)
-            .await
-            .map_err(|e| {
-                SqlNodeError::ConnectionError(format!("Failed to set statement_timeout: {}", e))
-            })?;
-
-        sqlx::query(&format!("SET work_mem = '{}MB'", work_mem_mb))
-            .execute(&pool)
-            .await
-            .map_err(|e| SqlNodeError::ConnectionError(format!("Failed to set work_mem: {}", e)))?;
-
-        *self.pool.write().await = Some(pool);
-        *self.statement_timeout_ms.write().await = statement_timeout_ms;
-        *self.work_mem_mb.write().await = work_mem_mb;
-        Ok(())
-    }
-
     async fn execute_query(
         &self,
         query: &str,
         max_rows: u64,
         tenant_user_id: Option<&str>,
     ) -> Result<QueryResult, SqlNodeError> {
-        let pool = self.get_pool().await?;
-        let timeout_ms = *self.statement_timeout_ms.read().await;
-        let work_mem = *self.work_mem_mb.read().await;
+        let pool = &*self.pool;
+        let timeout_ms = self.statement_timeout_ms;
+        let work_mem = self.work_mem_mb;
 
         let trimmed = query.trim_start().to_uppercase();
         let is_select = trimmed.starts_with("SELECT") || trimmed.starts_with("WITH");
@@ -438,7 +406,7 @@ impl SqlConnectionPort for PgPoolAdapter {
         &self,
         schemas: &[String],
     ) -> Result<Vec<TableInfo>, SqlNodeError> {
-        let pool = self.get_pool().await?;
+        let pool = &*self.pool;
 
         if schemas.is_empty() {
             return Ok(vec![]);
@@ -468,7 +436,7 @@ impl SqlConnectionPort for PgPoolAdapter {
             q = q.bind(schema);
         }
 
-        let rows = q.fetch_all(&pool).await.map_err(|e| {
+        let rows = q.fetch_all(pool).await.map_err(|e| {
             SqlNodeError::ExecutionError(format!("Failed to load table metadata: {}", e))
         })?;
 
@@ -484,9 +452,6 @@ impl SqlConnectionPort for PgPoolAdapter {
     }
 
     fn is_connected(&self) -> bool {
-        self.pool
-            .try_read()
-            .map(|guard| guard.is_some())
-            .unwrap_or(false)
+        true
     }
 }

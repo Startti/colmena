@@ -22,16 +22,23 @@ impl HashMapNodeRegistry {
     /// Construye un nuevo registro e inicializa todos los nodos estándar.
     pub fn new(
         repository_factory: Arc<ConversationRepositoryFactory>,
+        sql_port_factory: Arc<crate::dag_engine::infrastructure::sql_port_factory::SqlPortFactory>,
         task_memory_repo: Option<
             Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>,
         >,
     ) -> Arc<Self> {
-        HashMapNodeRegistry::new_with_secure_values(repository_factory, task_memory_repo, None)
+        HashMapNodeRegistry::new_with_secure_values(
+            repository_factory,
+            sql_port_factory,
+            task_memory_repo,
+            None,
+        )
     }
 
     /// Construye el registro inyectando además un SecureValueService (para Secure Values en Tool Calling).
     pub fn new_with_secure_values(
         repository_factory: Arc<ConversationRepositoryFactory>,
+        sql_port_factory: Arc<crate::dag_engine::infrastructure::sql_port_factory::SqlPortFactory>,
         task_memory_repo: Option<
             Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>,
         >,
@@ -64,7 +71,10 @@ impl HashMapNodeRegistry {
             nodes.insert("socketio_request".to_string(), Arc::new(SocketIoNode));
 
             // --- Register SQL Node ---
-            nodes.insert("sql_query".to_string(), Arc::new(SqlNode::new()));
+            nodes.insert(
+                "sql_query".to_string(),
+                Arc::new(SqlNode::new(sql_port_factory.clone())),
+            );
 
             // --- Registrar Nodos LLM ---
             // Pass the weak reference to the registry to LlmNode

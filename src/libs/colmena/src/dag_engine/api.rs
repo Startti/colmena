@@ -11,7 +11,9 @@ use std::sync::Arc;
 // Import from crate since this is part of the colmena library
 use crate::dag_engine::application::run_use_case::DagRunUseCase;
 use crate::dag_engine::domain::graph::Graph;
+use crate::dag_engine::infrastructure::pool_registry::{PoolConfig, PgPoolRegistry};
 use crate::dag_engine::infrastructure::registry::HashMapNodeRegistry;
+use crate::dag_engine::infrastructure::sql_port_factory::SqlPortFactory;
 use crate::llm::infrastructure::ConversationRepositoryFactory;
 
 pub async fn run_dag(
@@ -24,16 +26,15 @@ pub async fn run_dag(
     // Load .env file
     dotenvy::dotenv().ok();
 
-    // Initialize Database Pool
+    // Initialize Database Pool via registry (minimal patch — full migration in Commit 3)
     let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(3)
-        .connect(&db_url)
-        .await?;
+    let pool_registry = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+    let pool_arc = pool_registry.pin(&db_url).await
+        .map_err(|e| anyhow::anyhow!("Failed to create pool: {:?}", e))?;
 
     // Initialize Repository Factory and State Repo
-    let repository_factory = Arc::new(ConversationRepositoryFactory::new());
-    let state_repo = Arc::new(crate::dag_engine::infrastructure::persistence::postgres_dag_state_repository::PostgresDagStateRepository::new(pool.clone()));
+    let repository_factory = Arc::new(ConversationRepositoryFactory::new(pool_registry.clone()));
+    let state_repo = Arc::new(crate::dag_engine::infrastructure::persistence::postgres_dag_state_repository::PostgresDagStateRepository::new((*pool_arc).clone()));
     state_repo
         .migrate()
         .await
@@ -41,7 +42,7 @@ pub async fn run_dag(
 
     let secure_value_repo = Arc::new(
         crate::dag_engine::infrastructure::persistence::PostgresSecureValueRepository::new(
-            pool.clone(),
+            (*pool_arc).clone(),
         ),
     );
     secure_value_repo
@@ -55,9 +56,11 @@ pub async fn run_dag(
         ),
     );
 
+    let sql_port_factory = Arc::new(SqlPortFactory::new(pool_registry.clone()));
     let registry =
         crate::dag_engine::infrastructure::registry::HashMapNodeRegistry::new_with_secure_values(
             repository_factory,
+            sql_port_factory,
             Some(state_repo.clone()
                 as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),
             Some(secure_value_service.clone()),
@@ -315,16 +318,15 @@ pub async fn serve_dag(
     // Load .env file
     dotenvy::dotenv().ok();
 
-    // Initialize Database Pool
+    // Initialize Database Pool via registry (minimal patch — full migration in Commit 3)
     let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(3)
-        .connect(&db_url)
-        .await?;
+    let pool_registry = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+    let pool_arc = pool_registry.pin(&db_url).await
+        .map_err(|e| anyhow::anyhow!("Failed to create pool: {:?}", e))?;
 
     // Initialize Repository Factory and State Repo
-    let repository_factory = Arc::new(ConversationRepositoryFactory::new());
-    let state_repo = Arc::new(crate::dag_engine::infrastructure::persistence::postgres_dag_state_repository::PostgresDagStateRepository::new(pool.clone()));
+    let repository_factory = Arc::new(ConversationRepositoryFactory::new(pool_registry.clone()));
+    let state_repo = Arc::new(crate::dag_engine::infrastructure::persistence::postgres_dag_state_repository::PostgresDagStateRepository::new((*pool_arc).clone()));
     state_repo
         .migrate()
         .await
@@ -332,7 +334,7 @@ pub async fn serve_dag(
 
     let secure_value_repo = Arc::new(
         crate::dag_engine::infrastructure::persistence::PostgresSecureValueRepository::new(
-            pool.clone(),
+            (*pool_arc).clone(),
         ),
     );
     secure_value_repo
@@ -346,8 +348,10 @@ pub async fn serve_dag(
         ),
     );
 
+    let sql_port_factory = Arc::new(SqlPortFactory::new(pool_registry.clone()));
     let registry = HashMapNodeRegistry::new_with_secure_values(
         repository_factory,
+        sql_port_factory,
         Some(state_repo.clone()
             as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),
         Some(secure_value_service.clone()),

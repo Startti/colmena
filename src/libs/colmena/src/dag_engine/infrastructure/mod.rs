@@ -6,4 +6,5 @@ pub mod registry;
 pub mod sql_function_registry;
 pub mod sql_llm_critic;
 pub mod sql_pool_adapter;
+pub mod sql_port_factory;
 pub mod sql_static_validator;

@@ -7,40 +7,32 @@ use crate::dag_engine::domain::sql_errors::SqlNodeError;
 use crate::dag_engine::domain::sql_ports::{FunctionInfo, FunctionRegistryPort};
 use sqlx::{PgPool, Row};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// Adapter that stores function metadata and query feedback in PostgreSQL.
 pub struct PgRegistryAdapter {
-    pool: Arc<RwLock<Option<PgPool>>>,
+    pool: Arc<PgPool>,
     sandbox_schema: String,
 }
 
 impl PgRegistryAdapter {
-    pub fn new(pool: Arc<RwLock<Option<PgPool>>>, sandbox_schema: String) -> Self {
+    pub fn new(pool: Arc<PgPool>, sandbox_schema: String) -> Self {
         Self {
             pool,
             sandbox_schema,
         }
-    }
-
-    async fn get_pool(&self) -> Result<PgPool, SqlNodeError> {
-        let guard = self.pool.read().await;
-        guard
-            .clone()
-            .ok_or_else(|| SqlNodeError::ConnectionError("Pool not initialized.".to_string()))
     }
 }
 
 #[async_trait::async_trait]
 impl FunctionRegistryPort for PgRegistryAdapter {
     async fn ensure_schema(&self) -> Result<(), SqlNodeError> {
-        let pool = self.get_pool().await?;
+        let pool = &*self.pool;
         let schema = &self.sandbox_schema;
 
         // Execute each DDL statement separately — PostgreSQL doesn't allow
         // mixing DDL with COMMENT in a single multi-statement string via sqlx.
         sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {}", schema))
-            .execute(&pool)
+            .execute(pool)
             .await
             .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to create schema: {}", e)))?;
 
@@ -60,7 +52,7 @@ impl FunctionRegistryPort for PgRegistryAdapter {
             )",
             schema = schema
         ))
-        .execute(&pool)
+        .execute(pool)
         .await
         .map_err(|e| {
             SqlNodeError::ExecutionError(format!("Failed to create function_registry: {}", e))
@@ -71,7 +63,7 @@ impl FunctionRegistryPort for PgRegistryAdapter {
              'Registry of SQL functions created by AI agents in the sandbox schema'",
             schema
         ))
-        .execute(&pool)
+        .execute(pool)
         .await
         .map_err(|e| {
             SqlNodeError::ExecutionError(format!("Failed to comment on function_registry: {}", e))
@@ -89,7 +81,7 @@ impl FunctionRegistryPort for PgRegistryAdapter {
             )",
             schema = schema
         ))
-        .execute(&pool)
+        .execute(pool)
         .await
         .map_err(|e| {
             SqlNodeError::ExecutionError(format!("Failed to create query_feedback: {}", e))
@@ -100,7 +92,7 @@ impl FunctionRegistryPort for PgRegistryAdapter {
              'Feedback history from static validator and LLM critic on agent queries'",
             schema
         ))
-        .execute(&pool)
+        .execute(pool)
         .await
         .map_err(|e| {
             SqlNodeError::ExecutionError(format!("Failed to comment on query_feedback: {}", e))
@@ -114,7 +106,7 @@ impl FunctionRegistryPort for PgRegistryAdapter {
         info: &FunctionInfo,
         session_id: &str,
     ) -> Result<(), SqlNodeError> {
-        let pool = self.get_pool().await?;
+        let pool = &*self.pool;
         let schema = &self.sandbox_schema;
 
         sqlx::query(&format!(
@@ -132,7 +124,7 @@ impl FunctionRegistryPort for PgRegistryAdapter {
         .bind(&info.return_type)
         .bind(&info.description)
         .bind(session_id)
-        .execute(&pool)
+        .execute(pool)
         .await
         .map_err(|e| {
             SqlNodeError::ExecutionError(format!("Failed to register function: {}", e))
@@ -142,7 +134,7 @@ impl FunctionRegistryPort for PgRegistryAdapter {
     }
 
     async fn list_functions(&self) -> Result<Vec<FunctionInfo>, SqlNodeError> {
-        let pool = self.get_pool().await?;
+        let pool = &*self.pool;
         let schema = &self.sandbox_schema;
 
         let rows = sqlx::query(&format!(
@@ -150,7 +142,7 @@ impl FunctionRegistryPort for PgRegistryAdapter {
              FROM {}.function_registry ORDER BY function_name",
             schema
         ))
-        .fetch_all(&pool)
+        .fetch_all(pool)
         .await
         .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to list functions: {}", e)))?;
 
@@ -175,7 +167,7 @@ impl FunctionRegistryPort for PgRegistryAdapter {
         source: &str,
         message: &str,
     ) -> Result<(), SqlNodeError> {
-        let pool = self.get_pool().await?;
+        let pool = &*self.pool;
         let schema = &self.sandbox_schema;
 
         sqlx::query(&format!(
@@ -189,7 +181,7 @@ impl FunctionRegistryPort for PgRegistryAdapter {
         .bind(feedback_type)
         .bind(source)
         .bind(message)
-        .execute(&pool)
+        .execute(pool)
         .await
         .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to record feedback: {}", e)))?;
 

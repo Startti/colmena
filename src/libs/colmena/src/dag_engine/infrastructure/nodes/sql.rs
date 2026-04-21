@@ -16,28 +16,145 @@ use crate::dag_engine::domain::sql_ports::{
 use crate::dag_engine::infrastructure::sql_function_registry::PgRegistryAdapter;
 use crate::dag_engine::infrastructure::sql_llm_critic::LlmCriticAdapter;
 use crate::dag_engine::infrastructure::sql_pool_adapter::PgPoolAdapter;
+use crate::dag_engine::infrastructure::sql_port_factory::SqlPortFactory;
 use crate::dag_engine::infrastructure::sql_static_validator::StaticRuleValidator;
 use serde_json::{json, Value};
 use std::error::Error as StdError;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::RwLock;
+use tokio::sync::OnceCell;
+
+/// Holds the fully-initialized state of a `SqlNode`.
+/// Created exactly once per node instance via `OnceCell::get_or_try_init`.
+struct SqlNodeInit {
+    adapter: Arc<PgPoolAdapter>,
+    description_supplement: String,
+}
 
 pub struct SqlNode {
-    pool_adapter: Arc<PgPoolAdapter>,
-    initialized: Arc<RwLock<bool>>,
-    /// Cached metadata for LLM description injection.
-    cached_description: Arc<RwLock<Option<String>>>,
+    factory: Arc<SqlPortFactory>,
+    /// Populated atomically on the first call that needs initialization.
+    /// `OnceCell` prevents the TOCTOU race where two concurrent callers both
+    /// observe `initialized == false` and both run the expensive setup work.
+    init: OnceCell<SqlNodeInit>,
 }
 
 impl SqlNode {
-    pub fn new() -> Self {
-        let pool_adapter = Arc::new(PgPoolAdapter::new());
+    pub fn new(factory: Arc<SqlPortFactory>) -> Self {
         Self {
-            pool_adapter,
-            initialized: Arc::new(RwLock::new(false)),
-            cached_description: Arc::new(RwLock::new(None)),
+            factory,
+            init: OnceCell::new(),
         }
+    }
+
+    /// Perform the full initialization and return the result.
+    /// Called at most once — subsequent calls return the cached `SqlNodeInit`.
+    async fn get_or_init(
+        &self,
+        config: &Value,
+    ) -> Result<&SqlNodeInit, Box<dyn StdError + Send + Sync>> {
+        // We need to own config data in the closure; clone the parts we need.
+        let config_owned = config.clone();
+        self.init
+            .get_or_try_init(|| async move {
+                Self::do_initialize_inner(&self.factory, &config_owned).await
+            })
+            .await
+    }
+
+    /// Body of the initialization logic — called once by `get_or_init`.
+    async fn do_initialize_inner(
+        factory: &Arc<SqlPortFactory>,
+        config: &Value,
+    ) -> Result<SqlNodeInit, Box<dyn StdError + Send + Sync>> {
+        let connection_url_raw = config
+            .get("connection_url")
+            .and_then(|v| v.as_str())
+            .ok_or("sql_query node requires 'connection_url' in config")?;
+        let connection_url = Self::resolve_env_vars(connection_url_raw)
+            .map_err(|e| format!("Failed to resolve connection_url: {}", e))?;
+
+        let runtime_limits = config.get("runtime_limits");
+        let statement_timeout_ms = runtime_limits
+            .and_then(|r| r.get("statement_timeout_ms"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(30_000);
+        let work_mem_mb = runtime_limits
+            .and_then(|r| r.get("work_mem_mb"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(64);
+        let max_rows = runtime_limits
+            .and_then(|r| r.get("max_rows"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(100);
+
+        let permissions = SqlPermissions::from_config(config.get("permissions"))
+            .map_err(|e| format!("Invalid permissions config: {}", e))?;
+
+        // Acquire adapter from factory (gets or creates the registry pool)
+        let adapter = factory
+            .get_adapter(&connection_url, statement_timeout_ms, work_mem_mb)
+            .await
+            .map_err(|e| format!("Failed to acquire SQL pool: {}", e))?;
+
+        // Create registry adapter sharing the same pool
+        let sandbox_schema = permissions.sandbox_schema().to_string();
+        let registry = PgRegistryAdapter::new(adapter.pool(), sandbox_schema);
+
+        // ensure_schema + list_functions via trait
+        {
+            let reg: &dyn FunctionRegistryPort = &registry;
+            let _ = reg.ensure_schema().await; // Best-effort
+        }
+
+        // Load table metadata
+        let allowed_schemas: Vec<String> = config
+            .get("permissions")
+            .and_then(|p| p.get("allowed_schemas"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let tables: Vec<TableInfo> = {
+            let conn: &dyn SqlConnectionPort = adapter.as_ref();
+            conn.load_table_metadata(&allowed_schemas)
+                .await
+                .unwrap_or_default()
+        };
+
+        let functions: Vec<FunctionInfo> = {
+            let reg: &dyn FunctionRegistryPort = &registry;
+            reg.list_functions().await.unwrap_or_default()
+        };
+
+        let description_supplement =
+            Self::build_description_supplement(&tables, &functions, &permissions, max_rows);
+
+        // Auto-RLS setup if enabled
+        if permissions.auto_rls() {
+            println!("[SqlNode] auto_rls enabled — setting up RLS policies...");
+            let tenant_col = permissions.tenant_column();
+            for table in &tables {
+                if let Err(e) = adapter
+                    .setup_rls_for_table(&table.schema_name, &table.table_name, tenant_col)
+                    .await
+                {
+                    println!(
+                        "[SqlNode] RLS setup warning for {}.{}: {}",
+                        table.schema_name, table.table_name, e
+                    );
+                }
+            }
+        }
+
+        Ok(SqlNodeInit {
+            adapter,
+            description_supplement,
+        })
     }
 
     /// Resolve `${ENV_VAR}` in a string.
@@ -140,111 +257,15 @@ impl SqlNode {
     }
 }
 
-impl Default for SqlNode {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[async_trait::async_trait]
 impl InitializableNode for SqlNode {
     async fn initialize(
         &self,
         config: &Value,
     ) -> Result<InitContext, Box<dyn StdError + Send + Sync>> {
-        let connection_url_raw = config
-            .get("connection_url")
-            .and_then(|v| v.as_str())
-            .ok_or("sql_query node requires 'connection_url' in config")?;
-        let connection_url = Self::resolve_env_vars(connection_url_raw)
-            .map_err(|e| format!("Failed to resolve connection_url: {}", e))?;
-
-        let runtime_limits = config.get("runtime_limits");
-        let statement_timeout_ms = runtime_limits
-            .and_then(|r| r.get("statement_timeout_ms"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(30_000);
-        let work_mem_mb = runtime_limits
-            .and_then(|r| r.get("work_mem_mb"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(64);
-        let max_rows = runtime_limits
-            .and_then(|r| r.get("max_rows"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(100);
-
-        let permissions = SqlPermissions::from_config(config.get("permissions"))
-            .map_err(|e| format!("Invalid permissions config: {}", e))?;
-
-        // Connect (via trait)
-        {
-            let conn: &dyn SqlConnectionPort = &*self.pool_adapter;
-            conn.connect(&connection_url, statement_timeout_ms, work_mem_mb)
-                .await
-                .map_err(|e| format!("Failed to initialize SQL pool: {}", e))?;
-        }
-
-        // Create registry adapter sharing the same pool
-        let sandbox_schema = permissions.sandbox_schema().to_string();
-        let pool_ref = self.pool_adapter.pool_ref();
-        let registry = PgRegistryAdapter::new(pool_ref, sandbox_schema);
-
-        // ensure_schema + list_functions via trait
-        {
-            let reg: &dyn FunctionRegistryPort = &registry;
-            let _ = reg.ensure_schema().await; // Best-effort
-        }
-
-        // Load table metadata
-        let allowed_schemas: Vec<String> = config
-            .get("permissions")
-            .and_then(|p| p.get("allowed_schemas"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let tables: Vec<TableInfo> = {
-            let conn: &dyn SqlConnectionPort = &*self.pool_adapter;
-            conn.load_table_metadata(&allowed_schemas)
-                .await
-                .unwrap_or_default()
-        };
-
-        let functions: Vec<FunctionInfo> = {
-            let reg: &dyn FunctionRegistryPort = &registry;
-            reg.list_functions().await.unwrap_or_default()
-        };
-
-        let supplement =
-            Self::build_description_supplement(&tables, &functions, &permissions, max_rows);
-
-        // Auto-RLS setup if enabled
-        if permissions.auto_rls() {
-            println!("[SqlNode] auto_rls enabled — setting up RLS policies...");
-            let tenant_col = permissions.tenant_column();
-            for table in &tables {
-                if let Err(e) = self
-                    .pool_adapter
-                    .setup_rls_for_table(&table.schema_name, &table.table_name, tenant_col)
-                    .await
-                {
-                    println!(
-                        "[SqlNode] RLS setup warning for {}.{}: {}",
-                        table.schema_name, table.table_name, e
-                    );
-                }
-            }
-        }
-
-        *self.cached_description.write().await = Some(supplement.clone());
-        *self.initialized.write().await = true;
-
+        let init = self.get_or_init(config).await?;
         Ok(InitContext {
-            description_supplement: Some(supplement),
+            description_supplement: Some(init.description_supplement.clone()),
         })
     }
 }
@@ -268,13 +289,15 @@ impl ExecutableNode for SqlNode {
             .and_then(|v| v.as_str())
             .ok_or("sql_query node requires 'query' input")?;
 
-        // Lazy initialization: connect on first call if not already initialized
-        if !*self.initialized.read().await {
+        // Lazy initialization: connect on first call if not already initialized.
+        // OnceCell ensures concurrent callers wait on the same future — no TOCTOU race.
+        if self.init.get().is_none() {
             println!("[SqlNode] First call — initializing connection pool...");
-            self.initialize(&effective_config)
-                .await
-                .map_err(|e| format!("SqlNode initialization failed: {}", e))?;
         }
+        let init = self
+            .get_or_init(&effective_config)
+            .await
+            .map_err(|e| format!("SqlNode initialization failed: {}", e))?;
 
         let permissions = SqlPermissions::from_config(effective_config.get("permissions"))
             .map_err(|e| format!("Invalid permissions: {}", e))?;
@@ -330,25 +353,19 @@ impl ExecutableNode for SqlNode {
             };
 
         let sandbox_schema = permissions.sandbox_schema().to_string();
-        let pool_ref = self.pool_adapter.pool_ref();
-        let registry = Arc::new(PgRegistryAdapter::new(pool_ref, sandbox_schema))
+        let adapter = init.adapter.clone();
+        let registry = Arc::new(PgRegistryAdapter::new(adapter.pool(), sandbox_schema))
             as Arc<dyn crate::dag_engine::domain::sql_ports::FunctionRegistryPort>;
 
         let service = SqlExecutionService::new(
-            self.pool_adapter.clone()
-                as Arc<dyn crate::dag_engine::domain::sql_ports::SqlConnectionPort>,
+            adapter.clone() as Arc<dyn crate::dag_engine::domain::sql_ports::SqlConnectionPort>,
             validator,
             critic,
             registry,
         );
 
         let session_id = Self::new_session_id();
-        let schema_context = self
-            .cached_description
-            .read()
-            .await
-            .clone()
-            .unwrap_or_default();
+        let schema_context = init.description_supplement.clone();
 
         println!("[SqlNode] Executing: {}", &query[..query.len().min(100)]);
 
@@ -377,8 +394,7 @@ impl ExecutableNode for SqlNode {
                             "[SqlNode] CREATE TABLE detected — applying RLS to {}.{}",
                             schema, table
                         );
-                        if let Err(e) = self
-                            .pool_adapter
+                        if let Err(e) = adapter
                             .setup_rls_for_new_table(&schema, &table, permissions.tenant_column())
                             .await
                         {

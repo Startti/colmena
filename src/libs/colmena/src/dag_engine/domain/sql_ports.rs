@@ -50,14 +50,6 @@ pub struct TableInfo {
 /// Port for managing the PostgreSQL connection pool and executing queries.
 #[async_trait::async_trait]
 pub trait SqlConnectionPort: Send + Sync {
-    /// Create a connection pool and apply runtime limits.
-    async fn connect(
-        &self,
-        connection_url: &str,
-        statement_timeout_ms: u64,
-        work_mem_mb: u64,
-    ) -> Result<(), SqlNodeError>;
-
     /// Execute a SQL query and return results as JSON.
     /// If `tenant_user_id` is Some, runs `SET LOCAL app.current_user_id` in the same transaction.
     async fn execute_query(
