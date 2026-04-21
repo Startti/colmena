@@ -25,9 +25,11 @@ impl SqlPortFactory {
         statement_timeout_ms: u64,
         work_mem_mb: u64,
     ) -> Result<Arc<PgPoolAdapter>, SqlNodeError> {
-        let pool = self.registry.get_or_create(url).await.map_err(|e| {
-            SqlNodeError::ConnectionError(format!("pool registry: {}", e))
-        })?;
+        let pool = self
+            .registry
+            .get_or_create(url)
+            .await
+            .map_err(|e| SqlNodeError::ConnectionError(format!("pool registry: {}", e)))?;
         Ok(Arc::new(PgPoolAdapter::new(
             pool,
             statement_timeout_ms,

@@ -41,13 +41,13 @@ impl ConversationRepositoryFactory {
         let repo: Arc<dyn ConversationRepository> = if connection_url.starts_with("postgres://")
             || connection_url.starts_with("postgresql://")
         {
-            let pool_arc =
-                self.registry
-                    .get_or_create(connection_url)
-                    .await
-                    .map_err(|e| LlmError::RequestFailed {
-                        message: format!("Failed to get Postgres pool: {}", e),
-                    })?;
+            let pool_arc = self
+                .registry
+                .get_or_create(connection_url)
+                .await
+                .map_err(|e| LlmError::RequestFailed {
+                    message: format!("Failed to get Postgres pool: {}", e),
+                })?;
 
             // Run migrations (ignore missing: the DB may have old migrations
             // that no longer exist on disk from previous schema consolidations).
