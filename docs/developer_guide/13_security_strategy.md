@@ -725,6 +725,57 @@ A: For MVP yes (AES-256 via PostgreSQL pgcrypto). For high-security scenarios, i
 
 ---
 
+## Transport Security (TLS / SSL)
+
+Este bloque resume el estado real del cifrado en tránsito para cada componente que abre sockets salientes.
+
+### Postgres (`PgPoolRegistry`)
+
+- sqlx 0.8 se compila con `runtime-tokio-rustls` — TLS disponible out-of-the-box, sin OpenSSL nativo.
+- El pool crea conexiones con `.connect(url)`. El modo TLS se elige por query param:
+
+  | `sslmode` | Qué hace |
+  |-----------|----------|
+  | omitido | `prefer`: intenta TLS, cae a plaintext |
+  | `require` | Cifrado obligatorio, cert no validado |
+  | `verify-ca` | Cifrado + valida CA (necesita `sslrootcert`) |
+  | `verify-full` | `verify-ca` + valida hostname — **recomendado en producción** |
+
+- `UrlKey::normalize` preserva query params, así que una URL con `sslmode=require` y otra sin él producen **pools separados** (aislamiento correcto).
+- mTLS cliente no está expuesto por el registry (requeriría usar `PgConnectOptions` directamente).
+
+### Nodo HTTP (`reqwest`)
+
+- `reqwest 0.11` con features `["json", "stream", "rustls-tls"]` y `default-features = false` — usa **rustls + webpki-roots** (bundle de CAs públicas embebido).
+- El cliente se construye con `Client::builder().http1_only().build()` — sin flags de TLS personalizadas.
+- En la práctica:
+  - HTTPS contra APIs con CA pública: ✅ funciona.
+  - Certificados self-signed o CA privada: ❌ falla. No hay opción actual para inyectar una CA.
+  - mTLS cliente: ❌ no soportado.
+- Recomendado: todo tráfico saliente del nodo HTTP debe ir por HTTPS. Los paths HTTP solo deberían aparecer en entornos locales/dev.
+
+### Nodo Socket.IO (`rust_socketio`)
+
+- `rust_socketio 0.6` — el scheme del URL decide el transporte:
+  - `https://...` → Socket.IO sobre TLS.
+  - `wss://...` → WebSocket Secure.
+  - `http://...` / `ws://...` → sin cifrado.
+- Internamente usa rustls (vía tungstenite) — mismo comportamiento que HTTP: solo CAs públicas.
+- Config expone `transport: any|websocket|polling`, pero **ninguna opción TLS custom**.
+
+### Brechas conocidas
+
+| Capacidad | Postgres | HTTP | Socket.IO |
+|-----------|:--------:|:----:|:---------:|
+| TLS con CA pública | ✅ | ✅ | ✅ |
+| `verify-full` hostname | ✅ | ✅ (default rustls) | ✅ |
+| CA privada / self-signed | ✅ vía `sslrootcert` | ❌ | ❌ |
+| mTLS (cliente con cert) | ❌ | ❌ | ❌ |
+
+Si se necesita CA privada o mTLS en HTTP/Socket.IO hay que extender la config del nodo y crear un `Client` con `ClientBuilder::add_root_certificate(...)` o `Identity::from_pem(...)`. Para Postgres existe el camino vía `PgConnectOptions` (no expuesto hoy).
+
+---
+
 ## References
 
 - [Secure Values Design](SECURE_VALUES_DESIGN.md)
@@ -732,6 +783,7 @@ A: For MVP yes (AES-256 via PostgreSQL pgcrypto). For high-security scenarios, i
 - [Secure Values Quick Reference](SECURE_VALUES_QUICK_REFERENCE.md)
 - [NODE_CONNECTION_AND_DATA_FLOW.md](NODE_CONNECTION_AND_DATA_FLOW.md)
 - [LLM Node Complete Guide](LLM_NODE_COMPLETE_GUIDE.md)
+- [Connection Pool Management spec](../superpowers/specs/2026-04-20-connection-pool-management-design.md)
 
 ---
 

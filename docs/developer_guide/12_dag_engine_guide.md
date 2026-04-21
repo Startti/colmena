@@ -504,11 +504,14 @@ curl -X POST http://localhost:3000/chat \
    - Envía el historial completo al LLM para mantener contexto
    - Guarda el nuevo mensaje y respuesta
 
-3. **Connection Pooling:**
-   - Las conexiones se cachean por `connection_url`
-   - Múltiples nodos pueden compartir la misma conexión
-   - PostgreSQL: hasta 5 conexiones concurrentes
-   - SQLite: 1 conexión (limitación de SQLite)
+3. **Connection Pooling (`PgPoolRegistry` compartido):**
+   - Todos los pools Postgres del proceso pasan por un **único registry** propiedad de `ColmenaEngine`.
+   - Una sola instancia de pool por `connection_url` — se comparte entre nodos SQL, LLM (memoria), state repository y secure values.
+   - El pool del `DATABASE_URL` del proceso queda **pinned** (exento de la política LRU).
+   - Las URLs adicionales se cachean con tope `COLMENA_POOL_MAX_ENTRIES` (default 100) y política LRU.
+   - Por defecto cada pool tiene `max_conn = 2`, `min_conn = 0`, `idle_timeout = 30s` — ajustable vía env vars (ver [`15_memory_guide.md`](./15_memory_guide.md#-pool-compartido-colmenaengine)).
+   - Endpoint de observabilidad en el worker: `GET /debug/pools` devuelve las métricas del registry sin exponer URLs (solo SHA-256 hash).
+   - SQLite: sin cambios — una conexión por base (limitación de SQLite).
 
 ### ⚠️ Consideraciones Importantes
 
@@ -1231,12 +1234,79 @@ Levanta un servidor HTTP (Axum) que expone los endpoints definidos en los nodos 
 cargo run --bin dag_engine -- serve tests/my_graph.json
 ```
 
+## 🏗️ Ciclo de vida de `ColmenaEngine`
+
+`ColmenaEngine` es el punto de entrada **process-wide** para toda ejecución de DAG. Fue introducido para eliminar la creación de pools por job que saturaba Postgres. Un único `ColmenaEngine` por proceso posee:
+
+- `PgPoolRegistry` — caché LRU de pools Postgres con pinned-exemption.
+- Pool **pinned** del `DATABASE_URL` del proceso — nunca desalojado.
+- Repositorios compartidos: `PostgresDagStateRepository`, `PostgresSecureValueRepository`.
+- Factories: `ConversationRepositoryFactory`, `SqlPortFactory` — ambos consumen el registry.
+- `DagRunUseCase` listo para ejecutar.
+
+### Boot
+
+```rust
+use colmena::dag_engine::engine::{ColmenaEngine, EngineConfig};
+
+let config = EngineConfig::from_env()?;      // lee DATABASE_URL + COLMENA_POOL_*
+let engine = ColmenaEngine::new(config).await?;
+```
+
+`ColmenaEngine::new` pin'ea el pool interno, corre las migraciones de state + secure_values sobre él, e inyecta el registry en todos los factories.
+
+### Ejecución
+
+```rust
+use futures::StreamExt;
+
+let graph: Graph = serde_json::from_str(&json)?;
+let mut stream = Box::pin(engine.execute_stream(graph, None, None, true));
+while let Some(event) = stream.next().await {
+    // manejar DagExecutionEvent
+}
+```
+
+Todos los nodos del grafo que referencian un URL Postgres pasarán por el mismo registry — si el URL coincide con el `DATABASE_URL` interno, reutilizan el pool pinned.
+
+### Shutdown
+
+Shutdown es **explícito y asíncrono** — no ocurre en `Drop`:
+
+```rust
+engine.shutdown().await;   // cierra todos los pools, idempotente
+```
+
+Patrón recomendado para propagar errores sin saltar el shutdown:
+
+```rust
+let result: Result<(), _> = async {
+    // ... ejecutar grafo ...
+    Ok(())
+}.await;
+
+engine.shutdown().await;   // se ejecuta siempre, incluso si el block devolvió Err
+result?;                   // propaga el error después del shutdown
+```
+
+Si la app termina sin llamar a `shutdown()`, el `Drop` de `ColmenaEngine` loguea `engine_dropped_without_shutdown` como warning — es señal de que los pools no se cerraron limpiamente.
+
+### Observabilidad
+
+- `snapshot = engine.registry_metrics()` — devuelve `RegistryMetrics` con `cached_pools`, `pinned_pools`, `evictions_total`, `cache_hits_total`, y `per_url[].{url_hash, size, idle, pinned}` (el URL **nunca** se expone, solo el SHA-256).
+- Eventos tracing: `engine_started`, `engine_shutdown`, `pool_created`, `pool_evicted` (warn), `engine_dropped_without_shutdown` (warn).
+- En el worker de la plataforma, estas métricas se exponen en `GET /debug/pools` como JSON.
+
+Ver la spec completa en `docs/superpowers/specs/2026-04-20-connection-pool-management-design.md` y el runbook de validación en `docs/superpowers/runbooks/connection-pool-management-validation.md`.
+
 ## 🔍 Best Practices
 
 1. **Usa `test_payload` para desarrollo**: Acelera el ciclo de desarrollo evitando levantar servidores.
 2. **Configuración dinámica**: Aprovecha `inputs > config` para crear grafos más flexibles.
 3. **Manejo de Secretos**: Nunca pongas API Keys reales en el JSON. Usa `${VAR_ENV}` o Secure Values.
 4. **Validación de Esquema**: Cada nodo valida sus entradas. Si un nodo falla, revisa que los `edges` estén enviando el tipo de dato correcto (String vs Number).
+5. **Un `ColmenaEngine` por proceso**: No instancies múltiples engines — compartirían DB pero no el registry, anulando el beneficio de reuso de pools.
+6. **Siempre llama `engine.shutdown().await`** antes de salir, incluso en error paths.
 
 ## 📚 Más Información
 

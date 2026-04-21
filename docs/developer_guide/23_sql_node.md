@@ -300,12 +300,20 @@ The critic uses a low-temperature call (`temperature: 0.0`, `max_tokens: 500`) f
 
 The SQL node implements `InitializableNode`, which runs once when the node is first loaded (either at DAG startup or on first tool call):
 
-1. **Connect** — Creates a `sqlx::PgPool` (max 5 connections) and applies runtime limits
+1. **Connect** — Obtains the pool from the shared `PgPoolRegistry` via `SqlPortFactory::get_adapter(url)`. If another node (or the internal state repository) already opened a pool for this URL, it is **reused**; otherwise a new pool is created and cached. TOCTOU-safe via `tokio::sync::OnceCell`.
 2. **Ensure sandbox** — Creates the sandbox schema and registry tables (`function_registry`, `query_feedback`)
 3. **Load metadata** — Queries `information_schema.tables` for table names and `pg_catalog.obj_description` for table comments
 4. **Load functions** — Queries `sandbox.function_registry` for registered functions
 5. **Build description supplement** — Generates a text block listing available tables, functions, permissions, and max_rows
 6. **Auto-RLS** (if enabled) — Sets up RLS policies on all existing tables
+
+### Shared-pool behavior
+
+Distintos nodos SQL con el **mismo** `connection_url` comparten el mismo `PgPoolAdapter` y por lo tanto el mismo pool sqlx. Implicaciones:
+
+- El `statement_timeout_ms` y `work_mem_mb` se aplican con `SET LOCAL` dentro de la transacción de cada query — no afectan a otras conexiones del pool.
+- Si un nodo apunta al mismo URL que el `DATABASE_URL` del proceso, reutiliza el pool **pinned** del engine.
+- Cambiar `sslmode` crea una nueva entrada (pools separados). Ver [`13_security_strategy.md`](./13_security_strategy.md#postgres-pgpoolregistry) para la tabla de modos.
 
 The **description supplement** is automatically appended to the tool's description when used as an LLM tool. This gives the LLM context about the database schema without manual configuration:
 
