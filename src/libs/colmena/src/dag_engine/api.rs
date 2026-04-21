@@ -9,12 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 // Import from crate since this is part of the colmena library
-use crate::dag_engine::application::run_use_case::DagRunUseCase;
 use crate::dag_engine::domain::graph::Graph;
-use crate::dag_engine::infrastructure::pool_registry::{PoolConfig, PgPoolRegistry};
-use crate::dag_engine::infrastructure::registry::HashMapNodeRegistry;
-use crate::dag_engine::infrastructure::sql_port_factory::SqlPortFactory;
-use crate::llm::infrastructure::ConversationRepositoryFactory;
 
 pub async fn run_dag(
     file_path: String,
@@ -23,290 +18,254 @@ pub async fn run_dag(
     inject_payload: Option<Value>,
     include_extra_info: bool,
 ) -> Result<Value, Box<dyn std::error::Error>> {
-    // Load .env file
     dotenvy::dotenv().ok();
 
-    // Initialize Database Pool via registry (minimal patch — full migration in Commit 3)
-    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool_registry = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
-    let pool_arc = pool_registry.pin(&db_url).await
-        .map_err(|e| anyhow::anyhow!("Failed to create pool: {:?}", e))?;
-
-    // Initialize Repository Factory and State Repo
-    let repository_factory = Arc::new(ConversationRepositoryFactory::new(pool_registry.clone()));
-    let state_repo = Arc::new(crate::dag_engine::infrastructure::persistence::postgres_dag_state_repository::PostgresDagStateRepository::new((*pool_arc).clone()));
-    state_repo
-        .migrate()
+    let engine_config = crate::dag_engine::engine::EngineConfig::from_env()
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    let engine = crate::dag_engine::engine::ColmenaEngine::new(engine_config)
         .await
-        .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
-    let secure_value_repo = Arc::new(
-        crate::dag_engine::infrastructure::persistence::PostgresSecureValueRepository::new(
-            (*pool_arc).clone(),
-        ),
-    );
-    secure_value_repo
-        .migrate()
-        .await
-        .map_err(|e| anyhow::anyhow!("Secure values migration failed: {:?}", e))?;
+    let result: Result<Value, Box<dyn std::error::Error>> = async {
+        // Load and execute the graph
+        let file_content = tokio::fs::read_to_string(&file_path).await?;
+        let mut graph: Graph = serde_json::from_str(&file_content)?;
 
-    let secure_value_service = Arc::new(
-        crate::dag_engine::application::secure_value_service::SecureValueService::new(
-            secure_value_repo,
-        ),
-    );
-
-    let sql_port_factory = Arc::new(SqlPortFactory::new(pool_registry.clone()));
-    let registry =
-        crate::dag_engine::infrastructure::registry::HashMapNodeRegistry::new_with_secure_values(
-            repository_factory,
-            sql_port_factory,
-            Some(state_repo.clone()
-                as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),
-            Some(secure_value_service.clone()),
-        );
-    let run_use_case_arc = Arc::new(DagRunUseCase::with_secure_values_and_service(
-        registry.clone(),
-        Some(state_repo.clone()),
-        secure_value_service.clone(),
-    ));
-    registry.set_subgraph_executor(run_use_case_arc.clone());
-    let run_use_case = (*run_use_case_arc).clone();
-
-    // Load and execute the graph
-    let file_content = tokio::fs::read_to_string(&file_path).await?;
-    let mut graph: Graph = serde_json::from_str(&file_content)?;
-
-    // If an injected payload was provided (e.g. from a previous loop), inject it into start nodes
-    if let Some(payload) = inject_payload {
-        for (_, node) in graph.nodes.iter_mut() {
-            if node.node_type == "trigger_webhook"
-                || node.node_type == "input"
-                || node.node_type == "mock_input"
-            {
-                if node.config.is_null() {
-                    node.config = serde_json::json!({});
-                }
-                node.config["__payload__"] = payload.clone();
-            }
-        }
-    }
-
-    // Check if any node has streaming enabled
-    let is_stream = graph.nodes.values().any(|node| {
-        node.config
-            .get("stream")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-    });
-
-    if is_stream {
-        use crate::dag_engine::domain::events::DagExecutionEvent;
-        use futures::StreamExt;
-
-        let internal_stream = run_use_case.execute_stream(
-            graph,
-            resume_id.clone(),
-            resume_answer.clone(),
-            include_extra_info,
-        );
-        tokio::pin!(internal_stream);
-
-        // 1. Send the global START part
-        println!(
-            "data: {}\n",
-            serde_json::json!({
-                "type": "start",
-                "messageId": format!("msg_{}", uuid::Uuid::new_v4())
-            })
-        );
-
-        let mut text_block_uuids = std::collections::HashMap::new();
-        let mut seen_tool_ids = std::collections::HashSet::new();
-        let mut total_prompt_tokens = 0;
-        let mut total_completion_tokens = 0;
-        let mut final_output: Value = Value::Null;
-
-        while let Some(result) = internal_stream.next().await {
-            let event = match result {
-                Ok(ev) => ev,
-                Err(e) => {
-                    println!(
-                        "data: {}\n",
-                        serde_json::json!({
-                            "type": "error",
-                            "errorText": e.to_string()
-                        })
-                    );
-                    continue;
-                }
-            };
-
-            // Protocol State Management
-            match &event {
-                DagExecutionEvent::LlmToken { node_id, .. }
-                    if !text_block_uuids.contains_key(node_id) =>
+        // If an injected payload was provided (e.g. from a previous loop), inject it into start nodes
+        if let Some(payload) = inject_payload {
+            for (_, node) in graph.nodes.iter_mut() {
+                if node.node_type == "trigger_webhook"
+                    || node.node_type == "input"
+                    || node.node_type == "mock_input"
                 {
-                    let part_id = format!("txt_{}", uuid::Uuid::new_v4());
-                    println!(
-                        "data: {}\n",
-                        serde_json::json!({
-                            "type": "text-start",
-                            "id": part_id
-                        })
-                    );
-                    text_block_uuids.insert(node_id.clone(), part_id);
-                }
-                DagExecutionEvent::NodeFinish { node_id, .. }
-                | DagExecutionEvent::SubgraphNodeFinish { node_id, .. } => {
-                    if let Some(part_id) = text_block_uuids.remove(node_id) {
-                        println!(
-                            "data: {}\n",
-                            serde_json::json!({
-                                "type": "text-end",
-                                "id": part_id
-                            })
-                        );
+                    if node.config.is_null() {
+                        node.config = serde_json::json!({});
                     }
+                    node.config["__payload__"] = payload.clone();
                 }
-                DagExecutionEvent::LlmUsage {
-                    prompt_tokens,
-                    completion_tokens,
-                    ..
-                } => {
-                    total_prompt_tokens += prompt_tokens;
-                    total_completion_tokens += completion_tokens;
-                }
-                DagExecutionEvent::LlmToolCall {
-                    tool_id, tool_name, ..
-                } if !seen_tool_ids.contains(tool_id) => {
-                    seen_tool_ids.insert(tool_id.clone());
-                    println!(
-                        "data: {}\n",
-                        serde_json::json!({
-                            "type": "tool-input-start",
-                            "toolCallId": tool_id,
-                            "toolName": tool_name
-                        })
-                    );
-                }
-                DagExecutionEvent::GraphFinish { output } => {
-                    final_output = output.clone();
-                }
-                _ => {}
-            }
-
-            // Map to official Data Stream Protocol JSON
-            let protocol_json = match event {
-                DagExecutionEvent::LlmToken { node_id, token } => {
-                    let part_id = text_block_uuids
-                        .get(&node_id)
-                        .cloned()
-                        .unwrap_or_else(|| node_id.clone());
-                    Some(serde_json::json!({
-                        "type": "text-delta",
-                        "id": part_id,
-                        "delta": token
-                    }))
-                }
-                DagExecutionEvent::ThinkingToken { node_id, token } => Some(serde_json::json!({
-                    "type": "thinking-delta",
-                    "node_id": node_id,
-                    "delta": token
-                })),
-                DagExecutionEvent::LlmToolCall {
-                    tool_id,
-                    args_chunk,
-                    ..
-                } => Some(serde_json::json!({
-                    "type": "tool-input-delta",
-                    "toolCallId": tool_id,
-                    "inputTextDelta": args_chunk
-                })),
-                DagExecutionEvent::LlmToolCallStart {
-                    tool_id,
-                    tool_name,
-                    tool_args,
-                    ..
-                } => Some(serde_json::json!({
-                    "type": "tool-input-available",
-                    "toolCallId": tool_id,
-                    "toolName": tool_name,
-                    "input": serde_json::from_str::<serde_json::Value>(&tool_args).unwrap_or(serde_json::Value::String(tool_args))
-                })),
-                DagExecutionEvent::LlmToolCallFinish {
-                    tool_id, output, ..
-                } => Some(serde_json::json!({
-                    "type": "tool-output-available",
-                    "toolCallId": tool_id,
-                    "output": serde_json::from_str::<serde_json::Value>(&output).unwrap_or(serde_json::Value::String(output))
-                })),
-                DagExecutionEvent::LlmUsage { .. } => None,
-                DagExecutionEvent::GraphUsageSummary { entries } => Some(serde_json::json!({
-                    "type": "usage-summary",
-                    "nodes": entries
-                })),
-                DagExecutionEvent::NodeFinish { node_id, .. } => {
-                    text_block_uuids.get(&node_id).map(|part_id| {
-                        serde_json::json!({
-                            "type": "node-end",
-                            "id": part_id,
-                            "usage": {
-                                "promptTokens": total_prompt_tokens,
-                                "completionTokens": total_completion_tokens
-                            }
-                        })
-                    })
-                }
-                DagExecutionEvent::SubgraphNodeFinish { node_id, output } => {
-                    Some(serde_json::json!({
-                        "type": "node-end",
-                        "node_id": node_id,
-                        "node_type": "subgraph",
-                        "output": output
-                    }))
-                }
-                DagExecutionEvent::GraphFinish { .. } => Some(serde_json::json!({
-                    "type": "finish",
-                    "finishReason": "stop",
-                    "usage": {
-                        "promptTokens": total_prompt_tokens,
-                        "completionTokens": total_completion_tokens
-                    }
-                })),
-                DagExecutionEvent::Error { message } => Some(serde_json::json!({
-                    "type": "error",
-                    "errorText": message
-                })),
-                _ => None,
-            };
-
-            if let Some(json) = protocol_json {
-                println!("data: {}\n", json);
             }
         }
 
-        // 3. Finalization: Ensure all pending text blocks are ended
-        for (_, part_id) in text_block_uuids {
+        // Check if any node has streaming enabled
+        let is_stream = graph.nodes.values().any(|node| {
+            node.config
+                .get("stream")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        });
+
+        if is_stream {
+            use crate::dag_engine::domain::events::DagExecutionEvent;
+            use futures::StreamExt;
+
+            let internal_stream = engine.execute_stream(
+                graph,
+                resume_id.clone(),
+                resume_answer.clone(),
+                include_extra_info,
+            );
+            tokio::pin!(internal_stream);
+
+            // 1. Send the global START part
             println!(
                 "data: {}\n",
                 serde_json::json!({
-                    "type": "text-end",
-                    "id": part_id
+                    "type": "start",
+                    "messageId": format!("msg_{}", uuid::Uuid::new_v4())
                 })
             );
+
+            let mut text_block_uuids = std::collections::HashMap::new();
+            let mut seen_tool_ids = std::collections::HashSet::new();
+            let mut total_prompt_tokens = 0;
+            let mut total_completion_tokens = 0;
+            let mut final_output: Value = Value::Null;
+
+            while let Some(result) = internal_stream.next().await {
+                let event = match result {
+                    Ok(ev) => ev,
+                    Err(e) => {
+                        println!(
+                            "data: {}\n",
+                            serde_json::json!({
+                                "type": "error",
+                                "errorText": e.to_string()
+                            })
+                        );
+                        continue;
+                    }
+                };
+
+                // Protocol State Management
+                match &event {
+                    DagExecutionEvent::LlmToken { node_id, .. }
+                        if !text_block_uuids.contains_key(node_id) =>
+                    {
+                        let part_id = format!("txt_{}", uuid::Uuid::new_v4());
+                        println!(
+                            "data: {}\n",
+                            serde_json::json!({
+                                "type": "text-start",
+                                "id": part_id
+                            })
+                        );
+                        text_block_uuids.insert(node_id.clone(), part_id);
+                    }
+                    DagExecutionEvent::NodeFinish { node_id, .. }
+                    | DagExecutionEvent::SubgraphNodeFinish { node_id, .. } => {
+                        if let Some(part_id) = text_block_uuids.remove(node_id) {
+                            println!(
+                                "data: {}\n",
+                                serde_json::json!({
+                                    "type": "text-end",
+                                    "id": part_id
+                                })
+                            );
+                        }
+                    }
+                    DagExecutionEvent::LlmUsage {
+                        prompt_tokens,
+                        completion_tokens,
+                        ..
+                    } => {
+                        total_prompt_tokens += prompt_tokens;
+                        total_completion_tokens += completion_tokens;
+                    }
+                    DagExecutionEvent::LlmToolCall {
+                        tool_id, tool_name, ..
+                    } if !seen_tool_ids.contains(tool_id) => {
+                        seen_tool_ids.insert(tool_id.clone());
+                        println!(
+                            "data: {}\n",
+                            serde_json::json!({
+                                "type": "tool-input-start",
+                                "toolCallId": tool_id,
+                                "toolName": tool_name
+                            })
+                        );
+                    }
+                    DagExecutionEvent::GraphFinish { output } => {
+                        final_output = output.clone();
+                    }
+                    _ => {}
+                }
+
+                // Map to official Data Stream Protocol JSON
+                let protocol_json = match event {
+                    DagExecutionEvent::LlmToken { node_id, token } => {
+                        let part_id = text_block_uuids
+                            .get(&node_id)
+                            .cloned()
+                            .unwrap_or_else(|| node_id.clone());
+                        Some(serde_json::json!({
+                            "type": "text-delta",
+                            "id": part_id,
+                            "delta": token
+                        }))
+                    }
+                    DagExecutionEvent::ThinkingToken { node_id, token } => Some(serde_json::json!({
+                        "type": "thinking-delta",
+                        "node_id": node_id,
+                        "delta": token
+                    })),
+                    DagExecutionEvent::LlmToolCall {
+                        tool_id,
+                        args_chunk,
+                        ..
+                    } => Some(serde_json::json!({
+                        "type": "tool-input-delta",
+                        "toolCallId": tool_id,
+                        "inputTextDelta": args_chunk
+                    })),
+                    DagExecutionEvent::LlmToolCallStart {
+                        tool_id,
+                        tool_name,
+                        tool_args,
+                        ..
+                    } => Some(serde_json::json!({
+                        "type": "tool-input-available",
+                        "toolCallId": tool_id,
+                        "toolName": tool_name,
+                        "input": serde_json::from_str::<serde_json::Value>(&tool_args).unwrap_or(serde_json::Value::String(tool_args))
+                    })),
+                    DagExecutionEvent::LlmToolCallFinish {
+                        tool_id, output, ..
+                    } => Some(serde_json::json!({
+                        "type": "tool-output-available",
+                        "toolCallId": tool_id,
+                        "output": serde_json::from_str::<serde_json::Value>(&output).unwrap_or(serde_json::Value::String(output))
+                    })),
+                    DagExecutionEvent::LlmUsage { .. } => None,
+                    DagExecutionEvent::GraphUsageSummary { entries } => Some(serde_json::json!({
+                        "type": "usage-summary",
+                        "nodes": entries
+                    })),
+                    DagExecutionEvent::NodeFinish { node_id, .. } => {
+                        text_block_uuids.get(&node_id).map(|part_id| {
+                            serde_json::json!({
+                                "type": "node-end",
+                                "id": part_id,
+                                "usage": {
+                                    "promptTokens": total_prompt_tokens,
+                                    "completionTokens": total_completion_tokens
+                                }
+                            })
+                        })
+                    }
+                    DagExecutionEvent::SubgraphNodeFinish { node_id, output } => {
+                        Some(serde_json::json!({
+                            "type": "node-end",
+                            "node_id": node_id,
+                            "node_type": "subgraph",
+                            "output": output
+                        }))
+                    }
+                    DagExecutionEvent::GraphFinish { .. } => Some(serde_json::json!({
+                        "type": "finish",
+                        "finishReason": "stop",
+                        "usage": {
+                            "promptTokens": total_prompt_tokens,
+                            "completionTokens": total_completion_tokens
+                        }
+                    })),
+                    DagExecutionEvent::Error { message } => Some(serde_json::json!({
+                        "type": "error",
+                        "errorText": message
+                    })),
+                    _ => None,
+                };
+
+                if let Some(json) = protocol_json {
+                    println!("data: {}\n", json);
+                }
+            }
+
+            // 3. Finalization: Ensure all pending text blocks are ended
+            for (_, part_id) in text_block_uuids {
+                println!(
+                    "data: {}\n",
+                    serde_json::json!({
+                        "type": "text-end",
+                        "id": part_id
+                    })
+                );
+            }
+
+            // 4. Send the literal [DONE] marker
+            println!("data: [DONE]\n");
+
+            Ok(final_output)
+        } else {
+            engine
+                .run_dag(graph, resume_id, resume_answer, include_extra_info)
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
         }
-
-        // 4. Send the literal [DONE] marker
-        println!("data: [DONE]\n");
-
-        Ok(final_output)
-    } else {
-        run_use_case
-            .execute(graph, resume_id, resume_answer, include_extra_info)
-            .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     }
+    .await;
+
+    engine.shutdown().await;
+    result
 }
 
 /// Serve a DAG as an HTTP API
@@ -315,53 +274,15 @@ pub async fn serve_dag(
     host: String,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Load .env file
     dotenvy::dotenv().ok();
 
-    // Initialize Database Pool via registry (minimal patch — full migration in Commit 3)
-    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool_registry = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
-    let pool_arc = pool_registry.pin(&db_url).await
-        .map_err(|e| anyhow::anyhow!("Failed to create pool: {:?}", e))?;
-
-    // Initialize Repository Factory and State Repo
-    let repository_factory = Arc::new(ConversationRepositoryFactory::new(pool_registry.clone()));
-    let state_repo = Arc::new(crate::dag_engine::infrastructure::persistence::postgres_dag_state_repository::PostgresDagStateRepository::new((*pool_arc).clone()));
-    state_repo
-        .migrate()
-        .await
-        .map_err(|e| anyhow::anyhow!("{:?}", e))?;
-
-    let secure_value_repo = Arc::new(
-        crate::dag_engine::infrastructure::persistence::PostgresSecureValueRepository::new(
-            (*pool_arc).clone(),
-        ),
+    let engine_config = crate::dag_engine::engine::EngineConfig::from_env()
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    let engine = Arc::new(
+        crate::dag_engine::engine::ColmenaEngine::new(engine_config)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?,
     );
-    secure_value_repo
-        .migrate()
-        .await
-        .map_err(|e| anyhow::anyhow!("Secure values migration failed: {:?}", e))?;
-
-    let secure_value_service = Arc::new(
-        crate::dag_engine::application::secure_value_service::SecureValueService::new(
-            secure_value_repo,
-        ),
-    );
-
-    let sql_port_factory = Arc::new(SqlPortFactory::new(pool_registry.clone()));
-    let registry = HashMapNodeRegistry::new_with_secure_values(
-        repository_factory,
-        sql_port_factory,
-        Some(state_repo.clone()
-            as Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>),
-        Some(secure_value_service.clone()),
-    );
-    let run_use_case = Arc::new(DagRunUseCase::with_secure_values_and_service(
-        registry.clone(),
-        Some(state_repo.clone()),
-        secure_value_service.clone(),
-    ));
-    registry.set_subgraph_executor(run_use_case.clone());
 
     // Load the graph
     let file_content = tokio::fs::read_to_string(&file_path).await?;
@@ -383,7 +304,7 @@ pub async fn serve_dag(
 
                 let state = AppState {
                     graph: graph_arc.clone(),
-                    use_case: run_use_case.clone(),
+                    engine: engine.clone(),
                 };
 
                 app = app.route(path, post(handler_webhook).with_state(state));
@@ -400,7 +321,7 @@ pub async fn serve_dag(
         // Also register the resume route when serving
         let state = AppState {
             graph: graph_arc.clone(),
-            use_case: run_use_case.clone(),
+            engine: engine.clone(),
         };
         println!("   └── Registering route: POST /resume (System)");
         app = app.route("/resume", post(handler_resume).with_state(state));
@@ -410,9 +331,18 @@ pub async fn serve_dag(
     let addr_str = format!("{}:{}", host, port);
     println!("✅ Server listening on http://{}", addr_str);
 
-    let listener = tokio::net::TcpListener::bind(&addr_str).await?;
-    axum::serve(listener, app).await?;
-
+    let shutdown_future = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    let serve_result: Result<(), std::io::Error> = async {
+        let listener = tokio::net::TcpListener::bind(&addr_str).await?;
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_future)
+            .await
+    }
+    .await;
+    engine.shutdown().await;
+    serve_result?;
     Ok(())
 }
 
@@ -420,7 +350,7 @@ pub async fn serve_dag(
 #[derive(Clone)]
 struct AppState {
     graph: Arc<Graph>,
-    use_case: Arc<DagRunUseCase>,
+    engine: Arc<crate::dag_engine::engine::ColmenaEngine>,
 }
 
 #[derive(serde::Deserialize)]
@@ -474,7 +404,7 @@ async fn handler_webhook(
         use axum::response::sse::{Event, KeepAlive, Sse};
         use futures::StreamExt;
 
-        let use_case = (*state.use_case).clone();
+        let engine = state.engine.clone();
 
         // Wrap the internal stream to manage protocol state (text-start, text-end, [DONE])
         let protocol_stream = async_stream::stream! {
@@ -500,7 +430,7 @@ async fn handler_webhook(
                     })).expect("json_data"));
                 }
 
-                let internal_stream = use_case.clone().execute_stream(current_graph.clone(), None, None, false);
+                let internal_stream = engine.execute_stream(current_graph.clone(), None, None, false);
                 let mut final_output_value: Option<Value> = None;
 
                 tokio::pin!(internal_stream);
@@ -753,8 +683,8 @@ async fn handler_webhook(
                 println!("\n🔄 -- API Turno {} --", turn_count);
             }
             match state
-                .use_case
-                .execute(
+                .engine
+                .run_dag(
                     graph_instance.clone(),
                     current_resume_id.clone(),
                     None,
@@ -930,8 +860,8 @@ async fn handler_resume(
     }
 
     match state
-        .use_case
-        .execute(
+        .engine
+        .run_dag(
             graph_instance,
             Some(payload.session_id),
             Some(payload.answer),

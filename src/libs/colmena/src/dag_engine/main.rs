@@ -52,14 +52,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             include_extra_info,
             verbose,
         } => {
-            use colmena::dag_engine::application::run_use_case::DagRunUseCase;
             use colmena::dag_engine::domain::events::DagExecutionEvent;
-            use colmena::dag_engine::infrastructure::pool_registry::{PoolConfig, PgPoolRegistry};
-            use colmena::dag_engine::infrastructure::registry::HashMapNodeRegistry;
-            use colmena::dag_engine::infrastructure::sql_port_factory::SqlPortFactory;
-            use colmena::llm::infrastructure::ConversationRepositoryFactory;
             use futures::StreamExt;
-            use std::sync::Arc;
 
             // Enable verbose mode via flag or env var
             let verbose_env = std::env::var("COLMENA_VERBOSE")
@@ -69,50 +63,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("🚀 Ejecutando grafo: {}", file_path);
 
-            // Bootstrap the engine (minimal patch — full migration in Commit 3)
             dotenvy::dotenv().ok();
-            let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-            let pool_registry = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
-            let pool_arc = pool_registry.pin(&db_url).await
-                .map_err(|e| anyhow::anyhow!("Failed to create pool: {:?}", e))?;
+            let engine_config = colmena::dag_engine::engine::EngineConfig::from_env()
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            let engine = colmena::dag_engine::engine::ColmenaEngine::new(engine_config)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-            // Run the graph in an inner block so we can always close the pool afterward
+            // Run the graph in an inner block so we can always shut down the engine afterward
             let result: Result<(), anyhow::Error> = async {
-                let repository_factory = Arc::new(ConversationRepositoryFactory::new(pool_registry.clone()));
-                let state_repo = Arc::new(
-                    colmena::dag_engine::infrastructure::persistence::postgres_dag_state_repository::PostgresDagStateRepository::new((*pool_arc).clone())
-                );
-                state_repo
-                    .migrate()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{:?}", e))?;
-
-                // Migrate secure values table
-                let secure_value_repo = Arc::new(
-                    colmena::dag_engine::infrastructure::persistence::PostgresSecureValueRepository::new((*pool_arc).clone())
-                );
-                secure_value_repo
-                    .migrate()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Secure values migration failed: {:?}", e))?;
-
-                let secure_value_service = Arc::new(
-                    colmena::dag_engine::application::secure_value_service::SecureValueService::new(
-                        secure_value_repo,
-                    ),
-                );
-
-                let sql_port_factory = Arc::new(SqlPortFactory::new(pool_registry.clone()));
-                let registry = HashMapNodeRegistry::new_with_secure_values(
-                    repository_factory,
-                    sql_port_factory,
-                    Some(state_repo.clone()
-                        as Arc<dyn colmena::dag_engine::domain::state::DagTaskMemoryRepository>),
-                    Some(secure_value_service.clone()),
-                );
-                let run_use_case = DagRunUseCase::with_secure_values_and_service(registry.clone(), Some(state_repo), secure_value_service);
-                registry.set_subgraph_executor(Arc::new(run_use_case.clone()));
-
                 let file_content = tokio::fs::read_to_string(&file_path).await?;
                 let graph: colmena::dag_engine::domain::graph::Graph =
                     serde_json::from_str(&file_content)?;
@@ -127,7 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // The new active_queue engine natively handles both linear and cyclic graphs
                 let s =
-                    run_use_case.execute_stream(graph, session_id.clone(), answer, include_extra_info);
+                    engine.execute_stream(graph, session_id.clone(), answer, include_extra_info);
                 let stream = Box::pin(s);
                 tokio::pin!(stream);
 
@@ -331,8 +290,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(())
             }.await;
 
-            // Always close the database pool, even if the graph execution failed
-            pool_registry.close_all().await;
+            // Always shut down the engine (closes all pools), even if the graph execution failed
+            engine.shutdown().await;
 
             // Propagate the error if any
             result?;
