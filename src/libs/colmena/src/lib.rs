@@ -1,4 +1,5 @@
 pub mod dag_engine;
+pub mod documents;
 pub mod llm;
 pub mod skills;
 

@@ -83,6 +83,12 @@ sha2 = "0.10"
 serde_yaml = "0.9"
 include_dir = "0.7"
 
+# Documents feature
+rust_xlsxwriter = "0.77"
+docx-rs = "0.4"
+schemars = { version = "0.8", features = ["chrono", "uuid1", "preserve_order"] }
+ulid = "1"
+
 # Socket.IO client
 rust_socketio = { version = "0.6", features = ["async"] }
 
@@ -102,5 +108,6 @@ serde_json = { version = "1.0", features = ["preserve_order"] }
 derivative = "2.2"
 tempfile = "3.10"
 serial_test = "3"
+calamine = "0.24"
 
 
