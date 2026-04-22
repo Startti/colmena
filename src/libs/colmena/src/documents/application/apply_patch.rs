@@ -99,10 +99,58 @@ impl ApplyPatchUseCase {
                     summary: PatchSummary::default(),
                 })
             }
-            ArtifactKind::Word => Err(DocumentError::InvalidPatchOp {
-                reason: "Word patches not yet implemented (Phase B)".into(),
-                op: serde_json::Value::Null,
-            }),
+            ArtifactKind::Word => {
+                use crate::documents::application::apply_word_ops::WordOpApplier;
+                use crate::documents::domain::ir::WordIR;
+
+                let mut ir: WordIR = serde_json::from_value(current_data.ir.clone()).map_err(
+                    |e| DocumentError::IRValidationFailed {
+                        path: "/".into(),
+                        reason: format!("parse current Word IR: {e}"),
+                    },
+                )?;
+                let applier = WordOpApplier {
+                    ids: self.ids.as_ref(),
+                };
+                for op in &input.patch.ops {
+                    applier.apply(&mut ir, op)?;
+                }
+                let new_version = current.next();
+                ir.version_id = new_version.0.clone();
+                let ir_value = serde_json::to_value(&ir).unwrap();
+                self.word_validator.validate(&ir_value)?;
+                let rendered = self.word_renderer.render(&ir_value).await?;
+
+                let patch_applied = PatchApplied {
+                    patch: serde_json::to_value(&input.patch).unwrap(),
+                    applied_at: Utc::now(),
+                    resulted_in: new_version.clone(),
+                    summary: PatchSummary::default(),
+                };
+                let version_data = VersionData {
+                    ir: ir_value,
+                    rendered_binary: rendered,
+                    rendered_extension: "docx",
+                    patch_applied,
+                    blobs: vec![],
+                };
+                self.store
+                    .write_version(&artifact_id, &new_version, &version_data)
+                    .await?;
+                self.store
+                    .set_head(&artifact_id, Some(&current), &new_version)
+                    .await?;
+
+                let mut new_meta = meta.clone();
+                new_meta.current_version = new_version.clone();
+                new_meta.updated_at = Utc::now();
+                self.store.update_meta(&artifact_id, &new_meta).await?;
+
+                Ok(ApplyPatchOutput {
+                    version_id: new_version,
+                    summary: PatchSummary::default(),
+                })
+            }
         }
     }
 }
