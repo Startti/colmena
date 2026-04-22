@@ -149,6 +149,122 @@ pub enum PatchOp {
         style_ref: String,
         definition: serde_json::Value,
     },
+
+    // -------- Word ops --------
+
+    /// Insert a new block. Exactly one of `before` or `after` must be provided
+    /// (referencing an existing block_id). If both omitted, appends at end.
+    #[serde(rename = "insert_block")]
+    InsertBlock {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+        /// Full block JSON (type-tagged). ID will be assigned server-side.
+        block: serde_json::Value,
+    },
+
+    /// Delete a block by ID.
+    #[serde(rename = "delete_block")]
+    DeleteBlock { block_id: String },
+
+    /// Replace a block's entire content (preserves the ID).
+    #[serde(rename = "replace_block")]
+    ReplaceBlock {
+        block_id: String,
+        block: serde_json::Value,
+    },
+
+    /// Move a block to appear right after `after_block_id`.
+    #[serde(rename = "move_block")]
+    MoveBlock {
+        block_id: String,
+        after_block_id: String,
+    },
+
+    /// Change the level of a heading block (1-6).
+    #[serde(rename = "set_heading_level")]
+    SetHeadingLevel { block_id: String, level: u8 },
+
+    /// Replace the text of a specific run inside a paragraph or heading.
+    #[serde(rename = "replace_run_text")]
+    ReplaceRunText {
+        block_id: String,
+        run_id: String,
+        new_text: String,
+    },
+
+    /// Update style properties of a run (bold/italic/underline/size/color).
+    /// `style_patch` is a partial Run — only provided fields are updated.
+    #[serde(rename = "set_run_style")]
+    SetRunStyle {
+        block_id: String,
+        run_id: String,
+        style_patch: serde_json::Value,
+    },
+
+    /// Insert a run at a position inside a paragraph or heading. ID assigned server-side.
+    #[serde(rename = "insert_run")]
+    InsertRun {
+        block_id: String,
+        at_index: u32,
+        run: serde_json::Value,
+    },
+
+    /// Delete a run from a paragraph or heading.
+    #[serde(rename = "delete_run")]
+    DeleteRun { block_id: String, run_id: String },
+
+    /// Insert an item into a list block.
+    #[serde(rename = "insert_list_item")]
+    InsertListItem {
+        list_block_id: String,
+        at_index: u32,
+        runs: Vec<serde_json::Value>,
+    },
+
+    /// Replace all runs of a list item.
+    #[serde(rename = "replace_list_item")]
+    ReplaceListItem {
+        list_block_id: String,
+        item_id: String,
+        runs: Vec<serde_json::Value>,
+    },
+
+    /// Delete a list item.
+    #[serde(rename = "delete_list_item")]
+    DeleteListItem {
+        list_block_id: String,
+        item_id: String,
+    },
+
+    /// Insert a row in a table block. Exactly one of `before`/`after` must be provided.
+    #[serde(rename = "insert_table_row")]
+    InsertTableRow {
+        table_block_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+        /// Array of cells, each with a `runs` array.
+        cells: Vec<serde_json::Value>,
+    },
+
+    /// Delete a table row.
+    #[serde(rename = "delete_table_row")]
+    DeleteTableRow {
+        table_block_id: String,
+        row_id: String,
+    },
+
+    /// Replace a table cell's runs.
+    #[serde(rename = "update_table_cell")]
+    UpdateTableCell {
+        table_block_id: String,
+        row_id: String,
+        col_index: u32,
+        runs: Vec<serde_json::Value>,
+    },
 }
 
 #[cfg(test)]
@@ -177,6 +293,15 @@ mod tests {
         assert!(s.contains("set_cell"));
         assert!(s.contains("set_range"));
         assert!(s.contains("A1-style address"));
+    }
+
+    #[test]
+    fn word_ops_in_schema() {
+        let schema = schemars::schema_for!(PatchOp);
+        let s = serde_json::to_string(&schema).unwrap();
+        assert!(s.contains("insert_block"));
+        assert!(s.contains("replace_run_text"));
+        assert!(s.contains("insert_table_row"));
     }
 
     #[test]

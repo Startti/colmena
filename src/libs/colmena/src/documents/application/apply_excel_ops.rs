@@ -279,6 +279,24 @@ impl<'a> ExcelOpApplier<'a> {
                     .map_err(|e| invalid(op, &format!("bad style: {e}")))?;
                 ir.workbook.named_styles.insert(style_ref.clone(), style);
             }
+            // Word-only ops are not valid for Excel artifacts.
+            PatchOp::InsertBlock { .. }
+            | PatchOp::DeleteBlock { .. }
+            | PatchOp::ReplaceBlock { .. }
+            | PatchOp::MoveBlock { .. }
+            | PatchOp::SetHeadingLevel { .. }
+            | PatchOp::ReplaceRunText { .. }
+            | PatchOp::SetRunStyle { .. }
+            | PatchOp::InsertRun { .. }
+            | PatchOp::DeleteRun { .. }
+            | PatchOp::InsertListItem { .. }
+            | PatchOp::ReplaceListItem { .. }
+            | PatchOp::DeleteListItem { .. }
+            | PatchOp::InsertTableRow { .. }
+            | PatchOp::DeleteTableRow { .. }
+            | PatchOp::UpdateTableCell { .. } => {
+                return Err(invalid(op, "Word op not applicable to Excel artifact"));
+            }
         }
         Ok(())
     }
