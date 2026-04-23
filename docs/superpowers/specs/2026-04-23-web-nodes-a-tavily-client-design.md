@@ -52,7 +52,6 @@ Tavily is the right provider for this because:
     "cache_ttl_seconds": 3600,
 
     "max_calls_per_run": 50,
-    "max_calls_per_day": null,
     "fail_on_limit": false,
 
     "retry_policy": {
@@ -184,7 +183,7 @@ pub struct FetchResponse { pub url: String, pub title: Option<String>, pub conte
 
 Wraps the port with:
 - **LRU cache** (`lru` crate) keyed by hash of the full request; respects `enable_cache` and `cache_ttl_seconds`.
-- **Rate-limit counter**: per-`dag_run_id` counter for `max_calls_per_run`; a process-local daily bucket for `max_calls_per_day`. Both live in an `Arc<Mutex<RateLimitState>>` owned by the use case. The daily bucket resets at UTC midnight and is **not** shared across engine processes — for multi-process deployments needing a true global cap, a future decorator adapter can back it with Redis.
+- **Rate-limit counter**: per-`dag_run_id` counter enforcing `max_calls_per_run`. Lives in an `Arc<Mutex<RateLimitState>>` owned by the use case. Reset when the run completes. A global daily/monthly ceiling is explicitly deferred: users configure it on their Tavily account (authoritative and global). A future Redis-backed rate-limit decorator adapter can add in-node global caps if needed.
 - **Retry loop** using the configured policy for 5xx / transport errors.
 
 ```rust
@@ -230,7 +229,7 @@ Each handler: validates args → builds domain request → calls use case → fo
 
 | Domain error | LLM sees |
 |---|---|
-| `RateLimit` | `{ error: "rate_limit", calls_used, cap, scope: "run" \| "day", message: "..." }` |
+| `RateLimit` | `{ error: "rate_limit", calls_used, cap, message: "..." }` |
 | `Timeout` | `{ error: "timeout", ms, message: "..." }` |
 | `Upstream {status}` (after retries exhausted) | `{ error: "upstream_error", status, retryable: false, message: "..." }` |
 | `InvalidConfig` / `AdapterInit` | DAG crashes (not an LLM-recoverable error) |

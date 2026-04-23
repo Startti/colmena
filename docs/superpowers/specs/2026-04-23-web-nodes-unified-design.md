@@ -251,12 +251,13 @@ Applies only to `tavily_client` (the sole node with metered external pricing).
 ```json
 {
   "max_calls_per_run": 50,     // per dag_run, default 50, null = off
-  "max_calls_per_day": null,   // global, default off
   "fail_on_limit": true         // if false, rate-limit error is returned to LLM as structured result
 }
 ```
 
 Counters are maintained per-node-instance, keyed by `dag_run_id` (not conversation_id — each run gets its own budget).
+
+A global per-day cap is **not** provided by the node in v1: per-process counters for a multi-day window are fragile across process restarts and horizontal scaling. Users who need a global daily ceiling should configure it on their Tavily account (dashboard-level cap), which is authoritative. A future Redis-backed rate-limit decorator can extend the port if a global in-node cap becomes necessary.
 
 ### Observability
 
