@@ -22,6 +22,11 @@ use crate::skills::infrastructure::{
 use std::path::PathBuf;
 use std::sync::Weak;
 
+/// Default system message used when the user has not provided one. Instructs the
+/// model to stay grounded in the context it has received and avoid fabricating
+/// specific facts that are not present in the conversation.
+const LLM_DEFAULT_SYSTEM: &str = include_str!("prompts/llm_default_system.md");
+
 #[derive(Debug, Clone)]
 struct SkillLoadedLogEntry {
     skill_name: String,
@@ -366,17 +371,20 @@ impl ExecutableNode for LlmNode {
             .or_else(|| config.get("verbose").and_then(|v| v.as_bool()))
             .unwrap_or(false);
 
-        // System Message (Optional)
+        // System Message — honor user-provided value if any (including via inputs
+        // or config), otherwise fall back to a grounding default so the model is
+        // steered away from fabricating facts not present in the context.
         let system_message_str;
         let system_message = if let Some(sys) = inputs
             .get("system_message")
             .and_then(|v| v.as_str())
             .or_else(|| config.get("system_message").and_then(|v| v.as_str()))
+            .filter(|s| !s.trim().is_empty())
         {
             system_message_str = Self::resolve_template_vars(sys, inputs);
             Some(system_message_str.as_str())
         } else {
-            None
+            Some(LLM_DEFAULT_SYSTEM)
         };
 
         // Thread ID (Optional - for Memory)

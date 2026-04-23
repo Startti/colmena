@@ -13,6 +13,14 @@ use std::sync::{Arc, Weak};
 /// Uses `{agents_list}` as a placeholder for the available agents.
 const PHASE_REACTOR_TEMPLATE: &str = include_str!("prompts/orchestrator_phase_reactor.md");
 
+/// Anti-hallucination grounding rules appended to both reactor system messages
+/// after the schema template / user-provided system message.
+const ORCHESTRATOR_GROUNDING: &str = include_str!("prompts/orchestrator_grounding.md");
+
+/// Default system message used as a fallback when the user has not provided one
+/// for the final reactor. The grounding rules are appended on top of this.
+const LLM_DEFAULT_SYSTEM: &str = include_str!("prompts/llm_default_system.md");
+
 // ── ChildNodeObserver ────────────────────────────────────────────────────────
 // Re-attributes all NodeEvent variants to a specific child node_id and forwards
 // them as SubgraphChildEvent so they appear in the stream under the correct ID
@@ -685,11 +693,15 @@ impl OrchestratorNode {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        // System message
-        let system_msg = final_reactor_cfg
+        // System message — respect user-provided system_message if any, otherwise
+        // use the generic workflow default. In both cases append the grounding
+        // rules so the final reactor can only use facts present in the context.
+        let user_system = final_reactor_cfg
             .get("system_message")
             .and_then(|v| v.as_str())
-            .unwrap_or("You are a helpful assistant. Using the context provided, write a clear and complete response to the user's original question.");
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(LLM_DEFAULT_SYSTEM);
+        let system_msg = format!("{}\n\n{}", user_system, ORCHESTRATOR_GROUNDING);
 
         // Build user message: original prompt + phase summaries.
         // Upstream input nodes may label the field `prompt` or `user_message`
@@ -729,7 +741,7 @@ impl OrchestratorNode {
         let tid = crate::llm::domain::SessionId(uuid::Uuid::new_v4().to_string());
 
         let messages = vec![
-            crate::llm::domain::LlmMessage::system(system_msg.to_string())?,
+            crate::llm::domain::LlmMessage::system(system_msg)?,
             crate::llm::domain::LlmMessage::user(user_message)?,
         ];
 
@@ -1982,7 +1994,10 @@ fn inject_reactor_schema_constraints(
             .to_string();
         obj.insert(
             "system_message".to_string(),
-            Value::String(format!("{}{}", existing, schema_instruction)),
+            Value::String(format!(
+                "{}{}\n\n{}",
+                existing, schema_instruction, ORCHESTRATOR_GROUNDING
+            )),
         );
     }
 }
