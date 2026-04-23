@@ -13,11 +13,11 @@
     "agent_llm": {
       "type": "llm_call",
       "config": {
-        "provider": "openai",
-        "model": "gpt-4o-mini",
-        "api_key": "${OPENAI_API_KEY}",
-        "stream": true,
-        "system_message": "You are a helpful analyst.",
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "stream": false,
+        "system_message": "You are a helpful analyst. Read the attached PDF and answer the user's question.",
         "temperature": 0.0,
         "files": [
           {

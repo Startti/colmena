@@ -1,12 +1,14 @@
 use crate::llm::domain::{
-    LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk, LlmStreamPart,
-    LlmUsage, MessageRole,
+    FunctionCall, LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk,
+    LlmStreamPart, LlmUsage, MessageRole, ToolCall, ToolCallChunk,
 };
 use async_trait::async_trait;
-use futures::{Stream, StreamExt, TryStreamExt};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use futures::{Stream, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -46,24 +48,91 @@ impl AnthropicAdapter {
                     system_message = Some(message.content().to_string());
                 }
                 MessageRole::User => {
-                    messages.push(AnthropicMessage {
-                        role: "user".to_string(),
-                        content: message.content().to_string(),
-                    });
+                    if let Some(files) = message.files() {
+                        let mut blocks: Vec<AnthropicContentBlock> = Vec::new();
+                        for file in files {
+                            if file.mime_type.starts_with("image/") {
+                                blocks.push(AnthropicContentBlock::Image {
+                                    source: AnthropicMediaSource {
+                                        source_type: "base64".to_string(),
+                                        media_type: file.mime_type.clone(),
+                                        data: STANDARD.encode(&file.bytes),
+                                    },
+                                });
+                            } else if file.mime_type == "application/pdf" {
+                                blocks.push(AnthropicContentBlock::Document {
+                                    source: AnthropicMediaSource {
+                                        source_type: "base64".to_string(),
+                                        media_type: file.mime_type.clone(),
+                                        data: STANDARD.encode(&file.bytes),
+                                    },
+                                });
+                            } else {
+                                eprintln!(
+                                    "WARN: Anthropic adapter does not support media type '{}'. Skipping file '{}'.",
+                                    file.mime_type, file.filename
+                                );
+                            }
+                        }
+                        // Image/Document blocks come before the text per Anthropic's recommendation.
+                        if !message.content().is_empty() {
+                            blocks.push(AnthropicContentBlock::Text {
+                                text: message.content().to_string(),
+                            });
+                        }
+                        messages.push(AnthropicMessage {
+                            role: "user".to_string(),
+                            content: AnthropicContent::Blocks(blocks),
+                        });
+                    } else {
+                        messages.push(AnthropicMessage {
+                            role: "user".to_string(),
+                            content: AnthropicContent::Text(message.content().to_string()),
+                        });
+                    }
                 }
                 MessageRole::Assistant => {
-                    messages.push(AnthropicMessage {
-                        role: "assistant".to_string(),
-                        content: message.content().to_string(),
-                    });
+                    if let Some(tool_calls) = message.tool_calls() {
+                        let mut blocks: Vec<AnthropicContentBlock> = Vec::new();
+                        if !message.content().is_empty() {
+                            blocks.push(AnthropicContentBlock::Text {
+                                text: message.content().to_string(),
+                            });
+                        }
+                        for tc in tool_calls {
+                            let input: serde_json::Value =
+                                serde_json::from_str(&tc.function.arguments)
+                                    .unwrap_or(serde_json::json!({}));
+                            blocks.push(AnthropicContentBlock::ToolUse {
+                                id: tc.id.clone(),
+                                name: tc.function.name.clone(),
+                                input,
+                            });
+                        }
+                        messages.push(AnthropicMessage {
+                            role: "assistant".to_string(),
+                            content: AnthropicContent::Blocks(blocks),
+                        });
+                    } else {
+                        messages.push(AnthropicMessage {
+                            role: "assistant".to_string(),
+                            content: AnthropicContent::Text(message.content().to_string()),
+                        });
+                    }
                 }
                 MessageRole::Tool => {
-                    // Anthropic uses a specific format for tool results (user role with tool_result content block)
-                    // For now, we'll treat it as a user message with the content
-                    // TODO: Implement proper tool result formatting for Anthropic
+                    // Anthropic encodes tool results as a `user` message with a single
+                    // `tool_result` content block that references the assistant's tool_use id.
+                    let tool_use_id =
+                        message.tool_call_id().unwrap_or_default().to_string();
                     messages.push(AnthropicMessage {
                         role: "user".to_string(),
-                        content: format!("Tool result: {}", message.content()),
+                        content: AnthropicContent::Blocks(vec![
+                            AnthropicContentBlock::ToolResult {
+                                tool_use_id,
+                                content: message.content().to_string(),
+                            },
+                        ]),
                     });
                 }
             }
@@ -89,12 +158,36 @@ impl AnthropicAdapter {
             body["temperature"] = json!(temp);
         }
 
-        if let Some(max_tokens) = request.config().max_tokens() {
-            body["max_tokens"] = json!(max_tokens);
-        }
+        // Anthropic's Messages API requires max_tokens. Fall back to a
+        // conservative default when the caller didn't configure one so nodes
+        // (planner, sub-agents, final_reactor) work out-of-the-box like the
+        // OpenAI and Gemini adapters do.
+        let max_tokens = request.config().max_tokens().unwrap_or(4096);
+        body["max_tokens"] = json!(max_tokens);
 
         if let Some(top_p) = request.config().top_p() {
             body["top_p"] = json!(top_p);
+        }
+
+        if let Some(tools) = request.tools() {
+            let anthropic_tools: Vec<serde_json::Value> = tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "input_schema": {
+                            "type": tool.parameters.schema_type,
+                            "properties": tool.parameters.properties,
+                            "required": tool.parameters.required,
+                        }
+                    })
+                })
+                .collect();
+
+            if !anthropic_tools.is_empty() {
+                body["tools"] = json!(anthropic_tools);
+            }
         }
 
         body
@@ -133,12 +226,22 @@ impl LlmRepository for AnthropicAdapter {
             .await
             .map_err(|e| LlmError::parsing_error(e.to_string()))?;
 
-        let content = anthropic_response
-            .content
-            .first()
-            .map(|content| content.text.clone())
-            .ok_or_else(|| LlmError::parsing_error("No content in response"))?;
+        let mut text_parts: Vec<String> = Vec::new();
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
 
+        for block in anthropic_response.content {
+            match block {
+                AnthropicResponseBlock::Text { text } => text_parts.push(text),
+                AnthropicResponseBlock::ToolUse { id, name, input } => {
+                    let arguments = serde_json::to_string(&input)
+                        .map_err(|e| LlmError::parsing_error(e.to_string()))?;
+                    tool_calls.push(ToolCall::new(id, FunctionCall::new(name, arguments)));
+                }
+                AnthropicResponseBlock::Other => {}
+            }
+        }
+
+        let content = text_parts.join("");
         let usage = LlmUsage::new(
             anthropic_response.usage.input_tokens,
             anthropic_response.usage.output_tokens,
@@ -148,9 +251,12 @@ impl LlmRepository for AnthropicAdapter {
             request.id().clone(),
             content,
             request.config().provider().clone(),
-        )?;
+        )?
+        .with_usage(usage);
 
-        response = response.with_usage(usage);
+        if !tool_calls.is_empty() {
+            response = response.with_tool_calls(tool_calls);
+        }
 
         if let Some(stop_reason) = anthropic_response.stop_reason {
             response = response.with_finish_reason(stop_reason);
@@ -188,42 +294,98 @@ impl LlmRepository for AnthropicAdapter {
         let provider = request.config().provider().clone();
 
         let byte_stream = response.bytes_stream();
-        let sse_stream = SseParser::new(byte_stream).try_filter_map(move |event| {
-            let request_id = request_id.clone();
-            let provider = provider.clone();
-            async move {
-                match event {
-                    SseEvent::Message(data) => {
-                        if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(&data) {
-                            match event.event_type.as_str() {
-                                "content_block_delta" => {
-                                    if let Some(delta) = event.delta {
-                                        if let Some(text) = delta.text {
-                                            return Ok(Some(LlmStreamChunk::new(
-                                                request_id,
-                                                LlmStreamPart::Content(text),
-                                                provider,
-                                                false,
-                                            )));
-                                        }
+        let mut sse_parser = SseParser::new(byte_stream);
+
+        // Tracks per-block-index metadata (id + name) for tool_use blocks so that
+        // subsequent input_json_delta events can be attributed to the right tool call.
+        let mut tool_state: HashMap<usize, (String, String)> = HashMap::new();
+        let mut stop_reason: Option<String> = None;
+
+        let sse_stream = async_stream::try_stream! {
+            while let Some(event_result) = sse_parser.next().await {
+                let event = event_result?;
+                let SseEvent::Message(data) = event;
+                let parsed: AnthropicStreamEvent = match serde_json::from_str(&data) {
+                    Ok(ev) => ev,
+                    Err(_) => continue, // tolerate ping / unknown events
+                };
+
+                match parsed.event_type.as_str() {
+                    "content_block_start" => {
+                        if let (Some(idx), Some(block)) = (parsed.index, parsed.content_block) {
+                            if let AnthropicStreamBlock::ToolUse { id, name, .. } = block {
+                                tool_state.insert(idx, (id.clone(), name.clone()));
+                                yield LlmStreamChunk::new(
+                                    request_id.clone(),
+                                    LlmStreamPart::ToolCallChunk(ToolCallChunk {
+                                        index: idx,
+                                        id,
+                                        name,
+                                        args_chunk: String::new(),
+                                    }),
+                                    provider.clone(),
+                                    false,
+                                );
+                            }
+                        }
+                    }
+                    "content_block_delta" => {
+                        if let Some(delta) = parsed.delta {
+                            match delta.delta_type.as_deref() {
+                                Some("text_delta") => {
+                                    if let Some(text) = delta.text {
+                                        yield LlmStreamChunk::new(
+                                            request_id.clone(),
+                                            LlmStreamPart::Content(text),
+                                            provider.clone(),
+                                            false,
+                                        );
                                     }
                                 }
-                                "message_stop" => {
-                                    return Ok(Some(LlmStreamChunk::new(
-                                        request_id,
-                                        LlmStreamPart::Content(String::new()),
-                                        provider,
-                                        true,
-                                    )));
+                                Some("input_json_delta") => {
+                                    if let (Some(idx), Some(partial)) = (parsed.index, delta.partial_json) {
+                                        if let Some((id, name)) = tool_state.get(&idx) {
+                                            yield LlmStreamChunk::new(
+                                                request_id.clone(),
+                                                LlmStreamPart::ToolCallChunk(ToolCallChunk {
+                                                    index: idx,
+                                                    id: id.clone(),
+                                                    name: name.clone(),
+                                                    args_chunk: partial,
+                                                }),
+                                                provider.clone(),
+                                                false,
+                                            );
+                                        }
+                                    }
                                 }
                                 _ => {}
                             }
                         }
-                        Ok(None)
                     }
+                    "message_delta" => {
+                        if let Some(delta) = parsed.delta {
+                            if let Some(reason) = delta.stop_reason {
+                                stop_reason = Some(reason);
+                            }
+                        }
+                    }
+                    "message_stop" => {
+                        let mut chunk = LlmStreamChunk::new(
+                            request_id.clone(),
+                            LlmStreamPart::Content(String::new()),
+                            provider.clone(),
+                            true,
+                        );
+                        if let Some(reason) = stop_reason.clone() {
+                            chunk = chunk.with_finish_reason(reason);
+                        }
+                        yield chunk;
+                    }
+                    _ => {}
                 }
             }
-        });
+        };
 
         Ok(Box::pin(sse_stream))
     }
@@ -260,23 +422,77 @@ impl LlmRepository for AnthropicAdapter {
     }
 }
 
-// Response structures for Anthropic API
+// Request structures for Anthropic API
 #[derive(Debug, Serialize, Deserialize)]
 struct AnthropicMessage {
     role: String,
-    content: String,
+    content: AnthropicContent,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum AnthropicContent {
+    /// Plain text shorthand — serializes as `"content": "hello"`.
+    Text(String),
+    /// Structured content blocks — serializes as `"content": [ {...}, ... ]`.
+    Blocks(Vec<AnthropicContentBlock>),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicContentBlock {
+    Text {
+        text: String,
+    },
+    Image {
+        source: AnthropicMediaSource,
+    },
+    Document {
+        source: AnthropicMediaSource,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AnthropicMediaSource {
+    #[serde(rename = "type")]
+    source_type: String,
+    media_type: String,
+    data: String,
+}
+
+// Response structures for Anthropic API
 #[derive(Debug, Deserialize)]
 struct AnthropicResponse {
-    content: Vec<AnthropicContent>,
+    content: Vec<AnthropicResponseBlock>,
     usage: AnthropicUsage,
     stop_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct AnthropicContent {
-    text: String,
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicResponseBlock {
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    /// Tolerate unknown / server-side blocks (e.g. `tool_search_tool_result`,
+    /// `server_tool_use`) so the adapter does not crash if the caller enables
+    /// beta server-side tools.
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Deserialize)]
@@ -290,12 +506,35 @@ struct AnthropicUsage {
 struct AnthropicStreamEvent {
     #[serde(rename = "type")]
     event_type: String,
-    delta: Option<AnthropicDelta>,
+    index: Option<usize>,
+    content_block: Option<AnthropicStreamBlock>,
+    delta: Option<AnthropicStreamDelta>,
 }
 
 #[derive(Debug, Deserialize)]
-struct AnthropicDelta {
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicStreamBlock {
+    Text {
+        #[allow(dead_code)]
+        text: Option<String>,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        #[allow(dead_code)]
+        input: Option<serde_json::Value>,
+    },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicStreamDelta {
+    #[serde(rename = "type")]
+    delta_type: Option<String>,
     text: Option<String>,
+    partial_json: Option<String>,
+    stop_reason: Option<String>,
 }
 
 // SSE Parser implementation

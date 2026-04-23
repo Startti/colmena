@@ -409,9 +409,20 @@ impl ExecutableNode for PlannerNode {
         // --- 5b. Detect suspend request (questions instead of tasks) ---
         // The LLM may return { "questions": [...] } when it needs clarification.
         // Bare arrays are treated as a task list (backward-compatible).
+        // Defensive: some models (notably gpt-4o-mini) echo the schema back as
+        // the output, producing { "type": "array", "items": [<tasks...>] }.
+        // Unwrap that shape into a bare array so downstream treats it as tasks.
         let normalized: Value = if parsed.is_array() {
-            // Bare array — wrap as tasks for uniform handling
             json!({ "tasks": parsed })
+        } else if parsed
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.eq_ignore_ascii_case("array"))
+            .unwrap_or(false)
+            && parsed.get("items").map(|v| v.is_array()).unwrap_or(false)
+        {
+            colmena_log!("⚠️  [PlannerNode] LLM echoed schema wrapper ({{type:array, items:[...]}}); unwrapping items as task list.");
+            json!({ "tasks": parsed.get("items").cloned().unwrap_or(json!([])) })
         } else {
             parsed
         };

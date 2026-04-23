@@ -624,6 +624,12 @@ impl OrchestratorNode {
             };
 
             emit_internal_node_finish(&observer, "phase_summary", Value::String(truncated.clone()));
+            // Persist the fallback summary so the final_reactor can see it.
+            // Without this, final_reactor builds an empty user_message and the
+            // downstream LlmMessage::user() construction fails.
+            if !truncated.trim().is_empty() {
+                repo.save_phase_summary(session_id, phase, &truncated).await?;
+            }
             phase_output = Value::String(truncated);
         }
 
@@ -685,9 +691,15 @@ impl OrchestratorNode {
             .and_then(|v| v.as_str())
             .unwrap_or("You are a helpful assistant. Using the context provided, write a clear and complete response to the user's original question.");
 
-        // Build user message: original prompt + phase summaries
+        // Build user message: original prompt + phase summaries.
+        // Upstream input nodes may label the field `prompt` or `user_message`
+        // (the latter is the default variableName in the UI builder); accept both.
         let mut context_parts = Vec::new();
-        let user_prompt = inputs.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+        let user_prompt = inputs
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .or_else(|| inputs.get("user_message").and_then(|v| v.as_str()))
+            .unwrap_or("");
         if !user_prompt.is_empty() {
             context_parts.push(format!("# User's Original Question\n\n{}", user_prompt));
         }

@@ -7,6 +7,7 @@ For each task you MUST also set:
 IMPORTANT — Two possible response formats:
 
 1. If you have enough information to create a complete plan, respond with a JSON ARRAY of tasks.
+   Example shape: [ { "task": "...", "assigned_to": "...", "completed": false, "phase": 1, "parallel": true }, ... ]
 
 2. If the request is ambiguous or missing critical information that would prevent you from creating a useful plan, respond with a JSON object containing 'questions':
    { "questions": [ { "id": "<short_id>", "question": "<text>", "type": "open" | "choice", "options": ["A", "B"] } ] }
@@ -15,3 +16,6 @@ IMPORTANT — Two possible response formats:
 Prefer planning over asking. Only ask questions when the ambiguity would lead to fundamentally different plans. If you can make reasonable assumptions, do so and plan.
 
 Output ONLY valid JSON. Do NOT include markdown or code fences.
+
+CRITICAL — Output the DATA, not the schema:
+The schema shown below describes the SHAPE your output must follow. You must output actual DATA that matches that shape — a JSON array of task objects (or a questions object). Do NOT echo the schema back. Never output an object like { "type": "array", "items": [...] } — that is the schema description, not the answer. Output the bare JSON array.

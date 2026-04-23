@@ -1,0 +1,37 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/agent-demo",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Calculate 25 + 17, then multiply the result by 2"
+        }
+      }
+    },
+    "agent_llm": {
+      "type": "llm_call",
+      "config": {
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5-20251001",
+        "api_key": "${ANTHROPIC_API_KEY}",
+        "stream": false,
+        "system_message": "You are a helpful math assistant. You MUST use the available tools (add, multiply, subtract, divide) for every calculation. Do not calculate mentally.",
+        "temperature": 0.0,
+        "enabled_tools": [
+          "add",
+          "multiply",
+          "subtract",
+          "divide"
+        ]
+      }
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "agent_llm"
+    }
+  ]
+}
