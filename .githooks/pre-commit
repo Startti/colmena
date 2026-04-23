@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Colmena pre-commit hook — delegates to repo-tracked scripts.
+set -e
+repo_root="$(git rev-parse --show-toplevel)"
+exec bash "$repo_root/scripts/check_no_credentials.sh"

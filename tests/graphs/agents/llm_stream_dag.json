@@ -13,7 +13,7 @@
       "type": "llm_call",
       "config": {
         "provider": "mock",
-        "api_key": "dummy",
+        "api_key": "${MOCK_API_KEY}",
         "stream": true
       }
     }
