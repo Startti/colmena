@@ -64,7 +64,7 @@
           }
         },
         "provider": "gemini",
-        "api_key": "***REDACTED_GEMINI_KEY***"
+        "api_key": "${GEMINI_API_KEY}"
       }
     }
   },
