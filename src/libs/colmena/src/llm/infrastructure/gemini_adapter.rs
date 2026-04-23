@@ -167,21 +167,29 @@ impl GeminiAdapter {
         Ok((combined_system_instruction, contents))
     }
 
-    /// Convert ToolDefinitions to Gemini's function declaration format
+    /// Convert ToolDefinitions to Gemini's function declaration format.
+    /// When a tool has no parameters, omit `parameters` entirely — Gemini
+    /// silently fails across the whole tool set if any function declares
+    /// `parameters: { type: object, properties: {}, required: [] }`.
     fn convert_tools_to_gemini(&self, request: &LlmRequest) -> Option<serde_json::Value> {
         request.tools().map(|tools| {
             let function_declarations: Vec<serde_json::Value> = tools
                 .iter()
                 .map(|tool| {
-                    json!({
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": {
-                            "type": tool.parameters.schema_type,
-                            "properties": tool.parameters.properties,
-                            "required": tool.parameters.required
-                        }
-                    })
+                    let mut decl = serde_json::Map::new();
+                    decl.insert("name".to_string(), json!(tool.name));
+                    decl.insert("description".to_string(), json!(tool.description));
+                    if !tool.parameters.properties.is_empty() {
+                        decl.insert(
+                            "parameters".to_string(),
+                            json!({
+                                "type": tool.parameters.schema_type,
+                                "properties": tool.parameters.properties,
+                                "required": tool.parameters.required
+                            }),
+                        );
+                    }
+                    serde_json::Value::Object(decl)
                 })
                 .collect();
 
@@ -223,13 +231,17 @@ impl GeminiAdapter {
             generation_config.insert("topP".to_string(), json!(top_p));
         }
 
-        // Disable thinking for Gemini 2.5-flash to reduce token usage
-        generation_config.insert(
-            "thinkingConfig".to_string(),
-            json!({
-                "thinkingBudget": 0
-            }),
-        );
+        // Disable thinking only when no tools are present. Gemini 2.5-flash with
+        // tools and thinkingBudget: 0 returns empty responses because it can't
+        // reason about tool selection without any reasoning budget.
+        if !request.has_tools() {
+            generation_config.insert(
+                "thinkingConfig".to_string(),
+                json!({
+                    "thinkingBudget": 0
+                }),
+            );
+        }
 
         if !generation_config.is_empty() {
             body["generationConfig"] = json!(generation_config);
@@ -286,7 +298,7 @@ impl LlmRepository for GeminiAdapter {
 
         // Extract function calls if present
         let tool_calls = gemini_response.candidates.first().and_then(|candidate| {
-            candidate.content.parts.as_ref().and_then(|parts| {
+            candidate.content.as_ref()?.parts.as_ref().and_then(|parts| {
                 let function_calls: Vec<ToolCall> = parts
                     .iter()
                     .filter_map(|part| {
@@ -317,8 +329,9 @@ impl LlmRepository for GeminiAdapter {
             .candidates
             .first()
             .and_then(|candidate| {
+                let content = candidate.content.as_ref()?;
                 // Try direct text field first (for newer models)
-                if let Some(text) = &candidate.content.text {
+                if let Some(text) = &content.text {
                     if !text.is_empty() {
                         Some(text.clone())
                     } else {
@@ -326,7 +339,7 @@ impl LlmRepository for GeminiAdapter {
                     }
                 } else {
                     // Fallback to parts structure (for older models)
-                    candidate.content.parts
+                    content.parts
                         .as_ref()
                         .and_then(|parts| parts.iter().find_map(|part| {
                             part.text.as_ref().filter(|text| !text.is_empty()).cloned()
@@ -430,7 +443,8 @@ impl LlmRepository for GeminiAdapter {
                     let is_final = candidate.finish_reason.is_some();
                     let finish_reason = candidate.finish_reason.clone();
 
-                    if let Some(parts) = &candidate.content.parts {
+                    let candidate_content = candidate.content.as_ref();
+                    if let Some(parts) = candidate_content.and_then(|c| c.parts.as_ref()) {
                         for part in parts {
                             if let Some(text) = &part.text {
                                 if !text.is_empty() {
@@ -469,7 +483,7 @@ impl LlmRepository for GeminiAdapter {
                                 yield chunk;
                             }
                         }
-                    } else if let Some(text) = &candidate.content.text {
+                    } else if let Some(text) = candidate_content.and_then(|c| c.text.as_ref()) {
                         let mut chunk = LlmStreamChunk::new(
                             request_id.clone(),
                             LlmStreamPart::Content(text.clone()),
@@ -596,7 +610,7 @@ struct GeminiResponse {
 
 #[derive(Debug, Deserialize)]
 struct GeminiCandidate {
-    content: GeminiContent,
+    content: Option<GeminiContent>,
     #[serde(rename = "finishReason")]
     finish_reason: Option<String>,
 }

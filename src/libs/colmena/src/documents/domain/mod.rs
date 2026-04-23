@@ -5,7 +5,9 @@ pub mod ir;
 pub mod patch;
 pub mod ports;
 
-pub use artifact::{ArtifactMeta, ArtifactSummary, PatchApplied, PatchSummary, VersionData};
+pub use artifact::{
+    ArtifactMeta, ArtifactSummary, AssignedIds, OpOutcome, PatchApplied, PatchSummary, VersionData,
+};
 pub use error::{ConflictDetail, DocumentError, IndexError, RenderError, StorageError};
 pub use ids::{ArtifactId, ArtifactKind, SessionId, VersionId};
 pub use patch::{Patch, PatchOp, PatchSource};

@@ -60,6 +60,39 @@ pub struct PatchSummary {
     pub structured: Vec<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OpOutcome {
+    #[serde(default, skip_serializing_if = "AssignedIds::is_empty")]
+    pub assigned_ids: AssignedIds,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AssignedIds {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub list_items: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rows: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<String>,
+}
+
+impl AssignedIds {
+    pub fn is_empty(&self) -> bool {
+        self.block.is_none()
+            && self.runs.is_empty()
+            && self.list_items.is_empty()
+            && self.rows.is_empty()
+            && self.table.is_none()
+            && self.sheet.is_none()
+    }
+}
+
 pub struct VersionData {
     pub ir: serde_json::Value,
     pub rendered_binary: Vec<u8>,

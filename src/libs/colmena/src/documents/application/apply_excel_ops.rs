@@ -1,3 +1,4 @@
+use crate::documents::domain::artifact::{AssignedIds, OpOutcome};
 use crate::documents::domain::ir::{Cell, CellType, ExcelIR, NamedStyle, NamedTable, Sheet};
 use crate::documents::domain::patch::PatchOp;
 use crate::documents::domain::{DocumentError, IdGenerator};
@@ -8,7 +9,8 @@ pub struct ExcelOpApplier<'a> {
 }
 
 impl<'a> ExcelOpApplier<'a> {
-    pub fn apply(&self, ir: &mut ExcelIR, op: &PatchOp) -> Result<(), DocumentError> {
+    pub fn apply(&self, ir: &mut ExcelIR, op: &PatchOp) -> Result<OpOutcome, DocumentError> {
+        let mut assigned = AssignedIds::default();
         match op {
             PatchOp::SetCell {
                 sheet_id,
@@ -178,6 +180,7 @@ impl<'a> ExcelOpApplier<'a> {
             }
             PatchOp::AddSheet { name, at_index } => {
                 let id = self.ids.new_sheet_id();
+                assigned.sheet = Some(id.clone());
                 let order = at_index.unwrap_or(ir.workbook.sheets.len() as u32);
                 for s in ir.workbook.sheets.iter_mut() {
                     if s.order >= order {
@@ -226,6 +229,7 @@ impl<'a> ExcelOpApplier<'a> {
                 style_preset,
             } => {
                 let id = self.ids.new_table_id();
+                assigned.table = Some(id.clone());
                 let sheet = ir
                     .sheet_mut(sheet_id)
                     .ok_or_else(|| invalid(op, "sheet not found"))?;
@@ -244,7 +248,9 @@ impl<'a> ExcelOpApplier<'a> {
                 for sheet in ir.workbook.sheets.iter_mut() {
                     if let Some(t) = sheet.tables.iter_mut().find(|t| &t.id == table_id) {
                         t.range = new_range.clone();
-                        return Ok(());
+                        return Ok(OpOutcome {
+                            assigned_ids: assigned,
+                        });
                     }
                 }
                 return Err(invalid(op, "table not found"));
@@ -298,7 +304,9 @@ impl<'a> ExcelOpApplier<'a> {
                 return Err(invalid(op, "Word op not applicable to Excel artifact"));
             }
         }
-        Ok(())
+        Ok(OpOutcome {
+            assigned_ids: assigned,
+        })
     }
 }
 
@@ -488,7 +496,7 @@ mod tests {
         let ids = CountingIdGenerator::default();
         let applier = ExcelOpApplier { ids: &ids };
         let mut ir = sheet_ir();
-        applier
+        let out = applier
             .apply(
                 &mut ir,
                 &PatchOp::AddSheet {
@@ -499,6 +507,27 @@ mod tests {
             .unwrap();
         assert_eq!(ir.workbook.sheets.len(), 2);
         assert_eq!(ir.workbook.sheets[1].id, "sheet_01");
+        assert_eq!(out.assigned_ids.sheet.as_deref(), Some("sheet_01"));
+    }
+
+    #[test]
+    fn create_table_reports_table_id() {
+        let ids = CountingIdGenerator::default();
+        let applier = ExcelOpApplier { ids: &ids };
+        let mut ir = sheet_ir();
+        let out = applier
+            .apply(
+                &mut ir,
+                &PatchOp::CreateTable {
+                    sheet_id: "s1".into(),
+                    range: "A1:B3".into(),
+                    name: "T".into(),
+                    header_row: true,
+                    style_preset: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(out.assigned_ids.table.as_deref(), Some("tbl_01"));
     }
 
     #[test]

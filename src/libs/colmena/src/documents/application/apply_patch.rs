@@ -59,9 +59,19 @@ impl ApplyPatchUseCase {
                 let applier = ExcelOpApplier {
                     ids: self.ids.as_ref(),
                 };
-                for op in &input.patch.ops {
-                    applier.apply(&mut ir, op)?;
+                let mut structured = Vec::with_capacity(input.patch.ops.len());
+                let mut natural_language = Vec::with_capacity(input.patch.ops.len());
+                for (i, op) in input.patch.ops.iter().enumerate() {
+                    let outcome = applier.apply(&mut ir, op)?;
+                    natural_language.push(describe_op(op, &outcome));
+                    if !outcome.assigned_ids.is_empty() {
+                        structured.push(op_outcome_entry(i, op, &outcome));
+                    }
                 }
+                let summary = PatchSummary {
+                    natural_language,
+                    structured,
+                };
                 let new_version = current.next();
                 ir.version_id = new_version.0.clone();
                 let ir_value = serde_json::to_value(&ir).unwrap();
@@ -72,7 +82,7 @@ impl ApplyPatchUseCase {
                     patch: serde_json::to_value(&input.patch).unwrap(),
                     applied_at: Utc::now(),
                     resulted_in: new_version.clone(),
-                    summary: PatchSummary::default(),
+                    summary: summary.clone(),
                 };
                 let version_data = VersionData {
                     ir: ir_value,
@@ -96,7 +106,7 @@ impl ApplyPatchUseCase {
 
                 Ok(ApplyPatchOutput {
                     version_id: new_version,
-                    summary: PatchSummary::default(),
+                    summary,
                 })
             }
             ArtifactKind::Word => {
@@ -112,9 +122,19 @@ impl ApplyPatchUseCase {
                 let applier = WordOpApplier {
                     ids: self.ids.as_ref(),
                 };
-                for op in &input.patch.ops {
-                    applier.apply(&mut ir, op)?;
+                let mut structured = Vec::with_capacity(input.patch.ops.len());
+                let mut natural_language = Vec::with_capacity(input.patch.ops.len());
+                for (i, op) in input.patch.ops.iter().enumerate() {
+                    let outcome = applier.apply(&mut ir, op)?;
+                    natural_language.push(describe_op(op, &outcome));
+                    if !outcome.assigned_ids.is_empty() {
+                        structured.push(op_outcome_entry(i, op, &outcome));
+                    }
                 }
+                let summary = PatchSummary {
+                    natural_language,
+                    structured,
+                };
                 let new_version = current.next();
                 ir.version_id = new_version.0.clone();
                 let ir_value = serde_json::to_value(&ir).unwrap();
@@ -125,7 +145,7 @@ impl ApplyPatchUseCase {
                     patch: serde_json::to_value(&input.patch).unwrap(),
                     applied_at: Utc::now(),
                     resulted_in: new_version.clone(),
-                    summary: PatchSummary::default(),
+                    summary: summary.clone(),
                 };
                 let version_data = VersionData {
                     ir: ir_value,
@@ -148,10 +168,230 @@ impl ApplyPatchUseCase {
 
                 Ok(ApplyPatchOutput {
                     version_id: new_version,
-                    summary: PatchSummary::default(),
+                    summary,
                 })
             }
         }
+    }
+}
+
+fn op_outcome_entry(
+    op_index: usize,
+    op: &crate::documents::domain::patch::PatchOp,
+    outcome: &crate::documents::domain::artifact::OpOutcome,
+) -> serde_json::Value {
+    let op_tag = serde_json::to_value(op)
+        .ok()
+        .and_then(|v| v.get("op").and_then(|s| s.as_str()).map(|s| s.to_string()))
+        .unwrap_or_default();
+    serde_json::json!({
+        "op_index": op_index,
+        "op": op_tag,
+        "assigned_ids": outcome.assigned_ids,
+    })
+}
+
+fn describe_op(
+    op: &crate::documents::domain::patch::PatchOp,
+    outcome: &crate::documents::domain::artifact::OpOutcome,
+) -> String {
+    use crate::documents::domain::patch::PatchOp::*;
+    let ids = &outcome.assigned_ids;
+    match op {
+        // ---- Excel ----
+        SetCell {
+            sheet_id,
+            address,
+            value,
+            style_ref,
+            ..
+        } => {
+            let mut s = format!(
+                "Set cell {address} on sheet '{sheet_id}' to {}",
+                fmt_value(value)
+            );
+            if let Some(sr) = style_ref {
+                s.push_str(&format!(" (style: {sr})"));
+            }
+            s
+        }
+        SetRange {
+            sheet_id,
+            range,
+            values,
+            ..
+        } => {
+            let n: usize = values.iter().flatten().filter(|v| !v.is_null()).count();
+            format!("Set {n} cells in range {range} on sheet '{sheet_id}'")
+        }
+        ClearRange { sheet_id, range } => {
+            format!("Cleared cells in range {range} on sheet '{sheet_id}'")
+        }
+        InsertRow {
+            sheet_id,
+            before_row,
+            ..
+        } => format!("Inserted row before row {before_row} on sheet '{sheet_id}'"),
+        DeleteRow {
+            sheet_id,
+            row_index,
+        } => format!("Deleted row {row_index} on sheet '{sheet_id}'"),
+        InsertColumn {
+            sheet_id,
+            before_col,
+            ..
+        } => format!("Inserted column before col {before_col} on sheet '{sheet_id}'"),
+        DeleteColumn {
+            sheet_id,
+            col_index,
+        } => format!("Deleted column {col_index} on sheet '{sheet_id}'"),
+        AddSheet { name, .. } => match &ids.sheet {
+            Some(sid) => format!("Added sheet '{name}' (id: {sid})"),
+            None => format!("Added sheet '{name}'"),
+        },
+        RenameSheet { sheet_id, new_name } => {
+            format!("Renamed sheet '{sheet_id}' to '{new_name}'")
+        }
+        DeleteSheet { sheet_id } => format!("Deleted sheet '{sheet_id}'"),
+        ReorderSheets { order } => format!("Reordered sheets to [{}]", order.join(", ")),
+        CreateTable {
+            sheet_id,
+            range,
+            name,
+            ..
+        } => match &ids.table {
+            Some(tid) => format!(
+                "Created table '{name}' over {range} on sheet '{sheet_id}' (id: {tid})"
+            ),
+            None => format!("Created table '{name}' over {range} on sheet '{sheet_id}'"),
+        },
+        ResizeTable {
+            table_id,
+            new_range,
+        } => format!("Resized table {table_id} to {new_range}"),
+        DeleteTable { table_id } => format!("Deleted table {table_id}"),
+        SetColumnWidth {
+            sheet_id,
+            col,
+            width,
+        } => format!("Set column {col} width to {width} on sheet '{sheet_id}'"),
+        DefineStyle { style_ref, .. } => format!("Defined style '{style_ref}'"),
+
+        // ---- Word ----
+        InsertBlock {
+            before,
+            after,
+            block,
+        } => {
+            let btype = block.get("type").and_then(|v| v.as_str()).unwrap_or("block");
+            let pos = match (before.as_deref(), after.as_deref()) {
+                (Some(b), _) => format!(" before {b}"),
+                (_, Some(a)) => format!(" after {a}"),
+                _ => " at end".to_string(),
+            };
+            let id_part = ids
+                .block
+                .as_ref()
+                .map(|b| format!(" (id: {b})"))
+                .unwrap_or_default();
+            format!("Inserted {btype}{pos}{id_part}")
+        }
+        DeleteBlock { block_id } => format!("Deleted block {block_id}"),
+        ReplaceBlock { block_id, .. } => format!("Replaced block {block_id}"),
+        MoveBlock {
+            block_id,
+            after_block_id,
+        } => format!("Moved block {block_id} after {after_block_id}"),
+        SetHeadingLevel { block_id, level } => {
+            format!("Set heading level of {block_id} to {level}")
+        }
+        ReplaceRunText {
+            block_id,
+            run_id,
+            new_text,
+        } => format!(
+            "Replaced text in run {run_id} of {block_id} to '{}'",
+            truncate(new_text, 60)
+        ),
+        SetRunStyle {
+            block_id, run_id, ..
+        } => format!("Updated style on run {run_id} of {block_id}"),
+        InsertRun {
+            block_id, at_index, ..
+        } => {
+            let id_part = ids
+                .runs
+                .first()
+                .map(|r| format!(" (id: {r})"))
+                .unwrap_or_default();
+            format!("Inserted run in {block_id} at index {at_index}{id_part}")
+        }
+        DeleteRun { block_id, run_id } => format!("Deleted run {run_id} from {block_id}"),
+        InsertListItem {
+            list_block_id,
+            at_index,
+            ..
+        } => {
+            let id_part = ids
+                .list_items
+                .first()
+                .map(|i| format!(" (id: {i})"))
+                .unwrap_or_default();
+            format!("Inserted list item in {list_block_id} at index {at_index}{id_part}")
+        }
+        ReplaceListItem {
+            list_block_id,
+            item_id,
+            ..
+        } => format!("Replaced list item {item_id} in {list_block_id}"),
+        DeleteListItem {
+            list_block_id,
+            item_id,
+        } => format!("Deleted list item {item_id} from {list_block_id}"),
+        InsertTableRow {
+            table_block_id,
+            before,
+            after,
+            ..
+        } => {
+            let pos = match (before.as_deref(), after.as_deref()) {
+                (Some(b), _) => format!(" before {b}"),
+                (_, Some(a)) => format!(" after {a}"),
+                _ => " at end".to_string(),
+            };
+            let id_part = ids
+                .rows
+                .first()
+                .map(|r| format!(" (id: {r})"))
+                .unwrap_or_default();
+            format!("Inserted row in {table_block_id}{pos}{id_part}")
+        }
+        DeleteTableRow {
+            table_block_id,
+            row_id,
+        } => format!("Deleted row {row_id} from {table_block_id}"),
+        UpdateTableCell {
+            table_block_id,
+            row_id,
+            col_index,
+            ..
+        } => format!("Updated cell in {table_block_id} at row {row_id}, col {col_index}"),
+    }
+}
+
+fn fmt_value(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => format!("'{}'", truncate(s, 40)),
+        _ => truncate(&v.to_string(), 40),
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let kept: String = s.chars().take(max.saturating_sub(3)).collect();
+        format!("{kept}...")
     }
 }
 

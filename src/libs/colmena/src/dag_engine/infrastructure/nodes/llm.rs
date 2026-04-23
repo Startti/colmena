@@ -521,12 +521,29 @@ impl ExecutableNode for LlmNode {
             .upgrade()
             .ok_or("NodeRegistry has been dropped")?;
 
-        // Parse tool_configurations
-        let mut tool_configurations: HashMap<String, ToolConfiguration> = inputs
-            .get("tool_configurations")
-            .or_else(|| config.get("tool_configurations"))
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
+        // Parse tool_configurations. Surface parse errors instead of silently
+        // falling back to an empty map — a malformed entry (e.g. an invalid
+        // field inside node_schema) would otherwise strip ALL tools from the
+        // LLM with no visible diagnostic.
+        let mut tool_configurations: HashMap<String, ToolConfiguration> =
+            match inputs
+                .get("tool_configurations")
+                .or_else(|| config.get("tool_configurations"))
+            {
+                Some(v) => match serde_json::from_value::<HashMap<String, ToolConfiguration>>(
+                    v.clone(),
+                ) {
+                    Ok(map) => map,
+                    Err(e) => {
+                        colmena_log!(
+                            "WARN: tool_configurations failed to parse — no tools will be exposed to the LLM. Error: {}",
+                            e
+                        );
+                        HashMap::new()
+                    }
+                },
+                None => HashMap::new(),
+            };
 
         // Resolve context variables in both fixed_config and node_schema
         for tool_cfg in tool_configurations.values_mut() {

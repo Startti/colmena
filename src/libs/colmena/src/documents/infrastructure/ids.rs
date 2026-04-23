@@ -1,6 +1,7 @@
 use crate::documents::domain::IdGenerator;
 use std::sync::Mutex;
 
+#[derive(Default)]
 pub struct UlidIdGenerator;
 
 impl UlidIdGenerator {

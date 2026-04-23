@@ -28,21 +28,25 @@ pub struct WordDocument {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Block {
     Heading {
+        #[serde(default)]
         id: String,
         level: u8,
         runs: Vec<Run>,
     },
     Paragraph {
+        #[serde(default)]
         id: String,
         runs: Vec<Run>,
     },
     List {
+        #[serde(default)]
         id: String,
         #[serde(default = "default_list_style")]
         style: ListStyle,
         items: Vec<ListItem>,
     },
     Table {
+        #[serde(default)]
         id: String,
         rows: Vec<TableRow>,
     },
@@ -61,6 +65,7 @@ pub enum ListStyle {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Run {
+    #[serde(default)]
     pub id: String,
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,12 +82,14 @@ pub struct Run {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ListItem {
+    #[serde(default)]
     pub id: String,
     pub runs: Vec<Run>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TableRow {
+    #[serde(default)]
     pub id: String,
     pub cells: Vec<TableCell>,
 }

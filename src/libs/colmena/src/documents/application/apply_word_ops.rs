@@ -1,3 +1,4 @@
+use crate::documents::domain::artifact::{AssignedIds, OpOutcome};
 use crate::documents::domain::ir::{Block, ListItem, Run, TableCell, TableRow, WordIR};
 use crate::documents::domain::patch::PatchOp;
 use crate::documents::domain::{DocumentError, IdGenerator};
@@ -7,7 +8,8 @@ pub struct WordOpApplier<'a> {
 }
 
 impl<'a> WordOpApplier<'a> {
-    pub fn apply(&self, ir: &mut WordIR, op: &PatchOp) -> Result<(), DocumentError> {
+    pub fn apply(&self, ir: &mut WordIR, op: &PatchOp) -> Result<OpOutcome, DocumentError> {
+        let mut assigned = AssignedIds::default();
         match op {
             PatchOp::InsertBlock {
                 before,
@@ -16,7 +18,7 @@ impl<'a> WordOpApplier<'a> {
             } => {
                 let mut new_block: Block = serde_json::from_value(block.clone())
                     .map_err(|e| invalid(op, &format!("bad block: {e}")))?;
-                assign_block_ids(&mut new_block, self.ids);
+                assign_block_ids(&mut new_block, self.ids, &mut assigned);
                 let pos = if let Some(b) = before {
                     ir.block_index(b)
                         .ok_or_else(|| invalid(op, "before block not found"))?
@@ -117,6 +119,7 @@ impl<'a> WordOpApplier<'a> {
                 let mut new_run: Run = serde_json::from_value(run.clone())
                     .map_err(|e| invalid(op, &format!("bad run: {e}")))?;
                 new_run.id = self.ids.new_run_id();
+                assigned.runs.push(new_run.id.clone());
                 match b {
                     Block::Paragraph { runs, .. } | Block::Heading { runs, .. } => {
                         let pos = (*at_index as usize).min(runs.len());
@@ -156,13 +159,16 @@ impl<'a> WordOpApplier<'a> {
                     let mut run: Run = serde_json::from_value(r.clone())
                         .map_err(|e| invalid(op, &format!("bad run: {e}")))?;
                     run.id = self.ids.new_run_id();
+                    assigned.runs.push(run.id.clone());
                     new_runs.push(run);
                 }
                 let pos = (*at_index as usize).min(items.len());
+                let item_id = self.ids.new_list_item_id();
+                assigned.list_items.push(item_id.clone());
                 items.insert(
                     pos,
                     ListItem {
-                        id: self.ids.new_list_item_id(),
+                        id: item_id,
                         runs: new_runs,
                     },
                 );
@@ -187,6 +193,7 @@ impl<'a> WordOpApplier<'a> {
                     let mut run: Run = serde_json::from_value(r.clone())
                         .map_err(|e| invalid(op, &format!("bad run: {e}")))?;
                     run.id = self.ids.new_run_id();
+                    assigned.runs.push(run.id.clone());
                     new_runs.push(run);
                 }
                 it.runs = new_runs;
@@ -221,11 +228,14 @@ impl<'a> WordOpApplier<'a> {
                         .map_err(|e| invalid(op, &format!("bad cell: {e}")))?;
                     for run in cell.runs.iter_mut() {
                         run.id = self.ids.new_run_id();
+                        assigned.runs.push(run.id.clone());
                     }
                     new_cells.push(cell);
                 }
+                let row_id = self.ids.new_row_id();
+                assigned.rows.push(row_id.clone());
                 let row = TableRow {
-                    id: self.ids.new_row_id(),
+                    id: row_id,
                     cells: new_cells,
                 };
                 let pos = if let Some(b) = before {
@@ -280,6 +290,7 @@ impl<'a> WordOpApplier<'a> {
                     let mut run: Run = serde_json::from_value(r.clone())
                         .map_err(|e| invalid(op, &format!("bad run: {e}")))?;
                     run.id = self.ids.new_run_id();
+                    assigned.runs.push(run.id.clone());
                     new_runs.push(run);
                 }
                 cell.runs = new_runs;
@@ -287,7 +298,9 @@ impl<'a> WordOpApplier<'a> {
 
             other => return Err(invalid(other, "not a Word op")),
         }
-        Ok(())
+        Ok(OpOutcome {
+            assigned_ids: assigned,
+        })
     }
 }
 
@@ -298,30 +311,38 @@ fn invalid(op: &PatchOp, reason: &str) -> DocumentError {
     }
 }
 
-fn assign_block_ids(block: &mut Block, ids: &dyn IdGenerator) {
+fn assign_block_ids(block: &mut Block, ids: &dyn IdGenerator, out: &mut AssignedIds) {
     match block {
         Block::Heading { id, runs, .. } | Block::Paragraph { id, runs } => {
             *id = ids.new_block_id();
+            out.block = Some(id.clone());
             for r in runs {
                 r.id = ids.new_run_id();
+                out.runs.push(r.id.clone());
             }
         }
         Block::List { id, items, .. } => {
             *id = ids.new_block_id();
+            out.block = Some(id.clone());
             for it in items {
                 it.id = ids.new_list_item_id();
+                out.list_items.push(it.id.clone());
                 for r in it.runs.iter_mut() {
                     r.id = ids.new_run_id();
+                    out.runs.push(r.id.clone());
                 }
             }
         }
         Block::Table { id, rows } => {
             *id = ids.new_block_id();
+            out.block = Some(id.clone());
             for row in rows {
                 row.id = ids.new_row_id();
+                out.rows.push(row.id.clone());
                 for cell in row.cells.iter_mut() {
                     for r in cell.runs.iter_mut() {
                         r.id = ids.new_run_id();
+                        out.runs.push(r.id.clone());
                     }
                 }
             }
@@ -375,7 +396,7 @@ mod tests {
         let ids = CountingIdGenerator::default();
         let applier = WordOpApplier { ids: &ids };
         let mut ir = base_ir();
-        applier
+        let out = applier
             .apply(
                 &mut ir,
                 &PatchOp::ReplaceRunText {
@@ -385,6 +406,7 @@ mod tests {
                 },
             )
             .unwrap();
+        assert!(out.assigned_ids.is_empty());
         if let Block::Paragraph { runs, .. } = &ir.document.blocks[0] {
             assert_eq!(runs[0].text, "world");
         } else {
@@ -397,7 +419,7 @@ mod tests {
         let ids = CountingIdGenerator::default();
         let applier = WordOpApplier { ids: &ids };
         let mut ir = base_ir();
-        applier
+        let out = applier
             .apply(
                 &mut ir,
                 &PatchOp::InsertBlock {
@@ -405,13 +427,38 @@ mod tests {
                     after: Some("b1".into()),
                     block: serde_json::json!({
                         "type": "paragraph",
-                        "id": "CLIENT_SHOULD_IGNORE",
-                        "runs": [{"id": "ignored", "text": "new"}]
+                        "runs": [{"text": "new"}, {"text": "second"}]
                     }),
                 },
             )
             .unwrap();
         assert_eq!(ir.document.blocks.len(), 2);
         assert!(ir.document.blocks[1].id().starts_with("blk_"));
+        assert_eq!(out.assigned_ids.block.as_deref(), Some("blk_01"));
+        assert_eq!(out.assigned_ids.runs, vec!["run_01", "run_02"]);
+    }
+
+    #[test]
+    fn insert_list_item_reports_ids() {
+        let ids = CountingIdGenerator::default();
+        let applier = WordOpApplier { ids: &ids };
+        let mut ir = base_ir();
+        ir.document.blocks.push(Block::List {
+            id: "lst".into(),
+            style: crate::documents::domain::ir::ListStyle::Bullet,
+            items: vec![],
+        });
+        let out = applier
+            .apply(
+                &mut ir,
+                &PatchOp::InsertListItem {
+                    list_block_id: "lst".into(),
+                    at_index: 0,
+                    runs: vec![serde_json::json!({"text": "item"})],
+                },
+            )
+            .unwrap();
+        assert_eq!(out.assigned_ids.list_items, vec!["li_01"]);
+        assert_eq!(out.assigned_ids.runs, vec!["run_01"]);
     }
 }

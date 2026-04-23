@@ -1,0 +1,77 @@
+{
+  "comment": "User canvas load test — fixed enabled_tools to match tool name 'load_canvas'",
+  "nodes": {
+    "d0cunjrcvj1j5feofii5yzr4": {
+      "type": "input",
+      "config": {
+        "prompt": "que hay en el canvas?"
+      }
+    },
+    "itbgvxuplxh7sf2ofzgx2qx0": {
+      "type": "llm_call",
+      "config": {
+        "model": "gemini-2.5-flash",
+        "maxSteps": 10,
+        "description": "ADP agent creator agent",
+        "temperature": 0,
+        "memoryWindow": "",
+        "stream": true,
+        "system_message": "You are a canvas automation agent for the ADP platform. You manage nodes and edges on a visual workflow canvas.\n\nWORKFLOW:\n1. Always first to see existing nodes, edges, and groups.\n",
+        "connection_url": "postgresql://colmena:qwerty123@34.172.146.67:5432/colmena_llm_memory",
+        "enabled_tools": [
+          "load_canvas"
+        ],
+        "tool_configurations": {
+          "tnu1c1p604qipbiwfvl5hitn": {
+            "name": "load_canvas",
+            "node_type": "socketio_request",
+            "description": "Load the current canvas state for the environment. Returns all existing nodes, edges, and groups. Always call this first to understand the current layout before making changes.",
+            "node_schema": {
+              "url": {
+                "type": "string",
+                "fixed": "https://api.dev.startti.ai"
+              },
+              "namespace": {
+                "type": "string",
+                "fixed": "/canvas"
+              },
+              "event": {
+                "type": "string",
+                "fixed": "load_canvas_state"
+              },
+              "wait_event": {
+                "type": "string",
+                "fixed": "canvas_state_loaded"
+              },
+              "cookies": {
+                "type": "string",
+                "fixed": "__Secure-better-auth.session_token=lJzqK4tjSeWXcohjWajOWXeHXYLrnEFe.d3QARnpdaawAasHxTnXGLCMU9yGPMtQtzVnsSA0JE4Y%3D"
+              },
+              "payload": {
+                "type": "object",
+                "properties": {
+                  "environmentId": {
+                    "type": "string",
+                    "fixed": "cmo3v9cpb0003mfit512qs4rt"
+                  }
+                }
+              },
+              "timeout_ms": {
+                "type": "integer",
+                "fixed": 15000
+              }
+            }
+          }
+        },
+        "provider": "gemini",
+        "api_key": "***REDACTED_GEMINI_KEY***"
+      }
+    }
+  },
+  "edges": [
+    {
+      "from": "d0cunjrcvj1j5feofii5yzr4",
+      "to": "itbgvxuplxh7sf2ofzgx2qx0"
+    }
+  ]
+}
