@@ -1,0 +1,235 @@
+{
+  "edges": [
+    {
+      "to": "qx0hzh9ctq4sua26iol465o7",
+      "from": "gy0vhhgvukwow2pay1akxdlp"
+    }
+  ],
+  "nodes": {
+    "gy0vhhgvukwow2pay1akxdlp": {
+      "type": "input",
+      "config": {
+        "data": {
+          "user_message": "Quiero viajar de Madrid a Barcelona el 2026-05-15 para 2 adultos. Arma un plan completo."
+        },
+        "inputType": "Text",
+        "variableName": "user_message"
+      }
+    },
+    "qx0hzh9ctq4sua26iol465o7": {
+      "type": "orchestrator",
+      "config": {
+        "agents": {
+          "experto_vuelos": {
+            "description": "Agente para buscar vuelos",
+            "child_graph_inline": {
+              "edges": [
+                {
+                  "to": "aqzbbfq4d070nfi76f4yvbin",
+                  "from": "aqzbbfq4d070nfi76f4yvbin_in"
+                },
+                {
+                  "to": "aqzbbfq4d070nfi76f4yvbin_out",
+                  "from": "aqzbbfq4d070nfi76f4yvbin"
+                }
+              ],
+              "nodes": {
+                "aqzbbfq4d070nfi76f4yvbin": {
+                  "type": "llm_call",
+                  "config": {
+                    "model": "gpt-4o-mini",
+                    "provider": "openai",
+                    "api_key": "${OPENAI_API_KEY}",
+                    "enabled_tools": [
+                      "get_amadeus_token",
+                      "search_flights"
+                    ],
+                    "system_message": "You are a flight search assistant for the Amadeus API. You have TWO function tools available: `get_amadeus_token` and `search_flights`.\n\nCRITICAL RULES:\n- You MUST invoke tools using the function-calling mechanism. DO NOT write pseudo-code, markdown code blocks, `<tool_code>`, `print(...)`, or any textual simulation of a tool call. Never describe calling a tool — just call it.\n- Do not ask the user for clarification. If any parameter is missing, reason from the task context and proceed.\n\nEXECUTION SEQUENCE (mandatory, in order):\n\nStep 1 — Call `get_amadeus_token` with no arguments. The response JSON will contain an `access_token` string.\n\nStep 2 — Call `search_flights` with:\n  - `bearer_token`: the exact `access_token` value from Step 1 (copy verbatim).\n  - `originLocationCode`: IATA code of origin airport (e.g. MAD).\n  - `destinationLocationCode`: IATA code of destination airport (e.g. BCN).\n  - `departureDate`: YYYY-MM-DD.\n  - `adults`: string with the number of adults (e.g. \"2\").\n\nStep 3 — After receiving the flight offers, respond to the user in Spanish with a concise bulleted list of the top 3 options. Each option must include: airline, departure time, arrival time, total duration, price with currency, and number of stops. If the API returns no offers or errors, say so clearly and stop — do not invent flights.",
+                    "tool_configurations": {
+                      "hj6wiymaahkeo55f2uqwx8cz": {
+                        "name": "get_amadeus_token",
+                        "node_type": "http_request",
+                        "description": "Authenticate with the Amadeus API using client credentials. Returns an access_token that you must pass to search_flights.",
+                        "node_schema": {
+                          "body": {
+                            "type": "object",
+                            "fixed": "grant_type=client_credentials&client_id=53l1B1s7iNHWvOQFokoGdKeT7Evhcbar&client_secret=LVkjF7dlmzZybrhm"
+                          },
+                          "method": {
+                            "type": "string",
+                            "fixed": "POST"
+                          },
+                          "secure": { "type": "boolean", "fixed": true },
+                          "headers": {
+                            "type": "object",
+                            "fixed": {
+                              "Content-Type": "application/x-www-form-urlencoded"
+                            }
+                          },
+                          "base_url": {
+                            "type": "string",
+                            "fixed": "https://api.amadeus.com/v1/security/oauth2"
+                          },
+                          "endpoint": {
+                            "type": "string",
+                            "fixed": "/token"
+                          }
+                        }
+                      },
+                      "jvew83sjlox8fmecl00it7lv": {
+                        "name": "search_flights",
+                        "node_type": "http_request",
+                        "description": "Search for flight offers on Amadeus. Requires the access_token obtained from get_amadeus_token. Pass the token exactly as received.",
+                        "node_schema": {
+                          "method": {
+                            "type": "string",
+                            "fixed": "GET"
+                          },
+                          "secure": { "type": "boolean", "fixed": false },
+                          "base_url": {
+                            "type": "string",
+                            "fixed": "https://api.amadeus.com"
+                          },
+                          "endpoint": {
+                            "type": "string",
+                            "fixed": "/v2/shopping/flight-offers"
+                          },
+                          "bearer_token": {
+                            "type": "string",
+                            "required": true,
+                            "description": "The Amadeus access token obtained from get_amadeus_token. Pass the exact value as received"
+                          },
+                          "query_params": {
+                            "type": "object",
+                            "properties": {
+                              "max": {
+                                "type": "string",
+                                "fixed": "5"
+                              },
+                              "adults": {
+                                "type": "string",
+                                "required": true,
+                                "description": "Number of adult passengers (1-9)"
+                              },
+                              "departureDate": {
+                                "type": "string",
+                                "required": true,
+                                "description": "Departure date in YYYY-MM-DD format"
+                              },
+                              "originLocationCode": {
+                                "type": "string",
+                                "required": true,
+                                "description": "IATA origin airport code (e.g., 'MAD' for Madrid)"
+                              },
+                              "destinationLocationCode": {
+                                "type": "string",
+                                "required": true,
+                                "description": "IATA destination airport code (e.g., 'BCN' for Barcelona)"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "aqzbbfq4d070nfi76f4yvbin_in": {
+                  "type": "input",
+                  "config": {}
+                },
+                "aqzbbfq4d070nfi76f4yvbin_out": {
+                  "type": "output",
+                  "config": {}
+                }
+              }
+            }
+          },
+          "experto_hoteles": {
+            "description": "experto en buscar hoteles",
+            "child_graph_inline": {
+              "edges": [
+                {
+                  "to": "w0zcok1h6qqcai9g25tu2huw",
+                  "from": "w0zcok1h6qqcai9g25tu2huw_in"
+                },
+                {
+                  "to": "w0zcok1h6qqcai9g25tu2huw_out",
+                  "from": "w0zcok1h6qqcai9g25tu2huw"
+                }
+              ],
+              "nodes": {
+                "w0zcok1h6qqcai9g25tu2huw": {
+                  "type": "llm_call",
+                  "config": {
+                    "model": "gpt-4o-mini",
+                    "provider": "openai",
+                    "api_key": "${OPENAI_API_KEY}",
+                    "system_message": "Eres un experto en hoteles. Recibirás el destino, fechas, y número de huéspedes (adultos/niños/movilidad reducida) ya resueltos en el contexto de la tarea. NO pidas clarificación al usuario. Recomienda 3 hoteles concretos en el destino adecuados al perfil de los viajeros: nombre del hotel, zona/barrio, categoría (estrellas), razón por la que encaja. Sé breve (máx. 10 líneas) y responde en español."
+                  }
+                },
+                "w0zcok1h6qqcai9g25tu2huw_in": {
+                  "type": "input",
+                  "config": {}
+                },
+                "w0zcok1h6qqcai9g25tu2huw_out": {
+                  "type": "output",
+                  "config": {}
+                }
+              }
+            }
+          },
+          "experto_actividades": {
+            "description": "Tool para organizar actividades en viajes",
+            "child_graph_inline": {
+              "edges": [
+                {
+                  "to": "yd8rvlsu857t3ehk3gljujvs",
+                  "from": "yd8rvlsu857t3ehk3gljujvs_in"
+                },
+                {
+                  "to": "yd8rvlsu857t3ehk3gljujvs_out",
+                  "from": "yd8rvlsu857t3ehk3gljujvs"
+                }
+              ],
+              "nodes": {
+                "yd8rvlsu857t3ehk3gljujvs": {
+                  "type": "llm_call",
+                  "config": {
+                    "model": "gpt-4o-mini",
+                    "provider": "openai",
+                    "api_key": "${OPENAI_API_KEY}",
+                    "system_message": "Eres un experto en planificación de actividades turísticas. Recibirás destino, fechas, y número de viajeros (adultos/niños/movilidad reducida) ya resueltos en el contexto de la tarea. NO pidas clarificación al usuario. Entrega un itinerario compacto día por día con actividades concretas ajustadas al perfil del grupo. Sé conciso (máx. 15 líneas en total) y responde en español."
+                  }
+                },
+                "yd8rvlsu857t3ehk3gljujvs_in": {
+                  "type": "input",
+                  "config": {}
+                },
+                "yd8rvlsu857t3ehk3gljujvs_out": {
+                  "type": "output",
+                  "config": {}
+                }
+              }
+            }
+          }
+        },
+        "planner": {
+          "model": "gpt-4o-mini",
+          "provider": "openai",
+          "api_key": "${OPENAI_API_KEY}",
+          "system_message": "eres un experto en creacion de viajes.\nEl usuario envia un origen y destino y tienes que armar un plan de viaje con vuelos hoteles y actividades."
+        },
+        "final_reactor": {
+          "model": "gpt-4o-mini",
+          "provider": "openai",
+          "api_key": "${OPENAI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "Eres el paso final del orquestador de viajes. Combina los resultados de vuelos, hoteles y actividades en un resumen claro y bien estructurado del plan de viaje (máx. 10 líneas). Responde en español."
+        },
+        "verbose": false,
+        "max_phases": 10,
+        "include_extra_info": true
+      }
+    }
+  }
+}

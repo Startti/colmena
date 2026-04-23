@@ -8,7 +8,7 @@ use futures::{Stream, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -299,6 +299,11 @@ impl LlmRepository for AnthropicAdapter {
         // Tracks per-block-index metadata (id + name) for tool_use blocks so that
         // subsequent input_json_delta events can be attributed to the right tool call.
         let mut tool_state: HashMap<usize, (String, String)> = HashMap::new();
+        // Indices of tool_use blocks that emitted at least one input_json_delta.
+        // Blocks missing from this set on content_block_stop are zero-arg tool calls
+        // (e.g. get_amadeus_token()) for which Anthropic never emits deltas — we
+        // synthesize `{}` so the downstream accumulator produces parseable arguments.
+        let mut tool_received_delta: HashSet<usize> = HashSet::new();
         let mut stop_reason: Option<String> = None;
 
         let sse_stream = async_stream::try_stream! {
@@ -345,21 +350,46 @@ impl LlmRepository for AnthropicAdapter {
                                 Some("input_json_delta") => {
                                     if let (Some(idx), Some(partial)) = (parsed.index, delta.partial_json) {
                                         if let Some((id, name)) = tool_state.get(&idx) {
-                                            yield LlmStreamChunk::new(
-                                                request_id.clone(),
-                                                LlmStreamPart::ToolCallChunk(ToolCallChunk {
-                                                    index: idx,
-                                                    id: id.clone(),
-                                                    name: name.clone(),
-                                                    args_chunk: partial,
-                                                }),
-                                                provider.clone(),
-                                                false,
-                                            );
+                                            // Anthropic emits a single empty input_json_delta for
+                                            // zero-arg tools. Only count non-empty deltas so the
+                                            // content_block_stop fallback can synthesize `{}`.
+                                            if !partial.is_empty() {
+                                                tool_received_delta.insert(idx);
+                                                yield LlmStreamChunk::new(
+                                                    request_id.clone(),
+                                                    LlmStreamPart::ToolCallChunk(ToolCallChunk {
+                                                        index: idx,
+                                                        id: id.clone(),
+                                                        name: name.clone(),
+                                                        args_chunk: partial,
+                                                    }),
+                                                    provider.clone(),
+                                                    false,
+                                                );
+                                            }
                                         }
                                     }
                                 }
                                 _ => {}
+                            }
+                        }
+                    }
+                    "content_block_stop" => {
+                        if let Some(idx) = parsed.index {
+                            if let Some((id, name)) = tool_state.get(&idx) {
+                                if !tool_received_delta.contains(&idx) {
+                                    yield LlmStreamChunk::new(
+                                        request_id.clone(),
+                                        LlmStreamPart::ToolCallChunk(ToolCallChunk {
+                                            index: idx,
+                                            id: id.clone(),
+                                            name: name.clone(),
+                                            args_chunk: "{}".to_string(),
+                                        }),
+                                        provider.clone(),
+                                        false,
+                                    );
+                                }
                             }
                         }
                     }
