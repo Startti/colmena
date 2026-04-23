@@ -8,7 +8,7 @@
 
 ## Summary
 
-Introduce a new toolkit node `api_explorer` that lets an LLM agent take an OpenAPI 3.x specification URL at runtime and then deterministically discover endpoints and build valid HTTP-request configurations against it. Five sub-tools are exposed to the LLM: `load_spec`, `list_endpoints`, `search_endpoint`, `get_endpoint_details`, and `build_http_request`. Parsed specs are cached per conversation (24 h default) with ETag-based revalidation. The output of `build_http_request` is a JSON object shaped exactly as the input of the existing `http_request` node — closing the loop from "an API's docs URL" to "an executing HTTP call" without LLM hallucination.
+Introduce a new toolkit node `api_explorer` that lets an LLM agent take an OpenAPI specification URL at runtime (either OpenAPI 3.x or Swagger 2.0) and then deterministically discover endpoints and build valid HTTP-request configurations against it. Five sub-tools are exposed to the LLM: `load_spec`, `list_endpoints`, `search_endpoint`, `get_endpoint_details`, and `build_http_request`. Swagger 2.0 documents are transparently converted to OpenAPI 3.0 inside the adapter so the rest of the system sees a single, modern internal model. Common Git-forge "blob" URLs (GitHub, GitLab, Bitbucket) are automatically rewritten to their raw-content equivalents so the LLM does not need to know the transformation. Parsed specs are cached per conversation (24 h default) with ETag-based revalidation. The output of `build_http_request` is a JSON object shaped exactly as the input of the existing `http_request` node — closing the loop from "an API's docs URL" to "an executing HTTP call" without LLM hallucination.
 
 ## Motivation
 
@@ -24,7 +24,8 @@ Agents frequently need to integrate with APIs whose specification is public (Str
 
 ## Goals
 
-- Download and parse an OpenAPI 3.x spec from a URL, with size and timeout limits.
+- Download and parse a spec from a URL, accepting **OpenAPI 3.x** (JSON or YAML) natively and **Swagger 2.0** (JSON or YAML) via internal conversion to 3.0. Enforce size and timeout limits.
+- Auto-rewrite common Git-forge blob URLs (GitHub, GitLab, Bitbucket) to their raw-content URLs before downloading, so the LLM can hand in "the URL the user pasted" without knowing the forge's rendering convention.
 - Cache parsed specs per conversation with ETag/Last-Modified revalidation (cheap no-op re-validation when the spec hasn't changed).
 - Expose five sub-tools that let the LLM list, search (keyword + fuzzy), and inspect endpoints.
 - Provide `build_http_request(operation_id, params, auth_secret_ref?)` that:
@@ -32,12 +33,12 @@ Agents frequently need to integrate with APIs whose specification is public (Str
   - Resolves path parameters, query parameters, request body, and headers according to the spec.
   - Emits a JSON object directly usable as input to the `http_request` node (url, method, headers, query_params, body).
   - Applies auth schemes declared in the spec using a user-provided Secure Value reference.
-- Surface validation errors (missing required, type mismatch, unknown operation_id) as structured LLM-recoverable results with fuzzy-match hints.
+- Surface validation errors (missing required, type mismatch, unknown operation_id, HTML instead of spec) as structured LLM-recoverable results with hints.
 
 ## Non-goals
 
-- **Swagger 2.0 / OpenAPI 2.0** — not supported in v1. APIs still on 2.0 fall back to `tavily_client` + manual `http_request`. Deferred.
-- **AsyncAPI, GraphQL SDL, RAML, Postman collections** — out of scope.
+- **AsyncAPI, GraphQL SDL, RAML, Postman collections** — out of scope. Fall back to `tavily_client` + manual `http_request` for these formats.
+- **Full Swagger 2.0 fidelity**: the conversion handles the mechanical 1:1 mappings (host/basePath/schemes → servers, definitions → components.schemas, body params → requestBody, consumes/produces → content, securityDefinitions → securitySchemes, etc.). Edge cases that require semantic rework (complex `allOf` polymorphism, vendor extensions, unusual `collectionFormat` values) may result in a conversion error rather than silent data loss — the LLM receives a clear error and can fall back to `tavily_client` for those specific specs.
 - **Semantic (embedding-based) endpoint search** — keyword + fuzzy only in v1. The `ApiSpecPort` trait allows plugging a `SemanticEndpointIndex` adapter later.
 - **Actually executing the request** — `api_explorer.build_http_request` emits config; the `http_request` node (or a direct tool call) executes it. This keeps `api_explorer` deterministic and side-effect-free.
 - **Spec authoring / editing** — read-only.
@@ -83,23 +84,25 @@ Each sub-tool's description is rich — accuracy hinges on the LLM knowing when 
 
 **Description:**
 
-> Download and parse an OpenAPI 3.x specification from a URL. Must be called before any other api_explorer tool. The parsed spec is cached for the conversation so subsequent tools are fast. Returns a summary of what the spec contains. If the URL points to a Swagger 2.0 document, this tool will return an error — fall back to reading HTML docs with `web__fetch`.
+> Download and parse an OpenAPI 3.x or Swagger 2.0 specification from a URL. Must be called before any other api_explorer tool. The parsed spec is cached for the conversation so subsequent tools are fast. Returns a summary of what the spec contains. You can paste Git-forge URLs (github.com/.../blob/..., gitlab.com/.../-/blob/...) — the node rewrites them to the raw-content URL automatically; use `resolved_url` in the result to see what was actually fetched. Swagger 2.0 documents are converted internally to OpenAPI 3.0 so all subsequent tools behave identically. If the download returns HTML (usually because a Git-forge blob URL could not be normalized), you get a clear error suggesting the raw URL format.
 
 **Parameters:**
 
 | Name | Type | Required | Description |
 |---|---|---|---|
-| `url` | string | yes | Absolute URL of an OpenAPI 3.x JSON or YAML file. |
+| `url` | string | yes | Absolute URL of an OpenAPI 3.x or Swagger 2.0 JSON/YAML file. Git-forge blob URLs are accepted and auto-rewritten to raw. |
 | `force_reload` | boolean | no | If true, bypass cache and re-download. Default false. |
 
 **Returns:**
 
 ```json
 {
-  "spec_url": "...",
+  "spec_url_input": "https://github.com/.../blob/main/openapi.yaml",
+  "resolved_url": "https://raw.githubusercontent.com/.../main/openapi.yaml",
+  "original_format": "swagger-2.0",
+  "internal_format": "openapi-3.0.3",
   "title": "Stripe API",
   "version": "2024-06-20",
-  "openapi_version": "3.0.0",
   "description": "The Stripe API provides...",
   "server_url": "https://api.stripe.com",
   "endpoints_count": 318,
@@ -108,6 +111,8 @@ Each sub-tool's description is rich — accuracy hinges on the LLM knowing when 
   "cached": true
 }
 ```
+
+`original_format` is `"openapi-3.x"` or `"swagger-2.0"`; `internal_format` is always an OpenAPI 3.x string after conversion.
 
 #### `api_explorer__list_endpoints`
 
@@ -344,13 +349,51 @@ struct CachedSpec {
 }
 ```
 
-### Infrastructure (`web/infrastructure/openapi_adapter.rs`)
+### Infrastructure (`web/infrastructure/openapi_adapter.rs` + `swagger2_to_oas3.rs`)
 
-- Uses `reqwest` to download the spec (honoring `spec_download_timeout_seconds` and `max_spec_size_bytes` via streaming + early abort).
-- Sends `If-None-Match` and `If-Modified-Since` headers when revalidating. On `304`, returns `SpecFetchResult::NotModified`.
-- Detects format (JSON vs YAML) from `Content-Type` or first character of the body.
-- Parses with `oas3` crate. Converts the `oas3` model to Colmena's `ParsedSpec` domain value object (so the rest of the system is isolated from the crate's types).
-- Rejects Swagger 2.0 documents with a clear error: the presence of `"swagger": "2.0"` at the root is detected explicitly before handing off to `oas3`.
+The adapter is split into a download/normalize stage, a format-detection stage, a (conditional) Swagger-2.0-to-OpenAPI-3.0 conversion stage, and a parse-to-domain stage.
+
+**Download pipeline (in order):**
+
+1. **URL normalization** — before issuing any request, the input URL is matched against known Git-forge patterns and rewritten:
+   - `github.com/{owner}/{repo}/blob/{ref}/{path}` → `raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}`
+   - `github.com/{owner}/{repo}/tree/{ref}/{path}` → same as above (covers the less-common case)
+   - `gitlab.com/{owner}/{repo}/-/blob/{ref}/{path}` → `gitlab.com/{owner}/{repo}/-/raw/{ref}/{path}`
+   - `bitbucket.org/{owner}/{repo}/src/{ref}/{path}` → `bitbucket.org/{owner}/{repo}/raw/{ref}/{path}`
+
+   The original and resolved URLs are both tracked and returned.
+
+2. **Fetch** — `reqwest` GET with streaming, honouring `spec_download_timeout_seconds` and `max_spec_size_bytes` (abort mid-stream if the byte counter exceeds the cap).
+
+3. **ETag / Last-Modified revalidation** — if a previous ETag is known, send `If-None-Match`; on `304 Not Modified` return `SpecFetchResult::NotModified`.
+
+4. **HTML-response detection** — if `Content-Type` starts with `text/html`, or if after `Content-Type` absence the first non-whitespace character is `<`, return the `UnexpectedHtmlResponse` error with a hint about using a raw URL.
+
+5. **Format detection (JSON vs YAML)** — by `Content-Type`, file extension, or first non-whitespace character (`{` or `[` → JSON, otherwise YAML).
+
+6. **Root-key detection** — inspect the parsed (but not yet typed) JSON/YAML:
+   - If root contains `"swagger": "2.0"` → hand off to the Swagger-2.0 converter.
+   - If root contains `"openapi": "3.x"` → skip conversion.
+   - Anything else (AsyncAPI, invalid, truncated) → `SpecParseError` with details.
+
+7. **Swagger 2.0 conversion** (`swagger2_to_oas3.rs`, when needed) — pure-Rust JSON-tree transformation; no external deps. Produces an OpenAPI 3.0.3 JSON value. The mapping rules:
+
+   | Swagger 2.0 | OpenAPI 3.0.3 |
+   |---|---|
+   | `swagger: "2.0"` | `openapi: "3.0.3"` |
+   | `host` + `basePath` + `schemes[]` | `servers: [{ url: "{scheme}://{host}{basePath}" }]` (one entry per scheme) |
+   | `definitions` | `components.schemas` |
+   | `parameters` (global) | `components.parameters` (refs updated) |
+   | `responses` (global) | `components.responses` |
+   | `securityDefinitions` | `components.securitySchemes` |
+   | Per-operation parameter with `in: body` + `schema` | `requestBody: { content: { <consume>: { schema } } }` |
+   | Per-operation parameter with `in: formData` | `requestBody` with `multipart/form-data` or `application/x-www-form-urlencoded` schema |
+   | `consumes` / `produces` (operation or global) | Folded into the `content` keys of `requestBody` / `responses` |
+   | `$ref: "#/definitions/X"` | `$ref: "#/components/schemas/X"` (rewritten everywhere) |
+   | `type: file` (formData) | `type: string, format: binary` |
+   | `collectionFormat` on array params | OpenAPI 3.0's `style` + `explode` (csv → form/explode=false; multi → form/explode=true; ssv → spaceDelimited; pipes → pipeDelimited; tsv → error, unsupported in 3.0) |
+
+8. **Parse with `oas3`** — the (now guaranteed 3.x) JSON/YAML is handed to `oas3`, then mapped into Colmena's `ParsedSpec` domain value object (isolates the rest of the system from the crate's types).
 
 ### Node (`dag_engine/infrastructure/nodes/api_explorer.rs`)
 
@@ -361,8 +404,10 @@ Implements `ToolkitNode`. `sub_tool_catalog()` returns five static `SubToolDefin
 | Domain error | LLM sees |
 |---|---|
 | Spec not loaded (sub-tool called before `load_spec`) | `{ error: "spec_not_loaded", message: "Call load_spec(url) first." }` |
-| `SpecParseError` | `{ error: "spec_parse_failed", details, message: "Spec at <url> could not be parsed as OpenAPI 3.x." }` |
-| Swagger 2.0 detected | `{ error: "unsupported_spec_version", detected: "2.0", message: "api_explorer supports OpenAPI 3.x only." }` |
+| `SpecParseError` | `{ error: "spec_parse_failed", details, message: "Spec at <resolved_url> could not be parsed as OpenAPI 3.x or Swagger 2.0." }` |
+| `UnexpectedHtmlResponse` | `{ error: "unexpected_html_response", url_given, resolved_url, message: "URL returned HTML. If this is a Git forge 'blob' URL for a lesser-known host, use the raw content URL instead." }` |
+| `Swagger2ConversionFailed` | `{ error: "swagger2_conversion_failed", reason, unsupported_feature, message: "This Swagger 2.0 spec uses a feature the converter does not handle. Fall back to reading docs with web__fetch." }` |
+| `UnsupportedSpecFormat` (e.g., AsyncAPI, RAML detected) | `{ error: "unsupported_spec_format", detected, message: "api_explorer supports OpenAPI 3.x and Swagger 2.0 only." }` |
 | `EndpointNotFound` | `{ error: "endpoint_not_found", searched_for, did_you_mean: [top 3 fuzzy] }` |
 | Missing required params in `build_http_request` | `{ error: "missing_required_params", missing: [...], hints }` |
 | Type mismatch | `{ error: "invalid_param_type", param, expected_type, got }` |
@@ -445,7 +490,20 @@ It can pass this to an `http_request` tool invocation next.
 
 ### Unit tests
 
-- `openapi_adapter.rs`: fixture specs in `tests/fixtures/specs/` — petstore (canonical OpenAPI 3.0 example), stripe-excerpt (a subset with form-urlencoded body), github-excerpt (JSON body with OAuth/Bearer). Covers YAML and JSON parsing, ETag/304, size limit, Swagger 2.0 rejection.
+- `openapi_adapter.rs`: fixture specs in `tests/fixtures/specs/`:
+  - `petstore-3.0.yaml` (canonical OpenAPI 3.0 example)
+  - `stripe-excerpt-3.0.json` (form-urlencoded body, `components.schemas` with refs)
+  - `github-excerpt-3.0.json` (JSON body, Bearer auth)
+  - `amadeus-airlines-2.0.yaml` (real Swagger 2.0 spec — the user's concrete case; round-trip through the converter)
+  - `petstore-2.0.yaml` (canonical Swagger 2.0 example)
+  - `with-form-data-2.0.yaml` (exercises formData → multipart conversion)
+  - `collection-formats-2.0.yaml` (covers csv/multi/ssv/pipes/tsv mappings)
+
+  Covers: YAML and JSON parsing, ETag/304, size limit, HTML-instead-of-spec detection, format detection, unsupported format (AsyncAPI sample).
+
+- `swagger2_to_oas3.rs` (conversion module): tested independently against the 2.0 fixtures. Each mapping rule has a focused test; a golden-file test compares converted output against a hand-verified 3.0 equivalent for `petstore-2.0.yaml`.
+
+- `url_normalizer.rs` (small pure module): table-driven tests for each forge pattern (github.com blob/tree, gitlab, bitbucket, unknown hosts passed through unchanged).
 - `api_spec_use_case.rs`: cache hit/miss/expire, fuzzy search scoring, `build_http_request` validation matrix (required missing, type mismatch, auth missing, path params, body encoding).
 - `api_explorer.rs` node: dispatch on `__sub_tool`, spec-not-loaded error, JSON shape of every response.
 
@@ -458,6 +516,7 @@ All offline:
 
 - `tests/graphs/web/api_explorer_petstore.json` — LLM loads petstore spec, lists endpoints, builds a `POST /pet` call.
 - `tests/graphs/web/api_explorer_stripe.json` — LLM loads a Stripe-like spec and builds a `POST /v1/subscriptions` call.
+- `tests/graphs/web/api_explorer_amadeus_swagger2.json` — LLM loads the Amadeus airline-code-lookup spec via its GitHub blob URL, verifies the URL was rewritten to raw.githubusercontent.com, confirms the internal format became OpenAPI 3.0.3, and builds a valid `GET /v1/reference-data/airlines` call.
 - `tests/graphs/web/full_flow_discover_use_api.json` — end-to-end: `tavily_client` finds a spec URL → `api_explorer` loads + searches + builds → `http_request` executes. (Shared with Spec A.)
 
 ### Bindings
@@ -475,12 +534,14 @@ All offline:
 Implementation order (each is a task in the plan):
 
 1. Domain layer: `ApiSpecPort`, `ParsedSpec` and its sub-types, errors.
-2. `openapi_adapter`: fetch + parse + Swagger-2.0 rejection + ETag revalidation. Fixture-backed unit tests.
-3. `ApiSpecUseCase`: cache (using shared `SessionRegistry`), fuzzy search, validation + request construction.
-4. `api_explorer` node: `ToolkitNode` impl with five sub-tools.
-5. Test graphs and the cross-node end-to-end test graph.
-6. Python / TS bindings smoke.
-7. Docs: `docs/node_configurations.json`, `docs/agent_context/node_ports_reference.md`, and update `docs/developer_guide/25_web_nodes.md` (introduced by Spec A) with an `api_explorer` section.
+2. `url_normalizer` module: pure-function Git-forge URL rewriter with table-driven tests.
+3. `swagger2_to_oas3` module: standalone pure-Rust JSON-tree converter with the mapping rules table above, plus its fixture tests (including Amadeus and Petstore 2.0).
+4. `openapi_adapter`: fetch + URL normalization + HTML detection + format detection + conversion dispatch + parse via `oas3` + ETag revalidation. Fixture-backed unit tests.
+5. `ApiSpecUseCase`: cache (using shared `SessionRegistry`), fuzzy search, validation + request construction.
+6. `api_explorer` node: `ToolkitNode` impl with five sub-tools.
+7. Test graphs and the cross-node end-to-end test graph.
+8. Python / TS bindings smoke.
+9. Docs: `docs/node_configurations.json`, `docs/agent_context/node_ports_reference.md`, and update `docs/developer_guide/25_web_nodes.md` (introduced by Spec A) with an `api_explorer` section that documents the Swagger 2.0 conversion and URL normalization behaviors explicitly.
 
 The runtime multi-tool extension is already in place from Spec A; this spec reuses it.
 
@@ -489,3 +550,5 @@ The runtime multi-tool extension is already in place from Spec A; this spec reus
 - **Behaviour when the spec's `servers[]` is empty**: reject with a clear error asking the user to set `default_base_url_override` in config. Decision: yes, reject — guessing is worse than asking.
 - **Body serialization of deeply nested objects for `application/x-www-form-urlencoded`**: Stripe-style bracket notation is the de facto standard (`items[0][price]`). Implement bracket notation; document clearly; non-Stripe users sending JSON bodies won't hit this path.
 - **Maximum endpoints per spec**: do we cap? Some specs (AWS) have thousands. No hard cap, but `list_endpoints` enforces pagination; search returns top-N. Memory cost is ~1 KB per endpoint, acceptable.
+- **Swagger 2.0 `collectionFormat: tsv`**: OpenAPI 3.0 has no equivalent `style` for tab-separated arrays. Decision: emit a `Swagger2ConversionFailed` error naming `collectionFormat` as the unsupported feature rather than silently degrading. TSV is rare (<1% of specs) and misrepresentation would cause silent request failures — better to surface clearly.
+- **URL normalization for private Git instances** (e.g., `git.internal.company.com`): patterns are only recognized for public hosts (github.com, gitlab.com, bitbucket.org). Self-hosted GitLab/Gitea users must pass the raw URL directly, or provide a normalization pattern via config in a future iteration. Out of scope for v1.
