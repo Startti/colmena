@@ -657,6 +657,9 @@ impl ToolExecutor for DagToolExecutor {
         for (name, config) in &self.tool_configurations {
             if config.is_toolkit() {
                 // Toolkit: expand one ToolDefinition per declared sub-tool.
+                // Unlike the non-toolkit branch (which silently skips on miss), an
+                // unknown toolkit node_type is almost always a user misconfiguration
+                // worth surfacing — the alias exists but no handler is registered.
                 let Some(toolkit) = self.registry.get_toolkit_node(&config.node_type) else {
                     colmena_log!(
                         "WARN: toolkit config '{}' references unknown toolkit node_type '{}'",
@@ -665,7 +668,10 @@ impl ToolExecutor for DagToolExecutor {
                     );
                     continue;
                 };
-                let node_cfg = config.node_config.clone().unwrap_or(Value::Object(Default::default()));
+                let node_cfg = config
+                    .node_config
+                    .clone()
+                    .unwrap_or_else(|| Value::Object(Default::default()));
                 let catalog = toolkit.sub_tool_catalog(&node_cfg);
                 let filter = config.expose_sub_tools.as_ref().expect("is_toolkit → filter present");
                 for sub in catalog {
