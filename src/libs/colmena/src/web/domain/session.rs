@@ -146,6 +146,64 @@ impl<T> SessionRegistry<T> {
         }
         count
     }
+
+    /// Remove every entry whose `SessionKey.conversation_id` matches `conversation_id`.
+    /// Returns the number of entries removed. The cleanup closure fires once per evicted value.
+    pub async fn cleanup_conversation(
+        &self,
+        conversation_id: &str,
+        mut on_evicted: impl FnMut(T),
+    ) -> usize {
+        let mut map = self.inner.lock().await;
+        let matching: Vec<SessionKey> = map
+            .keys()
+            .filter(|k| k.conversation_id == conversation_id)
+            .cloned()
+            .collect();
+        let count = matching.len();
+        for k in matching {
+            if let Some(entry) = map.remove(&k) {
+                on_evicted(entry.value);
+            }
+        }
+        count
+    }
+
+    /// Insert respecting `max_active_sessions`. If at or over capacity, evict the
+    /// LRU (oldest `last_activity`) entry before inserting. The cleanup closure fires
+    /// once if an entry was evicted, with the evicted key and value.
+    pub async fn insert_with_capacity(
+        &self,
+        key: SessionKey,
+        value: T,
+        on_evicted: impl FnOnce(SessionKey, T),
+    ) -> Option<T> {
+        let mut map = self.inner.lock().await;
+        let now = Utc::now();
+
+        if (map.len() as u32) >= self.ttl.max_active_sessions && !map.contains_key(&key) {
+            if let Some((victim_key, _)) = map
+                .iter()
+                .min_by_key(|(_, e)| e.last_activity)
+                .map(|(k, e)| (k.clone(), e.last_activity))
+            {
+                if let Some(entry) = map.remove(&victim_key) {
+                    on_evicted(victim_key, entry.value);
+                }
+            }
+        }
+
+        let prev = map.remove(&key);
+        map.insert(
+            key,
+            SessionEntry {
+                value,
+                created_at: now,
+                last_activity: now,
+            },
+        );
+        prev.map(|e| e.value)
+    }
 }
 
 #[cfg(test)]
@@ -278,5 +336,72 @@ mod tests {
         let mut vals: Vec<u32> = guard.clone();
         vals.sort_unstable();
         assert_eq!(vals, vec![10, 20]);
+    }
+
+    #[tokio::test]
+    async fn cleanup_conversation_removes_matching_entries() {
+        let reg: Arc<SessionRegistry<u32>> = SessionRegistry::new(TtlConfig::default());
+        reg.insert(SessionKey::new("conv-a", "s1"), 1).await;
+        reg.insert(SessionKey::new("conv-a", "s2"), 2).await;
+        reg.insert(SessionKey::new("conv-b", "s1"), 3).await;
+
+        let removed = reg.cleanup_conversation("conv-a", |_v| {}).await;
+        assert_eq!(removed, 2);
+        assert_eq!(reg.len().await, 1);
+        assert!(reg.contains(&SessionKey::new("conv-b", "s1")).await);
+    }
+
+    #[tokio::test]
+    async fn insert_evicts_lru_when_over_cap() {
+        let ttl = TtlConfig {
+            idle_ttl_seconds: 3600,
+            max_lifetime_seconds: 3600,
+            max_active_sessions: 2,
+        };
+        let reg: Arc<SessionRegistry<u32>> = SessionRegistry::new(ttl);
+
+        let k1 = SessionKey::new("c1", "default");
+        let k2 = SessionKey::new("c2", "default");
+        let k3 = SessionKey::new("c3", "default");
+
+        let evicted_keys: Arc<Mutex<Vec<SessionKey>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // k1 is inserted first, then touched; k2 is inserted next; k3 triggers eviction → k2 should go.
+        reg.insert_with_capacity(k1.clone(), 1, {
+            let ek = evicted_keys.clone();
+            move |k, _v| {
+                let mut g = ek.try_lock().unwrap();
+                g.push(k);
+            }
+        })
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        reg.insert_with_capacity(k2.clone(), 2, {
+            let ek = evicted_keys.clone();
+            move |k, _v| {
+                let mut g = ek.try_lock().unwrap();
+                g.push(k);
+            }
+        })
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        // Touch k1 so k2 becomes the LRU victim.
+        reg.with_entry(&k1, |_| ()).await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        reg.insert_with_capacity(k3.clone(), 3, {
+            let ek = evicted_keys.clone();
+            move |k, _v| {
+                let mut g = ek.try_lock().unwrap();
+                g.push(k);
+            }
+        })
+        .await;
+
+        assert_eq!(reg.len().await, 2);
+        let evicted = evicted_keys.lock().await.clone();
+        assert_eq!(evicted, vec![k2]);
     }
 }
