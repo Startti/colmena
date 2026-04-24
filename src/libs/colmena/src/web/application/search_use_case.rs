@@ -51,6 +51,13 @@ struct CachedEntry {
     inserted_at: DateTime<Utc>,
 }
 
+fn is_retryable(e: &WebDomainError) -> bool {
+    matches!(
+        e,
+        WebDomainError::Upstream { status, .. } if (500..600).contains(status) || *status == 0
+    ) || matches!(e, WebDomainError::Timeout { .. })
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchUseCaseConfig {
     pub enable_cache: bool,
@@ -146,7 +153,7 @@ impl SearchUseCase {
             .unwrap()
             .try_increment(dag_run_id, self.config.max_calls_per_run)?;
 
-        let resp = self.port.search(req).await?;
+        let resp = self.call_with_retry_search(req).await?;
 
         if self.config.enable_cache {
             self.cache.write().unwrap().put(
@@ -179,7 +186,7 @@ impl SearchUseCase {
             .unwrap()
             .try_increment(dag_run_id, self.config.max_calls_per_run)?;
 
-        let resp = self.port.fetch(req).await?;
+        let resp = self.call_with_retry_fetch(req).await?;
 
         if self.config.enable_cache {
             self.cache.write().unwrap().put(
@@ -222,6 +229,46 @@ impl SearchUseCase {
     fn is_expired(&self, entry: &CachedEntry) -> bool {
         let age_ms = (Utc::now() - entry.inserted_at).num_milliseconds().max(0) as u64;
         age_ms >= self.config.cache_ttl.as_millis() as u64
+    }
+
+    async fn call_with_retry_search(
+        &self,
+        req: SearchRequest,
+    ) -> Result<SearchResponse, WebDomainError> {
+        let mut attempt = 0u32;
+        let mut backoff = self.config.initial_backoff;
+        loop {
+            attempt += 1;
+            match self.port.search(req.clone()).await {
+                Ok(v) => return Ok(v),
+                Err(e) if is_retryable(&e) && attempt < self.config.max_attempts => {
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff.saturating_mul(2);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    async fn call_with_retry_fetch(
+        &self,
+        req: FetchRequest,
+    ) -> Result<FetchResponse, WebDomainError> {
+        let mut attempt = 0u32;
+        let mut backoff = self.config.initial_backoff;
+        loop {
+            attempt += 1;
+            match self.port.fetch(req.clone()).await {
+                Ok(v) => return Ok(v),
+                Err(e) if is_retryable(&e) && attempt < self.config.max_attempts => {
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff.saturating_mul(2);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 }
 
@@ -464,5 +511,162 @@ mod tests {
         // Still counts only 1 toward the port; cap not yet hit.
         let err = uc.search("run-A", SearchRequest::new("y")).await.unwrap_err();
         assert!(matches!(err, WebDomainError::RateLimit { .. }));
+    }
+
+    fn clone_err(e: &WebDomainError) -> WebDomainError {
+        match e {
+            WebDomainError::Upstream { status, body } => WebDomainError::Upstream {
+                status: *status,
+                body: body.clone(),
+            },
+            WebDomainError::Timeout { ms } => WebDomainError::Timeout { ms: *ms },
+            WebDomainError::RateLimit { calls_used, cap } => WebDomainError::RateLimit {
+                calls_used: *calls_used,
+                cap: *cap,
+            },
+            WebDomainError::AdapterInit(s) => WebDomainError::AdapterInit(s.clone()),
+            other => WebDomainError::AdapterInit(format!("{other:?}")),
+        }
+    }
+
+    /// Fails the first `fail_times` invocations with the stored error, then returns Ok.
+    struct FlakyPort {
+        remaining_failures: Mutex<u32>,
+        err: WebDomainError,
+        calls: Mutex<u32>,
+    }
+
+    impl FlakyPort {
+        fn new(fail_times: u32, err: WebDomainError) -> Self {
+            Self {
+                remaining_failures: Mutex::new(fail_times),
+                err,
+                calls: Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SearchPort for FlakyPort {
+        async fn search(&self, req: SearchRequest) -> Result<SearchResponse, WebDomainError> {
+            *self.calls.lock().unwrap() += 1;
+            let mut left = self.remaining_failures.lock().unwrap();
+            if *left > 0 {
+                *left -= 1;
+                return Err(clone_err(&self.err));
+            }
+            Ok(SearchResponse {
+                query: req.query,
+                results: vec![],
+                answer: None,
+                credits_used: 1,
+            })
+        }
+        async fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, WebDomainError> {
+            *self.calls.lock().unwrap() += 1;
+            let mut left = self.remaining_failures.lock().unwrap();
+            if *left > 0 {
+                *left -= 1;
+                return Err(clone_err(&self.err));
+            }
+            Ok(FetchResponse {
+                url: req.url,
+                title: None,
+                content: "ok".into(),
+                content_length: 2,
+                credits_used: 1,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_on_upstream_5xx_eventually_succeeds() {
+        let port = Arc::new(FlakyPort::new(
+            2,
+            WebDomainError::Upstream {
+                status: 503,
+                body: "down".into(),
+            },
+        ));
+        let cfg = SearchUseCaseConfig {
+            max_attempts: 3,
+            initial_backoff: Duration::from_millis(1),
+            enable_cache: false,
+            ..Default::default()
+        };
+        let uc = SearchUseCase::new(port.clone(), cfg);
+        let resp = uc.search("run-A", SearchRequest::new("q")).await.unwrap();
+        assert_eq!(resp.query, "q");
+        assert_eq!(*port.calls.lock().unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_exhaustion_surfaces_last_error() {
+        let port = Arc::new(FlakyPort::new(
+            10,
+            WebDomainError::Upstream {
+                status: 502,
+                body: "bad gateway".into(),
+            },
+        ));
+        let cfg = SearchUseCaseConfig {
+            max_attempts: 3,
+            initial_backoff: Duration::from_millis(1),
+            enable_cache: false,
+            ..Default::default()
+        };
+        let uc = SearchUseCase::new(port.clone(), cfg);
+        let err = uc
+            .search("run-A", SearchRequest::new("q"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WebDomainError::Upstream { status: 502, .. }));
+        assert_eq!(*port.calls.lock().unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_does_not_retry_rate_limit() {
+        let port = Arc::new(FlakyPort::new(
+            10,
+            WebDomainError::RateLimit {
+                calls_used: 1,
+                cap: 1,
+            },
+        ));
+        let cfg = SearchUseCaseConfig {
+            max_attempts: 5,
+            initial_backoff: Duration::from_millis(1),
+            enable_cache: false,
+            ..Default::default()
+        };
+        let uc = SearchUseCase::new(port.clone(), cfg);
+        let err = uc
+            .search("run-A", SearchRequest::new("q"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WebDomainError::RateLimit { .. }));
+        // One attempt only — no retry.
+        assert_eq!(*port.calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_does_not_retry_adapter_init() {
+        let port = Arc::new(FlakyPort::new(
+            10,
+            WebDomainError::AdapterInit("bad key".into()),
+        ));
+        let cfg = SearchUseCaseConfig {
+            max_attempts: 5,
+            initial_backoff: Duration::from_millis(1),
+            enable_cache: false,
+            ..Default::default()
+        };
+        let uc = SearchUseCase::new(port.clone(), cfg);
+        let err = uc
+            .search("run-A", SearchRequest::new("q"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WebDomainError::AdapterInit(_)));
+        assert_eq!(*port.calls.lock().unwrap(), 1);
     }
 }
