@@ -10,7 +10,8 @@ use crate::web::domain::errors::WebDomainError;
 use crate::web::domain::search_port::{
     FetchRequest, FetchResponse, SearchPort, SearchRequest, SearchResponse,
 };
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -38,18 +39,52 @@ impl Default for SearchUseCaseConfig {
     }
 }
 
+#[derive(Default)]
+struct RateLimitState {
+    per_run: HashMap<String, u32>,
+}
+
+impl RateLimitState {
+    fn try_increment(&mut self, run_id: &str, cap: u32) -> Result<u32, WebDomainError> {
+        let entry = self.per_run.entry(run_id.to_string()).or_insert(0);
+        if *entry >= cap {
+            return Err(WebDomainError::RateLimit {
+                calls_used: *entry,
+                cap,
+            });
+        }
+        *entry += 1;
+        Ok(*entry)
+    }
+
+    fn reset(&mut self, run_id: &str) {
+        self.per_run.remove(run_id);
+    }
+}
+
 pub struct SearchUseCase {
     port: Arc<dyn SearchPort>,
     config: SearchUseCaseConfig,
+    counters: Mutex<RateLimitState>,
 }
 
 impl SearchUseCase {
     pub fn new(port: Arc<dyn SearchPort>, config: SearchUseCaseConfig) -> Self {
-        Self { port, config }
+        Self {
+            port,
+            config,
+            counters: Mutex::new(RateLimitState::default()),
+        }
     }
 
     pub fn config(&self) -> &SearchUseCaseConfig {
         &self.config
+    }
+
+    /// Reset the rate-limit counter for a given `dag_run_id`. Called by the
+    /// engine at run-end. Safe to call even if no entry exists for the id.
+    pub fn reset_run(&self, dag_run_id: &str) {
+        self.counters.lock().unwrap().reset(dag_run_id);
     }
 
     /// Run a search. `dag_run_id` identifies the run for rate-limit accounting.
@@ -58,7 +93,10 @@ impl SearchUseCase {
         dag_run_id: &str,
         req: SearchRequest,
     ) -> Result<SearchResponse, WebDomainError> {
-        let _ = dag_run_id;
+        self.counters
+            .lock()
+            .unwrap()
+            .try_increment(dag_run_id, self.config.max_calls_per_run)?;
         self.port.search(req).await
     }
 
@@ -68,7 +106,10 @@ impl SearchUseCase {
         dag_run_id: &str,
         req: FetchRequest,
     ) -> Result<FetchResponse, WebDomainError> {
-        let _ = dag_run_id;
+        self.counters
+            .lock()
+            .unwrap()
+            .try_increment(dag_run_id, self.config.max_calls_per_run)?;
         self.port.fetch(req).await
     }
 }
@@ -164,5 +205,76 @@ mod tests {
         assert!(!d.fail_on_limit);
         assert_eq!(d.max_attempts, 3);
         assert_eq!(d.initial_backoff, Duration::from_millis(500));
+    }
+
+    #[tokio::test]
+    async fn rate_limit_caps_calls_per_run_non_fail() {
+        let port = Arc::new(StubPort::new());
+        let cfg = SearchUseCaseConfig {
+            max_calls_per_run: 2,
+            fail_on_limit: false,
+            ..Default::default()
+        };
+        let uc = SearchUseCase::new(port.clone(), cfg);
+
+        // 3 calls, cap of 2: first two hit port, third returns RateLimit (fail_on_limit=false
+        // means structured RateLimit error — still not a crash).
+        uc.search("run-A", SearchRequest::new("q1")).await.unwrap();
+        uc.search("run-A", SearchRequest::new("q2")).await.unwrap();
+        let err = uc.search("run-A", SearchRequest::new("q3")).await.unwrap_err();
+        assert!(matches!(
+            err,
+            WebDomainError::RateLimit { calls_used: 2, cap: 2 }
+        ));
+        assert_eq!(*port.search_calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_separate_runs_have_separate_counters() {
+        let port = Arc::new(StubPort::new());
+        let cfg = SearchUseCaseConfig {
+            max_calls_per_run: 1,
+            ..Default::default()
+        };
+        let uc = SearchUseCase::new(port.clone(), cfg);
+
+        uc.search("run-A", SearchRequest::new("q1")).await.unwrap();
+        // run-B has its own counter, so this should succeed.
+        uc.search("run-B", SearchRequest::new("q1")).await.unwrap();
+        assert_eq!(*port.search_calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_reset_run_clears_counter() {
+        let port = Arc::new(StubPort::new());
+        let cfg = SearchUseCaseConfig {
+            max_calls_per_run: 1,
+            ..Default::default()
+        };
+        let uc = SearchUseCase::new(port.clone(), cfg);
+        uc.search("run-A", SearchRequest::new("q1")).await.unwrap();
+        let err = uc.search("run-A", SearchRequest::new("q2")).await.unwrap_err();
+        assert!(matches!(err, WebDomainError::RateLimit { .. }));
+        uc.reset_run("run-A");
+        uc.search("run-A", SearchRequest::new("q3")).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rate_limit_fetch_shares_counter_with_search() {
+        let port = Arc::new(StubPort::new());
+        let cfg = SearchUseCaseConfig {
+            max_calls_per_run: 1,
+            ..Default::default()
+        };
+        let uc = SearchUseCase::new(port.clone(), cfg);
+        uc.search("run-A", SearchRequest::new("q1")).await.unwrap();
+        let err = uc
+            .fetch(
+                "run-A",
+                FetchRequest { url: "u".into(), format: ExtractFormat::Text },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WebDomainError::RateLimit { .. }));
     }
 }
