@@ -154,7 +154,8 @@ impl ApiSpecUseCase {
     }
 }
 
-use crate::web::domain::{Endpoint, HttpMethod};
+use crate::web::domain::{Endpoint, HttpMethod, ParamType, ParameterSpec};
+use serde_json::{json, Value};
 
 #[derive(Debug, Clone)]
 pub struct EndpointListPage {
@@ -306,6 +307,108 @@ pub fn search_endpoint(
             match_reason: reason,
         })
         .collect()
+}
+
+/// Look up a single endpoint by `operation_id` and return a verbose JSON
+/// description of its parameters, request body, responses, and security.
+///
+/// Returns [`WebDomainError::EndpointNotFound`] with fuzzy `did_you_mean`
+/// suggestions when the `operation_id` is not found.
+pub fn get_endpoint_details(
+    spec: &ParsedSpec,
+    operation_id: &str,
+) -> Result<Value, WebDomainError> {
+    let ep = match spec.endpoints.iter().find(|e| e.operation_id == operation_id) {
+        Some(e) => e,
+        None => {
+            // Return top-3 fuzzy suggestions.
+            let hits = search_endpoint(spec, operation_id, None, 3, 0.0);
+            return Err(WebDomainError::EndpointNotFound {
+                searched_for: operation_id.to_string(),
+                did_you_mean: hits.into_iter().map(|h| h.operation_id).collect(),
+            });
+        }
+    };
+
+    fn params_to_json(params: &[ParameterSpec]) -> Value {
+        Value::Array(
+            params
+                .iter()
+                .map(|p| {
+                    json!({
+                        "name": p.name,
+                        "type": param_type_str(&p.param_type),
+                        "required": p.required,
+                        "description": p.description,
+                        "style": p.style,
+                        "explode": p.explode,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    fn param_type_str(t: &ParamType) -> String {
+        match t {
+            ParamType::String => "string".into(),
+            ParamType::Integer => "integer".into(),
+            ParamType::Number => "number".into(),
+            ParamType::Boolean => "boolean".into(),
+            ParamType::Array(_) => "array".into(),
+            ParamType::Object => "object".into(),
+            ParamType::Unknown => "string".into(),
+        }
+    }
+
+    let request_body = ep.request_body.as_ref().map(|rb| {
+        json!({
+            "content_type": rb.content_type,
+            "required": rb.required,
+            "schema": rb.schema,
+        })
+    });
+
+    let responses = {
+        let mut m = serde_json::Map::new();
+        for (code, r) in &ep.responses {
+            let content: serde_json::Map<String, Value> = r
+                .content
+                .iter()
+                .map(|(ct, schema)| (ct.clone(), schema.clone()))
+                .collect();
+            m.insert(
+                code.clone(),
+                json!({
+                    "description": r.description,
+                    "content": Value::Object(content),
+                }),
+            );
+        }
+        Value::Object(m)
+    };
+
+    let security = Value::Array(
+        ep.security
+            .iter()
+            .map(|s| {
+                json!({ "scheme": s.scheme, "scopes": s.scopes })
+            })
+            .collect(),
+    );
+
+    Ok(json!({
+        "operation_id": ep.operation_id,
+        "method": ep.method.as_str(),
+        "path": ep.path,
+        "summary": ep.summary,
+        "description": ep.description,
+        "path_parameters": params_to_json(&ep.path_params),
+        "query_parameters": params_to_json(&ep.query_params),
+        "header_parameters": params_to_json(&ep.header_params),
+        "request_body": request_body,
+        "responses": responses,
+        "security": security,
+    }))
 }
 
 fn explain_match(query: &str, ep: &Endpoint) -> String {
@@ -599,5 +702,117 @@ mod tests_list_and_search {
             0.1,
         );
         assert!(results.len() <= 2);
+    }
+}
+
+#[cfg(test)]
+mod tests_details {
+    use super::*;
+    use crate::web::domain::{
+        Endpoint, HttpMethod, ParamType, ParameterSpec, ParsedSpec, RequestBodySpec,
+        ResponseSpec, SpecFormat,
+    };
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn sample() -> ParsedSpec {
+        ParsedSpec {
+            resolved_url: "u".into(),
+            input_url: "u".into(),
+            original_format: SpecFormat::OpenApi3x,
+            internal_format: "openapi-3.0.3".into(),
+            title: "T".into(),
+            version: "1".into(),
+            description: None,
+            servers: vec!["https://api.example.com".into()],
+            endpoints: vec![Endpoint {
+                operation_id: "createSubscription".into(),
+                method: HttpMethod::Post,
+                path: "/v1/subscriptions".into(),
+                summary: Some("Create a subscription".into()),
+                description: None,
+                tags: vec!["billing".into()],
+                path_params: Vec::new(),
+                query_params: vec![ParameterSpec {
+                    name: "expand".into(),
+                    description: Some("Fields to expand".into()),
+                    required: false,
+                    param_type: ParamType::Array(Box::new(ParamType::String)),
+                    style: Some("form".into()),
+                    explode: Some(false),
+                }],
+                header_params: Vec::new(),
+                request_body: Some(RequestBodySpec {
+                    content_type: "application/x-www-form-urlencoded".into(),
+                    required: true,
+                    schema: json!({
+                        "type": "object",
+                        "required": ["customer"],
+                        "properties": {
+                            "customer": { "type": "string" },
+                            "items": { "type": "array" }
+                        }
+                    }),
+                }),
+                responses: {
+                    let mut m = HashMap::new();
+                    m.insert(
+                        "200".to_string(),
+                        ResponseSpec {
+                            description: Some("Success".into()),
+                            content: {
+                                let mut c = HashMap::new();
+                                c.insert(
+                                    "application/json".into(),
+                                    json!({ "$ref": "#/components/schemas/Subscription" }),
+                                );
+                                c
+                            },
+                        },
+                    );
+                    m
+                },
+                security: Vec::new(),
+            }],
+            security_schemes: HashMap::new(),
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn happy_path_returns_expected_shape() {
+        let spec = sample();
+        let details = super::super::api_spec_use_case::get_endpoint_details(
+            &spec,
+            "createSubscription",
+        )
+        .unwrap();
+        assert_eq!(details["operation_id"], "createSubscription");
+        assert_eq!(details["method"], "POST");
+        assert_eq!(details["path"], "/v1/subscriptions");
+        assert_eq!(details["path_parameters"].as_array().unwrap().len(), 0);
+        assert_eq!(details["query_parameters"][0]["name"], "expand");
+        assert_eq!(details["query_parameters"][0]["type"], "array");
+        assert_eq!(
+            details["request_body"]["content_type"],
+            "application/x-www-form-urlencoded"
+        );
+        assert_eq!(details["responses"]["200"]["description"], "Success");
+    }
+
+    #[test]
+    fn missing_operation_suggests_candidates() {
+        let spec = sample();
+        let err = super::super::api_spec_use_case::get_endpoint_details(
+            &spec,
+            "createSubscrpition", // typo
+        )
+        .unwrap_err();
+        match err {
+            WebDomainError::EndpointNotFound { did_you_mean, .. } => {
+                assert!(did_you_mean.iter().any(|s| s == "createSubscription"));
+            }
+            other => panic!("expected EndpointNotFound, got {other:?}"),
+        }
     }
 }
