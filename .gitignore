@@ -34,3 +34,6 @@ __pycache__/
 *.pyo
 *.egg-info/
 dist/
+
+# Git worktrees (local dev)
+.worktrees/
