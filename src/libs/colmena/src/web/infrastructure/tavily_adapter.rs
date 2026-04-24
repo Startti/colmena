@@ -188,11 +188,80 @@ impl SearchPort for TavilyAdapter {
         })
     }
 
-    async fn fetch(&self, _req: FetchRequest) -> Result<FetchResponse, WebDomainError> {
-        // Implemented in Task 4.
-        Err(WebDomainError::Upstream {
-            status: 0,
-            body: "fetch not yet implemented".into(),
+    async fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, WebDomainError> {
+        let body = json!({
+            "api_key": self.api_key,
+            "urls": [req.url],
+            "extract_depth": "basic",
+            "format": req.format.as_str(),
+        });
+
+        let url = format!("{}/extract", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(Self::map_transport_error)?;
+
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Self::map_error(status, body));
+        }
+        let raw: Value = resp.json().await.map_err(|e| WebDomainError::Upstream {
+            status: 200,
+            body: format!("invalid JSON from Tavily /extract: {e}"),
+        })?;
+
+        // Tavily returns results + failed_results arrays. We requested one URL.
+        if let Some(failed) = raw
+            .get("failed_results")
+            .and_then(|v| v.as_array())
+            .filter(|a| !a.is_empty())
+        {
+            let msg = failed
+                .first()
+                .and_then(|v| v.get("error"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("extract failed")
+                .to_string();
+            return Err(WebDomainError::Upstream { status: 200, body: msg });
+        }
+
+        let results = raw
+            .get("results")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let first = results.into_iter().next().ok_or_else(|| {
+            WebDomainError::Upstream {
+                status: 200,
+                body: "empty results from /extract".into(),
+            }
+        })?;
+        let content = first
+            .get("raw_content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let title = first
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let resolved_url = first
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&req.url)
+            .to_string();
+        let content_length = content.len() as u64;
+        Ok(FetchResponse {
+            url: resolved_url,
+            title,
+            content,
+            content_length,
+            credits_used: 1,
         })
     }
 }
@@ -410,5 +479,92 @@ mod tests {
         let a = fast_adapter(&server.uri());
         let err = a.search(SReq::new("q")).await.unwrap_err();
         assert!(matches!(err, WebDomainError::Upstream { status: 503, .. }));
+    }
+
+    use crate::web::domain::search_port::FetchRequest as FReq;
+
+    #[tokio::test]
+    async fn fetch_happy_path_markdown() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/extract"))
+            .and(body_partial_json(serde_json::json!({
+                "api_key": "tvly-test",
+                "urls": ["https://example.com"],
+                "extract_depth": "basic",
+                "format": "markdown"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [
+                    {
+                        "url": "https://example.com",
+                        "raw_content": "# Hello\n\nbody text."
+                    }
+                ],
+                "failed_results": []
+            })))
+            .mount(&server)
+            .await;
+
+        let a = fast_adapter(&server.uri());
+        let resp = a
+            .fetch(FReq {
+                url: "https://example.com".into(),
+                format: ExtractFormat::Markdown,
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp.url, "https://example.com");
+        assert!(resp.content.contains("# Hello"));
+        assert_eq!(resp.content_length as usize, resp.content.len());
+        assert_eq!(resp.credits_used, 1);
+    }
+
+    #[tokio::test]
+    async fn fetch_reports_failed_results_as_upstream() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/extract"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [],
+                "failed_results": [
+                    { "url": "https://bad.example", "error": "connection refused" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let a = fast_adapter(&server.uri());
+        let err = a
+            .fetch(FReq {
+                url: "https://bad.example".into(),
+                format: ExtractFormat::Text,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            WebDomainError::Upstream { .. } | WebDomainError::NavigationFailed(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_429_maps_to_rate_limit() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/extract"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+
+        let a = fast_adapter(&server.uri());
+        let err = a
+            .fetch(FReq {
+                url: "https://example.com".into(),
+                format: ExtractFormat::Markdown,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WebDomainError::RateLimit { .. }));
     }
 }
