@@ -26,12 +26,16 @@ use std::time::Duration;
 /// registry construction.
 pub struct TavilyClientNode {
     secure_values: Option<Arc<SecureValueService>>,
+    #[cfg(test)]
+    pub(crate) test_use_case: Option<Arc<SearchUseCase>>,
 }
 
 impl TavilyClientNode {
     pub fn new() -> Self {
         Self {
             secure_values: None,
+            #[cfg(test)]
+            test_use_case: None,
         }
     }
 
@@ -59,6 +63,11 @@ impl TavilyClientNode {
         config: &Value,
         session_id: &str,
     ) -> Result<Arc<SearchUseCase>, Box<dyn StdError + Send + Sync>> {
+        #[cfg(test)]
+        if let Some(uc) = &self.test_use_case {
+            return Ok(uc.clone());
+        }
+
         // Resolve secure value placeholders (<value_N>) in a *copy* so the caller's
         // config is untouched. Env-var placeholders (${VAR}) are resolved below.
         let mut cfg_copy = config.clone();
@@ -135,12 +144,91 @@ impl Default for TavilyClientNode {
     }
 }
 
+impl TavilyClientNode {
+    async fn handle_search(
+        &self,
+        inputs: &NodeInputs,
+        config: &Value,
+        session_id: &str,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+        use crate::web::domain::search_port::{SearchDepth, SearchRequest, TimeRange};
+
+        let Some(query) = inputs.get("query").and_then(|v| v.as_str()) else {
+            return Ok(json!({
+                "error": "invalid_input",
+                "message": "search requires `query` (string)"
+            }));
+        };
+
+        let defaults = config.get("search_defaults").cloned().unwrap_or(json!({}));
+
+        let max_results = inputs
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .or_else(|| defaults.get("max_results").and_then(|v| v.as_u64()))
+            .unwrap_or(5)
+            .clamp(1, 10) as u8;
+        let include_content = inputs
+            .get("include_content")
+            .and_then(|v| v.as_bool())
+            .or_else(|| defaults.get("include_content").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+
+        let search_depth_str = inputs
+            .get("search_depth")
+            .and_then(|v| v.as_str())
+            .or_else(|| defaults.get("search_depth").and_then(|v| v.as_str()))
+            .unwrap_or("basic");
+        let search_depth = match search_depth_str {
+            "advanced" => SearchDepth::Advanced,
+            _ => SearchDepth::Basic,
+        };
+
+        let include_domains = merge_string_array(
+            inputs.get("include_domains"),
+            defaults.get("include_domains"),
+        );
+        let exclude_domains = merge_string_array(
+            inputs.get("exclude_domains"),
+            defaults.get("exclude_domains"),
+        );
+
+        let time_range = inputs
+            .get("time_range")
+            .and_then(|v| v.as_str())
+            .or_else(|| defaults.get("time_range").and_then(|v| v.as_str()))
+            .and_then(|s| match s {
+                "day" => Some(TimeRange::Day),
+                "week" => Some(TimeRange::Week),
+                "month" => Some(TimeRange::Month),
+                "year" => Some(TimeRange::Year),
+                _ => None,
+            });
+
+        let uc = self.build_use_case(config, session_id).await?;
+        let req = SearchRequest {
+            query: query.to_string(),
+            max_results,
+            include_content,
+            search_depth,
+            include_domains,
+            exclude_domains,
+            time_range,
+        };
+
+        match uc.search(session_id, req).await {
+            Ok(resp) => Ok(serde_json::to_value(resp)?),
+            Err(e) => format_llm_error(e, config),
+        }
+    }
+}
+
 #[async_trait]
 impl ExecutableNode for TavilyClientNode {
     async fn execute(
         &self,
         inputs: &NodeInputs,
-        _config: &Value,
+        config: &Value,
         _state: &mut Value,
         _observer: Option<Arc<dyn ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
@@ -148,7 +236,15 @@ impl ExecutableNode for TavilyClientNode {
             .get(SUB_TOOL_INPUT_KEY)
             .and_then(|v| v.as_str())
             .ok_or("tavily_client: missing __sub_tool")?;
-        Err(format!("tavily_client: sub_tool '{sub}' not implemented yet").into())
+        // `dag_run_id` not yet threaded through ExecutableNode — we reuse a
+        // stable default session id for rate-limiting. See Plan 0 Task 12 for
+        // the full ConversationLifecycleBus story.
+        let session_id = "default";
+        match sub {
+            "search" => self.handle_search(inputs, config, session_id).await,
+            "fetch" => Err("tavily_client: fetch not yet implemented".into()),
+            other => Err(format!("tavily_client: unknown sub_tool '{other}'").into()),
+        }
     }
 
     fn schema(&self) -> Value {
@@ -264,6 +360,68 @@ fn search_sub_tool() -> SubToolDefinition {
     }
 }
 
+fn merge_string_array(from_input: Option<&Value>, from_defaults: Option<&Value>) -> Vec<String> {
+    let read = |v: Option<&Value>| -> Vec<String> {
+        v.and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| e.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let a = read(from_input);
+    if !a.is_empty() {
+        a
+    } else {
+        read(from_defaults)
+    }
+}
+
+fn format_llm_error(
+    e: crate::web::domain::errors::WebDomainError,
+    config: &Value,
+) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+    use crate::web::domain::errors::WebDomainError;
+
+    let fail_on_limit = config
+        .get("fail_on_limit")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if !e.is_llm_recoverable() {
+        return Err(Box::new(e));
+    }
+    match e {
+        WebDomainError::RateLimit { calls_used, cap } => {
+            if fail_on_limit {
+                return Err(Box::new(WebDomainError::RateLimit { calls_used, cap }));
+            }
+            Ok(json!({
+                "error": "rate_limit",
+                "calls_used": calls_used,
+                "cap": cap,
+                "message": format!("rate limit reached ({calls_used}/{cap})")
+            }))
+        }
+        WebDomainError::Timeout { ms } => Ok(json!({
+            "error": "timeout",
+            "ms": ms,
+            "message": format!("request timed out after {ms} ms")
+        })),
+        WebDomainError::Upstream { status, body } => Ok(json!({
+            "error": "upstream_error",
+            "status": status,
+            "retryable": false,
+            "message": body
+        })),
+        other => Ok(json!({
+            "error": "web_error",
+            "message": other.to_string()
+        })),
+    }
+}
+
 fn fetch_sub_tool() -> SubToolDefinition {
     let mut props = HashMap::new();
     props.insert(
@@ -336,5 +494,197 @@ mod tests {
         std::env::set_var("COLMENA_TEST_TAVILY_KEY", "tvly-zzz");
         let v = TavilyClientNode::resolve_env_var("${COLMENA_TEST_TAVILY_KEY}").unwrap();
         assert_eq!(v, "tvly-zzz");
+    }
+
+    use crate::web::application::search_use_case::{
+        SearchUseCase as UcSearchUseCase, SearchUseCaseConfig as UcCfg,
+    };
+    use crate::web::domain::errors::WebDomainError;
+    use crate::web::domain::search_port::{
+        FetchRequest as FReq, FetchResponse as FResp, SearchPort,
+        SearchRequest as SReq, SearchResponse as SResp, SearchResult,
+    };
+    use std::sync::Mutex;
+
+    struct StubPort {
+        search_calls: Mutex<u32>,
+        fetch_calls: Mutex<u32>,
+    }
+
+    #[async_trait]
+    impl SearchPort for StubPort {
+        async fn search(&self, req: SReq) -> Result<SResp, WebDomainError> {
+            *self.search_calls.lock().unwrap() += 1;
+            Ok(SResp {
+                query: req.query,
+                results: vec![SearchResult {
+                    title: "Rust".into(),
+                    url: "https://example.com".into(),
+                    snippet: "snip".into(),
+                    score: 0.9,
+                    content: None,
+                }],
+                answer: None,
+                credits_used: 1,
+            })
+        }
+        async fn fetch(&self, req: FReq) -> Result<FResp, WebDomainError> {
+            *self.fetch_calls.lock().unwrap() += 1;
+            Ok(FResp {
+                url: req.url,
+                title: None,
+                content: "body".into(),
+                content_length: 4,
+                credits_used: 1,
+            })
+        }
+    }
+
+    fn node_with_stub() -> (Arc<StubPort>, TavilyClientNode, Arc<UcSearchUseCase>) {
+        let port = Arc::new(StubPort {
+            search_calls: Mutex::new(0),
+            fetch_calls: Mutex::new(0),
+        });
+        let uc = Arc::new(UcSearchUseCase::new(
+            port.clone() as Arc<dyn SearchPort>,
+            UcCfg::default(),
+        ));
+        let mut node = TavilyClientNode::new();
+        node.test_use_case = Some(uc.clone());
+        (port, node, uc)
+    }
+
+    #[tokio::test]
+    async fn search_dispatches_and_returns_json() {
+        let (port, node, _uc) = node_with_stub();
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("search"));
+        inputs.insert("query".into(), json!("rust async"));
+        let mut state = json!({});
+        let out = node
+            .execute(&inputs, &json!({ "api_key": "tvly-stub" }), &mut state, None)
+            .await
+            .unwrap();
+        assert_eq!(out.get("query").and_then(|v| v.as_str()), Some("rust async"));
+        assert_eq!(
+            out.get("results")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(1)
+        );
+        assert_eq!(*port.search_calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn search_merges_search_defaults_from_config() {
+        let (port, node, _uc) = node_with_stub();
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("search"));
+        inputs.insert("query".into(), json!("q"));
+        let config = json!({
+            "api_key": "tvly-stub",
+            "search_defaults": { "max_results": 3, "include_domains": ["rust-lang.org"] }
+        });
+        let mut state = json!({});
+        node.execute(&inputs, &config, &mut state, None).await.unwrap();
+        assert_eq!(*port.search_calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn search_rate_limit_returns_structured_error_when_fail_on_limit_false() {
+        let port = Arc::new(StubPort {
+            search_calls: Mutex::new(0),
+            fetch_calls: Mutex::new(0),
+        });
+        let uc = Arc::new(UcSearchUseCase::new(
+            port.clone() as Arc<dyn SearchPort>,
+            UcCfg {
+                max_calls_per_run: 1,
+                fail_on_limit: false,
+                enable_cache: false,
+                ..Default::default()
+            },
+        ));
+        let mut node = TavilyClientNode::new();
+        node.test_use_case = Some(uc);
+
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("search"));
+        inputs.insert("query".into(), json!("a"));
+        let mut state = json!({});
+        node.execute(
+            &inputs,
+            &json!({ "api_key": "tvly-stub" }),
+            &mut state,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut inputs2: NodeInputs = HashMap::new();
+        inputs2.insert(SUB_TOOL_INPUT_KEY.into(), json!("search"));
+        inputs2.insert("query".into(), json!("b"));
+        let out = node
+            .execute(
+                &inputs2,
+                &json!({ "api_key": "tvly-stub" }),
+                &mut state,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            out.get("error").and_then(|v| v.as_str()),
+            Some("rate_limit")
+        );
+    }
+
+    #[tokio::test]
+    async fn search_rate_limit_crashes_dag_when_fail_on_limit_true() {
+        let port = Arc::new(StubPort {
+            search_calls: Mutex::new(0),
+            fetch_calls: Mutex::new(0),
+        });
+        let uc = Arc::new(UcSearchUseCase::new(
+            port.clone() as Arc<dyn SearchPort>,
+            UcCfg {
+                max_calls_per_run: 0,
+                fail_on_limit: true,
+                ..Default::default()
+            },
+        ));
+        let mut node = TavilyClientNode::new();
+        node.test_use_case = Some(uc);
+
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("search"));
+        inputs.insert("query".into(), json!("a"));
+        let mut state = json!({});
+        let err = node
+            .execute(
+                &inputs,
+                &json!({ "api_key": "tvly-stub", "fail_on_limit": true }),
+                &mut state,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("rate"));
+    }
+
+    #[tokio::test]
+    async fn search_missing_query_returns_structured_error() {
+        let (_port, node, _uc) = node_with_stub();
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("search"));
+        let mut state = json!({});
+        let out = node
+            .execute(&inputs, &json!({ "api_key": "tvly-stub" }), &mut state, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.get("error").and_then(|v| v.as_str()),
+            Some("invalid_input")
+        );
     }
 }
