@@ -16,9 +16,10 @@
 //!   | other transport    | `WebDomainError::Upstream`     |
 
 use crate::web::domain::errors::WebDomainError;
+#[allow(unused_imports)]
 use crate::web::domain::search_port::{
-    FetchRequest, FetchResponse, SearchDepth, SearchPort, SearchRequest, SearchResponse,
-    SearchResult,
+    ExtractFormat, FetchRequest, FetchResponse, SearchDepth, SearchPort, SearchRequest,
+    SearchResponse, SearchResult,
 };
 use async_trait::async_trait;
 use reqwest::Client;
@@ -64,9 +65,9 @@ impl TavilyAdapter {
     /// Map an HTTP response (after reading body) to `WebDomainError` for non-2xx.
     fn map_error(status: u16, body: String) -> WebDomainError {
         match status {
-            401 | 403 => WebDomainError::AdapterInit(format!(
-                "Tavily auth failed (status {status}): {body}"
-            )),
+            401 | 403 => {
+                WebDomainError::AdapterInit(format!("Tavily auth failed (status {status}): {body}"))
+            }
             429 => WebDomainError::RateLimit {
                 calls_used: 0,
                 cap: 0,
@@ -125,13 +126,10 @@ impl SearchPort for TavilyAdapter {
             let body = resp.text().await.unwrap_or_default();
             return Err(Self::map_error(status, body));
         }
-        let raw: Value = resp
-            .json()
-            .await
-            .map_err(|e| WebDomainError::Upstream {
-                status: 200,
-                body: format!("invalid JSON from Tavily /search: {e}"),
-            })?;
+        let raw: Value = resp.json().await.map_err(|e| WebDomainError::Upstream {
+            status: 200,
+            body: format!("invalid JSON from Tavily /search: {e}"),
+        })?;
 
         let results = raw
             .get("results")
@@ -155,10 +153,7 @@ impl SearchPort for TavilyAdapter {
                     .and_then(|v| v.as_str())
                     .map(|s| s.chars().take(400).collect())
                     .unwrap_or_default(),
-                score: item
-                    .get("score")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0) as f32,
+                score: item.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
                 content: if req.include_content {
                     item.get("content")
                         .and_then(|v| v.as_str())
@@ -227,7 +222,10 @@ impl SearchPort for TavilyAdapter {
                 .and_then(|v| v.as_str())
                 .unwrap_or("extract failed")
                 .to_string();
-            return Err(WebDomainError::Upstream { status: 200, body: msg });
+            return Err(WebDomainError::Upstream {
+                status: 200,
+                body: msg,
+            });
         }
 
         let results = raw
@@ -235,12 +233,13 @@ impl SearchPort for TavilyAdapter {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        let first = results.into_iter().next().ok_or_else(|| {
-            WebDomainError::Upstream {
+        let first = results
+            .into_iter()
+            .next()
+            .ok_or_else(|| WebDomainError::Upstream {
                 status: 200,
                 body: "empty results from /extract".into(),
-            }
-        })?;
+            })?;
         let content = first
             .get("raw_content")
             .and_then(|v| v.as_str())
@@ -366,7 +365,10 @@ mod tests {
         assert_eq!(resp.results.len(), 2);
         assert_eq!(resp.results[0].title, "Rust Async Book");
         assert_eq!(resp.results[0].score, 0.92);
-        assert_eq!(resp.answer.as_deref(), Some("Rust has async/await since 1.39."));
+        assert_eq!(
+            resp.answer.as_deref(),
+            Some("Rust has async/await since 1.39.")
+        );
         assert_eq!(resp.credits_used, 1);
     }
 
@@ -399,7 +401,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/search"))
-            .and(body_partial_json(serde_json::json!({ "search_depth": "advanced" })))
+            .and(body_partial_json(
+                serde_json::json!({ "search_depth": "advanced" }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "query": "q",
                 "results": []

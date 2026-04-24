@@ -17,7 +17,7 @@ pub mod reactor;
 pub mod socketio;
 pub mod sql;
 pub mod subgraph;
-pub mod tavily_client;
 pub mod suspend;
 pub mod task_memory_writer;
+pub mod tavily_client;
 pub mod trigger;

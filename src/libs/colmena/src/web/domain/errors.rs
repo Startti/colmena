@@ -80,12 +80,19 @@ mod tests {
 
     #[test]
     fn rate_limit_is_recoverable() {
-        assert!(WebDomainError::RateLimit { calls_used: 51, cap: 50 }.is_llm_recoverable());
+        assert!(WebDomainError::RateLimit {
+            calls_used: 51,
+            cap: 50
+        }
+        .is_llm_recoverable());
     }
 
     #[test]
     fn session_lost_is_recoverable() {
-        assert!(WebDomainError::SessionLost { last_known_url: None }.is_llm_recoverable());
+        assert!(WebDomainError::SessionLost {
+            last_known_url: None
+        }
+        .is_llm_recoverable());
     }
 
     #[test]
@@ -104,7 +111,10 @@ mod tests {
 
     #[test]
     fn display_uses_thiserror_message() {
-        let e = WebDomainError::RateLimit { calls_used: 51, cap: 50 };
+        let e = WebDomainError::RateLimit {
+            calls_used: 51,
+            cap: 50,
+        };
         assert_eq!(e.to_string(), "rate limit exceeded (51/50)");
     }
 }

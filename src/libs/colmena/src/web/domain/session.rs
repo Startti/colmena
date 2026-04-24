@@ -492,12 +492,11 @@ mod tests {
         let evicted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let evicted_clone = evicted.clone();
 
-        let handle = reg.clone().start_sweeper(
-            std::time::Duration::from_millis(50),
-            move |_v| {
+        let handle = reg
+            .clone()
+            .start_sweeper(std::time::Duration::from_millis(50), move |_v| {
                 evicted_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            },
-        );
+            });
 
         reg.insert(SessionKey::new("c1", "default"), 1).await;
         reg.insert(SessionKey::new("c2", "default"), 2).await;

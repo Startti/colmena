@@ -229,7 +229,8 @@ impl HashMapNodeRegistry {
             let name = node_type.into();
             this.nodes
                 .insert(name.clone(), node.clone() as Arc<dyn ExecutableNode>);
-            this.toolkit_nodes.insert(name, node as Arc<dyn ToolkitNode>);
+            this.toolkit_nodes
+                .insert(name, node as Arc<dyn ToolkitNode>);
         }
     }
 }
@@ -247,10 +248,7 @@ impl NodeRegistryPort for HashMapNodeRegistry {
         self.nodes.clone()
     }
 
-    fn get_toolkit_node(
-        &self,
-        node_type: &str,
-    ) -> Option<Arc<dyn ToolkitNode>> {
+    fn get_toolkit_node(&self, node_type: &str) -> Option<Arc<dyn ToolkitNode>> {
         self.toolkit_nodes.get(node_type).cloned()
     }
 }
@@ -273,17 +271,10 @@ mod registry_tavily_tests {
         async fn add_task(&self, _task: &DagTask) -> Result<(), DagError> {
             Ok(())
         }
-        async fn update_task_result(
-            &self,
-            _task_id: &str,
-            _result: Value,
-        ) -> Result<(), DagError> {
+        async fn update_task_result(&self, _task_id: &str, _result: Value) -> Result<(), DagError> {
             Ok(())
         }
-        async fn get_tasks_for_run(
-            &self,
-            _session_id: &str,
-        ) -> Result<Vec<DagTask>, DagError> {
+        async fn get_tasks_for_run(&self, _session_id: &str) -> Result<Vec<DagTask>, DagError> {
             Ok(vec![])
         }
         async fn get_first_uncompleted_task(
@@ -298,10 +289,7 @@ mod registry_tavily_tests {
         async fn clear_tasks_for_run(&self, _session_id: &str) -> Result<(), DagError> {
             Ok(())
         }
-        async fn get_current_phase(
-            &self,
-            _session_id: &str,
-        ) -> Result<Option<i32>, DagError> {
+        async fn get_current_phase(&self, _session_id: &str) -> Result<Option<i32>, DagError> {
             Ok(None)
         }
         async fn get_uncompleted_tasks_for_phase(

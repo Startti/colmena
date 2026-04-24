@@ -21,14 +21,15 @@ use std::time::Duration;
 
 fn hash_search(req: &SearchRequest) -> u64 {
     let mut h = DefaultHasher::new();
-    ("search",
-     &req.query,
-     req.max_results,
-     req.include_content,
-     req.search_depth as u8,
-     &req.include_domains,
-     &req.exclude_domains,
-     req.time_range.map(|r| r as u8),
+    (
+        "search",
+        &req.query,
+        req.max_results,
+        req.include_content,
+        req.search_depth as u8,
+        &req.include_domains,
+        &req.exclude_domains,
+        req.time_range.map(|r| r as u8),
     )
         .hash(&mut h);
     h.finish()
@@ -379,10 +380,16 @@ mod tests {
         // means structured RateLimit error — still not a crash).
         uc.search("run-A", SearchRequest::new("q1")).await.unwrap();
         uc.search("run-A", SearchRequest::new("q2")).await.unwrap();
-        let err = uc.search("run-A", SearchRequest::new("q3")).await.unwrap_err();
+        let err = uc
+            .search("run-A", SearchRequest::new("q3"))
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
-            WebDomainError::RateLimit { calls_used: 2, cap: 2 }
+            WebDomainError::RateLimit {
+                calls_used: 2,
+                cap: 2
+            }
         ));
         assert_eq!(*port.search_calls.lock().unwrap(), 2);
     }
@@ -414,7 +421,10 @@ mod tests {
         };
         let uc = SearchUseCase::new(port.clone(), cfg);
         uc.search("run-A", SearchRequest::new("q1")).await.unwrap();
-        let err = uc.search("run-A", SearchRequest::new("q2")).await.unwrap_err();
+        let err = uc
+            .search("run-A", SearchRequest::new("q2"))
+            .await
+            .unwrap_err();
         assert!(matches!(err, WebDomainError::RateLimit { .. }));
         uc.reset_run("run-A");
         uc.search("run-A", SearchRequest::new("q3")).await.unwrap();
@@ -432,7 +442,10 @@ mod tests {
         let err = uc
             .fetch(
                 "run-A",
-                FetchRequest { url: "u".into(), format: ExtractFormat::Text },
+                FetchRequest {
+                    url: "u".into(),
+                    format: ExtractFormat::Text,
+                },
             )
             .await
             .unwrap_err();
@@ -448,8 +461,14 @@ mod tests {
         };
         let uc = SearchUseCase::new(port.clone(), cfg);
 
-        let r1 = uc.search("run-A", SearchRequest::new("same")).await.unwrap();
-        let r2 = uc.search("run-A", SearchRequest::new("same")).await.unwrap();
+        let r1 = uc
+            .search("run-A", SearchRequest::new("same"))
+            .await
+            .unwrap();
+        let r2 = uc
+            .search("run-A", SearchRequest::new("same"))
+            .await
+            .unwrap();
         assert_eq!(r1.query, r2.query);
         // Only first call hits the port.
         assert_eq!(*port.search_calls.lock().unwrap(), 1);
@@ -476,8 +495,12 @@ mod tests {
             ..Default::default()
         };
         let uc = SearchUseCase::new(port.clone(), cfg);
-        uc.search("run-A", SearchRequest::new("same")).await.unwrap();
-        uc.search("run-A", SearchRequest::new("same")).await.unwrap();
+        uc.search("run-A", SearchRequest::new("same"))
+            .await
+            .unwrap();
+        uc.search("run-A", SearchRequest::new("same"))
+            .await
+            .unwrap();
         assert_eq!(*port.search_calls.lock().unwrap(), 2);
     }
 
@@ -490,9 +513,13 @@ mod tests {
             ..Default::default()
         };
         let uc = SearchUseCase::new(port.clone(), cfg);
-        uc.search("run-A", SearchRequest::new("same")).await.unwrap();
+        uc.search("run-A", SearchRequest::new("same"))
+            .await
+            .unwrap();
         // TTL=0 means every lookup is immediately expired.
-        uc.search("run-A", SearchRequest::new("same")).await.unwrap();
+        uc.search("run-A", SearchRequest::new("same"))
+            .await
+            .unwrap();
         assert_eq!(*port.search_calls.lock().unwrap(), 2);
     }
 
@@ -509,7 +536,10 @@ mod tests {
         // Cache hit; should not exhaust the cap.
         uc.search("run-A", SearchRequest::new("x")).await.unwrap();
         // Still counts only 1 toward the port; cap not yet hit.
-        let err = uc.search("run-A", SearchRequest::new("y")).await.unwrap_err();
+        let err = uc
+            .search("run-A", SearchRequest::new("y"))
+            .await
+            .unwrap_err();
         assert!(matches!(err, WebDomainError::RateLimit { .. }));
     }
 

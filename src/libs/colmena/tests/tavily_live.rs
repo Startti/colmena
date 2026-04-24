@@ -5,9 +5,7 @@
 
 use colmena::web::application::search_use_case::{SearchUseCase, SearchUseCaseConfig};
 use colmena::web::domain::errors::WebDomainError;
-use colmena::web::domain::search_port::{
-    ExtractFormat, FetchRequest, SearchPort, SearchRequest,
-};
+use colmena::web::domain::search_port::{ExtractFormat, FetchRequest, SearchPort, SearchRequest};
 use colmena::web::infrastructure::tavily_adapter::TavilyAdapter;
 use std::sync::Arc;
 use std::time::Duration;

@@ -381,7 +381,12 @@ fn search_sub_tool() -> SubToolDefinition {
         ParameterProperty {
             property_type: "string".into(),
             description: "Restrict to content from this recency window.".into(),
-            enum_values: Some(vec!["day".into(), "week".into(), "month".into(), "year".into()]),
+            enum_values: Some(vec![
+                "day".into(),
+                "week".into(),
+                "month".into(),
+                "year".into(),
+            ]),
             pattern: None,
         },
     );
@@ -526,7 +531,10 @@ mod tests {
 
     #[test]
     fn resolve_env_var_passes_literal_through() {
-        assert_eq!(TavilyClientNode::resolve_env_var("tvly-xxx").unwrap(), "tvly-xxx");
+        assert_eq!(
+            TavilyClientNode::resolve_env_var("tvly-xxx").unwrap(),
+            "tvly-xxx"
+        );
     }
 
     #[test]
@@ -541,8 +549,8 @@ mod tests {
     };
     use crate::web::domain::errors::WebDomainError;
     use crate::web::domain::search_port::{
-        FetchRequest as FReq, FetchResponse as FResp, SearchPort,
-        SearchRequest as SReq, SearchResponse as SResp, SearchResult,
+        FetchRequest as FReq, FetchResponse as FResp, SearchPort, SearchRequest as SReq,
+        SearchResponse as SResp, SearchResult,
     };
     use std::sync::Mutex;
 
@@ -602,10 +610,18 @@ mod tests {
         inputs.insert("query".into(), json!("rust async"));
         let mut state = json!({});
         let out = node
-            .execute(&inputs, &json!({ "api_key": "tvly-stub" }), &mut state, None)
+            .execute(
+                &inputs,
+                &json!({ "api_key": "tvly-stub" }),
+                &mut state,
+                None,
+            )
             .await
             .unwrap();
-        assert_eq!(out.get("query").and_then(|v| v.as_str()), Some("rust async"));
+        assert_eq!(
+            out.get("query").and_then(|v| v.as_str()),
+            Some("rust async")
+        );
         assert_eq!(
             out.get("results")
                 .and_then(|v| v.as_array())
@@ -626,7 +642,9 @@ mod tests {
             "search_defaults": { "max_results": 3, "include_domains": ["rust-lang.org"] }
         });
         let mut state = json!({});
-        node.execute(&inputs, &config, &mut state, None).await.unwrap();
+        node.execute(&inputs, &config, &mut state, None)
+            .await
+            .unwrap();
         assert_eq!(*port.search_calls.lock().unwrap(), 1);
     }
 
@@ -719,7 +737,12 @@ mod tests {
         inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("search"));
         let mut state = json!({});
         let out = node
-            .execute(&inputs, &json!({ "api_key": "tvly-stub" }), &mut state, None)
+            .execute(
+                &inputs,
+                &json!({ "api_key": "tvly-stub" }),
+                &mut state,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -736,7 +759,12 @@ mod tests {
         inputs.insert("url".into(), json!("https://example.com"));
         let mut state = json!({});
         let out = node
-            .execute(&inputs, &json!({ "api_key": "tvly-stub" }), &mut state, None)
+            .execute(
+                &inputs,
+                &json!({ "api_key": "tvly-stub" }),
+                &mut state,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -754,9 +782,14 @@ mod tests {
         inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("fetch"));
         inputs.insert("url".into(), json!("https://example.com"));
         let mut state = json!({});
-        node.execute(&inputs, &json!({ "api_key": "tvly-stub" }), &mut state, None)
-            .await
-            .unwrap();
+        node.execute(
+            &inputs,
+            &json!({ "api_key": "tvly-stub" }),
+            &mut state,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -766,7 +799,12 @@ mod tests {
         inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("fetch"));
         let mut state = json!({});
         let out = node
-            .execute(&inputs, &json!({ "api_key": "tvly-stub" }), &mut state, None)
+            .execute(
+                &inputs,
+                &json!({ "api_key": "tvly-stub" }),
+                &mut state,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -782,7 +820,12 @@ mod tests {
         inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("nope"));
         let mut state = json!({});
         let err = node
-            .execute(&inputs, &json!({ "api_key": "tvly-stub" }), &mut state, None)
+            .execute(
+                &inputs,
+                &json!({ "api_key": "tvly-stub" }),
+                &mut state,
+                None,
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("unknown sub_tool"));

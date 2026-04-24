@@ -6,6 +6,6 @@
 //! (`tavily_client`, `api_explorer`, `browser`) plus cross-cutting pieces that
 //! all of them use: [`session::SessionRegistry`], [`errors::WebDomainError`].
 
-pub mod domain;
 pub mod application;
+pub mod domain;
 pub mod infrastructure;
