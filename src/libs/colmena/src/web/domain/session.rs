@@ -208,6 +208,31 @@ impl<T> SessionRegistry<T> {
         )
         .map(|e| e.value)
     }
+
+    /// Spawn a background tokio task that periodically calls `sweep_expired`.
+    /// Returns the task handle; callers retain it and call `.abort()` during shutdown.
+    ///
+    /// The cleanup closure must be `Send + 'static + Clone` because it is shared
+    /// across ticks of the sweeper.
+    pub fn start_sweeper<F>(
+        self: Arc<Self>,
+        period: std::time::Duration,
+        cleanup: F,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        T: Send + 'static,
+        F: Fn(T) + Send + Sync + Clone + 'static,
+    {
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(period);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                let c = cleanup.clone();
+                self.sweep_expired(c).await;
+            }
+        })
+    }
 }
 
 #[cfg(test)]
@@ -442,5 +467,34 @@ mod tests {
             0,
             "re-insert of same key must not trigger eviction"
         );
+    }
+
+    #[tokio::test]
+    async fn start_sweeper_evicts_on_tick() {
+        let ttl = TtlConfig {
+            idle_ttl_seconds: 0,
+            max_lifetime_seconds: 3600,
+            max_active_sessions: 50,
+        };
+        let reg: Arc<SessionRegistry<u32>> = SessionRegistry::new(ttl);
+
+        let evicted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let evicted_clone = evicted.clone();
+
+        let handle = reg.clone().start_sweeper(
+            std::time::Duration::from_millis(50),
+            move |_v| {
+                evicted_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        );
+
+        reg.insert(SessionKey::new("c1", "default"), 1).await;
+        reg.insert(SessionKey::new("c2", "default"), 2).await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        handle.abort();
+
+        assert_eq!(evicted.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(reg.len().await, 0);
     }
 }
