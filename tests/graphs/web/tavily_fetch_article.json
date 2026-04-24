@@ -1,0 +1,38 @@
+{
+  "nodes": {
+    "ask": {
+      "type": "input",
+      "config": {
+        "default": "Please read https://example.com and summarize it in two sentences."
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "anthropic",
+        "model": "claude-opus-4-7",
+        "api_key": "${ANTHROPIC_API_KEY}",
+        "system_message": "Use `web__fetch` to read any URL the user references before answering.",
+        "tool_configurations": {
+          "web": {
+            "name": "web",
+            "description": "Web search and fetch via Tavily",
+            "node_type": "tavily_client",
+            "node_config": {
+              "api_key": "${TAVILY_API_KEY}"
+            },
+            "expose_sub_tools": ["fetch"]
+          }
+        }
+      }
+    },
+    "sink": {
+      "type": "output",
+      "config": {}
+    }
+  },
+  "edges": [
+    { "from": "ask", "to": "agent", "field": "prompt" },
+    { "from": "agent", "to": "sink" }
+  ]
+}
