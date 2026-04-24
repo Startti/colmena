@@ -40,9 +40,20 @@ pub fn convert_swagger2_to_openapi3(input: &Value) -> Result<Value, WebDomainErr
         out.insert("servers".into(), Value::Array(servers));
     }
 
-    // paths (deep-copied then ref-rewritten; operation-body conversion lives in Task 3)
+    let global_consumes = root
+        .get("consumes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let global_produces = root
+        .get("produces")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
     let paths = root.get("paths").cloned().unwrap_or(json!({}));
     let paths = rewrite_refs_recursive(paths);
+    let paths = convert_operations(paths, &global_consumes, &global_produces)?;
     out.insert("paths".into(), paths);
 
     // components
@@ -218,6 +229,248 @@ fn rewrite_single_ref(r: &str) -> String {
     }
 }
 
+/// Walk each path → method → operation and rewrite 2.0-isms.
+fn convert_operations(
+    paths: Value,
+    global_consumes: &[Value],
+    global_produces: &[Value],
+) -> Result<Value, WebDomainError> {
+    let Value::Object(mut path_map) = paths else {
+        return Ok(paths);
+    };
+    let path_keys: Vec<String> = path_map.keys().cloned().collect();
+    for path_key in path_keys {
+        let Some(path_item) = path_map.get_mut(&path_key) else { continue };
+        let Value::Object(item_map) = path_item else { continue };
+        let method_keys: Vec<String> = item_map.keys().cloned().collect();
+        for method_key in method_keys {
+            if !is_http_method(&method_key) {
+                continue;
+            }
+            let Some(op_val) = item_map.get_mut(&method_key) else { continue };
+            let Value::Object(op) = op_val else { continue };
+            convert_single_operation(op, global_consumes, global_produces)?;
+        }
+    }
+    Ok(Value::Object(path_map))
+}
+
+fn is_http_method(k: &str) -> bool {
+    matches!(
+        k.to_ascii_lowercase().as_str(),
+        "get" | "put" | "post" | "delete" | "options" | "head" | "patch" | "trace"
+    )
+}
+
+fn convert_single_operation(
+    op: &mut Map<String, Value>,
+    global_consumes: &[Value],
+    global_produces: &[Value],
+) -> Result<(), WebDomainError> {
+    // Determine effective consumes / produces.
+    let consumes: Vec<Value> = op
+        .get("consumes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_else(|| global_consumes.to_vec());
+    let produces: Vec<Value> = op
+        .get("produces")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_else(|| global_produces.to_vec());
+    op.remove("consumes");
+    op.remove("produces");
+
+    // Split parameters: body + formData vs the rest.
+    let mut new_params: Vec<Value> = Vec::new();
+    let mut body_param: Option<Value> = None;
+    let mut form_data: Vec<Value> = Vec::new();
+
+    if let Some(Value::Array(params)) = op.remove("parameters") {
+        for p in params {
+            let Value::Object(mut p_obj) = p else {
+                new_params.push(p);
+                continue;
+            };
+            let kind = p_obj.get("in").and_then(|v| v.as_str()).unwrap_or("");
+            match kind {
+                "body" => body_param = Some(Value::Object(p_obj)),
+                "formData" => form_data.push(Value::Object(p_obj)),
+                _ => {
+                    convert_param_collection_format(&mut p_obj)?;
+                    new_params.push(Value::Object(p_obj));
+                }
+            }
+        }
+    }
+
+    if !new_params.is_empty() {
+        op.insert("parameters".into(), Value::Array(new_params));
+    }
+
+    // body → requestBody
+    if let Some(Value::Object(mut bp)) = body_param {
+        let required = bp
+            .remove("required")
+            .unwrap_or(Value::Bool(false));
+        let description = bp.remove("description");
+        let schema = bp.remove("schema").unwrap_or(json!({}));
+
+        let content_type = pick_first_content_type(&consumes, "application/json");
+        let mut content = Map::new();
+        let mut media = Map::new();
+        media.insert("schema".into(), schema);
+        content.insert(content_type, Value::Object(media));
+
+        let mut rb = Map::new();
+        rb.insert("required".into(), required);
+        if let Some(d) = description {
+            rb.insert("description".into(), d);
+        }
+        rb.insert("content".into(), Value::Object(content));
+        op.insert("requestBody".into(), Value::Object(rb));
+    }
+
+    // formData → requestBody (urlencoded or multipart)
+    if !form_data.is_empty() {
+        let has_file = form_data.iter().any(|p| {
+            p.get("type").and_then(|v| v.as_str()) == Some("file")
+        });
+        let media_type = if has_file {
+            "multipart/form-data"
+        } else {
+            // Honor the operation's consumes if it names form-urlencoded; otherwise default.
+            pick_first_consume_for_form(&consumes).unwrap_or("application/x-www-form-urlencoded")
+        }
+        .to_string();
+
+        let mut properties = Map::new();
+        let mut required_names: Vec<Value> = Vec::new();
+
+        for p in form_data {
+            let Value::Object(p_obj) = p else { continue };
+            let Some(name) = p_obj.get("name").and_then(|v| v.as_str()).map(String::from) else {
+                continue;
+            };
+            let mut prop = Map::new();
+            if p_obj.get("type").and_then(|v| v.as_str()) == Some("file") {
+                prop.insert("type".into(), Value::String("string".into()));
+                prop.insert("format".into(), Value::String("binary".into()));
+            } else if let Some(ty) = p_obj.get("type") {
+                prop.insert("type".into(), ty.clone());
+                if let Some(fmt) = p_obj.get("format") {
+                    prop.insert("format".into(), fmt.clone());
+                }
+                if let Some(items) = p_obj.get("items") {
+                    prop.insert("items".into(), items.clone());
+                }
+                if let Some(en) = p_obj.get("enum") {
+                    prop.insert("enum".into(), en.clone());
+                }
+            }
+            if let Some(desc) = p_obj.get("description") {
+                prop.insert("description".into(), desc.clone());
+            }
+            if p_obj.get("required").and_then(|v| v.as_bool()).unwrap_or(false) {
+                required_names.push(Value::String(name.clone()));
+            }
+            properties.insert(name, Value::Object(prop));
+        }
+
+        let mut schema = Map::new();
+        schema.insert("type".into(), Value::String("object".into()));
+        schema.insert("properties".into(), Value::Object(properties));
+        if !required_names.is_empty() {
+            schema.insert("required".into(), Value::Array(required_names));
+        }
+
+        let mut media = Map::new();
+        media.insert("schema".into(), Value::Object(schema));
+
+        let mut content = Map::new();
+        content.insert(media_type, Value::Object(media));
+
+        let mut rb = Map::new();
+        rb.insert("required".into(), Value::Bool(true));
+        rb.insert("content".into(), Value::Object(content));
+        op.insert("requestBody".into(), Value::Object(rb));
+    }
+
+    // responses.<code>.schema → responses.<code>.content.<produce>.schema
+    if let Some(Value::Object(ref mut responses)) = op.get_mut("responses") {
+        let codes: Vec<String> = responses.keys().cloned().collect();
+        for code in codes {
+            let Some(Value::Object(ref mut resp)) = responses.get_mut(&code) else {
+                continue;
+            };
+            if let Some(schema) = resp.remove("schema") {
+                let content_type = pick_first_content_type(&produces, "application/json");
+                let mut media = Map::new();
+                media.insert("schema".into(), schema);
+                let mut content = Map::new();
+                content.insert(content_type, Value::Object(media));
+                resp.insert("content".into(), Value::Object(content));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn pick_first_content_type(list: &[Value], default: &str) -> String {
+    list.iter()
+        .find_map(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn pick_first_consume_for_form(list: &[Value]) -> Option<&'static str> {
+    for v in list {
+        match v.as_str() {
+            Some("application/x-www-form-urlencoded") => return Some("application/x-www-form-urlencoded"),
+            Some("multipart/form-data") => return Some("multipart/form-data"),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Translate Swagger 2.0 `collectionFormat` on a parameter to OpenAPI 3.0
+/// `style` + `explode`. Errors on `tsv` (no 3.0 equivalent).
+fn convert_param_collection_format(p: &mut Map<String, Value>) -> Result<(), WebDomainError> {
+    let Some(Value::String(cf)) = p.remove("collectionFormat") else {
+        return Ok(());
+    };
+    match cf.as_str() {
+        "csv" => {
+            p.insert("style".into(), Value::String("form".into()));
+            p.insert("explode".into(), Value::Bool(false));
+        }
+        "multi" => {
+            p.insert("style".into(), Value::String("form".into()));
+            p.insert("explode".into(), Value::Bool(true));
+        }
+        "ssv" => {
+            p.insert("style".into(), Value::String("spaceDelimited".into()));
+        }
+        "pipes" => {
+            p.insert("style".into(), Value::String("pipeDelimited".into()));
+        }
+        "tsv" => {
+            return Err(WebDomainError::Swagger2ConversionFailed {
+                reason: "collectionFormat: tsv has no OpenAPI 3.0 equivalent".into(),
+                unsupported_feature: Some("collectionFormat.tsv".into()),
+            });
+        }
+        other => {
+            return Err(WebDomainError::Swagger2ConversionFailed {
+                reason: format!("unknown collectionFormat: {other}"),
+                unsupported_feature: Some(format!("collectionFormat.{other}")),
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests_root {
     use super::*;
@@ -324,7 +577,8 @@ mod tests_root {
             "definitions": { "Pet": { "type": "object" } }
         });
         let out = convert_swagger2_to_openapi3(&input).unwrap();
-        let r = &out["paths"]["/pet"]["get"]["responses"]["200"]["schema"]["$ref"];
+        // After operation conversion, schema moves into content.<media-type>.schema
+        let r = &out["paths"]["/pet"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"];
         assert_eq!(r, "#/components/schemas/Pet");
     }
 
@@ -414,5 +668,268 @@ mod tests_root {
         let out = convert_swagger2_to_openapi3(&input).unwrap();
         assert_eq!(out["tags"][0]["name"], "pets");
         assert_eq!(out["tags"][1]["name"], "users");
+    }
+}
+
+#[cfg(test)]
+mod tests_operations {
+    use super::*;
+    use serde_json::json;
+
+    fn petstore_post_with_body() -> Value {
+        json!({
+            "swagger": "2.0",
+            "info": { "title": "Pet", "version": "1" },
+            "host": "api.example.com",
+            "basePath": "/v2",
+            "schemes": ["https"],
+            "consumes": ["application/json"],
+            "produces": ["application/json"],
+            "paths": {
+                "/pet": {
+                    "post": {
+                        "operationId": "addPet",
+                        "parameters": [
+                            {
+                                "in": "body",
+                                "name": "body",
+                                "required": true,
+                                "schema": { "$ref": "#/definitions/Pet" }
+                            }
+                        ],
+                        "responses": {
+                            "200": { "description": "ok", "schema": { "$ref": "#/definitions/Pet" } }
+                        }
+                    }
+                }
+            },
+            "definitions": {
+                "Pet": { "type": "object", "properties": { "id": { "type": "integer" } } }
+            }
+        })
+    }
+
+    #[test]
+    fn body_param_becomes_request_body() {
+        let out = convert_swagger2_to_openapi3(&petstore_post_with_body()).unwrap();
+        let op = &out["paths"]["/pet"]["post"];
+        assert!(op["parameters"].as_array().map(|a| a.is_empty()).unwrap_or(true));
+        let rb = &op["requestBody"];
+        assert_eq!(rb["required"], true);
+        assert_eq!(
+            rb["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/Pet"
+        );
+    }
+
+    #[test]
+    fn response_schema_becomes_content_schema() {
+        let out = convert_swagger2_to_openapi3(&petstore_post_with_body()).unwrap();
+        let resp = &out["paths"]["/pet"]["post"]["responses"]["200"];
+        assert!(resp["schema"].is_null() || resp.get("schema").is_none());
+        assert_eq!(
+            resp["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/Pet"
+        );
+        assert_eq!(resp["description"], "ok");
+    }
+
+    #[test]
+    fn formdata_becomes_urlencoded_request_body() {
+        let input = json!({
+            "swagger": "2.0",
+            "info": { "title": "T", "version": "1" },
+            "paths": {
+                "/login": {
+                    "post": {
+                        "parameters": [
+                            { "in": "formData", "name": "user",     "type": "string", "required": true },
+                            { "in": "formData", "name": "password", "type": "string", "required": true }
+                        ],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        });
+        let out = convert_swagger2_to_openapi3(&input).unwrap();
+        let rb = &out["paths"]["/login"]["post"]["requestBody"];
+        let schema = &rb["content"]["application/x-www-form-urlencoded"]["schema"];
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"]["user"].is_object());
+        assert!(schema["properties"]["password"].is_object());
+        let req = schema["required"].as_array().unwrap();
+        assert!(req.iter().any(|v| v == "user"));
+        assert!(req.iter().any(|v| v == "password"));
+    }
+
+    #[test]
+    fn formdata_with_file_becomes_multipart() {
+        let input = json!({
+            "swagger": "2.0",
+            "info": { "title": "T", "version": "1" },
+            "paths": {
+                "/upload": {
+                    "post": {
+                        "parameters": [
+                            { "in": "formData", "name": "file", "type": "file", "required": true },
+                            { "in": "formData", "name": "caption", "type": "string" }
+                        ],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        });
+        let out = convert_swagger2_to_openapi3(&input).unwrap();
+        let rb = &out["paths"]["/upload"]["post"]["requestBody"];
+        let schema = &rb["content"]["multipart/form-data"]["schema"];
+        assert_eq!(schema["properties"]["file"]["type"], "string");
+        assert_eq!(schema["properties"]["file"]["format"], "binary");
+        assert_eq!(schema["properties"]["caption"]["type"], "string");
+    }
+
+    #[test]
+    fn collection_format_csv_becomes_form_no_explode() {
+        let input = json!({
+            "swagger": "2.0",
+            "info": { "title": "T", "version": "1" },
+            "paths": {
+                "/things": {
+                    "get": {
+                        "parameters": [{
+                            "in": "query", "name": "ids",
+                            "type": "array", "items": { "type": "string" },
+                            "collectionFormat": "csv"
+                        }],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        });
+        let out = convert_swagger2_to_openapi3(&input).unwrap();
+        let p = &out["paths"]["/things"]["get"]["parameters"][0];
+        assert_eq!(p["style"], "form");
+        assert_eq!(p["explode"], false);
+        assert!(p.get("collectionFormat").is_none());
+    }
+
+    #[test]
+    fn collection_format_multi_becomes_form_explode_true() {
+        let input = json!({
+            "swagger": "2.0",
+            "info": { "title": "T", "version": "1" },
+            "paths": {
+                "/things": {
+                    "get": {
+                        "parameters": [{
+                            "in": "query", "name": "ids",
+                            "type": "array", "items": { "type": "string" },
+                            "collectionFormat": "multi"
+                        }],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        });
+        let out = convert_swagger2_to_openapi3(&input).unwrap();
+        let p = &out["paths"]["/things"]["get"]["parameters"][0];
+        assert_eq!(p["style"], "form");
+        assert_eq!(p["explode"], true);
+    }
+
+    #[test]
+    fn collection_format_ssv_becomes_space_delimited() {
+        let input = json!({
+            "swagger": "2.0",
+            "info": { "title": "T", "version": "1" },
+            "paths": {
+                "/things": {
+                    "get": {
+                        "parameters": [{
+                            "in": "query", "name": "ids",
+                            "type": "array", "items": { "type": "string" },
+                            "collectionFormat": "ssv"
+                        }],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        });
+        let out = convert_swagger2_to_openapi3(&input).unwrap();
+        let p = &out["paths"]["/things"]["get"]["parameters"][0];
+        assert_eq!(p["style"], "spaceDelimited");
+    }
+
+    #[test]
+    fn collection_format_pipes_becomes_pipe_delimited() {
+        let input = json!({
+            "swagger": "2.0",
+            "info": { "title": "T", "version": "1" },
+            "paths": {
+                "/things": {
+                    "get": {
+                        "parameters": [{
+                            "in": "query", "name": "ids",
+                            "type": "array", "items": { "type": "string" },
+                            "collectionFormat": "pipes"
+                        }],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        });
+        let out = convert_swagger2_to_openapi3(&input).unwrap();
+        let p = &out["paths"]["/things"]["get"]["parameters"][0];
+        assert_eq!(p["style"], "pipeDelimited");
+    }
+
+    #[test]
+    fn collection_format_tsv_is_conversion_error() {
+        let input = json!({
+            "swagger": "2.0",
+            "info": { "title": "T", "version": "1" },
+            "paths": {
+                "/things": {
+                    "get": {
+                        "parameters": [{
+                            "in": "query", "name": "ids",
+                            "type": "array", "items": { "type": "string" },
+                            "collectionFormat": "tsv"
+                        }],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        });
+        let err = convert_swagger2_to_openapi3(&input).unwrap_err();
+        match err {
+            WebDomainError::Swagger2ConversionFailed { unsupported_feature, .. } => {
+                assert_eq!(unsupported_feature.as_deref(), Some("collectionFormat.tsv"));
+            }
+            other => panic!("expected Swagger2ConversionFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn operation_consumes_overrides_global_consumes() {
+        let input = json!({
+            "swagger": "2.0",
+            "info": { "title": "T", "version": "1" },
+            "consumes": ["application/json"],
+            "paths": {
+                "/form": {
+                    "post": {
+                        "consumes": ["application/x-www-form-urlencoded"],
+                        "parameters": [
+                            { "in": "formData", "name": "x", "type": "string", "required": true }
+                        ],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        });
+        let out = convert_swagger2_to_openapi3(&input).unwrap();
+        let rb = &out["paths"]["/form"]["post"]["requestBody"];
+        assert!(rb["content"]["application/x-www-form-urlencoded"].is_object());
+        assert!(rb.get("content").and_then(|c| c.get("application/json")).is_none());
     }
 }
