@@ -105,10 +105,7 @@ impl<T> SessionRegistry<T> {
 
     /// Apply a closure to the entry for `key` if present. Updates `last_activity` on
     /// each call. Returns `Some(f(&entry.value))` or `None`.
-    pub async fn with_entry<R>(&self, key: &SessionKey, f: impl FnOnce(&T) -> R) -> Option<R>
-    where
-        T: Clone,
-    {
+    pub async fn with_entry<R>(&self, key: &SessionKey, f: impl FnOnce(&T) -> R) -> Option<R> {
         let mut map = self.inner.lock().await;
         if let Some(entry) = map.get_mut(key) {
             entry.last_activity = Utc::now();
