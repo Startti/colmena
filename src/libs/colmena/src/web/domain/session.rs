@@ -93,6 +93,11 @@ impl<T> SessionRegistry<T> {
         self.inner.lock().await.len()
     }
 
+    /// Returns `true` if the registry holds no sessions.
+    pub async fn is_empty(&self) -> bool {
+        self.inner.lock().await.is_empty()
+    }
+
     /// Return `true` if the key is present.
     pub async fn contains(&self, key: &SessionKey) -> bool {
         self.inner.lock().await.contains_key(key)
