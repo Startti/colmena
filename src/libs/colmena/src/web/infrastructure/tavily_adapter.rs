@@ -17,8 +17,8 @@
 
 use crate::web::domain::errors::WebDomainError;
 use crate::web::domain::search_port::{
-    ExtractFormat, FetchRequest, FetchResponse, SearchDepth, SearchPort, SearchRequest,
-    SearchResponse, SearchResult,
+    FetchRequest, FetchResponse, SearchDepth, SearchPort, SearchRequest, SearchResponse,
+    SearchResult,
 };
 use async_trait::async_trait;
 use reqwest::Client;
