@@ -988,12 +988,14 @@ Guidelines:
 
 ## `tavily_client` (Toolkit)
 
-Nodo de herramientas expuesto a un `llm_call`. Dos sub-herramientas: `search` y `fetch`.
+Nodo de herramientas expuesto a un `llm_call`. Dos sub-herramientas: `search` y `fetch`. También ejecutable como nodo DAG regular.
 
-**Inputs — `search`:** `query` (string, requerido), `max_results` (1-10), `include_content` (bool), `search_depth` (`basic`|`advanced`), `include_domains` (array), `exclude_domains` (array), `time_range` (`day`|`week`|`month`|`year`).
+**Ruteo de sub-tool:** todos los inputs incluyen la clave reservada `__sub_tool` (`"search"` o `"fetch"`) que el nodo lee para elegir el handler. En uso vía `tool_configurations` la inyecta `DagToolExecutor`; en uso directo debe proveerla el edge upstream (p. ej. un `input` node con `data.__sub_tool`).
+
+**Inputs — `search`:** `__sub_tool: "search"`, `query` (string, requerido), `max_results` (1-10), `include_content` (bool), `search_depth` (`basic`|`advanced`), `include_domains` (array), `exclude_domains` (array), `time_range` (`day`|`week`|`month`|`year`).
 **Outputs — `search`:** `{ query, results: [{ title, url, snippet, score, content? }], answer?, credits_used }`.
 
-**Inputs — `fetch`:** `url` (string, requerido), `extract_format` (`markdown`|`text`).
+**Inputs — `fetch`:** `__sub_tool: "fetch"`, `url` (string, requerido), `extract_format` (`markdown`|`text`).
 **Outputs — `fetch`:** `{ url, title?, content, content_length, credits_used }`.
 
 Errores recuperables por el LLM: `rate_limit`, `timeout`, `upstream_error`. `AdapterInit` e `InvalidConfig` causan fallo de ejecución de DAG.

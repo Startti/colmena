@@ -1872,8 +1872,30 @@
 
     "tavily_client": {
       "name": "Tavily Client",
-      "description": "Web search and fetch via Tavily. Toolkit node that exposes two LLM sub-tools: `search` and `fetch`. Added to an `llm_call` via `tool_configurations`, so the agent sees `<alias>__search` and `<alias>__fetch`.",
+      "description": "Web search and fetch via Tavily. Toolkit node that exposes two LLM sub-tools: `search` and `fetch`. Primary usage is via an `llm_call`'s `tool_configurations` (the agent sees `<alias>__search` and `<alias>__fetch`). Also invokable as a regular DAG node by providing `__sub_tool` in its inputs.",
       "category": "web",
+      "inputs": {
+        "__sub_tool": {
+          "type": "string",
+          "enum": ["search", "fetch"],
+          "required": true,
+          "description": "Which sub-tool handler to run. Injected automatically by DagToolExecutor when used via tool_configurations; must be supplied by the upstream edge when the node is called directly."
+        },
+        "query": { "type": "string", "description": "Required when __sub_tool='search'." },
+        "url":   { "type": "string", "description": "Required when __sub_tool='fetch'." },
+        "max_results":     { "type": "integer" },
+        "include_content": { "type": "boolean" },
+        "search_depth":    { "type": "string", "enum": ["basic", "advanced"] },
+        "include_domains": { "type": "array", "items": { "type": "string" } },
+        "exclude_domains": { "type": "array", "items": { "type": "string" } },
+        "time_range":      { "type": "string", "enum": ["day", "week", "month", "year"] },
+        "extract_format":  { "type": "string", "enum": ["markdown", "text"] }
+      },
+      "outputs": {
+        "output": {
+          "description": "For search: { query, results: [{title, url, snippet, score, content?}], answer?, credits_used }. For fetch: { url, title?, content, content_length, credits_used }."
+        }
+      },
       "config_fields": {
         "api_key": {
           "type": "string",

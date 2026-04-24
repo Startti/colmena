@@ -73,6 +73,42 @@ Herramienta LLM para búsqueda y lectura web vía Tavily. Expone dos sub-herrami
 
 El LLM verá dos herramientas: `web__search` y `web__fetch`. Con `expose_sub_tools: ["fetch"]` sólo ve la segunda.
 
+> **Nota:** declarar un alias en `tool_configurations` expone automáticamente sus sub-tools al LLM. No es necesario repetir los nombres en `enabled_tools`; si se incluyen en ambos lados, el engine los deduplica.
+
+### Uso directo como nodo DAG (sin LLM)
+
+El nodo también es ejecutable como cualquier otro `ExecutableNode`. Para invocar una sub-herramienta directamente desde un edge, inyecta la clave reservada `__sub_tool` en los inputs (`"search"` o `"fetch"`) junto a los parámetros que correspondan (`query` para búsqueda, `url` para fetch).
+
+```json
+{
+  "nodes": {
+    "start": {
+      "type": "input",
+      "config": {
+        "data": {
+          "__sub_tool": "search",
+          "query": "What is the Rust programming language?"
+        }
+      }
+    },
+    "tavily": {
+      "type": "tavily_client",
+      "config": {
+        "api_key": "${TAVILY_API_KEY}",
+        "search_defaults": { "max_results": 3 }
+      }
+    },
+    "sink": { "type": "output", "config": {} }
+  },
+  "edges": [
+    { "from": "start",  "to": "tavily" },
+    { "from": "tavily", "to": "sink" }
+  ]
+}
+```
+
+Ver `tests/graphs/web/tavily_direct_search.json`. El output del nodo es el mismo JSON que recibiría el LLM como tool result (`{ query, results, answer, credits_used }` para search; `{ url, content, ... }` para fetch).
+
 ### Manejo de errores
 
 | Upstream | Para el LLM (recuperable) | Crash de DAG |

@@ -1,0 +1,33 @@
+{
+  "comment": "Calls tavily_client directly as a DAG node (no LLM). The input node supplies __sub_tool='search' plus the query; tavily_client runs the search and the output node echoes the result.",
+  "metadata": {
+    "category": "web",
+    "requires_env": ["TAVILY_API_KEY"]
+  },
+  "nodes": {
+    "start": {
+      "type": "input",
+      "config": {
+        "data": {
+          "__sub_tool": "search",
+          "query": "What is the Rust programming language?"
+        }
+      }
+    },
+    "tavily": {
+      "type": "tavily_client",
+      "config": {
+        "api_key": "${TAVILY_API_KEY}",
+        "search_defaults": { "max_results": 3 }
+      }
+    },
+    "sink": {
+      "type": "output",
+      "config": {}
+    }
+  },
+  "edges": [
+    { "from": "start", "to": "tavily" },
+    { "from": "tavily", "to": "sink" }
+  ]
+}
