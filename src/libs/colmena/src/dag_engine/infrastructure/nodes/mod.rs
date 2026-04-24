@@ -1,6 +1,7 @@
 // Hacemos públicos los módulos de nodos
 pub mod critic;
 pub mod debug;
+pub mod echo_toolkit;
 pub mod extraction;
 pub mod http;
 pub mod input;
@@ -18,4 +19,5 @@ pub mod sql;
 pub mod subgraph;
 pub mod suspend;
 pub mod task_memory_writer;
+pub mod tavily_client;
 pub mod trigger;

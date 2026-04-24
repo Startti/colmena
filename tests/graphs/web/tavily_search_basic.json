@@ -1,0 +1,40 @@
+{
+  "nodes": {
+    "ask": {
+      "type": "input",
+      "config": {
+        "default": "What are the top three news stories about the Rust language in the past month? Answer concisely."
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "anthropic",
+        "model": "claude-opus-4-7",
+        "api_key": "${ANTHROPIC_API_KEY}",
+        "system_message": "You are a research assistant. Use the `web__search` tool to look up up-to-date information before answering. Prefer `time_range=month` for recent-events questions.",
+        "tool_configurations": {
+          "web": {
+            "name": "web",
+            "description": "Web search and fetch via Tavily",
+            "node_type": "tavily_client",
+            "node_config": {
+              "api_key": "${TAVILY_API_KEY}",
+              "max_calls_per_run": 10,
+              "search_defaults": { "max_results": 5 }
+            },
+            "expose_sub_tools": "all"
+          }
+        }
+      }
+    },
+    "sink": {
+      "type": "output",
+      "config": {}
+    }
+  },
+  "edges": [
+    { "from": "ask", "to": "agent", "field": "prompt" },
+    { "from": "agent", "to": "sink" }
+  ]
+}

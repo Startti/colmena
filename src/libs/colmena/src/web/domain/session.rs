@@ -1,0 +1,510 @@
+//! Conversation-scoped session registry shared by the three web-toolkit nodes.
+//!
+//! Generic over the session state type `T`. Each node constructs its own
+//! `Arc<SessionRegistry<MyState>>` and looks entries up by
+//! `SessionKey { conversation_id, session_name }`.
+//!
+//! The registry supports three scopes of cleanup:
+//! - Explicit removal via `remove()`.
+//! - Passive TTL-based eviction via a background sweeper (Task 3).
+//! - Eager removal of all entries for a given `conversation_id` via
+//!   `cleanup_conversation()` (Task 4).
+
+use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+pub type ConversationId = String;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SessionKey {
+    pub conversation_id: ConversationId,
+    pub session_name: String,
+}
+
+impl SessionKey {
+    pub fn new(conversation_id: impl Into<String>, session_name: impl Into<String>) -> Self {
+        Self {
+            conversation_id: conversation_id.into(),
+            session_name: session_name.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TtlConfig {
+    pub idle_ttl_seconds: u64,
+    pub max_lifetime_seconds: u64,
+    pub max_active_sessions: u32,
+}
+
+impl Default for TtlConfig {
+    fn default() -> Self {
+        Self {
+            idle_ttl_seconds: 900,
+            max_lifetime_seconds: 3600,
+            max_active_sessions: 50,
+        }
+    }
+}
+
+pub struct SessionEntry<T> {
+    pub value: T,
+    pub created_at: DateTime<Utc>,
+    pub last_activity: DateTime<Utc>,
+}
+
+pub struct SessionRegistry<T> {
+    inner: Arc<Mutex<HashMap<SessionKey, SessionEntry<T>>>>,
+    ttl: TtlConfig,
+}
+
+impl<T> SessionRegistry<T> {
+    pub fn new(ttl: TtlConfig) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            ttl,
+        })
+    }
+
+    pub fn ttl(&self) -> &TtlConfig {
+        &self.ttl
+    }
+
+    /// Insert a new entry (or replace if one exists). Returns the previous entry if any.
+    pub async fn insert(&self, key: SessionKey, value: T) -> Option<T> {
+        let mut map = self.inner.lock().await;
+        let now = Utc::now();
+        let prev = map.remove(&key);
+        map.insert(
+            key,
+            SessionEntry {
+                value,
+                created_at: now,
+                last_activity: now,
+            },
+        );
+        prev.map(|e| e.value)
+    }
+
+    /// Get the current number of entries.
+    pub async fn len(&self) -> usize {
+        self.inner.lock().await.len()
+    }
+
+    /// Returns `true` if the registry holds no sessions.
+    pub async fn is_empty(&self) -> bool {
+        self.inner.lock().await.is_empty()
+    }
+
+    /// Return `true` if the key is present.
+    pub async fn contains(&self, key: &SessionKey) -> bool {
+        self.inner.lock().await.contains_key(key)
+    }
+
+    /// Remove a single entry by key. Returns the extracted value if any.
+    pub async fn remove(&self, key: &SessionKey) -> Option<T> {
+        self.inner.lock().await.remove(key).map(|e| e.value)
+    }
+
+    /// Apply a closure to the entry for `key` if present. Updates `last_activity` on
+    /// each call. Returns `Some(f(&entry.value))` or `None`.
+    pub async fn with_entry<R>(&self, key: &SessionKey, f: impl FnOnce(&T) -> R) -> Option<R> {
+        let mut map = self.inner.lock().await;
+        if let Some(entry) = map.get_mut(key) {
+            entry.last_activity = Utc::now();
+            Some(f(&entry.value))
+        } else {
+            None
+        }
+    }
+
+    /// Remove entries whose idle TTL or max-lifetime has been exceeded. The
+    /// provided cleanup closure is invoked once per evicted value. Returns the
+    /// number of entries removed.
+    ///
+    /// The closure runs synchronously inside the registry's critical section;
+    /// callers that need async cleanup should spawn it from the closure using
+    /// `tokio::spawn`.
+    pub async fn sweep_expired(&self, mut on_evicted: impl FnMut(T)) -> usize {
+        use chrono::Duration as ChronoDuration;
+
+        let now = Utc::now();
+        let idle_cap = ChronoDuration::seconds(self.ttl.idle_ttl_seconds as i64);
+        let life_cap = ChronoDuration::seconds(self.ttl.max_lifetime_seconds as i64);
+
+        let mut map = self.inner.lock().await;
+        let expired_keys: Vec<SessionKey> = map
+            .iter()
+            .filter(|(_, entry)| {
+                (now - entry.last_activity) > idle_cap || (now - entry.created_at) > life_cap
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        let count = expired_keys.len();
+        for k in expired_keys {
+            if let Some(entry) = map.remove(&k) {
+                on_evicted(entry.value);
+            }
+        }
+        count
+    }
+
+    /// Remove every entry whose `SessionKey.conversation_id` matches `conversation_id`.
+    /// Returns the number of entries removed. The cleanup closure fires once per evicted value.
+    pub async fn cleanup_conversation(
+        &self,
+        conversation_id: &str,
+        mut on_evicted: impl FnMut(T),
+    ) -> usize {
+        let mut map = self.inner.lock().await;
+        let matching: Vec<SessionKey> = map
+            .keys()
+            .filter(|k| k.conversation_id == conversation_id)
+            .cloned()
+            .collect();
+        let count = matching.len();
+        for k in matching {
+            if let Some(entry) = map.remove(&k) {
+                on_evicted(entry.value);
+            }
+        }
+        count
+    }
+
+    /// Insert respecting `max_active_sessions`. If at or over capacity, evict the
+    /// LRU (oldest `last_activity`) entry before inserting. The cleanup closure fires
+    /// once if an entry was evicted, with the evicted key and value.
+    ///
+    /// The cleanup closure runs under the registry lock — keep it cheap and synchronous.
+    /// Requires `max_active_sessions >= 1`; a value of `0` is treated as `1`
+    /// (capacity is never actually disabled).
+    /// Ties in `last_activity` are broken by `HashMap` iteration order (non-deterministic).
+    pub async fn insert_with_capacity(
+        &self,
+        key: SessionKey,
+        value: T,
+        on_evicted: impl FnOnce(SessionKey, T),
+    ) -> Option<T> {
+        let mut map = self.inner.lock().await;
+        let now = Utc::now();
+
+        if (map.len() as u32) >= self.ttl.max_active_sessions && !map.contains_key(&key) {
+            if let Some((victim_key, _)) = map
+                .iter()
+                .min_by_key(|(_, e)| e.last_activity)
+                .map(|(k, e)| (k.clone(), e.last_activity))
+            {
+                if let Some(entry) = map.remove(&victim_key) {
+                    on_evicted(victim_key, entry.value);
+                }
+            }
+        }
+
+        map.insert(
+            key,
+            SessionEntry {
+                value,
+                created_at: now,
+                last_activity: now,
+            },
+        )
+        .map(|e| e.value)
+    }
+
+    /// Spawn a background tokio task that periodically calls `sweep_expired`.
+    /// Returns the task handle; callers retain it and call `.abort()` during shutdown.
+    ///
+    /// This method consumes an `Arc<Self>` — call `registry.clone().start_sweeper(...)`
+    /// if you still need your own handle to the registry. The spawned task keeps its
+    /// own `Arc<Self>`, which means the registry will NOT be dropped automatically
+    /// when external references go away; call `.abort()` on the returned handle
+    /// (or drop its owning struct via a `Drop` wrapper) to let the registry deallocate.
+    ///
+    /// The cleanup closure must be `Send + 'static + Clone` because it is shared
+    /// across ticks of the sweeper.
+    pub fn start_sweeper<F>(
+        self: Arc<Self>,
+        period: std::time::Duration,
+        cleanup: F,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        T: Send + 'static,
+        F: Fn(T) + Send + Clone + 'static,
+    {
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(period);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                let c = cleanup.clone();
+                self.sweep_expired(c).await;
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn insert_and_contains() {
+        let reg: Arc<SessionRegistry<String>> = SessionRegistry::new(TtlConfig::default());
+        let key = SessionKey::new("conv-1", "default");
+        assert!(!reg.contains(&key).await);
+        reg.insert(key.clone(), "hello".into()).await;
+        assert!(reg.contains(&key).await);
+        assert_eq!(reg.len().await, 1);
+    }
+
+    #[tokio::test]
+    async fn insert_replaces_and_returns_prev() {
+        let reg: Arc<SessionRegistry<String>> = SessionRegistry::new(TtlConfig::default());
+        let key = SessionKey::new("conv-1", "default");
+        reg.insert(key.clone(), "first".into()).await;
+        let prev = reg.insert(key.clone(), "second".into()).await;
+        assert_eq!(prev, Some("first".into()));
+        assert_eq!(reg.len().await, 1);
+    }
+
+    #[tokio::test]
+    async fn remove_returns_value() {
+        let reg: Arc<SessionRegistry<String>> = SessionRegistry::new(TtlConfig::default());
+        let key = SessionKey::new("conv-1", "default");
+        reg.insert(key.clone(), "bye".into()).await;
+        let removed = reg.remove(&key).await;
+        assert_eq!(removed, Some("bye".into()));
+        assert!(!reg.contains(&key).await);
+    }
+
+    #[tokio::test]
+    async fn remove_missing_returns_none() {
+        let reg: Arc<SessionRegistry<u32>> = SessionRegistry::new(TtlConfig::default());
+        let key = SessionKey::new("conv-1", "default");
+        assert!(reg.remove(&key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_touches_last_activity() {
+        let reg: Arc<SessionRegistry<u32>> = SessionRegistry::new(TtlConfig::default());
+        let key = SessionKey::new("conv-1", "default");
+        reg.insert(key.clone(), 7).await;
+
+        let first = reg
+            .inner
+            .lock()
+            .await
+            .get(&key)
+            .map(|e| e.last_activity)
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let got = reg.with_entry(&key, |e| *e).await;
+        assert_eq!(got, Some(7));
+
+        let second = reg
+            .inner
+            .lock()
+            .await
+            .get(&key)
+            .map(|e| e.last_activity)
+            .unwrap();
+        assert!(second > first, "with_entry must update last_activity");
+    }
+
+    #[tokio::test]
+    async fn sweep_removes_idle_expired_entries() {
+        let ttl = TtlConfig {
+            idle_ttl_seconds: 0, // everything is immediately idle-expired
+            max_lifetime_seconds: 3600,
+            max_active_sessions: 50,
+        };
+        let reg: Arc<SessionRegistry<u32>> = SessionRegistry::new(ttl);
+        reg.insert(SessionKey::new("c1", "default"), 1).await;
+        reg.insert(SessionKey::new("c2", "default"), 2).await;
+        assert_eq!(reg.len().await, 2);
+
+        // allow wall-clock to advance
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let evicted = reg.sweep_expired(|_v| {}).await;
+        assert_eq!(evicted, 2);
+        assert_eq!(reg.len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn sweep_removes_max_lifetime_expired() {
+        let ttl = TtlConfig {
+            idle_ttl_seconds: 3600,
+            max_lifetime_seconds: 0, // expire on lifetime
+            max_active_sessions: 50,
+        };
+        let reg: Arc<SessionRegistry<u32>> = SessionRegistry::new(ttl);
+        reg.insert(SessionKey::new("c1", "default"), 1).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let evicted = reg.sweep_expired(|_v| {}).await;
+        assert_eq!(evicted, 1);
+    }
+
+    #[tokio::test]
+    async fn sweep_calls_cleanup_closure_per_evicted() {
+        let ttl = TtlConfig {
+            idle_ttl_seconds: 0,
+            max_lifetime_seconds: 3600,
+            max_active_sessions: 50,
+        };
+        let reg: Arc<SessionRegistry<u32>> = SessionRegistry::new(ttl);
+        reg.insert(SessionKey::new("c1", "default"), 10).await;
+        reg.insert(SessionKey::new("c2", "default"), 20).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let collected = Arc::new(Mutex::new(Vec::<u32>::new()));
+        let collected_clone = collected.clone();
+        reg.sweep_expired(move |v| {
+            let c = collected_clone.clone();
+            // Note: cleanup closure is sync; accumulate via blocking lock. Tests only.
+            let mut guard = c.try_lock().unwrap();
+            guard.push(v);
+        })
+        .await;
+
+        let guard = collected.lock().await;
+        let mut vals: Vec<u32> = guard.clone();
+        vals.sort_unstable();
+        assert_eq!(vals, vec![10, 20]);
+    }
+
+    #[tokio::test]
+    async fn cleanup_conversation_removes_matching_entries() {
+        let reg: Arc<SessionRegistry<u32>> = SessionRegistry::new(TtlConfig::default());
+        reg.insert(SessionKey::new("conv-a", "s1"), 1).await;
+        reg.insert(SessionKey::new("conv-a", "s2"), 2).await;
+        reg.insert(SessionKey::new("conv-b", "s1"), 3).await;
+
+        let removed = reg.cleanup_conversation("conv-a", |_v| {}).await;
+        assert_eq!(removed, 2);
+        assert_eq!(reg.len().await, 1);
+        assert!(reg.contains(&SessionKey::new("conv-b", "s1")).await);
+    }
+
+    #[tokio::test]
+    async fn insert_evicts_lru_when_over_cap() {
+        let ttl = TtlConfig {
+            idle_ttl_seconds: 3600,
+            max_lifetime_seconds: 3600,
+            max_active_sessions: 2,
+        };
+        let reg: Arc<SessionRegistry<u32>> = SessionRegistry::new(ttl);
+
+        let k1 = SessionKey::new("c1", "default");
+        let k2 = SessionKey::new("c2", "default");
+        let k3 = SessionKey::new("c3", "default");
+
+        let evicted_keys: Arc<Mutex<Vec<SessionKey>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // k1 is inserted first, then touched; k2 is inserted next; k3 triggers eviction → k2 should go.
+        reg.insert_with_capacity(k1.clone(), 1, {
+            let ek = evicted_keys.clone();
+            move |k, _v| {
+                let mut g = ek.try_lock().unwrap();
+                g.push(k);
+            }
+        })
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        reg.insert_with_capacity(k2.clone(), 2, {
+            let ek = evicted_keys.clone();
+            move |k, _v| {
+                let mut g = ek.try_lock().unwrap();
+                g.push(k);
+            }
+        })
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        // Touch k1 so k2 becomes the LRU victim.
+        reg.with_entry(&k1, |_| ()).await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        reg.insert_with_capacity(k3.clone(), 3, {
+            let ek = evicted_keys.clone();
+            move |k, _v| {
+                let mut g = ek.try_lock().unwrap();
+                g.push(k);
+            }
+        })
+        .await;
+
+        assert_eq!(reg.len().await, 2);
+        let evicted = evicted_keys.lock().await.clone();
+        assert_eq!(evicted, vec![k2]);
+    }
+
+    #[tokio::test]
+    async fn insert_with_capacity_same_key_does_not_evict() {
+        let ttl = TtlConfig {
+            idle_ttl_seconds: 3600,
+            max_lifetime_seconds: 3600,
+            max_active_sessions: 1,
+        };
+        let reg: Arc<SessionRegistry<u32>> = SessionRegistry::new(ttl);
+
+        let k = SessionKey::new("c1", "default");
+        let evicted_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let ec = evicted_count.clone();
+        let prev = reg
+            .insert_with_capacity(k.clone(), 1, move |_k, _v| {
+                ec.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .await;
+        assert!(prev.is_none());
+
+        let ec = evicted_count.clone();
+        let prev = reg
+            .insert_with_capacity(k.clone(), 2, move |_k, _v| {
+                ec.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .await;
+        assert_eq!(prev, Some(1));
+        assert_eq!(reg.len().await, 1);
+        assert_eq!(
+            evicted_count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "re-insert of same key must not trigger eviction"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_sweeper_evicts_on_tick() {
+        let ttl = TtlConfig {
+            idle_ttl_seconds: 0,
+            max_lifetime_seconds: 3600,
+            max_active_sessions: 50,
+        };
+        let reg: Arc<SessionRegistry<u32>> = SessionRegistry::new(ttl);
+
+        let evicted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let evicted_clone = evicted.clone();
+
+        let handle = reg
+            .clone()
+            .start_sweeper(std::time::Duration::from_millis(50), move |_v| {
+                evicted_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
+
+        reg.insert(SessionKey::new("c1", "default"), 1).await;
+        reg.insert(SessionKey::new("c2", "default"), 2).await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        handle.abort();
+
+        assert_eq!(evicted.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(reg.len().await, 0);
+    }
+}

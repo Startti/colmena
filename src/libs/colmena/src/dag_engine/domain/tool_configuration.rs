@@ -52,6 +52,45 @@ use std::collections::HashMap;
 ///   for deep nesting or complex type requirements.
 pub const DYNAMIC_PLACEHOLDER: &str = "$DYNAMIC";
 
+/// Selector for which sub-tools of a toolkit node to expose to the LLM.
+///
+/// Accepts either the string keyword `"all"` (expose everything the node declares)
+/// or an explicit allow-list of sub-tool names.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SubToolFilter {
+    /// An explicit allow-list of sub-tool names (without the `toolkit_alias__` prefix).
+    List(Vec<String>),
+    /// String `"all"` — expose every sub-tool the node declares.
+    Keyword(SubToolKeyword),
+}
+
+/// Enum-wrapped keyword used inside `SubToolFilter::Keyword` so serde can
+/// distinguish the string `"all"` from an arbitrary bare string.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SubToolKeyword {
+    #[serde(rename = "all")]
+    All,
+}
+
+impl SubToolFilter {
+    pub fn all() -> Self {
+        Self::Keyword(SubToolKeyword::All)
+    }
+
+    pub fn is_all(&self) -> bool {
+        matches!(self, Self::Keyword(SubToolKeyword::All))
+    }
+
+    /// Return `true` if the given sub-tool should be exposed.
+    pub fn includes(&self, sub_tool: &str) -> bool {
+        match self {
+            Self::Keyword(SubToolKeyword::All) => true,
+            Self::List(v) => v.iter().any(|s| s == sub_tool),
+        }
+    }
+}
+
 /// Configuration for exposing a DAG node as an LLM-callable tool.
 ///
 /// Defined inside `tool_configurations` of an `llm_call` node. The executor uses this
@@ -122,6 +161,25 @@ pub struct ToolConfiguration {
     /// Takes priority over `fixed_config` + `$DYNAMIC` if both are present (though mixing is not recommended).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub node_schema: Option<NodeSchema>,
+
+    /// Per-toolkit static node configuration passed to the toolkit node at runtime.
+    /// Only meaningful for toolkit entries (where `expose_sub_tools` is set).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub node_config: Option<Value>,
+
+    /// Which sub-tools of this toolkit to expose to the LLM. When present, the entry
+    /// is treated as a toolkit entry and the generator expands it into N ToolDefinitions.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub expose_sub_tools: Option<SubToolFilter>,
+}
+
+impl ToolConfiguration {
+    /// Whether this configuration represents a **toolkit** entry (a node that
+    /// exposes multiple sub-tools to the LLM) rather than a legacy single-tool
+    /// configuration.
+    pub fn is_toolkit(&self) -> bool {
+        self.expose_sub_tools.is_some()
+    }
 }
 
 /// A single field entry within a node_schema object or nested properties map.
@@ -602,6 +660,63 @@ mod tests {
         assert!(!parsed
             .required_params
             .contains(&"target_params.id".to_string()));
+    }
+
+    #[test]
+    fn deserialize_toolkit_config_all() {
+        let json = serde_json::json!({
+            "name": "web",
+            "description": "Web search",
+            "node_type": "tavily_client",
+            "node_config": { "api_key": "${TAVILY_API_KEY}" },
+            "expose_sub_tools": "all"
+        });
+
+        let cfg: ToolConfiguration = serde_json::from_value(json).unwrap();
+        assert_eq!(cfg.node_type, "tavily_client");
+        assert!(cfg.is_toolkit());
+        assert!(cfg.expose_sub_tools.as_ref().unwrap().is_all());
+        assert_eq!(
+            cfg.node_config
+                .as_ref()
+                .and_then(|v| v.get("api_key"))
+                .and_then(|v| v.as_str()),
+            Some("${TAVILY_API_KEY}")
+        );
+    }
+
+    #[test]
+    fn deserialize_toolkit_config_list() {
+        let json = serde_json::json!({
+            "name": "browser",
+            "description": "",
+            "node_type": "browser",
+            "node_config": { "browserless_ws_url": "ws://localhost:3000" },
+            "expose_sub_tools": ["navigate", "click"]
+        });
+
+        let cfg: ToolConfiguration = serde_json::from_value(json).unwrap();
+        assert!(cfg.is_toolkit());
+        let filter = cfg.expose_sub_tools.as_ref().unwrap();
+        assert!(!filter.is_all());
+        assert!(filter.includes("navigate"));
+        assert!(filter.includes("click"));
+        assert!(!filter.includes("fill"));
+    }
+
+    #[test]
+    fn legacy_config_is_not_toolkit() {
+        let json = serde_json::json!({
+            "name": "fetch_users",
+            "description": "List users",
+            "node_type": "http_request",
+            "fixed_config": { "base_url": "https://api.example.com" }
+        });
+
+        let cfg: ToolConfiguration = serde_json::from_value(json).unwrap();
+        assert!(!cfg.is_toolkit());
+        assert!(cfg.node_config.is_none());
+        assert!(cfg.expose_sub_tools.is_none());
     }
 
     #[test]

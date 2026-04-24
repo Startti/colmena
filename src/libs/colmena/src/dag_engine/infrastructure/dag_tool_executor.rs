@@ -180,6 +180,80 @@ impl DagToolExecutor {
         dynamic_fields
     }
 
+    async fn execute_toolkit(
+        &self,
+        alias: &str,
+        sub_tool: &str,
+        cfg: &ToolConfiguration,
+        tool_call: &crate::llm::domain::ToolCall,
+    ) -> Result<crate::llm::domain::ToolResult, crate::llm::domain::LlmError> {
+        use crate::dag_engine::domain::toolkit_node::SUB_TOOL_INPUT_KEY;
+        use crate::llm::domain::{LlmError, ToolResult};
+
+        // Resolve the toolkit node.
+        let toolkit = self.registry.get_toolkit_node(&cfg.node_type).ok_or_else(|| {
+            LlmError::ToolNotFound {
+                name: cfg.node_type.clone(),
+            }
+        })?;
+
+        // Confirm this sub-tool is actually in the filter / catalogue.
+        let node_cfg = cfg.node_config.clone().unwrap_or_else(|| Value::Object(Default::default()));
+        let catalog = toolkit.sub_tool_catalog(&node_cfg);
+        let known = catalog.iter().any(|d| d.name.as_ref() == sub_tool);
+        let exposed = cfg
+            .expose_sub_tools
+            .as_ref()
+            .map(|f| f.includes(sub_tool))
+            .unwrap_or(false);
+        if !known || !exposed {
+            return Ok(ToolResult {
+                tool_call_id: tool_call.id.clone(),
+                success: false,
+                output: format!(
+                    "unknown sub-tool '{}' for toolkit '{}'",
+                    sub_tool, alias
+                ),
+                error: Some("unknown sub-tool".to_string()),
+            });
+        }
+
+        // Parse LLM arguments.
+        let mut inputs: HashMap<String, Value> = serde_json::from_str(&tool_call.function.arguments)
+            .map_err(|e| LlmError::InvalidToolCall {
+                reason: format!("Failed to parse arguments for {}: {}", tool_call.function.name, e),
+            })?;
+
+        // Inject the reserved sub-tool discriminator.
+        inputs.insert(SUB_TOOL_INPUT_KEY.to_string(), Value::String(sub_tool.to_string()));
+
+        // Execute the underlying toolkit node as a plain ExecutableNode.
+        // node_exec_config is the per-toolkit static node_config from the entry
+        // (e.g. { "api_key": "..." }).
+        let exec_node = self
+            .registry
+            .get_node(&cfg.node_type)
+            .ok_or_else(|| LlmError::ToolNotFound { name: cfg.node_type.clone() })?;
+
+        let mut state = serde_json::json!({});
+        let result = exec_node.execute(&inputs, &node_cfg, &mut state, None).await;
+
+        match result {
+            Ok(value) => Ok(ToolResult {
+                tool_call_id: tool_call.id.clone(),
+                success: true,
+                output: value.to_string(),
+                error: None,
+            }),
+            Err(e) => Ok(ToolResult {
+                tool_call_id: tool_call.id.clone(),
+                success: false,
+                output: format!("Error executing toolkit {}__{}: {}", alias, sub_tool, e),
+                error: Some(e.to_string()),
+            }),
+        }
+    }
+
     /// Generate ToolDefinition from node with partial configuration
     #[allow(deprecated)]
     fn generate_tool_definition(
@@ -365,6 +439,15 @@ impl ToolExecutor for DagToolExecutor {
                 obs(&result);
             }
             return Ok(into_tool_result(&tool_call.id, &result));
+        }
+
+        // --- Toolkit dispatch: names of the form "<alias>__<sub_tool>" ---
+        if let Some((alias, sub_tool)) = tool_call.function.name.split_once("__") {
+            if let Some(cfg) = self.tool_configurations.get(alias) {
+                if cfg.is_toolkit() {
+                    return self.execute_toolkit(alias, sub_tool, cfg, tool_call).await;
+                }
+            }
         }
 
         let node_type = &tool_call.function.name;
@@ -655,7 +738,40 @@ impl ToolExecutor for DagToolExecutor {
 
         // 1. Add configured tools first
         for (name, config) in &self.tool_configurations {
-            if let Some(node) = self.registry.get_node(&config.node_type) {
+            if config.is_toolkit() {
+                // Toolkit: expand one ToolDefinition per declared sub-tool.
+                // Unlike the non-toolkit branch (which silently skips on miss), an
+                // unknown toolkit node_type is almost always a user misconfiguration
+                // worth surfacing — the alias exists but no handler is registered.
+                let Some(toolkit) = self.registry.get_toolkit_node(&config.node_type) else {
+                    colmena_log!(
+                        "WARN: toolkit config '{}' references unknown toolkit node_type '{}'",
+                        name,
+                        config.node_type
+                    );
+                    continue;
+                };
+                let node_cfg = config
+                    .node_config
+                    .clone()
+                    .unwrap_or_else(|| Value::Object(Default::default()));
+                let catalog = toolkit.sub_tool_catalog(&node_cfg);
+                let filter = config.expose_sub_tools.as_ref().expect("is_toolkit → filter present");
+                for sub in catalog {
+                    if !filter.includes(&sub.name) {
+                        continue;
+                    }
+                    tools.push(crate::llm::domain::ToolDefinition {
+                        name: format!("{}__{}", name, sub.name),
+                        description: sub.description,
+                        parameters: crate::llm::domain::ToolParameters {
+                            schema_type: "object".to_string(),
+                            properties: sub.properties,
+                            required: sub.required,
+                        },
+                    });
+                }
+            } else if let Some(node) = self.registry.get_node(&config.node_type) {
                 tools.push(self.generate_tool_definition(name, config, &node));
             }
         }
@@ -889,6 +1005,8 @@ mod tests {
                 mergeable_fields: None,
                 field_mapping: None,
                 node_schema: None,
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -929,6 +1047,8 @@ mod tests {
                 mergeable_fields: None,
                 field_mapping: None,
                 node_schema: None,
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -970,6 +1090,8 @@ mod tests {
                 mergeable_fields: None,
                 field_mapping: None,
                 node_schema: None,
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -1015,6 +1137,8 @@ mod tests {
                 mergeable_fields: None,
                 node_schema: None,
                 field_mapping: Some(field_mapping),
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -1066,6 +1190,8 @@ mod tests {
                 mergeable_fields: Some(vec!["body".to_string()]),
                 node_schema: None,
                 field_mapping: Some(field_mapping),
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -1114,6 +1240,8 @@ mod tests {
                 mergeable_fields: Some(vec!["headers".to_string()]),
                 node_schema: None,
                 field_mapping: Some(field_mapping),
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -1159,6 +1287,8 @@ mod tests {
                 mergeable_fields: None,
                 field_mapping: None,
                 node_schema: None,
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -1213,6 +1343,8 @@ mod tests {
                 mergeable_fields: None,
                 field_mapping: None,
                 node_schema: None,
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -1279,6 +1411,8 @@ mod tests {
                 mergeable_fields: None,
                 field_mapping: None,
                 node_schema: None,
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -1333,6 +1467,8 @@ mod tests {
                 mergeable_fields: None,
                 field_mapping: None,
                 node_schema: None,
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -1395,6 +1531,8 @@ mod tests {
                 mergeable_fields: None,
                 field_mapping: None,
                 node_schema: None,
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -1493,6 +1631,8 @@ mod tests {
                 mergeable_fields: None,
                 node_schema: None,
                 field_mapping: Some(field_mapping),
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -1513,5 +1653,157 @@ mod tests {
         // title should be in body (from $DYNAMIC), not in headers (from field_mapping)
         assert_eq!(output["body"]["title"], "Test");
         assert!(output.get("headers").is_none() || output["headers"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod toolkit_runtime_tests {
+    use super::*;
+    use crate::dag_engine::domain::node::ExecutableNode;
+    use crate::dag_engine::domain::toolkit_node::ToolkitNode;
+    use crate::dag_engine::infrastructure::nodes::echo_toolkit::EchoToolkitNode;
+    use crate::dag_engine::domain::tool_configuration::{SubToolFilter, ToolConfiguration};
+    use async_trait::async_trait;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    /// Test registry that returns the same `Arc<EchoToolkitNode>` for both
+    /// `get_node()` and `get_toolkit_node()`.
+    struct EchoRegistry {
+        node: Arc<EchoToolkitNode>,
+    }
+
+    impl crate::dag_engine::application::ports::NodeRegistryPort for EchoRegistry {
+        fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            if node_type == "echo_toolkit" {
+                Some(self.node.clone() as Arc<dyn ExecutableNode>)
+            } else {
+                None
+            }
+        }
+
+        fn get_all_nodes(&self) -> std::collections::HashMap<String, Arc<dyn ExecutableNode>> {
+            let mut m = std::collections::HashMap::new();
+            m.insert("echo_toolkit".to_string(), self.node.clone() as Arc<dyn ExecutableNode>);
+            m
+        }
+
+        fn get_toolkit_node(&self, node_type: &str) -> Option<Arc<dyn ToolkitNode>> {
+            if node_type == "echo_toolkit" {
+                Some(self.node.clone() as Arc<dyn ToolkitNode>)
+            } else {
+                None
+            }
+        }
+    }
+
+    #[allow(deprecated)]
+    fn build_executor_with_toolkit_all() -> DagToolExecutor {
+        let registry = Arc::new(EchoRegistry {
+            node: Arc::new(EchoToolkitNode),
+        });
+        let mut configs = HashMap::new();
+        configs.insert(
+            "web".to_string(),
+            ToolConfiguration {
+                name: "web".to_string(),
+                description: "echo toolkit".to_string(),
+                node_type: "echo_toolkit".to_string(),
+                fixed_config: HashMap::new(),
+                exposed_inputs: None,
+                parameters: None,
+                mergeable_fields: None,
+                field_mapping: None,
+                node_schema: None,
+                node_config: Some(json!({})),
+                expose_sub_tools: Some(SubToolFilter::all()),
+            },
+        );
+        DagToolExecutor::new(registry, configs)
+    }
+
+    #[tokio::test]
+    async fn toolkit_expands_to_one_tooldef_per_sub_tool() {
+        let exec = build_executor_with_toolkit_all();
+        let tools = exec.available_tools().await;
+        let names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+        // Prefixed by alias "web__"
+        assert!(names.contains(&"web__echo".to_string()));
+        assert!(names.contains(&"web__double".to_string()));
+    }
+
+    #[tokio::test]
+    async fn toolkit_dispatch_echo_returns_message() {
+        use crate::llm::domain::{FunctionCall, ToolCall};
+
+        let exec = build_executor_with_toolkit_all();
+
+        let call = ToolCall {
+            id: "call-1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "web__echo".to_string(),
+                arguments: r#"{"message":"hola"}"#.to_string(),
+            },
+            response: None,
+        };
+        let result = exec.execute(&call).await.expect("execute ok");
+        assert!(result.success, "got error: {:?}", result.error);
+        // Output is a JSON-stringified value.
+        let parsed: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(parsed.get("output").unwrap().as_str(), Some("hola"));
+    }
+
+    #[tokio::test]
+    async fn toolkit_dispatch_unknown_sub_tool_errors_cleanly() {
+        use crate::llm::domain::{FunctionCall, ToolCall};
+
+        let exec = build_executor_with_toolkit_all();
+
+        let call = ToolCall {
+            id: "call-2".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "web__does_not_exist".to_string(),
+                arguments: "{}".to_string(),
+            },
+            response: None,
+        };
+        let result = exec.execute(&call).await.expect("execute returns ToolResult");
+        assert!(!result.success);
+        assert!(result
+            .output
+            .to_lowercase()
+            .contains("unknown sub-tool"));
+    }
+
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn toolkit_filter_list_only_exposes_listed_sub_tools() {
+        let registry = Arc::new(EchoRegistry {
+            node: Arc::new(EchoToolkitNode),
+        });
+        let mut configs = HashMap::new();
+        configs.insert(
+            "web".to_string(),
+            ToolConfiguration {
+                name: "web".to_string(),
+                description: "".to_string(),
+                node_type: "echo_toolkit".to_string(),
+                fixed_config: HashMap::new(),
+                exposed_inputs: None,
+                parameters: None,
+                mergeable_fields: None,
+                field_mapping: None,
+                node_schema: None,
+                node_config: None,
+                expose_sub_tools: Some(SubToolFilter::List(vec!["echo".to_string()])),
+            },
+        );
+        let exec = DagToolExecutor::new(registry, configs);
+        let tools = exec.available_tools().await;
+        let names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+        assert!(names.contains(&"web__echo".to_string()));
+        assert!(!names.contains(&"web__double".to_string()));
     }
 }
