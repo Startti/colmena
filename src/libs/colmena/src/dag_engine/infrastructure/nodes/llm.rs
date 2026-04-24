@@ -568,6 +568,13 @@ impl ExecutableNode for LlmNode {
             }
         }
 
+        // Snapshot the aliases declared in tool_configurations before the map is
+        // moved into the executor. These aliases are auto-enabled below — a user
+        // who declared `tool_configurations` should not also have to list the same
+        // tool names under `enabled_tools`.
+        let configured_aliases: std::collections::HashSet<String> =
+            tool_configurations.keys().cloned().collect();
+
         // Build skill repository (if configured).
         let skill_repo: Option<Arc<dyn SkillRepository>> =
             Self::build_skill_repository_from_config(config, inputs)?;
@@ -666,46 +673,65 @@ impl ExecutableNode for LlmNode {
 
         let agent_service = AgentService::new(llm_repo_arc, conversation_repo);
 
-        // Define tools based on enabled_tools config
-        // enabled_tools can be:
-        // - Array of specific tool names: ["add", "multiply"]
-        // - "*" (wildcard for all tools)
-        // - Not specified (no tools)
+        // Decide which tools are exposed to the LLM.
+        //
+        // Two independent inputs feed this decision:
+        //   - `tool_configurations` (present above) — every declared alias is
+        //     auto-enabled; for toolkit aliases this expands to
+        //     `{alias}__{sub_tool}` names.
+        //   - `enabled_tools` (this block) — optional allow-list that unions
+        //     with the auto-enabled set (deduplicated). Accepts:
+        //       * `"*"` wildcard → expose every available tool
+        //       * string → enable a single named tool
+        //       * array of strings → enable each named tool
+        //
+        // When a user lists a name under `enabled_tools` that is already
+        // covered by `tool_configurations`, the dedup silently collapses it.
         let enabled_tools_config = inputs
             .get("enabled_tools")
             .or_else(|| config.get("enabled_tools"));
 
-        let mut tools = if let Some(enabled) = enabled_tools_config {
-            // Get all available tools from the executor
-            let all_tools = tool_executor.available_tools().await;
-            if let Some(wildcard) = enabled.as_str() {
-                if wildcard == "*" {
-                    // Enable all tools
-                    all_tools
-                } else {
-                    // Single tool name as string
-                    all_tools
-                        .into_iter()
-                        .filter(|t| t.name == wildcard)
-                        .collect()
+        let all_tools = tool_executor.available_tools().await;
+
+        let is_auto_enabled = |tool_name: &str| -> bool {
+            configured_aliases.iter().any(|alias| {
+                tool_name == alias.as_str()
+                    || tool_name.starts_with(&format!("{}__", alias))
+            })
+        };
+
+        let mut enabled_names: Vec<String> = all_tools
+            .iter()
+            .filter(|t| is_auto_enabled(&t.name))
+            .map(|t| t.name.clone())
+            .collect();
+
+        let mut wildcard_all = false;
+        if let Some(enabled) = enabled_tools_config {
+            if let Some(value) = enabled.as_str() {
+                if value == "*" {
+                    wildcard_all = true;
+                } else if !enabled_names.iter().any(|n| n == value) {
+                    enabled_names.push(value.to_string());
                 }
             } else if let Some(tool_names) = enabled.as_array() {
-                // Array of tool names
-                let names: Vec<String> = tool_names
-                    .iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect();
-
-                all_tools
-                    .into_iter()
-                    .filter(|t| names.contains(&t.name))
-                    .collect()
-            } else {
-                Vec::new()
+                for v in tool_names {
+                    if let Some(name) = v.as_str() {
+                        if !enabled_names.iter().any(|n| n == name) {
+                            enabled_names.push(name.to_string());
+                        }
+                    }
+                }
             }
+        }
+
+        let mut tools: Vec<crate::llm::domain::ToolDefinition> = if wildcard_all {
+            all_tools
         } else {
-            // No tools enabled
-            Vec::new()
+            all_tools
+                .into_iter()
+                .filter(|t| enabled_names.iter().any(|n| n == &t.name))
+                .collect()
         };
 
         if let Some(repo) = skill_repo.as_ref() {
