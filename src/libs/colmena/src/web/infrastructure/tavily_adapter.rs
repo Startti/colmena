@@ -91,11 +91,100 @@ impl TavilyAdapter {
 
 #[async_trait]
 impl SearchPort for TavilyAdapter {
-    async fn search(&self, _req: SearchRequest) -> Result<SearchResponse, WebDomainError> {
-        // Implemented in Task 3.
-        Err(WebDomainError::Upstream {
-            status: 0,
-            body: "search not yet implemented".into(),
+    async fn search(&self, req: SearchRequest) -> Result<SearchResponse, WebDomainError> {
+        let mut body = json!({
+            "api_key": self.api_key,
+            "query": req.query,
+            "search_depth": req.search_depth.as_str(),
+            "max_results": req.max_results,
+            "include_answer": true,
+            "include_raw_content": req.include_content,
+        });
+
+        if !req.include_domains.is_empty() {
+            body["include_domains"] = json!(req.include_domains);
+        }
+        if !req.exclude_domains.is_empty() {
+            body["exclude_domains"] = json!(req.exclude_domains);
+        }
+        if let Some(range) = req.time_range {
+            body["time_range"] = json!(range.as_str());
+        }
+
+        let url = format!("{}/search", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(Self::map_transport_error)?;
+
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Self::map_error(status, body));
+        }
+        let raw: Value = resp
+            .json()
+            .await
+            .map_err(|e| WebDomainError::Upstream {
+                status: 200,
+                body: format!("invalid JSON from Tavily /search: {e}"),
+            })?;
+
+        let results = raw
+            .get("results")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|item| SearchResult {
+                title: item
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                url: item
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                snippet: item
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.chars().take(400).collect())
+                    .unwrap_or_default(),
+                score: item
+                    .get("score")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as f32,
+                content: if req.include_content {
+                    item.get("content")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                },
+            })
+            .collect::<Vec<_>>();
+
+        Ok(SearchResponse {
+            query: raw
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&req.query)
+                .to_string(),
+            results,
+            answer: raw
+                .get("answer")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            credits_used: if matches!(req.search_depth, SearchDepth::Advanced) {
+                2
+            } else {
+                1
+            },
         })
     }
 
@@ -106,12 +195,6 @@ impl SearchPort for TavilyAdapter {
             body: "fetch not yet implemented".into(),
         })
     }
-}
-
-// Silence unused-import warnings until Tasks 3/4 use them.
-#[allow(dead_code)]
-fn _ensure_imports(_: &SearchResult, _: ExtractFormat, _: SearchDepth, _: Value) {
-    let _ = json!({});
 }
 
 #[cfg(test)]
@@ -160,5 +243,172 @@ mod tests {
         // Non-standard statuses should still round-trip as Upstream so callers can log them.
         let e = TavilyAdapter::map_error(418, "teapot".into());
         assert!(matches!(e, WebDomainError::Upstream { status: 418, .. }));
+    }
+
+    use crate::web::domain::search_port::{SearchRequest as SReq, TimeRange};
+    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn fast_adapter(url: &str) -> TavilyAdapter {
+        TavilyAdapter::new("tvly-test", Duration::from_secs(5))
+            .unwrap()
+            .with_base_url(url)
+    }
+
+    #[tokio::test]
+    async fn search_happy_path_returns_results() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "query": "rust async",
+            "answer": "Rust has async/await since 1.39.",
+            "results": [
+                {
+                    "title": "Rust Async Book",
+                    "url": "https://rust-lang.github.io/async-book/",
+                    "content": "Full content...",
+                    "score": 0.92
+                },
+                {
+                    "title": "Async Rust",
+                    "url": "https://example.com/a",
+                    "content": "Snippet only",
+                    "score": 0.80
+                }
+            ]
+        });
+        Mock::given(method("POST"))
+            .and(path("/search"))
+            .and(header("content-type", "application/json"))
+            .and(body_partial_json(serde_json::json!({
+                "api_key": "tvly-test",
+                "query": "rust async",
+                "search_depth": "basic",
+                "max_results": 5,
+                "include_answer": true,
+                "include_raw_content": false
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let a = fast_adapter(&server.uri());
+        let resp = a.search(SReq::new("rust async")).await.unwrap();
+        assert_eq!(resp.query, "rust async");
+        assert_eq!(resp.results.len(), 2);
+        assert_eq!(resp.results[0].title, "Rust Async Book");
+        assert_eq!(resp.results[0].score, 0.92);
+        assert_eq!(resp.answer.as_deref(), Some("Rust has async/await since 1.39."));
+        assert_eq!(resp.credits_used, 1);
+    }
+
+    #[tokio::test]
+    async fn search_with_content_sets_include_raw_content_true() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/search"))
+            .and(body_partial_json(serde_json::json!({
+                "include_raw_content": true
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query": "q",
+                "results": [
+                    { "title": "T", "url": "https://u", "content": "body", "score": 0.5 }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let a = fast_adapter(&server.uri());
+        let mut req = SReq::new("q");
+        req.include_content = true;
+        let resp = a.search(req).await.unwrap();
+        assert_eq!(resp.results[0].content.as_deref(), Some("body"));
+    }
+
+    #[tokio::test]
+    async fn search_advanced_depth_charges_two_credits() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/search"))
+            .and(body_partial_json(serde_json::json!({ "search_depth": "advanced" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query": "q",
+                "results": []
+            })))
+            .mount(&server)
+            .await;
+
+        let a = fast_adapter(&server.uri());
+        let mut req = SReq::new("q");
+        req.search_depth = SearchDepth::Advanced;
+        let resp = a.search(req).await.unwrap();
+        assert_eq!(resp.credits_used, 2);
+    }
+
+    #[tokio::test]
+    async fn search_forwards_domain_filters_and_time_range() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/search"))
+            .and(body_partial_json(serde_json::json!({
+                "include_domains": ["docs.aws.amazon.com"],
+                "exclude_domains": ["reddit.com"],
+                "time_range": "week"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query": "q",
+                "results": []
+            })))
+            .mount(&server)
+            .await;
+
+        let a = fast_adapter(&server.uri());
+        let mut req = SReq::new("q");
+        req.include_domains = vec!["docs.aws.amazon.com".into()];
+        req.exclude_domains = vec!["reddit.com".into()];
+        req.time_range = Some(TimeRange::Week);
+        a.search(req).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn search_429_maps_to_rate_limit() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/search"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("slow down"))
+            .mount(&server)
+            .await;
+
+        let a = fast_adapter(&server.uri());
+        let err = a.search(SReq::new("q")).await.unwrap_err();
+        assert!(matches!(err, WebDomainError::RateLimit { .. }));
+    }
+
+    #[tokio::test]
+    async fn search_401_maps_to_adapter_init() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/search"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("bad key"))
+            .mount(&server)
+            .await;
+
+        let a = fast_adapter(&server.uri());
+        let err = a.search(SReq::new("q")).await.unwrap_err();
+        assert!(matches!(err, WebDomainError::AdapterInit(_)));
+    }
+
+    #[tokio::test]
+    async fn search_503_maps_to_upstream() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/search"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("down"))
+            .mount(&server)
+            .await;
+
+        let a = fast_adapter(&server.uri());
+        let err = a.search(SReq::new("q")).await.unwrap_err();
+        assert!(matches!(err, WebDomainError::Upstream { status: 503, .. }));
     }
 }
