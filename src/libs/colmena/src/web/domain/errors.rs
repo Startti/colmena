@@ -53,6 +53,14 @@ pub enum WebDomainError {
 
     #[error("unexpected HTML response from {url}")]
     UnexpectedHtmlResponse { url: String, resolved_url: String },
+
+    /// A Swagger 2.0 document could not be converted to OpenAPI 3.0.3.
+    /// The `unsupported_feature` field pinpoints the bit that tripped us up.
+    #[error("swagger 2.0 conversion failed: {reason}")]
+    Swagger2ConversionFailed {
+        reason: String,
+        unsupported_feature: Option<String>,
+    },
 }
 
 impl WebDomainError {
@@ -105,6 +113,15 @@ mod tests {
         assert!(WebDomainError::Upstream {
             status: 502,
             body: "bad gateway".into()
+        }
+        .is_llm_recoverable());
+    }
+
+    #[test]
+    fn swagger2_conversion_failed_is_recoverable() {
+        assert!(WebDomainError::Swagger2ConversionFailed {
+            reason: "bad flow".into(),
+            unsupported_feature: Some("oauth2.flow".into())
         }
         .is_llm_recoverable());
     }
