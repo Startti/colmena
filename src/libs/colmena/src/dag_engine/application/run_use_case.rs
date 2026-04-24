@@ -39,6 +39,11 @@ impl DagRunUseCase {
 
     /// Attaches a conversation lifecycle bus so that session-bearing web registries
     /// can be notified when the engine considers a conversation finished.
+    ///
+    /// **Order matters:** this is a builder-style method (takes `self` and returns `Self`),
+    /// so it must be called AFTER any `with_secure_values*` constructor. Calling one of
+    /// those constructors afterwards produces a fresh instance and will silently drop
+    /// the bus.
     pub fn with_conversation_lifecycle(
         mut self,
         bus: crate::web::domain::ConversationLifecycleBus,
@@ -47,7 +52,11 @@ impl DagRunUseCase {
         self
     }
 
-    /// Creates a new DagRunUseCase with secure values support (using an existing pool)
+    /// Creates a new DagRunUseCase with secure values support (using an existing pool).
+    ///
+    /// Note: this is a fresh constructor — it does not preserve a previously attached
+    /// `ConversationLifecycleBus`. Chain `.with_conversation_lifecycle(...)` after this
+    /// call if you need lifecycle notifications.
     pub fn with_secure_values(
         registry: Arc<dyn NodeRegistryPort>,
         state_repository: Option<Arc<dyn DagStateRepository>>,
@@ -68,6 +77,10 @@ impl DagRunUseCase {
     ///
     /// Prefer this over `with_secure_values` when you need the **same service instance** to be
     /// shared between LlmNode (for tool calling) and DagRunUseCase (for regular node execution).
+    ///
+    /// Note: this is a fresh constructor — it does not preserve a previously attached
+    /// `ConversationLifecycleBus`. Chain `.with_conversation_lifecycle(...)` after this
+    /// call if you need lifecycle notifications.
     pub fn with_secure_values_and_service(
         registry: Arc<dyn NodeRegistryPort>,
         state_repository: Option<Arc<dyn DagStateRepository>>,
