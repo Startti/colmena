@@ -2,6 +2,7 @@ use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::application::ports::SubGraphExecutorPort;
 use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::ExecutableNode;
+use crate::dag_engine::domain::toolkit_node::ToolkitNode;
 use crate::dag_engine::infrastructure::nodes::{
     debug::*, http::*, input::*, llm::*, math::*, orchestrator::*, output::*, python_node::*,
     socketio::*, sql::*, subgraph::*, task_memory_writer::*, trigger::*,
@@ -13,8 +14,7 @@ use std::sync::{Arc, Weak};
 /// Utiliza un `HashMap` para almacenar instancias de todos los nodos disponibles.
 pub struct HashMapNodeRegistry {
     nodes: HashMap<String, Arc<dyn ExecutableNode>>,
-    toolkit_nodes:
-        HashMap<String, Arc<dyn crate::dag_engine::domain::toolkit_node::ToolkitNode>>,
+    toolkit_nodes: HashMap<String, Arc<dyn ToolkitNode>>,
     subgraph_node: Option<Arc<SubGraphNode>>,
 }
 
@@ -196,16 +196,19 @@ impl HashMapNodeRegistry {
         node_type: impl Into<String>,
         node: Arc<N>,
     ) where
-        N: crate::dag_engine::domain::toolkit_node::ToolkitNode + 'static,
+        N: ToolkitNode + 'static,
     {
-        if let Some(this) = Arc::get_mut(self) {
+        let this = Arc::get_mut(self);
+        debug_assert!(
+            this.is_some(),
+            "register_toolkit_node called on a shared Arc<HashMapNodeRegistry>; \
+             this helper is for fresh test-construction only"
+        );
+        if let Some(this) = this {
             let name = node_type.into();
             this.nodes
                 .insert(name.clone(), node.clone() as Arc<dyn ExecutableNode>);
-            this.toolkit_nodes.insert(
-                name,
-                node as Arc<dyn crate::dag_engine::domain::toolkit_node::ToolkitNode>,
-            );
+            this.toolkit_nodes.insert(name, node as Arc<dyn ToolkitNode>);
         }
     }
 }
@@ -226,7 +229,7 @@ impl NodeRegistryPort for HashMapNodeRegistry {
     fn get_toolkit_node(
         &self,
         node_type: &str,
-    ) -> Option<Arc<dyn crate::dag_engine::domain::toolkit_node::ToolkitNode>> {
+    ) -> Option<Arc<dyn ToolkitNode>> {
         self.toolkit_nodes.get(node_type).cloned()
     }
 }
