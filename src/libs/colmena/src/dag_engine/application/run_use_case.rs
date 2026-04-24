@@ -18,6 +18,10 @@ pub struct DagRunUseCase {
     registry: Arc<dyn NodeRegistryPort>,
     state_repository: Option<Arc<dyn DagStateRepository>>,
     secure_value_service: Option<Arc<SecureValueService>>,
+    /// Optional bus notified when a conversation is considered finished.
+    /// Registries (web nodes) subscribe to eagerly evict scoped state.
+    // TODO(plan-C): call conversation_lifecycle.notify_conversation_closed(...) when sessions land
+    pub conversation_lifecycle: Option<crate::web::domain::ConversationLifecycleBus>,
 }
 
 impl DagRunUseCase {
@@ -29,7 +33,18 @@ impl DagRunUseCase {
             registry,
             state_repository,
             secure_value_service: None,
+            conversation_lifecycle: None,
         }
+    }
+
+    /// Attaches a conversation lifecycle bus so that session-bearing web registries
+    /// can be notified when the engine considers a conversation finished.
+    pub fn with_conversation_lifecycle(
+        mut self,
+        bus: crate::web::domain::ConversationLifecycleBus,
+    ) -> Self {
+        self.conversation_lifecycle = Some(bus);
+        self
     }
 
     /// Creates a new DagRunUseCase with secure values support (using an existing pool)
@@ -45,6 +60,7 @@ impl DagRunUseCase {
             registry,
             state_repository,
             secure_value_service: Some(secure_value_service),
+            conversation_lifecycle: None,
         }
     }
 
@@ -61,6 +77,7 @@ impl DagRunUseCase {
             registry,
             state_repository,
             secure_value_service: Some(secure_value_service),
+            conversation_lifecycle: None,
         }
     }
 
