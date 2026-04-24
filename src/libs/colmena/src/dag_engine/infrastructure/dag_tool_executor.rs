@@ -889,6 +889,8 @@ mod tests {
                 mergeable_fields: None,
                 field_mapping: None,
                 node_schema: None,
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -929,6 +931,8 @@ mod tests {
                 mergeable_fields: None,
                 field_mapping: None,
                 node_schema: None,
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -970,6 +974,8 @@ mod tests {
                 mergeable_fields: None,
                 field_mapping: None,
                 node_schema: None,
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -1015,6 +1021,8 @@ mod tests {
                 mergeable_fields: None,
                 node_schema: None,
                 field_mapping: Some(field_mapping),
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -1066,6 +1074,8 @@ mod tests {
                 mergeable_fields: Some(vec!["body".to_string()]),
                 node_schema: None,
                 field_mapping: Some(field_mapping),
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -1114,6 +1124,8 @@ mod tests {
                 mergeable_fields: Some(vec!["headers".to_string()]),
                 node_schema: None,
                 field_mapping: Some(field_mapping),
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -1159,6 +1171,8 @@ mod tests {
                 mergeable_fields: None,
                 field_mapping: None,
                 node_schema: None,
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -1213,6 +1227,8 @@ mod tests {
                 mergeable_fields: None,
                 field_mapping: None,
                 node_schema: None,
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -1279,6 +1295,8 @@ mod tests {
                 mergeable_fields: None,
                 field_mapping: None,
                 node_schema: None,
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -1333,6 +1351,8 @@ mod tests {
                 mergeable_fields: None,
                 field_mapping: None,
                 node_schema: None,
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -1395,6 +1415,8 @@ mod tests {
                 mergeable_fields: None,
                 field_mapping: None,
                 node_schema: None,
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
@@ -1493,6 +1515,8 @@ mod tests {
                 mergeable_fields: None,
                 node_schema: None,
                 field_mapping: Some(field_mapping),
+                node_config: None,
+                expose_sub_tools: None,
             },
         );
 
