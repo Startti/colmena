@@ -655,7 +655,34 @@ impl ToolExecutor for DagToolExecutor {
 
         // 1. Add configured tools first
         for (name, config) in &self.tool_configurations {
-            if let Some(node) = self.registry.get_node(&config.node_type) {
+            if config.is_toolkit() {
+                // Toolkit: expand one ToolDefinition per declared sub-tool.
+                let Some(toolkit) = self.registry.get_toolkit_node(&config.node_type) else {
+                    colmena_log!(
+                        "WARN: toolkit config '{}' references unknown toolkit node_type '{}'",
+                        name,
+                        config.node_type
+                    );
+                    continue;
+                };
+                let node_cfg = config.node_config.clone().unwrap_or(Value::Object(Default::default()));
+                let catalog = toolkit.sub_tool_catalog(&node_cfg);
+                let filter = config.expose_sub_tools.as_ref().expect("is_toolkit → filter present");
+                for sub in catalog {
+                    if !filter.includes(&sub.name) {
+                        continue;
+                    }
+                    tools.push(crate::llm::domain::ToolDefinition {
+                        name: format!("{}__{}", name, sub.name),
+                        description: sub.description,
+                        parameters: crate::llm::domain::ToolParameters {
+                            schema_type: "object".to_string(),
+                            properties: sub.properties,
+                            required: sub.required,
+                        },
+                    });
+                }
+            } else if let Some(node) = self.registry.get_node(&config.node_type) {
                 tools.push(self.generate_tool_definition(name, config, &node));
             }
         }
@@ -1537,5 +1564,112 @@ mod tests {
         // title should be in body (from $DYNAMIC), not in headers (from field_mapping)
         assert_eq!(output["body"]["title"], "Test");
         assert!(output.get("headers").is_none() || output["headers"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod toolkit_runtime_tests {
+    use super::*;
+    use crate::dag_engine::domain::node::ExecutableNode;
+    use crate::dag_engine::domain::toolkit_node::ToolkitNode;
+    use crate::dag_engine::infrastructure::nodes::echo_toolkit::EchoToolkitNode;
+    use crate::dag_engine::domain::tool_configuration::{SubToolFilter, ToolConfiguration};
+    use async_trait::async_trait;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    /// Test registry that returns the same `Arc<EchoToolkitNode>` for both
+    /// `get_node()` and `get_toolkit_node()`.
+    struct EchoRegistry {
+        node: Arc<EchoToolkitNode>,
+    }
+
+    impl crate::dag_engine::application::ports::NodeRegistryPort for EchoRegistry {
+        fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            if node_type == "echo_toolkit" {
+                Some(self.node.clone() as Arc<dyn ExecutableNode>)
+            } else {
+                None
+            }
+        }
+
+        fn get_all_nodes(&self) -> std::collections::HashMap<String, Arc<dyn ExecutableNode>> {
+            let mut m = std::collections::HashMap::new();
+            m.insert("echo_toolkit".to_string(), self.node.clone() as Arc<dyn ExecutableNode>);
+            m
+        }
+
+        fn get_toolkit_node(&self, node_type: &str) -> Option<Arc<dyn ToolkitNode>> {
+            if node_type == "echo_toolkit" {
+                Some(self.node.clone() as Arc<dyn ToolkitNode>)
+            } else {
+                None
+            }
+        }
+    }
+
+    #[allow(deprecated)]
+    fn build_executor_with_toolkit_all() -> DagToolExecutor {
+        let registry = Arc::new(EchoRegistry {
+            node: Arc::new(EchoToolkitNode),
+        });
+        let mut configs = HashMap::new();
+        configs.insert(
+            "web".to_string(),
+            ToolConfiguration {
+                name: "web".to_string(),
+                description: "echo toolkit".to_string(),
+                node_type: "echo_toolkit".to_string(),
+                fixed_config: HashMap::new(),
+                exposed_inputs: None,
+                parameters: None,
+                mergeable_fields: None,
+                field_mapping: None,
+                node_schema: None,
+                node_config: Some(json!({})),
+                expose_sub_tools: Some(SubToolFilter::all()),
+            },
+        );
+        DagToolExecutor::new(registry, configs)
+    }
+
+    #[tokio::test]
+    async fn toolkit_expands_to_one_tooldef_per_sub_tool() {
+        let exec = build_executor_with_toolkit_all();
+        let tools = exec.available_tools().await;
+        let names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+        // Prefixed by alias "web__"
+        assert!(names.contains(&"web__echo".to_string()));
+        assert!(names.contains(&"web__double".to_string()));
+    }
+
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn toolkit_filter_list_only_exposes_listed_sub_tools() {
+        let registry = Arc::new(EchoRegistry {
+            node: Arc::new(EchoToolkitNode),
+        });
+        let mut configs = HashMap::new();
+        configs.insert(
+            "web".to_string(),
+            ToolConfiguration {
+                name: "web".to_string(),
+                description: "".to_string(),
+                node_type: "echo_toolkit".to_string(),
+                fixed_config: HashMap::new(),
+                exposed_inputs: None,
+                parameters: None,
+                mergeable_fields: None,
+                field_mapping: None,
+                node_schema: None,
+                node_config: None,
+                expose_sub_tools: Some(SubToolFilter::List(vec!["echo".to_string()])),
+            },
+        );
+        let exec = DagToolExecutor::new(registry, configs);
+        let tools = exec.available_tools().await;
+        let names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+        assert!(names.contains(&"web__echo".to_string()));
+        assert!(!names.contains(&"web__double".to_string()));
     }
 }
