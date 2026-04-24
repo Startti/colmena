@@ -172,6 +172,11 @@ impl<T> SessionRegistry<T> {
     /// Insert respecting `max_active_sessions`. If at or over capacity, evict the
     /// LRU (oldest `last_activity`) entry before inserting. The cleanup closure fires
     /// once if an entry was evicted, with the evicted key and value.
+    ///
+    /// The cleanup closure runs under the registry lock — keep it cheap and synchronous.
+    /// Requires `max_active_sessions >= 1`; a value of `0` is treated as `1`
+    /// (capacity is never actually disabled).
+    /// Ties in `last_activity` are broken by `HashMap` iteration order (non-deterministic).
     pub async fn insert_with_capacity(
         &self,
         key: SessionKey,
@@ -193,7 +198,6 @@ impl<T> SessionRegistry<T> {
             }
         }
 
-        let prev = map.remove(&key);
         map.insert(
             key,
             SessionEntry {
@@ -201,8 +205,8 @@ impl<T> SessionRegistry<T> {
                 created_at: now,
                 last_activity: now,
             },
-        );
-        prev.map(|e| e.value)
+        )
+        .map(|e| e.value)
     }
 }
 
@@ -403,5 +407,40 @@ mod tests {
         assert_eq!(reg.len().await, 2);
         let evicted = evicted_keys.lock().await.clone();
         assert_eq!(evicted, vec![k2]);
+    }
+
+    #[tokio::test]
+    async fn insert_with_capacity_same_key_does_not_evict() {
+        let ttl = TtlConfig {
+            idle_ttl_seconds: 3600,
+            max_lifetime_seconds: 3600,
+            max_active_sessions: 1,
+        };
+        let reg: Arc<SessionRegistry<u32>> = SessionRegistry::new(ttl);
+
+        let k = SessionKey::new("c1", "default");
+        let evicted_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let ec = evicted_count.clone();
+        let prev = reg
+            .insert_with_capacity(k.clone(), 1, move |_k, _v| {
+                ec.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .await;
+        assert!(prev.is_none());
+
+        let ec = evicted_count.clone();
+        let prev = reg
+            .insert_with_capacity(k.clone(), 2, move |_k, _v| {
+                ec.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .await;
+        assert_eq!(prev, Some(1));
+        assert_eq!(reg.len().await, 1);
+        assert_eq!(
+            evicted_count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "re-insert of same key must not trigger eviction"
+        );
     }
 }
