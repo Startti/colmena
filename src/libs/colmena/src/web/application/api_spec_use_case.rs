@@ -154,6 +154,181 @@ impl ApiSpecUseCase {
     }
 }
 
+use crate::web::domain::{Endpoint, HttpMethod};
+
+#[derive(Debug, Clone)]
+pub struct EndpointListPage {
+    pub total: usize,
+    pub returned: usize,
+    pub offset: usize,
+    pub endpoints: Vec<EndpointSummary>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EndpointSummary {
+    pub operation_id: String,
+    pub method: String,
+    pub path: String,
+    pub summary: Option<String>,
+    pub tags: Vec<String>,
+}
+
+impl From<&Endpoint> for EndpointSummary {
+    fn from(e: &Endpoint) -> Self {
+        Self {
+            operation_id: e.operation_id.clone(),
+            method: e.method.as_str().to_string(),
+            path: e.path.clone(),
+            summary: e.summary.clone(),
+            tags: e.tags.clone(),
+        }
+    }
+}
+
+pub fn list_endpoints(
+    spec: &ParsedSpec,
+    tag: Option<&str>,
+    limit: usize,
+    offset: usize,
+) -> EndpointListPage {
+    let filtered: Vec<&Endpoint> = spec
+        .endpoints
+        .iter()
+        .filter(|e| match tag {
+            None => true,
+            Some(t) => e.tags.iter().any(|candidate| candidate == t),
+        })
+        .collect();
+    let total = filtered.len();
+    let slice: Vec<EndpointSummary> = filtered
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(EndpointSummary::from)
+        .collect();
+    let returned = slice.len();
+    EndpointListPage {
+        total,
+        returned,
+        offset,
+        endpoints: slice,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EndpointSearchHit {
+    pub operation_id: String,
+    pub method: String,
+    pub path: String,
+    pub summary: Option<String>,
+    pub score: f32,
+    pub match_reason: String,
+}
+
+/// Fuzzy-search endpoints by a free-text query. The input is tokenized
+/// and each token is scored independently against a concatenated
+/// searchable string; the final score is the normalized sum.
+pub fn search_endpoint(
+    spec: &ParsedSpec,
+    query: &str,
+    method_filter: Option<&str>,
+    max_results: usize,
+    threshold: f32,
+) -> Vec<EndpointSearchHit> {
+    use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
+    use nucleo_matcher::{Config as NucleoConfig, Matcher, Utf32Str};
+
+    let method_filter = method_filter.and_then(HttpMethod::parse);
+
+    let mut matcher = Matcher::new(NucleoConfig::DEFAULT);
+
+    let candidates: Vec<(&Endpoint, String)> = spec
+        .endpoints
+        .iter()
+        .filter(|e| match method_filter {
+            None => true,
+            Some(m) => e.method == m,
+        })
+        .map(|e| {
+            let mut haystack = String::new();
+            haystack.push_str(&e.path);
+            haystack.push(' ');
+            haystack.push_str(&e.operation_id);
+            haystack.push(' ');
+            if let Some(s) = &e.summary {
+                haystack.push_str(s);
+                haystack.push(' ');
+            }
+            if let Some(d) = &e.description {
+                haystack.push_str(d);
+                haystack.push(' ');
+            }
+            for t in &e.tags {
+                haystack.push_str(t);
+                haystack.push(' ');
+            }
+            (e, haystack)
+        })
+        .collect();
+
+    let pattern = Pattern::new(
+        query,
+        CaseMatching::Smart,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    );
+
+    // Score each haystack with nucleo.
+    let mut scored: Vec<(f32, &Endpoint, String)> = Vec::new();
+    let mut hay_buf = Vec::new();
+    for (ep, hay) in &candidates {
+        hay_buf.clear();
+        let hay_u32 = Utf32Str::new(hay, &mut hay_buf);
+        if let Some(raw) = pattern.score(hay_u32, &mut matcher) {
+            let normalized = (raw as f32) / (hay.chars().count().max(1) as f32 * 16.0);
+            if normalized >= threshold {
+                let reason = explain_match(query, ep);
+                scored.push((normalized.min(1.0), ep, reason));
+            }
+        }
+    }
+
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored
+        .into_iter()
+        .take(max_results)
+        .map(|(score, ep, reason)| EndpointSearchHit {
+            operation_id: ep.operation_id.clone(),
+            method: ep.method.as_str().to_string(),
+            path: ep.path.clone(),
+            summary: ep.summary.clone(),
+            score,
+            match_reason: reason,
+        })
+        .collect()
+}
+
+fn explain_match(query: &str, ep: &Endpoint) -> String {
+    let q = query.to_ascii_lowercase();
+    let mut hits = Vec::new();
+    if ep.path.to_ascii_lowercase().contains(&q) {
+        hits.push(format!("path matches '{}'", q));
+    }
+    if let Some(s) = &ep.summary {
+        if s.to_ascii_lowercase().contains(&q) {
+            hits.push(format!("summary matches '{}'", q));
+        }
+    }
+    if ep.operation_id.to_ascii_lowercase().contains(&q) {
+        hits.push(format!("operation_id matches '{}'", q));
+    }
+    if hits.is_empty() {
+        "fuzzy match across path/summary/description/tags".into()
+    } else {
+        hits.join("; ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,5 +463,141 @@ mod tests {
             .unwrap();
         assert_eq!(port.calls.load(Ordering::SeqCst), 2);
         assert_eq!(res.etag.as_deref(), Some("\"v1\""));
+    }
+}
+
+#[cfg(test)]
+mod tests_list_and_search {
+    use crate::web::domain::{Endpoint, HttpMethod, ParsedSpec, SpecFormat};
+    use std::collections::HashMap;
+
+    fn spec_with(endpoints: Vec<Endpoint>) -> ParsedSpec {
+        ParsedSpec {
+            resolved_url: "u".into(),
+            input_url: "u".into(),
+            original_format: SpecFormat::OpenApi3x,
+            internal_format: "openapi-3.0.3".into(),
+            title: "T".into(),
+            version: "1".into(),
+            description: None,
+            servers: vec!["https://api.example.com".into()],
+            endpoints,
+            security_schemes: HashMap::new(),
+            tags: vec!["pet".into(), "store".into()],
+        }
+    }
+
+    fn ep(
+        op: &str,
+        method: HttpMethod,
+        path: &str,
+        summary: &str,
+        tag: &str,
+    ) -> Endpoint {
+        Endpoint {
+            operation_id: op.into(),
+            method,
+            path: path.into(),
+            summary: Some(summary.into()),
+            description: None,
+            tags: vec![tag.into()],
+            path_params: Vec::new(),
+            query_params: Vec::new(),
+            header_params: Vec::new(),
+            request_body: None,
+            responses: HashMap::new(),
+            security: Vec::new(),
+        }
+    }
+
+    fn sample() -> ParsedSpec {
+        spec_with(vec![
+            ep("listPets", HttpMethod::Get, "/pet", "List pets", "pet"),
+            ep("addPet", HttpMethod::Post, "/pet", "Add a new pet", "pet"),
+            ep("getPet", HttpMethod::Get, "/pet/{id}", "Get pet by ID", "pet"),
+            ep("listStores", HttpMethod::Get, "/store", "List stores", "store"),
+            ep("createSubscription", HttpMethod::Post, "/subscription", "Create a subscription", "billing"),
+        ])
+    }
+
+    #[test]
+    fn list_all_returns_all_endpoints() {
+        let spec = sample();
+        let page = super::super::api_spec_use_case::list_endpoints(&spec, None, 50, 0);
+        assert_eq!(page.total, 5);
+        assert_eq!(page.returned, 5);
+        assert_eq!(page.endpoints.len(), 5);
+    }
+
+    #[test]
+    fn list_paginates() {
+        let spec = sample();
+        let page = super::super::api_spec_use_case::list_endpoints(&spec, None, 2, 2);
+        assert_eq!(page.total, 5);
+        assert_eq!(page.returned, 2);
+        assert_eq!(page.endpoints[0].operation_id, "getPet");
+    }
+
+    #[test]
+    fn list_filters_by_tag() {
+        let spec = sample();
+        let page = super::super::api_spec_use_case::list_endpoints(&spec, Some("billing"), 50, 0);
+        assert_eq!(page.total, 1);
+        assert_eq!(page.endpoints[0].operation_id, "createSubscription");
+    }
+
+    #[test]
+    fn search_finds_by_summary() {
+        let spec = sample();
+        let results = super::super::api_spec_use_case::search_endpoint(
+            &spec,
+            "create subscription",
+            None,
+            10,
+            0.1,
+        );
+        assert!(!results.is_empty());
+        assert_eq!(results[0].operation_id, "createSubscription");
+    }
+
+    #[test]
+    fn search_filters_by_method() {
+        let spec = sample();
+        let results = super::super::api_spec_use_case::search_endpoint(
+            &spec,
+            "pet",
+            Some("GET"),
+            10,
+            0.1,
+        );
+        for r in &results {
+            assert_eq!(r.method, "GET");
+        }
+    }
+
+    #[test]
+    fn search_respects_threshold() {
+        let spec = sample();
+        let tight = super::super::api_spec_use_case::search_endpoint(
+            &spec,
+            "completely unrelated nonsense xyz",
+            None,
+            10,
+            0.99,
+        );
+        assert!(tight.is_empty());
+    }
+
+    #[test]
+    fn search_returns_top_n() {
+        let spec = sample();
+        let results = super::super::api_spec_use_case::search_endpoint(
+            &spec,
+            "pet",
+            None,
+            2,
+            0.1,
+        );
+        assert!(results.len() <= 2);
     }
 }
