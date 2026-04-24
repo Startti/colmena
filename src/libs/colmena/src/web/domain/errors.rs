@@ -54,6 +54,9 @@ pub enum WebDomainError {
     #[error("unexpected HTML response from {url}")]
     UnexpectedHtmlResponse { url: String, resolved_url: String },
 
+    #[error("spec too large: {size_bytes} bytes > {limit_bytes}")]
+    SpecTooLarge { size_bytes: u64, limit_bytes: u64 },
+
     /// A Swagger 2.0 document could not be converted to OpenAPI 3.0.3.
     /// The `unsupported_feature` field pinpoints the bit that tripped us up.
     #[error("swagger 2.0 conversion failed: {reason}")]
@@ -68,7 +71,10 @@ impl WebDomainError {
     /// tool result. Returns `false` for configuration / adapter init failures that
     /// should bubble up and crash the DAG.
     pub fn is_llm_recoverable(&self) -> bool {
-        !matches!(self, Self::InvalidConfig(_) | Self::AdapterInit(_))
+        !matches!(
+            self,
+            Self::InvalidConfig(_) | Self::AdapterInit(_) | Self::SpecTooLarge { .. }
+        )
     }
 }
 
@@ -133,5 +139,14 @@ mod tests {
             cap: 50,
         };
         assert_eq!(e.to_string(), "rate limit exceeded (51/50)");
+    }
+
+    #[test]
+    fn spec_too_large_is_not_recoverable() {
+        assert!(!WebDomainError::SpecTooLarge {
+            size_bytes: 11_000_000,
+            limit_bytes: 10_485_760,
+        }
+        .is_llm_recoverable());
     }
 }
