@@ -180,6 +180,80 @@ impl DagToolExecutor {
         dynamic_fields
     }
 
+    async fn execute_toolkit(
+        &self,
+        alias: &str,
+        sub_tool: &str,
+        cfg: &ToolConfiguration,
+        tool_call: &crate::llm::domain::ToolCall,
+    ) -> Result<crate::llm::domain::ToolResult, crate::llm::domain::LlmError> {
+        use crate::dag_engine::domain::toolkit_node::SUB_TOOL_INPUT_KEY;
+        use crate::llm::domain::{LlmError, ToolResult};
+
+        // Resolve the toolkit node.
+        let toolkit = self.registry.get_toolkit_node(&cfg.node_type).ok_or_else(|| {
+            LlmError::ToolNotFound {
+                name: cfg.node_type.clone(),
+            }
+        })?;
+
+        // Confirm this sub-tool is actually in the filter / catalogue.
+        let node_cfg = cfg.node_config.clone().unwrap_or_else(|| Value::Object(Default::default()));
+        let catalog = toolkit.sub_tool_catalog(&node_cfg);
+        let known = catalog.iter().any(|d| d.name.as_ref() == sub_tool);
+        let exposed = cfg
+            .expose_sub_tools
+            .as_ref()
+            .map(|f| f.includes(sub_tool))
+            .unwrap_or(false);
+        if !known || !exposed {
+            return Ok(ToolResult {
+                tool_call_id: tool_call.id.clone(),
+                success: false,
+                output: format!(
+                    "unknown sub-tool '{}' for toolkit '{}'",
+                    sub_tool, alias
+                ),
+                error: Some("unknown sub-tool".to_string()),
+            });
+        }
+
+        // Parse LLM arguments.
+        let mut inputs: HashMap<String, Value> = serde_json::from_str(&tool_call.function.arguments)
+            .map_err(|e| LlmError::InvalidToolCall {
+                reason: format!("Failed to parse arguments for {}: {}", tool_call.function.name, e),
+            })?;
+
+        // Inject the reserved sub-tool discriminator.
+        inputs.insert(SUB_TOOL_INPUT_KEY.to_string(), Value::String(sub_tool.to_string()));
+
+        // Execute the underlying toolkit node as a plain ExecutableNode.
+        // node_exec_config is the per-toolkit static node_config from the entry
+        // (e.g. { "api_key": "..." }).
+        let exec_node = self
+            .registry
+            .get_node(&cfg.node_type)
+            .ok_or_else(|| LlmError::ToolNotFound { name: cfg.node_type.clone() })?;
+
+        let mut state = serde_json::json!({});
+        let result = exec_node.execute(&inputs, &node_cfg, &mut state, None).await;
+
+        match result {
+            Ok(value) => Ok(ToolResult {
+                tool_call_id: tool_call.id.clone(),
+                success: true,
+                output: value.to_string(),
+                error: None,
+            }),
+            Err(e) => Ok(ToolResult {
+                tool_call_id: tool_call.id.clone(),
+                success: false,
+                output: format!("Error executing toolkit {}__{}: {}", alias, sub_tool, e),
+                error: Some(e.to_string()),
+            }),
+        }
+    }
+
     /// Generate ToolDefinition from node with partial configuration
     #[allow(deprecated)]
     fn generate_tool_definition(
@@ -365,6 +439,15 @@ impl ToolExecutor for DagToolExecutor {
                 obs(&result);
             }
             return Ok(into_tool_result(&tool_call.id, &result));
+        }
+
+        // --- Toolkit dispatch: names of the form "<alias>__<sub_tool>" ---
+        if let Some((alias, sub_tool)) = tool_call.function.name.split_once("__") {
+            if let Some(cfg) = self.tool_configurations.get(alias) {
+                if cfg.is_toolkit() {
+                    return self.execute_toolkit(alias, sub_tool, cfg, tool_call).await;
+                }
+            }
         }
 
         let node_type = &tool_call.function.name;
@@ -1647,6 +1730,51 @@ mod toolkit_runtime_tests {
         // Prefixed by alias "web__"
         assert!(names.contains(&"web__echo".to_string()));
         assert!(names.contains(&"web__double".to_string()));
+    }
+
+    #[tokio::test]
+    async fn toolkit_dispatch_echo_returns_message() {
+        use crate::llm::domain::{FunctionCall, ToolCall};
+
+        let exec = build_executor_with_toolkit_all();
+
+        let call = ToolCall {
+            id: "call-1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "web__echo".to_string(),
+                arguments: r#"{"message":"hola"}"#.to_string(),
+            },
+            response: None,
+        };
+        let result = exec.execute(&call).await.expect("execute ok");
+        assert!(result.success, "got error: {:?}", result.error);
+        // Output is a JSON-stringified value.
+        let parsed: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(parsed.get("output").unwrap().as_str(), Some("hola"));
+    }
+
+    #[tokio::test]
+    async fn toolkit_dispatch_unknown_sub_tool_errors_cleanly() {
+        use crate::llm::domain::{FunctionCall, ToolCall};
+
+        let exec = build_executor_with_toolkit_all();
+
+        let call = ToolCall {
+            id: "call-2".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "web__does_not_exist".to_string(),
+                arguments: "{}".to_string(),
+            },
+            response: None,
+        };
+        let result = exec.execute(&call).await.expect("execute returns ToolResult");
+        assert!(!result.success);
+        assert!(result
+            .output
+            .to_lowercase()
+            .contains("unknown sub-tool"));
     }
 
     #[tokio::test]
