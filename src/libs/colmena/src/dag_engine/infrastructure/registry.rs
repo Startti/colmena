@@ -13,6 +13,8 @@ use std::sync::{Arc, Weak};
 /// Utiliza un `HashMap` para almacenar instancias de todos los nodos disponibles.
 pub struct HashMapNodeRegistry {
     nodes: HashMap<String, Arc<dyn ExecutableNode>>,
+    toolkit_nodes:
+        HashMap<String, Arc<dyn crate::dag_engine::domain::toolkit_node::ToolkitNode>>,
     subgraph_node: Option<Arc<SubGraphNode>>,
 }
 
@@ -167,6 +169,7 @@ impl HashMapNodeRegistry {
 
             Self {
                 nodes,
+                toolkit_nodes: HashMap::new(),
                 subgraph_node: Some(sub_node),
             }
         })
@@ -177,6 +180,32 @@ impl HashMapNodeRegistry {
     pub fn set_subgraph_executor(&self, executor: Arc<dyn SubGraphExecutorPort>) {
         if let Some(sub) = &self.subgraph_node {
             let _ = sub.executor.set(executor);
+        }
+    }
+
+    /// Register a toolkit node. Stored in both maps (as `ExecutableNode` for
+    /// normal DAG use and as `ToolkitNode` for sub-tool dispatch).
+    ///
+    /// Intended for **test** construction where the caller still has a fresh
+    /// unique `Arc`. Production registration of toolkit nodes happens inside
+    /// `new_with_secure_values` via direct field access on `&mut self`.
+    /// Silently does nothing if the `Arc` is already shared (`Arc::get_mut`
+    /// returns `None`).
+    pub fn register_toolkit_node<N>(
+        self: &mut Arc<Self>,
+        node_type: impl Into<String>,
+        node: Arc<N>,
+    ) where
+        N: crate::dag_engine::domain::toolkit_node::ToolkitNode + 'static,
+    {
+        if let Some(this) = Arc::get_mut(self) {
+            let name = node_type.into();
+            this.nodes
+                .insert(name.clone(), node.clone() as Arc<dyn ExecutableNode>);
+            this.toolkit_nodes.insert(
+                name,
+                node as Arc<dyn crate::dag_engine::domain::toolkit_node::ToolkitNode>,
+            );
         }
     }
 }
@@ -192,5 +221,12 @@ impl NodeRegistryPort for HashMapNodeRegistry {
 
     fn get_all_nodes(&self) -> std::collections::HashMap<String, Arc<dyn ExecutableNode>> {
         self.nodes.clone()
+    }
+
+    fn get_toolkit_node(
+        &self,
+        node_type: &str,
+    ) -> Option<Arc<dyn crate::dag_engine::domain::toolkit_node::ToolkitNode>> {
+        self.toolkit_nodes.get(node_type).cloned()
     }
 }

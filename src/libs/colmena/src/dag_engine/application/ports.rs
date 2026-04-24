@@ -15,6 +15,16 @@ pub trait NodeRegistryPort: Send + Sync {
 
     /// Retorna todos los nodos registrados.
     fn get_all_nodes(&self) -> std::collections::HashMap<String, Arc<dyn ExecutableNode>>;
+
+    /// Return the node as a `ToolkitNode` if it was registered as one; `None`
+    /// otherwise (including for standalone ExecutableNode registrations). Default
+    /// impl returns `None` so existing registries don't need changes.
+    fn get_toolkit_node(
+        &self,
+        _node_type: &str,
+    ) -> Option<std::sync::Arc<dyn crate::dag_engine::domain::toolkit_node::ToolkitNode>> {
+        None
+    }
 }
 
 /// Define el "Puerto" que un Nodo SubGraph utiliza para ejecutar
