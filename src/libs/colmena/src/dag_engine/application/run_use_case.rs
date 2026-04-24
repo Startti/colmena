@@ -20,8 +20,8 @@ pub struct DagRunUseCase {
     secure_value_service: Option<Arc<SecureValueService>>,
     /// Optional bus notified when a conversation is considered finished.
     /// Registries (web nodes) subscribe to eagerly evict scoped state.
-    // TODO(plan-C): call conversation_lifecycle.notify_conversation_closed(...) when sessions land
-    pub conversation_lifecycle: Option<crate::web::domain::ConversationLifecycleBus>,
+    /// Fire-site is deferred to Plan C (see TODO near `DagRunStatus::Completed`).
+    conversation_lifecycle: Option<crate::web::domain::ConversationLifecycleBus>,
 }
 
 impl DagRunUseCase {
@@ -558,6 +558,13 @@ impl DagRunUseCase {
                 };
                 repo.save(&state).await?;
             }
+            // TODO(plan-C): when conversations span multiple runs and a final
+            // "conversation closed" signal is available here, fire:
+            //   if let Some(bus) = &self.conversation_lifecycle {
+            //       bus.notify_conversation_closed(&conversation_id).await;
+            //   }
+            // Today a DAG run !== a conversation, so firing on every completion
+            // would be premature.
 
             let mut final_aggregated_output = serde_json::to_value(&all_outputs).unwrap_or(Value::Null);
             if !include_extra_info {
