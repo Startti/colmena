@@ -86,6 +86,13 @@ sha2 = "0.10"
 
 # Skills: YAML frontmatter + compile-in built-in skills
 serde_yaml = "0.9"
+
+# OpenAPI 3.x parsing (api_explorer node, Spec C).
+oas3 = { version = "0.21", features = ["yaml-spec"] }
+
+# Unicode-aware fuzzy matcher (used by Helix editor) — endpoint search.
+nucleo-matcher = "0.3"
+
 include_dir = "0.7"
 
 # Documents feature
