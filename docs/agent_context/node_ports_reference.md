@@ -984,3 +984,16 @@ Guidelines:
 | Dynamic inputs | `{ from: "A", to: "python" }` | ✅ all keys flattened |
 | Extract 1 field | `{ from: "A.result", to: "B" }` | ✅ and B gets just that field |
 
+---
+
+## `tavily_client` (Toolkit)
+
+Nodo de herramientas expuesto a un `llm_call`. Dos sub-herramientas: `search` y `fetch`.
+
+**Inputs — `search`:** `query` (string, requerido), `max_results` (1-10), `include_content` (bool), `search_depth` (`basic`|`advanced`), `include_domains` (array), `exclude_domains` (array), `time_range` (`day`|`week`|`month`|`year`).
+**Outputs — `search`:** `{ query, results: [{ title, url, snippet, score, content? }], answer?, credits_used }`.
+
+**Inputs — `fetch`:** `url` (string, requerido), `extract_format` (`markdown`|`text`).
+**Outputs — `fetch`:** `{ url, title?, content, content_length, credits_used }`.
+
+Errores recuperables por el LLM: `rate_limit`, `timeout`, `upstream_error`. `AdapterInit` e `InvalidConfig` causan fallo de ejecución de DAG.

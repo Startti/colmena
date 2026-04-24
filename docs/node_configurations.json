@@ -14,7 +14,8 @@
         "add", "subtract", "multiply", "divide", "exponential",
         "http_request", "socketio_request", "sql_query", "python_script",
         "llm_call", "information_extraction", "planner", "critic", "reactor",
-        "orchestrator", "task_memory_writer"
+        "orchestrator", "task_memory_writer",
+        "tavily_client"
       ],
       "example": "llm_call"
     },
@@ -1867,6 +1868,91 @@
         "description": "DEPRECATED (use node_schema instead). Maps each LLM parameter to its destination container field.",
         "deprecated": true
       }
+    },
+
+    "tavily_client": {
+      "name": "Tavily Client",
+      "description": "Web search and fetch via Tavily. Toolkit node that exposes two LLM sub-tools: `search` and `fetch`. Added to an `llm_call` via `tool_configurations`, so the agent sees `<alias>__search` and `<alias>__fetch`.",
+      "category": "web",
+      "config_fields": {
+        "api_key": {
+          "type": "string",
+          "required": true,
+          "description": "Tavily API key. Accepts a literal, `${ENV_VAR}`, or a secure-value placeholder."
+        },
+        "enable_cache": {
+          "type": "boolean",
+          "required": false,
+          "default": true,
+          "description": "Cache search and fetch results across runs."
+        },
+        "cache_ttl_seconds": {
+          "type": "integer",
+          "required": false,
+          "default": 3600,
+          "description": "Cache entry lifetime."
+        },
+        "max_calls_per_run": {
+          "type": "integer",
+          "required": false,
+          "default": 50,
+          "description": "Hard cap on search + fetch calls per dag_run."
+        },
+        "fail_on_limit": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "When true, exceeding the cap crashes the DAG instead of returning a structured error to the LLM."
+        },
+        "retry_policy": {
+          "type": "object",
+          "required": false,
+          "description": "Retry settings for transient (5xx / timeout) upstream errors.",
+          "properties": {
+            "max_attempts": { "type": "integer", "default": 3 },
+            "initial_backoff_ms": { "type": "integer", "default": 500 }
+          }
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "required": false,
+          "default": 30,
+          "description": "Per-request timeout for the underlying reqwest client."
+        },
+        "search_defaults": {
+          "type": "object",
+          "required": false,
+          "description": "Default values for the search sub-tool. Each call may override them.",
+          "properties": {
+            "search_depth": { "type": "string", "enum": ["basic", "advanced"], "default": "basic" },
+            "max_results": { "type": "integer", "default": 5 },
+            "include_content": { "type": "boolean", "default": false },
+            "include_domains": { "type": "array", "items": { "type": "string" } },
+            "exclude_domains": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      },
+      "sub_tools": {
+        "search": {
+          "description": "Search the web for up-to-date information. Returns a ranked list of titles/URLs/snippets (and optionally full content).",
+          "parameters": {
+            "query": { "type": "string", "required": true },
+            "max_results": { "type": "integer", "default": 5 },
+            "include_content": { "type": "boolean", "default": false },
+            "search_depth": { "type": "string", "enum": ["basic", "advanced"], "default": "basic" },
+            "include_domains": { "type": "array" },
+            "exclude_domains": { "type": "array" },
+            "time_range": { "type": "string", "enum": ["day", "week", "month", "year"] }
+          }
+        },
+        "fetch": {
+          "description": "Read cleaned text content from a specific URL.",
+          "parameters": {
+            "url": { "type": "string", "required": true },
+            "extract_format": { "type": "string", "enum": ["markdown", "text"], "default": "markdown" }
+          }
+        }
+      }
     }
   },
 
@@ -1900,6 +1986,11 @@
       "name": "Orchestration",
       "description": "Multi-agent coordination and task memory management.",
       "node_types": ["orchestrator", "task_memory_writer"]
+    },
+    "web": {
+      "name": "Web",
+      "description": "Toolkit nodes that give LLM agents internet access: search, fetch, API exploration, browser automation.",
+      "node_types": ["tavily_client"]
     }
   }
 }
