@@ -221,6 +221,46 @@ impl TavilyClientNode {
             Err(e) => format_llm_error(e, config),
         }
     }
+
+    async fn handle_fetch(
+        &self,
+        inputs: &NodeInputs,
+        config: &Value,
+        session_id: &str,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+        use crate::web::domain::search_port::{ExtractFormat, FetchRequest};
+
+        let Some(url) = inputs.get("url").and_then(|v| v.as_str()) else {
+            return Ok(json!({
+                "error": "invalid_input",
+                "message": "fetch requires `url` (string)"
+            }));
+        };
+
+        let format_str = inputs
+            .get("extract_format")
+            .and_then(|v| v.as_str())
+            .unwrap_or("markdown");
+        let format = match format_str {
+            "text" => ExtractFormat::Text,
+            _ => ExtractFormat::Markdown,
+        };
+
+        let uc = self.build_use_case(config, session_id).await?;
+        match uc
+            .fetch(
+                session_id,
+                FetchRequest {
+                    url: url.to_string(),
+                    format,
+                },
+            )
+            .await
+        {
+            Ok(resp) => Ok(serde_json::to_value(resp)?),
+            Err(e) => format_llm_error(e, config),
+        }
+    }
 }
 
 #[async_trait]
@@ -242,7 +282,7 @@ impl ExecutableNode for TavilyClientNode {
         let session_id = "default";
         match sub {
             "search" => self.handle_search(inputs, config, session_id).await,
-            "fetch" => Err("tavily_client: fetch not yet implemented".into()),
+            "fetch" => self.handle_fetch(inputs, config, session_id).await,
             other => Err(format!("tavily_client: unknown sub_tool '{other}'").into()),
         }
     }
@@ -686,5 +726,65 @@ mod tests {
             out.get("error").and_then(|v| v.as_str()),
             Some("invalid_input")
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_dispatches_and_returns_json() {
+        let (port, node, _uc) = node_with_stub();
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("fetch"));
+        inputs.insert("url".into(), json!("https://example.com"));
+        let mut state = json!({});
+        let out = node
+            .execute(&inputs, &json!({ "api_key": "tvly-stub" }), &mut state, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.get("url").and_then(|v| v.as_str()),
+            Some("https://example.com")
+        );
+        assert_eq!(out.get("content").and_then(|v| v.as_str()), Some("body"));
+        assert_eq!(*port.fetch_calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn fetch_defaults_to_markdown() {
+        let (_port, node, _uc) = node_with_stub();
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("fetch"));
+        inputs.insert("url".into(), json!("https://example.com"));
+        let mut state = json!({});
+        node.execute(&inputs, &json!({ "api_key": "tvly-stub" }), &mut state, None)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn fetch_missing_url_returns_structured_error() {
+        let (_port, node, _uc) = node_with_stub();
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("fetch"));
+        let mut state = json!({});
+        let out = node
+            .execute(&inputs, &json!({ "api_key": "tvly-stub" }), &mut state, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.get("error").and_then(|v| v.as_str()),
+            Some("invalid_input")
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_sub_tool_errors() {
+        let (_port, node, _uc) = node_with_stub();
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("nope"));
+        let mut state = json!({});
+        let err = node
+            .execute(&inputs, &json!({ "api_key": "tvly-stub" }), &mut state, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown sub_tool"));
     }
 }
