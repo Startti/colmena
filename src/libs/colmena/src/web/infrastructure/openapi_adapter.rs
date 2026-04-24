@@ -256,10 +256,11 @@ pub(crate) fn parse_body_to_spec(
             parse_oas3_value(as_value, SpecFormat::OpenApi3x, input_url, resolved_url)
         }
         SpecFormat::Swagger20 => {
-            // Task 7 fills this in; for now, error cleanly.
-            Err(WebDomainError::AdapterInit(
-                "Swagger 2.0 path pending Task 7".into(),
-            ))
+            let converted =
+                crate::web::application::swagger2_to_oas3::convert_swagger2_to_openapi3(
+                    &as_value,
+                )?;
+            parse_oas3_value(converted, SpecFormat::Swagger20, input_url, resolved_url)
         }
     }
 }
@@ -837,5 +838,102 @@ mod tests_fetch {
             WebDomainError::Upstream { status: 500, .. } => {}
             other => panic!("expected Upstream(500), got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests_parse_swagger2 {
+    use super::*;
+    use crate::web::domain::{ApiKeyLocation, HttpMethod, SecurityScheme, SpecFormat};
+
+    fn petstore2_yaml() -> &'static str {
+        include_str!("../../../tests/fixtures/specs/petstore-2.0.yaml")
+    }
+
+    #[test]
+    fn parse_swagger2_petstore_roundtrips() {
+        let body = petstore2_yaml().as_bytes().to_vec();
+        let parsed = super::super::openapi_adapter::parse_body_to_spec(
+            &body,
+            Some("application/yaml"),
+            "https://example.test/petstore2.yaml",
+            "https://example.test/petstore2.yaml",
+        )
+        .unwrap();
+
+        assert_eq!(parsed.original_format, SpecFormat::Swagger20);
+        assert!(parsed.internal_format.starts_with("openapi-3.0"));
+        assert_eq!(parsed.title, "Swagger Petstore 2.0");
+        assert_eq!(
+            parsed.servers,
+            vec!["https://petstore.swagger.io/v2".to_string()]
+        );
+        assert!(!parsed.endpoints.is_empty());
+
+        // POST /pet exists, with a requestBody that came from the body parameter.
+        let post_pet = parsed
+            .endpoints
+            .iter()
+            .find(|e| e.method == HttpMethod::Post && e.path == "/pet")
+            .expect("POST /pet");
+        let rb = post_pet.request_body.as_ref().expect("request body");
+        assert_eq!(rb.content_type, "application/json");
+
+        // ApiKeyAuth security scheme survived the conversion.
+        let sec = parsed.security_schemes.get("ApiKeyAuth").expect("ApiKeyAuth");
+        match sec {
+            SecurityScheme::ApiKey { name, location } => {
+                assert_eq!(name, "X-API-Key");
+                assert_eq!(*location, ApiKeyLocation::Header);
+            }
+            other => panic!("expected ApiKey, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_and_parse_uses_conditional_get_roundtrip() {
+        use wiremock::matchers::{header_exists, method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // First GET → 200 + ETag.
+        let body = petstore2_yaml();
+        Mock::given(method("GET"))
+            .and(wm_path("/ps.yaml"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("ETag", "\"v1\"")
+                    .set_body_raw(body.as_bytes().to_vec(), "application/yaml"),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        // Second GET with If-None-Match → 304.
+        Mock::given(method("GET"))
+            .and(wm_path("/ps.yaml"))
+            .and(header_exists("If-None-Match"))
+            .respond_with(ResponseTemplate::new(304))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/ps.yaml", server.uri());
+        let adapter = OpenApiAdapter::new(OpenApiAdapterConfig::default()).unwrap();
+        let first = adapter.fetch_and_parse(&url, None, None).await.unwrap();
+        let etag = match first {
+            crate::web::domain::SpecFetchResult::Fresh { etag, .. } => etag,
+            _ => panic!("expected Fresh"),
+        };
+        assert_eq!(etag.as_deref(), Some("\"v1\""));
+
+        let second = adapter
+            .fetch_and_parse(&url, etag.as_deref(), None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            second,
+            crate::web::domain::SpecFetchResult::NotModified
+        ));
     }
 }
