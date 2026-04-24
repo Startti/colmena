@@ -212,6 +212,12 @@ impl<T> SessionRegistry<T> {
     /// Spawn a background tokio task that periodically calls `sweep_expired`.
     /// Returns the task handle; callers retain it and call `.abort()` during shutdown.
     ///
+    /// This method consumes an `Arc<Self>` — call `registry.clone().start_sweeper(...)`
+    /// if you still need your own handle to the registry. The spawned task keeps its
+    /// own `Arc<Self>`, which means the registry will NOT be dropped automatically
+    /// when external references go away; call `.abort()` on the returned handle
+    /// (or drop its owning struct via a `Drop` wrapper) to let the registry deallocate.
+    ///
     /// The cleanup closure must be `Send + 'static + Clone` because it is shared
     /// across ticks of the sweeper.
     pub fn start_sweeper<F>(
@@ -221,7 +227,7 @@ impl<T> SessionRegistry<T> {
     ) -> tokio::task::JoinHandle<()>
     where
         T: Send + 'static,
-        F: Fn(T) + Send + Sync + Clone + 'static,
+        F: Fn(T) + Send + Clone + 'static,
     {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(period);
