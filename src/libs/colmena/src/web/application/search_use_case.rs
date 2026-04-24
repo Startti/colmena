@@ -10,9 +10,46 @@ use crate::web::domain::errors::WebDomainError;
 use crate::web::domain::search_port::{
     FetchRequest, FetchResponse, SearchPort, SearchRequest, SearchResponse,
 };
+use chrono::{DateTime, Utc};
+use lru::LruCache;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::hash::{Hash, Hasher};
+use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
+
+fn hash_search(req: &SearchRequest) -> u64 {
+    let mut h = DefaultHasher::new();
+    ("search",
+     &req.query,
+     req.max_results,
+     req.include_content,
+     req.search_depth as u8,
+     &req.include_domains,
+     &req.exclude_domains,
+     req.time_range.map(|r| r as u8),
+    )
+        .hash(&mut h);
+    h.finish()
+}
+
+fn hash_fetch(req: &FetchRequest) -> u64 {
+    let mut h = DefaultHasher::new();
+    ("fetch", &req.url, req.format as u8).hash(&mut h);
+    h.finish()
+}
+
+#[derive(Clone)]
+enum CachedResponse {
+    Search(SearchResponse),
+    Fetch(FetchResponse),
+}
+
+struct CachedEntry {
+    resp: CachedResponse,
+    inserted_at: DateTime<Utc>,
+}
 
 #[derive(Debug, Clone)]
 pub struct SearchUseCaseConfig {
@@ -66,14 +103,17 @@ pub struct SearchUseCase {
     port: Arc<dyn SearchPort>,
     config: SearchUseCaseConfig,
     counters: Mutex<RateLimitState>,
+    cache: RwLock<LruCache<u64, CachedEntry>>,
 }
 
 impl SearchUseCase {
     pub fn new(port: Arc<dyn SearchPort>, config: SearchUseCaseConfig) -> Self {
+        let cap = NonZeroUsize::new(1024).unwrap();
         Self {
             port,
             config,
             counters: Mutex::new(RateLimitState::default()),
+            cache: RwLock::new(LruCache::new(cap)),
         }
     }
 
@@ -93,11 +133,31 @@ impl SearchUseCase {
         dag_run_id: &str,
         req: SearchRequest,
     ) -> Result<SearchResponse, WebDomainError> {
+        let key = hash_search(&req);
+
+        if self.config.enable_cache {
+            if let Some(resp) = self.cache_lookup_search(key) {
+                return Ok(resp);
+            }
+        }
+
         self.counters
             .lock()
             .unwrap()
             .try_increment(dag_run_id, self.config.max_calls_per_run)?;
-        self.port.search(req).await
+
+        let resp = self.port.search(req).await?;
+
+        if self.config.enable_cache {
+            self.cache.write().unwrap().put(
+                key,
+                CachedEntry {
+                    resp: CachedResponse::Search(resp.clone()),
+                    inserted_at: Utc::now(),
+                },
+            );
+        }
+        Ok(resp)
     }
 
     /// Run a fetch. `dag_run_id` identifies the run for rate-limit accounting.
@@ -106,11 +166,62 @@ impl SearchUseCase {
         dag_run_id: &str,
         req: FetchRequest,
     ) -> Result<FetchResponse, WebDomainError> {
+        let key = hash_fetch(&req);
+
+        if self.config.enable_cache {
+            if let Some(resp) = self.cache_lookup_fetch(key) {
+                return Ok(resp);
+            }
+        }
+
         self.counters
             .lock()
             .unwrap()
             .try_increment(dag_run_id, self.config.max_calls_per_run)?;
-        self.port.fetch(req).await
+
+        let resp = self.port.fetch(req).await?;
+
+        if self.config.enable_cache {
+            self.cache.write().unwrap().put(
+                key,
+                CachedEntry {
+                    resp: CachedResponse::Fetch(resp.clone()),
+                    inserted_at: Utc::now(),
+                },
+            );
+        }
+        Ok(resp)
+    }
+
+    fn cache_lookup_search(&self, key: u64) -> Option<SearchResponse> {
+        let mut cache = self.cache.write().unwrap();
+        let entry = cache.get(&key)?;
+        if self.is_expired(entry) {
+            cache.pop(&key);
+            return None;
+        }
+        match &entry.resp {
+            CachedResponse::Search(s) => Some(s.clone()),
+            CachedResponse::Fetch(_) => None,
+        }
+    }
+
+    fn cache_lookup_fetch(&self, key: u64) -> Option<FetchResponse> {
+        let mut cache = self.cache.write().unwrap();
+        let entry = cache.get(&key)?;
+        if self.is_expired(entry) {
+            cache.pop(&key);
+            return None;
+        }
+        match &entry.resp {
+            CachedResponse::Fetch(f) => Some(f.clone()),
+            CachedResponse::Search(_) => None,
+        }
+    }
+
+    fn is_expired(&self, entry: &CachedEntry) -> bool {
+        let age_ms = (Utc::now() - entry.inserted_at).num_milliseconds().max(0) as u64;
+        age_ms >= self.config.cache_ttl.as_millis() as u64
     }
 }
 
@@ -232,8 +343,11 @@ mod tests {
     #[tokio::test]
     async fn rate_limit_separate_runs_have_separate_counters() {
         let port = Arc::new(StubPort::new());
+        // Cache is shared across runs by design, so disable it here to keep
+        // the test focused on rate-limit accounting only.
         let cfg = SearchUseCaseConfig {
             max_calls_per_run: 1,
+            enable_cache: false,
             ..Default::default()
         };
         let uc = SearchUseCase::new(port.clone(), cfg);
@@ -275,6 +389,80 @@ mod tests {
             )
             .await
             .unwrap_err();
+        assert!(matches!(err, WebDomainError::RateLimit { .. }));
+    }
+
+    #[tokio::test]
+    async fn cache_hit_returns_same_response_without_hitting_port() {
+        let port = Arc::new(StubPort::new());
+        let cfg = SearchUseCaseConfig {
+            enable_cache: true,
+            ..Default::default()
+        };
+        let uc = SearchUseCase::new(port.clone(), cfg);
+
+        let r1 = uc.search("run-A", SearchRequest::new("same")).await.unwrap();
+        let r2 = uc.search("run-A", SearchRequest::new("same")).await.unwrap();
+        assert_eq!(r1.query, r2.query);
+        // Only first call hits the port.
+        assert_eq!(*port.search_calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn cache_miss_on_different_query() {
+        let port = Arc::new(StubPort::new());
+        let cfg = SearchUseCaseConfig {
+            enable_cache: true,
+            ..Default::default()
+        };
+        let uc = SearchUseCase::new(port.clone(), cfg);
+        uc.search("run-A", SearchRequest::new("a")).await.unwrap();
+        uc.search("run-A", SearchRequest::new("b")).await.unwrap();
+        assert_eq!(*port.search_calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn cache_disabled_always_hits_port() {
+        let port = Arc::new(StubPort::new());
+        let cfg = SearchUseCaseConfig {
+            enable_cache: false,
+            ..Default::default()
+        };
+        let uc = SearchUseCase::new(port.clone(), cfg);
+        uc.search("run-A", SearchRequest::new("same")).await.unwrap();
+        uc.search("run-A", SearchRequest::new("same")).await.unwrap();
+        assert_eq!(*port.search_calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn cache_entry_expires_after_ttl() {
+        let port = Arc::new(StubPort::new());
+        let cfg = SearchUseCaseConfig {
+            enable_cache: true,
+            cache_ttl: Duration::from_millis(0),
+            ..Default::default()
+        };
+        let uc = SearchUseCase::new(port.clone(), cfg);
+        uc.search("run-A", SearchRequest::new("same")).await.unwrap();
+        // TTL=0 means every lookup is immediately expired.
+        uc.search("run-A", SearchRequest::new("same")).await.unwrap();
+        assert_eq!(*port.search_calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn cache_does_not_count_toward_rate_limit() {
+        let port = Arc::new(StubPort::new());
+        let cfg = SearchUseCaseConfig {
+            enable_cache: true,
+            max_calls_per_run: 1,
+            ..Default::default()
+        };
+        let uc = SearchUseCase::new(port.clone(), cfg);
+        uc.search("run-A", SearchRequest::new("x")).await.unwrap();
+        // Cache hit; should not exhaust the cap.
+        uc.search("run-A", SearchRequest::new("x")).await.unwrap();
+        // Still counts only 1 toward the port; cap not yet hit.
+        let err = uc.search("run-A", SearchRequest::new("y")).await.unwrap_err();
         assert!(matches!(err, WebDomainError::RateLimit { .. }));
     }
 }
