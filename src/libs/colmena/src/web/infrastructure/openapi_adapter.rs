@@ -15,8 +15,13 @@
 //! without breaking earlier ones.
 
 use crate::web::application::url_normalizer::{normalize_forge_url, NormalizedUrl};
-use crate::web::domain::{ApiSpecPort, SpecFetchResult, WebDomainError};
+use crate::web::domain::{
+    ApiKeyLocation, ApiSpecPort, Endpoint, HttpMethod, ParamType, ParameterSpec, ParsedSpec,
+    RequestBodySpec, ResponseSpec, SecurityRequirement, SecurityScheme, SpecFetchResult,
+    SpecFormat, WebDomainError,
+};
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// Caps and limits shared across the pipeline stages.
@@ -172,18 +177,523 @@ pub(crate) enum FetchRawResult {
     NotModified,
 }
 
-/// Temporary `ApiSpecPort` impl — Task 6 replaces the body with real parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BodyFormat {
+    Json,
+    Yaml,
+}
+
+pub(crate) fn detect_body_format(body: &[u8]) -> BodyFormat {
+    let first = body.iter().copied().find(|b| !b.is_ascii_whitespace());
+    match first {
+        Some(b'{') | Some(b'[') => BodyFormat::Json,
+        _ => BodyFormat::Yaml,
+    }
+}
+
+pub(crate) fn detect_spec_kind(v: &serde_json::Value) -> Result<SpecFormat, WebDomainError> {
+    if let Some(openapi) = v.get("openapi").and_then(|x| x.as_str()) {
+        if openapi.starts_with("3.") {
+            return Ok(SpecFormat::OpenApi3x);
+        }
+        return Err(WebDomainError::UnsupportedSpecFormat {
+            detected: format!("openapi {openapi}"),
+        });
+    }
+    if let Some(swagger) = v.get("swagger").and_then(|x| x.as_str()) {
+        if swagger.starts_with("2.") {
+            return Ok(SpecFormat::Swagger20);
+        }
+        return Err(WebDomainError::UnsupportedSpecFormat {
+            detected: format!("swagger {swagger}"),
+        });
+    }
+    let hint = ["asyncapi", "raml", "info", "definitions"]
+        .iter()
+        .find(|k| v.get(*k).is_some())
+        .copied()
+        .unwrap_or("(none)");
+    Err(WebDomainError::UnsupportedSpecFormat {
+        detected: format!("root key '{hint}' not recognized as OpenAPI or Swagger"),
+    })
+}
+
+/// Parse raw bytes of an OpenAPI 3.x document into `ParsedSpec`.
+/// Swagger 2.0 dispatch is added in Task 7.
+pub(crate) fn parse_body_to_spec(
+    body: &[u8],
+    content_type: Option<&str>,
+    input_url: &str,
+    resolved_url: &str,
+) -> Result<ParsedSpec, WebDomainError> {
+    let fmt = match content_type {
+        Some(ct) if ct.contains("json") => BodyFormat::Json,
+        Some(ct) if ct.contains("yaml") || ct.contains("yml") => BodyFormat::Yaml,
+        _ => detect_body_format(body),
+    };
+
+    let as_value: serde_json::Value = match fmt {
+        BodyFormat::Json => serde_json::from_slice(body).map_err(|e| {
+            WebDomainError::SpecParseFailed {
+                details: format!("json parse: {e}"),
+            }
+        })?,
+        BodyFormat::Yaml => {
+            let y: serde_yaml::Value = serde_yaml::from_slice(body).map_err(|e| {
+                WebDomainError::SpecParseFailed {
+                    details: format!("yaml parse: {e}"),
+                }
+            })?;
+            serde_json::to_value(y).map_err(|e| WebDomainError::SpecParseFailed {
+                details: format!("yaml→json: {e}"),
+            })?
+        }
+    };
+
+    let kind = detect_spec_kind(&as_value)?;
+    match kind {
+        SpecFormat::OpenApi3x => {
+            parse_oas3_value(as_value, SpecFormat::OpenApi3x, input_url, resolved_url)
+        }
+        SpecFormat::Swagger20 => {
+            // Task 7 fills this in; for now, error cleanly.
+            Err(WebDomainError::AdapterInit(
+                "Swagger 2.0 path pending Task 7".into(),
+            ))
+        }
+    }
+}
+
+fn parse_oas3_value(
+    v: serde_json::Value,
+    original_format: SpecFormat,
+    input_url: &str,
+    resolved_url: &str,
+) -> Result<ParsedSpec, WebDomainError> {
+    let spec: oas3::OpenApiV3Spec =
+        serde_json::from_value(v.clone()).map_err(|e| WebDomainError::SpecParseFailed {
+            details: format!("oas3 decode: {e}"),
+        })?;
+
+    let title = spec.info.title.clone();
+    let version = spec.info.version.clone();
+    let description = spec.info.description.clone();
+    let internal_format = format!("openapi-{}", spec.openapi);
+    let tags = spec.tags.iter().map(|t| t.name.clone()).collect();
+    let servers = spec
+        .servers
+        .iter()
+        .map(|s| s.url.clone())
+        .collect::<Vec<_>>();
+
+    let security_schemes = extract_security_schemes(&v);
+    let endpoints = extract_endpoints(&v)?;
+
+    Ok(ParsedSpec {
+        resolved_url: resolved_url.to_string(),
+        input_url: input_url.to_string(),
+        original_format,
+        internal_format,
+        title,
+        version,
+        description,
+        servers,
+        endpoints,
+        security_schemes,
+        tags,
+    })
+}
+
+/// We walk the raw JSON rather than `oas3`'s typed view so refs we don't
+/// inline still carry through — the LLM sees whatever the spec author
+/// wrote, even if it's a `$ref` to a component we haven't resolved.
+fn extract_endpoints(root: &serde_json::Value) -> Result<Vec<Endpoint>, WebDomainError> {
+    let mut out: Vec<Endpoint> = Vec::new();
+    let Some(paths) = root.get("paths").and_then(|v| v.as_object()) else {
+        return Ok(out);
+    };
+
+    for (path, item) in paths {
+        let Some(item_obj) = item.as_object() else {
+            continue;
+        };
+
+        // Path-level parameters apply to every operation under the path.
+        let path_level_params: Vec<serde_json::Value> = item_obj
+            .get("parameters")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        for (method_key, op_val) in item_obj {
+            let Some(method) = HttpMethod::parse(method_key) else {
+                continue;
+            };
+            let Some(op) = op_val.as_object() else {
+                continue;
+            };
+
+            let operation_id = op
+                .get("operationId")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| generate_operation_id(method, path));
+
+            let summary = op.get("summary").and_then(|v| v.as_str()).map(String::from);
+            let description = op
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let tags = op
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+
+            // Merge path-level + op-level parameters; op-level wins on name conflict.
+            let mut combined: Vec<serde_json::Value> = path_level_params.clone();
+            if let Some(Some(arr)) = op.get("parameters").map(|v| v.as_array()) {
+                for p in arr {
+                    combined.retain(|existing| {
+                        existing.get("name") != p.get("name")
+                            || existing.get("in") != p.get("in")
+                    });
+                    combined.push(p.clone());
+                }
+            }
+
+            let mut path_params = Vec::new();
+            let mut query_params = Vec::new();
+            let mut header_params = Vec::new();
+            for p in combined {
+                let Some(p_obj) = p.as_object() else { continue };
+                let spec = parameter_from_json(p_obj);
+                match p_obj.get("in").and_then(|v| v.as_str()) {
+                    Some("path") => path_params.push(spec),
+                    Some("query") => query_params.push(spec),
+                    Some("header") => header_params.push(spec),
+                    _ => {} // cookie ignored for v1
+                }
+            }
+
+            let request_body = op.get("requestBody").and_then(request_body_from_json);
+            let responses = op
+                .get("responses")
+                .and_then(|v| v.as_object())
+                .map(|map| {
+                    let mut out = HashMap::new();
+                    for (code, resp) in map {
+                        out.insert(code.clone(), response_spec_from_json(resp));
+                    }
+                    out
+                })
+                .unwrap_or_default();
+            let security = op
+                .get("security")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().flat_map(security_requirements_from_array).collect())
+                .unwrap_or_default();
+
+            out.push(Endpoint {
+                operation_id,
+                method,
+                path: path.clone(),
+                summary,
+                description,
+                tags,
+                path_params,
+                query_params,
+                header_params,
+                request_body,
+                responses,
+                security,
+            });
+        }
+    }
+
+    Ok(out)
+}
+
+fn generate_operation_id(method: HttpMethod, path: &str) -> String {
+    // Derive a stable ID when the author didn't provide one.
+    // e.g. (POST, /pet/{petId}/uploadImage) → Post_pet_petId_uploadImage
+    let cleaned: String = path
+        .chars()
+        .map(|c| if c == '/' || c == '{' || c == '}' || c == '-' { '_' } else { c })
+        .collect();
+    let cleaned = cleaned.trim_matches('_');
+    format!(
+        "{}{}",
+        match method {
+            HttpMethod::Get => "Get_",
+            HttpMethod::Put => "Put_",
+            HttpMethod::Post => "Post_",
+            HttpMethod::Delete => "Delete_",
+            HttpMethod::Options => "Options_",
+            HttpMethod::Head => "Head_",
+            HttpMethod::Patch => "Patch_",
+            HttpMethod::Trace => "Trace_",
+        },
+        cleaned
+    )
+}
+
+fn parameter_from_json(p: &serde_json::Map<String, serde_json::Value>) -> ParameterSpec {
+    let name = p
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_default();
+    let description = p.get("description").and_then(|v| v.as_str()).map(String::from);
+    let required = p.get("required").and_then(|v| v.as_bool()).unwrap_or(false);
+    let schema = p
+        .get("schema")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let param_type = classify_schema(&schema);
+    let style = p.get("style").and_then(|v| v.as_str()).map(String::from);
+    let explode = p.get("explode").and_then(|v| v.as_bool());
+    ParameterSpec {
+        name,
+        description,
+        required,
+        param_type,
+        style,
+        explode,
+    }
+}
+
+fn classify_schema(schema: &serde_json::Value) -> ParamType {
+    let Some(schema) = schema.as_object() else {
+        return ParamType::Unknown;
+    };
+    match schema.get("type").and_then(|v| v.as_str()) {
+        Some("string") => ParamType::String,
+        Some("integer") => ParamType::Integer,
+        Some("number") => ParamType::Number,
+        Some("boolean") => ParamType::Boolean,
+        Some("array") => {
+            let items = schema.get("items").cloned().unwrap_or(serde_json::Value::Null);
+            ParamType::Array(Box::new(classify_schema(&items)))
+        }
+        Some("object") => ParamType::Object,
+        _ => {
+            if schema.contains_key("$ref") {
+                ParamType::Object
+            } else {
+                ParamType::Unknown
+            }
+        }
+    }
+}
+
+fn request_body_from_json(rb: &serde_json::Value) -> Option<RequestBodySpec> {
+    let rb_obj = rb.as_object()?;
+    let required = rb_obj.get("required").and_then(|v| v.as_bool()).unwrap_or(false);
+    let content = rb_obj.get("content").and_then(|v| v.as_object())?;
+    // Prefer JSON, fall back to form-urlencoded, multipart, then first key.
+    let preferred = ["application/json", "application/x-www-form-urlencoded", "multipart/form-data"];
+    let content_type = preferred
+        .iter()
+        .find(|k| content.contains_key(**k))
+        .map(|s| s.to_string())
+        .or_else(|| content.keys().next().cloned())?;
+    let media = content.get(&content_type)?.as_object()?;
+    let schema = media.get("schema").cloned().unwrap_or(serde_json::Value::Null);
+    Some(RequestBodySpec {
+        content_type,
+        required,
+        schema,
+    })
+}
+
+fn response_spec_from_json(resp: &serde_json::Value) -> ResponseSpec {
+    let description = resp
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let mut content = HashMap::new();
+    if let Some(cmap) = resp.get("content").and_then(|v| v.as_object()) {
+        for (ct, media) in cmap {
+            if let Some(media_obj) = media.as_object() {
+                if let Some(schema) = media_obj.get("schema") {
+                    content.insert(ct.clone(), schema.clone());
+                }
+            }
+        }
+    }
+    ResponseSpec { description, content }
+}
+
+fn security_requirements_from_array(v: &serde_json::Value) -> Vec<SecurityRequirement> {
+    let Some(obj) = v.as_object() else {
+        return Vec::new();
+    };
+    obj.iter()
+        .map(|(scheme, scopes)| SecurityRequirement {
+            scheme: scheme.clone(),
+            scopes: scopes
+                .as_array()
+                .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+fn extract_security_schemes(root: &serde_json::Value) -> HashMap<String, SecurityScheme> {
+    let mut out = HashMap::new();
+    let Some(comps) = root.get("components").and_then(|v| v.as_object()) else {
+        return out;
+    };
+    let Some(ss) = comps.get("securitySchemes").and_then(|v| v.as_object()) else {
+        return out;
+    };
+    for (name, raw) in ss {
+        let Some(scheme_obj) = raw.as_object() else { continue };
+        let ty = scheme_obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let scheme = match ty {
+            "http" => SecurityScheme::Http {
+                scheme: scheme_obj
+                    .get("scheme")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("bearer")
+                    .to_string(),
+                bearer_format: scheme_obj
+                    .get("bearerFormat")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+            },
+            "apiKey" => {
+                let location = match scheme_obj.get("in").and_then(|v| v.as_str()).unwrap_or("header") {
+                    "query" => ApiKeyLocation::Query,
+                    "cookie" => ApiKeyLocation::Cookie,
+                    _ => ApiKeyLocation::Header,
+                };
+                SecurityScheme::ApiKey {
+                    name: scheme_obj
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    location,
+                }
+            }
+            "oauth2" => SecurityScheme::OAuth2 {
+                flows: scheme_obj
+                    .get("flows")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            },
+            "openIdConnect" => SecurityScheme::OpenIdConnect {
+                openid_connect_url: scheme_obj
+                    .get("openIdConnectUrl")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            },
+            _ => continue,
+        };
+        out.insert(name.clone(), scheme);
+    }
+    out
+}
+
 #[async_trait]
 impl ApiSpecPort for OpenApiAdapter {
     async fn fetch_and_parse(
         &self,
-        _url: &str,
-        _etag: Option<&str>,
-        _last_modified: Option<&str>,
+        url: &str,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
     ) -> Result<SpecFetchResult, WebDomainError> {
-        Err(WebDomainError::AdapterInit(
-            "OpenApiAdapter::fetch_and_parse not yet implemented — Task 6 wires it up".into(),
-        ))
+        match self.fetch_raw(url, etag, last_modified).await? {
+            FetchRawResult::NotModified => Ok(SpecFetchResult::NotModified),
+            FetchRawResult::Fresh {
+                body,
+                content_type,
+                etag,
+                last_modified,
+                resolved_url,
+            } => {
+                let spec = parse_body_to_spec(&body, content_type.as_deref(), url, &resolved_url)?;
+                Ok(SpecFetchResult::Fresh {
+                    spec,
+                    etag,
+                    last_modified,
+                })
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_parse_openapi3 {
+    use super::*;
+    use crate::web::domain::{HttpMethod, SpecFormat};
+
+    fn petstore_yaml() -> &'static str {
+        include_str!("../../../tests/fixtures/specs/petstore-3.0.yaml")
+    }
+
+    #[test]
+    fn detect_format_json_braces() {
+        let b = b"  { \"openapi\": \"3.0.3\" }";
+        assert!(matches!(
+            super::super::openapi_adapter::detect_body_format(b),
+            BodyFormat::Json
+        ));
+    }
+
+    #[test]
+    fn detect_format_yaml_fallback() {
+        let b = b"openapi: 3.0.3\ninfo: ...";
+        assert!(matches!(
+            super::super::openapi_adapter::detect_body_format(b),
+            BodyFormat::Yaml
+        ));
+    }
+
+    #[test]
+    fn detect_spec_kind_openapi_3x() {
+        let v: serde_json::Value = serde_json::from_str(r#"{"openapi": "3.0.3"}"#).unwrap();
+        assert_eq!(super::super::openapi_adapter::detect_spec_kind(&v).unwrap(), SpecFormat::OpenApi3x);
+    }
+
+    #[test]
+    fn detect_spec_kind_swagger_2() {
+        let v: serde_json::Value = serde_json::from_str(r#"{"swagger": "2.0"}"#).unwrap();
+        assert_eq!(super::super::openapi_adapter::detect_spec_kind(&v).unwrap(), SpecFormat::Swagger20);
+    }
+
+    #[test]
+    fn detect_spec_kind_rejects_asyncapi() {
+        let v: serde_json::Value = serde_json::from_str(r#"{"asyncapi": "2.4.0"}"#).unwrap();
+        let err = super::super::openapi_adapter::detect_spec_kind(&v).unwrap_err();
+        assert!(matches!(err, WebDomainError::UnsupportedSpecFormat { .. }));
+    }
+
+    #[tokio::test]
+    async fn parse_petstore_yaml_succeeds() {
+        let body = petstore_yaml().as_bytes().to_vec();
+        let parsed = super::super::openapi_adapter::parse_body_to_spec(
+            &body,
+            Some("application/yaml"),
+            "https://example.test/petstore.yaml",
+            "https://example.test/petstore.yaml",
+        )
+        .unwrap();
+        assert_eq!(parsed.title, "Swagger Petstore");
+        assert_eq!(parsed.original_format, SpecFormat::OpenApi3x);
+        assert!(parsed.endpoints.len() >= 3);
+        // find POST /pet
+        let post_pet = parsed
+            .endpoints
+            .iter()
+            .find(|e| e.method == HttpMethod::Post && e.path == "/pet")
+            .expect("POST /pet should exist");
+        assert!(post_pet.request_body.is_some());
+        let rb = post_pet.request_body.as_ref().unwrap();
+        assert!(rb.content_type.starts_with("application/"));
     }
 }
 

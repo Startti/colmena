@@ -36,8 +36,11 @@ pub enum WebDomainError {
     #[error("timeout after {ms}ms")]
     Timeout { ms: u64 },
 
-    #[error("spec parse failed: {0}")]
-    SpecParseError(String),
+    #[error("spec parse failed: {details}")]
+    SpecParseFailed { details: String },
+
+    #[error("unsupported spec format: {detected}")]
+    UnsupportedSpecFormat { detected: String },
 
     #[error("endpoint not found: {searched_for}")]
     EndpointNotFound {
@@ -146,6 +149,22 @@ mod tests {
         assert!(!WebDomainError::SpecTooLarge {
             size_bytes: 11_000_000,
             limit_bytes: 10_485_760,
+        }
+        .is_llm_recoverable());
+    }
+
+    #[test]
+    fn spec_parse_failed_is_recoverable() {
+        assert!(WebDomainError::SpecParseFailed {
+            details: "json parse: unexpected token".into()
+        }
+        .is_llm_recoverable());
+    }
+
+    #[test]
+    fn unsupported_spec_format_is_recoverable() {
+        assert!(WebDomainError::UnsupportedSpecFormat {
+            detected: "asyncapi 2.4.0".into()
         }
         .is_llm_recoverable());
     }
