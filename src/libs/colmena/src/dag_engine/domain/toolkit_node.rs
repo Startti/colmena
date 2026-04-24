@@ -9,6 +9,7 @@
 use crate::dag_engine::domain::node::ExecutableNode;
 use crate::llm::domain::tools::ParameterProperty;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// Reserved input key injected by `DagToolExecutor` to identify which sub-tool
@@ -19,7 +20,10 @@ pub const SUB_TOOL_INPUT_KEY: &str = "__sub_tool";
 #[derive(Debug, Clone)]
 pub struct SubToolDefinition {
     /// Short programmatic name (no toolkit prefix). Examples: `"search"`, `"navigate"`.
-    pub name: &'static str,
+    /// Using `Cow<'static, str>` lets static toolkits use string literals while
+    /// leaving the door open for dynamic toolkits (e.g. API explorer) that
+    /// compute sub-tool names from a spec at runtime.
+    pub name: Cow<'static, str>,
     /// Rich description shown to the LLM. Accuracy relies on this.
     pub description: String,
     /// JSON-Schema-style properties map for the LLM-visible parameters.
@@ -37,6 +41,9 @@ pub struct SubToolDefinition {
 /// or a **dynamic** list computed from the node configuration (future work —
 /// e.g. exposing each endpoint of an HTTP spec as its own sub-tool).
 pub trait ToolkitNode: ExecutableNode {
+    /// Return the sub-tools this node exposes, given the node's static config.
+    /// Callers pass already-validated config; implementations should return an
+    /// empty `Vec` rather than panic if the shape is unexpected.
     fn sub_tool_catalog(&self, config: &Value) -> Vec<SubToolDefinition>;
 }
 
@@ -52,7 +59,7 @@ mod tests {
     #[test]
     fn sub_tool_definition_clone_is_cheap() {
         let def = SubToolDefinition {
-            name: "search",
+            name: Cow::Borrowed("search"),
             description: "search the web".into(),
             properties: HashMap::new(),
             required: Vec::new(),
