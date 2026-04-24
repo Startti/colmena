@@ -35,14 +35,14 @@ impl ExecutableNode for EchoToolkitNode {
                 let msg = inputs
                     .get("message")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                    .ok_or("echo: missing required 'message'")?;
                 Ok(json!({ "output": msg }))
             }
             "double" => {
                 let n = inputs
                     .get("n")
                     .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0);
+                    .ok_or("double: missing required 'n'")?;
                 Ok(json!({ "output": n * 2.0 }))
             }
             other => Err(format!("unknown sub_tool: {other}").into()),
@@ -132,5 +132,44 @@ mod tests {
         assert_eq!(cat.len(), 2);
         assert!(cat.iter().any(|d| d.name == "echo"));
         assert!(cat.iter().any(|d| d.name == "double"));
+    }
+
+    #[tokio::test]
+    async fn missing_sub_tool_returns_error() {
+        let node = EchoToolkitNode;
+        let inputs: NodeInputs = HashMap::new();
+        let mut state = json!({});
+        let err = node.execute(&inputs, &json!({}), &mut state, None).await.unwrap_err();
+        assert!(err.to_string().contains("__sub_tool"));
+    }
+
+    #[tokio::test]
+    async fn unknown_sub_tool_returns_error() {
+        let node = EchoToolkitNode;
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("nope"));
+        let mut state = json!({});
+        let err = node.execute(&inputs, &json!({}), &mut state, None).await.unwrap_err();
+        assert!(err.to_string().contains("unknown sub_tool"));
+    }
+
+    #[tokio::test]
+    async fn echo_missing_message_returns_error() {
+        let node = EchoToolkitNode;
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("echo"));
+        let mut state = json!({});
+        let err = node.execute(&inputs, &json!({}), &mut state, None).await.unwrap_err();
+        assert!(err.to_string().contains("message"));
+    }
+
+    #[tokio::test]
+    async fn double_missing_n_returns_error() {
+        let node = EchoToolkitNode;
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("double"));
+        let mut state = json!({});
+        let err = node.execute(&inputs, &json!({}), &mut state, None).await.unwrap_err();
+        assert!(err.to_string().contains("'n'"));
     }
 }
