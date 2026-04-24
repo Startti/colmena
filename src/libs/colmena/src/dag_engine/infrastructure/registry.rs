@@ -160,6 +160,21 @@ impl HashMapNodeRegistry {
                 ),
             );
 
+            // --- Register Tavily Client ---
+            let tavily = Arc::new({
+                use crate::dag_engine::infrastructure::nodes::tavily_client::TavilyClientNode;
+                let n = TavilyClientNode::new();
+                if let Some(svc) = secure_value_service.clone() {
+                    n.with_secure_values(svc)
+                } else {
+                    n
+                }
+            });
+            nodes.insert(
+                "tavily_client".to_string(),
+                tavily.clone() as Arc<dyn ExecutableNode>,
+            );
+
             // --- Registrar SubGraph ---
             let sub_node = Arc::new(SubGraphNode::new());
             nodes.insert(
@@ -167,9 +182,15 @@ impl HashMapNodeRegistry {
                 sub_node.clone() as Arc<dyn ExecutableNode>,
             );
 
+            let mut toolkit_nodes: HashMap<String, Arc<dyn ToolkitNode>> = HashMap::new();
+            toolkit_nodes.insert(
+                "tavily_client".to_string(),
+                tavily.clone() as Arc<dyn ToolkitNode>,
+            );
+
             Self {
                 nodes,
-                toolkit_nodes: HashMap::new(),
+                toolkit_nodes,
                 subgraph_node: Some(sub_node),
             }
         })
@@ -231,5 +252,108 @@ impl NodeRegistryPort for HashMapNodeRegistry {
         node_type: &str,
     ) -> Option<Arc<dyn ToolkitNode>> {
         self.toolkit_nodes.get(node_type).cloned()
+    }
+}
+
+#[cfg(test)]
+mod registry_tavily_tests {
+    use super::*;
+    use crate::dag_engine::domain::error::DagError;
+    use crate::dag_engine::domain::state::{DagPhaseSummary, DagTask, DagTaskMemoryRepository};
+    use crate::dag_engine::infrastructure::pool_registry::{PgPoolRegistry, PoolConfig};
+    use crate::dag_engine::infrastructure::sql_port_factory::SqlPortFactory;
+    use crate::llm::infrastructure::ConversationRepositoryFactory;
+    use async_trait::async_trait;
+    use serde_json::Value;
+
+    struct StubTaskMemory;
+
+    #[async_trait]
+    impl DagTaskMemoryRepository for StubTaskMemory {
+        async fn add_task(&self, _task: &DagTask) -> Result<(), DagError> {
+            Ok(())
+        }
+        async fn update_task_result(
+            &self,
+            _task_id: &str,
+            _result: Value,
+        ) -> Result<(), DagError> {
+            Ok(())
+        }
+        async fn get_tasks_for_run(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<DagTask>, DagError> {
+            Ok(vec![])
+        }
+        async fn get_first_uncompleted_task(
+            &self,
+            _session_id: &str,
+        ) -> Result<Option<DagTask>, DagError> {
+            Ok(None)
+        }
+        async fn delete_task(&self, _task_id: &str) -> Result<(), DagError> {
+            Ok(())
+        }
+        async fn clear_tasks_for_run(&self, _session_id: &str) -> Result<(), DagError> {
+            Ok(())
+        }
+        async fn get_current_phase(
+            &self,
+            _session_id: &str,
+        ) -> Result<Option<i32>, DagError> {
+            Ok(None)
+        }
+        async fn get_uncompleted_tasks_for_phase(
+            &self,
+            _session_id: &str,
+            _phase: i32,
+        ) -> Result<Vec<DagTask>, DagError> {
+            Ok(vec![])
+        }
+        async fn save_phase_summary(
+            &self,
+            _session_id: &str,
+            _phase: i32,
+            _summary: &str,
+        ) -> Result<(), DagError> {
+            Ok(())
+        }
+        async fn get_phase_summaries(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<DagPhaseSummary>, DagError> {
+            Ok(vec![])
+        }
+    }
+
+    fn build_registry() -> Arc<HashMapNodeRegistry> {
+        let pool_registry = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+        let repo_factory = Arc::new(ConversationRepositoryFactory::new(pool_registry.clone()));
+        let sql_factory = Arc::new(SqlPortFactory::new(pool_registry));
+        let task_memory: Arc<dyn DagTaskMemoryRepository> = Arc::new(StubTaskMemory);
+        HashMapNodeRegistry::new(repo_factory, sql_factory, Some(task_memory))
+    }
+
+    #[test]
+    fn tavily_client_registered_as_executable_node() {
+        let reg = build_registry();
+        let node = reg.get_node("tavily_client");
+        assert!(
+            node.is_some(),
+            "tavily_client must be registered as an ExecutableNode"
+        );
+    }
+
+    #[test]
+    fn tavily_client_registered_as_toolkit_node() {
+        let reg = build_registry();
+        let tk = reg.get_toolkit_node("tavily_client");
+        assert!(
+            tk.is_some(),
+            "tavily_client must be registered as a ToolkitNode"
+        );
+        let cat = tk.unwrap().sub_tool_catalog(&serde_json::json!({}));
+        assert_eq!(cat.len(), 2);
     }
 }
