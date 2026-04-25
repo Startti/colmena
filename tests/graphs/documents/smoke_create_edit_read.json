@@ -1,0 +1,57 @@
+{
+  "nodes": {
+    "create_step": {
+      "type": "document_create",
+      "config": {
+        "kind": "excel",
+        "label": "Smoke test workbook",
+        "storage_root": "/tmp/colmena_smoke_documents",
+        "initial_ir": {
+          "kind": "excel",
+          "artifact_id": "placeholder",
+          "version_id": "v1",
+          "schema_version": "1.0.0",
+          "workbook": {
+            "sheets": [
+              {
+                "id": "s1",
+                "name": "Hoja1",
+                "order": 0,
+                "columns": [],
+                "cells": {},
+                "tables": []
+              }
+            ],
+            "named_styles": {}
+          }
+        }
+      }
+    },
+    "edit_step": {
+      "type": "document_edit",
+      "config": {
+        "storage_root": "/tmp/colmena_smoke_documents",
+        "ops": [
+          { "op": "set_cell", "sheet_id": "s1", "address": "A1", "value": "Hola" },
+          { "op": "set_cell", "sheet_id": "s1", "address": "B1", "value": 42 }
+        ]
+      }
+    },
+    "read_step": {
+      "type": "document_read",
+      "config": {
+        "storage_root": "/tmp/colmena_smoke_documents"
+      }
+    },
+    "log_step": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "create_step.output.artifact_id", "to": "edit_step.artifact_id" },
+    { "from": "create_step.output.version_id",  "to": "edit_step.base_version" },
+    { "from": "create_step.output.artifact_id", "to": "read_step.artifact_id" },
+    { "from": "edit_step.output.version_id",    "to": "read_step.version" },
+    { "from": "read_step",                       "to": "log_step" }
+  ]
+}
