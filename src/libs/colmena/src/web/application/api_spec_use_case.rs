@@ -801,7 +801,7 @@ mod tests_build_http_request {
     use super::*;
     use crate::web::domain::{
         ApiKeyLocation, Endpoint, HttpMethod, ParamType, ParameterSpec, ParsedSpec,
-        RequestBodySpec, ResponseSpec, SecurityRequirement, SecurityScheme, SpecFormat,
+        RequestBodySpec, SecurityRequirement, SecurityScheme, SpecFormat,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -1122,11 +1122,6 @@ mod tests_build_http_request {
         assert_eq!(req["query_params"]["api_key"], "${SECURE:my_key}");
     }
 
-    #[test]
-    fn unused_import_response_spec() {
-        // This test exists only to silence the dead_code warning on ResponseSpec import.
-        let _ = ResponseSpec { description: None, content: HashMap::new() };
-    }
 }
 
 #[cfg(test)]
