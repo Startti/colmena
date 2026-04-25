@@ -432,6 +432,703 @@ fn explain_match(query: &str, ep: &Endpoint) -> String {
     }
 }
 
+use crate::web::domain::{ApiKeyLocation, RequestBodySpec, SecurityScheme};
+
+/// Given an endpoint + parameter map + optional auth secret reference,
+/// emit the JSON object the `http_request` node consumes.
+///
+/// # Errors
+/// - [`WebDomainError::EndpointNotFound`] — `operation_id` not in spec.
+/// - [`WebDomainError::MissingRequiredParams`] — one or more required params absent.
+/// - [`WebDomainError::InvalidParamType`] — value cannot be coerced to declared type.
+/// - [`WebDomainError::MissingAuth`] — endpoint requires auth but `auth_secret_ref` is `None`.
+/// - [`WebDomainError::InvalidConfig`] — spec is internally inconsistent (missing security scheme
+///   definition, no `servers[]`, unsupported content-type).
+pub fn build_http_request(
+    spec: &ParsedSpec,
+    operation_id: &str,
+    params: &Value,
+    auth_secret_ref: Option<&str>,
+) -> Result<Value, WebDomainError> {
+    let ep = spec
+        .endpoints
+        .iter()
+        .find(|e| e.operation_id == operation_id)
+        .ok_or_else(|| WebDomainError::EndpointNotFound {
+            searched_for: operation_id.to_string(),
+            did_you_mean: search_endpoint(spec, operation_id, None, 3, 0.0)
+                .into_iter()
+                .map(|h| h.operation_id)
+                .collect(),
+        })?;
+
+    let params_obj = params
+        .as_object()
+        .cloned()
+        .unwrap_or_else(serde_json::Map::new);
+
+    // ---- Path parameters ----
+    let mut url_path = ep.path.clone();
+    let mut missing: Vec<String> = Vec::new();
+    for p in &ep.path_params {
+        match params_obj.get(&p.name) {
+            Some(v) => {
+                let coerced = coerce_scalar(v, &p.param_type, &p.name)?;
+                url_path = url_path.replace(&format!("{{{}}}", p.name), &coerced);
+            }
+            None if p.required => missing.push(p.name.clone()),
+            None => {}
+        }
+    }
+
+    // ---- Query parameters ----
+    let mut query_params = serde_json::Map::new();
+    for p in &ep.query_params {
+        match params_obj.get(&p.name) {
+            Some(v) => {
+                query_params.insert(p.name.clone(), encode_param(v, p)?);
+            }
+            None if p.required => missing.push(p.name.clone()),
+            None => {}
+        }
+    }
+
+    // ---- Header parameters ----
+    let mut headers = serde_json::Map::new();
+    for p in &ep.header_params {
+        match params_obj.get(&p.name) {
+            Some(v) => {
+                let coerced = coerce_scalar(v, &p.param_type, &p.name)?;
+                headers.insert(p.name.clone(), Value::String(coerced));
+            }
+            None if p.required => missing.push(p.name.clone()),
+            None => {}
+        }
+    }
+
+    // ---- Body ----
+    let mut body_value: Value = Value::Null;
+    if let Some(rb) = &ep.request_body {
+        let (body, body_missing) = build_body(rb, &params_obj)?;
+        if rb.required {
+            for m in body_missing {
+                missing.push(m);
+            }
+        }
+        body_value = body;
+        headers.insert("Content-Type".into(), Value::String(rb.content_type.clone()));
+    }
+
+    if !missing.is_empty() {
+        return Err(WebDomainError::MissingRequiredParams {
+            missing,
+            hints: Some(format!(
+                "The listed parameters are required for {}. Check get_endpoint_details for descriptions.",
+                ep.operation_id
+            )),
+        });
+    }
+
+    // ---- Security ----
+    if !ep.security.is_empty() {
+        let required = &ep.security[0]; // use the first security option
+        let scheme = spec.security_schemes.get(&required.scheme).ok_or_else(|| {
+            WebDomainError::InvalidConfig(format!(
+                "endpoint declares security scheme '{}' but the spec has no matching entry in components.securitySchemes",
+                required.scheme
+            ))
+        })?;
+        let secret_ref = auth_secret_ref.ok_or_else(|| WebDomainError::MissingAuth {
+            scheme: required.scheme.clone(),
+            message: format!(
+                "endpoint '{}' requires auth scheme '{}' but no auth_secret_ref was provided",
+                ep.operation_id, required.scheme
+            ),
+        })?;
+        apply_security_scheme(scheme, secret_ref, &mut headers, &mut query_params);
+    }
+
+    // ---- Base URL ----
+    let base = spec
+        .servers
+        .first()
+        .cloned()
+        .ok_or_else(|| WebDomainError::InvalidConfig(
+            "spec has no servers[]; set default_base_url_override in the node config".into(),
+        ))?;
+    let url = format!("{}{}", base.trim_end_matches('/'), url_path);
+
+    Ok(json!({
+        "url": url,
+        "method": ep.method.as_str(),
+        "headers": headers,
+        "query_params": query_params,
+        "body": body_value,
+    }))
+}
+
+fn coerce_scalar(v: &Value, ty: &ParamType, name: &str) -> Result<String, WebDomainError> {
+    match (v, ty) {
+        (Value::String(s), ParamType::Integer) => {
+            s.parse::<i64>()
+                .map(|n| n.to_string())
+                .map_err(|_| WebDomainError::InvalidParamType {
+                    param: name.into(),
+                    expected_type: "integer".into(),
+                    got: format!("\"{s}\""),
+                })
+        }
+        (Value::String(s), ParamType::Number) => {
+            s.parse::<f64>()
+                .map(|n| n.to_string())
+                .map_err(|_| WebDomainError::InvalidParamType {
+                    param: name.into(),
+                    expected_type: "number".into(),
+                    got: format!("\"{s}\""),
+                })
+        }
+        (Value::Number(n), ParamType::Integer) => Ok(n.as_i64()
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| n.to_string())),
+        (Value::Number(n), ParamType::Number) => Ok(n.to_string()),
+        (Value::Bool(b), ParamType::Boolean) => Ok(b.to_string()),
+        (Value::String(s), ParamType::Boolean) => match s.as_str() {
+            "true" | "false" => Ok(s.clone()),
+            other => Err(WebDomainError::InvalidParamType {
+                param: name.into(),
+                expected_type: "boolean".into(),
+                got: format!("\"{other}\""),
+            }),
+        },
+        (Value::String(s), _) => Ok(s.clone()),
+        (Value::Number(n), _) => Ok(n.to_string()),
+        (Value::Bool(b), _) => Ok(b.to_string()),
+        (Value::Null, _) => Err(WebDomainError::InvalidParamType {
+            param: name.into(),
+            expected_type: format!("{ty:?}"),
+            got: "null".into(),
+        }),
+        (other, _) => Err(WebDomainError::InvalidParamType {
+            param: name.into(),
+            expected_type: format!("{ty:?}"),
+            got: format!("{other:?}"),
+        }),
+    }
+}
+
+fn encode_param(v: &Value, p: &ParameterSpec) -> Result<Value, WebDomainError> {
+    if let ParamType::Array(inner) = &p.param_type {
+        let arr = v.as_array().ok_or_else(|| WebDomainError::InvalidParamType {
+            param: p.name.clone(),
+            expected_type: "array".into(),
+            got: format!("{v:?}"),
+        })?;
+        let strs: Result<Vec<String>, WebDomainError> = arr
+            .iter()
+            .map(|e| coerce_scalar(e, inner, &p.name))
+            .collect();
+        let strs = strs?;
+        let style = p.style.as_deref().unwrap_or("form");
+        let explode = p.explode.unwrap_or(true);
+        let encoded = match (style, explode) {
+            ("form", false) => strs.join(","),
+            // explode=true is consumed as an array by the http_request node; CSV is a safe transport default
+            ("form", true) => strs.join(","),
+            ("spaceDelimited", _) => strs.join(" "),
+            ("pipeDelimited", _) => strs.join("|"),
+            _ => strs.join(","),
+        };
+        Ok(Value::String(encoded))
+    } else {
+        Ok(Value::String(coerce_scalar(v, &p.param_type, &p.name)?))
+    }
+}
+
+fn build_body(
+    rb: &RequestBodySpec,
+    params: &serde_json::Map<String, Value>,
+) -> Result<(Value, Vec<String>), WebDomainError> {
+    match rb.content_type.as_str() {
+        "application/json" => Ok(build_body_json(rb, params)),
+        "application/x-www-form-urlencoded" => Ok(build_body_form_urlencoded(rb, params)),
+        "multipart/form-data" => Ok(build_body_multipart(rb, params)),
+        other => Err(WebDomainError::InvalidConfig(format!(
+            "unsupported request body content_type: {other}"
+        ))),
+    }
+}
+
+fn required_fields_from_schema(schema: &Value) -> Vec<String> {
+    schema
+        .get("required")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+        .unwrap_or_default()
+}
+
+fn schema_property_names(schema: &Value) -> Vec<String> {
+    schema
+        .get("properties")
+        .and_then(|v| v.as_object())
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn build_body_json(
+    rb: &RequestBodySpec,
+    params: &serde_json::Map<String, Value>,
+) -> (Value, Vec<String>) {
+    let required = required_fields_from_schema(&rb.schema);
+    let mut missing = Vec::new();
+    for name in &required {
+        if !params.contains_key(name) {
+            missing.push(name.clone());
+        }
+    }
+    let props = schema_property_names(&rb.schema);
+    let mut body = serde_json::Map::new();
+    for name in props {
+        if let Some(v) = params.get(&name) {
+            body.insert(name, v.clone());
+        }
+    }
+    // Any extra params not in the schema are still allowed (many specs are
+    // partial); include them verbatim.
+    for (k, v) in params {
+        if !body.contains_key(k) {
+            body.insert(k.clone(), v.clone());
+        }
+    }
+    (Value::Object(body), missing)
+}
+
+fn build_body_form_urlencoded(
+    rb: &RequestBodySpec,
+    params: &serde_json::Map<String, Value>,
+) -> (Value, Vec<String>) {
+    let required = required_fields_from_schema(&rb.schema);
+    let mut missing = Vec::new();
+    for name in &required {
+        if !params.contains_key(name) {
+            missing.push(name.clone());
+        }
+    }
+    let pairs: Vec<String> = params
+        .iter()
+        .map(|(k, v)| {
+            let vs = match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            format!("{}={}", percent_encode(k), percent_encode(&vs))
+        })
+        .collect();
+    (Value::String(pairs.join("&")), missing)
+}
+
+fn build_body_multipart(
+    rb: &RequestBodySpec,
+    params: &serde_json::Map<String, Value>,
+) -> (Value, Vec<String>) {
+    let required = required_fields_from_schema(&rb.schema);
+    let mut missing = Vec::new();
+    for name in &required {
+        if !params.contains_key(name) {
+            missing.push(name.clone());
+        }
+    }
+    let mut out = params.clone();
+    out.insert("__multipart".into(), Value::Bool(true));
+    (Value::Object(out), missing)
+}
+
+fn percent_encode(s: &str) -> String {
+    // RFC 3986 unreserved: A-Z a-z 0-9 - . _ ~
+    // application/x-www-form-urlencoded also permits +/= but we stay strict
+    // and percent-encode everything else (uppercase hex per RFC 3986).
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        let c = *b as char;
+        if c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_' || c == '~' {
+            out.push(c);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
+}
+
+fn apply_security_scheme(
+    scheme: &SecurityScheme,
+    secret_ref: &str,
+    headers: &mut serde_json::Map<String, Value>,
+    query_params: &mut serde_json::Map<String, Value>,
+) {
+    let placeholder = format!("${{SECURE:{secret_ref}}}");
+    match scheme {
+        SecurityScheme::Http { scheme: s, .. } => {
+            let prefix = if s.eq_ignore_ascii_case("basic") { "Basic" } else { "Bearer" };
+            headers.insert(
+                "Authorization".into(),
+                Value::String(format!("{prefix} {placeholder}")),
+            );
+        }
+        SecurityScheme::ApiKey { name, location } => match location {
+            ApiKeyLocation::Header => {
+                headers.insert(name.clone(), Value::String(placeholder));
+            }
+            ApiKeyLocation::Query => {
+                query_params.insert(name.clone(), Value::String(placeholder));
+            }
+            ApiKeyLocation::Cookie => {
+                headers.insert(
+                    "Cookie".into(),
+                    Value::String(format!("{name}={placeholder}")),
+                );
+            }
+        },
+        SecurityScheme::OAuth2 { .. } | SecurityScheme::OpenIdConnect { .. } => {
+            headers.insert(
+                "Authorization".into(),
+                Value::String(format!("Bearer {placeholder}")),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_build_http_request {
+    use super::*;
+    use crate::web::domain::{
+        ApiKeyLocation, Endpoint, HttpMethod, ParamType, ParameterSpec, ParsedSpec,
+        RequestBodySpec, ResponseSpec, SecurityRequirement, SecurityScheme, SpecFormat,
+    };
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn spec_stripe_like() -> ParsedSpec {
+        let mut security_schemes = HashMap::new();
+        security_schemes.insert(
+            "BearerAuth".to_string(),
+            SecurityScheme::Http {
+                scheme: "bearer".into(),
+                bearer_format: None,
+            },
+        );
+        ParsedSpec {
+            resolved_url: "u".into(),
+            input_url: "u".into(),
+            original_format: SpecFormat::OpenApi3x,
+            internal_format: "openapi-3.0.3".into(),
+            title: "Stripe".into(),
+            version: "x".into(),
+            description: None,
+            servers: vec!["https://api.stripe.com".into()],
+            endpoints: vec![Endpoint {
+                operation_id: "PostSubscriptions".into(),
+                method: HttpMethod::Post,
+                path: "/v1/subscriptions".into(),
+                summary: None,
+                description: None,
+                tags: Vec::new(),
+                path_params: Vec::new(),
+                query_params: Vec::new(),
+                header_params: Vec::new(),
+                request_body: Some(RequestBodySpec {
+                    content_type: "application/x-www-form-urlencoded".into(),
+                    required: true,
+                    schema: json!({
+                        "type": "object",
+                        "required": ["customer"],
+                        "properties": {
+                            "customer": { "type": "string" },
+                            "items[0][price]": { "type": "string" }
+                        }
+                    }),
+                }),
+                responses: HashMap::new(),
+                security: vec![SecurityRequirement {
+                    scheme: "BearerAuth".into(),
+                    scopes: Vec::new(),
+                }],
+            }],
+            security_schemes,
+            tags: Vec::new(),
+        }
+    }
+
+    fn spec_pet_by_id() -> ParsedSpec {
+        ParsedSpec {
+            resolved_url: "u".into(),
+            input_url: "u".into(),
+            original_format: SpecFormat::OpenApi3x,
+            internal_format: "openapi-3.0.3".into(),
+            title: "Pet".into(),
+            version: "1".into(),
+            description: None,
+            servers: vec!["https://api.example.com".into()],
+            endpoints: vec![Endpoint {
+                operation_id: "getPetById".into(),
+                method: HttpMethod::Get,
+                path: "/pet/{petId}".into(),
+                summary: None,
+                description: None,
+                tags: Vec::new(),
+                path_params: vec![ParameterSpec {
+                    name: "petId".into(),
+                    description: None,
+                    required: true,
+                    param_type: ParamType::Integer,
+                    style: None,
+                    explode: None,
+                }],
+                query_params: Vec::new(),
+                header_params: Vec::new(),
+                request_body: None,
+                responses: HashMap::new(),
+                security: Vec::new(),
+            }],
+            security_schemes: HashMap::new(),
+            tags: Vec::new(),
+        }
+    }
+
+    fn spec_search_with_array_query() -> ParsedSpec {
+        ParsedSpec {
+            resolved_url: "u".into(),
+            input_url: "u".into(),
+            original_format: SpecFormat::OpenApi3x,
+            internal_format: "openapi-3.0.3".into(),
+            title: "S".into(),
+            version: "1".into(),
+            description: None,
+            servers: vec!["https://api.example.com".into()],
+            endpoints: vec![Endpoint {
+                operation_id: "search".into(),
+                method: HttpMethod::Get,
+                path: "/items".into(),
+                summary: None,
+                description: None,
+                tags: Vec::new(),
+                path_params: Vec::new(),
+                query_params: vec![ParameterSpec {
+                    name: "ids".into(),
+                    description: None,
+                    required: false,
+                    param_type: ParamType::Array(Box::new(ParamType::String)),
+                    style: Some("form".into()),
+                    explode: Some(false),
+                }],
+                header_params: Vec::new(),
+                request_body: None,
+                responses: HashMap::new(),
+                security: Vec::new(),
+            }],
+            security_schemes: HashMap::new(),
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn happy_path_stripe_post_subscriptions() {
+        let spec = spec_stripe_like();
+        let req = build_http_request(
+            &spec,
+            "PostSubscriptions",
+            &json!({
+                "customer": "cus_ABC",
+                "items[0][price]": "price_XYZ"
+            }),
+            Some("stripe_key"),
+        )
+        .unwrap();
+        assert_eq!(req["url"], "https://api.stripe.com/v1/subscriptions");
+        assert_eq!(req["method"], "POST");
+        assert_eq!(
+            req["headers"]["Authorization"],
+            "Bearer ${SECURE:stripe_key}"
+        );
+        assert_eq!(
+            req["headers"]["Content-Type"],
+            "application/x-www-form-urlencoded"
+        );
+        let body = req["body"].as_str().unwrap();
+        assert!(body.contains("customer=cus_ABC"));
+        assert!(body.contains("items%5B0%5D%5Bprice%5D=price_XYZ"));
+    }
+
+    #[test]
+    fn missing_required_body_field_returns_error() {
+        let spec = spec_stripe_like();
+        let err = build_http_request(
+            &spec,
+            "PostSubscriptions",
+            &json!({ "items[0][price]": "price_XYZ" }),
+            Some("stripe_key"),
+        )
+        .unwrap_err();
+        match err {
+            WebDomainError::MissingRequiredParams { missing, .. } => {
+                assert!(missing.contains(&"customer".to_string()));
+            }
+            other => panic!("expected MissingRequiredParams, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_auth_when_endpoint_requires_it() {
+        let spec = spec_stripe_like();
+        let err = build_http_request(
+            &spec,
+            "PostSubscriptions",
+            &json!({ "customer": "cus_ABC" }),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, WebDomainError::MissingAuth { .. }));
+    }
+
+    #[test]
+    fn path_parameter_is_substituted() {
+        let spec = spec_pet_by_id();
+        let req = build_http_request(
+            &spec,
+            "getPetById",
+            &json!({ "petId": 42 }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(req["url"], "https://api.example.com/pet/42");
+        assert_eq!(req["method"], "GET");
+    }
+
+    #[test]
+    fn missing_required_path_parameter_returns_error() {
+        let spec = spec_pet_by_id();
+        let err = build_http_request(
+            &spec,
+            "getPetById",
+            &json!({}),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, WebDomainError::MissingRequiredParams { .. }));
+    }
+
+    #[test]
+    fn integer_param_accepts_string_coercion() {
+        let spec = spec_pet_by_id();
+        let req = build_http_request(
+            &spec,
+            "getPetById",
+            &json!({ "petId": "42" }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(req["url"], "https://api.example.com/pet/42");
+    }
+
+    #[test]
+    fn integer_param_rejects_non_numeric_string() {
+        let spec = spec_pet_by_id();
+        let err = build_http_request(
+            &spec,
+            "getPetById",
+            &json!({ "petId": "not-a-number" }),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, WebDomainError::InvalidParamType { .. }));
+    }
+
+    #[test]
+    fn array_query_csv_serializes_comma_separated() {
+        let spec = spec_search_with_array_query();
+        let req = build_http_request(
+            &spec,
+            "search",
+            &json!({ "ids": ["a", "b", "c"] }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(req["query_params"]["ids"], "a,b,c");
+    }
+
+    #[test]
+    fn missing_auth_scheme_definition_is_error() {
+        // Endpoint declares "GhostAuth" but the spec has no matching security scheme.
+        let mut spec = spec_stripe_like();
+        spec.security_schemes.clear();
+        let err = build_http_request(
+            &spec,
+            "PostSubscriptions",
+            &json!({ "customer": "cus" }),
+            Some("key"),
+        )
+        .unwrap_err();
+        match err {
+            WebDomainError::InvalidConfig(msg) => assert!(msg.contains("BearerAuth")),
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_key_scheme_with_header_location() {
+        let mut spec = spec_stripe_like();
+        spec.security_schemes.clear();
+        spec.security_schemes.insert(
+            "KeyHdr".into(),
+            SecurityScheme::ApiKey {
+                name: "X-API-Key".into(),
+                location: ApiKeyLocation::Header,
+            },
+        );
+        spec.endpoints[0].security = vec![SecurityRequirement {
+            scheme: "KeyHdr".into(),
+            scopes: Vec::new(),
+        }];
+        let req = build_http_request(
+            &spec,
+            "PostSubscriptions",
+            &json!({ "customer": "cus_ABC" }),
+            Some("my_key"),
+        )
+        .unwrap();
+        assert_eq!(req["headers"]["X-API-Key"], "${SECURE:my_key}");
+    }
+
+    #[test]
+    fn api_key_scheme_with_query_location() {
+        let mut spec = spec_stripe_like();
+        spec.security_schemes.clear();
+        spec.security_schemes.insert(
+            "KeyQ".into(),
+            SecurityScheme::ApiKey {
+                name: "api_key".into(),
+                location: ApiKeyLocation::Query,
+            },
+        );
+        spec.endpoints[0].security = vec![SecurityRequirement {
+            scheme: "KeyQ".into(),
+            scopes: Vec::new(),
+        }];
+        let req = build_http_request(
+            &spec,
+            "PostSubscriptions",
+            &json!({ "customer": "cus_ABC" }),
+            Some("my_key"),
+        )
+        .unwrap();
+        assert_eq!(req["query_params"]["api_key"], "${SECURE:my_key}");
+    }
+
+    #[test]
+    fn unused_import_response_spec() {
+        // This test exists only to silence the dead_code warning on ResponseSpec import.
+        let _ = ResponseSpec { description: None, content: HashMap::new() };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

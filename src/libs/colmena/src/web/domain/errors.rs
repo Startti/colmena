@@ -67,6 +67,22 @@ pub enum WebDomainError {
         reason: String,
         unsupported_feature: Option<String>,
     },
+
+    #[error("missing required parameters: {missing:?}")]
+    MissingRequiredParams {
+        missing: Vec<String>,
+        hints: Option<String>,
+    },
+
+    #[error("invalid param type: {param} — expected {expected_type}, got {got}")]
+    InvalidParamType {
+        param: String,
+        expected_type: String,
+        got: String,
+    },
+
+    #[error("missing auth for scheme {scheme}")]
+    MissingAuth { scheme: String, message: String },
 }
 
 impl WebDomainError {
@@ -165,6 +181,34 @@ mod tests {
     fn unsupported_spec_format_is_recoverable() {
         assert!(WebDomainError::UnsupportedSpecFormat {
             detected: "asyncapi 2.4.0".into()
+        }
+        .is_llm_recoverable());
+    }
+
+    #[test]
+    fn missing_required_params_is_recoverable() {
+        assert!(WebDomainError::MissingRequiredParams {
+            missing: vec!["customer".into()],
+            hints: None,
+        }
+        .is_llm_recoverable());
+    }
+
+    #[test]
+    fn invalid_param_type_is_recoverable() {
+        assert!(WebDomainError::InvalidParamType {
+            param: "petId".into(),
+            expected_type: "integer".into(),
+            got: "\"not-a-number\"".into(),
+        }
+        .is_llm_recoverable());
+    }
+
+    #[test]
+    fn missing_auth_is_recoverable() {
+        assert!(WebDomainError::MissingAuth {
+            scheme: "BearerAuth".into(),
+            message: "no secret ref".into(),
         }
         .is_llm_recoverable());
     }
