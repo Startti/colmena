@@ -22,6 +22,7 @@ pub trait ApiSpecPort: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum SpecFetchResult {
     Fresh {
         spec: ParsedSpec,
