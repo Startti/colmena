@@ -16,6 +16,10 @@ pub struct HashMapNodeRegistry {
     nodes: HashMap<String, Arc<dyn ExecutableNode>>,
     toolkit_nodes: HashMap<String, Arc<dyn ToolkitNode>>,
     subgraph_node: Option<Arc<SubGraphNode>>,
+    /// Nodes that need to be notified on conversation close. Populated at
+    /// construction time and consumed by `subscribe_lifecycle`.
+    lifecycle_subscribers:
+        Vec<Arc<dyn crate::web::domain::lifecycle::ConversationLifecycleSubscriber>>,
 }
 
 use crate::llm::infrastructure::ConversationRepositoryFactory;
@@ -175,6 +179,21 @@ impl HashMapNodeRegistry {
                 tavily.clone() as Arc<dyn ExecutableNode>,
             );
 
+            // --- Register API Explorer ---
+            let api_explorer = {
+                use crate::dag_engine::infrastructure::nodes::api_explorer::ApiExplorerNode;
+                let n = ApiExplorerNode::new();
+                if let Some(svc) = secure_value_service.clone() {
+                    Arc::new(n.with_secure_values(svc))
+                } else {
+                    Arc::new(n)
+                }
+            };
+            nodes.insert(
+                "api_explorer".to_string(),
+                api_explorer.clone() as Arc<dyn ExecutableNode>,
+            );
+
             // --- Registrar SubGraph ---
             let sub_node = Arc::new(SubGraphNode::new());
             nodes.insert(
@@ -187,13 +206,35 @@ impl HashMapNodeRegistry {
                 "tavily_client".to_string(),
                 tavily.clone() as Arc<dyn ToolkitNode>,
             );
+            toolkit_nodes.insert(
+                "api_explorer".to_string(),
+                api_explorer.clone() as Arc<dyn ToolkitNode>,
+            );
+
+            let lifecycle_subscribers: Vec<
+                Arc<dyn crate::web::domain::lifecycle::ConversationLifecycleSubscriber>,
+            > = vec![api_explorer.clone()
+                as Arc<dyn crate::web::domain::lifecycle::ConversationLifecycleSubscriber>];
 
             Self {
                 nodes,
                 toolkit_nodes,
                 subgraph_node: Some(sub_node),
+                lifecycle_subscribers,
             }
         })
+    }
+
+    /// Subscribes every lifecycle-aware node held by this registry to the shared
+    /// [`ConversationLifecycleBus`]. Call once at engine setup so closing a
+    /// conversation evicts per-conversation caches in stateful web nodes.
+    pub async fn subscribe_lifecycle(
+        &self,
+        bus: &crate::web::domain::lifecycle::ConversationLifecycleBus,
+    ) {
+        for sub in &self.lifecycle_subscribers {
+            bus.subscribe(sub.clone()).await;
+        }
     }
 }
 
@@ -315,7 +356,7 @@ mod registry_tavily_tests {
         }
     }
 
-    fn build_registry() -> Arc<HashMapNodeRegistry> {
+    pub(super) fn build_registry() -> Arc<HashMapNodeRegistry> {
         let pool_registry = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
         let repo_factory = Arc::new(ConversationRepositoryFactory::new(pool_registry.clone()));
         let sql_factory = Arc::new(SqlPortFactory::new(pool_registry));
@@ -343,5 +384,39 @@ mod registry_tavily_tests {
         );
         let cat = tk.unwrap().sub_tool_catalog(&serde_json::json!({}));
         assert_eq!(cat.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod registry_api_explorer_tests {
+    use super::*;
+    use crate::web::domain::lifecycle::ConversationLifecycleBus;
+
+    #[test]
+    fn api_explorer_registered_as_executable_node() {
+        let reg = super::registry_tavily_tests::build_registry();
+        let node = reg.get_node("api_explorer");
+        assert!(node.is_some(), "api_explorer must be registered");
+    }
+
+    #[test]
+    fn api_explorer_registered_as_toolkit_node_with_five_sub_tools() {
+        let reg = super::registry_tavily_tests::build_registry();
+        let tk = reg.get_toolkit_node("api_explorer");
+        assert!(
+            tk.is_some(),
+            "api_explorer must be registered as ToolkitNode"
+        );
+        let cat = tk.unwrap().sub_tool_catalog(&serde_json::json!({}));
+        assert_eq!(cat.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn subscribe_lifecycle_attaches_api_explorer_subscriber() {
+        let reg = super::registry_tavily_tests::build_registry();
+        let bus = ConversationLifecycleBus::new();
+        reg.subscribe_lifecycle(&bus).await;
+        // Notification should reach api_explorer's lifecycle hook without panic.
+        bus.notify_conversation_closed("conv-x").await;
     }
 }
