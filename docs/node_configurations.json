@@ -1867,6 +1867,32 @@
         "default": null,
         "description": "DEPRECATED (use node_schema instead). Maps each LLM parameter to its destination container field.",
         "deprecated": true
+      },
+      "node_config": {
+        "type": "object",
+        "required": false,
+        "default": null,
+        "description": "For toolkit nodes only (e.g. tavily_client). Static configuration passed to the underlying toolkit node at construction time — API keys, rate limits, shared defaults. Never exposed to the LLM. Only meaningful when node_type is a registered ToolkitNode type.",
+        "example": {
+          "api_key": "${TAVILY_API_KEY}",
+          "max_calls_per_run": 10,
+          "search_defaults": { "max_results": 5 }
+        }
+      },
+      "expose_sub_tools": {
+        "type": "string | array",
+        "required": false,
+        "default": null,
+        "description": "For toolkit nodes only. Controls which sub-tools are exposed to the LLM. 'all' exposes every sub-tool the toolkit declares. An array of sub-tool name strings exposes only those sub-tools. When set, the LLM sees '<alias>__<subtool>' as the tool name — e.g. if the map key / name is 'web', the LLM sees 'web__search' and 'web__fetch'. Not applicable to non-toolkit node types.",
+        "valid_values": ["\"all\"", "[\"search\"]", "[\"search\", \"fetch\"]"],
+        "example": "all"
+      },
+      "context": {
+        "type": "object",
+        "required": false,
+        "default": null,
+        "description": "Dynamic values injected at runtime into node_schema 'fixed' values or fixed_config strings via '${context.key}' template syntax. Use this to pass values computed by upstream nodes (e.g. auth tokens, user IDs) into a tool without hardcoding them in the graph.",
+        "example": { "amadeus_token": "<value_1>", "user_id": "usr_123" }
       }
     },
 

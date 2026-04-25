@@ -25,6 +25,7 @@
 - `docs/` — Project documentation (start here before searching the repo)
   - `DEVELOPER_GUIDE.md` — **Main index** of all developer guides (22 sections)
   - `node_configurations.json` — **Canonical config schema** for every node type (fields, types, defaults)
+  - `node_as_tools_reference.json` — **How to use nodes as LLM tools** (tool_configurations schema, node_schema, expose_sub_tools, examples per node type)
   - `agent_context/node_ports_reference.md` — Ports & outputs per node type
   - `developer_guide/` — 20 guides:
     - `01_architecture.md` — Hexagonal architecture, layers, data flow
