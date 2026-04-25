@@ -308,6 +308,157 @@ fn run_dag(
     })
 }
 
+/// Validates that a graph dict deserialises into the engine's `Graph`. Used
+/// by smoke tests; mirrors the strictness of `cargo run -- run <file>` graph
+/// loading without requiring network or a live LLM.
+#[pyfunction]
+fn validate_graph(graph: pyo3::Bound<'_, pyo3::PyAny>) -> PyResult<()> {
+    let v: serde_json::Value =
+        pythonize::depythonize_bound(graph).map_err(|e| DagException::new_err(e.to_string()))?;
+    let _: crate::dag_engine::domain::graph::Graph = serde_json::from_value(v)
+        .map_err(|e| DagException::new_err(format!("invalid graph: {}", e)))?;
+    Ok(())
+}
+
+/// Read-only handle to a `HashMapNodeRegistry`; exposes inspection helpers
+/// that smoke tests rely on (no DB connection required).
+#[pyclass]
+struct Registry {
+    inner: Arc<crate::dag_engine::infrastructure::registry::HashMapNodeRegistry>,
+}
+
+#[pymethods]
+impl Registry {
+    fn node_types(&self) -> Vec<String> {
+        use crate::dag_engine::application::ports::NodeRegistryPort;
+        let mut keys: Vec<String> = self.inner.get_all_nodes().keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    fn toolkit_catalog(
+        &self,
+        py: Python<'_>,
+        node_type: &str,
+        config: pyo3::Bound<'_, pyo3::PyAny>,
+    ) -> PyResult<PyObject> {
+        use crate::dag_engine::application::ports::NodeRegistryPort;
+        let cfg: serde_json::Value = pythonize::depythonize_bound(config)
+            .map_err(|e| DagException::new_err(e.to_string()))?;
+        let tk = self
+            .inner
+            .get_toolkit_node(node_type)
+            .ok_or_else(|| DagException::new_err(format!("not a toolkit node: {}", node_type)))?;
+        let entries: Vec<serde_json::Value> = tk
+            .sub_tool_catalog(&cfg)
+            .into_iter()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name.as_ref(),
+                    "description": s.description,
+                    "required": s.required,
+                })
+            })
+            .collect();
+        let value = serde_json::Value::Array(entries);
+        pythonize::pythonize(py, &value)
+            .map(|b| b.into())
+            .map_err(|e| DagException::new_err(e.to_string()))
+    }
+}
+
+/// Stub task-memory repository used only by `default_registry` so the
+/// inspection-only smoke harness does not need a database. Every method is a
+/// no-op; these registries are not used to execute graphs.
+struct SmokeTaskMemory;
+
+#[async_trait::async_trait]
+impl crate::dag_engine::domain::state::DagTaskMemoryRepository for SmokeTaskMemory {
+    async fn add_task(
+        &self,
+        _task: &crate::dag_engine::domain::state::DagTask,
+    ) -> Result<(), crate::dag_engine::domain::error::DagError> {
+        Ok(())
+    }
+    async fn update_task_result(
+        &self,
+        _task_id: &str,
+        _result: serde_json::Value,
+    ) -> Result<(), crate::dag_engine::domain::error::DagError> {
+        Ok(())
+    }
+    async fn get_tasks_for_run(
+        &self,
+        _session_id: &str,
+    ) -> Result<Vec<crate::dag_engine::domain::state::DagTask>, crate::dag_engine::domain::error::DagError> {
+        Ok(vec![])
+    }
+    async fn get_first_uncompleted_task(
+        &self,
+        _session_id: &str,
+    ) -> Result<Option<crate::dag_engine::domain::state::DagTask>, crate::dag_engine::domain::error::DagError> {
+        Ok(None)
+    }
+    async fn delete_task(
+        &self,
+        _task_id: &str,
+    ) -> Result<(), crate::dag_engine::domain::error::DagError> {
+        Ok(())
+    }
+    async fn clear_tasks_for_run(
+        &self,
+        _session_id: &str,
+    ) -> Result<(), crate::dag_engine::domain::error::DagError> {
+        Ok(())
+    }
+    async fn get_current_phase(
+        &self,
+        _session_id: &str,
+    ) -> Result<Option<i32>, crate::dag_engine::domain::error::DagError> {
+        Ok(None)
+    }
+    async fn get_uncompleted_tasks_for_phase(
+        &self,
+        _session_id: &str,
+        _phase: i32,
+    ) -> Result<Vec<crate::dag_engine::domain::state::DagTask>, crate::dag_engine::domain::error::DagError> {
+        Ok(vec![])
+    }
+    async fn save_phase_summary(
+        &self,
+        _session_id: &str,
+        _phase: i32,
+        _summary: &str,
+    ) -> Result<(), crate::dag_engine::domain::error::DagError> {
+        Ok(())
+    }
+    async fn get_phase_summaries(
+        &self,
+        _session_id: &str,
+    ) -> Result<Vec<crate::dag_engine::domain::state::DagPhaseSummary>, crate::dag_engine::domain::error::DagError> {
+        Ok(vec![])
+    }
+}
+
+/// Builds a fresh `HashMapNodeRegistry` with no live database connections.
+/// `PgPoolRegistry::new` is in-memory; pools are pinned lazily on first use,
+/// which is fine because smoke tests only inspect the registry.
+#[pyfunction]
+fn default_registry() -> PyResult<Registry> {
+    use crate::dag_engine::infrastructure::pool_registry::{PgPoolRegistry, PoolConfig};
+    use crate::dag_engine::infrastructure::registry::HashMapNodeRegistry;
+    use crate::dag_engine::infrastructure::sql_port_factory::SqlPortFactory;
+    use crate::llm::infrastructure::ConversationRepositoryFactory;
+
+    let pools = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+    let conv = Arc::new(ConversationRepositoryFactory::new(pools.clone()));
+    let sql = Arc::new(SqlPortFactory::new(pools));
+    let task_memory: Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository> =
+        Arc::new(SmokeTaskMemory);
+    let inner = HashMapNodeRegistry::new(conv, sql, Some(task_memory));
+    Ok(Registry { inner })
+}
+
 #[pyfunction]
 #[pyo3(signature = (file_path, host="0.0.0.0".to_string(), port=8080))]
 fn serve_dag(py: Python, file_path: String, host: String, port: u16) -> PyResult<()> {
@@ -334,6 +485,9 @@ fn colmena(_py: Python, m: &PyModule) -> PyResult<()> {
     // DAG Engine bindings
     m.add_function(wrap_pyfunction!(run_dag, m)?)?;
     m.add_function(wrap_pyfunction!(serve_dag, m)?)?;
+    m.add_function(wrap_pyfunction!(validate_graph, m)?)?;
+    m.add_function(wrap_pyfunction!(default_registry, m)?)?;
+    m.add_class::<Registry>()?;
     m.add("DagException", _py.get_type_bound::<DagException>())?;
 
     Ok(())
