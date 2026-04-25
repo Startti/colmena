@@ -1,0 +1,38 @@
+{
+  "nodes": {
+    "ask": {
+      "type": "input",
+      "config": {
+        "default": "Load the Amadeus Airline Code Lookup spec from https://github.com/amadeus4dev/amadeus-open-api-specification/blob/main/spec/json/AirlineCodeLookup_v1_swagger_specification.json, then build a request to look up the airline with IATA code 'BA'. Return only the final http_request JSON config you would execute."
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "anthropic",
+        "model": "claude-opus-4-7",
+        "api_key": "${ANTHROPIC_API_KEY}",
+        "system_message": "You are an integration agent. Use apis__load_spec to load an OpenAPI or Swagger URL — Git-forge blob URLs are auto-rewritten for you; read the `resolved_url` and `original_format` in the result to confirm. Use apis__search_endpoint → apis__get_endpoint_details → apis__build_http_request to construct the call. The Amadeus API uses Bearer auth (scheme: Bearer); pass auth_secret_ref=\"amadeus_token\" in build_http_request.",
+        "tool_configurations": {
+          "apis": {
+            "name": "apis",
+            "description": "OpenAPI + Swagger 2.0 discovery",
+            "node_type": "api_explorer",
+            "node_config": {
+              "fuzzy_match_threshold": 0.3
+            },
+            "expose_sub_tools": "all"
+          }
+        }
+      }
+    },
+    "sink": {
+      "type": "output",
+      "config": {}
+    }
+  },
+  "edges": [
+    { "from": "ask", "to": "agent", "field": "prompt" },
+    { "from": "agent", "to": "sink" }
+  ]
+}
