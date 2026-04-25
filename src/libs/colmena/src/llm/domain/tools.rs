@@ -170,6 +170,10 @@ pub struct ParameterProperty {
     /// Optional regex pattern constraint for string validation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
+
+    /// Item schema for array types — required by OpenAI when property_type is "array"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub items: Option<Box<ParameterProperty>>,
 }
 
 impl ParameterProperty {
@@ -180,6 +184,7 @@ impl ParameterProperty {
             description,
             enum_values: None,
             pattern: None,
+            items: None,
         }
     }
 
@@ -192,6 +197,12 @@ impl ParameterProperty {
     /// Add a regex pattern constraint to the property
     pub fn with_pattern(mut self, pattern: String) -> Self {
         self.pattern = Some(pattern);
+        self
+    }
+
+    /// Set the item type for array properties (required by OpenAI)
+    pub fn with_items(mut self, item_type: String) -> Self {
+        self.items = Some(Box::new(ParameterProperty::new(item_type, String::new())));
         self
     }
 }
@@ -418,6 +429,17 @@ mod tests {
         assert!(!result.success);
         assert!(result.output.is_empty());
         assert_eq!(result.error.unwrap(), "Division by zero");
+    }
+
+    #[test]
+    fn test_array_property_serializes_with_items() {
+        let prop = ParameterProperty::new("array".to_string(), "List of domains".to_string())
+            .with_items("string".to_string());
+
+        let json = serde_json::to_value(&prop).unwrap();
+
+        assert_eq!(json["type"], "array");
+        assert_eq!(json["items"]["type"], "string");
     }
 
     #[test]

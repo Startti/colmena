@@ -61,23 +61,13 @@ impl ToolkitNode for EchoToolkitNode {
         let mut echo_props = HashMap::new();
         echo_props.insert(
             "message".to_string(),
-            ParameterProperty {
-                property_type: "string".to_string(),
-                description: "Text to echo back".to_string(),
-                enum_values: None,
-                pattern: None,
-            },
+            ParameterProperty::new("string".to_string(), "Text to echo back".to_string()),
         );
 
         let mut double_props = HashMap::new();
         double_props.insert(
             "n".to_string(),
-            ParameterProperty {
-                property_type: "number".to_string(),
-                description: "Number to double".to_string(),
-                enum_values: None,
-                pattern: None,
-            },
+            ParameterProperty::new("number".to_string(), "Number to double".to_string()),
         );
 
         vec![

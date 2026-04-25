@@ -352,12 +352,7 @@ impl DagToolExecutor {
                 };
                 properties.insert(
                     param_name.clone(),
-                    ParameterProperty {
-                        property_type: "string".to_string(),
-                        description,
-                        enum_values: None,
-                        pattern: None,
-                    },
+                    ParameterProperty::new("string".to_string(), description),
                 );
                 required.push(param_name.clone());
             }
@@ -419,12 +414,7 @@ impl DagToolExecutor {
 
             exposed_properties.insert(
                 key.clone(),
-                ParameterProperty {
-                    property_type: prop_type.to_string(),
-                    description: desc.to_string(),
-                    enum_values: None,
-                    pattern: None,
-                },
+                ParameterProperty::new(prop_type.to_string(), desc.to_string()),
             );
 
             if !is_optional {
@@ -943,12 +933,7 @@ impl ToolExecutor for DagToolExecutor {
 
                     properties.insert(
                         key.clone(),
-                        ParameterProperty {
-                            property_type: prop_type.to_string(),
-                            description: desc.to_string(),
-                            enum_values: None, // TODO: Parse enum values if available
-                            pattern: None,
-                        },
+                        ParameterProperty::new(prop_type.to_string(), desc.to_string()),
                     );
 
                     if !is_optional {

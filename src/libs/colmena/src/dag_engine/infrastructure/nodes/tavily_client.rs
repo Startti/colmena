@@ -322,73 +322,41 @@ fn search_sub_tool() -> SubToolDefinition {
     let mut props = HashMap::new();
     props.insert(
         "query".into(),
-        ParameterProperty {
-            property_type: "string".into(),
-            description: "Natural-language search query.".into(),
-            enum_values: None,
-            pattern: None,
-        },
+        ParameterProperty::new("string".into(), "Natural-language search query.".into()),
     );
     props.insert(
         "max_results".into(),
-        ParameterProperty {
-            property_type: "integer".into(),
-            description: "Number of results (1-10). Default 5.".into(),
-            enum_values: None,
-            pattern: None,
-        },
+        ParameterProperty::new("integer".into(), "Number of results (1-10). Default 5.".into()),
     );
     props.insert(
         "include_content".into(),
-        ParameterProperty {
-            property_type: "boolean".into(),
-            description:
-                "If true, include full extracted content in each result. 2-3x credit cost. Default false."
-                    .into(),
-            enum_values: None,
-            pattern: None,
-        },
+        ParameterProperty::new(
+            "boolean".into(),
+            "If true, include full extracted content in each result. 2-3x credit cost. Default false.".into(),
+        ),
     );
     props.insert(
         "search_depth".into(),
-        ParameterProperty {
-            property_type: "string".into(),
-            description: "\"basic\" (1 credit) or \"advanced\" (2 credits). Default basic.".into(),
-            enum_values: Some(vec!["basic".into(), "advanced".into()]),
-            pattern: None,
-        },
+        ParameterProperty::new(
+            "string".into(),
+            "\"basic\" (1 credit) or \"advanced\" (2 credits). Default basic.".into(),
+        )
+        .with_enum(vec!["basic".into(), "advanced".into()]),
     );
     props.insert(
         "include_domains".into(),
-        ParameterProperty {
-            property_type: "array".into(),
-            description: "Restrict results to these domains.".into(),
-            enum_values: None,
-            pattern: None,
-        },
+        ParameterProperty::new("array".into(), "Restrict results to these domains.".into())
+            .with_items("string".into()),
     );
     props.insert(
         "exclude_domains".into(),
-        ParameterProperty {
-            property_type: "array".into(),
-            description: "Exclude these domains.".into(),
-            enum_values: None,
-            pattern: None,
-        },
+        ParameterProperty::new("array".into(), "Exclude these domains.".into())
+            .with_items("string".into()),
     );
     props.insert(
         "time_range".into(),
-        ParameterProperty {
-            property_type: "string".into(),
-            description: "Restrict to content from this recency window.".into(),
-            enum_values: Some(vec![
-                "day".into(),
-                "week".into(),
-                "month".into(),
-                "year".into(),
-            ]),
-            pattern: None,
-        },
+        ParameterProperty::new("string".into(), "Restrict to content from this recency window.".into())
+            .with_enum(vec!["day".into(), "week".into(), "month".into(), "year".into()]),
     );
 
     SubToolDefinition {
@@ -471,21 +439,12 @@ fn fetch_sub_tool() -> SubToolDefinition {
     let mut props = HashMap::new();
     props.insert(
         "url".into(),
-        ParameterProperty {
-            property_type: "string".into(),
-            description: "Absolute URL to fetch.".into(),
-            enum_values: None,
-            pattern: None,
-        },
+        ParameterProperty::new("string".into(), "Absolute URL to fetch.".into()),
     );
     props.insert(
         "extract_format".into(),
-        ParameterProperty {
-            property_type: "string".into(),
-            description: "Output format (default markdown).".into(),
-            enum_values: Some(vec!["markdown".into(), "text".into()]),
-            pattern: None,
-        },
+        ParameterProperty::new("string".into(), "Output format (default markdown).".into())
+            .with_enum(vec!["markdown".into(), "text".into()]),
     );
     SubToolDefinition {
         name: "fetch".into(),

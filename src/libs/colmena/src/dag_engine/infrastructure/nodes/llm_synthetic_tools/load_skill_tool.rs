@@ -41,24 +41,17 @@ again with the `reference` parameter to load that additional material.",
     let mut properties: HashMap<String, ParameterProperty> = HashMap::new();
     properties.insert(
         "name".to_string(),
-        ParameterProperty {
-            property_type: "string".to_string(),
-            description: "The name of the skill to load".to_string(),
-            enum_values: Some(names),
-            pattern: None,
-        },
+        ParameterProperty::new("string".to_string(), "The name of the skill to load".to_string())
+            .with_enum(names),
     );
     properties.insert(
         "reference".to_string(),
-        ParameterProperty {
-            property_type: "string".to_string(),
-            description:
-                "Optional name of a reference file within the skill. Only use after loading the \
+        ParameterProperty::new(
+            "string".to_string(),
+            "Optional name of a reference file within the skill. Only use after loading the \
 skill and seeing it declares this reference."
-                    .to_string(),
-            enum_values: None,
-            pattern: None,
-        },
+                .to_string(),
+        ),
     );
 
     ToolDefinition {
