@@ -92,3 +92,108 @@ El LLM verá dos herramientas: `web__search` y `web__fetch`. Con `expose_sub_too
 ### Ejemplo completo
 
 Ver `tests/graphs/web/tavily_search_basic.json` y `tests/graphs/web/tavily_fetch_article.json`.
+
+## api_explorer
+
+Nodo toolkit que permite a un LLM descubrir endpoints en una especificación **OpenAPI 3.x** o **Swagger 2.0** y construir deterministicamente una configuración válida del nodo `http_request`. Los documentos Swagger 2.0 se convierten transparentemente a OpenAPI 3.0.3 dentro del adaptador, así que el código río abajo ve un único modelo.
+
+### Cinco sub-herramientas
+
+| Sub-tool | Propósito |
+|---|---|
+| `load_spec` | Descarga + parsea + cachea una spec. Debe llamarse antes que las otras. |
+| `list_endpoints` | Browse paginado por tag. |
+| `search_endpoint` | Búsqueda fuzzy (path + summary + op_id + tags + description). |
+| `get_endpoint_details` | Parámetros, request body, responses y security por endpoint. |
+| `build_http_request` | Emite un objeto JSON con la forma exacta del input del nodo `http_request`, con placeholders `${SECURE:<ref>}` para auth. |
+
+### Referencia de configuración
+
+Ver el schema canónico en `docs/node_configurations.json` (clave `api_explorer`). Knobs principales:
+
+- **`cache_ttl_seconds`** — vida útil de una spec parseada (default 24 h); las hits aún frescas se revalidan vía ETag/If-None-Match (304 ≈ HEAD).
+- **`max_spec_size_bytes`** — protege contra specs gigantescas (default 10 MiB). El adaptador aborta a mitad de stream si se cruza el límite.
+- **`fuzzy_match_threshold`** — sube para ser más estricto con `search_endpoint`; baja para mejor recall.
+
+### Uso desde un `llm_call`
+
+```json
+"tool_configurations": {
+  "apis": {
+    "name": "apis",
+    "description": "OpenAPI spec discovery + request builder",
+    "node_type": "api_explorer",
+    "node_config": { "fuzzy_match_threshold": 0.3 },
+    "expose_sub_tools": "all"
+  }
+}
+```
+
+El LLM verá las cinco herramientas con prefijo del alias: `apis__load_spec`, `apis__list_endpoints`, `apis__search_endpoint`, `apis__get_endpoint_details`, `apis__build_http_request`.
+
+### Normalización de URL
+
+El adaptador reescribe estos patrones de Git-forge antes de hacer la petición HTTP:
+
+| Patrón de entrada | Reescrito a |
+|---|---|
+| `github.com/{o}/{r}/blob/{ref}/{p}` | `raw.githubusercontent.com/{o}/{r}/{ref}/{p}` |
+| `github.com/{o}/{r}/tree/{ref}/{p}` | mismo que arriba |
+| `gitlab.com/{o}/{r}/-/blob/{ref}/{p}` | `gitlab.com/{o}/{r}/-/raw/{ref}/{p}` |
+| `bitbucket.org/{o}/{r}/src/{ref}/{p}` | `bitbucket.org/{o}/{r}/raw/{ref}/{p}` |
+
+Hosts desconocidos pasan sin cambio. El LLM ve tanto `spec_url_input` (lo que pasó) como `resolved_url` (lo que efectivamente se descargó) en el resultado de `load_spec`. Si una URL devuelve HTML (forge sin reescribir), el nodo retorna `unexpected_html_response` con sugerencia de usar la URL raw.
+
+### Conversión Swagger 2.0 → OpenAPI 3.0
+
+Toda la conversión es Rust puro (`swagger2_to_oas3.rs`). Reglas principales:
+
+| Swagger 2.0 | OpenAPI 3.0.3 |
+|---|---|
+| `swagger: "2.0"` | `openapi: "3.0.3"` |
+| `host` + `basePath` + `schemes[]` | `servers: [{ url: "{scheme}://{host}{basePath}" }]` (uno por scheme) |
+| `definitions` | `components.schemas` |
+| `securityDefinitions` | `components.securitySchemes` |
+| body param + `consumes` | `requestBody.content` |
+| formData params | `multipart/form-data` o `x-www-form-urlencoded` |
+| `collectionFormat: csv` | `style: form, explode: false` |
+| `collectionFormat: multi` | `style: form, explode: true` |
+| `collectionFormat: ssv` | `style: spaceDelimited` |
+| `collectionFormat: pipes` | `style: pipeDelimited` |
+| `collectionFormat: tsv` | **error** — no hay equivalente 3.0. |
+
+### `build_http_request` — contrato de salida
+
+El JSON devuelto coincide exactamente con el input del nodo `http_request`:
+
+```json
+{
+  "url": "...",
+  "method": "GET|POST|...",
+  "headers": { ... },
+  "query_params": { ... },
+  "body": "...raw string..." | { ... } | { "__multipart": true, "fields": { ... } }
+}
+```
+
+Los headers de auth usan el placeholder `${SECURE:<ref>}` que el nodo `http_request` resuelve más adelante. Los secretos en plano nunca entran en el contexto visible del LLM.
+
+### Caché por conversación + lifecycle
+
+Las specs cacheadas viven en un `SessionRegistry<Arc<SpecCache>>` indexado por `conversation_id`. El orquestador del DAG suscribe cada instancia de `api_explorer` al `ConversationLifecycleBus`, así que las specs de una conversación cerrada se evictan inmediatamente sin esperar al TTL.
+
+### Manejo de errores
+
+Recuperables (devueltos al LLM como JSON estructurado): `rate_limit`, `timeout`, `upstream`, `spec_parse_failed`, `unsupported_spec_format`, `endpoint_not_found` (con `did_you_mean`), `missing_required_params`, `invalid_param_type`, `missing_auth`, `spec_not_loaded`, `unexpected_html_response`, `swagger2_conversion_failed`.
+
+Crashean el DAG: `InvalidConfig`, `AdapterInit`, `SpecTooLarge`.
+
+### Ejemplos completos
+
+- `tests/graphs/web/api_explorer_petstore.json` — flow completo OpenAPI 3.0 (Petstore).
+- `tests/graphs/web/api_explorer_amadeus_swagger2.json` — ejercita el rewrite GitHub → raw + conversión Swagger 2.0 → OpenAPI 3.0.
+
+### Referencia
+
+Spec: [2026-04-23-web-nodes-c-api-explorer-design.md](../superpowers/specs/2026-04-23-web-nodes-c-api-explorer-design.md).
+Implementación: `src/libs/colmena/src/dag_engine/infrastructure/nodes/api_explorer.rs`, `src/libs/colmena/src/web/application/api_spec_use_case.rs`, `src/libs/colmena/src/web/infrastructure/openapi_adapter.rs`, `src/libs/colmena/src/web/infrastructure/swagger2_to_oas3.rs`, `src/libs/colmena/src/web/infrastructure/url_normalizer.rs`.

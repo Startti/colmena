@@ -15,7 +15,7 @@
         "http_request", "socketio_request", "sql_query", "python_script",
         "llm_call", "information_extraction", "planner", "critic", "reactor",
         "orchestrator", "task_memory_writer",
-        "tavily_client"
+        "tavily_client", "api_explorer"
       ],
       "example": "llm_call"
     },
@@ -1953,6 +1953,120 @@
           }
         }
       }
+    },
+
+    "api_explorer": {
+      "name": "API Explorer",
+      "description": "OpenAPI 3.x / Swagger 2.0 discovery and validated http_request builder. Toolkit node that exposes five LLM sub-tools: load_spec, list_endpoints, search_endpoint, get_endpoint_details, build_http_request. Stateful: caches parsed specs per conversation, evicted on conversation close.",
+      "category": "web",
+      "config_fields": {
+        "enable_cache": {
+          "type": "boolean",
+          "required": false,
+          "default": true,
+          "description": "Cache parsed specs per conversation."
+        },
+        "cache_ttl_seconds": {
+          "type": "integer",
+          "required": false,
+          "default": 86400,
+          "description": "Cached spec lifetime in seconds (default 24 h)."
+        },
+        "max_cached_specs": {
+          "type": "integer",
+          "required": false,
+          "default": 100,
+          "description": "Per-conversation LRU cache capacity."
+        },
+        "session_idle_ttl_seconds": {
+          "type": "integer",
+          "required": false,
+          "default": 900,
+          "description": "Evict spec caches whose conversation has been idle this long."
+        },
+        "session_max_lifetime_seconds": {
+          "type": "integer",
+          "required": false,
+          "default": 3600,
+          "description": "Absolute conversation cache lifetime."
+        },
+        "max_spec_size_bytes": {
+          "type": "integer",
+          "required": false,
+          "default": 10485760,
+          "description": "Abort the spec download if the response exceeds this many bytes (10 MiB default)."
+        },
+        "spec_download_timeout_seconds": {
+          "type": "integer",
+          "required": false,
+          "default": 60,
+          "description": "HTTP timeout for spec downloads."
+        },
+        "default_base_url_override": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Base URL used when the loaded spec's servers[] is empty."
+        },
+        "fuzzy_match_threshold": {
+          "type": "number",
+          "required": false,
+          "default": 0.6,
+          "description": "Minimum normalized score for search_endpoint matches (0.0 - 1.0)."
+        },
+        "retry_policy": {
+          "type": "object",
+          "required": false,
+          "description": "Retry policy for spec download failures.",
+          "properties": {
+            "max_attempts": { "type": "integer", "default": 3 },
+            "initial_backoff_ms": { "type": "integer", "default": 500 }
+          }
+        }
+      },
+      "sub_tools": {
+        "load_spec": {
+          "description": "Download, parse, and cache an OpenAPI 3.x or Swagger 2.0 spec. Must be called before the other four sub-tools. Git-forge blob URLs are auto-rewritten to raw URLs.",
+          "parameters": {
+            "url": { "type": "string", "required": true },
+            "force_reload": { "type": "boolean", "required": false, "default": false }
+          }
+        },
+        "list_endpoints": {
+          "description": "Paginated browse of endpoints in a previously-loaded spec, optionally filtered by tag.",
+          "parameters": {
+            "spec_url": { "type": "string", "required": true },
+            "tag": { "type": "string", "required": false },
+            "limit": { "type": "integer", "required": false, "default": 50 },
+            "offset": { "type": "integer", "required": false, "default": 0 }
+          }
+        },
+        "search_endpoint": {
+          "description": "Fuzzy keyword search across path, summary, operation_id, tags, and description. Returns top-N ranked hits.",
+          "parameters": {
+            "spec_url": { "type": "string", "required": true },
+            "query": { "type": "string", "required": true },
+            "method": { "type": "string", "required": false },
+            "max_results": { "type": "integer", "required": false, "default": 10 }
+          }
+        },
+        "get_endpoint_details": {
+          "description": "Returns full per-endpoint metadata (parameters, request_body, responses, security). Emits did_you_mean hints when the operation_id is unknown.",
+          "parameters": {
+            "spec_url": { "type": "string", "required": true },
+            "operation_id": { "type": "string", "required": true }
+          }
+        },
+        "build_http_request": {
+          "description": "Construct a JSON body shaped exactly like the http_request node's input. Routes the LLM-supplied params to path / query / header / body and emits ${SECURE:<ref>} placeholders for auth.",
+          "parameters": {
+            "spec_url": { "type": "string", "required": true },
+            "operation_id": { "type": "string", "required": true },
+            "params": { "type": "object", "required": true },
+            "auth_secret_ref": { "type": "string", "required": false }
+          }
+        }
+      }
     }
   },
 
@@ -1990,7 +2104,7 @@
     "web": {
       "name": "Web",
       "description": "Toolkit nodes that give LLM agents internet access: search, fetch, API exploration, browser automation.",
-      "node_types": ["tavily_client"]
+      "node_types": ["tavily_client", "api_explorer"]
     }
   }
 }
