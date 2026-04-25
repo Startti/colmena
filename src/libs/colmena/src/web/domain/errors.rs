@@ -83,6 +83,11 @@ pub enum WebDomainError {
 
     #[error("missing auth for scheme {scheme}")]
     MissingAuth { scheme: String, message: String },
+
+    /// A handler that needs a previously-loaded spec was called with a
+    /// `spec_url` that has no entry in the per-conversation cache.
+    #[error("spec not loaded: {spec_url}")]
+    SpecNotLoaded { spec_url: String },
 }
 
 impl WebDomainError {
@@ -209,6 +214,14 @@ mod tests {
         assert!(WebDomainError::MissingAuth {
             scheme: "BearerAuth".into(),
             message: "no secret ref".into(),
+        }
+        .is_llm_recoverable());
+    }
+
+    #[test]
+    fn spec_not_loaded_is_recoverable() {
+        assert!(WebDomainError::SpecNotLoaded {
+            spec_url: "https://ex/s.yaml".into(),
         }
         .is_llm_recoverable());
     }

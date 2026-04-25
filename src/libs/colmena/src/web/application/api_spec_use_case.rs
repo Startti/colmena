@@ -72,16 +72,17 @@ impl ApiSpecUseCase {
 
     /// Fetch-or-reuse a spec for a given conversation.
     ///
-    /// * If `force_reload` is true or the cached entry is older than the
-    ///   TTL, hit the port. A 304 response refreshes `cached_at` in place.
-    /// * Always returns a `CachedSpec` (either the freshly-parsed one or
-    ///   the reused one).
+    /// Returns `(entry, was_cached)`:
+    /// * `was_cached = true` when the in-memory cache satisfied the request
+    ///   without contacting the port.
+    /// * `was_cached = false` for a fresh fetch, a forced reload, or a 304
+    ///   revalidation (the network was hit either way).
     pub async fn fetch_spec(
         &self,
         conversation_id: &str,
         input_url: &str,
         force_reload: bool,
-    ) -> Result<CachedSpec, WebDomainError> {
+    ) -> Result<(CachedSpec, bool), WebDomainError> {
         let key = SessionKey::new(conversation_id, "api_explorer");
 
         // Get-or-create the per-conversation cache.
@@ -103,7 +104,7 @@ impl ApiSpecUseCase {
             {
                 if hit.cached_at.elapsed() < self.config.cache_ttl {
                     // Fresh enough — skip revalidation to avoid network.
-                    return Ok(hit);
+                    return Ok((hit, true));
                 }
             }
         }
@@ -130,7 +131,7 @@ impl ApiSpecUseCase {
                     cached_at: Instant::now(),
                 };
                 cache.specs.lock().await.put(input_url.to_string(), entry.clone());
-                Ok(entry)
+                Ok((entry, false))
             }
             SpecFetchResult::NotModified => {
                 let mut prev = previous.ok_or_else(|| WebDomainError::AdapterInit(
@@ -142,9 +143,95 @@ impl ApiSpecUseCase {
                     .lock()
                     .await
                     .put(input_url.to_string(), prev.clone());
-                Ok(prev)
+                Ok((prev, false))
             }
         }
+    }
+
+    /// Look up a previously-fetched spec for this conversation.
+    ///
+    /// Returns [`WebDomainError::SpecNotLoaded`] when no entry exists. This
+    /// is the recoverable shape that the LLM sees when it calls a handler
+    /// (`list_endpoints`, `search_endpoint`, …) before `load_spec` has
+    /// populated the cache.
+    pub async fn lookup_cached(
+        &self,
+        conversation_id: &str,
+        spec_url: &str,
+    ) -> Result<Arc<ParsedSpec>, WebDomainError> {
+        let key = SessionKey::new(conversation_id, "api_explorer");
+        let cache = self.registry.with_entry(&key, |c| c.clone()).await;
+        let cache = match cache {
+            Some(c) => c,
+            None => {
+                return Err(WebDomainError::SpecNotLoaded {
+                    spec_url: spec_url.to_string(),
+                });
+            }
+        };
+        let entry = cache.specs.lock().await.get(spec_url).cloned();
+        match entry {
+            Some(e) => Ok(e.parsed.clone()),
+            None => Err(WebDomainError::SpecNotLoaded {
+                spec_url: spec_url.to_string(),
+            }),
+        }
+    }
+
+    /// Conversation-scoped wrapper around [`list_endpoints`].
+    pub async fn list_endpoints(
+        &self,
+        conversation_id: &str,
+        spec_url: &str,
+        tag: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<EndpointListPage, WebDomainError> {
+        let spec = self.lookup_cached(conversation_id, spec_url).await?;
+        Ok(list_endpoints(&spec, tag, limit, offset))
+    }
+
+    /// Conversation-scoped wrapper around [`search_endpoint`].
+    pub async fn search_endpoint(
+        &self,
+        conversation_id: &str,
+        spec_url: &str,
+        query: &str,
+        method: Option<&str>,
+        max_results: usize,
+    ) -> Result<Vec<EndpointSearchHit>, WebDomainError> {
+        let spec = self.lookup_cached(conversation_id, spec_url).await?;
+        Ok(search_endpoint(
+            &spec,
+            query,
+            method,
+            max_results,
+            self.config.fuzzy_match_threshold,
+        ))
+    }
+
+    /// Conversation-scoped wrapper around [`get_endpoint_details`].
+    pub async fn get_endpoint_details(
+        &self,
+        conversation_id: &str,
+        spec_url: &str,
+        operation_id: &str,
+    ) -> Result<Value, WebDomainError> {
+        let spec = self.lookup_cached(conversation_id, spec_url).await?;
+        get_endpoint_details(&spec, operation_id)
+    }
+
+    /// Conversation-scoped wrapper around [`build_http_request`].
+    pub async fn build_http_request(
+        &self,
+        conversation_id: &str,
+        spec_url: &str,
+        operation_id: &str,
+        params: &Value,
+        auth_secret_ref: Option<&str>,
+    ) -> Result<Value, WebDomainError> {
+        let spec = self.lookup_cached(conversation_id, spec_url).await?;
+        build_http_request(&spec, operation_id, params, auth_secret_ref)
     }
 
     /// Public accessor for tests + later tasks that need the registry's
@@ -1203,8 +1290,12 @@ mod tests {
             respond_with: Mutex::new(None),
         });
         let uc = use_case_with(port.clone());
-        uc.fetch_spec("conv-1", "https://ex/s.yaml", false).await.unwrap();
+        let (_entry, was_cached) = uc
+            .fetch_spec("conv-1", "https://ex/s.yaml", false)
+            .await
+            .unwrap();
         assert_eq!(port.calls.load(Ordering::SeqCst), 1);
+        assert!(!was_cached);
     }
 
     #[tokio::test]
@@ -1214,9 +1305,17 @@ mod tests {
             respond_with: Mutex::new(None),
         });
         let uc = use_case_with(port.clone());
-        uc.fetch_spec("conv-1", "https://ex/s.yaml", false).await.unwrap();
-        uc.fetch_spec("conv-1", "https://ex/s.yaml", false).await.unwrap();
+        let (_e1, c1) = uc
+            .fetch_spec("conv-1", "https://ex/s.yaml", false)
+            .await
+            .unwrap();
+        let (_e2, c2) = uc
+            .fetch_spec("conv-1", "https://ex/s.yaml", false)
+            .await
+            .unwrap();
         assert_eq!(port.calls.load(Ordering::SeqCst), 1);
+        assert!(!c1);
+        assert!(c2);
     }
 
     #[tokio::test]
@@ -1227,8 +1326,12 @@ mod tests {
         });
         let uc = use_case_with(port.clone());
         uc.fetch_spec("conv-1", "https://ex/s.yaml", false).await.unwrap();
-        uc.fetch_spec("conv-1", "https://ex/s.yaml", true).await.unwrap();
+        let (_entry, was_cached) = uc
+            .fetch_spec("conv-1", "https://ex/s.yaml", true)
+            .await
+            .unwrap();
         assert_eq!(port.calls.load(Ordering::SeqCst), 2);
+        assert!(!was_cached);
     }
 
     #[tokio::test]
@@ -1252,12 +1355,49 @@ mod tests {
         let uc = use_case_with(port.clone());
         uc.fetch_spec("conv-1", "https://ex/s.yaml", false).await.unwrap();
         *port.respond_with.lock().await = Some(SpecFetchResult::NotModified);
-        let res = uc
+        let (entry, was_cached) = uc
             .fetch_spec("conv-1", "https://ex/s.yaml", true)
             .await
             .unwrap();
         assert_eq!(port.calls.load(Ordering::SeqCst), 2);
-        assert_eq!(res.etag.as_deref(), Some("\"v1\""));
+        assert_eq!(entry.etag.as_deref(), Some("\"v1\""));
+        assert!(!was_cached);
+    }
+
+    #[tokio::test]
+    async fn lookup_cached_returns_spec_not_loaded_when_missing() {
+        let port = Arc::new(CountingPort {
+            calls: AtomicU32::new(0),
+            respond_with: Mutex::new(None),
+        });
+        let uc = use_case_with(port.clone());
+        let err = uc
+            .lookup_cached("conv-1", "https://ex/s.yaml")
+            .await
+            .unwrap_err();
+        match err {
+            WebDomainError::SpecNotLoaded { spec_url } => {
+                assert_eq!(spec_url, "https://ex/s.yaml");
+            }
+            other => panic!("expected SpecNotLoaded, got {other:?}"),
+        }
+        assert_eq!(port.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn lookup_cached_returns_arc_after_fetch() {
+        let port = Arc::new(CountingPort {
+            calls: AtomicU32::new(0),
+            respond_with: Mutex::new(None),
+        });
+        let uc = use_case_with(port.clone());
+        uc.fetch_spec("conv-1", "https://ex/s.yaml", false).await.unwrap();
+        let spec = uc
+            .lookup_cached("conv-1", "https://ex/s.yaml")
+            .await
+            .unwrap();
+        assert_eq!(spec.title, "T");
+        assert_eq!(port.calls.load(Ordering::SeqCst), 1);
     }
 }
 
