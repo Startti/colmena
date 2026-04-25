@@ -1,0 +1,38 @@
+{
+  "nodes": {
+    "ask": {
+      "type": "input",
+      "config": {
+        "default": "Using the Petstore OpenAPI 3.0 spec at https://raw.githubusercontent.com/OAI/OpenAPI-Specification/main/examples/v3.0/petstore.yaml, build a request to add a new pet named 'Rex' (id 42, status 'available'). Return only the final http_request JSON config you would execute."
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "anthropic",
+        "model": "claude-opus-4-7",
+        "api_key": "${ANTHROPIC_API_KEY}",
+        "system_message": "You are an integration agent. Use apis__load_spec to load an OpenAPI URL, apis__search_endpoint to find what you need, apis__get_endpoint_details to check argument shapes, and apis__build_http_request to construct a valid call. Never guess parameter names — always call apis__get_endpoint_details first.",
+        "tool_configurations": {
+          "apis": {
+            "name": "apis",
+            "description": "OpenAPI spec discovery + request builder",
+            "node_type": "api_explorer",
+            "node_config": {
+              "fuzzy_match_threshold": 0.3
+            },
+            "expose_sub_tools": "all"
+          }
+        }
+      }
+    },
+    "sink": {
+      "type": "output",
+      "config": {}
+    }
+  },
+  "edges": [
+    { "from": "ask", "to": "agent", "field": "prompt" },
+    { "from": "agent", "to": "sink" }
+  ]
+}
