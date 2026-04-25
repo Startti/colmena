@@ -636,7 +636,8 @@ impl OrchestratorNode {
             // Without this, final_reactor builds an empty user_message and the
             // downstream LlmMessage::user() construction fails.
             if !truncated.trim().is_empty() {
-                repo.save_phase_summary(session_id, phase, &truncated).await?;
+                repo.save_phase_summary(session_id, phase, &truncated)
+                    .await?;
             }
             phase_output = Value::String(truncated);
         }

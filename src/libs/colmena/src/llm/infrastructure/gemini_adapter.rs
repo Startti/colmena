@@ -179,7 +179,9 @@ impl GeminiAdapter {
                     let mut decl = serde_json::Map::new();
                     decl.insert("name".to_string(), json!(tool.name));
                     decl.insert("description".to_string(), json!(tool.description));
-                    if !tool.parameters.properties.is_empty() {
+                    if let Some(override_schema) = tool.input_schema_override.as_ref() {
+                        decl.insert("parameters".to_string(), override_schema.clone());
+                    } else if !tool.parameters.properties.is_empty() {
                         decl.insert(
                             "parameters".to_string(),
                             json!({
@@ -298,31 +300,36 @@ impl LlmRepository for GeminiAdapter {
 
         // Extract function calls if present
         let tool_calls = gemini_response.candidates.first().and_then(|candidate| {
-            candidate.content.as_ref()?.parts.as_ref().and_then(|parts| {
-                let function_calls: Vec<ToolCall> = parts
-                    .iter()
-                    .filter_map(|part| {
-                        part.function_call.as_ref().map(|fc| {
-                            // Generate a unique ID for the tool call
-                            let call_id = format!("call_{}", uuid::Uuid::new_v4());
-                            ToolCall::new(
-                                call_id,
-                                FunctionCall::new(
-                                    fc.name.clone(),
-                                    serde_json::to_string(&fc.args)
-                                        .unwrap_or_else(|_| "{}".to_string()),
-                                ),
-                            )
+            candidate
+                .content
+                .as_ref()?
+                .parts
+                .as_ref()
+                .and_then(|parts| {
+                    let function_calls: Vec<ToolCall> = parts
+                        .iter()
+                        .filter_map(|part| {
+                            part.function_call.as_ref().map(|fc| {
+                                // Generate a unique ID for the tool call
+                                let call_id = format!("call_{}", uuid::Uuid::new_v4());
+                                ToolCall::new(
+                                    call_id,
+                                    FunctionCall::new(
+                                        fc.name.clone(),
+                                        serde_json::to_string(&fc.args)
+                                            .unwrap_or_else(|_| "{}".to_string()),
+                                    ),
+                                )
+                            })
                         })
-                    })
-                    .collect();
+                        .collect();
 
-                if function_calls.is_empty() {
-                    None
-                } else {
-                    Some(function_calls)
-                }
-            })
+                    if function_calls.is_empty() {
+                        None
+                    } else {
+                        Some(function_calls)
+                    }
+                })
         });
 
         let content = gemini_response

@@ -260,9 +260,13 @@ mod tests {
             10,
         );
         s.create_artifact(&meta).await.unwrap();
-        s.write_version(&meta.artifact_id, &VersionId::initial(), &sample_version_data())
-            .await
-            .unwrap();
+        s.write_version(
+            &meta.artifact_id,
+            &VersionId::initial(),
+            &sample_version_data(),
+        )
+        .await
+        .unwrap();
         s.set_head(&meta.artifact_id, None, &VersionId::initial())
             .await
             .unwrap();

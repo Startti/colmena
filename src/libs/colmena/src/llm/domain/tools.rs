@@ -42,6 +42,14 @@ pub struct ToolDefinition {
 
     /// JSON Schema for the tool's parameters
     pub parameters: ToolParameters,
+
+    /// Raw JSON Schema override. When `Some`, providers (OpenAI/Anthropic/Gemini)
+    /// send this object verbatim as the tool's input schema and ignore
+    /// `parameters`. Lets synthetic tools expose schemars-derived schemas with
+    /// nested objects, tagged unions and arrays — shapes that don't fit the
+    /// flat `ParameterProperty` model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema_override: Option<serde_json::Value>,
 }
 
 impl ToolDefinition {
@@ -51,7 +59,14 @@ impl ToolDefinition {
             name,
             description,
             parameters,
+            input_schema_override: None,
         }
+    }
+
+    /// Builder: attach a raw JSON Schema that providers send verbatim.
+    pub fn with_input_schema_override(mut self, schema: serde_json::Value) -> Self {
+        self.input_schema_override = Some(schema);
+        self
     }
 
     /// Validate that the tool definition is well-formed
@@ -62,6 +77,12 @@ impl ToolDefinition {
 
         if self.description.is_empty() {
             return Err("Tool description cannot be empty".to_string());
+        }
+
+        // When a raw override is provided, structured `parameters` validation
+        // is bypassed — the override is the source of truth for the schema.
+        if self.input_schema_override.is_some() {
+            return Ok(());
         }
 
         if self.parameters.schema_type != "object" {

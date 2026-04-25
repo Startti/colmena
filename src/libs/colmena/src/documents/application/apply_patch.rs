@@ -29,10 +29,7 @@ pub struct ApplyPatchUseCase {
 }
 
 impl ApplyPatchUseCase {
-    pub async fn execute(
-        &self,
-        input: ApplyPatchInput,
-    ) -> Result<ApplyPatchOutput, DocumentError> {
+    pub async fn execute(&self, input: ApplyPatchInput) -> Result<ApplyPatchOutput, DocumentError> {
         let artifact_id = ArtifactId::new(input.patch.artifact_id.clone());
         let meta = self.store.read_meta(&artifact_id).await?;
         let current = meta.current_version.clone();
@@ -50,12 +47,13 @@ impl ApplyPatchUseCase {
 
         match meta.kind {
             ArtifactKind::Excel => {
-                let mut ir: ExcelIR = serde_json::from_value(current_data.ir.clone()).map_err(
-                    |e| DocumentError::IRValidationFailed {
-                        path: "/".into(),
-                        reason: format!("parse current IR: {e}"),
-                    },
-                )?;
+                let mut ir: ExcelIR =
+                    serde_json::from_value(current_data.ir.clone()).map_err(|e| {
+                        DocumentError::IRValidationFailed {
+                            path: "/".into(),
+                            reason: format!("parse current IR: {e}"),
+                        }
+                    })?;
                 let applier = ExcelOpApplier {
                     ids: self.ids.as_ref(),
                 };
@@ -113,12 +111,13 @@ impl ApplyPatchUseCase {
                 use crate::documents::application::apply_word_ops::WordOpApplier;
                 use crate::documents::domain::ir::WordIR;
 
-                let mut ir: WordIR = serde_json::from_value(current_data.ir.clone()).map_err(
-                    |e| DocumentError::IRValidationFailed {
-                        path: "/".into(),
-                        reason: format!("parse current Word IR: {e}"),
-                    },
-                )?;
+                let mut ir: WordIR =
+                    serde_json::from_value(current_data.ir.clone()).map_err(|e| {
+                        DocumentError::IRValidationFailed {
+                            path: "/".into(),
+                            reason: format!("parse current Word IR: {e}"),
+                        }
+                    })?;
                 let applier = WordOpApplier {
                     ids: self.ids.as_ref(),
                 };
@@ -260,9 +259,9 @@ fn describe_op(
             name,
             ..
         } => match &ids.table {
-            Some(tid) => format!(
-                "Created table '{name}' over {range} on sheet '{sheet_id}' (id: {tid})"
-            ),
+            Some(tid) => {
+                format!("Created table '{name}' over {range} on sheet '{sheet_id}' (id: {tid})")
+            }
             None => format!("Created table '{name}' over {range} on sheet '{sheet_id}'"),
         },
         ResizeTable {
@@ -283,7 +282,10 @@ fn describe_op(
             after,
             block,
         } => {
-            let btype = block.get("type").and_then(|v| v.as_str()).unwrap_or("block");
+            let btype = block
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("block");
             let pos = match (before.as_deref(), after.as_deref()) {
                 (Some(b), _) => format!(" before {b}"),
                 (_, Some(a)) => format!(" after {a}"),

@@ -94,7 +94,8 @@ mod tests {
     #[test]
     fn empty_ir_is_valid() {
         let v = ExcelValidator;
-        v.validate(&serde_json::to_value(&base_ir()).unwrap()).unwrap();
+        v.validate(&serde_json::to_value(&base_ir()).unwrap())
+            .unwrap();
     }
 
     #[test]

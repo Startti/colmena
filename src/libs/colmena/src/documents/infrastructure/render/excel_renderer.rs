@@ -42,7 +42,9 @@ impl ExcelRenderer {
                                 fmt = fmt.set_font_size(sz);
                             }
                             if let Some(color) = &font.color {
-                                if let Ok(c) = u32::from_str_radix(color.trim_start_matches('#'), 16) {
+                                if let Ok(c) =
+                                    u32::from_str_radix(color.trim_start_matches('#'), 16)
+                                {
                                     fmt = fmt.set_font_color(rust_xlsxwriter::Color::RGB(c));
                                 }
                             }
@@ -85,11 +87,7 @@ fn infer_type(value: &serde_json::Value) -> CellType {
         CellType::Number
     } else if value.is_boolean() {
         CellType::Boolean
-    } else if value
-        .as_str()
-        .map(|s| s.starts_with('='))
-        .unwrap_or(false)
-    {
+    } else if value.as_str().map(|s| s.starts_with('=')).unwrap_or(false) {
         CellType::Formula
     } else {
         CellType::String
@@ -111,7 +109,8 @@ fn write_cell(
                 .as_str()
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| value.to_string());
-            ws.write_string_with_format(row, col, &s, fmt).map_err(err)?;
+            ws.write_string_with_format(row, col, &s, fmt)
+                .map_err(err)?;
         }
         CellType::Number => {
             let n = value.as_f64().unwrap_or(0.0);
@@ -119,20 +118,16 @@ fn write_cell(
         }
         CellType::Boolean => {
             let b = value.as_bool().unwrap_or(false);
-            ws.write_boolean_with_format(row, col, b, fmt).map_err(err)?;
+            ws.write_boolean_with_format(row, col, b, fmt)
+                .map_err(err)?;
         }
         CellType::Date => {
-            let s = value
-                .as_str()
-                .map(|s| s.to_string())
-                .unwrap_or_default();
-            ws.write_string_with_format(row, col, &s, fmt).map_err(err)?;
+            let s = value.as_str().map(|s| s.to_string()).unwrap_or_default();
+            ws.write_string_with_format(row, col, &s, fmt)
+                .map_err(err)?;
         }
         CellType::Formula => {
-            let s = value
-                .as_str()
-                .map(|s| s.to_string())
-                .unwrap_or_default();
+            let s = value.as_str().map(|s| s.to_string()).unwrap_or_default();
             let formula = rust_xlsxwriter::Formula::new(&s);
             ws.write_formula_with_format(row, col, formula, fmt)
                 .map_err(err)?;

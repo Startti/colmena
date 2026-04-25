@@ -123,8 +123,7 @@ impl AnthropicAdapter {
                 MessageRole::Tool => {
                     // Anthropic encodes tool results as a `user` message with a single
                     // `tool_result` content block that references the assistant's tool_use id.
-                    let tool_use_id =
-                        message.tool_call_id().unwrap_or_default().to_string();
+                    let tool_use_id = message.tool_call_id().unwrap_or_default().to_string();
                     messages.push(AnthropicMessage {
                         role: "user".to_string(),
                         content: AnthropicContent::Blocks(vec![
@@ -173,14 +172,17 @@ impl AnthropicAdapter {
             let anthropic_tools: Vec<serde_json::Value> = tools
                 .iter()
                 .map(|tool| {
-                    json!({
-                        "name": tool.name,
-                        "description": tool.description,
-                        "input_schema": {
+                    let input_schema = tool.input_schema_override.clone().unwrap_or_else(|| {
+                        json!({
                             "type": tool.parameters.schema_type,
                             "properties": tool.parameters.properties,
                             "required": tool.parameters.required,
-                        }
+                        })
+                    });
+                    json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "input_schema": input_schema,
                     })
                 })
                 .collect();

@@ -132,6 +132,9 @@ mod tests {
             tables: vec![],
         });
         let json = serde_json::to_value(&ir).unwrap();
-        assert_eq!(json["workbook"]["sheets"][0]["cells"]["A1"]["value"], "Hello");
+        assert_eq!(
+            json["workbook"]["sheets"][0]["cells"]["A1"]["value"],
+            "Hello"
+        );
     }
 }

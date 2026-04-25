@@ -20,12 +20,12 @@ impl<'a> ExcelOpApplier<'a> {
                 format,
                 style_ref,
             } => {
-                let sheet = ir.sheet_mut(sheet_id).ok_or_else(|| {
-                    DocumentError::InvalidPatchOp {
-                        reason: format!("sheet not found: {sheet_id}"),
-                        op: serde_json::to_value(op).unwrap(),
-                    }
-                })?;
+                let sheet =
+                    ir.sheet_mut(sheet_id)
+                        .ok_or_else(|| DocumentError::InvalidPatchOp {
+                            reason: format!("sheet not found: {sheet_id}"),
+                            op: serde_json::to_value(op).unwrap(),
+                        })?;
                 let ct = value_type.as_deref().and_then(parse_cell_type);
                 sheet.cells.insert(
                     address.to_ascii_uppercase(),
@@ -271,10 +271,12 @@ impl<'a> ExcelOpApplier<'a> {
                 if let Some(c) = sheet.columns.iter_mut().find(|c| c.index == *col) {
                     c.width = *width;
                 } else {
-                    sheet.columns.push(crate::documents::domain::ir::ColumnSpec {
-                        index: *col,
-                        width: *width,
-                    });
+                    sheet
+                        .columns
+                        .push(crate::documents::domain::ir::ColumnSpec {
+                            index: *col,
+                            width: *width,
+                        });
                 }
             }
             PatchOp::DefineStyle {
@@ -450,7 +452,10 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(ir.workbook.sheets[0].cells["B5"].value, serde_json::json!(42));
+        assert_eq!(
+            ir.workbook.sheets[0].cells["B5"].value,
+            serde_json::json!(42)
+        );
     }
 
     #[test]

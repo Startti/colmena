@@ -4,8 +4,8 @@ use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::ExecutableNode;
 use crate::dag_engine::domain::toolkit_node::ToolkitNode;
 use crate::dag_engine::infrastructure::nodes::{
-    debug::*, http::*, input::*, llm::*, math::*, orchestrator::*, output::*, python_node::*,
-    socketio::*, sql::*, subgraph::*, task_memory_writer::*, trigger::*,
+    debug::*, document_nodes::*, http::*, input::*, llm::*, math::*, orchestrator::*, output::*,
+    python_node::*, socketio::*, sql::*, subgraph::*, task_memory_writer::*, trigger::*,
 }; // Importa nuestros nodos
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -173,6 +173,20 @@ impl HashMapNodeRegistry {
             nodes.insert(
                 "tavily_client".to_string(),
                 tavily.clone() as Arc<dyn ExecutableNode>,
+            );
+
+            // --- Registrar Nodos de Documentos ---
+            nodes.insert(
+                "document_create".to_string(),
+                Arc::new(DocumentCreateNode::new()),
+            );
+            nodes.insert(
+                "document_edit".to_string(),
+                Arc::new(DocumentEditNode::new()),
+            );
+            nodes.insert(
+                "document_read".to_string(),
+                Arc::new(DocumentReadNode::new()),
             );
 
             // --- Registrar SubGraph ---

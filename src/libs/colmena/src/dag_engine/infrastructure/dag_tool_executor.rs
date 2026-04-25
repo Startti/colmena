@@ -59,6 +59,13 @@ pub struct DagToolExecutor {
     /// metadata so the enclosing LlmNode can emit SSE events.
     skill_repository: Option<Arc<dyn crate::skills::domain::SkillRepository>>,
     skill_observer: Option<SkillObserver>,
+    /// Optional documents context. When present, the executor intercepts the
+    /// seven `document_*` synthetic tool calls and dispatches them to the
+    /// underlying `DocumentRuntime` use cases instead of the normal
+    /// tool-configuration path.
+    documents_context: Option<
+        Arc<crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::DocumentToolsContext>,
+    >,
 }
 
 impl DagToolExecutor {
@@ -120,6 +127,7 @@ impl DagToolExecutor {
             session_id: None,
             skill_repository: None,
             skill_observer: None,
+            documents_context: None,
         }
     }
 
@@ -146,6 +154,16 @@ impl DagToolExecutor {
     /// Attach an observer callback that fires after a successful `load_skill` dispatch.
     pub fn with_skill_observer(mut self, cb: SkillObserver) -> Self {
         self.skill_observer = Some(cb);
+        self
+    }
+
+    /// Attach a `DocumentToolsContext` so the seven `document_*` synthetic
+    /// tool calls dispatch to the document runtime.
+    pub fn with_documents(
+        mut self,
+        ctx: Arc<crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::DocumentToolsContext>,
+    ) -> Self {
+        self.documents_context = Some(ctx);
         self
     }
 
@@ -191,14 +209,18 @@ impl DagToolExecutor {
         use crate::llm::domain::{LlmError, ToolResult};
 
         // Resolve the toolkit node.
-        let toolkit = self.registry.get_toolkit_node(&cfg.node_type).ok_or_else(|| {
-            LlmError::ToolNotFound {
+        let toolkit = self
+            .registry
+            .get_toolkit_node(&cfg.node_type)
+            .ok_or_else(|| LlmError::ToolNotFound {
                 name: cfg.node_type.clone(),
-            }
-        })?;
+            })?;
 
         // Confirm this sub-tool is actually in the filter / catalogue.
-        let node_cfg = cfg.node_config.clone().unwrap_or_else(|| Value::Object(Default::default()));
+        let node_cfg = cfg
+            .node_config
+            .clone()
+            .unwrap_or_else(|| Value::Object(Default::default()));
         let catalog = toolkit.sub_tool_catalog(&node_cfg);
         let known = catalog.iter().any(|d| d.name.as_ref() == sub_tool);
         let exposed = cfg
@@ -210,33 +232,42 @@ impl DagToolExecutor {
             return Ok(ToolResult {
                 tool_call_id: tool_call.id.clone(),
                 success: false,
-                output: format!(
-                    "unknown sub-tool '{}' for toolkit '{}'",
-                    sub_tool, alias
-                ),
+                output: format!("unknown sub-tool '{}' for toolkit '{}'", sub_tool, alias),
                 error: Some("unknown sub-tool".to_string()),
             });
         }
 
         // Parse LLM arguments.
-        let mut inputs: HashMap<String, Value> = serde_json::from_str(&tool_call.function.arguments)
-            .map_err(|e| LlmError::InvalidToolCall {
-                reason: format!("Failed to parse arguments for {}: {}", tool_call.function.name, e),
+        let mut inputs: HashMap<String, Value> =
+            serde_json::from_str(&tool_call.function.arguments).map_err(|e| {
+                LlmError::InvalidToolCall {
+                    reason: format!(
+                        "Failed to parse arguments for {}: {}",
+                        tool_call.function.name, e
+                    ),
+                }
             })?;
 
         // Inject the reserved sub-tool discriminator.
-        inputs.insert(SUB_TOOL_INPUT_KEY.to_string(), Value::String(sub_tool.to_string()));
+        inputs.insert(
+            SUB_TOOL_INPUT_KEY.to_string(),
+            Value::String(sub_tool.to_string()),
+        );
 
         // Execute the underlying toolkit node as a plain ExecutableNode.
         // node_exec_config is the per-toolkit static node_config from the entry
         // (e.g. { "api_key": "..." }).
-        let exec_node = self
-            .registry
-            .get_node(&cfg.node_type)
-            .ok_or_else(|| LlmError::ToolNotFound { name: cfg.node_type.clone() })?;
+        let exec_node =
+            self.registry
+                .get_node(&cfg.node_type)
+                .ok_or_else(|| LlmError::ToolNotFound {
+                    name: cfg.node_type.clone(),
+                })?;
 
         let mut state = serde_json::json!({});
-        let result = exec_node.execute(&inputs, &node_cfg, &mut state, None).await;
+        let result = exec_node
+            .execute(&inputs, &node_cfg, &mut state, None)
+            .await;
 
         match result {
             Ok(value) => Ok(ToolResult {
@@ -284,6 +315,7 @@ impl DagToolExecutor {
                     properties: parsed.llm_properties,
                     required: parsed.required_params,
                 },
+                input_schema_override: None,
             };
         }
 
@@ -294,6 +326,7 @@ impl DagToolExecutor {
                     name: effective_name.to_string(),
                     description: tool_config.description.clone(),
                     parameters: params,
+                    input_schema_override: None,
                 };
             } else {
                 colmena_log!(
@@ -343,6 +376,7 @@ impl DagToolExecutor {
                     properties,
                     required,
                 },
+                input_schema_override: None,
             };
         }
 
@@ -415,6 +449,7 @@ impl DagToolExecutor {
                 properties: exposed_properties,
                 required,
             },
+            input_schema_override: None,
         }
     }
 }
@@ -439,6 +474,73 @@ impl ToolExecutor for DagToolExecutor {
                 obs(&result);
             }
             return Ok(into_tool_result(&tool_call.id, &result));
+        }
+
+        // --- Synthetic document tools (document_create, document_edit, etc.) ---
+        if let Some(ctx) = self.documents_context.as_ref() {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
+                dispatch_document_apply_patch, dispatch_document_create,
+                dispatch_document_get_head, dispatch_document_list_my_artifacts,
+                dispatch_document_list_versions, dispatch_document_read,
+                dispatch_document_rollback, DOCUMENT_APPLY_PATCH_TOOL, DOCUMENT_CREATE_TOOL,
+                DOCUMENT_GET_HEAD_TOOL, DOCUMENT_LIST_MY_ARTIFACTS_TOOL,
+                DOCUMENT_LIST_VERSIONS_TOOL, DOCUMENT_READ_TOOL, DOCUMENT_ROLLBACK_TOOL,
+            };
+
+            let name = tool_call.function.name.as_str();
+            let is_doc_tool = matches!(
+                name,
+                n if n == DOCUMENT_CREATE_TOOL
+                    || n == DOCUMENT_APPLY_PATCH_TOOL
+                    || n == DOCUMENT_READ_TOOL
+                    || n == DOCUMENT_GET_HEAD_TOOL
+                    || n == DOCUMENT_LIST_VERSIONS_TOOL
+                    || n == DOCUMENT_ROLLBACK_TOOL
+                    || n == DOCUMENT_LIST_MY_ARTIFACTS_TOOL
+            );
+
+            if is_doc_tool {
+                let args: serde_json::Value = if tool_call.function.arguments.trim().is_empty() {
+                    serde_json::json!({})
+                } else {
+                    serde_json::from_str(&tool_call.function.arguments).map_err(|e| {
+                        LlmError::InvalidToolCall {
+                            reason: format!(
+                                "Failed to parse arguments for tool {}: {}",
+                                name, e
+                            ),
+                        }
+                    })?
+                };
+
+                let result = match name {
+                    n if n == DOCUMENT_CREATE_TOOL => {
+                        dispatch_document_create(ctx, args).await
+                    }
+                    n if n == DOCUMENT_APPLY_PATCH_TOOL => {
+                        dispatch_document_apply_patch(ctx, args).await
+                    }
+                    n if n == DOCUMENT_READ_TOOL => dispatch_document_read(ctx, args).await,
+                    n if n == DOCUMENT_GET_HEAD_TOOL => {
+                        dispatch_document_get_head(ctx, args).await
+                    }
+                    n if n == DOCUMENT_LIST_VERSIONS_TOOL => {
+                        dispatch_document_list_versions(ctx, args).await
+                    }
+                    n if n == DOCUMENT_ROLLBACK_TOOL => {
+                        dispatch_document_rollback(ctx, args).await
+                    }
+                    _ => dispatch_document_list_my_artifacts(ctx, args).await,
+                };
+
+                let success = !matches!(&result, serde_json::Value::Object(m) if m.contains_key("error"));
+                return Ok(crate::llm::domain::ToolResult {
+                    tool_call_id: tool_call.id.clone(),
+                    output: result.to_string(),
+                    success,
+                    error: None,
+                });
+            }
         }
 
         // --- Toolkit dispatch: names of the form "<alias>__<sub_tool>" ---
@@ -756,7 +858,10 @@ impl ToolExecutor for DagToolExecutor {
                     .clone()
                     .unwrap_or_else(|| Value::Object(Default::default()));
                 let catalog = toolkit.sub_tool_catalog(&node_cfg);
-                let filter = config.expose_sub_tools.as_ref().expect("is_toolkit → filter present");
+                let filter = config
+                    .expose_sub_tools
+                    .as_ref()
+                    .expect("is_toolkit → filter present");
                 for sub in catalog {
                     if !filter.includes(&sub.name) {
                         continue;
@@ -769,6 +874,7 @@ impl ToolExecutor for DagToolExecutor {
                             properties: sub.properties,
                             required: sub.required,
                         },
+                        input_schema_override: None,
                     });
                 }
             } else if let Some(node) = self.registry.get_node(&config.node_type) {
@@ -785,6 +891,13 @@ impl ToolExecutor for DagToolExecutor {
         for (name, node) in nodes {
             // Skip internal nodes or nodes that shouldn't be tools
             if name == "llm_call" || name == "mock_input" || name == "log" {
+                continue;
+            }
+
+            // Document nodes are exposed via richer synthetic tools. Skipping
+            // the raw-node auto-discovery here avoids name collisions with the
+            // schemars-derived definitions injected at the LLM node level.
+            if name.starts_with("document_") {
                 continue;
             }
 
@@ -855,6 +968,7 @@ impl ToolExecutor for DagToolExecutor {
                     properties,
                     required,
                 },
+                input_schema_override: None,
             });
         }
 
@@ -1660,9 +1774,9 @@ mod tests {
 mod toolkit_runtime_tests {
     use super::*;
     use crate::dag_engine::domain::node::ExecutableNode;
+    use crate::dag_engine::domain::tool_configuration::{SubToolFilter, ToolConfiguration};
     use crate::dag_engine::domain::toolkit_node::ToolkitNode;
     use crate::dag_engine::infrastructure::nodes::echo_toolkit::EchoToolkitNode;
-    use crate::dag_engine::domain::tool_configuration::{SubToolFilter, ToolConfiguration};
     use async_trait::async_trait;
     use serde_json::json;
     use std::sync::Arc;
@@ -1684,7 +1798,10 @@ mod toolkit_runtime_tests {
 
         fn get_all_nodes(&self) -> std::collections::HashMap<String, Arc<dyn ExecutableNode>> {
             let mut m = std::collections::HashMap::new();
-            m.insert("echo_toolkit".to_string(), self.node.clone() as Arc<dyn ExecutableNode>);
+            m.insert(
+                "echo_toolkit".to_string(),
+                self.node.clone() as Arc<dyn ExecutableNode>,
+            );
             m
         }
 
@@ -1769,12 +1886,12 @@ mod toolkit_runtime_tests {
             },
             response: None,
         };
-        let result = exec.execute(&call).await.expect("execute returns ToolResult");
+        let result = exec
+            .execute(&call)
+            .await
+            .expect("execute returns ToolResult");
         assert!(!result.success);
-        assert!(result
-            .output
-            .to_lowercase()
-            .contains("unknown sub-tool"));
+        assert!(result.output.to_lowercase().contains("unknown sub-tool"));
     }
 
     #[tokio::test]

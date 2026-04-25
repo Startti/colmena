@@ -61,7 +61,11 @@ impl RollbackUseCase {
             .write_version(&input.artifact_id, &new_version, &version_data)
             .await?;
         self.store
-            .set_head(&input.artifact_id, Some(&meta.current_version), &new_version)
+            .set_head(
+                &input.artifact_id,
+                Some(&meta.current_version),
+                &new_version,
+            )
             .await?;
         meta.current_version = new_version.clone();
         meta.updated_at = Utc::now();

@@ -116,16 +116,19 @@ impl OpenAiAdapter {
             let openai_tools: Vec<serde_json::Value> = tools
                 .iter()
                 .map(|tool| {
+                    let parameters = tool.input_schema_override.clone().unwrap_or_else(|| {
+                        json!({
+                            "type": tool.parameters.schema_type,
+                            "properties": tool.parameters.properties,
+                            "required": tool.parameters.required
+                        })
+                    });
                     json!({
                         "type": "function",
                         "function": {
                             "name": tool.name,
                             "description": tool.description,
-                            "parameters": {
-                                "type": tool.parameters.schema_type,
-                                "properties": tool.parameters.properties,
-                                "required": tool.parameters.required
-                            }
+                            "parameters": parameters,
                         }
                     })
                 })

@@ -141,7 +141,11 @@ pub enum PatchOp {
 
     /// Set the width of a column. `col` is 0-indexed.
     #[serde(rename = "set_column_width")]
-    SetColumnWidth { sheet_id: String, col: u32, width: f64 },
+    SetColumnWidth {
+        sheet_id: String,
+        col: u32,
+        width: f64,
+    },
 
     /// Create or update a named style referenced by cells via `style_ref`.
     #[serde(rename = "define_style")]
@@ -151,7 +155,6 @@ pub enum PatchOp {
     },
 
     // -------- Word ops --------
-
     /// Insert a new block. Exactly one of `before` or `after` must be provided
     /// (referencing an existing block_id). If both omitted, appends at end.
     #[serde(rename = "insert_block")]

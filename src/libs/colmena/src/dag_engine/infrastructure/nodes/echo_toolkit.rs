@@ -5,9 +5,7 @@
 
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
-use crate::dag_engine::domain::toolkit_node::{
-    SubToolDefinition, ToolkitNode, SUB_TOOL_INPUT_KEY,
-};
+use crate::dag_engine::domain::toolkit_node::{SubToolDefinition, ToolkitNode, SUB_TOOL_INPUT_KEY};
 use crate::llm::domain::tools::ParameterProperty;
 use serde_json::{json, Value};
 use std::borrow::Cow;
@@ -110,7 +108,10 @@ mod tests {
         inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("echo"));
         inputs.insert("message".into(), json!("hi"));
         let mut state = json!({});
-        let out = node.execute(&inputs, &json!({}), &mut state, None).await.unwrap();
+        let out = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap();
         assert_eq!(out.get("output").unwrap().as_str(), Some("hi"));
     }
 
@@ -121,7 +122,10 @@ mod tests {
         inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("double"));
         inputs.insert("n".into(), json!(4));
         let mut state = json!({});
-        let out = node.execute(&inputs, &json!({}), &mut state, None).await.unwrap();
+        let out = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap();
         assert_eq!(out.get("output").unwrap().as_f64(), Some(8.0));
     }
 
@@ -139,7 +143,10 @@ mod tests {
         let node = EchoToolkitNode;
         let inputs: NodeInputs = HashMap::new();
         let mut state = json!({});
-        let err = node.execute(&inputs, &json!({}), &mut state, None).await.unwrap_err();
+        let err = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("__sub_tool"));
     }
 
@@ -149,7 +156,10 @@ mod tests {
         let mut inputs: NodeInputs = HashMap::new();
         inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("nope"));
         let mut state = json!({});
-        let err = node.execute(&inputs, &json!({}), &mut state, None).await.unwrap_err();
+        let err = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("unknown sub_tool"));
     }
 
@@ -159,7 +169,10 @@ mod tests {
         let mut inputs: NodeInputs = HashMap::new();
         inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("echo"));
         let mut state = json!({});
-        let err = node.execute(&inputs, &json!({}), &mut state, None).await.unwrap_err();
+        let err = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("message"));
     }
 
@@ -169,7 +182,10 @@ mod tests {
         let mut inputs: NodeInputs = HashMap::new();
         inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("double"));
         let mut state = json!({});
-        let err = node.execute(&inputs, &json!({}), &mut state, None).await.unwrap_err();
+        let err = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("'n'"));
     }
 }

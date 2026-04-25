@@ -1,7 +1,9 @@
 use crate::documents::domain::artifact::{ArtifactMeta, PatchApplied, PatchSummary, VersionData};
 use crate::documents::domain::ids::{ArtifactId, ArtifactKind, SessionId, VersionId};
 use crate::documents::domain::patch::PatchSource;
-use crate::documents::domain::{ArtifactStore, DocumentError, IRRenderer, IRValidator, IdGenerator};
+use crate::documents::domain::{
+    ArtifactStore, DocumentError, IRRenderer, IRValidator, IdGenerator,
+};
 use chrono::Utc;
 use std::sync::Arc;
 
@@ -57,7 +59,8 @@ impl CreateDocumentUseCase {
             obj.insert("version_id".into(), serde_json::json!("v1"));
         }
 
-        let (validator, renderer): (&Arc<dyn IRValidator>, &Arc<dyn IRRenderer>) = match input.kind {
+        let (validator, renderer): (&Arc<dyn IRValidator>, &Arc<dyn IRRenderer>) = match input.kind
+        {
             ArtifactKind::Excel => (&self.excel_validator, &self.excel_renderer),
             ArtifactKind::Word => (&self.word_validator, &self.word_renderer),
         };

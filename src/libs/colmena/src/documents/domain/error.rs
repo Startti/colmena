@@ -49,7 +49,10 @@ pub enum DocumentError {
     ArtifactNotFound(ArtifactId),
 
     #[error("version not found: {artifact}/{version}")]
-    VersionNotFound { artifact: ArtifactId, version: VersionId },
+    VersionNotFound {
+        artifact: ArtifactId,
+        version: VersionId,
+    },
 
     #[error("version conflict: base {base}, current {current}")]
     VersionConflict {
@@ -63,7 +66,10 @@ pub enum DocumentError {
     IRValidationFailed { path: String, reason: String },
 
     #[error("invalid patch op: {reason}")]
-    InvalidPatchOp { reason: String, op: serde_json::Value },
+    InvalidPatchOp {
+        reason: String,
+        op: serde_json::Value,
+    },
 
     #[error("render failed: {0}")]
     RenderFailed(String),

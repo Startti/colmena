@@ -2,6 +2,6 @@
 //!
 //! See `docs/superpowers/specs/2026-04-21-documents-feature-design.md`.
 
-pub mod domain;
 pub mod application;
+pub mod domain;
 pub mod infrastructure;

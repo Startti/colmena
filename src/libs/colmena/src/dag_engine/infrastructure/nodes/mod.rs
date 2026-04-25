@@ -1,6 +1,7 @@
 // Hacemos públicos los módulos de nodos
 pub mod critic;
 pub mod debug;
+pub mod document_nodes;
 pub mod echo_toolkit;
 pub mod extraction;
 pub mod http;

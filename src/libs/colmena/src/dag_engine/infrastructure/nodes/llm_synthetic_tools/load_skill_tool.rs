@@ -69,6 +69,7 @@ skill and seeing it declares this reference."
             properties,
             required: vec!["name".to_string()],
         },
+        input_schema_override: None,
     }
 }
 

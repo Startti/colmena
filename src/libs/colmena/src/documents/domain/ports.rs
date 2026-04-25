@@ -1,7 +1,8 @@
-use super::artifact::{ArtifactMeta, VersionData};
-use super::error::{DocumentError, RenderError, StorageError};
-use super::ids::{ArtifactId, VersionId};
+use super::artifact::{ArtifactMeta, ArtifactSummary, VersionData};
+use super::error::{DocumentError, IndexError, RenderError, StorageError};
+use super::ids::{ArtifactId, SessionId, VersionId};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 
 #[async_trait]
 pub trait ArtifactStore: Send + Sync {
@@ -63,4 +64,32 @@ pub trait IdGenerator: Send + Sync {
     fn new_run_id(&self) -> String;
     fn new_row_id(&self) -> String;
     fn new_list_item_id(&self) -> String;
+}
+
+/// Maps `session_id ↔ [artifact_ids]` so an agent can list its own artifacts and
+/// the server can enforce session isolation. See spec §9.
+#[async_trait]
+pub trait SessionArtifactIndex: Send + Sync {
+    async fn register(
+        &self,
+        session: &SessionId,
+        id: &ArtifactId,
+        meta: &ArtifactMeta,
+    ) -> Result<(), IndexError>;
+
+    async fn list_by_session(
+        &self,
+        session: &SessionId,
+    ) -> Result<Vec<ArtifactSummary>, IndexError>;
+
+    async fn lookup(&self, id: &ArtifactId) -> Result<Option<ArtifactSummary>, IndexError>;
+
+    async fn update_head(
+        &self,
+        id: &ArtifactId,
+        version: &VersionId,
+        updated_at: DateTime<Utc>,
+    ) -> Result<(), IndexError>;
+
+    async fn unregister(&self, id: &ArtifactId) -> Result<(), IndexError>;
 }

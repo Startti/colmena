@@ -6,11 +6,12 @@ pub struct WordValidator;
 
 impl IRValidator for WordValidator {
     fn validate(&self, ir_value: &serde_json::Value) -> Result<(), DocumentError> {
-        let ir: WordIR =
-            serde_json::from_value(ir_value.clone()).map_err(|e| DocumentError::IRValidationFailed {
+        let ir: WordIR = serde_json::from_value(ir_value.clone()).map_err(|e| {
+            DocumentError::IRValidationFailed {
                 path: "/".into(),
                 reason: format!("not a valid Word IR: {e}"),
-            })?;
+            }
+        })?;
 
         let mut block_ids: HashSet<&str> = HashSet::new();
         for (i, block) in ir.document.blocks.iter().enumerate() {

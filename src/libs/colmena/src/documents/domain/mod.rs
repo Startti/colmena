@@ -11,4 +11,4 @@ pub use artifact::{
 pub use error::{ConflictDetail, DocumentError, IndexError, RenderError, StorageError};
 pub use ids::{ArtifactId, ArtifactKind, SessionId, VersionId};
 pub use patch::{Patch, PatchOp, PatchSource};
-pub use ports::{ArtifactStore, IRRenderer, IRValidator, IdGenerator};
+pub use ports::{ArtifactStore, IRRenderer, IRValidator, IdGenerator, SessionArtifactIndex};

@@ -13,7 +13,11 @@ use std::sync::Arc;
 
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
-use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::build_load_skill_tool_definition;
+use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
+    build_all_document_tools, build_load_skill_tool_definition, DocumentToolsContext,
+};
+use crate::documents::application::DocumentRuntime;
+use crate::documents::domain::ids::SessionId as DocSessionId;
 use crate::llm::application::AgentService;
 use crate::skills::domain::{SkillRepository, SkillsConfig};
 use crate::skills::infrastructure::{
@@ -533,14 +537,12 @@ impl ExecutableNode for LlmNode {
         // falling back to an empty map — a malformed entry (e.g. an invalid
         // field inside node_schema) would otherwise strip ALL tools from the
         // LLM with no visible diagnostic.
-        let mut tool_configurations: HashMap<String, ToolConfiguration> =
-            match inputs
-                .get("tool_configurations")
-                .or_else(|| config.get("tool_configurations"))
-            {
-                Some(v) => match serde_json::from_value::<HashMap<String, ToolConfiguration>>(
-                    v.clone(),
-                ) {
+        let mut tool_configurations: HashMap<String, ToolConfiguration> = match inputs
+            .get("tool_configurations")
+            .or_else(|| config.get("tool_configurations"))
+        {
+            Some(v) => {
+                match serde_json::from_value::<HashMap<String, ToolConfiguration>>(v.clone()) {
                     Ok(map) => map,
                     Err(e) => {
                         colmena_log!(
@@ -549,9 +551,10 @@ impl ExecutableNode for LlmNode {
                         );
                         HashMap::new()
                     }
-                },
-                None => HashMap::new(),
-            };
+                }
+            }
+            None => HashMap::new(),
+        };
 
         // Resolve context variables in both fixed_config and node_schema
         for tool_cfg in tool_configurations.values_mut() {
@@ -583,11 +586,44 @@ impl ExecutableNode for LlmNode {
         let skills_used_log: Arc<std::sync::Mutex<Vec<SkillLoadedLogEntry>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
 
+        // Build documents context if the LLM node was configured with a `documents`
+        // block. The seven `document_*` synthetic tools are exposed and dispatched
+        // through the runtime built here. Session id is resolved from the same
+        // priority chain used elsewhere in this node, falling back to "default".
+        let documents_context: Option<Arc<DocumentToolsContext>> = match inputs
+            .get("documents")
+            .cloned()
+            .or_else(|| config.get("documents").cloned())
+        {
+            Some(doc_cfg) => match DocumentRuntime::from_config(&doc_cfg) {
+                Ok(rt) => {
+                    let sid = session_id.unwrap_or("default").to_string();
+                    Some(Arc::new(DocumentToolsContext {
+                        create: rt.create.clone(),
+                        apply: rt.apply.clone(),
+                        read: rt.read.clone(),
+                        get_head: rt.get_head.clone(),
+                        list_versions: rt.list_versions.clone(),
+                        rollback: rt.rollback.clone(),
+                        session_index: None,
+                        session_id: DocSessionId::new(sid),
+                    }))
+                }
+                Err(e) => {
+                    return Err(format!("invalid `documents` config on llm node: {e}").into());
+                }
+            },
+            None => None,
+        };
+
         let tool_executor = {
             let mut executor = DagToolExecutor::new(registry, tool_configurations);
             // Propagate SecureValueService + session_id so tool calls decrypt secrets.
             if let (Some(svc), Some(sid)) = (self.secure_value_service.clone(), session_id) {
                 executor = executor.with_secure_values(svc, sid.to_string());
+            }
+            if let Some(ctx) = documents_context.clone() {
+                executor = executor.with_documents(ctx);
             }
             if let Some(repo) = skill_repo.clone() {
                 executor = executor.with_skills(repo.clone());
@@ -695,8 +731,7 @@ impl ExecutableNode for LlmNode {
 
         let is_auto_enabled = |tool_name: &str| -> bool {
             configured_aliases.iter().any(|alias| {
-                tool_name == alias.as_str()
-                    || tool_name.starts_with(&format!("{}__", alias))
+                tool_name == alias.as_str() || tool_name.starts_with(&format!("{}__", alias))
             })
         };
 
@@ -736,6 +771,16 @@ impl ExecutableNode for LlmNode {
 
         if let Some(repo) = skill_repo.as_ref() {
             tools.push(build_load_skill_tool_definition(repo));
+        }
+
+        // When the LLM node has a `documents` config, expose the seven synthetic
+        // document_* tools regardless of `enabled_tools` — same pattern as
+        // load_skill. The DagToolExecutor was already wired with the matching
+        // DocumentToolsContext above so dispatches succeed.
+        if documents_context.is_some() {
+            for td in build_all_document_tools() {
+                tools.push(td);
+            }
         }
 
         // 2.2 Add System Message if present and history is empty.
