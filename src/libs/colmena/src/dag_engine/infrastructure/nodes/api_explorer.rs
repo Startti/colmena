@@ -34,9 +34,9 @@ use std::sync::Arc;
 /// calls. The per-conversation cache lives inside the
 /// `SessionRegistry<Arc<SpecCache>>` owned by the use case.
 pub struct ApiExplorerNode {
-    #[allow(dead_code)] // used by handlers in Tasks 13-15
     use_case: Arc<ApiSpecUseCase>,
     registry: Arc<SessionRegistry<Arc<SpecCache>>>,
+    #[allow(dead_code)] // used in Tasks 14-15 (build_http_request needs secret resolution)
     secure_values: Option<Arc<SecureValueService>>,
 }
 
@@ -59,7 +59,6 @@ impl ApiExplorerNode {
     /// Build a node with a custom port — used by tests that inject a
     /// `CountingPort` or similar. Not part of the public API.
     #[cfg(test)]
-    #[allow(dead_code)] // used by port-injection tests in Tasks 13-15
     pub(crate) fn new_with_port(port: Arc<dyn ApiSpecPort>) -> Self {
         let registry = SessionRegistry::<Arc<SpecCache>>::new(TtlConfig::default());
         let cfg = ApiSpecUseCaseConfig::default();
@@ -85,7 +84,6 @@ impl ApiExplorerNode {
     /// Extract `conversation_id` from node inputs. Toolkit executor passes
     /// this through from the llm_call parent. Falls back to "default" so
     /// the node remains usable when the engine does not supply one.
-    #[allow(dead_code)] // used by handlers in Tasks 13-15
     fn extract_conversation_id(inputs: &NodeInputs) -> String {
         inputs
             .get("conversation_id")
@@ -96,7 +94,6 @@ impl ApiExplorerNode {
 
     /// Helper — read a required string field from the LLM's argument map.
     /// Returns a structured LLM-recoverable error JSON on miss.
-    #[allow(dead_code)] // used by handlers in Tasks 13-15
     pub(crate) fn require_str<'a>(inputs: &'a NodeInputs, key: &str) -> Result<&'a str, Value> {
         match inputs.get(key).and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => Ok(s),
@@ -106,6 +103,151 @@ impl ApiExplorerNode {
                 "message": format!("`{key}` is required (string)")
             })),
         }
+    }
+
+    /// Handler for the `load_spec` sub-tool. Fetches (or reuses the
+    /// cached) spec for this conversation and returns the summary the
+    /// LLM consumes.
+    async fn handle_load_spec(
+        &self,
+        inputs: &NodeInputs,
+        _config: &Value,
+        conversation_id: &str,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+        let url = match Self::require_str(inputs, "url") {
+            Ok(u) => u.to_string(),
+            Err(v) => return Ok(v),
+        };
+        let force_reload = inputs
+            .get("force_reload")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        match self
+            .use_case
+            .fetch_spec(conversation_id, &url, force_reload)
+            .await
+        {
+            Ok((entry, was_cached)) => {
+                let parsed = &entry.parsed;
+                let security_schemes: Vec<String> =
+                    parsed.security_schemes.keys().cloned().collect();
+                Ok(json!({
+                    "spec_url_input": url,
+                    "resolved_url": parsed.resolved_url,
+                    "original_format": parsed.original_format.as_str(),
+                    "internal_format": parsed.internal_format,
+                    "title": parsed.title,
+                    "version": parsed.version,
+                    "description": parsed.description,
+                    "server_url": parsed.servers.first().cloned().unwrap_or_default(),
+                    "endpoints_count": parsed.endpoints.len(),
+                    "tags": parsed.tags,
+                    "security_schemes": security_schemes,
+                    "cached": was_cached,
+                }))
+            }
+            Err(e) => Ok(format_spec_error(e)),
+        }
+    }
+}
+
+/// Translate a [`WebDomainError`] into the structured JSON the LLM sees.
+///
+/// Non-recoverable variants (`InvalidConfig`, `AdapterInit`,
+/// `SpecTooLarge`) bubble out as errors so the DAG crashes; everything
+/// else maps to a stable `error` discriminator the model can branch on.
+fn format_spec_error(e: crate::web::domain::WebDomainError) -> Value {
+    use crate::web::domain::WebDomainError as E;
+    match e {
+        E::SpecParseFailed { details } => json!({
+            "error": "spec_parse_failed",
+            "details": details,
+            "message": "Spec could not be parsed as OpenAPI 3.x or Swagger 2.0."
+        }),
+        E::UnexpectedHtmlResponse { url, resolved_url } => json!({
+            "error": "unexpected_html_response",
+            "url_given": url,
+            "resolved_url": resolved_url,
+            "message": "URL returned HTML. If this is a Git-forge blob URL for a lesser-known host, use the raw content URL instead."
+        }),
+        E::Swagger2ConversionFailed { reason, unsupported_feature } => json!({
+            "error": "swagger2_conversion_failed",
+            "reason": reason,
+            "unsupported_feature": unsupported_feature,
+            "message": "This Swagger 2.0 spec uses a feature the converter does not handle. Fall back to reading docs with web__fetch."
+        }),
+        E::UnsupportedSpecFormat { detected } => json!({
+            "error": "unsupported_spec_format",
+            "detected": detected,
+            "message": "api_explorer supports OpenAPI 3.x and Swagger 2.0 only."
+        }),
+        E::EndpointNotFound { searched_for, did_you_mean } => json!({
+            "error": "endpoint_not_found",
+            "searched_for": searched_for,
+            "did_you_mean": did_you_mean,
+        }),
+        E::MissingRequiredParams { missing, hints } => json!({
+            "error": "missing_required_params",
+            "missing": missing,
+            "hints": hints,
+        }),
+        E::InvalidParamType { param, expected_type, got } => json!({
+            "error": "invalid_param_type",
+            "param": param,
+            "expected_type": expected_type,
+            "got": got,
+        }),
+        E::MissingAuth { scheme, message } => json!({
+            "error": "missing_auth",
+            "scheme": scheme,
+            "message": message,
+        }),
+        E::SpecNotLoaded { spec_url } => json!({
+            "error": "spec_not_loaded",
+            "spec_url": spec_url,
+            "message": "Call load_spec(url) first.",
+        }),
+        E::Timeout { ms } => json!({
+            "error": "fetch_failed",
+            "reason": "timeout",
+            "ms": ms,
+            "retryable": true,
+        }),
+        E::Upstream { status, body } => json!({
+            "error": "fetch_failed",
+            "status": status,
+            "retryable": status >= 500,
+            "message": body,
+        }),
+        E::RateLimit { calls_used, cap } => json!({
+            "error": "rate_limit",
+            "calls_used": calls_used,
+            "cap": cap,
+        }),
+        E::SessionLost { last_known_url } => json!({
+            "error": "session_lost",
+            "last_known_url": last_known_url,
+        }),
+        E::SelectorNotFound { selector, page_url, hints } => json!({
+            "error": "selector_not_found",
+            "selector": selector,
+            "page_url": page_url,
+            "hints": hints,
+        }),
+        E::NavigationFailed(msg) => json!({
+            "error": "navigation_failed",
+            "message": msg,
+        }),
+        E::SessionCapReached { active, cap } => json!({
+            "error": "session_cap_reached",
+            "active": active,
+            "cap": cap,
+        }),
+        other => json!({
+            "error": "web_error",
+            "message": other.to_string(),
+        }),
     }
 }
 
@@ -127,7 +269,7 @@ impl ExecutableNode for ApiExplorerNode {
     async fn execute(
         &self,
         inputs: &NodeInputs,
-        _config: &Value,
+        config: &Value,
         _state: &mut Value,
         _observer: Option<Arc<dyn ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
@@ -135,7 +277,24 @@ impl ExecutableNode for ApiExplorerNode {
             .get(SUB_TOOL_INPUT_KEY)
             .and_then(|v| v.as_str())
             .ok_or("api_explorer: missing __sub_tool")?;
-        Err(format!("api_explorer: sub_tool '{sub}' not implemented yet").into())
+        let conversation_id = Self::extract_conversation_id(inputs);
+
+        match sub {
+            "load_spec" => self.handle_load_spec(inputs, config, &conversation_id).await,
+            "list_endpoints" => Err("api_explorer: list_endpoints not implemented yet".into()),
+            "search_endpoint" => Err("api_explorer: search_endpoint not implemented yet".into()),
+            "get_endpoint_details" => {
+                Err("api_explorer: get_endpoint_details not implemented yet".into())
+            }
+            "build_http_request" => {
+                Err("api_explorer: build_http_request not implemented yet".into())
+            }
+            other => Ok(json!({
+                "error": "unknown_sub_tool",
+                "sub_tool": other,
+                "message": "Use one of: load_spec, list_endpoints, search_endpoint, get_endpoint_details, build_http_request"
+            })),
+        }
     }
 
     fn schema(&self) -> Value {
@@ -479,12 +638,200 @@ mod tests {
     async fn dispatch_stub_errors_until_handlers_land() {
         let node = ApiExplorerNode::new();
         let mut inputs: NodeInputs = HashMap::new();
-        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("load_spec"));
+        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("list_endpoints"));
         let mut state = json!({});
         let err = node
             .execute(&inputs, &json!({}), &mut state, None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not implemented"));
+    }
+
+    use crate::web::domain::{
+        ApiKeyLocation, ApiSpecPort, Endpoint, HttpMethod, ParsedSpec, SecurityRequirement,
+        SecurityScheme, SpecFetchResult, SpecFormat, WebDomainError,
+    };
+    use std::sync::Mutex as StdMutex;
+
+    /// Minimal stub port returning a hand-built `ParsedSpec`. The
+    /// `resolved_url` echoes the input URL so cache lookups by URL work.
+    struct FakePort {
+        calls: StdMutex<u32>,
+        spec: ParsedSpec,
+    }
+
+    #[async_trait]
+    impl ApiSpecPort for FakePort {
+        async fn fetch_and_parse(
+            &self,
+            url: &str,
+            _etag: Option<&str>,
+            _last_modified: Option<&str>,
+        ) -> Result<SpecFetchResult, WebDomainError> {
+            *self.calls.lock().unwrap() += 1;
+            let mut s = self.spec.clone();
+            s.input_url = url.to_string();
+            s.resolved_url = url.to_string();
+            Ok(SpecFetchResult::Fresh {
+                spec: s,
+                etag: Some("W/\"v1\"".into()),
+                last_modified: None,
+            })
+        }
+    }
+
+    fn fake_parsed_spec() -> ParsedSpec {
+        let mut security_schemes = HashMap::new();
+        security_schemes.insert(
+            "ApiKeyAuth".into(),
+            SecurityScheme::ApiKey {
+                name: "X-API-Key".into(),
+                location: ApiKeyLocation::Header,
+            },
+        );
+        ParsedSpec {
+            resolved_url: "".into(),
+            input_url: "".into(),
+            original_format: SpecFormat::OpenApi3x,
+            internal_format: "openapi-3.0.3".into(),
+            title: "Petstore".into(),
+            version: "1.0.0".into(),
+            description: Some("Sample API.".into()),
+            servers: vec!["https://petstore.example.com".into()],
+            endpoints: vec![Endpoint {
+                operation_id: "listPets".into(),
+                method: HttpMethod::Get,
+                path: "/pets".into(),
+                summary: Some("List pets".into()),
+                description: None,
+                tags: vec!["pets".into()],
+                path_params: Vec::new(),
+                query_params: Vec::new(),
+                header_params: Vec::new(),
+                request_body: None,
+                responses: HashMap::new(),
+                security: vec![SecurityRequirement {
+                    scheme: "ApiKeyAuth".into(),
+                    scopes: Vec::new(),
+                }],
+            }],
+            security_schemes,
+            tags: vec!["pets".into()],
+        }
+    }
+
+    fn node_with_fake_port() -> (Arc<FakePort>, ApiExplorerNode) {
+        let port = Arc::new(FakePort {
+            calls: StdMutex::new(0),
+            spec: fake_parsed_spec(),
+        });
+        let node = ApiExplorerNode::new_with_port(port.clone() as Arc<dyn ApiSpecPort>);
+        (port, node)
+    }
+
+    #[tokio::test]
+    async fn load_spec_returns_summary_with_resolved_url() {
+        let (port, node) = node_with_fake_port();
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("load_spec"));
+        inputs.insert("url".into(), json!("https://example.com/petstore.yaml"));
+        inputs.insert("conversation_id".into(), json!("c-1"));
+        let mut state = json!({});
+        let out = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            out.get("spec_url_input").and_then(|v| v.as_str()),
+            Some("https://example.com/petstore.yaml")
+        );
+        assert_eq!(
+            out.get("resolved_url").and_then(|v| v.as_str()),
+            Some("https://example.com/petstore.yaml")
+        );
+        assert_eq!(out.get("title").and_then(|v| v.as_str()), Some("Petstore"));
+        assert_eq!(
+            out.get("original_format").and_then(|v| v.as_str()),
+            Some("openapi-3.x")
+        );
+        assert_eq!(
+            out.get("internal_format").and_then(|v| v.as_str()),
+            Some("openapi-3.0.3")
+        );
+        assert_eq!(out.get("endpoints_count").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(out.get("cached").and_then(|v| v.as_bool()), Some(false));
+        let schemes = out
+            .get("security_schemes")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert_eq!(schemes[0].as_str(), Some("ApiKeyAuth"));
+        assert_eq!(*port.calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn load_spec_caches_within_conversation() {
+        let (port, node) = node_with_fake_port();
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("load_spec"));
+        inputs.insert("url".into(), json!("https://example.com/petstore.yaml"));
+        inputs.insert("conversation_id".into(), json!("c-cache"));
+        let mut state = json!({});
+
+        let first = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+        assert_eq!(first.get("cached").and_then(|v| v.as_bool()), Some(false));
+
+        let second = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+        assert_eq!(second.get("cached").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            *port.calls.lock().unwrap(),
+            1,
+            "second call must hit cache, not the port"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_spec_force_reload_bypasses_cache() {
+        let (port, node) = node_with_fake_port();
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("load_spec"));
+        inputs.insert("url".into(), json!("https://example.com/petstore.yaml"));
+        inputs.insert("conversation_id".into(), json!("c-force"));
+        let mut state = json!({});
+
+        node.execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+        inputs.insert("force_reload".into(), json!(true));
+        let out = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+        assert_eq!(*port.calls.lock().unwrap(), 2);
+        assert_eq!(out.get("cached").and_then(|v| v.as_bool()), Some(false));
+    }
+
+    #[tokio::test]
+    async fn load_spec_missing_url_returns_invalid_input() {
+        let (_port, node) = node_with_fake_port();
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("load_spec"));
+        inputs.insert("conversation_id".into(), json!("c-x"));
+        let mut state = json!({});
+        let out = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.get("error").and_then(|v| v.as_str()),
+            Some("invalid_input")
+        );
+        assert_eq!(out.get("missing").and_then(|v| v.as_str()), Some("url"));
     }
 }
