@@ -60,8 +60,15 @@ impl ApiExplorerNode {
     /// `CountingPort` or similar. Not part of the public API.
     #[cfg(test)]
     pub(crate) fn new_with_port(port: Arc<dyn ApiSpecPort>) -> Self {
+        Self::new_with_port_and_config(port, ApiSpecUseCaseConfig::default())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_port_and_config(
+        port: Arc<dyn ApiSpecPort>,
+        cfg: ApiSpecUseCaseConfig,
+    ) -> Self {
         let registry = SessionRegistry::<Arc<SpecCache>>::new(TtlConfig::default());
-        let cfg = ApiSpecUseCaseConfig::default();
         let use_case = Arc::new(ApiSpecUseCase::new(port, registry.clone(), cfg));
         Self {
             use_case,
@@ -147,6 +154,110 @@ impl ApiExplorerNode {
                     "cached": was_cached,
                 }))
             }
+            Err(e) => Ok(format_spec_error(e)),
+        }
+    }
+
+    /// Handler for the `list_endpoints` sub-tool. Returns a paginated
+    /// summary; `spec_not_loaded` if `load_spec` was never called for
+    /// this conversation.
+    async fn handle_list_endpoints(
+        &self,
+        inputs: &NodeInputs,
+        conversation_id: &str,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+        let spec_url = match Self::require_str(inputs, "spec_url") {
+            Ok(u) => u.to_string(),
+            Err(v) => return Ok(v),
+        };
+        let tag = inputs
+            .get("tag")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let limit = inputs
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(50)
+            .clamp(1, 200) as usize;
+        let offset = inputs
+            .get("offset")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+
+        match self
+            .use_case
+            .list_endpoints(conversation_id, &spec_url, tag.as_deref(), limit, offset)
+            .await
+        {
+            Ok(page) => Ok(json!({
+                "total": page.total,
+                "returned": page.returned,
+                "offset": page.offset,
+                "endpoints": page
+                    .endpoints
+                    .iter()
+                    .map(|e| json!({
+                        "operation_id": e.operation_id,
+                        "method": e.method,
+                        "path": e.path,
+                        "summary": e.summary,
+                        "tags": e.tags,
+                    }))
+                    .collect::<Vec<_>>(),
+            })),
+            Err(e) => Ok(format_spec_error(e)),
+        }
+    }
+
+    /// Handler for the `search_endpoint` sub-tool.
+    async fn handle_search_endpoint(
+        &self,
+        inputs: &NodeInputs,
+        conversation_id: &str,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+        let spec_url = match Self::require_str(inputs, "spec_url") {
+            Ok(u) => u.to_string(),
+            Err(v) => return Ok(v),
+        };
+        let query = match Self::require_str(inputs, "query") {
+            Ok(q) => q.to_string(),
+            Err(v) => return Ok(v),
+        };
+        let method_filter = inputs
+            .get("method")
+            .and_then(|v| v.as_str())
+            .map(str::to_ascii_uppercase);
+        let max_results = inputs
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10)
+            .clamp(1, 50) as usize;
+
+        match self
+            .use_case
+            .search_endpoint(
+                conversation_id,
+                &spec_url,
+                &query,
+                method_filter.as_deref(),
+                max_results,
+            )
+            .await
+        {
+            Ok(results) => Ok(json!({
+                "query": query,
+                "results": results
+                    .into_iter()
+                    .map(|r| json!({
+                        "operation_id": r.operation_id,
+                        "method": r.method,
+                        "path": r.path,
+                        "summary": r.summary,
+                        "score": r.score,
+                        "match_reason": r.match_reason,
+                    }))
+                    .collect::<Vec<_>>(),
+            })),
             Err(e) => Ok(format_spec_error(e)),
         }
     }
@@ -281,8 +392,8 @@ impl ExecutableNode for ApiExplorerNode {
 
         match sub {
             "load_spec" => self.handle_load_spec(inputs, config, &conversation_id).await,
-            "list_endpoints" => Err("api_explorer: list_endpoints not implemented yet".into()),
-            "search_endpoint" => Err("api_explorer: search_endpoint not implemented yet".into()),
+            "list_endpoints" => self.handle_list_endpoints(inputs, &conversation_id).await,
+            "search_endpoint" => self.handle_search_endpoint(inputs, &conversation_id).await,
             "get_endpoint_details" => {
                 Err("api_explorer: get_endpoint_details not implemented yet".into())
             }
@@ -638,7 +749,7 @@ mod tests {
     async fn dispatch_stub_errors_until_handlers_land() {
         let node = ApiExplorerNode::new();
         let mut inputs: NodeInputs = HashMap::new();
-        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("list_endpoints"));
+        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("get_endpoint_details"));
         let mut state = json!({});
         let err = node
             .execute(&inputs, &json!({}), &mut state, None)
@@ -726,6 +837,25 @@ mod tests {
             spec: fake_parsed_spec(),
         });
         let node = ApiExplorerNode::new_with_port(port.clone() as Arc<dyn ApiSpecPort>);
+        (port, node)
+    }
+
+    /// Same as [`node_with_fake_port`] but with a very permissive
+    /// fuzzy-match threshold so the tiny single-endpoint fake spec
+    /// produces hits.
+    fn node_with_fake_port_loose() -> (Arc<FakePort>, ApiExplorerNode) {
+        let port = Arc::new(FakePort {
+            calls: StdMutex::new(0),
+            spec: fake_parsed_spec(),
+        });
+        let cfg = ApiSpecUseCaseConfig {
+            fuzzy_match_threshold: 0.05,
+            ..ApiSpecUseCaseConfig::default()
+        };
+        let node = ApiExplorerNode::new_with_port_and_config(
+            port.clone() as Arc<dyn ApiSpecPort>,
+            cfg,
+        );
         (port, node)
     }
 
@@ -833,5 +963,106 @@ mod tests {
             Some("invalid_input")
         );
         assert_eq!(out.get("missing").and_then(|v| v.as_str()), Some("url"));
+    }
+
+    #[tokio::test]
+    async fn list_endpoints_returns_paginated_summary() {
+        let (_port, node) = node_with_fake_port();
+        let mut load: NodeInputs = HashMap::new();
+        load.insert(SUB_TOOL_INPUT_KEY.into(), json!("load_spec"));
+        load.insert("url".into(), json!("https://x/spec.yaml"));
+        load.insert("conversation_id".into(), json!("c-list"));
+        let mut state = json!({});
+        node.execute(&load, &json!({}), &mut state, None).await.unwrap();
+
+        let mut list: NodeInputs = HashMap::new();
+        list.insert(SUB_TOOL_INPUT_KEY.into(), json!("list_endpoints"));
+        list.insert("spec_url".into(), json!("https://x/spec.yaml"));
+        list.insert("conversation_id".into(), json!("c-list"));
+        let out = node
+            .execute(&list, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+        assert_eq!(out.get("total").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(out.get("returned").and_then(|v| v.as_u64()), Some(1));
+        let eps = out.get("endpoints").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(
+            eps[0].get("operation_id").and_then(|v| v.as_str()),
+            Some("listPets")
+        );
+        assert_eq!(
+            eps[0].get("method").and_then(|v| v.as_str()),
+            Some("GET")
+        );
+    }
+
+    #[tokio::test]
+    async fn list_endpoints_on_unloaded_spec_returns_spec_not_loaded() {
+        let (_port, node) = node_with_fake_port();
+        let mut list: NodeInputs = HashMap::new();
+        list.insert(SUB_TOOL_INPUT_KEY.into(), json!("list_endpoints"));
+        list.insert("spec_url".into(), json!("https://never/loaded.yaml"));
+        list.insert("conversation_id".into(), json!("c-unloaded"));
+        let mut state = json!({});
+        let out = node
+            .execute(&list, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.get("error").and_then(|v| v.as_str()),
+            Some("spec_not_loaded")
+        );
+    }
+
+    #[tokio::test]
+    async fn search_endpoint_ranks_by_fuzzy_score() {
+        let (_port, node) = node_with_fake_port_loose();
+        let mut load: NodeInputs = HashMap::new();
+        load.insert(SUB_TOOL_INPUT_KEY.into(), json!("load_spec"));
+        load.insert("url".into(), json!("https://x/spec.yaml"));
+        load.insert("conversation_id".into(), json!("c-search"));
+        let mut state = json!({});
+        node.execute(&load, &json!({}), &mut state, None).await.unwrap();
+
+        let mut search: NodeInputs = HashMap::new();
+        search.insert(SUB_TOOL_INPUT_KEY.into(), json!("search_endpoint"));
+        search.insert("spec_url".into(), json!("https://x/spec.yaml"));
+        search.insert("conversation_id".into(), json!("c-search"));
+        search.insert("query".into(), json!("listPets"));
+        let out = node
+            .execute(&search, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+        let results = out.get("results").and_then(|v| v.as_array()).unwrap();
+        assert!(!results.is_empty(), "expected at least one fuzzy hit");
+        assert_eq!(
+            results[0].get("operation_id").and_then(|v| v.as_str()),
+            Some("listPets")
+        );
+        assert!(results[0].get("score").and_then(|v| v.as_f64()).is_some());
+    }
+
+    #[tokio::test]
+    async fn search_endpoint_filters_by_method() {
+        let (_port, node) = node_with_fake_port_loose();
+        let mut load: NodeInputs = HashMap::new();
+        load.insert(SUB_TOOL_INPUT_KEY.into(), json!("load_spec"));
+        load.insert("url".into(), json!("https://x/spec.yaml"));
+        load.insert("conversation_id".into(), json!("c-method"));
+        let mut state = json!({});
+        node.execute(&load, &json!({}), &mut state, None).await.unwrap();
+
+        let mut search: NodeInputs = HashMap::new();
+        search.insert(SUB_TOOL_INPUT_KEY.into(), json!("search_endpoint"));
+        search.insert("spec_url".into(), json!("https://x/spec.yaml"));
+        search.insert("conversation_id".into(), json!("c-method"));
+        search.insert("query".into(), json!("pets"));
+        search.insert("method".into(), json!("POST"));
+        let out = node
+            .execute(&search, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+        let results = out.get("results").and_then(|v| v.as_array()).unwrap();
+        assert!(results.is_empty(), "no POST /pets in fake spec");
     }
 }
