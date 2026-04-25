@@ -15,6 +15,7 @@ use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
     build_all_document_tools, build_load_skill_tool_definition, DocumentToolsContext,
+    DOCUMENTS_SYSTEM_PRELUDE,
 };
 use crate::documents::application::DocumentRuntime;
 use crate::documents::domain::ids::SessionId as DocSessionId;
@@ -783,23 +784,33 @@ impl ExecutableNode for LlmNode {
             }
         }
 
-        // 2.2 Add System Message if present and history is empty.
-        // When tools are enabled, append a pre-baked tool-use instruction block so the user
-        // doesn't have to include these instructions manually in every graph.
-        if let Some(sys_msg) = system_message {
-            if !history_exists {
-                let final_system_message = if !tools.is_empty() {
-                    let tool_names: Vec<String> =
-                        tools.iter().map(|t| format!("- {}", t.name)).collect();
-                    format!(
-                        "{}\n\n---\n## Tool Use Instructions\nYou have access to the following tools:\n{}\n\nRules:\n- ALWAYS use the available tools to answer questions that require real or live data. Never answer from your own knowledge when a tool can provide the data.\n- Call the most relevant tool before responding. Do not skip tool calls.\n- If a tool call fails, report the error clearly instead of guessing an answer.\n- Only respond without a tool call when the user's request is purely conversational and no tool is needed.",
-                        sys_msg,
-                        tool_names.join("\n")
-                    )
-                } else {
-                    sys_msg.to_string()
-                };
-                messages.push(LlmMessage::system(final_system_message)?);
+        // 2.2 Build the final system message. We assemble up to three sections,
+        // each emitted only when relevant:
+        //   - the user-provided `system_message` (if any),
+        //   - the documents prelude (only when this node has a `documents`
+        //     config — so the user prompt does not need to explain how the
+        //     document tools work),
+        //   - the generic tool-use rules block (when any tool is exposed).
+        // The combined message is pushed only when at least one section was
+        // produced AND no prior history already supplies a system message.
+        if !history_exists {
+            let mut sections: Vec<String> = Vec::new();
+            if let Some(sys_msg) = system_message {
+                sections.push(sys_msg.to_string());
+            }
+            if documents_context.is_some() {
+                sections.push(DOCUMENTS_SYSTEM_PRELUDE.to_string());
+            }
+            if !tools.is_empty() {
+                let tool_names: Vec<String> =
+                    tools.iter().map(|t| format!("- {}", t.name)).collect();
+                sections.push(format!(
+                    "## Tool Use Instructions\nYou have access to the following tools:\n{}\n\nRules:\n- ALWAYS use the available tools to answer questions that require real or live data. Never answer from your own knowledge when a tool can provide the data.\n- Call the most relevant tool before responding. Do not skip tool calls.\n- If a tool call fails, report the error clearly instead of guessing an answer.\n- Only respond without a tool call when the user's request is purely conversational and no tool is needed.",
+                    tool_names.join("\n")
+                ));
+            }
+            if !sections.is_empty() {
+                messages.push(LlmMessage::system(sections.join("\n\n---\n"))?);
             }
         }
 
