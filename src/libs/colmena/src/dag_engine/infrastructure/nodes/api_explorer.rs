@@ -261,6 +261,81 @@ impl ApiExplorerNode {
             Err(e) => Ok(format_spec_error(e)),
         }
     }
+
+    /// Handler for the `get_endpoint_details` sub-tool. Wraps
+    /// [`ApiSpecUseCase::get_endpoint_details`] and forwards its JSON
+    /// shape directly. EndpointNotFound carries `did_you_mean`.
+    async fn handle_get_endpoint_details(
+        &self,
+        inputs: &NodeInputs,
+        conversation_id: &str,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+        let spec_url = match Self::require_str(inputs, "spec_url") {
+            Ok(u) => u.to_string(),
+            Err(v) => return Ok(v),
+        };
+        let operation_id = match Self::require_str(inputs, "operation_id") {
+            Ok(o) => o.to_string(),
+            Err(v) => return Ok(v),
+        };
+
+        match self
+            .use_case
+            .get_endpoint_details(conversation_id, &spec_url, &operation_id)
+            .await
+        {
+            Ok(details) => Ok(details),
+            Err(e) => Ok(format_spec_error(e)),
+        }
+    }
+
+    /// Handler for the `build_http_request` sub-tool. Returns the JSON
+    /// envelope the `http_request` node consumes; auth secrets travel
+    /// as `${SECURE:<ref>}` placeholders that are resolved at execute
+    /// time.
+    async fn handle_build_http_request(
+        &self,
+        inputs: &NodeInputs,
+        conversation_id: &str,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+        let spec_url = match Self::require_str(inputs, "spec_url") {
+            Ok(u) => u.to_string(),
+            Err(v) => return Ok(v),
+        };
+        let operation_id = match Self::require_str(inputs, "operation_id") {
+            Ok(o) => o.to_string(),
+            Err(v) => return Ok(v),
+        };
+        let params = match inputs.get("params") {
+            Some(v) if v.is_object() => v.clone(),
+            _ => {
+                return Ok(json!({
+                    "error": "invalid_input",
+                    "missing": "params",
+                    "message": "`params` must be a JSON object mapping parameter names to values",
+                }));
+            }
+        };
+        let auth_secret_ref = inputs
+            .get("auth_secret_ref")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        match self
+            .use_case
+            .build_http_request(
+                conversation_id,
+                &spec_url,
+                &operation_id,
+                &params,
+                auth_secret_ref.as_deref(),
+            )
+            .await
+        {
+            Ok(request_value) => Ok(request_value),
+            Err(e) => Ok(format_spec_error(e)),
+        }
+    }
 }
 
 /// Translate a [`WebDomainError`] into the structured JSON the LLM sees.
@@ -395,10 +470,12 @@ impl ExecutableNode for ApiExplorerNode {
             "list_endpoints" => self.handle_list_endpoints(inputs, &conversation_id).await,
             "search_endpoint" => self.handle_search_endpoint(inputs, &conversation_id).await,
             "get_endpoint_details" => {
-                Err("api_explorer: get_endpoint_details not implemented yet".into())
+                self.handle_get_endpoint_details(inputs, &conversation_id)
+                    .await
             }
             "build_http_request" => {
-                Err("api_explorer: build_http_request not implemented yet".into())
+                self.handle_build_http_request(inputs, &conversation_id)
+                    .await
             }
             other => Ok(json!({
                 "error": "unknown_sub_tool",
@@ -746,16 +823,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_stub_errors_until_handlers_land() {
+    async fn dispatch_unknown_sub_tool_returns_structured_error() {
         let node = ApiExplorerNode::new();
         let mut inputs: NodeInputs = HashMap::new();
-        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("get_endpoint_details"));
+        inputs.insert(SUB_TOOL_INPUT_KEY.into(), json!("does_not_exist"));
         let mut state = json!({});
-        let err = node
+        let out = node
             .execute(&inputs, &json!({}), &mut state, None)
             .await
-            .unwrap_err();
-        assert!(err.to_string().contains("not implemented"));
+            .unwrap();
+        assert_eq!(
+            out.get("error").and_then(|v| v.as_str()),
+            Some("unknown_sub_tool")
+        );
+        assert_eq!(
+            out.get("sub_tool").and_then(|v| v.as_str()),
+            Some("does_not_exist")
+        );
     }
 
     use crate::web::domain::{
@@ -1040,6 +1124,145 @@ mod tests {
             Some("listPets")
         );
         assert!(results[0].get("score").and_then(|v| v.as_f64()).is_some());
+    }
+
+    #[tokio::test]
+    async fn get_endpoint_details_returns_structured_json() {
+        let (_port, node) = node_with_fake_port();
+        let mut load: NodeInputs = HashMap::new();
+        load.insert(SUB_TOOL_INPUT_KEY.into(), json!("load_spec"));
+        load.insert("url".into(), json!("https://x/spec.yaml"));
+        load.insert("conversation_id".into(), json!("c-det"));
+        let mut state = json!({});
+        node.execute(&load, &json!({}), &mut state, None).await.unwrap();
+
+        let mut det: NodeInputs = HashMap::new();
+        det.insert(SUB_TOOL_INPUT_KEY.into(), json!("get_endpoint_details"));
+        det.insert("spec_url".into(), json!("https://x/spec.yaml"));
+        det.insert("conversation_id".into(), json!("c-det"));
+        det.insert("operation_id".into(), json!("listPets"));
+        let out = node
+            .execute(&det, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.get("operation_id").and_then(|v| v.as_str()),
+            Some("listPets")
+        );
+        assert_eq!(out.get("method").and_then(|v| v.as_str()), Some("GET"));
+        assert_eq!(out.get("path").and_then(|v| v.as_str()), Some("/pets"));
+    }
+
+    #[tokio::test]
+    async fn get_endpoint_details_miss_returns_did_you_mean() {
+        let (_port, node) = node_with_fake_port();
+        let mut load: NodeInputs = HashMap::new();
+        load.insert(SUB_TOOL_INPUT_KEY.into(), json!("load_spec"));
+        load.insert("url".into(), json!("https://x/spec.yaml"));
+        load.insert("conversation_id".into(), json!("c-miss"));
+        let mut state = json!({});
+        node.execute(&load, &json!({}), &mut state, None).await.unwrap();
+
+        let mut det: NodeInputs = HashMap::new();
+        det.insert(SUB_TOOL_INPUT_KEY.into(), json!("get_endpoint_details"));
+        det.insert("spec_url".into(), json!("https://x/spec.yaml"));
+        det.insert("conversation_id".into(), json!("c-miss"));
+        det.insert("operation_id".into(), json!("listPet"));
+        let out = node
+            .execute(&det, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.get("error").and_then(|v| v.as_str()),
+            Some("endpoint_not_found")
+        );
+        let dym = out.get("did_you_mean").and_then(|v| v.as_array()).unwrap();
+        assert!(dym.iter().any(|v| v.as_str() == Some("listPets")));
+    }
+
+    #[tokio::test]
+    async fn build_http_request_emits_ready_to_execute_config() {
+        let (_port, node) = node_with_fake_port();
+        let mut load: NodeInputs = HashMap::new();
+        load.insert(SUB_TOOL_INPUT_KEY.into(), json!("load_spec"));
+        load.insert("url".into(), json!("https://x/spec.yaml"));
+        load.insert("conversation_id".into(), json!("c-build"));
+        let mut state = json!({});
+        node.execute(&load, &json!({}), &mut state, None).await.unwrap();
+
+        let mut build: NodeInputs = HashMap::new();
+        build.insert(SUB_TOOL_INPUT_KEY.into(), json!("build_http_request"));
+        build.insert("spec_url".into(), json!("https://x/spec.yaml"));
+        build.insert("conversation_id".into(), json!("c-build"));
+        build.insert("operation_id".into(), json!("listPets"));
+        build.insert("params".into(), json!({}));
+        build.insert("auth_secret_ref".into(), json!("my_key"));
+        let out = node
+            .execute(&build, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+        assert_eq!(out.get("method").and_then(|v| v.as_str()), Some("GET"));
+        assert_eq!(
+            out.get("url").and_then(|v| v.as_str()),
+            Some("https://petstore.example.com/pets")
+        );
+        let headers = out.get("headers").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(
+            headers.get("X-API-Key").and_then(|v| v.as_str()),
+            Some("${SECURE:my_key}")
+        );
+    }
+
+    #[tokio::test]
+    async fn build_http_request_missing_auth_returns_structured_error() {
+        let (_port, node) = node_with_fake_port();
+        let mut load: NodeInputs = HashMap::new();
+        load.insert(SUB_TOOL_INPUT_KEY.into(), json!("load_spec"));
+        load.insert("url".into(), json!("https://x/spec.yaml"));
+        load.insert("conversation_id".into(), json!("c-auth"));
+        let mut state = json!({});
+        node.execute(&load, &json!({}), &mut state, None).await.unwrap();
+
+        let mut build: NodeInputs = HashMap::new();
+        build.insert(SUB_TOOL_INPUT_KEY.into(), json!("build_http_request"));
+        build.insert("spec_url".into(), json!("https://x/spec.yaml"));
+        build.insert("conversation_id".into(), json!("c-auth"));
+        build.insert("operation_id".into(), json!("listPets"));
+        build.insert("params".into(), json!({}));
+        let out = node
+            .execute(&build, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.get("error").and_then(|v| v.as_str()),
+            Some("missing_auth")
+        );
+    }
+
+    #[tokio::test]
+    async fn build_http_request_params_not_object_returns_invalid_input() {
+        let (_port, node) = node_with_fake_port();
+        let mut load: NodeInputs = HashMap::new();
+        load.insert(SUB_TOOL_INPUT_KEY.into(), json!("load_spec"));
+        load.insert("url".into(), json!("https://x/spec.yaml"));
+        load.insert("conversation_id".into(), json!("c-bad-params"));
+        let mut state = json!({});
+        node.execute(&load, &json!({}), &mut state, None).await.unwrap();
+
+        let mut build: NodeInputs = HashMap::new();
+        build.insert(SUB_TOOL_INPUT_KEY.into(), json!("build_http_request"));
+        build.insert("spec_url".into(), json!("https://x/spec.yaml"));
+        build.insert("conversation_id".into(), json!("c-bad-params"));
+        build.insert("operation_id".into(), json!("listPets"));
+        build.insert("params".into(), json!("not-an-object"));
+        let out = node
+            .execute(&build, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.get("error").and_then(|v| v.as_str()),
+            Some("invalid_input")
+        );
     }
 
     #[tokio::test]
