@@ -571,7 +571,6 @@ async fn handler_resume(
     let graph_instance = (*state.graph).clone();
 
     if is_sse {
-        use crate::dag_engine::domain::events::DagExecutionEvent;
         use crate::dag_engine::sse_mapper::SseMapper;
         use axum::response::sse::{Event, KeepAlive, Sse};
         use futures::StreamExt;
