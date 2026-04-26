@@ -168,6 +168,12 @@ impl AnthropicAdapter {
             body["top_p"] = json!(top_p);
         }
 
+        if let Some(budget) = request.config().thinking_budget() {
+            body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+            // Extended thinking requires temperature = 1; remove any other value.
+            body.as_object_mut().map(|o| o.remove("temperature"));
+        }
+
         if let Some(tools) = request.tools() {
             let anthropic_tools: Vec<serde_json::Value> = tools
                 .iter()
@@ -229,11 +235,13 @@ impl LlmRepository for AnthropicAdapter {
             .map_err(|e| LlmError::parsing_error(e.to_string()))?;
 
         let mut text_parts: Vec<String> = Vec::new();
+        let mut thinking_parts: Vec<String> = Vec::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
 
         for block in anthropic_response.content {
             match block {
                 AnthropicResponseBlock::Text { text } => text_parts.push(text),
+                AnthropicResponseBlock::Thinking { thinking } => thinking_parts.push(thinking),
                 AnthropicResponseBlock::ToolUse { id, name, input } => {
                     let arguments = serde_json::to_string(&input)
                         .map_err(|e| LlmError::parsing_error(e.to_string()))?;
@@ -244,10 +252,15 @@ impl LlmRepository for AnthropicAdapter {
         }
 
         let content = text_parts.join("");
-        let usage = LlmUsage::new(
-            anthropic_response.usage.input_tokens,
-            anthropic_response.usage.output_tokens,
-        );
+        let thinking = thinking_parts.join("");
+        let raw = &anthropic_response.usage;
+        let mut usage = LlmUsage::new(raw.input_tokens, raw.output_tokens);
+        if raw.cache_read_input_tokens > 0 {
+            usage = usage.with_cache_read_tokens(raw.cache_read_input_tokens);
+        }
+        if raw.cache_creation_input_tokens > 0 {
+            usage = usage.with_cache_write_tokens(raw.cache_creation_input_tokens);
+        }
 
         let mut response = LlmResponse::new(
             request.id().clone(),
@@ -255,6 +268,10 @@ impl LlmRepository for AnthropicAdapter {
             request.config().provider().clone(),
         )?
         .with_usage(usage);
+
+        if !thinking.is_empty() {
+            response = response.with_thinking_content(thinking);
+        }
 
         if !tool_calls.is_empty() {
             response = response.with_tool_calls(tool_calls);
@@ -306,7 +323,13 @@ impl LlmRepository for AnthropicAdapter {
         // (e.g. get_amadeus_token()) for which Anthropic never emits deltas — we
         // synthesize `{}` so the downstream accumulator produces parseable arguments.
         let mut tool_received_delta: HashSet<usize> = HashSet::new();
+        // Indices of thinking blocks (for ThinkingStart/End lifecycle).
+        let mut thinking_blocks: HashSet<usize> = HashSet::new();
         let mut stop_reason: Option<String> = None;
+        // Usage tracking across message_start / message_delta events.
+        let mut stream_input_tokens: u32 = 0;
+        let mut stream_cache_read: u32 = 0;
+        let mut stream_cache_write: u32 = 0;
 
         let sse_stream = async_stream::try_stream! {
             while let Some(event_result) = sse_parser.next().await {
@@ -320,19 +343,31 @@ impl LlmRepository for AnthropicAdapter {
                 match parsed.event_type.as_str() {
                     "content_block_start" => {
                         if let (Some(idx), Some(block)) = (parsed.index, parsed.content_block) {
-                            if let AnthropicStreamBlock::ToolUse { id, name, .. } = block {
-                                tool_state.insert(idx, (id.clone(), name.clone()));
-                                yield LlmStreamChunk::new(
-                                    request_id.clone(),
-                                    LlmStreamPart::ToolCallChunk(ToolCallChunk {
-                                        index: idx,
-                                        id,
-                                        name,
-                                        args_chunk: String::new(),
-                                    }),
-                                    provider.clone(),
-                                    false,
-                                );
+                            match block {
+                                AnthropicStreamBlock::ToolUse { id, name, .. } => {
+                                    tool_state.insert(idx, (id.clone(), name.clone()));
+                                    yield LlmStreamChunk::new(
+                                        request_id.clone(),
+                                        LlmStreamPart::ToolCallChunk(ToolCallChunk {
+                                            index: idx,
+                                            id,
+                                            name,
+                                            args_chunk: String::new(),
+                                        }),
+                                        provider.clone(),
+                                        false,
+                                    );
+                                }
+                                AnthropicStreamBlock::Thinking { .. } => {
+                                    thinking_blocks.insert(idx);
+                                    yield LlmStreamChunk::new(
+                                        request_id.clone(),
+                                        LlmStreamPart::ThinkingStart,
+                                        provider.clone(),
+                                        false,
+                                    );
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -344,6 +379,16 @@ impl LlmRepository for AnthropicAdapter {
                                         yield LlmStreamChunk::new(
                                             request_id.clone(),
                                             LlmStreamPart::Content(text),
+                                            provider.clone(),
+                                            false,
+                                        );
+                                    }
+                                }
+                                Some("thinking_delta") => {
+                                    if let Some(thinking) = delta.thinking {
+                                        yield LlmStreamChunk::new(
+                                            request_id.clone(),
+                                            LlmStreamPart::ThinkingContent(thinking),
                                             provider.clone(),
                                             false,
                                         );
@@ -378,7 +423,14 @@ impl LlmRepository for AnthropicAdapter {
                     }
                     "content_block_stop" => {
                         if let Some(idx) = parsed.index {
-                            if let Some((id, name)) = tool_state.get(&idx) {
+                            if thinking_blocks.remove(&idx) {
+                                yield LlmStreamChunk::new(
+                                    request_id.clone(),
+                                    LlmStreamPart::ThinkingEnd,
+                                    provider.clone(),
+                                    false,
+                                );
+                            } else if let Some((id, name)) = tool_state.get(&idx) {
                                 if !tool_received_delta.contains(&idx) {
                                     yield LlmStreamChunk::new(
                                         request_id.clone(),
@@ -395,11 +447,36 @@ impl LlmRepository for AnthropicAdapter {
                             }
                         }
                     }
+                    "message_start" => {
+                        if let Some(msg) = parsed.message {
+                            if let Some(u) = msg.usage {
+                                stream_input_tokens = u.input_tokens;
+                                stream_cache_read = u.cache_read_input_tokens;
+                                stream_cache_write = u.cache_creation_input_tokens;
+                            }
+                        }
+                    }
                     "message_delta" => {
                         if let Some(delta) = parsed.delta {
                             if let Some(reason) = delta.stop_reason {
                                 stop_reason = Some(reason);
                             }
+                        }
+                        // message_delta carries final output_tokens count
+                        if let Some(u) = parsed.usage {
+                            let mut usage = LlmUsage::new(stream_input_tokens, u.output_tokens);
+                            if stream_cache_read > 0 {
+                                usage = usage.with_cache_read_tokens(stream_cache_read);
+                            }
+                            if stream_cache_write > 0 {
+                                usage = usage.with_cache_write_tokens(stream_cache_write);
+                            }
+                            yield LlmStreamChunk::new(
+                                request_id.clone(),
+                                LlmStreamPart::Usage(usage),
+                                provider.clone(),
+                                false,
+                            );
                         }
                     }
                     "message_stop" => {
@@ -515,6 +592,9 @@ enum AnthropicResponseBlock {
     Text {
         text: String,
     },
+    Thinking {
+        thinking: String,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -531,6 +611,10 @@ enum AnthropicResponseBlock {
 struct AnthropicUsage {
     input_tokens: u32,
     output_tokens: u32,
+    #[serde(default)]
+    cache_creation_input_tokens: u32,
+    #[serde(default)]
+    cache_read_input_tokens: u32,
 }
 
 // Streaming response structures
@@ -541,6 +625,27 @@ struct AnthropicStreamEvent {
     index: Option<usize>,
     content_block: Option<AnthropicStreamBlock>,
     delta: Option<AnthropicStreamDelta>,
+    /// Present in `message_start` — carries initial input token count.
+    message: Option<AnthropicStreamMessage>,
+    /// Present in `message_delta` — carries final output token count.
+    usage: Option<AnthropicStreamUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicStreamMessage {
+    usage: Option<AnthropicStreamUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicStreamUsage {
+    #[serde(default)]
+    input_tokens: u32,
+    #[serde(default)]
+    output_tokens: u32,
+    #[serde(default)]
+    cache_creation_input_tokens: u32,
+    #[serde(default)]
+    cache_read_input_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -549,6 +654,10 @@ enum AnthropicStreamBlock {
     Text {
         #[allow(dead_code)]
         text: Option<String>,
+    },
+    Thinking {
+        #[allow(dead_code)]
+        thinking: Option<String>,
     },
     ToolUse {
         id: String,
@@ -565,6 +674,8 @@ struct AnthropicStreamDelta {
     #[serde(rename = "type")]
     delta_type: Option<String>,
     text: Option<String>,
+    /// Incremental thinking text (delta_type = "thinking_delta")
+    thinking: Option<String>,
     partial_json: Option<String>,
     stop_reason: Option<String>,
 }

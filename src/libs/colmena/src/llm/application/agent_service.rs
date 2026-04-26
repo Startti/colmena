@@ -76,11 +76,7 @@ impl AgentService {
                 .await?;
         }
 
-        let mut cumulative_usage = LlmUsage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-        };
+        let mut cumulative_usage = LlmUsage::default();
         let mut all_tool_calls_executed = Vec::new();
         let mut cumulative_content = String::new();
 
@@ -107,6 +103,7 @@ impl AgentService {
                 let mut stream = stream;
 
                 let mut full_content = String::new();
+                let mut full_thinking = String::new();
                 let mut captured_provider = config.provider().clone();
                 let mut captured_req_id = crate::llm::domain::LlmRequestId::new();
                 let mut accumulated_tool_calls: std::collections::HashMap<usize, ToolCall> =
@@ -125,6 +122,9 @@ impl AgentService {
                             match chunk.part() {
                                 LlmStreamPart::Content(c) => {
                                     full_content.push_str(c);
+                                }
+                                LlmStreamPart::ThinkingContent(c) => {
+                                    full_thinking.push_str(c);
                                 }
                                 LlmStreamPart::ToolCallChunk(tc) => {
                                     let entry = accumulated_tool_calls
@@ -149,7 +149,9 @@ impl AgentService {
                                 LlmStreamPart::Usage(u) => {
                                     completion_usage = Some(u.clone());
                                 }
-                                LlmStreamPart::LlmToolCallStart(_)
+                                LlmStreamPart::ThinkingStart
+                                | LlmStreamPart::ThinkingEnd
+                                | LlmStreamPart::LlmToolCallStart(_)
                                 | LlmStreamPart::LlmToolCallFinish(_)
                                 | LlmStreamPart::LlmMessageStart
                                 | LlmStreamPart::LlmMessageFinish(_) => {}
@@ -161,6 +163,10 @@ impl AgentService {
 
                 let mut final_response =
                     LlmResponse::new(captured_req_id, full_content, captured_provider)?;
+
+                if !full_thinking.is_empty() {
+                    final_response = final_response.with_thinking_content(full_thinking);
+                }
 
                 if !accumulated_tool_calls.is_empty() {
                     let tools: Vec<ToolCall> = accumulated_tool_calls.into_values().collect();
@@ -188,6 +194,15 @@ impl AgentService {
                 cumulative_usage.prompt_tokens += usage.prompt_tokens;
                 cumulative_usage.completion_tokens += usage.completion_tokens;
                 cumulative_usage.total_tokens += usage.total_tokens;
+                if let Some(t) = usage.thinking_tokens {
+                    *cumulative_usage.thinking_tokens.get_or_insert(0) += t;
+                }
+                if let Some(cr) = usage.cache_read_tokens {
+                    *cumulative_usage.cache_read_tokens.get_or_insert(0) += cr;
+                }
+                if let Some(cw) = usage.cache_write_tokens {
+                    *cumulative_usage.cache_write_tokens.get_or_insert(0) += cw;
+                }
             }
 
             // B. Save assistant response to memory

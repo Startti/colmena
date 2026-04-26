@@ -27,6 +27,12 @@ pub enum DagExecutionEvent {
         node_id: String,
         prompt_tokens: u32,
         completion_tokens: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thinking_tokens: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_read_tokens: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_write_tokens: Option<u32>,
     },
     #[serde(rename = "llm_tool_call_start")]
     LlmToolCallStart {
@@ -52,6 +58,15 @@ pub enum DagExecutionEvent {
     /// Streaming token from an internal "thinking" LLM call (planner, critic, reactor, agent subgraphs).
     #[serde(rename = "thinking_token")]
     ThinkingToken { node_id: String, token: String },
+    /// A provider reasoning block has opened for `node_id`.
+    #[serde(rename = "reasoning_start")]
+    ReasoningStart { node_id: String, id: String },
+    /// An incremental reasoning token for `node_id`.
+    #[serde(rename = "reasoning_delta")]
+    ReasoningDelta { node_id: String, id: String, token: String },
+    /// The reasoning block for `node_id` has closed.
+    #[serde(rename = "reasoning_end")]
+    ReasoningEnd { node_id: String, id: String },
     #[serde(rename = "graph_finish")]
     GraphFinish { output: Value },
     #[serde(rename = "error")]

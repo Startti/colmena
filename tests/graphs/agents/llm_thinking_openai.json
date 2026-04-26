@@ -1,0 +1,33 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/thinking-openai",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. How much does the ball cost? Think carefully step by step."
+        }
+      }
+    },
+    "llm_step": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "o4-mini",
+        "system_message": "You are a careful reasoning assistant.",
+        "thinking_budget": 8000,
+        "max_tokens": 16000,
+        "stream": true
+      }
+    },
+    "log_step": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "llm_step" },
+    { "from": "llm_step", "to": "log_step" }
+  ]
+}

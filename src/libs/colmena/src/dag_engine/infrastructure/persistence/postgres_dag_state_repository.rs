@@ -61,22 +61,6 @@ impl PostgresDagStateRepository {
         .await
         .map_err(|e| DagError::StateError(format!("Migration error (is_bridge col): {}", e)))?;
 
-        // Create dag_phase_summaries table
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS dag_phase_summaries (
-                id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                session_id TEXT NOT NULL,
-                phase      INT  NOT NULL,
-                summary    TEXT NOT NULL,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            )"#,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| {
-            DagError::StateError(format!("Migration error (dag_phase_summaries): {}", e))
-        })?;
-
         Ok(())
     }
 }

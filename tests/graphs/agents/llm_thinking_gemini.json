@@ -1,0 +1,33 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/thinking-gemini",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. How much does the ball cost? Think carefully step by step."
+        }
+      }
+    },
+    "llm_step": {
+      "type": "llm_call",
+      "config": {
+        "provider": "gemini",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "system_message": "You are a careful reasoning assistant. Always think through problems step by step before answering.",
+        "thinking_budget": 8192,
+        "max_tokens": 16000,
+        "stream": true
+      }
+    },
+    "log_step": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "llm_step" },
+    { "from": "llm_step", "to": "log_step" }
+  ]
+}

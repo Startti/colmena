@@ -265,6 +265,9 @@ impl ExecutableNode for ReactorNode {
                         LlmStreamPart::Usage(usage) => obs.on_event(NodeEvent::LlmUsage {
                             prompt_tokens: usage.prompt_tokens,
                             completion_tokens: usage.completion_tokens,
+                            thinking_tokens: usage.thinking_tokens,
+                            cache_read_tokens: usage.cache_read_tokens,
+                            cache_write_tokens: usage.cache_write_tokens,
                         }),
                         LlmStreamPart::LlmMessageStart => obs.on_event(NodeEvent::LlmMessageStart),
                         LlmStreamPart::LlmMessageFinish(usage) => {

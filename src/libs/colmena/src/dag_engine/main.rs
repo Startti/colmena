@@ -81,6 +81,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::collections::HashMap::new();
                 let mut total_prompt_tokens: u32 = 0;
                 let mut total_completion_tokens: u32 = 0;
+                let mut total_thinking_tokens: u32 = 0;
+                let mut total_cache_read_tokens: u32 = 0;
+                let mut total_cache_write_tokens: u32 = 0;
                 // Track node_type per node_id so we can include it in node-end events
                 let mut node_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
@@ -127,10 +130,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         DagExecutionEvent::LlmUsage {
                             prompt_tokens,
                             completion_tokens,
+                            thinking_tokens,
+                            cache_read_tokens,
+                            cache_write_tokens,
                             ..
                         } => {
                             total_prompt_tokens += *prompt_tokens;
                             total_completion_tokens += *completion_tokens;
+                            total_thinking_tokens += thinking_tokens.unwrap_or(0);
+                            total_cache_read_tokens += cache_read_tokens.unwrap_or(0);
+                            total_cache_write_tokens += cache_write_tokens.unwrap_or(0);
                         }
                         _ => {}
                     }
@@ -183,12 +192,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "node_type": "subgraph",
                             "output": output
                         })),
-                        DagExecutionEvent::LlmToken { node_id, token } => Some(
-                            serde_json::json!({ "type": "node-delta", "node_id": node_id, "delta": token }),
-                        ),
+                        DagExecutionEvent::LlmToken { node_id, token } => {
+                            let part_id = text_block_ids
+                                .get(node_id)
+                                .cloned()
+                                .unwrap_or_else(|| node_id.clone());
+                            Some(serde_json::json!({
+                                "type": "text-delta",
+                                "id": part_id,
+                                "delta": token
+                            }))
+                        }
                         DagExecutionEvent::ThinkingToken { node_id, token } => Some(
                             serde_json::json!({ "type": "thinking-delta", "node_id": node_id, "delta": token }),
                         ),
+                        DagExecutionEvent::ReasoningStart { id, .. } => Some(serde_json::json!({
+                            "type": "reasoning-start",
+                            "id": id
+                        })),
+                        DagExecutionEvent::ReasoningDelta { id, token, .. } => Some(serde_json::json!({
+                            "type": "reasoning-delta",
+                            "id": id,
+                            "delta": token
+                        })),
+                        DagExecutionEvent::ReasoningEnd { id, .. } => Some(serde_json::json!({
+                            "type": "reasoning-end",
+                            "id": id
+                        })),
                         DagExecutionEvent::LlmUsage { .. } => None,
                         DagExecutionEvent::GraphUsageSummary { entries } => Some(serde_json::json!({
                             "type": "usage-summary",
@@ -236,10 +266,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 finish_reason = "suspended";
                             }
 
+                            let mut usage_obj = serde_json::json!({
+                                "promptTokens": total_prompt_tokens,
+                                "completionTokens": total_completion_tokens,
+                                "totalTokens": total_prompt_tokens + total_completion_tokens + total_thinking_tokens
+                            });
+                            if total_thinking_tokens > 0 {
+                                usage_obj["thinkingTokens"] = serde_json::json!(total_thinking_tokens);
+                            }
+                            if total_cache_read_tokens > 0 {
+                                usage_obj["cacheReadTokens"] = serde_json::json!(total_cache_read_tokens);
+                            }
+                            if total_cache_write_tokens > 0 {
+                                usage_obj["cacheWriteTokens"] = serde_json::json!(total_cache_write_tokens);
+                            }
                             Some(serde_json::json!({
                                 "type": "finish",
                                 "finishReason": finish_reason,
-                                "usage": { "promptTokens": total_prompt_tokens, "completionTokens": total_completion_tokens },
+                                "usage": usage_obj,
                                 "output": output
                             }))
                         }

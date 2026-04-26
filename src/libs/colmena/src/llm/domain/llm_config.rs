@@ -1,10 +1,22 @@
 use crate::llm::domain::{LlmError, LlmProvider};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct LlmUsage {
+    /// Tokens in the input prompt (excluding cache hits).
     pub prompt_tokens: u32,
+    /// Tokens in the text output (Gemini: text only; Anthropic/OpenAI: includes thinking).
     pub completion_tokens: u32,
+    /// Thinking / reasoning tokens (Gemini `thoughtsTokenCount`, OpenAI `reasoning_tokens`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_tokens: Option<u32>,
+    /// Tokens read from the prompt cache (Anthropic `cache_read_input_tokens`, OpenAI `cached_tokens`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u32>,
+    /// Tokens written to the prompt cache (Anthropic `cache_creation_input_tokens`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u32>,
+    /// prompt + completion + thinking (for models that report thinking separately).
     pub total_tokens: u32,
 }
 
@@ -14,7 +26,24 @@ impl LlmUsage {
             prompt_tokens,
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
+            ..Default::default()
         }
+    }
+
+    pub fn with_thinking_tokens(mut self, tokens: u32) -> Self {
+        self.thinking_tokens = Some(tokens);
+        self.total_tokens = self.prompt_tokens + self.completion_tokens + tokens;
+        self
+    }
+
+    pub fn with_cache_read_tokens(mut self, tokens: u32) -> Self {
+        self.cache_read_tokens = Some(tokens);
+        self
+    }
+
+    pub fn with_cache_write_tokens(mut self, tokens: u32) -> Self {
+        self.cache_write_tokens = Some(tokens);
+        self
     }
 }
 
@@ -118,6 +147,10 @@ impl LlmConfig {
 
     pub fn presence_penalty(&self) -> Option<f32> {
         self.presence_penalty
+    }
+
+    pub fn thinking_budget(&self) -> Option<u32> {
+        self.thinking_budget
     }
 }
 

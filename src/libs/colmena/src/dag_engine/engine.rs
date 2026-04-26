@@ -72,6 +72,16 @@ impl ColmenaEngine {
         // shared with any graph node that happens to reference the same URL.
         let internal_pool = registry.pin(&config.internal_database_url).await?;
 
+        // Run all schema migrations on the internal pool before any repo touches
+        // the database. This ensures tables exist before ALTER TABLE / CREATE TABLE
+        // safety-net calls in repo migrate() methods run.
+        let mut migrator = sqlx::migrate!("migrations/postgres");
+        migrator.set_ignore_missing(true);
+        migrator
+            .run(&*internal_pool)
+            .await
+            .map_err(|e| EngineError::Migration(format!("Schema migration failed: {}", e)))?;
+
         let state_repo = Arc::new(PostgresDagStateRepository::new((*internal_pool).clone()));
         state_repo
             .migrate()

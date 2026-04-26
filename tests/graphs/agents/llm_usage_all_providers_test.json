@@ -1,0 +1,64 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/usage-all-providers",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. How much does the ball cost?"
+        }
+      }
+    },
+    "anthropic_step": {
+      "type": "llm_call",
+      "config": {
+        "provider": "anthropic",
+        "api_key": "${ANTHROPIC_API_KEY}",
+        "model": "claude-sonnet-4-5",
+        "system_message": "You are a concise reasoning assistant. Answer in 2-3 sentences.",
+        "thinking_budget": 3000,
+        "max_tokens": 8000,
+        "stream": true
+      }
+    },
+    "gemini_step": {
+      "type": "llm_call",
+      "config": {
+        "provider": "gemini",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "system_message": "You are a concise reasoning assistant. Answer in 2-3 sentences.",
+        "thinking_budget": 3000,
+        "max_tokens": 8000,
+        "stream": true
+      }
+    },
+    "openai_step": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "o4-mini",
+        "system_message": "You are a concise reasoning assistant. Answer in 2-3 sentences.",
+        "thinking_budget": 3000,
+        "max_tokens": 8000,
+        "stream": true
+      }
+    },
+    "log_step": {
+      "type": "log",
+      "config": {
+        "message": "=== Usage comparison complete ==="
+      }
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "anthropic_step" },
+    { "from": "trigger", "to": "gemini_step" },
+    { "from": "trigger", "to": "openai_step" },
+    { "from": "anthropic_step", "to": "log_step" },
+    { "from": "gemini_step", "to": "log_step" },
+    { "from": "openai_step", "to": "log_step" }
+  ]
+}

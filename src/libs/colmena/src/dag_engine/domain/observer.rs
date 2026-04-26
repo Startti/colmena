@@ -13,6 +13,12 @@ pub enum NodeEvent {
     LlmUsage {
         prompt_tokens: u32,
         completion_tokens: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thinking_tokens: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_read_tokens: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_write_tokens: Option<u32>,
     },
     LlmToolCallStart {
         tool_id: String,
@@ -39,6 +45,19 @@ pub enum NodeEvent {
     /// Distinct from LlmToken so the frontend can separate thinking activity from the final response.
     ThinkingToken {
         token: String,
+    },
+    /// A provider reasoning block has opened (extended thinking / thinking models).
+    ReasoningStart {
+        id: String,
+    },
+    /// An incremental token within the current reasoning block.
+    ReasoningDelta {
+        id: String,
+        token: String,
+    },
+    /// The current reasoning block has closed.
+    ReasoningEnd {
+        id: String,
     },
     /// Raw DagExecutionEvent from a child subgraph execution.
     /// Child node IDs are preserved so the parent stream can re-yield them as-is.

@@ -12,53 +12,14 @@ impl PostgresSecureValueRepository {
         Self { pool }
     }
 
-    /// Run migrations to create the secure_value_mappings table
+    /// Ensure pgcrypto extension is available (safety net for environments where
+    /// the migration ran without superuser). The table itself is created by
+    /// migrations/postgres/20260425000002_secure_value_mappings.sql.
     pub async fn migrate(&self) -> Result<(), DagError> {
-        // Enable pgcrypto extension
         sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")
             .execute(&self.pool)
             .await
             .map_err(|e| DagError::StateError(format!("Failed to enable pgcrypto: {}", e)))?;
-
-        // Create table
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS secure_value_mappings (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                session_id VARCHAR(255) NOT NULL,
-                source_node_id VARCHAR(255) NOT NULL,
-                hash_key VARCHAR(255) NOT NULL,
-                encrypted_value BYTEA NOT NULL,
-                field_name VARCHAR(255),
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                expires_at TIMESTAMPTZ DEFAULT (NOW() + INTERVAL '1 hour'),
-                UNIQUE(session_id, hash_key)
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| {
-            DagError::StateError(format!(
-                "Failed to create secure_value_mappings table: {}",
-                e
-            ))
-        })?;
-
-        // Create indexes separately
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_secure_session_id ON secure_value_mappings(session_id)",
-        )
-        .execute(&self.pool)
-        .await
-        .ok(); // Ignore if already exists
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_secure_expires_at ON secure_value_mappings(expires_at)",
-        )
-        .execute(&self.pool)
-        .await
-        .ok(); // Ignore if already exists
 
         Ok(())
     }

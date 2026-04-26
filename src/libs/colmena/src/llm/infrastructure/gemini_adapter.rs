@@ -57,6 +57,7 @@ impl GeminiAdapter {
                         function_call: None,
                         function_response: None,
                         inline_data: None,
+                        thought: None,
                     });
 
                     if let Some(files) = message.files() {
@@ -70,6 +71,7 @@ impl GeminiAdapter {
                                     mime_type: file.mime_type.clone(),
                                     data: STANDARD.encode(&file.bytes),
                                 }),
+                                thought: None,
                             });
                         }
                     }
@@ -89,6 +91,7 @@ impl GeminiAdapter {
                             function_call: None,
                             function_response: None,
                             inline_data: None,
+                            thought: None,
                         });
                     }
 
@@ -103,6 +106,7 @@ impl GeminiAdapter {
                                 }),
                                 function_response: None,
                                 inline_data: None,
+                                thought: None,
                             });
                         }
                     }
@@ -114,6 +118,7 @@ impl GeminiAdapter {
                             function_call: None,
                             function_response: None,
                             inline_data: None,
+                            thought: None,
                         });
                     }
 
@@ -151,6 +156,7 @@ impl GeminiAdapter {
                                 "response": parsed_content
                             })),
                             inline_data: None,
+                            thought: None,
                         }]),
                         text: None,
                     });
@@ -233,10 +239,19 @@ impl GeminiAdapter {
             generation_config.insert("topP".to_string(), json!(top_p));
         }
 
-        // Disable thinking only when no tools are present. Gemini 2.5-flash with
-        // tools and thinkingBudget: 0 returns empty responses because it can't
-        // reason about tool selection without any reasoning budget.
-        if !request.has_tools() {
+        if let Some(budget) = request.config().thinking_budget() {
+            // Explicit budget requested — enable thoughts and surface them.
+            generation_config.insert(
+                "thinkingConfig".to_string(),
+                json!({
+                    "thinkingBudget": budget,
+                    "includeThoughts": true
+                }),
+            );
+        } else if !request.has_tools() {
+            // Disable thinking only when no tools are present. Gemini 2.5-flash with
+            // tools and thinkingBudget: 0 returns empty responses because it can't
+            // reason about tool selection without any reasoning budget.
             generation_config.insert(
                 "thinkingConfig".to_string(),
                 json!({
@@ -332,6 +347,22 @@ impl LlmRepository for GeminiAdapter {
                 })
         });
 
+        // Separate thought parts from regular text parts.
+        let thinking_content: Option<String> = gemini_response
+            .candidates
+            .first()
+            .and_then(|c| c.content.as_ref())
+            .and_then(|c| c.parts.as_ref())
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter(|p| p.thought == Some(true))
+                    .filter_map(|p| p.text.as_deref())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .filter(|s| !s.is_empty());
+
         let content = gemini_response
             .candidates
             .first()
@@ -345,12 +376,18 @@ impl LlmRepository for GeminiAdapter {
                         None
                     }
                 } else {
-                    // Fallback to parts structure (for older models)
+                    // Fallback to parts — exclude thought parts
                     content.parts
                         .as_ref()
-                        .and_then(|parts| parts.iter().find_map(|part| {
-                            part.text.as_ref().filter(|text| !text.is_empty()).cloned()
-                        }))
+                        .and_then(|parts| {
+                            let joined: String = parts
+                                .iter()
+                                .filter(|p| p.thought != Some(true))
+                                .filter_map(|p| p.text.as_deref().filter(|t| !t.is_empty()))
+                                .collect::<Vec<_>>()
+                                .join("");
+                            if joined.is_empty() { None } else { Some(joined) }
+                        })
                 }
             })
             .unwrap_or_else(|| {
@@ -370,10 +407,14 @@ impl LlmRepository for GeminiAdapter {
             });
 
         let usage = gemini_response.usage_metadata.map(|u| {
-            LlmUsage::new(
+            let mut usage = LlmUsage::new(
                 u.prompt_token_count.unwrap_or(0),
                 u.candidates_token_count.unwrap_or(0),
-            )
+            );
+            if let Some(t) = u.thoughts_token_count.filter(|&n| n > 0) {
+                usage = usage.with_thinking_tokens(t);
+            }
+            usage
         });
 
         let mut response = LlmResponse::new(
@@ -384,6 +425,10 @@ impl LlmRepository for GeminiAdapter {
 
         if let Some(usage) = usage {
             response = response.with_usage(usage);
+        }
+
+        if let Some(thinking) = thinking_content {
+            response = response.with_thinking_content(thinking);
         }
 
         if let Some(finish_reason) = gemini_response
@@ -441,6 +486,8 @@ impl LlmRepository for GeminiAdapter {
         let json_stream = async_stream::try_stream! {
             let mut latest_usage = None;
             let mut tool_call_index: usize = 0;
+            // Track whether we are currently inside a thinking block across chunks.
+            let mut in_thinking = false;
             while let Some(json_bytes_result) = json_parser.next().await {
                 let json_bytes = json_bytes_result?;
                 let chunk_response = serde_json::from_slice::<GeminiResponse>(&json_bytes)
@@ -453,18 +500,47 @@ impl LlmRepository for GeminiAdapter {
                     let candidate_content = candidate.content.as_ref();
                     if let Some(parts) = candidate_content.and_then(|c| c.parts.as_ref()) {
                         for part in parts {
+                            let is_thought = part.thought == Some(true);
+
                             if let Some(text) = &part.text {
                                 if !text.is_empty() {
-                                    let mut chunk = LlmStreamChunk::new(
-                                        request_id.clone(),
-                                        LlmStreamPart::Content(text.clone()),
-                                        provider.clone(),
-                                        is_final,
-                                    );
-                                    if let Some(reason) = &finish_reason {
-                                        chunk = chunk.with_finish_reason(reason.clone());
+                                    if is_thought {
+                                        if !in_thinking {
+                                            in_thinking = true;
+                                            yield LlmStreamChunk::new(
+                                                request_id.clone(),
+                                                LlmStreamPart::ThinkingStart,
+                                                provider.clone(),
+                                                false,
+                                            );
+                                        }
+                                        yield LlmStreamChunk::new(
+                                            request_id.clone(),
+                                            LlmStreamPart::ThinkingContent(text.clone()),
+                                            provider.clone(),
+                                            false,
+                                        );
+                                    } else {
+                                        if in_thinking {
+                                            in_thinking = false;
+                                            yield LlmStreamChunk::new(
+                                                request_id.clone(),
+                                                LlmStreamPart::ThinkingEnd,
+                                                provider.clone(),
+                                                false,
+                                            );
+                                        }
+                                        let mut chunk = LlmStreamChunk::new(
+                                            request_id.clone(),
+                                            LlmStreamPart::Content(text.clone()),
+                                            provider.clone(),
+                                            is_final,
+                                        );
+                                        if let Some(reason) = &finish_reason {
+                                            chunk = chunk.with_finish_reason(reason.clone());
+                                        }
+                                        yield chunk;
                                     }
-                                    yield chunk;
                                 }
                             }
 
@@ -502,6 +578,16 @@ impl LlmRepository for GeminiAdapter {
                         }
                         yield chunk;
                     } else if is_final {
+                        // Close any open thinking block before the final content marker.
+                        if in_thinking {
+                            in_thinking = false;
+                            yield LlmStreamChunk::new(
+                                request_id.clone(),
+                                LlmStreamPart::ThinkingEnd,
+                                provider.clone(),
+                                false,
+                            );
+                        }
                         let mut chunk = LlmStreamChunk::new(
                             request_id.clone(),
                             LlmStreamPart::Content(String::new()),
@@ -515,11 +601,15 @@ impl LlmRepository for GeminiAdapter {
                     }
                 }
 
-                if let Some(usage) = &chunk_response.usage_metadata {
-                    latest_usage = Some(LlmUsage::new(
-                        usage.prompt_token_count.unwrap_or(0),
-                        usage.candidates_token_count.unwrap_or(0)
-                    ));
+                if let Some(u) = &chunk_response.usage_metadata {
+                    let mut usage = LlmUsage::new(
+                        u.prompt_token_count.unwrap_or(0),
+                        u.candidates_token_count.unwrap_or(0),
+                    );
+                    if let Some(t) = u.thoughts_token_count.filter(|&n| n > 0) {
+                        usage = usage.with_thinking_tokens(t);
+                    }
+                    latest_usage = Some(usage);
                 }
             }
 
@@ -593,6 +683,9 @@ struct GeminiPart {
     function_response: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "inlineData")]
     inline_data: Option<GeminiInlineData>,
+    /// Present and `true` on thought/reasoning parts from Gemini 2.5+ models.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thought: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -628,6 +721,9 @@ struct GeminiUsage {
     prompt_token_count: Option<u32>,
     #[serde(rename = "candidatesTokenCount")]
     candidates_token_count: Option<u32>,
+    /// Thinking tokens reported separately by Gemini 2.5 models.
+    #[serde(rename = "thoughtsTokenCount")]
+    thoughts_token_count: Option<u32>,
 }
 
 // Custom Stream Parser for Gemini's JSON array stream

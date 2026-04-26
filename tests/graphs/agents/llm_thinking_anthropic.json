@@ -1,0 +1,33 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/thinking-anthropic",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. How much does the ball cost? Think carefully step by step."
+        }
+      }
+    },
+    "llm_step": {
+      "type": "llm_call",
+      "config": {
+        "provider": "anthropic",
+        "api_key": "${ANTHROPIC_API_KEY}",
+        "model": "claude-sonnet-4-5",
+        "system_message": "You are a careful reasoning assistant. Always think through problems step by step before answering.",
+        "thinking_budget": 8000,
+        "max_tokens": 16000,
+        "stream": true
+      }
+    },
+    "log_step": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "llm_step" },
+    { "from": "llm_step", "to": "log_step" }
+  ]
+}

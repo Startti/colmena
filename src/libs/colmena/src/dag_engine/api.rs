@@ -77,8 +77,11 @@ pub async fn run_dag(
 
             let mut text_block_uuids = std::collections::HashMap::new();
             let mut seen_tool_ids = std::collections::HashSet::new();
-            let mut total_prompt_tokens = 0;
-            let mut total_completion_tokens = 0;
+            let mut total_prompt_tokens = 0u32;
+            let mut total_completion_tokens = 0u32;
+            let mut total_thinking_tokens = 0u32;
+            let mut total_cache_read_tokens = 0u32;
+            let mut total_cache_write_tokens = 0u32;
             let mut final_output: Value = Value::Null;
 
             while let Some(result) = internal_stream.next().await {
@@ -126,10 +129,16 @@ pub async fn run_dag(
                     DagExecutionEvent::LlmUsage {
                         prompt_tokens,
                         completion_tokens,
+                        thinking_tokens,
+                        cache_read_tokens,
+                        cache_write_tokens,
                         ..
                     } => {
                         total_prompt_tokens += prompt_tokens;
                         total_completion_tokens += completion_tokens;
+                        total_thinking_tokens += thinking_tokens.unwrap_or(0);
+                        total_cache_read_tokens += cache_read_tokens.unwrap_or(0);
+                        total_cache_write_tokens += cache_write_tokens.unwrap_or(0);
                     }
                     DagExecutionEvent::LlmToolCall {
                         tool_id, tool_name, ..
@@ -168,6 +177,19 @@ pub async fn run_dag(
                         "node_id": node_id,
                         "delta": token
                     })),
+                    DagExecutionEvent::ReasoningStart { id, .. } => Some(serde_json::json!({
+                        "type": "reasoning-start",
+                        "id": id
+                    })),
+                    DagExecutionEvent::ReasoningDelta { id, token, .. } => Some(serde_json::json!({
+                        "type": "reasoning-delta",
+                        "id": id,
+                        "delta": token
+                    })),
+                    DagExecutionEvent::ReasoningEnd { id, .. } => Some(serde_json::json!({
+                        "type": "reasoning-end",
+                        "id": id
+                    })),
                     DagExecutionEvent::LlmToolCall {
                         tool_id,
                         args_chunk,
@@ -204,11 +226,7 @@ pub async fn run_dag(
                         text_block_uuids.get(&node_id).map(|part_id| {
                             serde_json::json!({
                                 "type": "node-end",
-                                "id": part_id,
-                                "usage": {
-                                    "promptTokens": total_prompt_tokens,
-                                    "completionTokens": total_completion_tokens
-                                }
+                                "id": part_id
                             })
                         })
                     }
@@ -220,14 +238,27 @@ pub async fn run_dag(
                             "output": output
                         }))
                     }
-                    DagExecutionEvent::GraphFinish { .. } => Some(serde_json::json!({
-                        "type": "finish",
-                        "finishReason": "stop",
-                        "usage": {
+                    DagExecutionEvent::GraphFinish { .. } => {
+                        let mut usage_obj = serde_json::json!({
                             "promptTokens": total_prompt_tokens,
-                            "completionTokens": total_completion_tokens
+                            "completionTokens": total_completion_tokens,
+                            "totalTokens": total_prompt_tokens + total_completion_tokens + total_thinking_tokens
+                        });
+                        if total_thinking_tokens > 0 {
+                            usage_obj["thinkingTokens"] = serde_json::json!(total_thinking_tokens);
                         }
-                    })),
+                        if total_cache_read_tokens > 0 {
+                            usage_obj["cacheReadTokens"] = serde_json::json!(total_cache_read_tokens);
+                        }
+                        if total_cache_write_tokens > 0 {
+                            usage_obj["cacheWriteTokens"] = serde_json::json!(total_cache_write_tokens);
+                        }
+                        Some(serde_json::json!({
+                            "type": "finish",
+                            "finishReason": "stop",
+                            "usage": usage_obj
+                        }))
+                    }
                     DagExecutionEvent::Error { message } => Some(serde_json::json!({
                         "type": "error",
                         "errorText": message
@@ -417,8 +448,11 @@ async fn handler_webhook(
 
                 let mut text_block_uuids = std::collections::HashMap::new();
                 let mut seen_tool_ids = std::collections::HashSet::new();
-                let mut total_prompt_tokens = 0;
-                let mut total_completion_tokens = 0;
+                let mut total_prompt_tokens = 0u32;
+                let mut total_completion_tokens = 0u32;
+                let mut total_thinking_tokens = 0u32;
+                let mut total_cache_read_tokens = 0u32;
+                let mut total_cache_write_tokens = 0u32;
                 let mut node_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
                 // Emitting custom event to show turn change in UI
@@ -468,9 +502,12 @@ async fn handler_webhook(
                                 })).expect("json_data"));
                             }
                         },
-                        DagExecutionEvent::LlmUsage { prompt_tokens, completion_tokens, .. } => {
+                        DagExecutionEvent::LlmUsage { prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens, .. } => {
                             total_prompt_tokens += prompt_tokens;
                             total_completion_tokens += completion_tokens;
+                            total_thinking_tokens += thinking_tokens.unwrap_or(0);
+                            total_cache_read_tokens += cache_read_tokens.unwrap_or(0);
+                            total_cache_write_tokens += cache_write_tokens.unwrap_or(0);
                         },
                         DagExecutionEvent::LlmToolCall { tool_id, tool_name, .. }
                             if !seen_tool_ids.contains(tool_id) =>
@@ -525,9 +562,13 @@ async fn handler_webhook(
                             None
                         },
                         DagExecutionEvent::LlmToken { node_id, token } => {
+                            let part_id = text_block_uuids
+                                .get(node_id)
+                                .cloned()
+                                .unwrap_or_else(|| node_id.clone());
                             Some(serde_json::json!({
-                                "type": "node-delta",
-                                "node_id": node_id,
+                                "type": "text-delta",
+                                "id": part_id,
                                 "delta": token
                             }))
                         },
@@ -538,6 +579,19 @@ async fn handler_webhook(
                                 "delta": token
                             }))
                         },
+                        DagExecutionEvent::ReasoningStart { id, .. } => Some(serde_json::json!({
+                            "type": "reasoning-start",
+                            "id": id
+                        })),
+                        DagExecutionEvent::ReasoningDelta { id, token, .. } => Some(serde_json::json!({
+                            "type": "reasoning-delta",
+                            "id": id,
+                            "delta": token
+                        })),
+                        DagExecutionEvent::ReasoningEnd { id, .. } => Some(serde_json::json!({
+                            "type": "reasoning-end",
+                            "id": id
+                        })),
                         DagExecutionEvent::LlmToolCall { tool_id, args_chunk, .. } => Some(serde_json::json!({
                             "type": "tool-input-delta",
                             "toolCallId": tool_id,
@@ -559,14 +613,27 @@ async fn handler_webhook(
                             "type": "usage-summary",
                             "nodes": entries
                         })),
-                        DagExecutionEvent::GraphFinish { .. } => Some(serde_json::json!({
-                            "type": "finish",
-                            "finishReason": "stop",
-                            "usage": {
+                        DagExecutionEvent::GraphFinish { .. } => {
+                            let mut usage_obj = serde_json::json!({
                                 "promptTokens": total_prompt_tokens,
-                                "completionTokens": total_completion_tokens
+                                "completionTokens": total_completion_tokens,
+                                "totalTokens": total_prompt_tokens + total_completion_tokens + total_thinking_tokens
+                            });
+                            if total_thinking_tokens > 0 {
+                                usage_obj["thinkingTokens"] = serde_json::json!(total_thinking_tokens);
                             }
-                        })),
+                            if total_cache_read_tokens > 0 {
+                                usage_obj["cacheReadTokens"] = serde_json::json!(total_cache_read_tokens);
+                            }
+                            if total_cache_write_tokens > 0 {
+                                usage_obj["cacheWriteTokens"] = serde_json::json!(total_cache_write_tokens);
+                            }
+                            Some(serde_json::json!({
+                                "type": "finish",
+                                "finishReason": "stop",
+                                "usage": usage_obj
+                            }))
+                        }
                         DagExecutionEvent::Error { message } => Some(serde_json::json!({
                             "type": "error",
                             "errorText": message

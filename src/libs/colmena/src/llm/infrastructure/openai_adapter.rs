@@ -162,6 +162,13 @@ impl OpenAiAdapter {
             body["presence_penalty"] = json!(pres_penalty);
         }
 
+        // o-series reasoning models: map thinking_budget → reasoning_effort.
+        // OpenAI does not surface reasoning content, so no stream changes needed.
+        if let Some(budget) = request.config().thinking_budget() {
+            let effort = if budget <= 1000 { "low" } else if budget <= 5000 { "medium" } else { "high" };
+            body["reasoning_effort"] = json!(effort);
+        }
+
         body
     }
 
@@ -238,9 +245,7 @@ impl OpenAiAdapter {
             .unwrap_or(&String::new())
             .clone();
 
-        let usage = openai_response
-            .usage
-            .map(|u| LlmUsage::new(u.prompt_tokens, u.completion_tokens));
+        let usage = openai_response.usage.map(openai_usage_to_llm_usage);
 
         let mut response = LlmResponse::new(
             request.id().clone(),
@@ -316,10 +321,7 @@ impl OpenAiAdapter {
                                 if let Some(usage) = chunk_response.usage {
                                     yield LlmStreamChunk::new(
                                         request_id.clone(),
-                                        LlmStreamPart::Usage(LlmUsage::new(
-                                            usage.prompt_tokens,
-                                            usage.completion_tokens,
-                                        )),
+                                        LlmStreamPart::Usage(openai_usage_to_llm_usage(usage)),
                                         provider.clone(),
                                         false,
                                     );
@@ -475,9 +477,23 @@ struct OpenAiFunctionCall {
 }
 
 #[derive(Debug, Deserialize)]
+struct OpenAiPromptDetails {
+    #[serde(default)]
+    cached_tokens: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiCompletionDetails {
+    #[serde(default)]
+    reasoning_tokens: u32,
+}
+
+#[derive(Debug, Deserialize)]
 struct OpenAiUsage {
     prompt_tokens: u32,
     completion_tokens: u32,
+    prompt_tokens_details: Option<OpenAiPromptDetails>,
+    completion_tokens_details: Option<OpenAiCompletionDetails>,
 }
 
 // Streaming response structures
@@ -517,6 +533,17 @@ struct OpenAiStreamFunctionCall {
 }
 
 // SSE Parser implementation
+fn openai_usage_to_llm_usage(u: OpenAiUsage) -> LlmUsage {
+    let mut usage = LlmUsage::new(u.prompt_tokens, u.completion_tokens);
+    if let Some(r) = u.completion_tokens_details.filter(|d| d.reasoning_tokens > 0) {
+        usage = usage.with_thinking_tokens(r.reasoning_tokens);
+    }
+    if let Some(p) = u.prompt_tokens_details.filter(|d| d.cached_tokens > 0) {
+        usage = usage.with_cache_read_tokens(p.cached_tokens);
+    }
+    usage
+}
+
 enum SseEvent {
     Message(String),
 }

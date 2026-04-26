@@ -428,6 +428,14 @@ impl ExecutableNode for LlmNode {
             llm_config = llm_config.with_max_tokens(max_tokens as u32)?;
         }
 
+        if let Some(thinking_budget) = inputs
+            .get("thinking_budget")
+            .and_then(|v| v.as_u64())
+            .or_else(|| config.get("thinking_budget").and_then(|v| v.as_u64()))
+        {
+            llm_config = llm_config.with_thinking_budget(thinking_budget as u32);
+        }
+
         let mut messages = Vec::new();
         let mut history_exists = false;
 
@@ -826,15 +834,43 @@ impl ExecutableNode for LlmNode {
             .or_else(|| config.get("stream").and_then(|v| v.as_bool()))
             .unwrap_or(true);
 
+        // Shared state for reasoning block ID across the on_token Fn closure.
+        let current_reasoning_id: Arc<std::sync::Mutex<Option<String>>> =
+            Arc::new(std::sync::Mutex::new(None));
+
         // Define on_token callback if streaming is enabled and observer is present
         let observer_for_stream = _observer.clone();
         let on_token: Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>> =
             if let Some(obs) = observer_for_stream {
+                let reasoning_id = current_reasoning_id.clone();
                 Some(Box::new(move |part: LlmStreamPart| {
                     use crate::dag_engine::domain::observer::NodeEvent;
                     match part {
                         LlmStreamPart::Content(token) if stream_enabled => {
                             obs.on_event(NodeEvent::LlmToken { token })
+                        }
+                        LlmStreamPart::ThinkingStart => {
+                            let id = format!("reasoning_{}", uuid::Uuid::new_v4());
+                            if let Ok(mut guard) = reasoning_id.lock() {
+                                *guard = Some(id.clone());
+                            }
+                            obs.on_event(NodeEvent::ReasoningStart { id });
+                        }
+                        LlmStreamPart::ThinkingContent(token) if stream_enabled => {
+                            let id = reasoning_id
+                                .lock()
+                                .ok()
+                                .and_then(|g| g.clone())
+                                .unwrap_or_default();
+                            obs.on_event(NodeEvent::ReasoningDelta { id, token });
+                        }
+                        LlmStreamPart::ThinkingEnd => {
+                            let id = reasoning_id
+                                .lock()
+                                .ok()
+                                .and_then(|mut g| g.take())
+                                .unwrap_or_default();
+                            obs.on_event(NodeEvent::ReasoningEnd { id });
                         }
                         LlmStreamPart::ToolCallChunk(chunk) if stream_enabled => {
                             obs.on_event(NodeEvent::LlmToolCall {
@@ -847,6 +883,9 @@ impl ExecutableNode for LlmNode {
                             obs.on_event(NodeEvent::LlmUsage {
                                 prompt_tokens: usage.prompt_tokens,
                                 completion_tokens: usage.completion_tokens,
+                                thinking_tokens: usage.thinking_tokens,
+                                cache_read_tokens: usage.cache_read_tokens,
+                                cache_write_tokens: usage.cache_write_tokens,
                             })
                         }
                         LlmStreamPart::LlmToolCallStart(tc) => {
@@ -907,6 +946,9 @@ impl ExecutableNode for LlmNode {
                 obs.on_event(NodeEvent::LlmUsage {
                     prompt_tokens: usage.prompt_tokens,
                     completion_tokens: usage.completion_tokens,
+                    thinking_tokens: usage.thinking_tokens,
+                    cache_read_tokens: usage.cache_read_tokens,
+                    cache_write_tokens: usage.cache_write_tokens,
                 });
             }
         }

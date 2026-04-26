@@ -17,6 +17,10 @@ pub struct LlmResponse {
     /// Tool calls requested by the LLM
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<ToolCall>>,
+
+    /// Reasoning/thinking content produced by the model before responding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_content: Option<String>,
 }
 
 impl LlmResponse {
@@ -35,6 +39,7 @@ impl LlmResponse {
             timestamp: Utc::now(),
             finish_reason: None,
             tool_calls: None,
+            thinking_content: None,
         })
     }
 
@@ -52,6 +57,7 @@ impl LlmResponse {
             timestamp: Utc::now(),
             finish_reason: None,
             tool_calls: None,
+            thinking_content: None,
         }
     }
 
@@ -147,6 +153,17 @@ impl LlmResponse {
             .map(|t| !t.is_empty())
             .unwrap_or(false)
     }
+
+    pub fn with_thinking_content(mut self, thinking: String) -> Self {
+        if !thinking.is_empty() {
+            self.thinking_content = Some(thinking);
+        }
+        self
+    }
+
+    pub fn thinking_content(&self) -> Option<&str> {
+        self.thinking_content.as_deref()
+    }
 }
 
 // For streaming responses
@@ -167,6 +184,12 @@ pub enum LlmStreamPart {
     LlmToolCallFinish(ToolResult),
     LlmMessageStart,
     LlmMessageFinish(Option<LlmUsage>),
+    /// A reasoning/thinking block has started.
+    ThinkingStart,
+    /// A delta token within the current reasoning block.
+    ThinkingContent(String),
+    /// The current reasoning block has ended.
+    ThinkingEnd,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -252,9 +252,9 @@ impl DagRunUseCase {
 
             // Usage tracking: accumulate token counts and model/provider per node_id.
             // node_meta: node_id → (model, provider, node_type)
-            // usage_accumulator: node_id → (prompt_tokens, completion_tokens)
+            // usage_accumulator: node_id → (prompt, completion, thinking, cache_read, cache_write)
             let mut node_meta: HashMap<String, (Option<String>, Option<String>, String)> = HashMap::new();
-            let mut usage_accumulator: HashMap<String, (u32, u32)> = HashMap::new();
+            let mut usage_accumulator: HashMap<String, (u32, u32, u32, u32, u32)> = HashMap::new();
 
             // Start cyclic execution loop
             while let Some(node_id) = active_queue.pop_front() {
@@ -404,17 +404,23 @@ impl DagRunUseCase {
                                             NodeEvent::LlmToken { token } => yield DagExecutionEvent::LlmToken { node_id: node_id.clone(), token },
                                             NodeEvent::ThinkingToken { token } => yield DagExecutionEvent::ThinkingToken { node_id: node_id.clone(), token },
                                             NodeEvent::LlmToolCall { tool_id, tool_name, args_chunk } => yield DagExecutionEvent::LlmToolCall { node_id: node_id.clone(), tool_id, tool_name, args_chunk },
-                                            NodeEvent::LlmUsage { prompt_tokens, completion_tokens } => {
-                                                let entry = usage_accumulator.entry(node_id.clone()).or_insert((0, 0));
+                                            NodeEvent::LlmUsage { prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens } => {
+                                                let entry = usage_accumulator.entry(node_id.clone()).or_insert((0, 0, 0, 0, 0));
                                                 entry.0 += prompt_tokens;
                                                 entry.1 += completion_tokens;
-                                                yield DagExecutionEvent::LlmUsage { node_id: node_id.clone(), prompt_tokens, completion_tokens };
+                                                entry.2 += thinking_tokens.unwrap_or(0);
+                                                entry.3 += cache_read_tokens.unwrap_or(0);
+                                                entry.4 += cache_write_tokens.unwrap_or(0);
+                                                yield DagExecutionEvent::LlmUsage { node_id: node_id.clone(), prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens };
                                             }
                                             NodeEvent::LlmToolCallStart { tool_id, tool_name, tool_args } => yield DagExecutionEvent::LlmToolCallStart { node_id: node_id.clone(), tool_id, tool_name, tool_args },
                                             NodeEvent::LlmToolCallFinish { tool_id, success, output } => yield DagExecutionEvent::LlmToolCallFinish { node_id: node_id.clone(), tool_id, success, output },
                                             NodeEvent::SkillLoaded { tool_id, skill_name, reference, source, size_bytes } => yield DagExecutionEvent::SkillLoaded { node_id: node_id.clone(), tool_id, skill_name, reference, source, size_bytes },
                                             NodeEvent::LlmMessageStart => yield DagExecutionEvent::LlmMessageStart { node_id: node_id.clone() },
                                             NodeEvent::LlmMessageFinish(usage) => yield DagExecutionEvent::LlmMessageFinish { node_id: node_id.clone(), usage: usage.map(|u| serde_json::json!(u)) },
+                                            NodeEvent::ReasoningStart { id } => yield DagExecutionEvent::ReasoningStart { node_id: node_id.clone(), id },
+                                            NodeEvent::ReasoningDelta { id, token } => yield DagExecutionEvent::ReasoningDelta { node_id: node_id.clone(), id, token },
+                                            NodeEvent::ReasoningEnd { id } => yield DagExecutionEvent::ReasoningEnd { node_id: node_id.clone(), id },
                                             NodeEvent::SubgraphChildEvent(raw) => {
                                                 // Re-yield child events preserving their original node IDs.
                                                 // GraphFinish is suppressed — SubgraphNodeFinish (below) serves that role.
@@ -429,10 +435,13 @@ impl DagRunUseCase {
                                                                 .and_then(|v| v.as_str()).map(|s| s.to_string());
                                                             node_meta.insert(cid.clone(), (model, provider, ctype.clone()));
                                                         }
-                                                        DagExecutionEvent::LlmUsage { node_id: cid, prompt_tokens, completion_tokens } => {
-                                                            let entry = usage_accumulator.entry(cid.clone()).or_insert((0, 0));
+                                                        DagExecutionEvent::LlmUsage { node_id: cid, prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens } => {
+                                                            let entry = usage_accumulator.entry(cid.clone()).or_insert((0, 0, 0, 0, 0));
                                                             entry.0 += prompt_tokens;
                                                             entry.1 += completion_tokens;
+                                                            entry.2 += thinking_tokens.unwrap_or(0);
+                                                            entry.3 += cache_read_tokens.unwrap_or(0);
+                                                            entry.4 += cache_write_tokens.unwrap_or(0);
                                                         }
                                                         DagExecutionEvent::GraphFinish { .. } => {
                                                             // suppressed
@@ -603,19 +612,22 @@ impl DagRunUseCase {
 
             // Emit per-node usage summary before finishing
             if !usage_accumulator.is_empty() {
-                let entries: Vec<Value> = usage_accumulator.iter().map(|(nid, (pt, ct))| {
+                let entries: Vec<Value> = usage_accumulator.iter().map(|(nid, (pt, ct, tt, cr, cw))| {
                     let (model, provider, ntype) = node_meta.get(nid)
                         .map(|(m, p, t)| (m.clone(), p.clone(), t.clone()))
                         .unwrap_or((None, None, String::new()));
-                    json!({
-                        "node_id": nid,
-                        "node_type": ntype,
-                        "model": model,
-                        "provider": provider,
-                        "prompt_tokens": pt,
-                        "completion_tokens": ct,
-                        "total_tokens": pt + ct
-                    })
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("node_id".into(), json!(nid));
+                    obj.insert("node_type".into(), json!(ntype));
+                    obj.insert("model".into(), json!(model));
+                    obj.insert("provider".into(), json!(provider));
+                    obj.insert("prompt_tokens".into(), json!(pt));
+                    obj.insert("completion_tokens".into(), json!(ct));
+                    if *tt > 0 { obj.insert("thinking_tokens".into(), json!(tt)); }
+                    if *cr > 0 { obj.insert("cache_read_tokens".into(), json!(cr)); }
+                    if *cw > 0 { obj.insert("cache_write_tokens".into(), json!(cw)); }
+                    obj.insert("total_tokens".into(), json!(pt + ct + tt));
+                    Value::Object(obj)
                 }).collect();
                 yield DagExecutionEvent::GraphUsageSummary { entries };
             }

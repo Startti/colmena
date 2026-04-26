@@ -41,10 +41,16 @@ impl ExecutionObserver for ChildNodeObserver {
             NodeEvent::LlmUsage {
                 prompt_tokens,
                 completion_tokens,
+                thinking_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
             } => DagExecutionEvent::LlmUsage {
                 node_id: self.node_id.clone(),
                 prompt_tokens,
                 completion_tokens,
+                thinking_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
             },
             NodeEvent::LlmToolCall {
                 tool_id,
@@ -102,6 +108,19 @@ impl ExecutionObserver for ChildNodeObserver {
                 reference,
                 source,
                 size_bytes,
+            },
+            NodeEvent::ReasoningStart { id } => DagExecutionEvent::ReasoningStart {
+                node_id: self.node_id.clone(),
+                id,
+            },
+            NodeEvent::ReasoningDelta { id, token } => DagExecutionEvent::ReasoningDelta {
+                node_id: self.node_id.clone(),
+                id,
+                token,
+            },
+            NodeEvent::ReasoningEnd { id } => DagExecutionEvent::ReasoningEnd {
+                node_id: self.node_id.clone(),
+                id,
             },
             NodeEvent::SubgraphChildEvent(raw) => {
                 self.parent.on_event(NodeEvent::SubgraphChildEvent(raw));
@@ -759,6 +778,9 @@ impl OrchestratorNode {
                             obs.on_event(NodeEvent::LlmUsage {
                                 prompt_tokens: usage.prompt_tokens,
                                 completion_tokens: usage.completion_tokens,
+                                thinking_tokens: usage.thinking_tokens,
+                                cache_read_tokens: usage.cache_read_tokens,
+                                cache_write_tokens: usage.cache_write_tokens,
                             })
                         }
                         crate::llm::domain::LlmStreamPart::LlmMessageStart => {
