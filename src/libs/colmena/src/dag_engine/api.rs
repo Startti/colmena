@@ -56,7 +56,20 @@ pub async fn run_dag(
 
         if is_stream {
             use crate::dag_engine::domain::events::DagExecutionEvent;
+            use crate::dag_engine::sse_mapper::SseMapper;
             use futures::StreamExt;
+
+            let mut mapper = SseMapper::new();
+            let mut final_output: Value = Value::Null;
+
+            // Global START marker (compatible with Vercel AI SDK)
+            println!(
+                "data: {}\n",
+                serde_json::json!({
+                    "type": "start",
+                    "messageId": format!("msg_{}", uuid::Uuid::new_v4())
+                })
+            );
 
             let internal_stream = engine.execute_stream(
                 graph,
@@ -66,340 +79,29 @@ pub async fn run_dag(
             );
             tokio::pin!(internal_stream);
 
-            // 1. Send the global START part
-            println!(
-                "data: {}\n",
-                serde_json::json!({
-                    "type": "start",
-                    "messageId": format!("msg_{}", uuid::Uuid::new_v4())
-                })
-            );
-
-            let mut text_block_uuids = std::collections::HashMap::new();
-            let mut seen_tool_ids = std::collections::HashSet::new();
-            let mut total_prompt_tokens = 0u32;
-            let mut total_completion_tokens = 0u32;
-            let mut total_thinking_tokens = 0u32;
-            let mut total_cache_read_tokens = 0u32;
-            let mut total_cache_write_tokens = 0u32;
-            let mut final_output: Value = Value::Null;
-
             while let Some(result) = internal_stream.next().await {
                 let event = match result {
                     Ok(ev) => ev,
                     Err(e) => {
                         println!(
                             "data: {}\n",
-                            serde_json::json!({
-                                "type": "error",
-                                "errorText": e.to_string()
-                            })
+                            serde_json::json!({ "type": "error", "errorText": e.to_string() })
                         );
                         continue;
                     }
                 };
 
-                // Protocol State Management
-                match &event {
-                    DagExecutionEvent::LlmToken { node_id, .. }
-                        if !text_block_uuids.contains_key(node_id) =>
-                    {
-                        let part_id = format!("txt_{}", uuid::Uuid::new_v4());
-                        println!(
-                            "data: {}\n",
-                            serde_json::json!({
-                                "type": "text-start",
-                                "id": part_id
-                            })
-                        );
-                        text_block_uuids.insert(node_id.clone(), part_id);
-                    }
-                    DagExecutionEvent::NodeFinish { node_id, .. }
-                    | DagExecutionEvent::SubgraphNodeFinish { node_id, .. } => {
-                        if let Some(part_id) = text_block_uuids.remove(node_id) {
-                            println!(
-                                "data: {}\n",
-                                serde_json::json!({
-                                    "type": "text-end",
-                                    "id": part_id
-                                })
-                            );
-                        }
-                    }
-                    DagExecutionEvent::LlmUsage {
-                        prompt_tokens,
-                        completion_tokens,
-                        thinking_tokens,
-                        cache_read_tokens,
-                        cache_write_tokens,
-                        ..
-                    } => {
-                        total_prompt_tokens += prompt_tokens;
-                        total_completion_tokens += completion_tokens;
-                        total_thinking_tokens += thinking_tokens.unwrap_or(0);
-                        total_cache_read_tokens += cache_read_tokens.unwrap_or(0);
-                        total_cache_write_tokens += cache_write_tokens.unwrap_or(0);
-                    }
-                    DagExecutionEvent::LlmToolCall {
-                        tool_id, tool_name, ..
-                    } if !seen_tool_ids.contains(tool_id) => {
-                        seen_tool_ids.insert(tool_id.clone());
-                        println!(
-                            "data: {}\n",
-                            serde_json::json!({
-                                "type": "tool-input-start",
-                                "toolCallId": tool_id,
-                                "toolName": tool_name
-                            })
-                        );
-                    }
-                    DagExecutionEvent::GraphFinish { output } => {
-                        final_output = output.clone();
-                    }
-                    DagExecutionEvent::SubgraphWrapped { inner } => {
-                        match inner.as_ref() {
-                            DagExecutionEvent::LlmToken { node_id, .. }
-                                if !text_block_uuids.contains_key(node_id) =>
-                            {
-                                let part_id = format!("txt_{}", uuid::Uuid::new_v4());
-                                println!("data: {}\n", serde_json::json!({
-                                    "type": "subgraph-text-start",
-                                    "id": part_id
-                                }));
-                                text_block_uuids.insert(node_id.clone(), part_id);
-                            }
-                            DagExecutionEvent::NodeFinish { node_id, .. }
-                            | DagExecutionEvent::SubgraphNodeFinish { node_id, .. } => {
-                                if let Some(part_id) = text_block_uuids.remove(node_id) {
-                                    println!("data: {}\n", serde_json::json!({
-                                        "type": "subgraph-text-end",
-                                        "id": part_id
-                                    }));
-                                }
-                            }
-                            DagExecutionEvent::LlmUsage {
-                                prompt_tokens, completion_tokens,
-                                thinking_tokens, cache_read_tokens, cache_write_tokens, ..
-                            } => {
-                                total_prompt_tokens += prompt_tokens;
-                                total_completion_tokens += completion_tokens;
-                                total_thinking_tokens += thinking_tokens.unwrap_or(0);
-                                total_cache_read_tokens += cache_read_tokens.unwrap_or(0);
-                                total_cache_write_tokens += cache_write_tokens.unwrap_or(0);
-                            }
-                            DagExecutionEvent::LlmToolCall { tool_id, tool_name, .. }
-                                if !seen_tool_ids.contains(tool_id) =>
-                            {
-                                seen_tool_ids.insert(tool_id.clone());
-                                println!("data: {}\n", serde_json::json!({
-                                    "type": "subgraph-tool-input-start",
-                                    "toolCallId": tool_id,
-                                    "toolName": tool_name
-                                }));
-                            }
-                            _ => {}
-                        }
-                    }
-                    _ => {}
+                // Capture final output for return value (before mapper consumes the event)
+                if let DagExecutionEvent::GraphFinish { output } = &event {
+                    final_output = output.clone();
                 }
 
-                // Map to official Data Stream Protocol JSON
-                let protocol_json = match event {
-                    DagExecutionEvent::LlmToken { node_id, token } => {
-                        let part_id = text_block_uuids
-                            .get(&node_id)
-                            .cloned()
-                            .unwrap_or_else(|| node_id.clone());
-                        Some(serde_json::json!({
-                            "type": "text-delta",
-                            "id": part_id,
-                            "delta": token
-                        }))
-                    }
-                    DagExecutionEvent::ThinkingToken { node_id, token } => Some(serde_json::json!({
-                        "type": "thinking-delta",
-                        "node_id": node_id,
-                        "delta": token
-                    })),
-                    DagExecutionEvent::ReasoningStart { id, .. } => Some(serde_json::json!({
-                        "type": "reasoning-start",
-                        "id": id
-                    })),
-                    DagExecutionEvent::ReasoningDelta { id, token, .. } => Some(serde_json::json!({
-                        "type": "reasoning-delta",
-                        "id": id,
-                        "delta": token
-                    })),
-                    DagExecutionEvent::ReasoningEnd { id, .. } => Some(serde_json::json!({
-                        "type": "reasoning-end",
-                        "id": id
-                    })),
-                    DagExecutionEvent::LlmToolCall {
-                        tool_id,
-                        args_chunk,
-                        ..
-                    } => Some(serde_json::json!({
-                        "type": "tool-input-delta",
-                        "toolCallId": tool_id,
-                        "inputTextDelta": args_chunk
-                    })),
-                    DagExecutionEvent::LlmToolCallStart {
-                        tool_id,
-                        tool_name,
-                        tool_args,
-                        ..
-                    } => Some(serde_json::json!({
-                        "type": "tool-input-available",
-                        "toolCallId": tool_id,
-                        "toolName": tool_name,
-                        "input": serde_json::from_str::<serde_json::Value>(&tool_args).unwrap_or(serde_json::Value::String(tool_args))
-                    })),
-                    DagExecutionEvent::LlmToolCallFinish {
-                        tool_id, output, ..
-                    } => Some(serde_json::json!({
-                        "type": "tool-output-available",
-                        "toolCallId": tool_id,
-                        "output": serde_json::from_str::<serde_json::Value>(&output).unwrap_or(serde_json::Value::String(output))
-                    })),
-                    DagExecutionEvent::LlmUsage { .. } => None,
-                    DagExecutionEvent::GraphUsageSummary { entries } => Some(serde_json::json!({
-                        "type": "usage-summary",
-                        "nodes": entries
-                    })),
-                    DagExecutionEvent::NodeFinish { node_id, .. } => {
-                        text_block_uuids.get(&node_id).map(|part_id| {
-                            serde_json::json!({
-                                "type": "node-end",
-                                "id": part_id
-                            })
-                        })
-                    }
-                    DagExecutionEvent::SubgraphNodeFinish { node_id, output } => {
-                        Some(serde_json::json!({
-                            "type": "node-end",
-                            "node_id": node_id,
-                            "node_type": "subgraph",
-                            "output": output
-                        }))
-                    }
-                    DagExecutionEvent::GraphFinish { .. } => {
-                        let mut usage_obj = serde_json::json!({
-                            "promptTokens": total_prompt_tokens,
-                            "completionTokens": total_completion_tokens,
-                            "totalTokens": total_prompt_tokens + total_completion_tokens + total_thinking_tokens
-                        });
-                        if total_thinking_tokens > 0 {
-                            usage_obj["thinkingTokens"] = serde_json::json!(total_thinking_tokens);
-                        }
-                        if total_cache_read_tokens > 0 {
-                            usage_obj["cacheReadTokens"] = serde_json::json!(total_cache_read_tokens);
-                        }
-                        if total_cache_write_tokens > 0 {
-                            usage_obj["cacheWriteTokens"] = serde_json::json!(total_cache_write_tokens);
-                        }
-                        Some(serde_json::json!({
-                            "type": "finish",
-                            "finishReason": "stop",
-                            "usage": usage_obj
-                        }))
-                    }
-                    DagExecutionEvent::Error { message } => Some(serde_json::json!({
-                        "type": "error",
-                        "errorText": message
-                    })),
-                    DagExecutionEvent::SubgraphWrapped { inner } => {
-                        match *inner {
-                            DagExecutionEvent::NodeStart { node_id, node_type, inputs, config } => {
-                                let clean_inputs = if let Some(obj) = inputs.as_object() {
-                                    serde_json::Value::Object(
-                                        obj.iter()
-                                            .filter(|(k, _)| !k.starts_with("__") && k.as_str() != "session_id")
-                                            .map(|(k, v)| (k.clone(), v.clone()))
-                                            .collect(),
-                                    )
-                                } else { inputs };
-                                Some(serde_json::json!({
-                                    "type": "subgraph-node-start",
-                                    "node_id": node_id,
-                                    "node_type": node_type,
-                                    "config": config,
-                                    "inputs": clean_inputs
-                                }))
-                            }
-                            DagExecutionEvent::NodeFinish { node_id, output } => {
-                                Some(serde_json::json!({
-                                    "type": "subgraph-node-end",
-                                    "node_id": node_id,
-                                    "output": output
-                                }))
-                            }
-                            DagExecutionEvent::SubgraphNodeFinish { node_id, output } => {
-                                Some(serde_json::json!({
-                                    "type": "subgraph-node-end",
-                                    "node_id": node_id,
-                                    "node_type": "subgraph",
-                                    "output": output
-                                }))
-                            }
-                            DagExecutionEvent::LlmToken { node_id, token } => {
-                                let part_id = text_block_uuids
-                                    .get(&node_id)
-                                    .cloned()
-                                    .unwrap_or_else(|| node_id.clone());
-                                Some(serde_json::json!({
-                                    "type": "subgraph-text-delta",
-                                    "id": part_id,
-                                    "delta": token
-                                }))
-                            }
-                            DagExecutionEvent::ThinkingToken { node_id, token } => Some(serde_json::json!({
-                                "type": "subgraph-thinking-delta",
-                                "node_id": node_id,
-                                "delta": token
-                            })),
-                            DagExecutionEvent::LlmToolCall { tool_id, args_chunk, .. } => Some(serde_json::json!({
-                                "type": "subgraph-tool-input-delta",
-                                "toolCallId": tool_id,
-                                "inputTextDelta": args_chunk
-                            })),
-                            DagExecutionEvent::LlmToolCallStart { tool_id, tool_name, tool_args, .. } => Some(serde_json::json!({
-                                "type": "subgraph-tool-input-available",
-                                "toolCallId": tool_id,
-                                "toolName": tool_name,
-                                "input": serde_json::from_str::<serde_json::Value>(&tool_args)
-                                    .unwrap_or(serde_json::Value::String(tool_args))
-                            })),
-                            DagExecutionEvent::LlmToolCallFinish { tool_id, output, .. } => Some(serde_json::json!({
-                                "type": "subgraph-tool-output-available",
-                                "toolCallId": tool_id,
-                                "output": serde_json::from_str::<serde_json::Value>(&output)
-                                    .unwrap_or(serde_json::Value::String(output))
-                            })),
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                };
-
-                if let Some(json) = protocol_json {
-                    println!("data: {}\n", json);
+                for part in mapper.map(&event) {
+                    println!("data: {}\n", part);
                 }
             }
 
-            // 3. Finalization: Ensure all pending text blocks are ended
-            for (_, part_id) in text_block_uuids {
-                println!(
-                    "data: {}\n",
-                    serde_json::json!({
-                        "type": "text-end",
-                        "id": part_id
-                    })
-                );
-            }
-
-            // 4. Send the literal [DONE] marker
             println!("data: [DONE]\n");
-
             Ok(final_output)
         } else {
             engine
