@@ -71,13 +71,12 @@ impl ExecutionObserver for DirectThinkingObserver {
             NodeEvent::LlmToken { token } => {
                 self.inner.on_event(NodeEvent::ThinkingToken { token });
             }
-            NodeEvent::ReasoningStart { .. }
+            NodeEvent::LlmUsage { .. }
+            | NodeEvent::ReasoningStart { .. }
             | NodeEvent::ReasoningDelta { .. }
             | NodeEvent::ReasoningEnd { .. } => {
                 self.inner.on_event(event);
             }
-            // Drop NodeStart/NodeFinish/LlmUsage/etc. — internal LLM lifecycle
-            // events are not meaningful at the parent stream level.
             _ => {}
         }
     }
