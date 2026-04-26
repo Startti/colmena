@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -13,6 +13,7 @@ use crate::dag_engine::domain::events::DagExecutionEvent;
 pub struct SseMapper {
     text_block_ids: HashMap<String, String>,
     node_types: HashMap<String, String>,
+    seen_tool_ids: HashSet<String>,
     total_prompt_tokens: u64,
     total_completion_tokens: u64,
     total_thinking_tokens: u64,
@@ -31,6 +32,7 @@ impl SseMapper {
         Self {
             text_block_ids: HashMap::new(),
             node_types: HashMap::new(),
+            seen_tool_ids: HashSet::new(),
             total_prompt_tokens: 0,
             total_completion_tokens: 0,
             total_thinking_tokens: 0,
@@ -73,6 +75,16 @@ impl SseMapper {
                 self.total_cache_read_tokens += cache_read_tokens.unwrap_or(0) as u64;
                 self.total_cache_write_tokens += cache_write_tokens.unwrap_or(0) as u64;
             }
+            DagExecutionEvent::LlmToolCall { tool_id, tool_name, .. } => {
+                if !self.seen_tool_ids.contains(tool_id) {
+                    self.seen_tool_ids.insert(tool_id.clone());
+                    parts.push(json!({
+                        "type": "tool-input-start",
+                        "toolCallId": tool_id,
+                        "toolName": tool_name
+                    }));
+                }
+            }
             DagExecutionEvent::SubgraphWrapped { inner } => match inner.as_ref() {
                 DagExecutionEvent::LlmToken { node_id, .. }
                 | DagExecutionEvent::ThinkingToken { node_id, .. } => {
@@ -101,6 +113,16 @@ impl SseMapper {
                     self.total_thinking_tokens += thinking_tokens.unwrap_or(0) as u64;
                     self.total_cache_read_tokens += cache_read_tokens.unwrap_or(0) as u64;
                     self.total_cache_write_tokens += cache_write_tokens.unwrap_or(0) as u64;
+                }
+                DagExecutionEvent::LlmToolCall { tool_id, tool_name, .. } => {
+                    if !self.seen_tool_ids.contains(tool_id) {
+                        self.seen_tool_ids.insert(tool_id.clone());
+                        parts.push(json!({
+                            "type": "subgraph-tool-input-start",
+                            "toolCallId": tool_id,
+                            "toolName": tool_name
+                        }));
+                    }
                 }
                 _ => {}
             },
@@ -378,5 +400,98 @@ impl SseMapper {
         } else {
             inputs.clone()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dag_engine::domain::events::DagExecutionEvent;
+
+    fn tool_call_sequence() -> Vec<DagExecutionEvent> {
+        vec![
+            DagExecutionEvent::LlmToolCall {
+                node_id: "llm_1".into(),
+                tool_id: "call_abc".into(),
+                tool_name: "getWeather".into(),
+                args_chunk: "{\"city\"".into(),
+            },
+            DagExecutionEvent::LlmToolCall {
+                node_id: "llm_1".into(),
+                tool_id: "call_abc".into(),
+                tool_name: "getWeather".into(),
+                args_chunk: ":\"SF\"}".into(),
+            },
+            DagExecutionEvent::LlmToolCallStart {
+                node_id: "llm_1".into(),
+                tool_id: "call_abc".into(),
+                tool_name: "getWeather".into(),
+                tool_args: "{\"city\":\"SF\"}".into(),
+            },
+            DagExecutionEvent::LlmToolCallFinish {
+                node_id: "llm_1".into(),
+                tool_id: "call_abc".into(),
+                success: true,
+                output: "{\"weather\":\"sunny\"}".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn test_tool_input_start_emitted_once_before_first_delta() {
+        let mut mapper = SseMapper::new();
+        let events = tool_call_sequence();
+
+        let parts = mapper.map(&events[0]);
+        assert_eq!(parts.len(), 2, "expected [tool-input-start, tool-input-delta]");
+        assert_eq!(parts[0]["type"], "tool-input-start");
+        assert_eq!(parts[0]["toolCallId"], "call_abc");
+        assert_eq!(parts[0]["toolName"], "getWeather");
+        assert_eq!(parts[1]["type"], "tool-input-delta");
+
+        let parts2 = mapper.map(&events[1]);
+        assert_eq!(parts2.len(), 1, "expected only tool-input-delta on repeat");
+        assert_eq!(parts2[0]["type"], "tool-input-delta");
+    }
+
+    #[test]
+    fn test_tool_input_available_and_output() {
+        let mut mapper = SseMapper::new();
+        let events = tool_call_sequence();
+
+        mapper.map(&events[0]); // warm up seen_tool_ids
+
+        let parts = mapper.map(&events[2]);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "tool-input-available");
+        assert_eq!(parts[0]["toolName"], "getWeather");
+
+        let parts = mapper.map(&events[3]);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "tool-output-available");
+    }
+
+    #[test]
+    fn test_subgraph_tool_input_start_emitted_once() {
+        let mut mapper = SseMapper::new();
+        let inner = DagExecutionEvent::LlmToolCall {
+            node_id: "inner_llm".into(),
+            tool_id: "call_xyz".into(),
+            tool_name: "search".into(),
+            args_chunk: "{\"q\"".into(),
+        };
+        let event = DagExecutionEvent::SubgraphWrapped {
+            inner: Box::new(inner.clone()),
+        };
+
+        let parts = mapper.map(&event);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "subgraph-tool-input-start");
+        assert_eq!(parts[0]["toolCallId"], "call_xyz");
+        assert_eq!(parts[1]["type"], "subgraph-tool-input-delta");
+
+        let parts2 = mapper.map(&event);
+        assert_eq!(parts2.len(), 1);
+        assert_eq!(parts2[0]["type"], "subgraph-tool-input-delta");
     }
 }
