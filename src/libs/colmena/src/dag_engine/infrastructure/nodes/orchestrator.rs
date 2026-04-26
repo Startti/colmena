@@ -21,160 +21,6 @@ const ORCHESTRATOR_GROUNDING: &str = include_str!("prompts/orchestrator_groundin
 /// for the final reactor. The grounding rules are appended on top of this.
 const LLM_DEFAULT_SYSTEM: &str = include_str!("prompts/llm_default_system.md");
 
-// ── ChildNodeObserver ────────────────────────────────────────────────────────
-// Re-attributes all NodeEvent variants to a specific child node_id and forwards
-// them as SubgraphChildEvent so they appear in the stream under the correct ID
-// instead of the parent orchestrator's ID.
-
-struct ChildNodeObserver {
-    parent: Arc<dyn ExecutionObserver>,
-    node_id: String,
-}
-
-impl ExecutionObserver for ChildNodeObserver {
-    fn on_event(&self, event: NodeEvent) {
-        let dag_event = match event {
-            NodeEvent::LlmToken { token } => DagExecutionEvent::LlmToken {
-                node_id: self.node_id.clone(),
-                token,
-            },
-            NodeEvent::LlmUsage {
-                prompt_tokens,
-                completion_tokens,
-                thinking_tokens,
-                cache_read_tokens,
-                cache_write_tokens,
-            } => DagExecutionEvent::LlmUsage {
-                node_id: self.node_id.clone(),
-                prompt_tokens,
-                completion_tokens,
-                thinking_tokens,
-                cache_read_tokens,
-                cache_write_tokens,
-            },
-            NodeEvent::LlmToolCall {
-                tool_id,
-                tool_name,
-                args_chunk,
-            } => DagExecutionEvent::LlmToolCall {
-                node_id: self.node_id.clone(),
-                tool_id,
-                tool_name,
-                args_chunk,
-            },
-            NodeEvent::LlmToolCallStart {
-                tool_id,
-                tool_name,
-                tool_args,
-            } => DagExecutionEvent::LlmToolCallStart {
-                node_id: self.node_id.clone(),
-                tool_id,
-                tool_name,
-                tool_args,
-            },
-            NodeEvent::LlmToolCallFinish {
-                tool_id,
-                success,
-                output,
-            } => DagExecutionEvent::LlmToolCallFinish {
-                node_id: self.node_id.clone(),
-                tool_id,
-                success,
-                output,
-            },
-            NodeEvent::LlmMessageStart => DagExecutionEvent::LlmMessageStart {
-                node_id: self.node_id.clone(),
-            },
-            NodeEvent::LlmMessageFinish(usage) => DagExecutionEvent::LlmMessageFinish {
-                node_id: self.node_id.clone(),
-                usage: usage
-                    .as_ref()
-                    .map(|u| serde_json::to_value(u).unwrap_or(Value::Null)),
-            },
-            NodeEvent::ThinkingToken { token } => DagExecutionEvent::ThinkingToken {
-                node_id: self.node_id.clone(),
-                token,
-            },
-            NodeEvent::SkillLoaded {
-                tool_id,
-                skill_name,
-                reference,
-                source,
-                size_bytes,
-            } => DagExecutionEvent::SkillLoaded {
-                node_id: self.node_id.clone(),
-                tool_id,
-                skill_name,
-                reference,
-                source,
-                size_bytes,
-            },
-            NodeEvent::ReasoningStart { id } => DagExecutionEvent::ReasoningStart {
-                node_id: self.node_id.clone(),
-                id,
-            },
-            NodeEvent::ReasoningDelta { id, token } => DagExecutionEvent::ReasoningDelta {
-                node_id: self.node_id.clone(),
-                id,
-                token,
-            },
-            NodeEvent::ReasoningEnd { id } => DagExecutionEvent::ReasoningEnd {
-                node_id: self.node_id.clone(),
-                id,
-            },
-            NodeEvent::SubgraphChildEvent(raw) => {
-                self.parent.on_event(NodeEvent::SubgraphChildEvent(raw));
-                return;
-            }
-        };
-        if let Ok(raw) = serde_json::to_value(&dag_event) {
-            self.parent.on_event(NodeEvent::SubgraphChildEvent(raw));
-        }
-    }
-}
-
-// ── ThinkingNodeObserver ─────────────────────────────────────────────────────
-// Wraps another observer and converts LlmToken → ThinkingToken so the frontend
-// can distinguish "thinking" activity (planner, critic, phase_reactor, agents)
-// from the final user-facing response (final_reactor).
-// Also rewrites `llm_token` events inside SubgraphChildEvent JSON payloads.
-
-struct ThinkingNodeObserver {
-    inner: Arc<dyn ExecutionObserver>,
-}
-
-impl ExecutionObserver for ThinkingNodeObserver {
-    fn on_event(&self, event: NodeEvent) {
-        match event {
-            NodeEvent::LlmToken { token } => {
-                self.inner.on_event(NodeEvent::ThinkingToken { token });
-            }
-            NodeEvent::SubgraphChildEvent(raw) => {
-                let rewritten = rewrite_llm_to_thinking(raw);
-                self.inner
-                    .on_event(NodeEvent::SubgraphChildEvent(rewritten));
-            }
-            other => self.inner.on_event(other),
-        }
-    }
-}
-
-/// Rewrites `"event":"llm_token"` → `"event":"thinking_token"` inside serialized
-/// SubgraphChildEvent JSON so agent subgraph tokens surface as thinking events.
-fn rewrite_llm_to_thinking(mut raw: Value) -> Value {
-    if let Some(event_name) = raw.get("event").and_then(|v| v.as_str()) {
-        if event_name == "llm_token" {
-            if let Some(obj) = raw.as_object_mut() {
-                obj.insert(
-                    "event".to_string(),
-                    Value::String("thinking_token".to_string()),
-                );
-            }
-        }
-    }
-    raw
-}
-
 fn emit_internal_node_start(
     observer: &Option<Arc<dyn ExecutionObserver>>,
     node_id: &str,
@@ -210,26 +56,38 @@ fn emit_internal_node_finish(
     }
 }
 
-fn child_observer(
-    observer: &Option<Arc<dyn ExecutionObserver>>,
-    node_id: &str,
-) -> Option<Arc<dyn ExecutionObserver>> {
-    observer.as_ref().map(|obs| {
-        Arc::new(ChildNodeObserver {
-            parent: obs.clone(),
-            node_id: node_id.to_string(),
-        }) as Arc<dyn ExecutionObserver>
-    })
+// ── DirectThinkingObserver ───────────────────────────────────────────────────
+// Fires LlmToken as ThinkingToken DIRECTLY to the parent (no SubgraphChildEvent
+// wrapping). Used for the orchestrator's internal LLMs (planner, critic,
+// phase_reactor, final_reactor) so their tokens reach run_use_case as plain
+// NodeEvent::ThinkingToken → DagExecutionEvent::ThinkingToken → "thinking-delta".
+struct DirectThinkingObserver {
+    inner: Arc<dyn ExecutionObserver>,
 }
 
-/// Like `child_observer` but wraps with `ThinkingNodeObserver` so all LlmToken
-/// events (direct and from subgraph children) are converted to ThinkingToken.
-fn thinking_child_observer(
+impl ExecutionObserver for DirectThinkingObserver {
+    fn on_event(&self, event: NodeEvent) {
+        match event {
+            NodeEvent::LlmToken { token } => {
+                self.inner.on_event(NodeEvent::ThinkingToken { token });
+            }
+            NodeEvent::ReasoningStart { .. }
+            | NodeEvent::ReasoningDelta { .. }
+            | NodeEvent::ReasoningEnd { .. } => {
+                self.inner.on_event(event);
+            }
+            // Drop NodeStart/NodeFinish/LlmUsage/etc. — internal LLM lifecycle
+            // events are not meaningful at the parent stream level.
+            _ => {}
+        }
+    }
+}
+
+fn direct_thinking_observer(
     observer: &Option<Arc<dyn ExecutionObserver>>,
-    node_id: &str,
 ) -> Option<Arc<dyn ExecutionObserver>> {
-    child_observer(observer, node_id).map(|child_obs| {
-        Arc::new(ThinkingNodeObserver { inner: child_obs }) as Arc<dyn ExecutionObserver>
+    observer.as_ref().map(|obs| {
+        Arc::new(DirectThinkingObserver { inner: obs.clone() }) as Arc<dyn ExecutionObserver>
     })
 }
 
@@ -411,7 +269,7 @@ impl OrchestratorNode {
                     "provider": reactor_cfg_owned.get("provider").cloned().unwrap_or(Value::Null),
                 }),
             );
-            let phase_reactor_obs = thinking_child_observer(&observer, "phase_reactor");
+            let phase_reactor_obs = direct_thinking_observer(&observer);
             let reactor_res = reactor_node
                 .execute(
                     &reactor_inputs,
@@ -766,7 +624,7 @@ impl OrchestratorNode {
         ];
 
         // Streaming callback — always stream, emits llm_token (user-facing response)
-        let final_obs = child_observer(&observer, "final_reactor");
+        let final_obs = direct_thinking_observer(&observer);
         let on_token: Option<Box<dyn Fn(crate::llm::domain::LlmStreamPart) + Send + Sync>> =
             if let Some(obs) = final_obs {
                 Some(Box::new(
@@ -1039,7 +897,7 @@ impl ExecutableNode for OrchestratorNode {
                             "provider": internal_planner_cfg.get("provider").cloned().unwrap_or(Value::Null),
                         }),
                     );
-                    let planner_obs = thinking_child_observer(&_observer, "planner");
+                    let planner_obs = direct_thinking_observer(&_observer);
                     let planner_result = planner_node
                         .execute(inputs, &internal_planner_cfg, _state, planner_obs)
                         .await?;
@@ -1588,13 +1446,8 @@ impl ExecutableNode for OrchestratorNode {
                                 .get_node("subgraph")
                                 .ok_or("subgraph node not found")?;
 
-                            let agent_obs: Option<Arc<dyn ExecutionObserver>> =
-                                _observer.as_ref().map(|obs| {
-                                    Arc::new(ThinkingNodeObserver { inner: obs.clone() })
-                                        as Arc<dyn ExecutionObserver>
-                                });
                             let agent_result = subgraph_node
-                                .execute(&task_inputs, &subgraph_cfg, _state, agent_obs)
+                                .execute(&task_inputs, &subgraph_cfg, _state, _observer.clone())
                                 .await?;
 
                             colmena_log!(
@@ -1653,8 +1506,7 @@ impl ExecutableNode for OrchestratorNode {
                                         "provider": critic_cfg.get("provider").cloned().unwrap_or(Value::Null),
                                     }),
                                 );
-                                let critic_obs =
-                                    thinking_child_observer(&_observer, &critic_node_id);
+                                let critic_obs = direct_thinking_observer(&_observer);
                                 let critic_res = critic_node
                                     .execute(&critic_inputs, critic_cfg, _state, critic_obs)
                                     .await?;

@@ -14,6 +14,7 @@ IMPORTANT — Two possible response formats:
    Use type 'open' for free-text answers and 'choice' when there are specific predefined options.
 
 Prefer planning over asking. Only ask questions when the ambiguity would lead to fundamentally different plans. If you can make reasonable assumptions, do so and plan.
+IMPORTANT: When asking questions, output ONLY the questions JSON object — do NOT include any explanatory text outside the JSON.
 
 Output ONLY valid JSON. Do NOT include markdown or code fences.
 

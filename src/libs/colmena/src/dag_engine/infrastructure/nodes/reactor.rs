@@ -62,10 +62,10 @@ fn reactor_schema() -> Value {
             },
             "question": {
                 "type": "string",
-                "description": "The question to ask the user. Required when suspend is true."
+                "description": "The question to ask the user. Required when suspend is true. Leave empty string when suspend is false."
             }
         },
-        "required": ["task_ok", "response", "add_tasks", "suspend"]
+        "required": ["task_ok", "response", "add_tasks", "suspend", "question"]
     })
 }
 

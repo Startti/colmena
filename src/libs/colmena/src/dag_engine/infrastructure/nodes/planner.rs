@@ -434,6 +434,7 @@ impl ExecutableNode for PlannerNode {
             if questions.is_array() && !questions.as_array().map(|a| a.is_empty()).unwrap_or(true) {
                 colmena_log!("⏸️  [PlannerNode] Planner requested clarification before planning ({} questions).", questions.as_array().map(|a| a.len()).unwrap_or(0));
                 return Ok(json!({
+                    "__colmena_status": "SUSPENDED",
                     "result": {
                         "questions": questions
                     },
