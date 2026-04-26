@@ -141,6 +141,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             total_cache_read_tokens += cache_read_tokens.unwrap_or(0);
                             total_cache_write_tokens += cache_write_tokens.unwrap_or(0);
                         }
+                        DagExecutionEvent::SubgraphWrapped { inner } => {
+                            match inner.as_ref() {
+                                DagExecutionEvent::LlmToken { node_id, .. } => {
+                                    if !text_block_ids.contains_key(node_id) {
+                                        let part_id = format!("txt_{}", uuid::Uuid::new_v4());
+                                        println!("data: {}\n", serde_json::json!({ "type": "subgraph-text-start", "id": part_id }));
+                                        text_block_ids.insert(node_id.clone(), part_id);
+                                    }
+                                }
+                                DagExecutionEvent::NodeFinish { node_id, .. }
+                                | DagExecutionEvent::SubgraphNodeFinish { node_id, .. } => {
+                                    if let Some(part_id) = text_block_ids.remove(node_id) {
+                                        println!("data: {}\n", serde_json::json!({ "type": "subgraph-text-end", "id": part_id }));
+                                    }
+                                }
+                                DagExecutionEvent::LlmUsage {
+                                    prompt_tokens, completion_tokens,
+                                    thinking_tokens, cache_read_tokens, cache_write_tokens, ..
+                                } => {
+                                    total_prompt_tokens += *prompt_tokens;
+                                    total_completion_tokens += *completion_tokens;
+                                    total_thinking_tokens += thinking_tokens.unwrap_or(0);
+                                    total_cache_read_tokens += cache_read_tokens.unwrap_or(0);
+                                    total_cache_write_tokens += cache_write_tokens.unwrap_or(0);
+                                }
+                                _ => {}
+                            }
+                        }
                         _ => {}
                     }
 
@@ -316,6 +344,75 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "source": source,
                             "sizeBytes": size_bytes,
                         })),
+                        DagExecutionEvent::SubgraphWrapped { inner } => {
+                            match inner.as_ref() {
+                                DagExecutionEvent::NodeStart { node_id, node_type, inputs, config } => {
+                                    node_types.insert(node_id.clone(), node_type.clone());
+                                    let clean_inputs = if let Some(obj) = inputs.as_object() {
+                                        serde_json::Value::Object(
+                                            obj.iter()
+                                                .filter(|(k, _)| !k.starts_with("__") && k.as_str() != "session_id")
+                                                .map(|(k, v)| (k.clone(), v.clone()))
+                                                .collect(),
+                                        )
+                                    } else { inputs.clone() };
+                                    Some(serde_json::json!({
+                                        "type": "subgraph-node-start",
+                                        "node_id": node_id,
+                                        "node_type": node_type,
+                                        "config": config,
+                                        "inputs": clean_inputs
+                                    }))
+                                }
+                                DagExecutionEvent::NodeFinish { node_id, output } => {
+                                    let ntype = node_types.get(node_id).cloned().unwrap_or_default();
+                                    Some(serde_json::json!({
+                                        "type": "subgraph-node-end",
+                                        "node_id": node_id,
+                                        "node_type": ntype,
+                                        "output": output
+                                    }))
+                                }
+                                DagExecutionEvent::SubgraphNodeFinish { node_id, output } => {
+                                    Some(serde_json::json!({
+                                        "type": "subgraph-node-end",
+                                        "node_id": node_id,
+                                        "node_type": "subgraph",
+                                        "output": output
+                                    }))
+                                }
+                                DagExecutionEvent::LlmToken { node_id, token } => {
+                                    let part_id = text_block_ids.get(node_id).cloned().unwrap_or_else(|| node_id.clone());
+                                    Some(serde_json::json!({
+                                        "type": "subgraph-text-delta",
+                                        "id": part_id,
+                                        "delta": token
+                                    }))
+                                }
+                                DagExecutionEvent::ThinkingToken { node_id, token } => Some(serde_json::json!({
+                                    "type": "subgraph-thinking-delta",
+                                    "node_id": node_id,
+                                    "delta": token
+                                })),
+                                DagExecutionEvent::LlmToolCall { tool_id, args_chunk, .. } => Some(serde_json::json!({
+                                    "type": "subgraph-tool-input-delta",
+                                    "toolCallId": tool_id,
+                                    "inputTextDelta": args_chunk
+                                })),
+                                DagExecutionEvent::LlmToolCallStart { tool_id, tool_name, tool_args, .. } => Some(serde_json::json!({
+                                    "type": "subgraph-tool-input-available",
+                                    "toolCallId": tool_id,
+                                    "toolName": tool_name,
+                                    "input": serde_json::from_str::<serde_json::Value>(tool_args).unwrap_or(serde_json::Value::String(tool_args.clone()))
+                                })),
+                                DagExecutionEvent::LlmToolCallFinish { tool_id, output, .. } => Some(serde_json::json!({
+                                    "type": "subgraph-tool-output-available",
+                                    "toolCallId": tool_id,
+                                    "output": serde_json::from_str::<serde_json::Value>(output).unwrap_or(serde_json::Value::String(output.clone()))
+                                })),
+                                _ => None,
+                            }
+                        }
                     };
 
                     if let Some(line) = protocol_line {

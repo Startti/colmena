@@ -450,7 +450,7 @@ impl DagRunUseCase {
                                                     }
                                                     match child_event {
                                                         DagExecutionEvent::GraphFinish { .. } => {}
-                                                        other => yield other,
+                                                        other => yield DagExecutionEvent::SubgraphWrapped { inner: Box::new(other) },
                                                     }
                                                 }
                                             }

@@ -93,4 +93,8 @@ pub enum DagExecutionEvent {
         source: String,
         size_bytes: usize,
     },
+    /// Wraps a DagExecutionEvent emitted from inside a subgraph execution.
+    /// The frontend receives these with a "subgraph-" prefix on the event type.
+    #[serde(rename = "subgraph_wrapped")]
+    SubgraphWrapped { inner: Box<DagExecutionEvent> },
 }
