@@ -43,9 +43,20 @@ Aplica cuando el modelo emite bloques de razonamiento (`ReasoningStart/Delta/End
 
 | Evento | Campos | Cuándo |
 |--------|--------|--------|
+| `tool-input-start` | `toolCallId`, `toolName` | Primer chunk de argumentos del tool (una vez por tool_id) |
 | `tool-input-delta` | `toolCallId`, `inputTextDelta` | Chunk de argumentos del tool (streaming) |
 | `tool-input-available` | `toolCallId`, `toolName`, `input` | Argumentos del tool completos |
 | `tool-output-available` | `toolCallId`, `output` | El tool terminó de ejecutarse |
+
+Secuencia completa para un tool call:
+
+```
+tool-input-start      { toolCallId: "call_abc", toolName: "getWeather" }
+tool-input-delta      { toolCallId: "call_abc", inputTextDelta: "{\"city\"" }
+tool-input-delta      { toolCallId: "call_abc", inputTextDelta: ":\"SF\"}" }
+tool-input-available  { toolCallId: "call_abc", toolName: "getWeather", input: {"city":"SF"} }
+tool-output-available { toolCallId: "call_abc", output: {"weather":"sunny"} }
+```
 
 ---
 
@@ -104,6 +115,7 @@ Todos los eventos que ocurren dentro de un subgrafo se emiten con el prefijo `su
 
 | Evento | Campos | Cuándo |
 |--------|--------|--------|
+| `subgraph-tool-input-start` | `toolCallId`, `toolName` | Primer chunk de argumentos de tool interno (una vez por tool_id) |
 | `subgraph-tool-input-delta` | `toolCallId`, `inputTextDelta` | Chunk de argumentos de tool interno |
 | `subgraph-tool-input-available` | `toolCallId`, `toolName`, `input` | Argumentos del tool interno completos |
 | `subgraph-tool-output-available` | `toolCallId`, `output` | Tool interno terminó |
@@ -206,6 +218,7 @@ node-start              { node_id: "llm_agent", node_type: "llm" }
   text-start            { id: "txt_abc123" }
   text-delta            { id: "txt_abc123", delta: "Voy a " }
   text-delta            { id: "txt_abc123", delta: "buscar..." }
+  tool-input-start      { toolCallId: "tc_1", toolName: "search" }
   tool-input-delta      { toolCallId: "tc_1", inputTextDelta: '{"q"' }
   tool-input-available  { toolCallId: "tc_1", toolName: "search", input: { q: "..." } }
   tool-output-available { toolCallId: "tc_1", output: { results: [...] } }
