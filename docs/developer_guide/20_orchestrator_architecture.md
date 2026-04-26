@@ -481,6 +481,44 @@ cargo run --bin dag_engine -- run tests/graphs/advanced/hitl_planner_suspend_tes
 
 ---
 
+## Eventos SSE del Orchestrator
+
+El nodo `orchestrator` emite una mezcla de eventos de nivel superior y eventos con prefijo `subgraph-`. La distinción clave es:
+
+| Actividad interna | Tipo de evento SSE |
+|---|---|
+| LLMs de planeación/revisión (planner, phase_reactor, critic, final_reactor) | `thinking-delta` (sin prefijo `subgraph-`) |
+| Agentes-tarea ejecutados como subgrafos | `subgraph-node-start/end`, `subgraph-text-*`, etc. |
+
+### Flujo de eventos de un ciclo completo
+
+```
+node-start { node_id: "orchestrator" }
+
+  thinking-delta { node_id: "orchestrator", delta: "..." }  ← planner analizando
+  thinking-delta ...                                          ← más tokens del planner
+
+  subgraph-node-start { node_id: "researcher_agent" }        ← tarea Phase 1
+    subgraph-text-start { id: "txt_xyz" }
+    subgraph-text-delta { id: "txt_xyz", delta: "..." }
+    subgraph-tool-input-available { ... }
+    subgraph-tool-output-available { ... }
+    subgraph-text-end { id: "txt_xyz" }
+  subgraph-node-end { node_id: "researcher_agent" }
+
+  thinking-delta ...                                          ← critic revisando
+  thinking-delta ...                                          ← phase_reactor sintetizando
+  thinking-delta ...                                          ← final_reactor produciendo respuesta
+
+node-end { node_id: "orchestrator" }
+usage-summary { nodes: [...] }
+finish { finishReason: "stop", ... }
+```
+
+> Para la referencia completa de todos los eventos SSE ver [docs/sse_events_reference.md](../sse_events_reference.md).
+
+---
+
 ## Referencia de Implementación
 
 Los archivos Rust relevantes para el orchestrator:

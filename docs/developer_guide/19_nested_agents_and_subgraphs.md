@@ -139,13 +139,24 @@ La clave `__colmena_resume_answer` es detectada por el `SubGraphNode` en la pró
 
 ## Eventos de Streaming
 
-Cuando el orchestrator invoca un agente via SubGraphNode, emite eventos de frontera visibles en el stream del padre:
+Cuando el motor ejecuta un subgrafo (ya sea un nodo `subgraph` o un agente-tarea del `orchestrator`), todos los eventos internos se emiten con el prefijo `subgraph-` en el stream SSE del padre:
 
-| Evento | Cuándo se emite |
+| Evento SSE | Cuándo se emite |
 |---|---|
-| `NodeStart { node_type: "subgraph" }` | Al iniciar la ejecución del grafo hijo |
-| `SubgraphNodeFinish { node_id, output }` | Al completarse el grafo hijo |
-| `SubgraphChildEvent(...)` | Re-atribución de todos los eventos internos del hijo |
+| `subgraph-node-start` | Al empezar a ejecutar un nodo dentro del subgrafo |
+| `subgraph-node-end` | Al completar un nodo dentro del subgrafo |
+| `subgraph-text-start` | Primer token de un LLM interno |
+| `subgraph-text-delta` | Por cada token generado por un LLM interno |
+| `subgraph-text-end` | Al finalizar el LLM interno |
+| `subgraph-tool-input-delta` | Chunk de argumentos de un tool interno (streaming) |
+| `subgraph-tool-input-available` | Argumentos completos de un tool interno |
+| `subgraph-tool-output-available` | Tool interno terminó de ejecutarse |
+| `subgraph-reasoning-start/delta/end` | Bloque de razonamiento de un LLM interno |
+| `subgraph-skill-loaded` | Skill cargada dentro del subgrafo |
+| `subgraph-usage-summary` | Resumen de tokens del subgrafo |
+| `subgraph-error` | Error dentro del subgrafo |
+
+> Para la referencia completa de todos los eventos SSE, incluyendo los de nivel superior y los específicos del orchestrator, ver [docs/sse_events_reference.md](../sse_events_reference.md).
 
 Esto permite que el frontend distinga claramente cuándo habla cada agente en un flujo multi-agente.
 
