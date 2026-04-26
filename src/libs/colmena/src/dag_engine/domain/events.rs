@@ -57,7 +57,7 @@ pub enum DagExecutionEvent {
     },
     /// Streaming token from an internal "thinking" LLM call (planner, critic, reactor, agent subgraphs).
     #[serde(rename = "thinking_token")]
-    ThinkingToken { node_id: String, token: String },
+    ThinkingToken { node_id: String, node_type: String, token: String },
     /// A provider reasoning block has opened for `node_id`.
     #[serde(rename = "reasoning_start")]
     ReasoningStart { node_id: String, id: String },

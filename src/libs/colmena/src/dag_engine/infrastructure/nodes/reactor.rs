@@ -221,6 +221,9 @@ impl ExecutableNode for ReactorNode {
         let provider = LlmProvider::new(provider_kind.clone(), api_key, model)?;
         let mut llm_config = LlmConfig::new(provider);
         llm_config = llm_config.with_temperature(0.2)?;
+        if let Some(budget) = config.get("thinking_budget").and_then(|v| v.as_u64()) {
+            llm_config = llm_config.with_thinking_budget(budget as u32);
+        }
 
         let llm_repo = LlmProviderFactory::create(provider_kind);
         let conversation_repo = Arc::new(InMemoryConversationRepository::new());

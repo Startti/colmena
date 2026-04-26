@@ -571,10 +571,60 @@ async fn handler_resume(
     let graph_instance = (*state.graph).clone();
 
     if is_sse {
-        // ... We could duplicate the SSE stream runner here, but for brevity in Phase 1
-        // we'll execute the rest. Let's just do a normal execute.
-        // If SSE is truly required for resuming, we can abstract the runner.
-        eprintln!("⚠️ SSE not fully supported yet on /resume, falling back to JSON");
+        use crate::dag_engine::domain::events::DagExecutionEvent;
+        use crate::dag_engine::sse_mapper::SseMapper;
+        use axum::response::sse::{Event, KeepAlive, Sse};
+        use futures::StreamExt;
+
+        let engine = state.engine.clone();
+        let session_id = payload.session_id.clone();
+        let answer = payload.answer.clone();
+
+        let protocol_stream = async_stream::stream! {
+            let mut mapper = SseMapper::new();
+
+            let internal_stream = engine.execute_stream(
+                graph_instance,
+                Some(session_id),
+                Some(answer),
+                false,
+            );
+            tokio::pin!(internal_stream);
+
+            while let Some(result) = internal_stream.next().await {
+                let event = match result {
+                    Ok(ev) => ev,
+                    Err(e) => {
+                        yield Ok::<Event, std::io::Error>(
+                            Event::default()
+                                .json_data(serde_json::json!({
+                                    "type": "error",
+                                    "errorText": e.to_string()
+                                }))
+                                .expect("json_data"),
+                        );
+                        continue;
+                    }
+                };
+
+                for part in mapper.map(&event) {
+                    yield Ok(Event::default().json_data(part).expect("json_data"));
+                }
+            }
+
+            yield Ok(Event::default().data("[DONE]"));
+        };
+
+        let mut response = Sse::new(protocol_stream)
+            .keep_alive(KeepAlive::default())
+            .into_response();
+
+        response.headers_mut().insert(
+            "x-vercel-ai-ui-message-stream",
+            axum::http::HeaderValue::from_static("v1"),
+        );
+
+        return response;
     }
 
     match state

@@ -167,9 +167,10 @@ impl SseMapper {
             }
             // ThinkingToken is emitted by the orchestrator node when internal planner/critic/reactor
             // LLMs stream tokens. Distinct from user-facing LlmToken.
-            DagExecutionEvent::ThinkingToken { node_id, token } => Some(json!({
+            DagExecutionEvent::ThinkingToken { node_id, node_type, token } => Some(json!({
                 "type": "thinking-delta",
                 "node_id": node_id,
+                "node_type": node_type,
                 "delta": token
             })),
             DagExecutionEvent::ReasoningStart { id, .. } => Some(json!({
@@ -312,13 +313,13 @@ impl SseMapper {
                         .unwrap_or_else(|| node_id.clone());
                     Some(json!({ "type": "subgraph-text-delta", "id": part_id, "delta": token }))
                 }
-                DagExecutionEvent::ThinkingToken { node_id, token } => {
+                DagExecutionEvent::ThinkingToken { node_id, node_type, token } => {
                     let part_id = self
                         .text_block_ids
                         .get(node_id)
                         .cloned()
                         .unwrap_or_else(|| node_id.clone());
-                    Some(json!({ "type": "subgraph-text-delta", "id": part_id, "delta": token }))
+                    Some(json!({ "type": "subgraph-text-delta", "id": part_id, "node_id": node_id, "node_type": node_type, "delta": token }))
                 }
                 DagExecutionEvent::LlmToolCall { tool_id, args_chunk, .. } => Some(json!({
                     "type": "subgraph-tool-input-delta",

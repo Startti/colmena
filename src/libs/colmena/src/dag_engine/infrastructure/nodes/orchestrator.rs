@@ -21,6 +21,20 @@ const ORCHESTRATOR_GROUNDING: &str = include_str!("prompts/orchestrator_groundin
 /// for the final reactor. The grounding rules are appended on top of this.
 const LLM_DEFAULT_SYSTEM: &str = include_str!("prompts/llm_default_system.md");
 
+// Config key names — these are the keys used in the orchestrator JSON config block
+// and also serve as the node_id for internal SSE events. Defined here as constants
+// to keep the config lookup and the SSE emission in sync with a single source of truth.
+const KEY_PLANNER: &str = "planner";
+const KEY_PHASE_REACTOR: &str = "phase_reactor";
+const KEY_FINAL_REACTOR: &str = "final_reactor";
+const KEY_CRITIC: &str = "critic";
+
+// Node type names for SSE events (match the Rust node registry names).
+const NODE_TYPE_PLANNER: &str = "planner";
+const NODE_TYPE_REACTOR: &str = "reactor";
+const NODE_TYPE_FINAL_REACTOR: &str = "llm_call";
+const NODE_TYPE_CRITIC: &str = "critic";
+
 fn emit_internal_node_start(
     observer: &Option<Arc<dyn ExecutionObserver>>,
     node_id: &str,
@@ -61,15 +75,23 @@ fn emit_internal_node_finish(
 // wrapping). Used for the orchestrator's internal LLMs (planner, critic,
 // phase_reactor, final_reactor) so their tokens reach run_use_case as plain
 // NodeEvent::ThinkingToken → DagExecutionEvent::ThinkingToken → "thinking-delta".
+// The node_id identifies the internal sub-node (e.g. "planner", "critic") so the
+// frontend can match thinking-delta events to the corresponding subgraph-node-start.
 struct DirectThinkingObserver {
     inner: Arc<dyn ExecutionObserver>,
+    node_id: String,
+    node_type: String,
 }
 
 impl ExecutionObserver for DirectThinkingObserver {
     fn on_event(&self, event: NodeEvent) {
         match event {
             NodeEvent::LlmToken { token } => {
-                self.inner.on_event(NodeEvent::ThinkingToken { token });
+                self.inner.on_event(NodeEvent::ThinkingToken {
+                    node_id: self.node_id.clone(),
+                    node_type: self.node_type.clone(),
+                    token,
+                });
             }
             NodeEvent::LlmUsage { .. }
             | NodeEvent::ReasoningStart { .. }
@@ -83,10 +105,16 @@ impl ExecutionObserver for DirectThinkingObserver {
 }
 
 fn direct_thinking_observer(
+    node_id: &str,
+    node_type: &str,
     observer: &Option<Arc<dyn ExecutionObserver>>,
 ) -> Option<Arc<dyn ExecutionObserver>> {
     observer.as_ref().map(|obs| {
-        Arc::new(DirectThinkingObserver { inner: obs.clone() }) as Arc<dyn ExecutionObserver>
+        Arc::new(DirectThinkingObserver {
+            inner: obs.clone(),
+            node_id: node_id.to_string(),
+            node_type: node_type.to_string(),
+        }) as Arc<dyn ExecutionObserver>
     })
 }
 
@@ -144,7 +172,7 @@ impl OrchestratorNode {
 
         let phase_output;
 
-        if let Some(reactor_cfg) = config.get("phase_reactor") {
+        if let Some(reactor_cfg) = config.get(KEY_PHASE_REACTOR) {
             colmena_log!("⚡ [OrchestratorNode] Internal Phase Reactor starting...");
             let registry = self.registry.upgrade().ok_or("Registry already dropped")?;
             let reactor_node = registry
@@ -260,15 +288,15 @@ impl OrchestratorNode {
 
             emit_internal_node_start(
                 &observer,
-                "phase_reactor",
-                "reactor",
+                KEY_PHASE_REACTOR,
+                NODE_TYPE_REACTOR,
                 json!({
                     "phase": phase,
                     "model": reactor_cfg_owned.get("model").cloned().unwrap_or(Value::Null),
                     "provider": reactor_cfg_owned.get("provider").cloned().unwrap_or(Value::Null),
                 }),
             );
-            let phase_reactor_obs = direct_thinking_observer(&observer);
+            let phase_reactor_obs = direct_thinking_observer(KEY_PHASE_REACTOR, NODE_TYPE_REACTOR, &observer);
             let reactor_res = reactor_node
                 .execute(
                     &reactor_inputs,
@@ -277,7 +305,7 @@ impl OrchestratorNode {
                     phase_reactor_obs,
                 )
                 .await?;
-            emit_internal_node_finish(&observer, "phase_reactor", reactor_res.clone());
+            emit_internal_node_finish(&observer, KEY_PHASE_REACTOR, reactor_res.clone());
 
             colmena_log!(
                 "📬 [OrchestratorNode] REACTOR RAW RESULT (phase {}):\n{}\n{}\n{}",
@@ -317,7 +345,7 @@ impl OrchestratorNode {
                 if allow_suspend_for(reactor_cfg) {
                     return Ok(OrchestratorSuspend::Suspended(make_suspend_response(
                         state,
-                        "phase_reactor",
+                        KEY_PHASE_REACTOR,
                         phase,
                         None,
                         questions,
@@ -544,7 +572,7 @@ impl OrchestratorNode {
         let phase_summaries = repo.get_phase_summaries(session_id).await?;
 
         let final_reactor_cfg = config
-            .get("final_reactor")
+            .get(KEY_FINAL_REACTOR)
             .ok_or("OrchestratorNode: 'final_reactor' is required in config. It produces the final response to the user's query.")?;
 
         // ── Direct LLM call (plain text, no JSON schema) ────────────────────
@@ -609,6 +637,12 @@ impl OrchestratorNode {
         {
             llm_config = llm_config.with_temperature(temp as f32)?;
         }
+        if let Some(budget) = final_reactor_cfg
+            .get("thinking_budget")
+            .and_then(|v| v.as_u64())
+        {
+            llm_config = llm_config.with_thinking_budget(budget as u32);
+        }
 
         let llm_repo = crate::llm::infrastructure::LlmProviderFactory::create(provider_kind);
         let conversation_repo = Arc::new(
@@ -623,7 +657,7 @@ impl OrchestratorNode {
         ];
 
         // Streaming callback — always stream, emits llm_token (user-facing response)
-        let final_obs = direct_thinking_observer(&observer);
+        let final_obs = direct_thinking_observer(KEY_FINAL_REACTOR, NODE_TYPE_FINAL_REACTOR, &observer);
         let on_token: Option<Box<dyn Fn(crate::llm::domain::LlmStreamPart) + Send + Sync>> =
             if let Some(obs) = final_obs {
                 Some(Box::new(
@@ -672,8 +706,8 @@ impl OrchestratorNode {
 
         emit_internal_node_start(
             &observer,
-            "final_reactor",
-            "llm_call",
+            KEY_FINAL_REACTOR,
+            NODE_TYPE_FINAL_REACTOR,
             json!({
                 "model": final_reactor_cfg.get("model").cloned().unwrap_or(Value::Null),
                 "provider": final_reactor_cfg.get("provider").cloned().unwrap_or(Value::Null),
@@ -694,7 +728,7 @@ impl OrchestratorNode {
         let response = agent_service.run(params).await?;
         let final_text = response.content().to_string();
 
-        emit_internal_node_finish(&observer, "final_reactor", json!({ "result": final_text }));
+        emit_internal_node_finish(&observer, KEY_FINAL_REACTOR, json!({ "result": final_text }));
 
         colmena_log!(
             "✅ [OrchestratorNode] Final response generated ({} chars).",
@@ -764,7 +798,7 @@ impl ExecutableNode for OrchestratorNode {
         if let (Some(ref ans), Some((ref sa, _, _, ref questions))) =
             (&resume_answer, &suspend_meta)
         {
-            if sa == "critic" {
+            if sa == KEY_CRITIC {
                 colmena_log!("▶️  [OrchestratorNode] Resuming from critic suspend. Preparing Q&A context for agent re-execution.");
                 // Prepare Q&A context but DO NOT clear suspend_meta — the resuming_critic guard in the task loop will handle the cleanup
                 let qa_str = questions_to_context_string(questions, ans);
@@ -775,7 +809,7 @@ impl ExecutableNode for OrchestratorNode {
                     );
                 }
                 // NOTE: Suspend meta cleanup happens in resuming_critic guard, not here
-            } else if sa == "planner" {
+            } else if sa == KEY_PLANNER {
                 colmena_log!("▶️  [OrchestratorNode] Resuming from planner suspend. Injecting Q&A as planner context and phase 0 summary.");
                 let new_qa = questions_to_context_string(questions, ans);
                 // Accumulate with any previous planner Q&A rounds so the planner sees the full history
@@ -819,7 +853,7 @@ impl ExecutableNode for OrchestratorNode {
         if let Some(repo) = &self.task_memory_repo {
             // ── 1. Auto-Planificación ─────────────────────────────────────────
             // Si hay config de 'planner' y la DB está vacía, ejecutamos el planner interno
-            if let Some(planner_cfg) = config.get("planner") {
+            if let Some(planner_cfg) = config.get(KEY_PLANNER) {
                 let existing_tasks = repo.get_tasks_for_run(&session_id).await?;
                 if existing_tasks.is_empty() {
                     colmena_log!("🗂️ [OrchestratorNode] Internal Planning started...");
@@ -881,26 +915,26 @@ impl ExecutableNode for OrchestratorNode {
 
                     let registry = self.registry.upgrade().ok_or("Registry already dropped")?;
                     let planner_node = registry
-                        .get_node("planner")
+                        .get_node(KEY_PLANNER)
                         .ok_or("Planner node not found")?;
 
                     // Ejecutamos el planner. El PlannerNode escribe el plan en 'state' y retorna { result: { items: [...] } }
                     // o { result: { questions: [...] } } si necesita clarificación.
                     emit_internal_node_start(
                         &_observer,
-                        "planner",
-                        "planner",
+                        KEY_PLANNER,
+                        NODE_TYPE_PLANNER,
                         json!({
                             "prompt": inputs.get("prompt").cloned().unwrap_or(Value::Null),
                             "model": internal_planner_cfg.get("model").cloned().unwrap_or(Value::Null),
                             "provider": internal_planner_cfg.get("provider").cloned().unwrap_or(Value::Null),
                         }),
                     );
-                    let planner_obs = direct_thinking_observer(&_observer);
+                    let planner_obs = direct_thinking_observer(KEY_PLANNER, NODE_TYPE_PLANNER, &_observer);
                     let planner_result = planner_node
                         .execute(inputs, &internal_planner_cfg, _state, planner_obs)
                         .await?;
-                    emit_internal_node_finish(&_observer, "planner", planner_result.clone());
+                    emit_internal_node_finish(&_observer, KEY_PLANNER, planner_result.clone());
 
                     // Detectar si el planner quiere suspender para pedir más info
                     let planner_questions_opt: Option<Vec<SuspendQuestion>> = planner_result
@@ -912,13 +946,13 @@ impl ExecutableNode for OrchestratorNode {
                     if let Some(planner_questions) = planner_questions_opt {
                         let planner_allow_suspend_default = json!({});
                         let planner_cfg_raw = config
-                            .get("planner")
+                            .get(KEY_PLANNER)
                             .unwrap_or(&planner_allow_suspend_default);
                         if allow_suspend_for(planner_cfg_raw) {
                             colmena_log!("⏸️  [OrchestratorNode] Planner requested clarification before generating tasks.");
                             return Ok(make_suspend_response(
                                 _state,
-                                "planner",
+                                KEY_PLANNER,
                                 0,
                                 None,
                                 planner_questions,
@@ -1092,7 +1126,7 @@ impl ExecutableNode for OrchestratorNode {
                             // Guard: si venimos de un suspend de phase_reactor para ESTA fase,
                             // inyectar Q&A y re-ejecutar el reactor con ese contexto.
                             let resuming_phase_reactor = resume_answer.is_some()
-                                && matches!(&suspend_meta, Some((sa, sp, _, _)) if sa == "phase_reactor" && *sp == current_phase);
+                                && matches!(&suspend_meta, Some((sa, sp, _, _)) if sa == KEY_PHASE_REACTOR && *sp == current_phase);
 
                             if resuming_phase_reactor {
                                 let ans = resume_answer.as_deref().unwrap();
@@ -1322,7 +1356,7 @@ impl ExecutableNode for OrchestratorNode {
                             // descartar el stash y re-ejecutar el agente con el contexto del usuario.
                             let resuming_critic = resume_answer.is_some()
                                 && !resuming_critic_max_retries
-                                && matches!(&suspend_meta, Some((sa, _, Some(tid), _)) if sa == "critic" && tid == &task.id);
+                                && matches!(&suspend_meta, Some((sa, _, Some(tid), _)) if sa == KEY_CRITIC && tid == &task.id);
 
                             if resuming_critic {
                                 let ans = resume_answer.as_deref().unwrap();
@@ -1461,7 +1495,7 @@ impl ExecutableNode for OrchestratorNode {
                             // ── Crítica ──
                             let stash_key = format!("__orch_pending_{}", task.id);
                             let mut is_ok = true;
-                            if let Some(critic_cfg) = config.get("critic") {
+                            if let Some(critic_cfg) = config.get(KEY_CRITIC) {
                                 let max_retries: u32 = critic_cfg
                                     .get("max_retries")
                                     .and_then(|v| v.as_u64())
@@ -1478,7 +1512,7 @@ impl ExecutableNode for OrchestratorNode {
                                     task.task_name, current_retries + 1, max_retries
                                 );
                                 let critic_node =
-                                    registry.get_node("critic").ok_or("critic node not found")?;
+                                    registry.get_node(KEY_CRITIC).ok_or("critic node not found")?;
 
                                 let mut critic_inputs = task_inputs.clone();
                                 critic_inputs
@@ -1498,14 +1532,14 @@ impl ExecutableNode for OrchestratorNode {
                                 emit_internal_node_start(
                                     &_observer,
                                     &critic_node_id,
-                                    "critic",
+                                    NODE_TYPE_CRITIC,
                                     json!({
                                         "task": task.task_name,
                                         "model": critic_cfg.get("model").cloned().unwrap_or(Value::Null),
                                         "provider": critic_cfg.get("provider").cloned().unwrap_or(Value::Null),
                                     }),
                                 );
-                                let critic_obs = direct_thinking_observer(&_observer);
+                                let critic_obs = direct_thinking_observer(&critic_node_id, NODE_TYPE_CRITIC, &_observer);
                                 let critic_res = critic_node
                                     .execute(&critic_inputs, critic_cfg, _state, critic_obs)
                                     .await?;
@@ -1543,7 +1577,7 @@ impl ExecutableNode for OrchestratorNode {
                                     if allow_suspend_for(critic_cfg) {
                                         return Ok(make_suspend_response(
                                             _state,
-                                            "critic",
+                                            KEY_CRITIC,
                                             current_phase,
                                             Some(&task.id),
                                             critic_questions,

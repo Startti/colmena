@@ -248,17 +248,11 @@ impl GeminiAdapter {
                     "includeThoughts": true
                 }),
             );
-        } else if !request.has_tools() {
-            // Disable thinking only when no tools are present. Gemini 2.5-flash with
-            // tools and thinkingBudget: 0 returns empty responses because it can't
-            // reason about tool selection without any reasoning budget.
-            generation_config.insert(
-                "thinkingConfig".to_string(),
-                json!({
-                    "thinkingBudget": 0
-                }),
-            );
         }
+        // When no explicit budget is set, omit thinkingConfig entirely so Gemini uses its
+        // model default (8 000 tokens for gemini-2.5-flash, dynamic for 2.5-pro).
+        // Previously we set thinkingBudget: 0 for tool-less requests, but the Gemini
+        // recommendation is to let the model decide.
 
         if !generation_config.is_empty() {
             body["generationConfig"] = json!(generation_config);

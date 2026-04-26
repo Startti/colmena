@@ -10,7 +10,7 @@
       "type": "input",
       "config": {
         "data": {
-          "user_message": "Quiero viajar de Madrid a Barcelona el 2026-05-15 para 2 adultos. Arma un plan completo."
+          "user_message": "Quiero viajar, ayúdame a planificar algo."
         },
         "inputType": "Text",
         "variableName": "user_message"
@@ -37,7 +37,7 @@
                 "aqzbbfq4d070nfi76f4yvbin": {
                   "type": "llm_call",
                   "config": {
-                    "model": "gemini-2.5-flash",
+                    "model": "gemini-2.5-pro",
                     "provider": "gemini",
                     "api_key": "${GEMINI_API_KEY}",
                     "enabled_tools": [
@@ -59,7 +59,10 @@
                             "type": "string",
                             "fixed": "POST"
                           },
-                          "secure": { "type": "boolean", "fixed": true },
+                          "secure": {
+                            "type": "boolean",
+                            "fixed": true
+                          },
                           "headers": {
                             "type": "object",
                             "fixed": {
@@ -85,7 +88,10 @@
                             "type": "string",
                             "fixed": "GET"
                           },
-                          "secure": { "type": "boolean", "fixed": false },
+                          "secure": {
+                            "type": "boolean",
+                            "fixed": false
+                          },
                           "base_url": {
                             "type": "string",
                             "fixed": "https://api.amadeus.com"
@@ -161,7 +167,7 @@
                 "w0zcok1h6qqcai9g25tu2huw": {
                   "type": "llm_call",
                   "config": {
-                    "model": "gemini-2.5-flash",
+                    "model": "gemini-2.5-pro",
                     "provider": "gemini",
                     "api_key": "${GEMINI_API_KEY}",
                     "system_message": "Eres un experto en hoteles. Recibirás el destino, fechas, y número de huéspedes (adultos/niños/movilidad reducida) ya resueltos en el contexto de la tarea. NO pidas clarificación al usuario. Recomienda 3 hoteles concretos en el destino adecuados al perfil de los viajeros: nombre del hotel, zona/barrio, categoría (estrellas), razón por la que encaja. Sé breve (máx. 10 líneas) y responde en español."
@@ -195,7 +201,7 @@
                 "yd8rvlsu857t3ehk3gljujvs": {
                   "type": "llm_call",
                   "config": {
-                    "model": "gemini-2.5-flash",
+                    "model": "gemini-2.5-pro",
                     "provider": "gemini",
                     "api_key": "${GEMINI_API_KEY}",
                     "system_message": "Eres un experto en planificación de actividades turísticas. Recibirás destino, fechas, y número de viajeros (adultos/niños/movilidad reducida) ya resueltos en el contexto de la tarea. NO pidas clarificación al usuario. Entrega un itinerario compacto día por día con actividades concretas ajustadas al perfil del grupo. Sé conciso (máx. 15 líneas en total) y responde en español."
@@ -214,15 +220,13 @@
           }
         },
         "planner": {
-          "model": "gemini-2.5-flash",
+          "model": "gemini-2.5-pro",
           "provider": "gemini",
           "api_key": "${GEMINI_API_KEY}",
-          "thinking_budget": 5000,
-          "streaming": true,
           "system_message": "eres un experto en creacion de viajes.\nEl usuario envia un origen y destino y tienes que armar un plan de viaje con vuelos hoteles y actividades."
         },
         "final_reactor": {
-          "model": "gemini-2.5-flash",
+          "model": "gemini-2.5-pro",
           "provider": "gemini",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,

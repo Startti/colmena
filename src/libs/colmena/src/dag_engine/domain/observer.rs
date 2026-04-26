@@ -44,6 +44,8 @@ pub enum NodeEvent {
     /// Streaming token from an internal "thinking" LLM call (planner, critic, reactor, agent subgraphs).
     /// Distinct from LlmToken so the frontend can separate thinking activity from the final response.
     ThinkingToken {
+        node_id: String,
+        node_type: String,
         token: String,
     },
     /// A provider reasoning block has opened (extended thinking / thinking models).
