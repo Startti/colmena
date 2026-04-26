@@ -13,7 +13,8 @@ use crate::dag_engine::domain::events::DagExecutionEvent;
 pub struct SseMapper {
     text_block_ids: HashMap<String, String>,
     node_types: HashMap<String, String>,
-    seen_tool_ids: HashSet<String>,
+    seen_top_tool_ids: HashSet<String>,
+    seen_sub_tool_ids: HashSet<String>,
     total_prompt_tokens: u64,
     total_completion_tokens: u64,
     total_thinking_tokens: u64,
@@ -32,7 +33,8 @@ impl SseMapper {
         Self {
             text_block_ids: HashMap::new(),
             node_types: HashMap::new(),
-            seen_tool_ids: HashSet::new(),
+            seen_top_tool_ids: HashSet::new(),
+            seen_sub_tool_ids: HashSet::new(),
             total_prompt_tokens: 0,
             total_completion_tokens: 0,
             total_thinking_tokens: 0,
@@ -76,8 +78,7 @@ impl SseMapper {
                 self.total_cache_write_tokens += cache_write_tokens.unwrap_or(0) as u64;
             }
             DagExecutionEvent::LlmToolCall { tool_id, tool_name, .. } => {
-                if !self.seen_tool_ids.contains(tool_id) {
-                    self.seen_tool_ids.insert(tool_id.clone());
+                if self.seen_top_tool_ids.insert(tool_id.clone()) {
                     parts.push(json!({
                         "type": "tool-input-start",
                         "toolCallId": tool_id,
@@ -115,8 +116,7 @@ impl SseMapper {
                     self.total_cache_write_tokens += cache_write_tokens.unwrap_or(0) as u64;
                 }
                 DagExecutionEvent::LlmToolCall { tool_id, tool_name, .. } => {
-                    if !self.seen_tool_ids.contains(tool_id) {
-                        self.seen_tool_ids.insert(tool_id.clone());
+                    if self.seen_sub_tool_ids.insert(tool_id.clone()) {
                         parts.push(json!({
                             "type": "subgraph-tool-input-start",
                             "toolCallId": tool_id,
@@ -220,6 +220,8 @@ impl SseMapper {
                     parts.push(json!({ "type": "text-end", "id": part_id }));
                 }
                 self.text_block_ids.clear();
+                self.seen_top_tool_ids.clear();
+                self.seen_sub_tool_ids.clear();
 
                 let finish_reason = output
                     .get("__colmena_status")
@@ -474,24 +476,63 @@ mod tests {
     #[test]
     fn test_subgraph_tool_input_start_emitted_once() {
         let mut mapper = SseMapper::new();
-        let inner = DagExecutionEvent::LlmToolCall {
-            node_id: "inner_llm".into(),
-            tool_id: "call_xyz".into(),
-            tool_name: "search".into(),
-            args_chunk: "{\"q\"".into(),
+        let event1 = DagExecutionEvent::SubgraphWrapped {
+            inner: Box::new(DagExecutionEvent::LlmToolCall {
+                node_id: "inner_llm".into(),
+                tool_id: "call_xyz".into(),
+                tool_name: "search".into(),
+                args_chunk: "{\"q\"".into(),
+            }),
         };
-        let event = DagExecutionEvent::SubgraphWrapped {
-            inner: Box::new(inner.clone()),
+        let event2 = DagExecutionEvent::SubgraphWrapped {
+            inner: Box::new(DagExecutionEvent::LlmToolCall {
+                node_id: "inner_llm".into(),
+                tool_id: "call_xyz".into(),
+                tool_name: "search".into(),
+                args_chunk: ":\"rust\"}".into(),
+            }),
         };
 
-        let parts = mapper.map(&event);
+        // First chunk → subgraph-tool-input-start + subgraph-tool-input-delta
+        let parts = mapper.map(&event1);
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0]["type"], "subgraph-tool-input-start");
         assert_eq!(parts[0]["toolCallId"], "call_xyz");
         assert_eq!(parts[1]["type"], "subgraph-tool-input-delta");
 
-        let parts2 = mapper.map(&event);
+        // Second chunk (same tool_id, different args) → only subgraph-tool-input-delta
+        let parts2 = mapper.map(&event2);
         assert_eq!(parts2.len(), 1);
         assert_eq!(parts2[0]["type"], "subgraph-tool-input-delta");
+    }
+
+    #[test]
+    fn test_top_level_and_subgraph_tool_ids_are_independent() {
+        let mut mapper = SseMapper::new();
+        let shared_tool_id = "call_shared";
+
+        // Top-level tool call fires first
+        let top_event = DagExecutionEvent::LlmToolCall {
+            node_id: "llm".into(),
+            tool_id: shared_tool_id.into(),
+            tool_name: "search".into(),
+            args_chunk: "{\"q\":\"x\"}".into(),
+        };
+        let top_parts = mapper.map(&top_event);
+        assert_eq!(top_parts.len(), 2);
+        assert_eq!(top_parts[0]["type"], "tool-input-start");
+
+        // Subgraph tool call with SAME tool_id — must still emit subgraph-tool-input-start
+        let sub_event = DagExecutionEvent::SubgraphWrapped {
+            inner: Box::new(DagExecutionEvent::LlmToolCall {
+                node_id: "inner_llm".into(),
+                tool_id: shared_tool_id.into(),
+                tool_name: "search".into(),
+                args_chunk: "{\"q\":\"y\"}".into(),
+            }),
+        };
+        let sub_parts = mapper.map(&sub_event);
+        assert_eq!(sub_parts.len(), 2, "subgraph tool-input-start must not be suppressed by top-level seen_tool_ids");
+        assert_eq!(sub_parts[0]["type"], "subgraph-tool-input-start");
     }
 }
