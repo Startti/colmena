@@ -248,7 +248,6 @@ async fn handler_webhook(
     }
 
     if is_sse {
-        use crate::dag_engine::domain::events::DagExecutionEvent;
         use axum::response::sse::{Event, KeepAlive, Sse};
         use futures::StreamExt;
 
@@ -256,346 +255,60 @@ async fn handler_webhook(
 
         // Wrap the internal stream to manage protocol state (text-start, text-end, [DONE])
         let protocol_stream = async_stream::stream! {
+            use crate::dag_engine::domain::events::DagExecutionEvent;
+            use crate::dag_engine::sse_mapper::SseMapper;
+
             let is_loop = params.get("loop").map(|v| v == "true").unwrap_or(false);
             let mut turn_count = 1;
             let mut current_graph = graph_instance;
 
             loop {
-                // Node start messages are emitted dynamically below.
+                // Fresh mapper per turn — resets text blocks, tool_id tracking, token counts
+                let mut mapper = SseMapper::new();
+                let mut final_output_value: Option<Value> = None;
 
-                let mut text_block_uuids = std::collections::HashMap::new();
-                let mut seen_tool_ids = std::collections::HashSet::new();
-                let mut total_prompt_tokens = 0u32;
-                let mut total_completion_tokens = 0u32;
-                let mut total_thinking_tokens = 0u32;
-                let mut total_cache_read_tokens = 0u32;
-                let mut total_cache_write_tokens = 0u32;
-                let mut node_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-
-                // Emitting custom event to show turn change in UI
                 if is_loop {
-                    yield Ok::<Event, std::io::Error>(Event::default().json_data(serde_json::json!({
-                        "type": "text-delta",
-                        "id": format!("txt_sys_{}", uuid::Uuid::new_v4()),
-                        "delta": format!("\n\n*--- Starting Turn {} ---*\n\n", turn_count)
-                    })).expect("json_data"));
+                    yield Ok::<Event, std::io::Error>(
+                        Event::default()
+                            .json_data(serde_json::json!({
+                                "type": "text-delta",
+                                "id": format!("txt_sys_{}", uuid::Uuid::new_v4()),
+                                "delta": format!("\n\n*--- Starting Turn {} ---*\n\n", turn_count)
+                            }))
+                            .expect("json_data"),
+                    );
                 }
 
                 let internal_stream = engine.execute_stream(current_graph.clone(), None, None, false);
-                let mut final_output_value: Option<Value> = None;
-
                 tokio::pin!(internal_stream);
 
                 while let Some(result) = internal_stream.next().await {
-                    // Here we ignore DAG errors for the protocol stream but we could also yield an Error part
                     let event = match result {
                         Ok(ev) => ev,
                         Err(e) => {
-                            yield Ok(Event::default().json_data(serde_json::json!({
-                                "type": "error",
-                                "errorText": e.to_string()
-                            })).expect("json_data"));
+                            yield Ok(
+                                Event::default()
+                                    .json_data(serde_json::json!({
+                                        "type": "error",
+                                        "errorText": e.to_string()
+                                    }))
+                                    .expect("json_data"),
+                            );
                             continue;
                         }
                     };
 
-                    // Protocol State Management
-                    match &event {
-                        DagExecutionEvent::LlmToken { node_id, .. }
-                            if !text_block_uuids.contains_key(node_id) =>
-                        {
-                            let part_id = format!("txt_{}", uuid::Uuid::new_v4());
-                            yield Ok(Event::default().json_data(serde_json::json!({
-                                "type": "text-start",
-                                "id": part_id
-                            })).expect("json_data"));
-                            text_block_uuids.insert(node_id.clone(), part_id);
-                        },
-                        DagExecutionEvent::NodeFinish { node_id, .. } => {
-                            if let Some(part_id) = text_block_uuids.remove(node_id) {
-                                yield Ok(Event::default().json_data(serde_json::json!({
-                                    "type": "text-end",
-                                    "id": part_id
-                                })).expect("json_data"));
-                            }
-                        },
-                        DagExecutionEvent::LlmUsage { prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens, .. } => {
-                            total_prompt_tokens += prompt_tokens;
-                            total_completion_tokens += completion_tokens;
-                            total_thinking_tokens += thinking_tokens.unwrap_or(0);
-                            total_cache_read_tokens += cache_read_tokens.unwrap_or(0);
-                            total_cache_write_tokens += cache_write_tokens.unwrap_or(0);
-                        },
-                        DagExecutionEvent::LlmToolCall { tool_id, tool_name, .. }
-                            if !seen_tool_ids.contains(tool_id) =>
-                        {
-                            seen_tool_ids.insert(tool_id.clone());
-                            yield Ok(Event::default().json_data(serde_json::json!({
-                                "type": "tool-input-start",
-                                "toolCallId": tool_id,
-                                "toolName": tool_name
-                            })).expect("json_data"));
-                        },
-                        DagExecutionEvent::GraphFinish { output } => {
-                            final_output_value = Some(output.clone());
-                        },
-                        DagExecutionEvent::SubgraphWrapped { inner } => {
-                            match inner.as_ref() {
-                                DagExecutionEvent::LlmToken { node_id, .. }
-                                    if !text_block_uuids.contains_key(node_id) =>
-                                {
-                                    let part_id = format!("txt_{}", uuid::Uuid::new_v4());
-                                    yield Ok(Event::default().json_data(serde_json::json!({
-                                        "type": "subgraph-text-start",
-                                        "id": part_id
-                                    })).expect("json_data"));
-                                    text_block_uuids.insert(node_id.clone(), part_id);
-                                }
-                                DagExecutionEvent::NodeFinish { node_id, .. }
-                                | DagExecutionEvent::SubgraphNodeFinish { node_id, .. } => {
-                                    if let Some(part_id) = text_block_uuids.remove(node_id) {
-                                        yield Ok(Event::default().json_data(serde_json::json!({
-                                            "type": "subgraph-text-end",
-                                            "id": part_id
-                                        })).expect("json_data"));
-                                    }
-                                }
-                                DagExecutionEvent::LlmUsage { prompt_tokens, completion_tokens, .. } => {
-                                    total_prompt_tokens += prompt_tokens;
-                                    total_completion_tokens += completion_tokens;
-                                }
-                                DagExecutionEvent::LlmToolCall { tool_id, tool_name, .. }
-                                    if !seen_tool_ids.contains(tool_id) =>
-                                {
-                                    seen_tool_ids.insert(tool_id.clone());
-                                    yield Ok(Event::default().json_data(serde_json::json!({
-                                        "type": "subgraph-tool-input-start",
-                                        "toolCallId": tool_id,
-                                        "toolName": tool_name
-                                    })).expect("json_data"));
-                                }
-                                _ => {}
-                            }
-                        }
-                        _ => {}
+                    // Capture final output before mapper consumes the event (needed for loop control)
+                    if let DagExecutionEvent::GraphFinish { output } = &event {
+                        final_output_value = Some(output.clone());
                     }
 
-                    // Map to official Data Stream Protocol JSON
-                    let protocol_json = match &event {
-                        DagExecutionEvent::NodeStart { node_id, config, node_type, inputs } => {
-                            node_types.insert(node_id.clone(), node_type.clone());
-                            let clean_inputs = if let Some(obj) = inputs.as_object() {
-                                serde_json::Value::Object(
-                                    obj.iter()
-                                        .filter(|(k, _)| !k.starts_with("__") && k.as_str() != "session_id")
-                                        .map(|(k, v)| (k.clone(), v.clone()))
-                                        .collect(),
-                                )
-                            } else {
-                                inputs.clone()
-                            };
-                            Some(serde_json::json!({
-                                "type": "node-start",
-                                "node_id": node_id,
-                                "node_type": node_type,
-                                "config": config,
-                                "inputs": clean_inputs
-                            }))
-                        },
-                        DagExecutionEvent::NodeFinish { node_id, output } => {
-                            let ntype = node_types.get(node_id).cloned().unwrap_or_default();
-                            Some(serde_json::json!({
-                                "type": "node-end",
-                                "node_id": node_id,
-                                "node_type": ntype,
-                                "output": output
-                            }))
-                        },
-                        DagExecutionEvent::LlmMessageFinish { .. } => {
-                            // Intermediate per-message finish (tool-call step) — suppressed.
-                            // The final NodeFinish carries the real output and usage.
-                            None
-                        },
-                        DagExecutionEvent::LlmToken { node_id, token } => {
-                            let part_id = text_block_uuids
-                                .get(node_id)
-                                .cloned()
-                                .unwrap_or_else(|| node_id.clone());
-                            Some(serde_json::json!({
-                                "type": "text-delta",
-                                "id": part_id,
-                                "delta": token
-                            }))
-                        },
-                        DagExecutionEvent::ThinkingToken { node_id, token } => {
-                            Some(serde_json::json!({
-                                "type": "thinking-delta",
-                                "node_id": node_id,
-                                "delta": token
-                            }))
-                        },
-                        DagExecutionEvent::ReasoningStart { id, .. } => Some(serde_json::json!({
-                            "type": "reasoning-start",
-                            "id": id
-                        })),
-                        DagExecutionEvent::ReasoningDelta { id, token, .. } => Some(serde_json::json!({
-                            "type": "reasoning-delta",
-                            "id": id,
-                            "delta": token
-                        })),
-                        DagExecutionEvent::ReasoningEnd { id, .. } => Some(serde_json::json!({
-                            "type": "reasoning-end",
-                            "id": id
-                        })),
-                        DagExecutionEvent::LlmToolCall { tool_id, args_chunk, .. } => Some(serde_json::json!({
-                            "type": "tool-input-delta",
-                            "toolCallId": tool_id,
-                            "inputTextDelta": args_chunk
-                        })),
-                        DagExecutionEvent::LlmToolCallStart { tool_id, tool_name, tool_args, .. } => Some(serde_json::json!({
-                            "type": "tool-input-available",
-                            "toolCallId": tool_id,
-                            "toolName": tool_name,
-                            "input": serde_json::from_str::<serde_json::Value>(tool_args).unwrap_or(serde_json::Value::String(tool_args.clone()))
-                        })),
-                        DagExecutionEvent::LlmToolCallFinish { tool_id, output, .. } => Some(serde_json::json!({
-                            "type": "tool-output-available",
-                            "toolCallId": tool_id,
-                            "output": serde_json::from_str::<serde_json::Value>(output).unwrap_or(serde_json::Value::String(output.clone()))
-                        })),
-                        DagExecutionEvent::LlmUsage { .. } => None,
-                        DagExecutionEvent::GraphUsageSummary { entries } => Some(serde_json::json!({
-                            "type": "usage-summary",
-                            "nodes": entries
-                        })),
-                        DagExecutionEvent::GraphFinish { .. } => {
-                            let mut usage_obj = serde_json::json!({
-                                "promptTokens": total_prompt_tokens,
-                                "completionTokens": total_completion_tokens,
-                                "totalTokens": total_prompt_tokens + total_completion_tokens + total_thinking_tokens
-                            });
-                            if total_thinking_tokens > 0 {
-                                usage_obj["thinkingTokens"] = serde_json::json!(total_thinking_tokens);
-                            }
-                            if total_cache_read_tokens > 0 {
-                                usage_obj["cacheReadTokens"] = serde_json::json!(total_cache_read_tokens);
-                            }
-                            if total_cache_write_tokens > 0 {
-                                usage_obj["cacheWriteTokens"] = serde_json::json!(total_cache_write_tokens);
-                            }
-                            Some(serde_json::json!({
-                                "type": "finish",
-                                "finishReason": "stop",
-                                "usage": usage_obj
-                            }))
-                        }
-                        DagExecutionEvent::Error { message } => Some(serde_json::json!({
-                            "type": "error",
-                            "errorText": message
-                        })),
-                        DagExecutionEvent::SubgraphNodeFinish { node_id, output } => {
-                            Some(serde_json::json!({
-                                "type": "node-end",
-                                "node_id": node_id,
-                                "node_type": "subgraph",
-                                "output": output
-                            }))
-                        },
-                        DagExecutionEvent::SubgraphWrapped { inner } => {
-                            match inner.as_ref() {
-                                DagExecutionEvent::NodeStart { node_id, node_type, inputs, config } => {
-                                    node_types.insert(node_id.clone(), node_type.clone());
-                                    let clean_inputs = if let Some(obj) = inputs.as_object() {
-                                        serde_json::Value::Object(
-                                            obj.iter()
-                                                .filter(|(k, _)| !k.starts_with("__") && k.as_str() != "session_id")
-                                                .map(|(k, v)| (k.clone(), v.clone()))
-                                                .collect(),
-                                        )
-                                    } else { inputs.clone() };
-                                    Some(serde_json::json!({
-                                        "type": "subgraph-node-start",
-                                        "node_id": node_id,
-                                        "node_type": node_type,
-                                        "config": config,
-                                        "inputs": clean_inputs
-                                    }))
-                                }
-                                DagExecutionEvent::NodeFinish { node_id, output } => {
-                                    let ntype = node_types.get(node_id).cloned().unwrap_or_default();
-                                    Some(serde_json::json!({
-                                        "type": "subgraph-node-end",
-                                        "node_id": node_id,
-                                        "node_type": ntype,
-                                        "output": output
-                                    }))
-                                }
-                                DagExecutionEvent::SubgraphNodeFinish { node_id, output } => {
-                                    Some(serde_json::json!({
-                                        "type": "subgraph-node-end",
-                                        "node_id": node_id,
-                                        "node_type": "subgraph",
-                                        "output": output
-                                    }))
-                                }
-                                DagExecutionEvent::LlmToken { node_id, token } => {
-                                    Some(serde_json::json!({
-                                        "type": "subgraph-text-delta",
-                                        "node_id": node_id,
-                                        "delta": token
-                                    }))
-                                }
-                                DagExecutionEvent::ThinkingToken { node_id, token } => {
-                                    Some(serde_json::json!({
-                                        "type": "subgraph-thinking-delta",
-                                        "node_id": node_id,
-                                        "delta": token
-                                    }))
-                                }
-                                DagExecutionEvent::LlmToolCall { tool_id, args_chunk, .. } => {
-                                    Some(serde_json::json!({
-                                        "type": "subgraph-tool-input-delta",
-                                        "toolCallId": tool_id,
-                                        "inputTextDelta": args_chunk
-                                    }))
-                                }
-                                DagExecutionEvent::LlmToolCallStart { tool_id, tool_name, tool_args, .. } => {
-                                    Some(serde_json::json!({
-                                        "type": "subgraph-tool-input-available",
-                                        "toolCallId": tool_id,
-                                        "toolName": tool_name,
-                                        "input": serde_json::from_str::<serde_json::Value>(tool_args)
-                                            .unwrap_or(serde_json::Value::String(tool_args.clone()))
-                                    }))
-                                }
-                                DagExecutionEvent::LlmToolCallFinish { tool_id, output, .. } => {
-                                    Some(serde_json::json!({
-                                        "type": "subgraph-tool-output-available",
-                                        "toolCallId": tool_id,
-                                        "output": serde_json::from_str::<serde_json::Value>(output)
-                                            .unwrap_or(serde_json::Value::String(output.clone()))
-                                    }))
-                                }
-                                _ => None
-                            }
-                        },
-                        _ => None
-                    };
-
-                    if let Some(json) = protocol_json {
-                        yield Ok(Event::default().json_data(json).expect("json_data"));
+                    for part in mapper.map(&event) {
+                        yield Ok(Event::default().json_data(part).expect("json_data"));
                     }
                 }
 
-                // 3. Finalization: Ensure all pending text blocks are ended for this turn
-                for (_, part_id) in text_block_uuids {
-                    yield Ok(Event::default().json_data(serde_json::json!({
-                        "type": "text-end",
-                        "id": part_id
-                    })).expect("json_data"));
-                }
-
-                // End of turn logic
+                // --- Loop control ---
                 let mut should_stop_loop = !is_loop;
 
                 if let Some(out) = final_output_value.as_ref() {
@@ -644,7 +357,6 @@ async fn handler_webhook(
                     }
 
                     if !should_stop_loop {
-                        // Prepare next iteration's input
                         for (_, node) in current_graph.nodes.iter_mut() {
                             if node.node_type == "trigger_webhook" || node.node_type == "input" {
                                 if node.config.is_null() {
@@ -656,7 +368,6 @@ async fn handler_webhook(
                         turn_count += 1;
                     }
                 } else {
-                    // No output = graph crashed or finished empty. Stop looping.
                     should_stop_loop = true;
                 }
 
@@ -665,7 +376,6 @@ async fn handler_webhook(
                 }
             }
 
-            // 4. Send the literal [DONE] marker
             yield Ok(Event::default().data("[DONE]"));
         };
 
