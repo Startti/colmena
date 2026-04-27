@@ -72,11 +72,20 @@
     },
 
     "enabled_tools": {
-      "summary": "Controls which tools in tool_configurations are active for the LLM. Can be '*' (all), a list of names, or a single name. Names must match either the map key OR the 'name' field inside each tool entry.",
+      "summary": "Optional allow-list that unions with the auto-enabled set. Tools defined in tool_configurations are auto-enabled — you do NOT need to list them here. Use enabled_tools only to: (1) enable built-in toolkit tools (Tavily, etc.) not in tool_configurations, or (2) use '*' to expose every available tool including built-ins.",
+      "auto_enabled_behavior": "Every key in tool_configurations is automatically enabled. enabled_tools is additive, not a gate. If all your tools are in tool_configurations and none are built-in toolkits, you can omit enabled_tools entirely.",
+      "when_to_use": [
+        "You have built-in toolkit tools (tavily_client, etc.) alongside tool_configurations entries",
+        "You want '*' to expose all available tools including built-ins",
+        "You want to dynamically enable/disable tools via an upstream node input"
+      ],
+      "when_to_omit": [
+        "All your tools are defined in tool_configurations and none are built-in toolkits"
+      ],
       "examples": {
-        "all": "*",
-        "list": ["search_flights", "get_weather"],
-        "single": "search_products"
+        "all_including_builtins": "*",
+        "specific_builtin_plus_configured": ["tavily_web", "search_products"],
+        "omit_when_only_tool_configurations": "No enabled_tools field needed"
       }
     },
 

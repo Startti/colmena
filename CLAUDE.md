@@ -181,6 +181,19 @@ When configuring nodes as LLM tools, use this rule to decide where to put fields
 
 Full reference: `docs/node_as_tools_reference.json` → `parameter_strategies.node_schema_fixed_vs_fixed_config`
 
+## Tool Config Standard — `enabled_tools`
+
+Tools defined in `tool_configurations` are **auto-enabled** — you do NOT need `enabled_tools` to activate them.
+
+```json
+// CORRECT — omit enabled_tools when all tools are in tool_configurations
+"tool_configurations": { "run_python": { ... }, "search_products": { ... } }
+
+// ONLY needed for built-in toolkit tools (tavily_client, etc.) or wildcard
+"enabled_tools": "*"            // expose everything including built-ins
+"enabled_tools": ["tavily_web"] // enable a built-in alongside tool_configurations
+```
+
 ## Skills
 - `/rust_dev` — Rust development protocol (architecture-aware, includes documentation)
 - `/python_dev` — Python development protocol (PyO3/maturin-aware, includes documentation)

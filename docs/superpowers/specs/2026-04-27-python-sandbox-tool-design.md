@@ -170,7 +170,7 @@ Path: `tests/graphs/agents/python_sandbox_tool_test.json`
             }
           }
         },
-        "enabled_tools": "*"
+        "enabled_tools": "omit — tool_configurations entries are auto-enabled"
       }
     },
     "output": {
