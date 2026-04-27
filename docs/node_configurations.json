@@ -2011,8 +2011,8 @@
         "fuzzy_match_threshold": {
           "type": "number",
           "required": false,
-          "default": 0.6,
-          "description": "Minimum normalized score for search_endpoint matches (0.0 - 1.0)."
+          "default": 0.1,
+          "description": "Minimum normalized score for search_endpoint matches (0.0 - 1.0). Scores normalize raw nucleo bonuses by haystack length, so short queries against verbose endpoints land low; defaults to 0.1 for good recall. Raise toward 0.5+ only if you see noisy matches."
         },
         "retry_policy": {
           "type": "object",

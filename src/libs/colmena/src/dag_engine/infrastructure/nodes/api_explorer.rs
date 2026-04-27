@@ -307,11 +307,13 @@ impl ApiExplorerNode {
             Err(v) => return Ok(v),
         };
         let params = match inputs.get("params") {
+            None => json!({}),
+            Some(v) if v.is_null() => json!({}),
             Some(v) if v.is_object() => v.clone(),
-            _ => {
+            Some(_) => {
                 return Ok(json!({
                     "error": "invalid_input",
-                    "missing": "params",
+                    "field": "params",
                     "message": "`params` must be a JSON object mapping parameter names to values",
                 }));
             }
@@ -758,7 +760,7 @@ fn build_http_request_sub_tool() -> SubToolDefinition {
             the error go away — the hint tells you exactly what to ask the user for."
             .into(),
         properties: props,
-        required: vec!["spec_url".into(), "operation_id".into(), "params".into()],
+        required: vec!["spec_url".into(), "operation_id".into()],
     }
 }
 
@@ -792,13 +794,18 @@ mod tests {
     }
 
     #[test]
-    fn build_http_request_requires_three_fields() {
+    fn build_http_request_requires_spec_url_and_operation_id() {
         let node = ApiExplorerNode::new();
         let cat = node.sub_tool_catalog(&json!({}));
         let s = cat.iter().find(|s| s.name == "build_http_request").unwrap();
-        for k in ["spec_url", "operation_id", "params"] {
+        for k in ["spec_url", "operation_id"] {
             assert!(s.required.contains(&k.to_string()), "missing required {k}");
         }
+        assert!(
+            !s.required.contains(&"params".to_string()),
+            "params is optional — handler treats absent / null as `{{}}` so the use_case can \
+             surface endpoint-specific missing_required_params errors"
+        );
     }
 
     #[test]

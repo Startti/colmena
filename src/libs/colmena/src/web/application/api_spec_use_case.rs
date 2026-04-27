@@ -26,7 +26,7 @@ impl Default for ApiSpecUseCaseConfig {
             enable_cache: true,
             cache_ttl: Duration::from_secs(86_400),
             max_cached_specs: 100,
-            fuzzy_match_threshold: 0.6,
+            fuzzy_match_threshold: 0.1,
             default_base_url_override: None,
         }
     }
@@ -124,13 +124,19 @@ impl ApiSpecUseCase {
                 etag,
                 last_modified,
             } => {
+                let resolved = spec.resolved_url.clone();
                 let entry = CachedSpec {
                     parsed: Arc::new(spec),
                     etag,
                     last_modified,
                     cached_at: Instant::now(),
                 };
-                cache.specs.lock().await.put(input_url.to_string(), entry.clone());
+                let mut locked = cache.specs.lock().await;
+                locked.put(input_url.to_string(), entry.clone());
+                // Also index by resolved_url so the LLM can use either form.
+                if resolved != input_url {
+                    locked.put(resolved, entry.clone());
+                }
                 Ok((entry, false))
             }
             SpecFetchResult::NotModified => {

@@ -113,7 +113,7 @@ Ver el schema canónico en `docs/node_configurations.json` (clave `api_explorer`
 
 - **`cache_ttl_seconds`** — vida útil de una spec parseada (default 24 h); las hits aún frescas se revalidan vía ETag/If-None-Match (304 ≈ HEAD).
 - **`max_spec_size_bytes`** — protege contra specs gigantescas (default 10 MiB). El adaptador aborta a mitad de stream si se cruza el límite.
-- **`fuzzy_match_threshold`** — sube para ser más estricto con `search_endpoint`; baja para mejor recall.
+- **`fuzzy_match_threshold`** — sube para ser más estricto con `search_endpoint`; baja para mejor recall. Default `0.1` porque la normalización divide el score crudo de nucleo por la longitud del haystack y para queries cortos (p. ej. `"add pet"`) sobre summaries largos los normalizados quedan bajos. Subir por encima de `0.5` solo si se ve ruido.
 
 ### Uso desde un `llm_call`
 
