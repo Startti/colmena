@@ -96,6 +96,38 @@
           "Fields are flat (no nesting beyond one level)",
           "5 fields or fewer"
         ]
+      },
+      "node_schema_fixed_vs_fixed_config": {
+        "summary": "Both can hide fields from the LLM, but they serve different purposes. Prefer node_schema+fixed for node fields; use fixed_config for purely operational/static values.",
+        "node_schema_with_fixed": {
+          "use_when": [
+            "The field is a node config parameter (e.g. sandbox_mode, method, base_url)",
+            "You want the field explicitly present in the schema so its intent is clear",
+            "The field co-exists with LLM-visible fields in the same schema object",
+            "You want consistent schema documentation for the node"
+          ],
+          "example": {
+            "node_schema": {
+              "sandbox_mode":         { "fixed": "restricted" },
+              "sandbox_timeout_secs": { "fixed": 10 },
+              "code": { "type": "string", "required": true, "description": "Python code to execute." }
+            }
+          }
+        },
+        "fixed_config": {
+          "use_when": [
+            "The value is purely operational and has no relevance to the LLM (e.g. api_key, base_url for a known endpoint)",
+            "You want a simple, flat override without declaring a full schema entry",
+            "Used together with $DYNAMIC placeholders for quick string-only cases"
+          ],
+          "example": {
+            "fixed_config": {
+              "base_url": "https://api.example.com",
+              "method": "GET"
+            }
+          }
+        },
+        "rule": "If the field is a node behavioral parameter (affects how the node runs), use node_schema+fixed. If it is a static plumbing value (URL, key, method), fixed_config is fine. When in doubt, use node_schema+fixed — it is always correct."
       }
     }
   },

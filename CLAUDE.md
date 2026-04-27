@@ -151,6 +151,36 @@ cargo run --bin dag_engine -- serve tests/graphs/agents/llm_call.json
 - **Errors**: `Result<T, DomainError>` in domain, `?` propagation
 - **Docs language**: Spanish in `docs/`, English in code comments and API docs
 
+## Tool Config Standard — `node_schema+fixed` vs `fixed_config`
+
+When configuring nodes as LLM tools, use this rule to decide where to put fields the LLM should NOT see:
+
+| Situation | Use |
+|-----------|-----|
+| Field is a node behavioral parameter (`sandbox_mode`, `method`, `secure`) | `node_schema` with `fixed` |
+| Field co-exists with LLM-visible fields in the same schema | `node_schema` with `fixed` |
+| Field is purely static plumbing (`base_url` for a known endpoint, `api_key`) | `fixed_config` |
+| Quick override with `$DYNAMIC` placeholders (all strings, flat, ≤5 fields) | `fixed_config` |
+
+**When in doubt: `node_schema+fixed` is always correct.**
+
+```json
+// CORRECT — behavioral param alongside LLM-visible field
+"node_schema": {
+  "sandbox_mode": { "fixed": "restricted" },
+  "code":         { "type": "string", "required": true, "description": "..." }
+}
+
+// CORRECT — static plumbing only
+"fixed_config": { "base_url": "https://api.example.com", "method": "GET" }
+
+// WRONG — mixing: sandbox_mode belongs in node_schema, not fixed_config
+"node_schema": { "code": { "type": "string", "required": true } },
+"fixed_config": { "sandbox_mode": "restricted" }
+```
+
+Full reference: `docs/node_as_tools_reference.json` → `parameter_strategies.node_schema_fixed_vs_fixed_config`
+
 ## Skills
 - `/rust_dev` — Rust development protocol (architecture-aware, includes documentation)
 - `/python_dev` — Python development protocol (PyO3/maturin-aware, includes documentation)
