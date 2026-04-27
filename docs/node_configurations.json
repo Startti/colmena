@@ -2062,7 +2062,7 @@
           "parameters": {
             "spec_url": { "type": "string", "required": true },
             "operation_id": { "type": "string", "required": true },
-            "params": { "type": "object", "required": true },
+            "params": { "type": "object", "required": false, "description": "Flat map of parameter values (path, query, header, body fields). Absent or null defaults to {} and the node returns missing_required_params with endpoint-specific hints." },
             "auth_secret_ref": { "type": "string", "required": false }
           }
         }

@@ -342,12 +342,19 @@ impl ApiExplorerNode {
 
 /// Translate a [`WebDomainError`] into the structured JSON the LLM sees.
 ///
-/// Non-recoverable variants (`InvalidConfig`, `AdapterInit`,
-/// `SpecTooLarge`) bubble out as errors so the DAG crashes; everything
-/// else maps to a stable `error` discriminator the model can branch on.
+/// Non-recoverable variants (`InvalidConfig`, `AdapterInit`, `SpecTooLarge`)
+/// are **not** handled here — callers must propagate them as `Err` so the DAG
+/// crashes. Everything else maps to a stable `error` discriminator the model
+/// can branch on.
 fn format_spec_error(e: crate::web::domain::WebDomainError) -> Value {
     use crate::web::domain::WebDomainError as E;
     match e {
+        // Non-recoverable — callers should have returned Err before reaching here.
+        E::InvalidConfig(msg) => panic!("api_explorer InvalidConfig (DAG should have crashed): {msg}"),
+        E::AdapterInit(msg)   => panic!("api_explorer AdapterInit (DAG should have crashed): {msg}"),
+        E::SpecTooLarge { size_bytes, limit_bytes } => panic!(
+            "api_explorer SpecTooLarge {size_bytes} > {limit_bytes} (DAG should have crashed)"
+        ),
         E::SpecParseFailed { details } => json!({
             "error": "spec_parse_failed",
             "details": details,
@@ -500,7 +507,7 @@ impl ExecutableNode for ApiExplorerNode {
                 "max_spec_size_bytes": "u64 (default 10 MiB)",
                 "spec_download_timeout_seconds": "u64 (default 60)",
                 "default_base_url_override": "string | null",
-                "fuzzy_match_threshold": "f32 (default 0.6)",
+                "fuzzy_match_threshold": "f32 (default 0.1)",
                 "retry_policy": { "max_attempts": "u32", "initial_backoff_ms": "u64" }
             }
         })

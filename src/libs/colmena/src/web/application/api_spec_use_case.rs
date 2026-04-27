@@ -237,7 +237,13 @@ impl ApiSpecUseCase {
         auth_secret_ref: Option<&str>,
     ) -> Result<Value, WebDomainError> {
         let spec = self.lookup_cached(conversation_id, spec_url).await?;
-        build_http_request(&spec, operation_id, params, auth_secret_ref)
+        build_http_request(
+            &spec,
+            operation_id,
+            params,
+            auth_secret_ref,
+            self.config.default_base_url_override.as_deref(),
+        )
     }
 
     /// Public accessor for tests + later tasks that need the registry's
@@ -542,6 +548,7 @@ pub fn build_http_request(
     operation_id: &str,
     params: &Value,
     auth_secret_ref: Option<&str>,
+    base_url_override: Option<&str>,
 ) -> Result<Value, WebDomainError> {
     let ep = spec
         .endpoints
@@ -642,10 +649,9 @@ pub fn build_http_request(
     }
 
     // ---- Base URL ----
-    let base = spec
-        .servers
-        .first()
-        .cloned()
+    let base = base_url_override
+        .map(str::to_string)
+        .or_else(|| spec.servers.first().cloned())
         .ok_or_else(|| WebDomainError::InvalidConfig(
             "spec has no servers[]; set default_base_url_override in the node config".into(),
         ))?;
@@ -1033,6 +1039,7 @@ mod tests_build_http_request {
                 "items[0][price]": "price_XYZ"
             }),
             Some("stripe_key"),
+            None,
         )
         .unwrap();
         assert_eq!(req["url"], "https://api.stripe.com/v1/subscriptions");
@@ -1058,6 +1065,7 @@ mod tests_build_http_request {
             "PostSubscriptions",
             &json!({ "items[0][price]": "price_XYZ" }),
             Some("stripe_key"),
+            None,
         )
         .unwrap_err();
         match err {
@@ -1076,6 +1084,7 @@ mod tests_build_http_request {
             "PostSubscriptions",
             &json!({ "customer": "cus_ABC" }),
             None,
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, WebDomainError::MissingAuth { .. }));
@@ -1088,6 +1097,7 @@ mod tests_build_http_request {
             &spec,
             "getPetById",
             &json!({ "petId": 42 }),
+            None,
             None,
         )
         .unwrap();
@@ -1103,6 +1113,7 @@ mod tests_build_http_request {
             "getPetById",
             &json!({}),
             None,
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, WebDomainError::MissingRequiredParams { .. }));
@@ -1115,6 +1126,7 @@ mod tests_build_http_request {
             &spec,
             "getPetById",
             &json!({ "petId": "42" }),
+            None,
             None,
         )
         .unwrap();
@@ -1129,6 +1141,7 @@ mod tests_build_http_request {
             "getPetById",
             &json!({ "petId": "not-a-number" }),
             None,
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, WebDomainError::InvalidParamType { .. }));
@@ -1141,6 +1154,7 @@ mod tests_build_http_request {
             &spec,
             "search",
             &json!({ "ids": ["a", "b", "c"] }),
+            None,
             None,
         )
         .unwrap();
@@ -1157,6 +1171,7 @@ mod tests_build_http_request {
             "PostSubscriptions",
             &json!({ "customer": "cus" }),
             Some("key"),
+            None,
         )
         .unwrap_err();
         match err {
@@ -1185,6 +1200,7 @@ mod tests_build_http_request {
             "PostSubscriptions",
             &json!({ "customer": "cus_ABC" }),
             Some("my_key"),
+            None,
         )
         .unwrap();
         assert_eq!(req["headers"]["X-API-Key"], "${SECURE:my_key}");
@@ -1210,6 +1226,7 @@ mod tests_build_http_request {
             "PostSubscriptions",
             &json!({ "customer": "cus_ABC" }),
             Some("my_key"),
+            None,
         )
         .unwrap();
         assert_eq!(req["query_params"]["api_key"], "${SECURE:my_key}");
