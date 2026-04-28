@@ -642,7 +642,8 @@ Find the `python_script` entry under `node_types_as_tools`. The current `special
     "All inputs except 'code', 'sandbox_mode', and 'sandbox_timeout_secs' are injected as Python variables.",
     "The script must assign its result to 'output'. Prefer dict output: output = {'count': 5, 'ids': [1,2,3]}.",
     "When sandbox_mode is 'restricted': imports are validated against a whitelist; open/exec/eval/compile are blocked; execution is capped at sandbox_timeout_secs.",
-    "On sandbox violation the node returns an error string the LLM can read and retry with corrected code."
+    "On sandbox violation the node returns an error string the LLM can read and retry with corrected code.",
+    "Markdown code-block wrappers (```python ... ```) are stripped automatically."
   ],
   "examples": {
     "fixed_code_llm_provides_variables": {
@@ -653,35 +654,41 @@ Find the `python_script` entry under `node_types_as_tools`. The current `special
           "description": "Contar las palabras en un texto.",
           "node_type": "python_script",
           "node_schema": {
-            "sandbox_mode": { "fixed": "restricted" },
-            "code":         { "fixed": "output = {'count': len(text.split())}" },
+            "sandbox_mode": { "type": "string", "fixed": "restricted" },
+            "code":         { "type": "string", "fixed": "output = {'count': len(text.split())}" },
             "text":         { "type": "string", "required": true, "description": "Texto a analizar." }
           }
         }
       }
     },
     "llm_generates_code": {
-      "description": "LLM writes Python code to process upstream data (e.g. HTTP response). sandbox_mode is fixed to 'restricted' so the LLM cannot change it. Variables available in the script come from the 'context' field.",
+      "description": "LLM writes Python code AND passes the data to process as a tool argument. The LLM has already seen the data in a previous tool call (e.g. an HTTP response in its message history) and now passes it back along with the code. sandbox_mode is fixed so the LLM cannot weaken it. The script accesses 'rows' as a Python variable (from the LLM-supplied tool argument).",
       "tool_configurations_entry": {
         "run_python": {
           "name": "run_python",
-          "description": "Ejecuta código Python para procesar datos. Variable disponible: 'rows' (lista de objetos del HTTP response). Asigna el resultado a 'output'. Prefiere formato diccionario: output = {'count': 5, 'ids': [1,2,3]}.",
+          "description": "Ejecuta código Python para procesar una lista de datos que tú mismo provees. Pasa la lista en el argumento 'rows' y el código en 'code'. Asigna el resultado a 'output' como diccionario. Ejemplo: output = {'active': len([r for r in rows if r['stock'] > 0])}.",
           "node_type": "python_script",
           "node_schema": {
-            "sandbox_mode":         { "fixed": "restricted" },
-            "sandbox_timeout_secs": { "fixed": 10 },
+            "sandbox_mode":         { "type": "string", "fixed": "restricted" },
+            "sandbox_timeout_secs": { "type": "number", "fixed": 10 },
             "code": {
               "type": "string",
               "required": true,
-              "description": "Código Python a ejecutar. Imports permitidos: math, json, re, datetime, collections, itertools. Asigna el resultado a 'output' como diccionario. Ejemplo: output = {'active': len([r for r in rows if r['stock'] > 0])}"
+              "description": "Código Python a ejecutar. Imports permitidos: math, json, re, datetime, collections, itertools, functools, string, decimal, statistics. NO uses os, sys, open, exec, eval. Asigna el resultado a 'output' como diccionario. Ejemplo: output = {'active': len([r for r in rows if r['stock'] > 0])}"
+            },
+            "rows": {
+              "type": "array",
+              "required": true,
+              "description": "Lista de objetos a procesar. Pásale exactamente la lista que recibiste de un tool call previo (e.g. el HTTP response de search_products)."
             }
-          },
-          "context": {
-            "rows": "${http_node.body.products}"
           }
         }
       },
-      "note": "The 'context' field maps upstream node outputs to Python variables. The key becomes the variable name in the script. The LLM must describe its code in terms of those variable names."
+      "notes": [
+        "In the current architecture, upstream node outputs do NOT auto-flow into a tool call. The LLM must include the data as a tool argument. This means the LLM has already seen the raw data in a previous turn — token cost is the trade-off for this minimal sandbox feature.",
+        "For token-efficient tool-to-tool piping (LLM never sees raw data), see the backlog: docs/superpowers/specs/python-tool-ideas-backlog.md.",
+        "Reserved keys (code, sandbox_mode, sandbox_timeout_secs) are the python_node config — everything else in the schema (e.g. 'rows') becomes a Python variable in the script."
+      ]
     }
   }
 }
@@ -712,13 +719,15 @@ Two graphs: one with `gpt-4o-mini` (fast, cheap, broad coverage) and one with `o
 - Create: `tests/graphs/agents/python_sandbox_tool_test.json`
 - Create: `tests/graphs/agents/python_sandbox_tool_thinking_test.json`
 
+> **Architecture note (corrected after spec review):** Originally this section used a `context: { "rows": "${node.field}" }` mechanism on the tool config to inject upstream node outputs as Python variables. That mechanism does NOT exist in the current `ToolConfiguration` Rust struct — it would be silently dropped by serde. The corrected pattern is: the LLM **passes the data as a tool argument** (`rows` is declared in `node_schema` as a required `array` field). The HTTP node feeds the agent via a regular DAG edge, the LLM sees the data in its message context, and when it calls `run_python` it copies the relevant data into the `rows` argument along with the code.
+
 - [ ] **Step 4.1: Create the standard test graph (gpt-4o-mini)**
 
 `tests/graphs/agents/python_sandbox_tool_test.json`:
 
 ```json
 {
-  "comment": "End-to-end test for python_script as LLM tool with sandbox_mode='restricted'. The LLM generates Python code to process the HTTP response from dummyjson products. Validates that LLM-generated code is AST-checked, banned imports are rejected, and the timeout works. Uses gpt-4o-mini for cost-efficient coverage.",
+  "comment": "End-to-end test for python_script as LLM tool with sandbox_mode='restricted'. The HTTP node feeds product data to the agent via edge; the LLM (gpt-4o-mini) sees the data in its message context and is required by the system_message to use run_python for any list processing. The LLM passes both the code AND the products data as tool arguments. Validates that AST check + execution work end-to-end.",
   "metadata": {
     "category": "agents",
     "features": ["python_script", "sandbox_mode", "tool_calling", "http_request"],
@@ -731,7 +740,7 @@ Two graphs: one with `gpt-4o-mini` (fast, cheap, broad coverage) and one with `o
         "path": "/python-sandbox-test",
         "method": "POST",
         "test_payload": {
-          "prompt": "Cuántos productos tienen un rating mayor a 4.5? Usa la tool run_python para procesar la lista."
+          "prompt": "Cuántos productos tienen un rating mayor a 4.5? Usa la tool run_python para procesar la lista (te paso la lista en el contexto)."
         }
       }
     },
@@ -739,7 +748,7 @@ Two graphs: one with `gpt-4o-mini` (fast, cheap, broad coverage) and one with `o
       "type": "http_request",
       "config": {
         "base_url": "https://dummyjson.com",
-        "endpoint": "/products?limit=100",
+        "endpoint": "/products?limit=30",
         "method": "GET"
       }
     },
@@ -749,26 +758,28 @@ Two graphs: one with `gpt-4o-mini` (fast, cheap, broad coverage) and one with `o
         "provider": "openai",
         "api_key": "${OPENAI_API_KEY}",
         "model": "gpt-4o-mini",
-        "system_message": "Eres un asistente de análisis de datos. Cuando necesites procesar listas de datos llama la tool run_python. Siempre asigna el resultado a 'output' como diccionario, ej. output = {'count': N}. Después de recibir el resultado de la tool, responde al usuario en lenguaje natural.",
+        "system_message": "Eres un asistente de análisis de datos. Recibes una lista de productos como input. Para cualquier conteo, filtro, o cálculo sobre la lista DEBES usar la tool run_python — no calcules mentalmente. Cuando llames run_python, pasa: (1) el argumento 'rows' con la lista exacta de productos que recibiste, (2) el argumento 'code' con código Python que asigne el resultado a la variable 'output' como diccionario. Después de recibir el resultado de la tool, responde al usuario en lenguaje natural.",
         "temperature": 0.0,
         "stream": false,
-        "max_tokens": 2000,
+        "max_tokens": 4000,
         "tool_configurations": {
           "run_python": {
             "name": "run_python",
-            "description": "Ejecuta código Python sandboxed para procesar datos. Variable disponible: 'products' (lista de productos, cada uno con campos: id, title, price, rating, stock, category, brand). Asigna el resultado a 'output' como diccionario.",
+            "description": "Ejecuta código Python sandboxed sobre una lista de datos. Recibe 'code' (el código a ejecutar) y 'rows' (la lista). Devuelve el valor de la variable 'output' del script.",
             "node_type": "python_script",
             "node_schema": {
-              "sandbox_mode":         { "fixed": "restricted" },
-              "sandbox_timeout_secs": { "fixed": 10 },
+              "sandbox_mode":         { "type": "string", "fixed": "restricted" },
+              "sandbox_timeout_secs": { "type": "number", "fixed": 10 },
               "code": {
                 "type": "string",
                 "required": true,
-                "description": "Código Python. Imports permitidos: math, json, re, datetime, collections, itertools, functools, string, decimal, statistics. NO uses os, sys, open, exec, eval. Asigna el resultado a 'output' como diccionario. Ejemplo: output = {'count': len([p for p in products if p['rating'] > 4.0])}"
+                "description": "Código Python. Imports permitidos: math, json, re, datetime, collections, itertools, functools, string, decimal, statistics. NO uses os, sys, open, exec, eval. Asigna el resultado a 'output' como diccionario. Ejemplo: output = {'count': len([p for p in rows if p['rating'] > 4.5])}"
+              },
+              "rows": {
+                "type": "array",
+                "required": true,
+                "description": "Lista de objetos a procesar (los productos del HTTP response). Pásala tal cual la recibiste, sin omitir campos."
               }
-            },
-            "context": {
-              "products": "${fetch_products.body.products}"
             }
           }
         }
@@ -792,7 +803,7 @@ Two graphs: one with `gpt-4o-mini` (fast, cheap, broad coverage) and one with `o
 
 ```json
 {
-  "comment": "Same as python_sandbox_tool_test.json but using o4-mini with thinking_budget. Reasoning models tend to write more careful Python code — this validates the sandbox works under that pattern. Slower and more expensive than the standard test, but useful for catching edge cases the LLM might explore.",
+  "comment": "Same as python_sandbox_tool_test.json but using o4-mini with thinking_budget. Reasoning models tend to write more careful Python code and follow the 'pass the rows argument' instruction more reliably. Slower and more expensive than the standard test.",
   "metadata": {
     "category": "agents",
     "features": ["python_script", "sandbox_mode", "tool_calling", "thinking_budget", "http_request"],
@@ -805,7 +816,7 @@ Two graphs: one with `gpt-4o-mini` (fast, cheap, broad coverage) and one with `o
         "path": "/python-sandbox-thinking",
         "method": "POST",
         "test_payload": {
-          "prompt": "Calcula el precio promedio de los productos de la categoría 'smartphones' y dime cuántos hay. Usa la tool run_python."
+          "prompt": "Calcula el precio promedio de los productos de la categoría 'smartphones' y dime cuántos hay. Usa la tool run_python pasándole la lista que recibiste."
         }
       }
     },
@@ -813,7 +824,7 @@ Two graphs: one with `gpt-4o-mini` (fast, cheap, broad coverage) and one with `o
       "type": "http_request",
       "config": {
         "base_url": "https://dummyjson.com",
-        "endpoint": "/products?limit=100",
+        "endpoint": "/products?limit=30",
         "method": "GET"
       }
     },
@@ -823,26 +834,28 @@ Two graphs: one with `gpt-4o-mini` (fast, cheap, broad coverage) and one with `o
         "provider": "openai",
         "api_key": "${OPENAI_API_KEY}",
         "model": "o4-mini",
-        "system_message": "Eres un asistente de análisis de datos. Cuando necesites procesar listas usa la tool run_python. Siempre asigna a 'output' un diccionario, ej. output = {'avg_price': 199.5, 'count': 5}.",
+        "system_message": "Eres un asistente de análisis de datos. Recibes una lista de productos. Para cualquier procesamiento DEBES usar la tool run_python pasando 'rows' (la lista exacta) y 'code' (Python que asigne el resultado a 'output' como diccionario). No calcules mentalmente.",
         "thinking_budget": 4000,
-        "max_tokens": 8000,
+        "max_tokens": 16000,
         "stream": false,
         "tool_configurations": {
           "run_python": {
             "name": "run_python",
-            "description": "Ejecuta código Python sandboxed para procesar datos. Variable disponible: 'products' (lista de productos con campos: id, title, price, rating, stock, category, brand). Asigna el resultado a 'output' como diccionario.",
+            "description": "Ejecuta código Python sandboxed sobre una lista. Recibe 'code' y 'rows'. Devuelve la variable 'output'.",
             "node_type": "python_script",
             "node_schema": {
-              "sandbox_mode":         { "fixed": "restricted" },
-              "sandbox_timeout_secs": { "fixed": 10 },
+              "sandbox_mode":         { "type": "string", "fixed": "restricted" },
+              "sandbox_timeout_secs": { "type": "number", "fixed": 10 },
               "code": {
                 "type": "string",
                 "required": true,
                 "description": "Código Python. Imports permitidos: math, json, re, datetime, collections, itertools, functools, string, decimal, statistics. NO uses os, sys, open, exec, eval. Asigna el resultado a 'output' como diccionario."
+              },
+              "rows": {
+                "type": "array",
+                "required": true,
+                "description": "Lista de productos a procesar."
               }
-            },
-            "context": {
-              "products": "${fetch_products.body.products}"
             }
           }
         }

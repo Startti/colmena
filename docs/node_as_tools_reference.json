@@ -458,7 +458,8 @@
         "All inputs except 'code', 'sandbox_mode', and 'sandbox_timeout_secs' are injected as Python variables.",
         "The script must assign its result to 'output'. Prefer dict output: output = {'count': 5, 'ids': [1,2,3]}.",
         "When sandbox_mode is 'restricted': imports are validated against a whitelist; open/exec/eval/compile are blocked; execution is capped at sandbox_timeout_secs.",
-        "On sandbox violation the node returns an error string the LLM can read and retry with corrected code."
+        "On sandbox violation the node returns an error string the LLM can read and retry with corrected code.",
+        "Markdown code-block wrappers (```python ... ```) are stripped automatically."
       ],
       "examples": {
         "fixed_code_llm_provides_variables": {
@@ -469,35 +470,41 @@
               "description": "Contar las palabras en un texto.",
               "node_type": "python_script",
               "node_schema": {
-                "sandbox_mode": { "fixed": "restricted" },
-                "code":         { "fixed": "output = {'count': len(text.split())}" },
+                "sandbox_mode": { "type": "string", "fixed": "restricted" },
+                "code":         { "type": "string", "fixed": "output = {'count': len(text.split())}" },
                 "text":         { "type": "string", "required": true, "description": "Texto a analizar." }
               }
             }
           }
         },
         "llm_generates_code": {
-          "description": "LLM writes Python code to process upstream data (e.g. HTTP response). sandbox_mode is fixed to 'restricted' so the LLM cannot change it. Variables available in the script come from the 'context' field.",
+          "description": "LLM writes Python code AND passes the data to process as a tool argument. The LLM has already seen the data in a previous tool call (e.g. an HTTP response in its message history) and now passes it back along with the code. sandbox_mode is fixed so the LLM cannot weaken it. The script accesses 'rows' as a Python variable (from the LLM-supplied tool argument).",
           "tool_configurations_entry": {
             "run_python": {
               "name": "run_python",
-              "description": "Ejecuta código Python para procesar datos. Variable disponible: 'rows' (lista de objetos del HTTP response). Asigna el resultado a 'output'. Prefiere formato diccionario: output = {'count': 5, 'ids': [1,2,3]}.",
+              "description": "Ejecuta código Python para procesar una lista de datos que tú mismo provees. Pasa la lista en el argumento 'rows' y el código en 'code'. Asigna el resultado a 'output' como diccionario. Ejemplo: output = {'active': len([r for r in rows if r['stock'] > 0])}.",
               "node_type": "python_script",
               "node_schema": {
-                "sandbox_mode":         { "fixed": "restricted" },
-                "sandbox_timeout_secs": { "fixed": 10 },
+                "sandbox_mode":         { "type": "string", "fixed": "restricted" },
+                "sandbox_timeout_secs": { "type": "number", "fixed": 10 },
                 "code": {
                   "type": "string",
                   "required": true,
-                  "description": "Código Python a ejecutar. Imports permitidos: math, json, re, datetime, collections, itertools. Asigna el resultado a 'output' como diccionario. Ejemplo: output = {'active': len([r for r in rows if r['stock'] > 0])}"
+                  "description": "Código Python a ejecutar. Imports permitidos: math, json, re, datetime, collections, itertools, functools, string, decimal, statistics. NO uses os, sys, open, exec, eval. Asigna el resultado a 'output' como diccionario. Ejemplo: output = {'active': len([r for r in rows if r['stock'] > 0])}"
+                },
+                "rows": {
+                  "type": "array",
+                  "required": true,
+                  "description": "Lista de objetos a procesar. Pásale exactamente la lista que recibiste de un tool call previo (e.g. el HTTP response de search_products)."
                 }
-              },
-              "context": {
-                "rows": "${http_node.body.products}"
               }
             }
           },
-          "note": "The 'context' field maps upstream node outputs to Python variables. The key becomes the variable name in the script. The LLM must describe its code in terms of those variable names."
+          "notes": [
+            "In the current architecture, upstream node outputs do NOT auto-flow into a tool call. The LLM must include the data as a tool argument. This means the LLM has already seen the raw data in a previous turn — token cost is the trade-off for this minimal sandbox feature.",
+            "For token-efficient tool-to-tool piping (LLM never sees raw data), see the backlog: docs/superpowers/specs/python-tool-ideas-backlog.md.",
+            "Reserved keys (code, sandbox_mode, sandbox_timeout_secs) are the python_node config — everything else in the schema (e.g. 'rows') becomes a Python variable in the script."
+          ]
         }
       }
     },
