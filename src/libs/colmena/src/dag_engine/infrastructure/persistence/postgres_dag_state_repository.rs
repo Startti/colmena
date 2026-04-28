@@ -196,6 +196,14 @@ impl DagStateRepository for PostgresDagStateRepository {
 
         Ok(())
     }
+
+    async fn find_suspended_leaf(
+        &self,
+        _agent_session_id: &str,
+    ) -> Result<Option<String>, DagError> {
+        // TODO(Task 10): implement the real SQL query
+        Ok(None)
+    }
 }
 
 // ─── DagTaskMemoryRepository ──────────────────────────────────────────────────

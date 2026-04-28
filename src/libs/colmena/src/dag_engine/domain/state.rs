@@ -81,6 +81,16 @@ pub struct DagRunState {
 pub trait DagStateRepository: Send + Sync {
     async fn get_by_id(&self, session_id: &str) -> Result<Option<DagRunState>, DagError>;
     async fn save(&self, state: &DagRunState) -> Result<(), DagError>;
+
+    /// Returns the `session_id` of the deepest SUSPENDED run for a given chat —
+    /// the row that is SUSPENDED and is NOT the parent of any other SUSPENDED row.
+    /// Returns `None` if no run is currently suspended for that chat.
+    /// Returns `Err` if more than one leaf exists (concurrent suspended branches —
+    /// out of scope for this design; defensive check).
+    async fn find_suspended_leaf(
+        &self,
+        agent_session_id: &str,
+    ) -> Result<Option<String>, DagError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
