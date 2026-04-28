@@ -1,5 +1,5 @@
 use crate::llm::domain::{
-    Conversation, ConversationRepository, LlmError, LlmMessage, MessageRole, SessionId,
+    Conversation, ConversationKey, ConversationRepository, LlmError, LlmMessage, MessageRole,
 };
 
 use async_trait::async_trait;
@@ -18,14 +18,33 @@ impl SqliteConversationRepository {
 
 #[async_trait]
 impl ConversationRepository for SqliteConversationRepository {
-    async fn get_by_id(&self, id: &SessionId) -> Result<Conversation, LlmError> {
-        let rows = sqlx::query(
-            "SELECT role, content, tool_call_id, tool_calls, created_at FROM llm_node_history WHERE session_id = ? ORDER BY created_at ASC"
-        )
-        .bind(&id.0)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| LlmError::RequestFailed { message: format!("Database error: {}", e) })?;
+    async fn get_by_id(&self, key: &ConversationKey) -> Result<Conversation, LlmError> {
+        let rows = if let Some(agent) = &key.agent_session_id {
+            sqlx::query(
+                "SELECT role, content, tool_call_id, tool_calls, created_at \
+                 FROM llm_node_history \
+                 WHERE agent_session_id = ? AND node_id = ? \
+                 ORDER BY created_at ASC",
+            )
+            .bind(&agent.0)
+            .bind(&key.node_id.0)
+            .fetch_all(&self.pool)
+            .await
+        } else {
+            sqlx::query(
+                "SELECT role, content, tool_call_id, tool_calls, created_at \
+                 FROM llm_node_history \
+                 WHERE session_id = ? AND node_id = ? \
+                 ORDER BY created_at ASC",
+            )
+            .bind(&key.session_id.0)
+            .bind(&key.node_id.0)
+            .fetch_all(&self.pool)
+            .await
+        }
+        .map_err(|e| LlmError::RequestFailed {
+            message: format!("Database error: {}", e),
+        })?;
 
         let messages = rows
             .into_iter()
@@ -34,7 +53,7 @@ impl ConversationRepository for SqliteConversationRepository {
                 let content: String = row.get("content");
                 let tool_call_id: Option<String> = row.get("tool_call_id");
                 let tool_calls_str: Option<String> = row.get("tool_calls");
-                let _created_at_str: String = row.get("created_at"); // Renamed to _created_at_str as it's not used
+                let _created_at_str: String = row.get("created_at");
 
                 let role = match role_str.as_str() {
                     "system" => MessageRole::System,
@@ -66,12 +85,16 @@ impl ConversationRepository for SqliteConversationRepository {
             .collect();
 
         Ok(Conversation {
-            session_id: id.clone(),
+            key: key.clone(),
             messages,
         })
     }
 
-    async fn add_message(&self, id: &SessionId, message: LlmMessage) -> Result<(), LlmError> {
+    async fn add_message(
+        &self,
+        key: &ConversationKey,
+        message: LlmMessage,
+    ) -> Result<(), LlmError> {
         let role_str = match message.role() {
             MessageRole::System => "system",
             MessageRole::User => "user",
@@ -79,19 +102,22 @@ impl ConversationRepository for SqliteConversationRepository {
             MessageRole::Tool => "tool",
         };
 
-        let msg_id = uuid::Uuid::new_v4().to_string();
-        // let created_at = Utc::now().to_rfc3339(); // This line is now redundant as per instruction
-
-        // Serialize tool_calls if present
         let tool_calls_str = message
             .tool_calls()
             .and_then(|tc| serde_json::to_string(tc).ok());
 
+        let id = uuid::Uuid::new_v4().to_string();
+
         sqlx::query(
-            "INSERT INTO llm_node_history (id, session_id, role, content, tool_call_id, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO llm_node_history (\
+                id, session_id, agent_session_id, node_id, \
+                role, content, tool_call_id, tool_calls, created_at\
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(msg_id)
-        .bind(&id.0)
+        .bind(&id)
+        .bind(&key.session_id.0)
+        .bind(key.agent_session_id.as_ref().map(|a| a.0.clone()))
+        .bind(&key.node_id.0)
         .bind(role_str)
         .bind(message.content())
         .bind(message.tool_call_id())
@@ -99,20 +125,33 @@ impl ConversationRepository for SqliteConversationRepository {
         .bind(Utc::now().to_rfc3339())
         .execute(&self.pool)
         .await
-        .map_err(|e| LlmError::RequestFailed { message: format!("Database error: {}", e) })?;
+        .map_err(|e| LlmError::RequestFailed {
+            message: format!("Database error: {}", e),
+        })?;
 
         Ok(())
     }
 
-    async fn delete(&self, id: &SessionId) -> Result<(), LlmError> {
-        sqlx::query("DELETE FROM llm_node_history WHERE session_id = ?")
-            .bind(&id.0)
+    async fn delete(&self, key: &ConversationKey) -> Result<(), LlmError> {
+        let res = if let Some(agent) = &key.agent_session_id {
+            sqlx::query(
+                "DELETE FROM llm_node_history WHERE agent_session_id = ? AND node_id = ?",
+            )
+            .bind(&agent.0)
+            .bind(&key.node_id.0)
             .execute(&self.pool)
             .await
-            .map_err(|e| LlmError::RequestFailed {
-                message: format!("Database error: {}", e),
-            })?;
+        } else {
+            sqlx::query("DELETE FROM llm_node_history WHERE session_id = ? AND node_id = ?")
+                .bind(&key.session_id.0)
+                .bind(&key.node_id.0)
+                .execute(&self.pool)
+                .await
+        };
 
+        res.map_err(|e| LlmError::RequestFailed {
+            message: format!("Database error: {}", e),
+        })?;
         Ok(())
     }
 }

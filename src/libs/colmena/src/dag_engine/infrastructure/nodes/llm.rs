@@ -2,7 +2,8 @@ use crate::colmena_log;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
 use crate::llm::domain::{
-    LlmConfig, LlmMessage, LlmProvider, LlmStreamPart, ProviderKind, SessionId, ToolExecutor,
+    ConversationKey, LlmConfig, LlmMessage, LlmProvider, LlmStreamPart, NodeIdPath, ProviderKind,
+    SessionId, ToolExecutor,
 };
 use crate::llm::infrastructure::{ConversationRepositoryFactory, LlmProviderFactory};
 use async_trait::async_trait;
@@ -449,8 +450,12 @@ impl ExecutableNode for LlmNode {
                 .await?;
             repo_instance = Some(repo.clone());
 
-            let tid = SessionId(tid.to_string());
-            let conversation = repo.get_by_id(&tid).await?;
+            let tid_key = ConversationKey {
+                session_id: SessionId(tid.to_string()),
+                agent_session_id: None,
+                node_id: NodeIdPath(tid.to_string()),
+            };
+            let conversation = repo.get_by_id(&tid_key).await?;
             // We only need to know if history exists to decide on system message
             history_exists = !conversation.messages.is_empty();
         }
@@ -914,8 +919,13 @@ impl ExecutableNode for LlmNode {
             };
 
         // Create AgentService parameters
+        let conv_key = ConversationKey {
+            session_id: SessionId(tid.clone()),
+            agent_session_id: None,
+            node_id: NodeIdPath(tid.clone()),
+        };
         let params = crate::llm::application::AgentRunParams {
-            session_id: &SessionId(tid),
+            session_id: &conv_key,
             prompt: prompt.to_string(),
             messages: Some(messages.clone()),
             config: llm_config,

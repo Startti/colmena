@@ -1,13 +1,13 @@
 use crate::llm::domain::{
-    ConversationRepository, LlmConfig, LlmError, LlmMessage, LlmRepository, LlmRequest,
-    LlmResponse, LlmStreamPart, LlmUsage, SessionId, ToolCall, ToolDefinition, ToolExecutor,
+    ConversationKey, ConversationRepository, LlmConfig, LlmError, LlmMessage, LlmRepository,
+    LlmRequest, LlmResponse, LlmStreamPart, LlmUsage, ToolCall, ToolDefinition, ToolExecutor,
     ToolResult,
 };
 use std::sync::Arc;
 
 /// Parameters for running the agent
 pub struct AgentRunParams<'a> {
-    pub session_id: &'a SessionId,
+    pub session_id: &'a ConversationKey,
     pub prompt: String,
     pub messages: Option<Vec<LlmMessage>>,
     pub config: LlmConfig,
@@ -311,9 +311,9 @@ mod tests {
         pub ConversationRepo {}
         #[async_trait]
         impl ConversationRepository for ConversationRepo {
-            async fn get_by_id(&self, session_id: &SessionId) -> Result<Conversation, LlmError>;
-            async fn add_message(&self, session_id: &SessionId, message: LlmMessage) -> Result<(), LlmError>;
-            async fn delete(&self, session_id: &SessionId) -> Result<(), LlmError>;
+            async fn get_by_id(&self, key: &ConversationKey) -> Result<Conversation, LlmError>;
+            async fn add_message(&self, key: &ConversationKey, message: LlmMessage) -> Result<(), LlmError>;
+            async fn delete(&self, key: &ConversationKey) -> Result<(), LlmError>;
         }
     }
 
@@ -338,23 +338,31 @@ mod tests {
         )
     }
 
+    fn test_key() -> ConversationKey {
+        ConversationKey {
+            session_id: SessionId("test-thread".to_string()),
+            agent_session_id: None,
+            node_id: NodeIdPath("agent_service".to_string()),
+        }
+    }
+
     #[tokio::test]
     async fn test_agent_service_simple_response_no_tools() {
         let mut mock_llm = MockLlmRepo::new();
         let mut mock_conv = MockConversationRepo::new();
         let mock_tool_exec = MockToolExec::new();
 
-        let session_id = SessionId("test-thread".to_string());
+        let key = test_key();
         let prompt = "Hello".to_string();
 
         // Setup Conversation Repo
         mock_conv
             .expect_get_by_id()
-            .with(eq(session_id.clone()))
+            .with(eq(key.clone()))
             .times(1)
-            .returning(|_| {
+            .returning(|k| {
                 Ok(Conversation {
-                    session_id: SessionId("test-thread".to_string()),
+                    key: k.clone(),
                     messages: vec![],
                 })
             });
@@ -383,7 +391,7 @@ mod tests {
 
         let result = service
             .run(AgentRunParams {
-                session_id: &session_id,
+                session_id: &key,
                 prompt,
                 messages: None,
                 config: create_config(),
@@ -404,13 +412,13 @@ mod tests {
         let mut mock_conv = MockConversationRepo::new();
         let mut mock_tool_exec = MockToolExec::new();
 
-        let session_id = SessionId("test-thread".to_string());
+        let key = test_key();
         let prompt = "Add 2+2".to_string();
 
         // Setup Conversation Repo
-        mock_conv.expect_get_by_id().returning(|_| {
+        mock_conv.expect_get_by_id().returning(|k| {
             Ok(Conversation {
-                session_id: SessionId("test-thread".to_string()),
+                key: k.clone(),
                 messages: vec![],
             })
         });
@@ -483,7 +491,7 @@ mod tests {
 
         let result = service
             .run(AgentRunParams {
-                session_id: &session_id,
+                session_id: &key,
                 prompt,
                 messages: None,
                 config: create_config(),
@@ -504,11 +512,11 @@ mod tests {
         let mut mock_conv = MockConversationRepo::new();
         let mut mock_tool_exec = MockToolExec::new();
 
-        let session_id = SessionId("test-thread".to_string());
+        let key = test_key();
 
-        mock_conv.expect_get_by_id().returning(|_| {
+        mock_conv.expect_get_by_id().returning(|k| {
             Ok(Conversation {
-                session_id: SessionId("test-thread".to_string()),
+                key: k.clone(),
                 messages: vec![],
             })
         });
@@ -553,7 +561,7 @@ mod tests {
 
         let result = service
             .run(AgentRunParams {
-                session_id: &session_id,
+                session_id: &key,
                 prompt: "Loop me".to_string(),
                 messages: None,
                 config: create_config(),

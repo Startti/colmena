@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use crate::llm::application::AgentService;
 use crate::llm::domain::{
-    LlmConfig, LlmMessage, LlmProvider, LlmStreamPart, ProviderKind, SessionId,
+    ConversationKey, LlmConfig, LlmMessage, LlmProvider, LlmStreamPart, NodeIdPath, ProviderKind,
+    SessionId,
 };
 use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
 use crate::llm::infrastructure::LlmProviderFactory;
@@ -191,7 +192,12 @@ impl ExecutableNode for CriticNode {
         let llm_repo = LlmProviderFactory::create(provider_kind);
         let conversation_repo = Arc::new(InMemoryConversationRepository::new());
         let agent_service = AgentService::new(llm_repo, conversation_repo);
-        let tid = SessionId(uuid::Uuid::new_v4().to_string());
+        let tid_str = uuid::Uuid::new_v4().to_string();
+        let tid = ConversationKey {
+            session_id: SessionId(tid_str.clone()),
+            agent_session_id: None,
+            node_id: NodeIdPath(tid_str),
+        };
 
         let messages = vec![
             LlmMessage::system(system_message)?,

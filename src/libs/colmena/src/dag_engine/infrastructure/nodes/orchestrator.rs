@@ -649,7 +649,12 @@ impl OrchestratorNode {
             crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository::new(),
         );
         let agent_service = crate::llm::application::AgentService::new(llm_repo, conversation_repo);
-        let tid = crate::llm::domain::SessionId(uuid::Uuid::new_v4().to_string());
+        let tid_str = uuid::Uuid::new_v4().to_string();
+        let tid = crate::llm::domain::ConversationKey {
+            session_id: crate::llm::domain::SessionId(tid_str.clone()),
+            agent_session_id: None,
+            node_id: crate::llm::domain::NodeIdPath(tid_str),
+        };
 
         let messages = vec![
             crate::llm::domain::LlmMessage::system(system_msg)?,

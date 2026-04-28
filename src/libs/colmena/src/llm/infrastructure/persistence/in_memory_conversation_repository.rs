@@ -1,50 +1,55 @@
-use crate::llm::domain::{Conversation, ConversationRepository, LlmError, LlmMessage, SessionId};
+use crate::llm::domain::{
+    Conversation, ConversationKey, ConversationRepository, LlmError, LlmMessage,
+};
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Mutex;
 
-/// In-memory conversation repository that doesn't persist to disk
-/// Useful for stateless LLM calls or testing
-#[derive(Clone)]
+#[derive(Default)]
 pub struct InMemoryConversationRepository {
-    conversations: Arc<RwLock<HashMap<String, Vec<LlmMessage>>>>,
+    /// Storage indexed by (agent_session_id_or_session_id, node_id) — the
+    /// effective key under which messages were appended.
+    inner: Mutex<HashMap<(String, String), Vec<LlmMessage>>>,
 }
 
 impl InMemoryConversationRepository {
     pub fn new() -> Self {
-        Self {
-            conversations: Arc::new(RwLock::new(HashMap::new())),
-        }
+        Self::default()
     }
-}
 
-impl Default for InMemoryConversationRepository {
-    fn default() -> Self {
-        Self::new()
+    fn lookup_key(key: &ConversationKey) -> (String, String) {
+        let id = match &key.agent_session_id {
+            Some(a) => a.0.clone(),
+            None => key.session_id.0.clone(),
+        };
+        (id, key.node_id.0.clone())
     }
 }
 
 #[async_trait]
 impl ConversationRepository for InMemoryConversationRepository {
-    async fn get_by_id(&self, id: &SessionId) -> Result<Conversation, LlmError> {
-        let conversations = self.conversations.read().unwrap();
-        let messages = conversations.get(&id.0).cloned().unwrap_or_default();
-
+    async fn get_by_id(&self, key: &ConversationKey) -> Result<Conversation, LlmError> {
+        let map = self.inner.lock().unwrap();
+        let messages = map.get(&Self::lookup_key(key)).cloned().unwrap_or_default();
         Ok(Conversation {
-            session_id: id.clone(),
+            key: key.clone(),
             messages,
         })
     }
 
-    async fn add_message(&self, id: &SessionId, message: LlmMessage) -> Result<(), LlmError> {
-        let mut conversations = self.conversations.write().unwrap();
-        conversations.entry(id.0.clone()).or_default().push(message);
+    async fn add_message(
+        &self,
+        key: &ConversationKey,
+        message: LlmMessage,
+    ) -> Result<(), LlmError> {
+        let mut map = self.inner.lock().unwrap();
+        map.entry(Self::lookup_key(key)).or_default().push(message);
         Ok(())
     }
 
-    async fn delete(&self, id: &SessionId) -> Result<(), LlmError> {
-        let mut conversations = self.conversations.write().unwrap();
-        conversations.remove(&id.0);
+    async fn delete(&self, key: &ConversationKey) -> Result<(), LlmError> {
+        let mut map = self.inner.lock().unwrap();
+        map.remove(&Self::lookup_key(key));
         Ok(())
     }
 }
@@ -52,49 +57,62 @@ impl ConversationRepository for InMemoryConversationRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::domain::{AgentSessionId, NodeIdPath, SessionId};
 
-    #[tokio::test]
-    async fn test_add_and_get_messages() {
-        let repo = InMemoryConversationRepository::new();
-        let session_id = SessionId("test_thread".to_string());
-
-        // Add messages
-        let msg1 = LlmMessage::user("Hello".to_string()).unwrap();
-        let msg2 = LlmMessage::assistant("Hi there!".to_string()).unwrap();
-
-        repo.add_message(&session_id, msg1.clone()).await.unwrap();
-        repo.add_message(&session_id, msg2.clone()).await.unwrap();
-
-        // Retrieve conversation
-        let conversation = repo.get_by_id(&session_id).await.unwrap();
-        assert_eq!(conversation.messages.len(), 2);
-        assert_eq!(conversation.messages[0].content(), "Hello");
-        assert_eq!(conversation.messages[1].content(), "Hi there!");
+    fn k(agent: Option<&str>, session: &str, node: &str) -> ConversationKey {
+        ConversationKey {
+            session_id: SessionId(session.to_string()),
+            agent_session_id: agent.map(|a| AgentSessionId(a.to_string())),
+            node_id: NodeIdPath(node.to_string()),
+        }
     }
 
     #[tokio::test]
-    async fn test_delete_conversation() {
+    async fn agent_keying_isolates_two_runs_under_same_chat() {
         let repo = InMemoryConversationRepository::new();
-        let session_id = SessionId("test_thread".to_string());
+        let k1 = k(Some("chat_x"), "run_1", "router");
+        let k2 = k(Some("chat_x"), "run_2", "router");
 
-        // Add a message
-        let msg = LlmMessage::user("Hello".to_string()).unwrap();
-        repo.add_message(&session_id, msg).await.unwrap();
-
-        // Delete conversation
-        repo.delete(&session_id).await.unwrap();
-
-        // Verify it's gone
-        let conversation = repo.get_by_id(&session_id).await.unwrap();
-        assert!(conversation.messages.is_empty());
+        repo.add_message(&k1, LlmMessage::user("hi from run 1".into()).unwrap())
+            .await
+            .unwrap();
+        let conv = repo.get_by_id(&k2).await.unwrap();
+        assert_eq!(
+            conv.messages.len(),
+            1,
+            "agent keying should let run 2 see run 1's history"
+        );
     }
 
     #[tokio::test]
-    async fn test_get_nonexistent_conversation() {
+    async fn legacy_keying_does_not_cross_runs() {
         let repo = InMemoryConversationRepository::new();
-        let session_id = SessionId("nonexistent".to_string());
+        let k1 = k(None, "run_1", "router");
+        let k2 = k(None, "run_2", "router");
 
-        let conversation = repo.get_by_id(&session_id).await.unwrap();
-        assert!(conversation.messages.is_empty());
+        repo.add_message(&k1, LlmMessage::user("hi from run 1".into()).unwrap())
+            .await
+            .unwrap();
+        let conv = repo.get_by_id(&k2).await.unwrap();
+        assert!(
+            conv.messages.is_empty(),
+            "legacy keying must not leak across runs"
+        );
+    }
+
+    #[tokio::test]
+    async fn node_id_isolates_two_llm_calls_in_same_run() {
+        let repo = InMemoryConversationRepository::new();
+        let router = k(Some("chat_x"), "run_1", "router");
+        let responder = k(Some("chat_x"), "run_1", "responder");
+
+        repo.add_message(&router, LlmMessage::user("router only".into()).unwrap())
+            .await
+            .unwrap();
+        let conv = repo.get_by_id(&responder).await.unwrap();
+        assert!(
+            conv.messages.is_empty(),
+            "responder must not see router's history"
+        );
     }
 }

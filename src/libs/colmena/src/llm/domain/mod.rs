@@ -20,7 +20,9 @@ pub use llm_repository::MockLlmRepository;
 pub use llm_repository::{LlmRepository, LlmStream};
 pub use llm_request::LlmRequest;
 pub use llm_response::{LlmResponse, LlmStreamChunk, LlmStreamPart, ToolCallChunk};
-pub use memory::{Conversation, ConversationRepository, SessionId};
+pub use memory::{
+    AgentSessionId, Conversation, ConversationKey, ConversationRepository, NodeIdPath, SessionId,
+};
 pub use tool_executor::ToolExecutor;
 pub use tools::{
     FunctionCall, ParameterProperty, ToolCall, ToolDefinition, ToolParameters, ToolResult,
