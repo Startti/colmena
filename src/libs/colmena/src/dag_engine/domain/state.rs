@@ -42,6 +42,16 @@ impl std::str::FromStr for DagRunStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DagRunState {
     pub session_id: String,
+
+    /// Chat / conversation handle. NULL for legacy runs that never opted in.
+    #[serde(default)]
+    pub agent_session_id: Option<String>,
+
+    /// session_id of the immediate parent run when this row is a subgraph.
+    /// NULL for root runs.
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
+
     pub graph_json: Value,
     pub all_outputs: HashMap<String, Value>,
     pub status: DagRunStatus,

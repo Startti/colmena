@@ -516,6 +516,8 @@ impl DagRunUseCase {
 
                         let state = DagRunState {
                             session_id: session_id.clone(),
+                            agent_session_id: None,
+                            parent_session_id: None,
                             graph_json: serde_json::to_value(&graph).unwrap_or(Value::Null),
                             all_outputs: all_outputs.clone(),
                             global_shared_state: global_shared_state.clone(),
@@ -569,6 +571,8 @@ impl DagRunUseCase {
             if let Some(repo) = &self.state_repository {
                 let state = DagRunState {
                     session_id: session_id.clone(),
+                    agent_session_id: None,
+                    parent_session_id: None,
                     graph_json: serde_json::to_value(&graph).unwrap_or(Value::Null),
                     all_outputs: all_outputs.clone(),
                     global_shared_state: global_shared_state.clone(),
@@ -803,6 +807,8 @@ impl SubGraphExecutorPort for DagRunUseCase {
         if let Some(repo) = &self.state_repository {
             let initial_state = DagRunState {
                 session_id: session_id.to_string(),
+                agent_session_id: None,
+                parent_session_id: None,
                 graph_json,
                 all_outputs: HashMap::new(),
                 global_shared_state: global_state,

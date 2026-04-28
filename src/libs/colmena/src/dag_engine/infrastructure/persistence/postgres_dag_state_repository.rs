@@ -131,6 +131,8 @@ impl DagStateRepository for PostgresDagStateRepository {
 
                 Ok(Some(DagRunState {
                     session_id: row.get("session_id"),
+                    agent_session_id: None,
+                    parent_session_id: None,
                     graph_json: row.get("graph_json"),
                     all_outputs,
                     status,
