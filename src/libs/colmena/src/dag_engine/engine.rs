@@ -145,12 +145,16 @@ impl ColmenaEngine {
         resume_session_id: Option<String>,
         resume_answer: Option<String>,
         include_extra_info: bool,
+        path_prefix: Option<String>,
+        agent_session_id: Option<String>,
     ) -> impl Stream<Item = Result<DagExecutionEvent, DagError>> + Send + '_ {
         (*self.use_case).clone().execute_stream(
             graph,
             resume_session_id,
             resume_answer,
             include_extra_info,
+            path_prefix,
+            agent_session_id,
         )
     }
 

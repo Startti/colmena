@@ -87,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // The new active_queue engine natively handles both linear and cyclic graphs
                 let s =
-                    engine.execute_stream(graph, session_id.clone(), answer, include_extra_info);
+                    engine.execute_stream(graph, session_id.clone(), answer, include_extra_info, None, None);
                 let stream = Box::pin(s);
                 tokio::pin!(stream);
 

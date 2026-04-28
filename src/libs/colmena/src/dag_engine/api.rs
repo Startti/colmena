@@ -79,6 +79,8 @@ pub async fn run_dag(
                 resume_id.clone(),
                 resume_answer.clone(),
                 include_extra_info,
+                None,
+                None,
             );
             tokio::pin!(internal_stream);
 
@@ -285,7 +287,7 @@ async fn handler_webhook(
                     );
                 }
 
-                let internal_stream = engine.execute_stream(current_graph.clone(), None, None, false);
+                let internal_stream = engine.execute_stream(current_graph.clone(), None, None, false, None, None);
                 tokio::pin!(internal_stream);
 
                 while let Some(result) = internal_stream.next().await {
@@ -593,6 +595,8 @@ async fn handler_resume(
                 Some(session_id),
                 Some(answer),
                 false,
+                None,
+                None,
             );
             tokio::pin!(internal_stream);
 

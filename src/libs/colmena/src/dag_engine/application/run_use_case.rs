@@ -187,6 +187,11 @@ impl DagRunUseCase {
         resume_session_id: Option<String>,
         resume_answer: Option<String>,
         include_extra_info: bool,
+        // Path prefix injected by the parent subgraph node, if any.
+        // For root runs this is `None` and node_id_path = node_id.
+        path_prefix: Option<String>,
+        // Conversation handle. `None` for legacy runs.
+        agent_session_id: Option<String>,
     ) -> impl futures::Stream<
         Item = Result<crate::dag_engine::domain::events::DagExecutionEvent, DagError>,
     > {
@@ -348,8 +353,24 @@ impl DagRunUseCase {
                 if let Some(ans) = &resume_answer {
                     inputs.insert("__colmena_resume_answer".to_string(), Value::String(ans.clone()));
                 }
+                let node_id_path = match &path_prefix {
+                    Some(prefix) => format!("{}/{}", prefix, node_id),
+                    None => node_id.clone(),
+                };
+
                 inputs.insert("__colmena_session_id".to_string(), Value::String(session_id.clone()));
                 inputs.insert("__node_id".to_string(), Value::String(node_id.clone()));
+                inputs.insert(
+                    "__colmena_node_id_path".to_string(),
+                    Value::String(node_id_path.clone()),
+                );
+                inputs.insert(
+                    "__colmena_agent_session_id".to_string(),
+                    match &agent_session_id {
+                        Some(a) => Value::String(a.clone()),
+                        None => Value::Null,
+                    },
+                );
 
                 // INJECT GLOBAL SHARED STATE (so nodes can use {{key}} out of the box).
                 // We override None, Null, AND empty objects — the latter arise when an
@@ -825,7 +846,7 @@ impl SubGraphExecutorPort for DagRunUseCase {
         let mut stream =
             Box::pin(
                 self.clone()
-                    .execute_stream(graph, Some(session_id.to_string()), None, true),
+                    .execute_stream(graph, Some(session_id.to_string()), None, true, None, None),
             );
 
         let mut final_out = Value::Null;
@@ -879,6 +900,8 @@ impl SubGraphExecutorPort for DagRunUseCase {
             Some(session_id.to_string()),
             Some(answer),
             true,
+            None,
+            None,
         ));
 
         let mut final_out = Value::Null;
