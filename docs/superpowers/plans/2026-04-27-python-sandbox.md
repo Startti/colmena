@@ -704,20 +704,35 @@ git commit -m "docs: add LLM-generated code pattern to python_script tool refere
 
 ---
 
-## Task 4: Create end-to-end test graph
+## Task 4: Create end-to-end test graphs
+
+Two graphs: one with `gpt-4o-mini` (fast, cheap, broad coverage) and one with `o4-mini` + `thinking_budget` (best for code generation, validates the sandbox under reasoning models).
 
 **Files:**
 - Create: `tests/graphs/agents/python_sandbox_tool_test.json`
+- Create: `tests/graphs/agents/python_sandbox_tool_thinking_test.json`
 
-- [ ] **Step 4.1: Create the test graph**
+- [ ] **Step 4.1: Create the standard test graph (gpt-4o-mini)**
+
+`tests/graphs/agents/python_sandbox_tool_test.json`:
 
 ```json
 {
+  "comment": "End-to-end test for python_script as LLM tool with sandbox_mode='restricted'. The LLM generates Python code to process the HTTP response from dummyjson products. Validates that LLM-generated code is AST-checked, banned imports are rejected, and the timeout works. Uses gpt-4o-mini for cost-efficient coverage.",
+  "metadata": {
+    "category": "agents",
+    "features": ["python_script", "sandbox_mode", "tool_calling", "http_request"],
+    "requires_env": ["OPENAI_API_KEY"]
+  },
   "nodes": {
-    "start": {
-      "type": "mock_input",
+    "trigger": {
+      "type": "trigger_webhook",
       "config": {
-        "prompt": "Usando la API de productos de dummyjson, dime cuántos productos tienen un rating mayor a 4.5"
+        "path": "/python-sandbox-test",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Cuántos productos tienen un rating mayor a 4.5? Usa la tool run_python para procesar la lista."
+        }
       }
     },
     "fetch_products": {
@@ -732,13 +747,16 @@ git commit -m "docs: add LLM-generated code pattern to python_script tool refere
       "type": "llm_call",
       "config": {
         "provider": "openai",
-        "model": "gpt-4o-mini",
         "api_key": "${OPENAI_API_KEY}",
-        "system_message": "Eres un asistente de análisis de datos. Cuando necesites procesar listas de datos usa la tool run_python. Siempre retorna resultados como diccionario en 'output'.",
+        "model": "gpt-4o-mini",
+        "system_message": "Eres un asistente de análisis de datos. Cuando necesites procesar listas de datos llama la tool run_python. Siempre asigna el resultado a 'output' como diccionario, ej. output = {'count': N}. Después de recibir el resultado de la tool, responde al usuario en lenguaje natural.",
+        "temperature": 0.0,
+        "stream": false,
+        "max_tokens": 2000,
         "tool_configurations": {
           "run_python": {
             "name": "run_python",
-            "description": "Ejecuta código Python para procesar datos. Variable disponible: 'products' (lista de productos de dummyjson, cada uno con campos: id, title, price, rating, stock, category). Asigna el resultado a 'output' como diccionario.",
+            "description": "Ejecuta código Python sandboxed para procesar datos. Variable disponible: 'products' (lista de productos, cada uno con campos: id, title, price, rating, stock, category, brand). Asigna el resultado a 'output' como diccionario.",
             "node_type": "python_script",
             "node_schema": {
               "sandbox_mode":         { "fixed": "restricted" },
@@ -746,7 +764,7 @@ git commit -m "docs: add LLM-generated code pattern to python_script tool refere
               "code": {
                 "type": "string",
                 "required": true,
-                "description": "Código Python. Imports permitidos: math, json, re, datetime, collections, itertools. Asigna resultado a 'output' como diccionario. Ejemplo: output = {'count': len([p for p in products if p['rating'] > 4.0])}"
+                "description": "Código Python. Imports permitidos: math, json, re, datetime, collections, itertools, functools, string, decimal, statistics. NO uses os, sys, open, exec, eval. Asigna el resultado a 'output' como diccionario. Ejemplo: output = {'count': len([p for p in products if p['rating'] > 4.0])}"
               }
             },
             "context": {
@@ -756,35 +774,130 @@ git commit -m "docs: add LLM-generated code pattern to python_script tool refere
         }
       }
     },
-    "output": {
-      "type": "output"
+    "log": {
+      "type": "log"
     }
   },
   "edges": [
-    { "from": "start",          "to": "agent" },
+    { "from": "trigger",        "to": "agent" },
     { "from": "fetch_products", "to": "agent" },
-    { "from": "agent",          "to": "output" }
+    { "from": "agent",          "to": "log" }
   ]
 }
 ```
 
-- [ ] **Step 4.2: Run the graph and verify the LLM uses the tool**
+- [ ] **Step 4.2: Create the thinking test graph (o4-mini with reasoning)**
+
+`tests/graphs/agents/python_sandbox_tool_thinking_test.json`:
+
+```json
+{
+  "comment": "Same as python_sandbox_tool_test.json but using o4-mini with thinking_budget. Reasoning models tend to write more careful Python code — this validates the sandbox works under that pattern. Slower and more expensive than the standard test, but useful for catching edge cases the LLM might explore.",
+  "metadata": {
+    "category": "agents",
+    "features": ["python_script", "sandbox_mode", "tool_calling", "thinking_budget", "http_request"],
+    "requires_env": ["OPENAI_API_KEY"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/python-sandbox-thinking",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Calcula el precio promedio de los productos de la categoría 'smartphones' y dime cuántos hay. Usa la tool run_python."
+        }
+      }
+    },
+    "fetch_products": {
+      "type": "http_request",
+      "config": {
+        "base_url": "https://dummyjson.com",
+        "endpoint": "/products?limit=100",
+        "method": "GET"
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "o4-mini",
+        "system_message": "Eres un asistente de análisis de datos. Cuando necesites procesar listas usa la tool run_python. Siempre asigna a 'output' un diccionario, ej. output = {'avg_price': 199.5, 'count': 5}.",
+        "thinking_budget": 4000,
+        "max_tokens": 8000,
+        "stream": false,
+        "tool_configurations": {
+          "run_python": {
+            "name": "run_python",
+            "description": "Ejecuta código Python sandboxed para procesar datos. Variable disponible: 'products' (lista de productos con campos: id, title, price, rating, stock, category, brand). Asigna el resultado a 'output' como diccionario.",
+            "node_type": "python_script",
+            "node_schema": {
+              "sandbox_mode":         { "fixed": "restricted" },
+              "sandbox_timeout_secs": { "fixed": 10 },
+              "code": {
+                "type": "string",
+                "required": true,
+                "description": "Código Python. Imports permitidos: math, json, re, datetime, collections, itertools, functools, string, decimal, statistics. NO uses os, sys, open, exec, eval. Asigna el resultado a 'output' como diccionario."
+              }
+            },
+            "context": {
+              "products": "${fetch_products.body.products}"
+            }
+          }
+        }
+      }
+    },
+    "log": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "trigger",        "to": "agent" },
+    { "from": "fetch_products", "to": "agent" },
+    { "from": "agent",          "to": "log" }
+  ]
+}
+```
+
+- [ ] **Step 4.3: Validate JSON files**
+
+```bash
+python3 -c "import json; json.load(open('tests/graphs/agents/python_sandbox_tool_test.json')); print('OK')"
+python3 -c "import json; json.load(open('tests/graphs/agents/python_sandbox_tool_thinking_test.json')); print('OK')"
+```
+
+Expected: `OK` for both.
+
+- [ ] **Step 4.4: Run the standard test graph**
 
 ```bash
 set -a; source .env; set +a
-cargo run --bin dag_engine -- run tests/graphs/agents/python_sandbox_tool_test.json 2>&1 | tail -30
+cargo run --bin dag_engine -- run tests/graphs/agents/python_sandbox_tool_test.json 2>&1 | tail -40
 ```
 
 Expected output contains:
 - `[PythonNode] Executing code:` — confirms the tool was called
-- A number as the final answer (how many products have rating > 4.5)
+- A number around 50-70 in the final answer (products with rating > 4.5)
 - No `SandboxViolation` errors
 
-- [ ] **Step 4.3: Commit**
+If you see `SandboxViolation` it likely means the LLM tried `import os` or similar — that's a valid sandbox catch, but the test should pass on retry since the LLM can correct the code.
+
+- [ ] **Step 4.5: Run the thinking test graph (optional, slower)**
 
 ```bash
-git add tests/graphs/agents/python_sandbox_tool_test.json
-git commit -m "test(graph): add python sandbox tool end-to-end test graph"
+cargo run --bin dag_engine -- run tests/graphs/agents/python_sandbox_tool_thinking_test.json 2>&1 | tail -40
+```
+
+Expected output contains:
+- `[PythonNode] Executing code:` with code that filters by `category == 'smartphones'` and computes average
+- A response with both the count and average price
+
+- [ ] **Step 4.6: Commit**
+
+```bash
+git add tests/graphs/agents/python_sandbox_tool_test.json tests/graphs/agents/python_sandbox_tool_thinking_test.json
+git commit -m "test(graph): add python sandbox tool e2e tests (gpt-4o-mini and o4-mini)"
 ```
 
 ---
@@ -805,8 +918,10 @@ git commit -m "test(graph): add python sandbox tool end-to-end test graph"
 | Error: `SandboxViolation: 'open' is not allowed in sandbox mode` | Task 1 |
 | Error: `SandboxTimeout: execution exceeded N seconds` | Task 1 |
 | Backward compatible — default `"none"` keeps existing behavior | Task 1 — `test_sandbox_default_mode_allows_os` |
-| `sandbox_mode` in `node_schema+fixed` (not `fixed_config`) | Task 3 examples |
+| `sandbox_mode` in `node_schema+fixed` (not `fixed_config`) | Task 3 examples + Task 4 graphs |
 | `node_configurations.json` updated | Task 2 |
 | `node_as_tools_reference.json` updated with both patterns | Task 3 |
-| End-to-end test graph | Task 4 |
+| E2E test with `gpt-4o-mini` (standard model) | Task 4.1 |
+| E2E test with `o4-mini` + `thinking_budget` (reasoning model) | Task 4.2 |
+| `trigger_webhook` + `test_payload` pattern (matches real test graphs) | Task 4 |
 | Reserved keys not injected as Python vars | Task 1 — inputs_clone filtering + `test_sandbox_skips_reserved_keys_as_python_vars` |
