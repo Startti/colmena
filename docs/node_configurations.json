@@ -955,7 +955,7 @@
           "type": "number",
           "required": false,
           "default": 10,
-          "description": "Maximum execution time in seconds. Only applies when sandbox_mode is 'restricted'. If the script exceeds this limit, the node returns a SandboxTimeout error to the caller. KNOWN LIMITATION: a tight Python loop (e.g., 'while True: pass') holds the GIL and cannot be cancelled by the timeout — the caller receives the error correctly, but the underlying thread leaks until the process restarts. In long-running 'serve' mode this can exhaust the blocking thread pool over time. Avoid for fully untrusted multi-tenant code; for LLM-generated code (the primary use case), the AST check + timeout combo is sufficient because LLM-written tight loops are rare and recoverable. Minimum recommended value: 2.",
+          "description": "Maximum execution time in seconds. Only applies when sandbox_mode is 'restricted'. If the script exceeds this limit, the node returns a SandboxTimeout error to the caller. KNOWN LIMITATION: a tight Python loop (e.g., 'while True: pass') holds the GIL and cannot be cancelled by the timeout — the caller receives the error correctly, but the underlying blocking-pool thread remains occupied until the process restarts. In long-running 'serve' mode this can exhaust the blocking thread pool over time. Avoid for fully untrusted multi-tenant code; for LLM-generated code (the primary use case), the AST check + timeout combo is sufficient because LLM-written tight loops are rare and recoverable. Minimum recommended value: 2; increase for scripts that process large datasets.",
           "example": 10
         }
       },
