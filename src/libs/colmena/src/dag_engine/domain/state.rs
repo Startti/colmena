@@ -91,6 +91,14 @@ pub trait DagStateRepository: Send + Sync {
         &self,
         agent_session_id: &str,
     ) -> Result<Option<String>, DagError>;
+
+    /// Returns the session_id of a SUSPENDED child run whose parent_session_id
+    /// matches the input. There must be at most one such child per parent in
+    /// the chosen single-leaf-at-a-time design.
+    async fn find_suspended_child(
+        &self,
+        parent_session_id: &str,
+    ) -> Result<Option<String>, DagError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -39,6 +39,9 @@ pub trait SubGraphExecutorPort: Send + Sync {
         graph_json: Value,
         global_state: Value,
         observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+        parent_session_id: Option<String>,
+        agent_session_id: Option<String>,
+        path_prefix: Option<String>,
     ) -> Result<Value, DagError>;
 
     /// Reanuda un subgrafo suspendido tras un Human-in-the-Loop.
@@ -47,5 +50,16 @@ pub trait SubGraphExecutorPort: Send + Sync {
         session_id: &str,
         answer: String,
         observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+        agent_session_id: Option<String>,
+        path_prefix: Option<String>,
     ) -> Result<Value, DagError>;
+
+    /// Finds the SUSPENDED child run whose parent_session_id matches.
+    /// (Currently single-leaf-per-parent design; the second arg is reserved
+    /// for future disambiguation when multiple children may suspend in parallel.)
+    async fn find_child_session_id_for_resume(
+        &self,
+        parent_session_id: &str,
+        parent_node_path: &str,
+    ) -> Result<Option<String>, DagError>;
 }

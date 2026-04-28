@@ -817,6 +817,9 @@ impl SubGraphExecutorPort for DagRunUseCase {
         graph_json: Value,
         global_state: Value,
         observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+        parent_session_id: Option<String>,
+        agent_session_id: Option<String>,
+        path_prefix: Option<String>,
     ) -> Result<Value, DagError> {
         let graph: Graph = serde_json::from_value(graph_json.clone())
             .map_err(|e| DagError::NodeExecution(format!("Invalid sub-graph JSON: {}", e)))?;
@@ -828,8 +831,8 @@ impl SubGraphExecutorPort for DagRunUseCase {
         if let Some(repo) = &self.state_repository {
             let initial_state = DagRunState {
                 session_id: session_id.to_string(),
-                agent_session_id: None,
-                parent_session_id: None,
+                agent_session_id: agent_session_id.clone(),
+                parent_session_id: parent_session_id.clone(),
                 graph_json,
                 all_outputs: HashMap::new(),
                 global_shared_state: global_state,
@@ -843,11 +846,14 @@ impl SubGraphExecutorPort for DagRunUseCase {
         }
 
         use futures::StreamExt;
-        let mut stream =
-            Box::pin(
-                self.clone()
-                    .execute_stream(graph, Some(session_id.to_string()), None, true, None, None),
-            );
+        let mut stream = Box::pin(self.clone().execute_stream(
+            graph,
+            Some(session_id.to_string()),
+            None,
+            true,
+            path_prefix,
+            agent_session_id,
+        ));
 
         let mut final_out = Value::Null;
         while let Some(res) = stream.next().await {
@@ -874,6 +880,8 @@ impl SubGraphExecutorPort for DagRunUseCase {
         session_id: &str,
         answer: String,
         observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+        agent_session_id: Option<String>,
+        path_prefix: Option<String>,
     ) -> Result<Value, DagError> {
         let state = if let Some(repo) = &self.state_repository {
             repo.get_by_id(session_id).await?.ok_or_else(|| {
@@ -900,8 +908,8 @@ impl SubGraphExecutorPort for DagRunUseCase {
             Some(session_id.to_string()),
             Some(answer),
             true,
-            None,
-            None,
+            path_prefix,
+            agent_session_id.or(state.agent_session_id),
         ));
 
         let mut final_out = Value::Null;
@@ -922,5 +930,17 @@ impl SubGraphExecutorPort for DagRunUseCase {
         }
 
         Ok(final_out)
+    }
+
+    async fn find_child_session_id_for_resume(
+        &self,
+        parent_session_id: &str,
+        _parent_node_path: &str,
+    ) -> Result<Option<String>, DagError> {
+        if let Some(repo) = &self.state_repository {
+            repo.find_suspended_child(parent_session_id).await
+        } else {
+            Ok(None)
+        }
     }
 }

@@ -246,6 +246,25 @@ impl DagStateRepository for PostgresDagStateRepository {
             ))),
         }
     }
+
+    async fn find_suspended_child(
+        &self,
+        parent_session_id: &str,
+    ) -> Result<Option<String>, DagError> {
+        let row_opt = sqlx::query(
+            "SELECT session_id FROM dag_runs \
+             WHERE parent_session_id = $1 AND status = 'SUSPENDED' \
+             ORDER BY updated_at DESC LIMIT 1",
+        )
+        .bind(parent_session_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| {
+            DagError::StateError(format!("Database error on find_suspended_child: {}", e))
+        })?;
+
+        Ok(row_opt.map(|r| r.get::<String, _>("session_id")))
+    }
 }
 
 // ─── DagTaskMemoryRepository ──────────────────────────────────────────────────

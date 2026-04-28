@@ -45,33 +45,63 @@ impl ExecutableNode for SubGraphNode {
         let parent_session_id = inputs
             .get("__colmena_session_id")
             .and_then(|v| v.as_str())
-            .unwrap_or("unknown_parent");
+            .unwrap_or("unknown_parent")
+            .to_string();
 
-        let node_id = inputs
-            .get("__node_id")
+        let agent_session_id = inputs
+            .get("__colmena_agent_session_id")
             .and_then(|v| v.as_str())
-            .unwrap_or("subgraph");
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
 
-        let child_session_id = format!("{}_sub_{}", parent_session_id, node_id);
+        // The subgraph node's *own* path is what its children must inherit.
+        let parent_path = inputs
+            .get("__colmena_node_id_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        let child_path_prefix = if parent_path.is_empty() {
+            None
+        } else {
+            Some(parent_path.clone())
+        };
 
         // --- 1. RESUME PROPAGATION ---
-        // If the parent was suspended in this node, it receives __colmena_resume_answer
+        // If the parent was suspended in this node, it receives __colmena_resume_answer.
+        // We find the existing child run by parent_session_id instead of the old
+        // deterministic "{parent}_sub_{node_id}" naming.
         if let Some(resume_answer) = inputs
             .get("__colmena_resume_answer")
             .and_then(|v| v.as_str())
         {
-            colmena_log!(
-                "▶️ [SubGraphNode] Resuming child graph {} with answer...",
-                child_session_id
-            );
-            let result = self
+            let executor = self
                 .executor
                 .get()
-                .ok_or("SubGraphExecutorPort not initialized in SubGraphNode")?
+                .ok_or("SubGraphExecutorPort not initialized in SubGraphNode")?;
+
+            let child_session_id = executor
+                .find_child_session_id_for_resume(&parent_session_id, &parent_path)
+                .await?
+                .ok_or_else(|| {
+                    format!(
+                        "No suspended child found under parent {} / path {}",
+                        parent_session_id, parent_path
+                    )
+                })?;
+
+            colmena_log!(
+                "▶️ [SubGraphNode] Resuming child graph {} (path={}) with answer...",
+                child_session_id,
+                parent_path
+            );
+            let result = executor
                 .resume_subgraph(
                     &child_session_id,
                     resume_answer.to_string(),
                     _observer.clone(),
+                    agent_session_id.clone(),
+                    child_path_prefix.clone(),
                 )
                 .await?;
 
@@ -130,9 +160,13 @@ impl ExecutableNode for SubGraphNode {
             }
         }
 
+        // FRESH RUN — generate a new UUID for the child session.
+        let child_session_id = uuid::Uuid::new_v4().to_string();
+
         colmena_log!(
-            "🔄 [SubGraphNode] Running SubGraph in isolated session: {}",
-            child_session_id
+            "🔄 [SubGraphNode] Running SubGraph in isolated session: {} (path_prefix={:?})",
+            child_session_id,
+            child_path_prefix
         );
 
         let result = self
@@ -144,6 +178,9 @@ impl ExecutableNode for SubGraphNode {
                 graph_json,
                 child_state,
                 _observer.clone(),
+                Some(parent_session_id.clone()),
+                agent_session_id.clone(),
+                child_path_prefix.clone(),
             )
             .await?;
 
