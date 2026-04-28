@@ -334,6 +334,17 @@ pub fn parse_node_schema(schema: &NodeSchema) -> ParsedNodeSchema {
                 prop = prop.with_pattern(pattern.clone());
             }
 
+            // OpenAI's strict tool-schema validator rejects array types without
+            // an `items` schema. Default to `items: { "type": "object" }` —
+            // permissive enough for the LLM to pass arbitrary JSON arrays
+            // (lists of dicts, the common case for piping HTTP/SQL results).
+            if top_field.field_type == "array" && prop.items.is_none() {
+                prop.items = Some(Box::new(ParameterProperty::new(
+                    "object".to_string(),
+                    "Array element".to_string(),
+                )));
+            }
+
             llm_properties.insert(top_key.clone(), prop);
 
             // Check if required
