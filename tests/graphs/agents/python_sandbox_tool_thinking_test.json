@@ -1,0 +1,69 @@
+{
+  "comment": "Same as python_sandbox_tool_test.json but using o4-mini with thinking_budget. Reasoning models tend to write more careful Python code and follow the 'pass the rows argument' instruction more reliably. Slower and more expensive than the standard test.",
+  "metadata": {
+    "category": "agents",
+    "features": ["python_script", "sandbox_mode", "tool_calling", "thinking_budget", "http_request"],
+    "requires_env": ["OPENAI_API_KEY"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/python-sandbox-thinking",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Calcula el precio promedio de los productos de la categoría 'smartphones' y dime cuántos hay. Usa la tool run_python pasándole la lista que recibiste."
+        }
+      }
+    },
+    "fetch_products": {
+      "type": "http_request",
+      "config": {
+        "base_url": "https://dummyjson.com",
+        "endpoint": "/products?limit=30",
+        "method": "GET"
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "o4-mini",
+        "system_message": "Eres un asistente de análisis de datos. Recibes una lista de productos. Para cualquier procesamiento DEBES usar la tool run_python pasando 'rows' (la lista exacta) y 'code' (Python que asigne el resultado a 'output' como diccionario). No calcules mentalmente.",
+        "thinking_budget": 4000,
+        "max_tokens": 16000,
+        "stream": false,
+        "tool_configurations": {
+          "run_python": {
+            "name": "run_python",
+            "description": "Ejecuta código Python sandboxed sobre una lista. Recibe 'code' y 'rows'. Devuelve la variable 'output'.",
+            "node_type": "python_script",
+            "node_schema": {
+              "sandbox_mode":         { "type": "string", "fixed": "restricted" },
+              "sandbox_timeout_secs": { "type": "number", "fixed": 10 },
+              "code": {
+                "type": "string",
+                "required": true,
+                "description": "Código Python. Imports permitidos: math, json, re, datetime, collections, itertools, functools, string, decimal, statistics. NO uses os, sys, open, exec, eval. Asigna el resultado a 'output' como diccionario."
+              },
+              "rows": {
+                "type": "array",
+                "required": true,
+                "description": "Lista de productos a procesar."
+              }
+            }
+          }
+        }
+      }
+    },
+    "log": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "trigger",        "to": "agent" },
+    { "from": "fetch_products", "to": "agent" },
+    { "from": "agent",          "to": "log" }
+  ]
+}

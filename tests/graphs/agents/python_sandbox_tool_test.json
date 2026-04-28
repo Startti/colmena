@@ -1,0 +1,69 @@
+{
+  "comment": "End-to-end test for python_script as LLM tool with sandbox_mode='restricted'. The HTTP node feeds product data to the agent via edge; the LLM (gpt-4o-mini) sees the data in its message context and is required by the system_message to use run_python for any list processing. The LLM passes both the code AND the products data as tool arguments. Validates that AST check + execution work end-to-end.",
+  "metadata": {
+    "category": "agents",
+    "features": ["python_script", "sandbox_mode", "tool_calling", "http_request"],
+    "requires_env": ["OPENAI_API_KEY"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/python-sandbox-test",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Cuántos productos tienen un rating mayor a 4.5? Usa la tool run_python para procesar la lista (te paso la lista en el contexto)."
+        }
+      }
+    },
+    "fetch_products": {
+      "type": "http_request",
+      "config": {
+        "base_url": "https://dummyjson.com",
+        "endpoint": "/products?limit=30",
+        "method": "GET"
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o-mini",
+        "system_message": "Eres un asistente de análisis de datos. Recibes una lista de productos como input. Para cualquier conteo, filtro, o cálculo sobre la lista DEBES usar la tool run_python — no calcules mentalmente. Cuando llames run_python, pasa: (1) el argumento 'rows' con la lista exacta de productos que recibiste, (2) el argumento 'code' con código Python que asigne el resultado a la variable 'output' como diccionario. Después de recibir el resultado de la tool, responde al usuario en lenguaje natural.",
+        "temperature": 0.0,
+        "stream": false,
+        "max_tokens": 4000,
+        "tool_configurations": {
+          "run_python": {
+            "name": "run_python",
+            "description": "Ejecuta código Python sandboxed sobre una lista de datos. Recibe 'code' (el código a ejecutar) y 'rows' (la lista). Devuelve el valor de la variable 'output' del script.",
+            "node_type": "python_script",
+            "node_schema": {
+              "sandbox_mode":         { "type": "string", "fixed": "restricted" },
+              "sandbox_timeout_secs": { "type": "number", "fixed": 10 },
+              "code": {
+                "type": "string",
+                "required": true,
+                "description": "Código Python. Imports permitidos: math, json, re, datetime, collections, itertools, functools, string, decimal, statistics. NO uses os, sys, open, exec, eval. Asigna el resultado a 'output' como diccionario. Ejemplo: output = {'count': len([p for p in rows if p['rating'] > 4.5])}"
+              },
+              "rows": {
+                "type": "array",
+                "required": true,
+                "description": "Lista de objetos a procesar (los productos del HTTP response). Pásala tal cual la recibiste, sin omitir campos."
+              }
+            }
+          }
+        }
+      }
+    },
+    "log": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "trigger",        "to": "agent" },
+    { "from": "fetch_products", "to": "agent" },
+    { "from": "agent",          "to": "log" }
+  ]
+}
