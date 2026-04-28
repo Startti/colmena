@@ -453,26 +453,51 @@
     },
 
     "python_script": {
-      "summary": "Run a Python snippet as a tool. The LLM can supply input variables; the script's return value (last expression or explicit return) becomes the tool output.",
+      "summary": "Run a Python snippet as a tool. Two patterns: (1) Fixed code + LLM provides input variables. (2) LLM generates the code itself — use sandbox_mode: 'restricted' to validate it safely.",
       "special_behaviors": [
-        "The 'script' field should be fixed — the LLM never writes code.",
-        "Expose input variables to the LLM via node_schema; they are injected as Python locals.",
-        "Output is the JSON-serialized return value of the script."
+        "All inputs except 'code', 'sandbox_mode', and 'sandbox_timeout_secs' are injected as Python variables.",
+        "The script must assign its result to 'output'. Prefer dict output: output = {'count': 5, 'ids': [1,2,3]}.",
+        "When sandbox_mode is 'restricted': imports are validated against a whitelist; open/exec/eval/compile are blocked; execution is capped at sandbox_timeout_secs.",
+        "On sandbox violation the node returns an error string the LLM can read and retry with corrected code."
       ],
       "examples": {
-        "text_transform": {
-          "description": "LLM provides a string; the script transforms it.",
+        "fixed_code_llm_provides_variables": {
+          "description": "LLM provides a string; the script (fixed) transforms it. LLM never sees the code.",
           "tool_configurations_entry": {
             "word_count": {
               "name": "word_count",
               "description": "Contar las palabras en un texto.",
               "node_type": "python_script",
               "node_schema": {
-                "script": { "type": "string", "fixed": "result = len(text.split())" },
-                "text":   { "type": "string", "required": true, "description": "Texto a analizar." }
+                "sandbox_mode": { "fixed": "restricted" },
+                "code":         { "fixed": "output = {'count': len(text.split())}" },
+                "text":         { "type": "string", "required": true, "description": "Texto a analizar." }
               }
             }
           }
+        },
+        "llm_generates_code": {
+          "description": "LLM writes Python code to process upstream data (e.g. HTTP response). sandbox_mode is fixed to 'restricted' so the LLM cannot change it. Variables available in the script come from the 'context' field.",
+          "tool_configurations_entry": {
+            "run_python": {
+              "name": "run_python",
+              "description": "Ejecuta código Python para procesar datos. Variable disponible: 'rows' (lista de objetos del HTTP response). Asigna el resultado a 'output'. Prefiere formato diccionario: output = {'count': 5, 'ids': [1,2,3]}.",
+              "node_type": "python_script",
+              "node_schema": {
+                "sandbox_mode":         { "fixed": "restricted" },
+                "sandbox_timeout_secs": { "fixed": 10 },
+                "code": {
+                  "type": "string",
+                  "required": true,
+                  "description": "Código Python a ejecutar. Imports permitidos: math, json, re, datetime, collections, itertools. Asigna el resultado a 'output' como diccionario. Ejemplo: output = {'active': len([r for r in rows if r['stock'] > 0])}"
+                }
+              },
+              "context": {
+                "rows": "${http_node.body.products}"
+              }
+            }
+          },
+          "note": "The 'context' field maps upstream node outputs to Python variables. The key becomes the variable name in the script. The LLM must describe its code in terms of those variable names."
         }
       }
     },
