@@ -863,6 +863,9 @@ impl SubGraphExecutorPort for DagRunUseCase {
 
         let graph: Graph = serde_json::from_value(state.graph_json)
             .map_err(|e| DagError::NodeExecution(format!("Invalid sub-graph state JSON: {}", e)))?;
+        graph
+            .validate()
+            .map_err(|e| DagError::NodeExecution(format!("Invalid sub-graph: {}", e)))?;
 
         use futures::StreamExt;
         let mut stream = Box::pin(self.clone().execute_stream(
