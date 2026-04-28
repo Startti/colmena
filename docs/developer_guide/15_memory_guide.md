@@ -125,7 +125,7 @@ curl -X POST http://localhost:3000/chat \
 
 Para habilitar memoria en un nodo `llm_call`, necesitas:
 
-1. **`thread_id`**: ID único de la conversación
+1. **`thread_id`** *(también llamado `session_id` en versiones recientes del código)*: ID único de la conversación. *Nota: algunas versiones antiguas del código lo llaman `thread_id` y otras `session_id`; ambos nombres refieren al mismo campo. El nombre canónico actual en los nodos es `thread_id` en el JSON de configuración, pero la columna en base de datos se llama `session_id`.*
 2. **`connection_url`**: URL de la base de datos
 
 Ambos pueden venir de:
@@ -153,6 +153,54 @@ Tuning con variables de entorno (todas opcionales):
 | `COLMENA_POOL_ACQUIRE_TIMEOUT_SEC` | 10 | Timeout para pedir una conexión del pool |
 
 Ver [`12_dag_engine_guide.md`](./12_dag_engine_guide.md#ciclo-de-vida-de-colmenaengine) para el ciclo de vida completo.
+
+## 🆕 Agent Session ID — memoria a través de runs
+
+Hasta ahora, la memoria de un nodo `llm_call` estaba ligada al `session_id` del run.
+Cada nueva ejecución (con un nuevo session_id) empezaba con historial vacío. Para
+casos de chat — donde el usuario manda múltiples mensajes y cada mensaje es un run
+distinto — esto era inconveniente.
+
+`agent_session_id` introduce un identificador a nivel de **conversación** que vive
+por encima del `session_id` del run individual. Los `llm_call` ahora indexan su
+historia por `(agent_session_id, node_id)` cuando hay un agent presente, lo que
+permite que la memoria persista entre runs.
+
+### CLI
+
+```bash
+cargo run --bin dag_engine -- run mi_grafo.json --agent-session-id chat_abc
+```
+
+- Si no hay un run SUSPENDED para `chat_abc` → arranca un run nuevo con ese chat.
+- Si hay uno SUSPENDED → lo reanuda automáticamente sin necesidad de pasar el
+  session_id del run.
+
+### HTTP
+
+```bash
+curl -X POST http://localhost:3000/webhook \
+  -H "X-Agent-Session-Id: chat_abc" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "hola"}'
+```
+
+(Alternativa: `"agent_session_id": "chat_abc"` en el body JSON.)
+
+### Diferencia clave: session_id vs agent_session_id
+
+| Identificador | Alcance | Persiste a través de | Llave principal en |
+|---|---|---|---|
+| `session_id` | Un run del DAG (root o subgrafo) | Suspend/resume del MISMO run | `dag_runs.session_id` (PK), `llm_node_history.session_id` (legacy reads) |
+| `agent_session_id` | Conversación / chat | Múltiples runs (root, subgraph, etc.) | `dag_runs.agent_session_id`, `llm_node_history.agent_session_id` (new reads) |
+
+### Compatibilidad hacia atrás
+
+Si no pasás `--agent-session-id`, el comportamiento es idéntico al previo: cada
+run obtiene su propio session_id, y la memoria se llavea por `(session_id, node_id)`.
+Los grafos existentes no requieren cambios.
+
+---
 
 ## 💡 Tips
 

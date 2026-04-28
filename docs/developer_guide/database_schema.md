@@ -13,6 +13,10 @@ safe to run on an already-initialized database.
 | `20240101000000_initial_schema.sql` | Creates `llm_node_history`, `dag_runs` (base columns), `dag_task_memory`, `dag_phase_summaries` |
 | `20260425000001_dag_runs_state_columns.sql` | Adds 5 JSONB execution-state columns to `dag_runs` |
 | `20260425000002_secure_value_mappings.sql` | Enables `pgcrypto`, creates `secure_value_mappings` |
+| `20260428000001_dag_runs_agent_session_id.sql` | Adds `agent_session_id`, `parent_session_id` columns and indices to `dag_runs` |
+| `20260428000002_llm_history_agent_and_node.sql` | Adds `agent_session_id`, `node_id` columns and indices to `llm_node_history` |
+
+*SQLite tiene su propia migración espejo `20260428000001_llm_history_agent_and_node.sql` para las columnas de `llm_node_history`. SQLite no tiene tabla `dag_runs` — esa funcionalidad es exclusiva de PostgreSQL.*
 
 ---
 
@@ -28,7 +32,9 @@ the node needs to send conversation history to a provider.
 | Column | Type | Nullable | Default | Description |
 |--------|------|----------|---------|-------------|
 | `id` | `UUID` | NO | `gen_random_uuid()` | Unique message identifier |
-| `session_id` | `TEXT` | NO | — | Conversation thread identifier (maps to `thread_id` in node config) |
+| `session_id` | `TEXT` | NO | — | Conversation thread identifier (maps to `thread_id`/`session_id` in node config) |
+| `agent_session_id` | `TEXT` | YES | — | Chat handle. Set when the engine run carries an `agent_session_id`; NULL otherwise. |
+| `node_id` | `TEXT` | YES | — | Path-qualified identifier of the `llm_call` node that wrote this row (e.g. `"router"` or `"ventas/responder"`). NULL for pre-migration rows. |
 | `role` | `TEXT` | NO | — | Message author: `system`, `user`, `assistant`, or `tool` |
 | `content` | `TEXT` | NO | — | Message text body |
 | `tool_call_id` | `TEXT` | YES | — | Provider-assigned ID linking a `tool` message back to the `assistant` tool call that requested it |
@@ -38,6 +44,19 @@ the node needs to send conversation history to a provider.
 **Indexes**
 - `idx_llm_node_history_session_id` on `(session_id)` — fast conversation load
 - `idx_llm_node_history_created_at` on `(created_at)` — chronological ordering
+- `idx_llm_history_agent_node` on `(agent_session_id, node_id, created_at)` — primary read path when an agent_session_id is present
+- `idx_llm_history_session_node` on `(session_id, node_id, created_at)` — fallback for legacy reads
+
+**Read semantics:**
+
+- When the run carries an `agent_session_id`, reads filter by `(agent_session_id, node_id)` —
+  history persists across multiple runs of the same chat.
+- When `agent_session_id IS NULL` (legacy mode), reads fall back to `(session_id, node_id)` —
+  history is scoped to a single run.
+- Pre-migration rows where `node_id IS NULL` are excluded from new reads.
+
+Writes always include `session_id`, `node_id`, and `agent_session_id` (when set) so the
+row is fully attributed.
 
 ---
 
@@ -51,6 +70,8 @@ HITL (Human-in-the-Loop) pause or process restart.
 | Column | Type | Nullable | Default | Description |
 |--------|------|----------|---------|-------------|
 | `session_id` | `VARCHAR(255)` | NO | — | **Primary key.** Unique run identifier passed to the engine at startup |
+| `agent_session_id` | `VARCHAR(255)` | YES | — | Chat / conversation handle. Groups multiple runs (and their subgraph children) under the same external chat session. NULL for legacy runs that did not opt in. |
+| `parent_session_id` | `VARCHAR(255)` | YES | — | When this row is a subgraph child, the parent run's `session_id`. NULL for root runs. |
 | `graph_json` | `JSONB` | NO | — | Complete DAG graph definition as submitted to the engine |
 | `all_outputs` | `JSONB` | NO | — | `HashMap<node_id, output_value>` — accumulated outputs from every node that has run |
 | `status` | `VARCHAR(50)` | NO | — | Run lifecycle state: `RUNNING`, `SUSPENDED`, `COMPLETED`, or `FAILED` |
@@ -61,6 +82,16 @@ HITL (Human-in-the-Loop) pause or process restart.
 | `global_shared_state` | `JSONB` | NO | `{}` | Persistent whiteboard object readable and writable by all nodes in the run |
 | `created_at` | `TIMESTAMPTZ` | YES | `CURRENT_TIMESTAMP` | When the run row was first inserted |
 | `updated_at` | `TIMESTAMPTZ` | YES | `CURRENT_TIMESTAMP` | Timestamp of the most recent state save |
+
+**Indexes**
+- `idx_dag_runs_agent_session_id` on `(agent_session_id)`
+- `idx_dag_runs_parent_session_id` on `(parent_session_id)`
+- `idx_dag_runs_agent_status` on `(agent_session_id, status)` — fast leaf lookup
+
+**Tree linkage:** When `parent_session_id IS NOT NULL`, the row represents a subgraph
+child. All rows in a conversation tree share the same `agent_session_id`. The deepest
+SUSPENDED row (the one not referenced as a parent by any other SUSPENDED row) is the
+"leaf" — the run currently awaiting user input.
 
 ---
 
@@ -150,7 +181,8 @@ dag_runs ──< dag_task_memory     (dag_runs.session_id = dag_task_memory.sess
 dag_runs ──< dag_phase_summaries (dag_runs.session_id = dag_phase_summaries.session_id)
 dag_runs ──< secure_value_mappings (dag_runs.session_id = secure_value_mappings.session_id)
 
-llm_node_history  ── standalone, keyed by thread_id configured per llm_call node
+llm_node_history  ── standalone; new reads keyed by (agent_session_id, node_id), legacy reads by (session_id, node_id)
+dag_runs ──< dag_runs (parent_session_id → session_id) — subgraph child tree
 ```
 
 ---

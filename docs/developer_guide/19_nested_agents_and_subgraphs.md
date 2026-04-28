@@ -6,7 +6,7 @@ El motor de grafos de Colmena permite encapsular funcionalidades complejas en su
 
 ## ¿Por qué usar Sub-Grafos?
 
-1. **Aislamiento de sesión**: Cada sub-grafo tiene su propio `session_id` derivado (`parent_session_id_sub_node_id`). El historial del LLM, las variables temporales de RAG, y los reintentos del Critic no contaminan la sesión del grafo padre.
+1. **Aislamiento de sesión**: Cada sub-grafo recibe un UUID v4 nuevo como `session_id`, ligado al padre mediante `parent_session_id` en `dag_runs`. El historial del LLM, las variables temporales de RAG, y los reintentos del Critic no contaminan la sesión del grafo padre.
 2. **Propagación HITL automática**: Si el grafo hijo se suspende (nodo `suspend`, Critic, etc.), el estado `SUSPENDED` sube automáticamente al padre. Cuando el padre recibe la respuesta del usuario, la inyecta al hijo y reanuda la ejecución.
 3. **Composición modular**: Un grafo padre puede ser un Manager/Router simple que delega trabajo a hijos especializados. Cada hijo es independiente: puede tener sus propias herramientas, LLMs, nodos de memoria o cadenas RAG.
 
@@ -98,14 +98,23 @@ Si no hay ningún nodo con ese flag, se retorna el estado completo del grafo hij
 
 ### Session ID Aislado
 
+Cada sub-grafo recibe un UUID v4 nuevo como `session_id`. La relación padre→hijo se
+persiste en la columna `parent_session_id` de `dag_runs`:
+
 ```
-parent session: "sess-abc-123"
+dag_runs: session_id="sess-abc-123"  agent_session_id="chat_abc"  parent_session_id=NULL
 │
-└── subgraph node_id: "research_agent"
-    child session: "sess-abc-123_sub_research_agent"
+└── dag_runs: session_id="<uuid-nuevo>"  agent_session_id="chat_abc"  parent_session_id="sess-abc-123"
+    (subgraph node_id: "research_agent")
 ```
 
-Esto garantiza que cada ejecución del agente tenga su propio historial en la base de datos, sin interferir con otros agentes de la misma sesión padre.
+Esto garantiza que dos invocaciones del mismo nodo `subgraph` generen filas distintas
+en lugar de colisionar. El `agent_session_id` es heredado del padre y es idéntico en
+toda la jerarquía.
+
+> **Nota histórica (legacy):** antes del feat `agent_session_id`, el session_id del hijo
+> se calculaba como `{parent_session_id}_sub_{node_id}`. Ese esquema ya no se usa; la
+> relación vive en `parent_session_id`.
 
 ---
 
@@ -377,7 +386,51 @@ cargo run --bin dag_engine -- run tests/graphs/advanced/hitl_planner_suspend_tes
 
 ---
 
+---
+
+## Propagación de identificadores en subgrafos
+
+Cuando un nodo `subgraph` dispara un grafo hijo, propaga tres identificadores hacia
+abajo:
+
+1. **`agent_session_id`** — heredado del padre. Todos los runs de la conversación
+   comparten el mismo handle, sin importar cuán profundos sean.
+2. **`parent_session_id`** — el `session_id` del run padre. Se escribe en la fila
+   del hijo en `dag_runs`, dando navegabilidad explícita del árbol de runs.
+3. **Path prefix** — el `node_id` cualificado del nodo `subgraph`. Los nodos
+   internos del hijo ven `__colmena_node_id_path = "<path_prefix>/<inner_id>"`.
+
+### `session_id` ya no es derivable del nombre
+
+Antes (legacy), el `session_id` del hijo se calculaba como
+`{parent_session_id}_sub_{node_id}`. Ahora cada hijo recibe un UUID v4 nuevo y la
+relación padre→hijo vive en la columna `parent_session_id` de `dag_runs`. La
+ventaja: dos invocaciones del mismo `subgraph` node generan rows distintos en
+lugar de colisionar.
+
+### Resume con árbol de runs
+
+Si un subsubgrafo suspende, el árbol de `dag_runs` queda con `status = SUSPENDED`
+en cada nivel. Reanudar con `agent_session_id` encuentra automáticamente la hoja
+(el run SUSPENDED que no es padre de ningún otro SUSPENDED) y le pasa la respuesta
+del usuario.
+
+### Memoria LLM dentro del subgrafo
+
+Un `llm_call` dentro de un `subgraph_ventas` con un nodo interno `responder`
+indexa su historia bajo `(agent_session_id, "subgraph_ventas/responder")`.
+Si el mismo grafo corre dos veces bajo el mismo `agent_session_id`, el
+`responder` recupera el historial de la primera ejecución automáticamente.
+
+Si dos subgrafos distintos contienen ambos un nodo `responder`, sus historias
+quedan aisladas por el path qualifier
+(`subgraph_ventas/responder` vs `subgraph_soporte/responder`). Esto resuelve
+una colisión silenciosa que existía antes.
+
+---
+
 ## Guías Relacionadas
 
 - **[20_orchestrator_architecture.md](./20_orchestrator_architecture.md)** — Arquitectura completa del orchestrator con HITL y bridge tasks
 - **[12_dag_engine_guide.md](./12_dag_engine_guide.md)** — Referencia completa del DAG engine
+- **[15_memory_guide.md](./15_memory_guide.md)** — Memoria persistente y `agent_session_id` para chats multi-run
