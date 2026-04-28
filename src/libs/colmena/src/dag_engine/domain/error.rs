@@ -26,4 +26,12 @@ pub enum DagError {
     /// Ocurre cuando hay un error persistiendo o recuperando el estado del DAG (Postgres).
     #[error("Error de estado: {0}")]
     StateError(String),
+
+    /// El graph contiene un node ID que viola una invariante estructural
+    /// (por ejemplo, contiene `/` reservado para path qualifiers).
+    #[error("Invalid node id '{node_id}': {reason}")]
+    InvalidNodeId {
+        node_id: String,
+        reason: &'static str,
+    },
 }

@@ -58,13 +58,13 @@ impl Graph {
     /// - Node IDs containing `/` — the engine uses `/` to separate path-qualified
     ///   `node_id`s in subgraph hierarchies (`subgraph_node/inner_node`). Allowing
     ///   `/` in user-defined IDs would make the resulting paths ambiguous.
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), crate::dag_engine::domain::error::DagError> {
         for node_id in self.nodes.keys() {
             if node_id.contains('/') {
-                return Err(format!(
-                    "Invalid node id '{}': character '/' is reserved for subgraph path qualifiers",
-                    node_id
-                ));
+                return Err(crate::dag_engine::domain::error::DagError::InvalidNodeId {
+                    node_id: node_id.clone(),
+                    reason: "character '/' is reserved for subgraph path qualifiers",
+                });
             }
         }
         Ok(())
@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn validate_rejects_slash_in_node_id() {
         let g = graph_with_node_id("router/inner");
-        let err = g.validate().unwrap_err();
+        let err = g.validate().unwrap_err().to_string();
         assert!(err.contains("router/inner"), "error should name the offending id, got: {}", err);
         assert!(err.contains("'/'"), "error should mention the forbidden char, got: {}", err);
     }
