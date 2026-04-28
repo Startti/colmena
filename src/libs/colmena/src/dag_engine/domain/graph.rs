@@ -50,3 +50,53 @@ pub struct Edge {
     #[serde(default)]
     pub cyclic: Option<bool>,
 }
+
+impl Graph {
+    /// Validates structural invariants the engine depends on.
+    ///
+    /// Currently rejects:
+    /// - Node IDs containing `/` — the engine uses `/` to separate path-qualified
+    ///   `node_id`s in subgraph hierarchies (`subgraph_node/inner_node`). Allowing
+    ///   `/` in user-defined IDs would make the resulting paths ambiguous.
+    pub fn validate(&self) -> Result<(), String> {
+        for node_id in self.nodes.keys() {
+            if node_id.contains('/') {
+                return Err(format!(
+                    "Invalid node id '{}': character '/' is reserved for subgraph path qualifiers",
+                    node_id
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn graph_with_node_id(id: &str) -> Graph {
+        let json = json!({
+            "nodes": {
+                id: { "type": "math", "config": {} }
+            },
+            "edges": []
+        });
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn validate_rejects_slash_in_node_id() {
+        let g = graph_with_node_id("router/inner");
+        let err = g.validate().unwrap_err();
+        assert!(err.contains("router/inner"), "error should name the offending id, got: {}", err);
+        assert!(err.contains("'/'"), "error should mention the forbidden char, got: {}", err);
+    }
+
+    #[test]
+    fn validate_accepts_clean_node_id() {
+        let g = graph_with_node_id("router_inner");
+        assert!(g.validate().is_ok());
+    }
+}
