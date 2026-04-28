@@ -202,27 +202,86 @@ impl DagRunUseCase {
             let mut all_outputs: HashMap<String, Value> = HashMap::new();
             let mut active_queue: VecDeque<String> = VecDeque::new();
             let mut session_id = uuid::Uuid::new_v4().to_string();
+            let mut active_agent_session_id: Option<String> = agent_session_id.clone();
+            let mut parent_session_id_for_save: Option<String> = None;
             let mut execution_history: Vec<(String, String)> = Vec::new();
             let mut global_calls: HashMap<String, u32> = HashMap::new();
             let mut caller_specific_calls: HashMap<String, HashMap<String, u32>> = HashMap::new();
             let mut global_shared_state = serde_json::json!({});
 
-            // Context loader
-            if let Some(id) = resume_session_id {
-                if let Some(repo) = &self.state_repository {
-                    if let Some(state) = repo.get_by_id(&id).await? {
-                        all_outputs = state.all_outputs;
-                        active_queue = state.active_queue;
-                        session_id = state.session_id;
-                        execution_history = state.execution_history;
-                        global_calls = state.global_calls;
-                        caller_specific_calls = state.caller_specific_calls;
-                        global_shared_state = state.global_shared_state;
+            // ── Lifecycle decision (spec §4.1) ─────────────────────────────────────
+            //
+            // Branch 1: explicit session_id provided → direct resume.
+            // Branch 2: only agent_session_id provided → search for SUSPENDED leaf,
+            //           else fresh root run under that chat.
+            // Branch 3: neither → legacy fresh-run path.
+            //
+            match (&resume_session_id, &agent_session_id) {
+                (Some(id), maybe_agent) => {
+                    // Branch 1: direct resume by run UUID.
+                    if let Some(repo) = &self.state_repository {
+                        if let Some(state) = repo.get_by_id(id).await? {
+                            // Conflict check: passed agent must match stored agent (when both present).
+                            if let (Some(passed), Some(stored)) =
+                                (maybe_agent, &state.agent_session_id)
+                            {
+                                if passed != stored {
+                                    Err(DagError::NodeExecution(format!(
+                                        "session_id {} belongs to agent_session_id {} but caller passed {}",
+                                        id, stored, passed
+                                    )))?;
+                                }
+                            }
+
+                            all_outputs = state.all_outputs;
+                            active_queue = state.active_queue;
+                            session_id = state.session_id;
+                            execution_history = state.execution_history;
+                            global_calls = state.global_calls;
+                            caller_specific_calls = state.caller_specific_calls;
+                            global_shared_state = state.global_shared_state;
+                            active_agent_session_id = state.agent_session_id;
+                            parent_session_id_for_save = state.parent_session_id;
+                        } else {
+                            // Row not found — caller knows the id but it's not in the table.
+                            // Treat as fresh start with that id.
+                            session_id = id.clone();
+                            active_agent_session_id = maybe_agent.clone();
+                        }
                     } else {
-                        session_id = id;
+                        session_id = id.clone();
+                        active_agent_session_id = maybe_agent.clone();
                     }
-                } else {
-                    session_id = id;
+                }
+                (None, Some(agent)) => {
+                    // Branch 2: resolve by chat handle.
+                    if let Some(repo) = &self.state_repository {
+                        match repo.find_suspended_leaf(agent).await? {
+                            Some(leaf_id) => {
+                                if let Some(state) = repo.get_by_id(&leaf_id).await? {
+                                    all_outputs = state.all_outputs;
+                                    active_queue = state.active_queue;
+                                    session_id = state.session_id;
+                                    execution_history = state.execution_history;
+                                    global_calls = state.global_calls;
+                                    caller_specific_calls = state.caller_specific_calls;
+                                    global_shared_state = state.global_shared_state;
+                                    active_agent_session_id = state.agent_session_id;
+                                    parent_session_id_for_save = state.parent_session_id;
+                                }
+                            }
+                            None => {
+                                // No suspended leaf — fresh root run under this chat.
+                                active_agent_session_id = Some(agent.clone());
+                            }
+                        }
+                    } else {
+                        active_agent_session_id = Some(agent.clone());
+                    }
+                }
+                (None, None) => {
+                    // Branch 3: pure legacy. session_id stays as a new UUID;
+                    // agent_session_id remains None.
                 }
             }
 
@@ -366,7 +425,7 @@ impl DagRunUseCase {
                 );
                 inputs.insert(
                     "__colmena_agent_session_id".to_string(),
-                    match &agent_session_id {
+                    match &active_agent_session_id {
                         Some(a) => Value::String(a.clone()),
                         None => Value::Null,
                     },
@@ -537,8 +596,8 @@ impl DagRunUseCase {
 
                         let state = DagRunState {
                             session_id: session_id.clone(),
-                            agent_session_id: None,
-                            parent_session_id: None,
+                            agent_session_id: active_agent_session_id.clone(),
+                            parent_session_id: parent_session_id_for_save.clone(),
                             graph_json: serde_json::to_value(&graph).unwrap_or(Value::Null),
                             all_outputs: all_outputs.clone(),
                             global_shared_state: global_shared_state.clone(),
@@ -592,8 +651,8 @@ impl DagRunUseCase {
             if let Some(repo) = &self.state_repository {
                 let state = DagRunState {
                     session_id: session_id.clone(),
-                    agent_session_id: None,
-                    parent_session_id: None,
+                    agent_session_id: active_agent_session_id.clone(),
+                    parent_session_id: parent_session_id_for_save.clone(),
                     graph_json: serde_json::to_value(&graph).unwrap_or(Value::Null),
                     all_outputs: all_outputs.clone(),
                     global_shared_state: global_shared_state.clone(),
