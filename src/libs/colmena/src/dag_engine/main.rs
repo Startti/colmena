@@ -79,6 +79,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let file_content = tokio::fs::read_to_string(&file_path).await?;
                 let graph: colmena::dag_engine::domain::graph::Graph =
                     serde_json::from_str(&file_content)?;
+                graph
+                    .validate()
+                    .map_err(|e| anyhow::anyhow!("Invalid graph: {}", e))?;
 
                 let mut mapper = SseMapper::new();
 

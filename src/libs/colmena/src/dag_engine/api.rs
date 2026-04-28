@@ -30,6 +30,9 @@ pub async fn run_dag(
         // Load and execute the graph
         let file_content = tokio::fs::read_to_string(&file_path).await?;
         let mut graph: Graph = serde_json::from_str(&file_content)?;
+        graph
+            .validate()
+            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Invalid graph: {}", e)))?;
 
         // If an injected payload was provided (e.g. from a previous loop), inject it into start nodes
         if let Some(payload) = inject_payload {
@@ -135,6 +138,9 @@ pub async fn serve_dag(
     // Load the graph
     let file_content = tokio::fs::read_to_string(&file_path).await?;
     let graph: Graph = serde_json::from_str(&file_content)?;
+    graph
+        .validate()
+        .map_err(|e| Box::<dyn std::error::Error>::from(format!("Invalid graph: {}", e)))?;
     let graph_arc = Arc::new(graph);
 
     // Build the Router dynamically

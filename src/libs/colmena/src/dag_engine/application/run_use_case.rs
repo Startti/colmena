@@ -795,6 +795,9 @@ impl SubGraphExecutorPort for DagRunUseCase {
     ) -> Result<Value, DagError> {
         let graph: Graph = serde_json::from_value(graph_json.clone())
             .map_err(|e| DagError::NodeExecution(format!("Invalid sub-graph JSON: {}", e)))?;
+        graph
+            .validate()
+            .map_err(|e| DagError::NodeExecution(format!("Invalid sub-graph: {}", e)))?;
 
         // Mapear globales del hijo a la tabla para el inicio
         if let Some(repo) = &self.state_repository {
