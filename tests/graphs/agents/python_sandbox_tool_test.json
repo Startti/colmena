@@ -49,6 +49,7 @@
               },
               "rows": {
                 "type": "array",
+                "items": { "type": "object" },
                 "required": true,
                 "description": "Lista de objetos a procesar (los productos del HTTP response). Pásala tal cual la recibiste, sin omitir campos."
               }

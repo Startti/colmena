@@ -212,6 +212,13 @@ pub struct NodeSchemaField {
     /// The executor collects LLM params from children and merges them into this container.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub properties: Option<HashMap<String, NodeSchemaField>>,
+
+    /// Item schema for array types. **Required** when `field_type` is `"array"` —
+    /// `parse_node_schema` returns an error if missing. Describes the element type
+    /// the LLM is expected to put in the array (e.g. `{ "type": "object" }` for
+    /// lists of dicts, `{ "type": "string" }` for tag lists).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub items: Option<Box<NodeSchemaField>>,
 }
 
 /// The top-level node_schema value: a flat map of field name → NodeSchemaField.
@@ -219,6 +226,7 @@ pub struct NodeSchemaField {
 pub type NodeSchema = HashMap<String, NodeSchemaField>;
 
 /// Output of parsing a NodeSchema for use by the executor.
+#[derive(Debug)]
 pub struct ParsedNodeSchema {
     /// Values that are always fixed (LLM never sees them).
     /// Key = top-level field name. Value = the fixed Value (string, number, object, etc.).
@@ -245,7 +253,7 @@ pub struct ParsedNodeSchema {
 ///   `param_to_container` (mapped to this container key).
 /// - **LLM-visible top-level field** (no `fixed`, no `properties`): added to `llm_properties`
 ///   at the top level (no container mapping).
-pub fn parse_node_schema(schema: &NodeSchema) -> ParsedNodeSchema {
+pub fn parse_node_schema(schema: &NodeSchema) -> Result<ParsedNodeSchema, String> {
     let mut fixed_values: HashMap<String, Value> = HashMap::new();
     let mut llm_properties: HashMap<String, ParameterProperty> = HashMap::new();
     let mut required_params: Vec<String> = Vec::new();
@@ -334,15 +342,28 @@ pub fn parse_node_schema(schema: &NodeSchema) -> ParsedNodeSchema {
                 prop = prop.with_pattern(pattern.clone());
             }
 
-            // OpenAI's strict tool-schema validator rejects array types without
-            // an `items` schema. Default to `items: { "type": "object" }` —
-            // permissive enough for the LLM to pass arbitrary JSON arrays
-            // (lists of dicts, the common case for piping HTTP/SQL results).
-            if top_field.field_type == "array" && prop.items.is_none() {
-                prop.items = Some(Box::new(ParameterProperty::new(
-                    "object".to_string(),
-                    "Array element".to_string(),
-                )));
+            // Array fields MUST declare items — OpenAI's strict tool-schema
+            // validator rejects array schemas without an `items` clause, and
+            // silently defaulting would hide the mismatch when an author
+            // intended e.g. `array of strings` but the LLM emits objects.
+            // Fail fast with a message that points to the exact remedy.
+            if top_field.field_type == "array" {
+                let items_field = top_field.items.as_ref().ok_or_else(|| {
+                    format!(
+                        "node_schema field '{}' has type 'array' but no 'items' was specified. \
+                         Add e.g. \"items\": {{ \"type\": \"object\" }} for lists of objects, \
+                         or \"items\": {{ \"type\": \"string\" }} for lists of strings.",
+                        top_key
+                    )
+                })?;
+                let mut items_prop = ParameterProperty::new(
+                    items_field.field_type.clone(),
+                    items_field.description.clone().unwrap_or_default(),
+                );
+                if let Some(pattern) = &items_field.pattern {
+                    items_prop = items_prop.with_pattern(pattern.clone());
+                }
+                prop.items = Some(Box::new(items_prop));
             }
 
             llm_properties.insert(top_key.clone(), prop);
@@ -375,12 +396,12 @@ pub fn parse_node_schema(schema: &NodeSchema) -> ParsedNodeSchema {
         param_to_container.insert(effective_key, container_key);
     }
 
-    ParsedNodeSchema {
+    Ok(ParsedNodeSchema {
         fixed_values,
         llm_properties,
         required_params,
         param_to_container,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -396,7 +417,7 @@ mod tests {
         }))
         .unwrap();
 
-        let parsed = parse_node_schema(&schema);
+        let parsed = parse_node_schema(&schema).unwrap();
 
         assert_eq!(parsed.fixed_values.len(), 2);
         assert_eq!(parsed.llm_properties.len(), 0);
@@ -415,7 +436,7 @@ mod tests {
         }))
         .unwrap();
 
-        let parsed = parse_node_schema(&schema);
+        let parsed = parse_node_schema(&schema).unwrap();
 
         assert_eq!(parsed.llm_properties.len(), 2);
         assert_eq!(parsed.required_params.len(), 1);
@@ -439,7 +460,7 @@ mod tests {
         }))
         .unwrap();
 
-        let parsed = parse_node_schema(&schema);
+        let parsed = parse_node_schema(&schema).unwrap();
 
         // base_url is fixed at top level
         assert_eq!(parsed.fixed_values.len(), 2);
@@ -495,7 +516,7 @@ mod tests {
         }))
         .unwrap();
 
-        let parsed = parse_node_schema(&schema);
+        let parsed = parse_node_schema(&schema).unwrap();
 
         // body should be in fixed_values with userId
         assert!(parsed.fixed_values.contains_key("body"));
@@ -522,6 +543,79 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_node_schema_array_requires_items() {
+        // An array field declared without `items` must produce a parse error
+        // with a message that points to the exact remedy.
+        let schema = serde_json::from_value::<NodeSchema>(json!({
+            "rows": {
+                "type": "array",
+                "required": true,
+                "description": "Lista de productos"
+            }
+        }))
+        .unwrap();
+
+        let err = parse_node_schema(&schema).expect_err("array without items must fail");
+        assert!(
+            err.contains("'rows'"),
+            "error must name the field, got: {err}"
+        );
+        assert!(
+            err.contains("'items'") || err.contains("items"),
+            "error must mention items, got: {err}"
+        );
+        assert!(
+            err.contains("\"type\": \"object\"") || err.contains("type\": \"string\""),
+            "error must show example fix, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_node_schema_array_with_items_object() {
+        // Array of objects (the common case for HTTP/SQL result piping).
+        let schema = serde_json::from_value::<NodeSchema>(json!({
+            "rows": {
+                "type": "array",
+                "required": true,
+                "description": "Productos a procesar",
+                "items": { "type": "object" }
+            }
+        }))
+        .unwrap();
+
+        let parsed = parse_node_schema(&schema).unwrap();
+        let prop = parsed.llm_properties.get("rows").unwrap();
+        assert_eq!(prop.property_type, "array");
+        let items = prop
+            .items
+            .as_ref()
+            .expect("items must be set when declared in node_schema");
+        assert_eq!(items.property_type, "object");
+        assert!(parsed.required_params.contains(&"rows".to_string()));
+    }
+
+    #[test]
+    fn test_parse_node_schema_array_with_items_string() {
+        // Array of strings — verifies the items type is propagated, not silently
+        // overridden to "object" the way the previous permissive default did.
+        let schema = serde_json::from_value::<NodeSchema>(json!({
+            "tags": {
+                "type": "array",
+                "required": false,
+                "description": "Etiquetas",
+                "items": { "type": "string", "description": "Una etiqueta" }
+            }
+        }))
+        .unwrap();
+
+        let parsed = parse_node_schema(&schema).unwrap();
+        let prop = parsed.llm_properties.get("tags").unwrap();
+        let items = prop.items.as_ref().unwrap();
+        assert_eq!(items.property_type, "string");
+        assert_eq!(items.description, "Una etiqueta");
+    }
+
+    #[test]
     fn test_parse_node_schema_pattern_passthrough() {
         let schema = serde_json::from_value::<NodeSchema>(json!({
             "departureDate": {
@@ -533,7 +627,7 @@ mod tests {
         }))
         .unwrap();
 
-        let parsed = parse_node_schema(&schema);
+        let parsed = parse_node_schema(&schema).unwrap();
 
         assert_eq!(parsed.llm_properties.len(), 1);
         let prop = parsed.llm_properties.get("departureDate").unwrap();
@@ -569,7 +663,7 @@ mod tests {
         }))
         .unwrap();
 
-        let parsed = parse_node_schema(&schema);
+        let parsed = parse_node_schema(&schema).unwrap();
 
         // url is fixed at top level
         assert!(parsed.fixed_values.contains_key("url"));
@@ -623,7 +717,7 @@ mod tests {
         }))
         .unwrap();
 
-        let parsed = parse_node_schema(&schema);
+        let parsed = parse_node_schema(&schema).unwrap();
 
         // All 4 children should be present (no overwrites)
         assert_eq!(parsed.llm_properties.len(), 4);
@@ -750,7 +844,7 @@ mod tests {
         }))
         .unwrap();
 
-        let parsed = parse_node_schema(&schema);
+        let parsed = parse_node_schema(&schema).unwrap();
 
         // Keys should remain flat (no dot prefix)
         assert_eq!(parsed.llm_properties.len(), 3);

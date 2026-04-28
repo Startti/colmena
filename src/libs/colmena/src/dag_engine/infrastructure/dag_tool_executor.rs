@@ -306,7 +306,12 @@ impl DagToolExecutor {
 
         // BRANCH 0 (HIGHEST PRIORITY): node_schema
         if let Some(schema) = &tool_config.node_schema {
-            let parsed = parse_node_schema(schema);
+            let parsed = parse_node_schema(schema).unwrap_or_else(|e| {
+                panic!(
+                    "Invalid node_schema for tool '{}': {}\nFix the graph configuration and re-run.",
+                    effective_name, e
+                )
+            });
             return ToolDefinition {
                 name: effective_name.to_string(),
                 description: tool_config.description.clone(),
@@ -587,7 +592,9 @@ impl ToolExecutor for DagToolExecutor {
 
         let inputs = if let Some(schema) = tool_cfg.and_then(|c| c.node_schema.as_ref()) {
             // PATH 0 (HIGHEST PRIORITY): node_schema
-            let parsed = parse_node_schema(schema);
+            let parsed = parse_node_schema(schema).map_err(|e| LlmError::InvalidToolCall {
+                reason: format!("Invalid node_schema for tool {}: {}", node_type, e),
+            })?;
             let mut result: HashMap<String, Value> = HashMap::new();
 
             // Seed with all fixed values (will be resolved later)

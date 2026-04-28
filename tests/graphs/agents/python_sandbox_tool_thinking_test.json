@@ -49,6 +49,7 @@
               },
               "rows": {
                 "type": "array",
+                "items": { "type": "object" },
                 "required": true,
                 "description": "Lista de productos a procesar."
               }
