@@ -17,6 +17,7 @@ pub async fn run_dag(
     resume_answer: Option<String>,
     inject_payload: Option<Value>,
     include_extra_info: bool,
+    agent_session_id: Option<String>,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
@@ -80,7 +81,7 @@ pub async fn run_dag(
                 resume_answer.clone(),
                 include_extra_info,
                 None,
-                None,
+                agent_session_id.clone(),
             );
             tokio::pin!(internal_stream);
 
@@ -110,7 +111,7 @@ pub async fn run_dag(
             Ok(final_output)
         } else {
             engine
-                .run_dag(graph, resume_id, resume_answer, include_extra_info)
+                .run_dag(graph, resume_id, resume_answer, include_extra_info, agent_session_id.clone())
                 .await
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
         }
@@ -213,6 +214,8 @@ struct AppState {
 struct ResumePayload {
     session_id: String,
     answer: String,
+    #[serde(default)]
+    agent_session_id: Option<String>,
 }
 
 /// Handler that executes when an HTTP request arrives
@@ -228,6 +231,20 @@ async fn handler_webhook(
     for (key, value) in &headers {
         println!("   Header: {:?}: {:?}", key, value);
     }
+
+    // Resolve agent_session_id: header takes precedence, then body field.
+    let agent_session_id_header = headers
+        .get("x-agent-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let agent_session_id_body = payload
+        .as_object()
+        .and_then(|o| o.get("agent_session_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let agent_session_id = agent_session_id_header.or(agent_session_id_body);
 
     // Check for "Accept: text/event-stream" or Vercel header OR query param
     let is_sse = headers
@@ -287,7 +304,7 @@ async fn handler_webhook(
                     );
                 }
 
-                let internal_stream = engine.execute_stream(current_graph.clone(), None, None, false, None, None);
+                let internal_stream = engine.execute_stream(current_graph.clone(), None, None, false, None, agent_session_id.clone());
                 tokio::pin!(internal_stream);
 
                 while let Some(result) = internal_stream.next().await {
@@ -415,6 +432,7 @@ async fn handler_webhook(
                     current_resume_id.clone(),
                     None,
                     false,
+                    agent_session_id.clone(),
                 )
                 .await
             {
@@ -568,6 +586,13 @@ async fn handler_resume(
 ) -> axum::response::Response {
     println!("🔔 Resume requested for session_id: {}", payload.session_id);
 
+    // Resolve agent_session_id: header takes precedence, then body field.
+    let agent_session_id = headers
+        .get("x-agent-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .or_else(|| payload.agent_session_id.clone());
+
     // Check for "Accept: text/event-stream" or Vercel header
     let is_sse = headers
         .get("accept")
@@ -596,7 +621,7 @@ async fn handler_resume(
                 Some(answer),
                 false,
                 None,
-                None,
+                agent_session_id.clone(),
             );
             tokio::pin!(internal_stream);
 
@@ -643,6 +668,7 @@ async fn handler_resume(
             Some(payload.session_id),
             Some(payload.answer),
             false,
+            agent_session_id.clone(),
         )
         .await
     {

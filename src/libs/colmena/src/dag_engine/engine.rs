@@ -133,6 +133,7 @@ impl ColmenaEngine {
         resume_session_id: Option<String>,
         resume_answer: Option<String>,
         include_extra_info: bool,
+        _agent_session_id: Option<String>,
     ) -> Result<Value, DagError> {
         self.use_case
             .execute(graph, resume_session_id, resume_answer, include_extra_info)

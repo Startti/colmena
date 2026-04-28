@@ -16,6 +16,8 @@ enum Commands {
         #[arg(long, alias = "resume-id")]
         session_id: Option<String>,
         #[arg(long)]
+        agent_session_id: Option<String>,
+        #[arg(long)]
         answer: Option<String>,
         #[arg(long, default_value_t = false)]
         include_extra_info: bool,
@@ -52,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Run {
             file_path,
             session_id,
+            agent_session_id,
             answer,
             include_extra_info,
             verbose,
@@ -87,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // The new active_queue engine natively handles both linear and cyclic graphs
                 let s =
-                    engine.execute_stream(graph, session_id.clone(), answer, include_extra_info, None, None);
+                    engine.execute_stream(graph, session_id.clone(), answer, include_extra_info, None, agent_session_id.clone());
                 let stream = Box::pin(s);
                 tokio::pin!(stream);
 

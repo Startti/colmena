@@ -132,6 +132,7 @@ pub async fn run_dag(
     resume_answer: Option<String>,
     inject_payload: Option<Value>,
     include_extra_info: Option<bool>,
+    agent_session_id: Option<String>,
 ) -> Result<Value> {
     let result = crate::dag_engine::api::run_dag(
         file_path,
@@ -139,6 +140,7 @@ pub async fn run_dag(
         resume_answer,
         inject_payload,
         include_extra_info.unwrap_or(false),
+        agent_session_id,
     )
     .await
     .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;

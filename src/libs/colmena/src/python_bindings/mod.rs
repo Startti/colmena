@@ -271,7 +271,7 @@ impl ColmenaLlm {
 create_exception!(colmena, DagException, PyException);
 
 #[pyfunction]
-#[pyo3(signature = (file_path, resume_id=None, resume_answer=None, inject_payload=None, include_extra_info=false))]
+#[pyo3(signature = (file_path, resume_id=None, resume_answer=None, inject_payload=None, include_extra_info=false, agent_session_id=None))]
 fn run_dag(
     py: Python,
     file_path: String,
@@ -279,6 +279,7 @@ fn run_dag(
     resume_answer: Option<String>,
     inject_payload: Option<pyo3::Bound<'_, pyo3::PyAny>>,
     include_extra_info: bool,
+    agent_session_id: Option<String>,
 ) -> PyResult<String> {
     let inject_payload_val: Option<serde_json::Value> = match inject_payload {
         Some(obj) => Some(
@@ -297,6 +298,7 @@ fn run_dag(
                 resume_answer,
                 inject_payload_val,
                 include_extra_info,
+                agent_session_id,
             )
             .await
             {
