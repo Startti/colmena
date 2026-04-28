@@ -1,4 +1,5 @@
 pub mod postgres_dag_state_repository;
 pub mod postgres_secure_value_repository;
 
+pub use postgres_dag_state_repository::PostgresDagStateRepository;
 pub use postgres_secure_value_repository::PostgresSecureValueRepository;

@@ -16,6 +16,13 @@ impl PostgresDagStateRepository {
         Self { pool }
     }
 
+    /// Returns a reference to the connection pool.
+    ///
+    /// Intended for use in integration tests that need to clean up rows directly.
+    pub fn pool(&self) -> &sqlx::PgPool {
+        &self.pool
+    }
+
     /// Apply schema migrations at startup (idempotent).
     pub async fn migrate(&self) -> Result<(), DagError> {
         // Ensure dag_runs table has full state columns
@@ -94,7 +101,9 @@ fn row_to_task(row: &sqlx::postgres::PgRow) -> DagTask {
 impl DagStateRepository for PostgresDagStateRepository {
     async fn get_by_id(&self, session_id: &str) -> Result<Option<DagRunState>, DagError> {
         let row_opt = sqlx::query(
-            "SELECT session_id, graph_json, all_outputs, status, active_queue, execution_history, global_calls, caller_specific_calls, global_shared_state FROM dag_runs WHERE session_id = $1"
+            "SELECT session_id, agent_session_id, parent_session_id, graph_json, all_outputs, status, \
+                    active_queue, execution_history, global_calls, caller_specific_calls, global_shared_state \
+             FROM dag_runs WHERE session_id = $1"
         )
         .bind(session_id)
         .fetch_optional(&self.pool)
@@ -131,8 +140,8 @@ impl DagStateRepository for PostgresDagStateRepository {
 
                 Ok(Some(DagRunState {
                     session_id: row.get("session_id"),
-                    agent_session_id: None,
-                    parent_session_id: None,
+                    agent_session_id: row.try_get("agent_session_id").ok().flatten(),
+                    parent_session_id: row.try_get("parent_session_id").ok().flatten(),
                     graph_json: row.get("graph_json"),
                     all_outputs,
                     status,
@@ -168,9 +177,16 @@ impl DagStateRepository for PostgresDagStateRepository {
             })?;
 
         sqlx::query(
-            r#"INSERT INTO dag_runs (session_id, graph_json, all_outputs, status, active_queue, execution_history, global_calls, caller_specific_calls, global_shared_state, updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+            r#"INSERT INTO dag_runs (
+                session_id, agent_session_id, parent_session_id,
+                graph_json, all_outputs, status,
+                active_queue, execution_history, global_calls, caller_specific_calls, global_shared_state,
+                updated_at
+               )
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
                ON CONFLICT (session_id) DO UPDATE SET
+                 agent_session_id = EXCLUDED.agent_session_id,
+                 parent_session_id = EXCLUDED.parent_session_id,
                  graph_json = EXCLUDED.graph_json,
                  all_outputs = EXCLUDED.all_outputs,
                  status = EXCLUDED.status,
@@ -182,6 +198,8 @@ impl DagStateRepository for PostgresDagStateRepository {
                  updated_at = NOW()"#
         )
         .bind(&state.session_id)
+        .bind(state.agent_session_id.as_deref())
+        .bind(state.parent_session_id.as_deref())
         .bind(&state.graph_json)
         .bind(&all_outputs_json)
         .bind(&status_str)
@@ -199,10 +217,34 @@ impl DagStateRepository for PostgresDagStateRepository {
 
     async fn find_suspended_leaf(
         &self,
-        _agent_session_id: &str,
+        agent_session_id: &str,
     ) -> Result<Option<String>, DagError> {
-        // TODO(Task 10): implement the real SQL query
-        Ok(None)
+        let rows = sqlx::query(
+            "SELECT session_id FROM dag_runs \
+             WHERE agent_session_id = $1 \
+               AND status = 'SUSPENDED' \
+               AND session_id NOT IN ( \
+                   SELECT parent_session_id FROM dag_runs \
+                    WHERE agent_session_id = $1 AND parent_session_id IS NOT NULL \
+                      AND status = 'SUSPENDED' \
+               )"
+        )
+        .bind(agent_session_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DagError::StateError(format!("Database error on find_suspended_leaf: {}", e)))?;
+
+        match rows.len() {
+            0 => Ok(None),
+            1 => {
+                let sid: String = rows[0].get("session_id");
+                Ok(Some(sid))
+            }
+            n => Err(DagError::StateError(format!(
+                "Found {} concurrent suspended leaves for agent_session_id {} — concurrent leaves are not supported in this design",
+                n, agent_session_id
+            ))),
+        }
     }
 }
 
