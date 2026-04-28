@@ -20,7 +20,7 @@
       "type": "http_request",
       "config": {
         "base_url": "https://dummyjson.com",
-        "endpoint": "/products?limit=30",
+        "endpoint": "/products?limit=10&select=id,title,rating,price,category",
         "method": "GET"
       }
     },
@@ -33,7 +33,7 @@
         "system_message": "Eres un asistente de análisis de datos. Recibes una lista de productos como input. Para cualquier conteo, filtro, o cálculo sobre la lista DEBES usar la tool run_python — no calcules mentalmente. Cuando llames run_python, pasa: (1) el argumento 'rows' con la lista exacta de productos que recibiste, (2) el argumento 'code' con código Python que asigne el resultado a la variable 'output' como diccionario. Después de recibir el resultado de la tool, responde al usuario en lenguaje natural.",
         "temperature": 0.0,
         "stream": false,
-        "max_tokens": 4000,
+        "max_tokens": 8000,
         "tool_configurations": {
           "run_python": {
             "name": "run_python",

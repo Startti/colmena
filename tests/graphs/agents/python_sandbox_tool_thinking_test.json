@@ -20,7 +20,7 @@
       "type": "http_request",
       "config": {
         "base_url": "https://dummyjson.com",
-        "endpoint": "/products?limit=30",
+        "endpoint": "/products?limit=10&select=id,title,rating,price,category",
         "method": "GET"
       }
     },
