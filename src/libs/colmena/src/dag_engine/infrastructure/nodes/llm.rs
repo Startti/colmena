@@ -2,8 +2,8 @@ use crate::colmena_log;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
 use crate::llm::domain::{
-    ConversationKey, LlmConfig, LlmMessage, LlmProvider, LlmStreamPart, NodeIdPath, ProviderKind,
-    SessionId, ToolExecutor,
+    AgentSessionId, ConversationKey, LlmConfig, LlmMessage, LlmProvider, LlmStreamPart,
+    NodeIdPath, ProviderKind, SessionId, ToolExecutor,
 };
 use crate::llm::infrastructure::{ConversationRepositoryFactory, LlmProviderFactory};
 use async_trait::async_trait;
@@ -393,13 +393,36 @@ impl ExecutableNode for LlmNode {
             Some(LLM_DEFAULT_SYSTEM)
         };
 
-        // Thread ID (Optional - for Memory)
-        // Priority: Global Session > Input Override > Config Sync
-        let session_id = inputs
+        // Conversation handle — injected by the engine (Task 14/15).
+        // agent_session_id: present only when the caller passed --agent-session-id.
+        // session_id_str: always present once the engine has injected inputs.
+        // node_id_path_str: path-qualified node id (e.g. "responder" or "ventas/responder").
+        let agent_session_id_str: Option<String> = inputs
+            .get("__colmena_agent_session_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        let session_id_str = inputs
             .get("__colmena_session_id")
             .and_then(|v| v.as_str())
-            .or_else(|| inputs.get("session_id").and_then(|v| v.as_str()))
-            .or_else(|| config.get("session_id").and_then(|v| v.as_str()));
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        let node_id_path_str = inputs
+            .get("__colmena_node_id_path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| session_id_str.clone());
+
+        // Effective conversation key for all memory operations on this node.
+        let conversation_key = ConversationKey {
+            session_id: SessionId(session_id_str.clone()),
+            agent_session_id: agent_session_id_str
+                .as_ref()
+                .map(|a| AgentSessionId(a.clone())),
+            node_id: NodeIdPath(node_id_path_str.clone()),
+        };
 
         // Connection URL (Optional - for Memory Backend)
         let connection_url_raw = inputs
@@ -440,9 +463,9 @@ impl ExecutableNode for LlmNode {
         let mut messages = Vec::new();
         let mut history_exists = false;
 
-        // 2.1 Load History if Thread ID and Connection URL are present
+        // 2.1 Load History if a Connection URL is configured (session_id is always present now).
         let mut repo_instance = None;
-        if let (Some(tid), Some(url_raw)) = (session_id, connection_url_raw) {
+        if let Some(url_raw) = connection_url_raw {
             let connection_url = Self::resolve_env_var(url_raw)?;
             let repo = self
                 .repository_factory
@@ -450,12 +473,7 @@ impl ExecutableNode for LlmNode {
                 .await?;
             repo_instance = Some(repo.clone());
 
-            let tid_key = ConversationKey {
-                session_id: SessionId(tid.to_string()),
-                agent_session_id: None,
-                node_id: NodeIdPath(tid.to_string()),
-            };
-            let conversation = repo.get_by_id(&tid_key).await?;
+            let conversation = repo.get_by_id(&conversation_key).await?;
             // We only need to know if history exists to decide on system message
             history_exists = !conversation.messages.is_empty();
         }
@@ -611,7 +629,7 @@ impl ExecutableNode for LlmNode {
         {
             Some(doc_cfg) => match DocumentRuntime::from_config(&doc_cfg) {
                 Ok(rt) => {
-                    let sid = session_id.unwrap_or("default").to_string();
+                    let sid = session_id_str.clone();
                     Some(Arc::new(DocumentToolsContext {
                         create: rt.create.clone(),
                         apply: rt.apply.clone(),
@@ -633,8 +651,8 @@ impl ExecutableNode for LlmNode {
         let tool_executor = {
             let mut executor = DagToolExecutor::new(registry, tool_configurations);
             // Propagate SecureValueService + session_id so tool calls decrypt secrets.
-            if let (Some(svc), Some(sid)) = (self.secure_value_service.clone(), session_id) {
-                executor = executor.with_secure_values(svc, sid.to_string());
+            if let Some(svc) = self.secure_value_service.clone() {
+                executor = executor.with_secure_values(svc, session_id_str.clone());
             }
             if let Some(ctx) = documents_context.clone() {
                 executor = executor.with_documents(ctx);
@@ -827,11 +845,6 @@ impl ExecutableNode for LlmNode {
             }
         }
 
-        // Use provided session_id or generate unique one for stateless calls
-        let tid = session_id
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
         // Check if streaming is enabled
         let stream_enabled = inputs
             .get("stream")
@@ -919,13 +932,8 @@ impl ExecutableNode for LlmNode {
             };
 
         // Create AgentService parameters
-        let conv_key = ConversationKey {
-            session_id: SessionId(tid.clone()),
-            agent_session_id: None,
-            node_id: NodeIdPath(tid.clone()),
-        };
         let params = crate::llm::application::AgentRunParams {
-            session_id: &conv_key,
+            session_id: &conversation_key,
             prompt: prompt.to_string(),
             messages: Some(messages.clone()),
             config: llm_config,
