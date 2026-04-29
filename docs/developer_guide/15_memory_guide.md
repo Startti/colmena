@@ -15,7 +15,6 @@ Esta guía proporciona ejemplos rápidos para usar memoria persistente en el DAG
   "config": {
     "provider": "openai",
     "api_key": "${OPENAI_API_KEY}",
-    "thread_id": "user_123",
     "connection_url": "sqlite://my_memory.db",
     "prompt": "Hello!"
   }
@@ -37,7 +36,6 @@ OPENAI_API_KEY="sk-..."
   "config": {
     "provider": "openai",
     "api_key": "${OPENAI_API_KEY}",
-    "thread_id": "user_123",
     "connection_url": "${DATABASE_URL}",
     "prompt": "Hello!"
   }
@@ -123,14 +121,15 @@ curl -X POST http://localhost:3000/chat \
 
 ## 🔑 Campos Requeridos para Memoria
 
-Para habilitar memoria en un nodo `llm_call`, necesitas:
+Para habilitar memoria persistente en un nodo `llm_call`, sólo necesitás:
 
-1. **`thread_id`** *(también llamado `session_id` en versiones recientes del código)*: ID único de la conversación. *Nota: algunas versiones antiguas del código lo llaman `thread_id` y otras `session_id`; ambos nombres refieren al mismo campo. El nombre canónico actual en los nodos es `thread_id` en el JSON de configuración, pero la columna en base de datos se llama `session_id`.*
-2. **`connection_url`**: URL de la base de datos
+1. **`connection_url`**: URL de la base de datos donde se guardan los mensajes del historial. Puede venir de:
+   - `config` (estático en el JSON)
+   - `inputs` (dinámico desde otro nodo)
 
-Ambos pueden venir de:
-- `config` (estático en el JSON)
-- `inputs` (dinámico desde otro nodo)
+El identificador con el que se llaveea cada mensaje (`session_id` en la tabla `llm_node_history`) lo deriva el engine automáticamente del run actual — no lo configurás vos en el nodo. Si querés que la conversación persista a través de múltiples runs (caso típico de un chat), usá `agent_session_id` en lugar de intentar fijar el `session_id`. Ver la sección "Agent Session ID — memoria a través de runs" más abajo para detalles.
+
+> **Nota histórica**: Versiones anteriores de la documentación describían un campo `thread_id` configurable en el JSON del nodo. Ese campo nunca fue leído por el código del motor — el `__colmena_session_id` inyectado automáticamente por el engine siempre tenía prioridad. La forma correcta y actual de controlar la memoria entre runs es `agent_session_id`.
 
 ## 🔁 Pool compartido (`ColmenaEngine`)
 
@@ -206,7 +205,7 @@ Los grafos existentes no requieren cambios.
 
 - **SQLite**: Perfecto para desarrollo y testing
 - **PostgreSQL**: Usa en producción para múltiples usuarios
-- **Thread IDs**: Usa IDs únicos por usuario/sesión (ej: `user_${user_id}`)
+- **Agent Session IDs**: Para chats continuos, usa `--agent-session-id` (CLI) o `X-Agent-Session-Id` (HTTP) con un ID único por usuario/sesión (ej: `chat_user_${user_id}`)
 - **Seguridad**: Siempre usa variables de entorno para credenciales y `sslmode=verify-full` en producción
 - **Auto-creación**: Las bases de datos y tablas se crean automáticamente
 
