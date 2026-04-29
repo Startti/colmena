@@ -256,7 +256,7 @@ impl DagRunUseCase {
                 (None, Some(agent)) => {
                     // Branch 2: resolve by chat handle.
                     if let Some(repo) = &self.state_repository {
-                        match repo.find_suspended_leaf(agent).await? {
+                        match repo.find_resume_entry(agent).await? {
                             Some(leaf_id) => {
                                 if let Some(state) = repo.get_by_id(&leaf_id).await? {
                                     all_outputs = state.all_outputs;

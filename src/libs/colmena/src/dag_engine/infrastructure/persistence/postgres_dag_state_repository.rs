@@ -215,7 +215,7 @@ impl DagStateRepository for PostgresDagStateRepository {
         Ok(())
     }
 
-    async fn find_suspended_leaf(
+    async fn find_resume_entry(
         &self,
         agent_session_id: &str,
     ) -> Result<Option<String>, DagError> {
@@ -223,16 +223,18 @@ impl DagStateRepository for PostgresDagStateRepository {
             "SELECT session_id FROM dag_runs \
              WHERE agent_session_id = $1 \
                AND status = 'SUSPENDED' \
-               AND session_id NOT IN ( \
-                   SELECT parent_session_id FROM dag_runs \
-                    WHERE agent_session_id = $1 AND parent_session_id IS NOT NULL \
-                      AND status = 'SUSPENDED' \
+               AND ( \
+                   parent_session_id IS NULL \
+                   OR parent_session_id NOT IN ( \
+                       SELECT session_id FROM dag_runs \
+                        WHERE agent_session_id = $1 AND status = 'SUSPENDED' \
+                   ) \
                )"
         )
         .bind(agent_session_id)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| DagError::StateError(format!("Database error on find_suspended_leaf: {}", e)))?;
+        .map_err(|e| DagError::StateError(format!("Database error on find_resume_entry: {}", e)))?;
 
         match rows.len() {
             0 => Ok(None),
@@ -241,7 +243,7 @@ impl DagStateRepository for PostgresDagStateRepository {
                 Ok(Some(sid))
             }
             n => Err(DagError::StateError(format!(
-                "Found {} concurrent suspended leaves for agent_session_id {} — concurrent leaves are not supported in this design",
+                "Found {} concurrent suspended chains for agent_session_id {} — concurrent chains are not supported in this design",
                 n, agent_session_id
             ))),
         }

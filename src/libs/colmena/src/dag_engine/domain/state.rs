@@ -82,12 +82,20 @@ pub trait DagStateRepository: Send + Sync {
     async fn get_by_id(&self, session_id: &str) -> Result<Option<DagRunState>, DagError>;
     async fn save(&self, state: &DagRunState) -> Result<(), DagError>;
 
-    /// Returns the `session_id` of the deepest SUSPENDED run for a given chat —
-    /// the row that is SUSPENDED and is NOT the parent of any other SUSPENDED row.
+    /// Returns the `session_id` of the run from which to drive a resume for the
+    /// given chat. Specifically: the topmost SUSPENDED row in the suspended
+    /// chain — the SUSPENDED row whose `parent_session_id` is either NULL or
+    /// points to a row that is NOT SUSPENDED.
+    ///
+    /// This is the entry point that, when resumed with the user's answer,
+    /// re-engages the parent's `subgraph` node, which in turn cascades the
+    /// resume down to its SUSPENDED child via `find_suspended_child`. The
+    /// chain unwinds end-to-end in a single user invocation.
+    ///
     /// Returns `None` if no run is currently suspended for that chat.
-    /// Returns `Err` if more than one leaf exists (concurrent suspended branches —
-    /// out of scope for this design; defensive check).
-    async fn find_suspended_leaf(
+    /// Returns `Err` if more than one entry exists (concurrent suspended
+    /// chains under the same chat — out of scope for this design; defensive).
+    async fn find_resume_entry(
         &self,
         agent_session_id: &str,
     ) -> Result<Option<String>, DagError>;

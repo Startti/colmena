@@ -1,5 +1,5 @@
-//! Integration test: find_suspended_leaf returns the deepest SUSPENDED run
-//! for an agent.
+//! Integration test: find_resume_entry returns the topmost SUSPENDED run
+//! in the chain for an agent.
 
 use colmena::dag_engine::domain::state::{DagRunState, DagRunStatus, DagStateRepository};
 use colmena::dag_engine::infrastructure::persistence::PostgresDagStateRepository;
@@ -28,7 +28,7 @@ fn fake_state(
 }
 
 #[tokio::test]
-async fn finds_leaf_in_three_level_tree() {
+async fn finds_topmost_in_three_level_chain() {
     dotenvy::dotenv().ok();
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
@@ -50,8 +50,8 @@ async fn finds_leaf_in_three_level_tree() {
     repo.save(&fake_state(&sub,  Some(chat), Some(&root),    DagRunStatus::Suspended)).await.unwrap();
     repo.save(&fake_state(&subsub, Some(chat), Some(&sub),  DagRunStatus::Suspended)).await.unwrap();
 
-    let leaf = repo.find_suspended_leaf(chat).await.unwrap();
-    assert_eq!(leaf, Some(subsub.clone()));
+    let entry = repo.find_resume_entry(chat).await.unwrap();
+    assert_eq!(entry, Some(root.clone())); // now expects ROOT, not subsub
 
     // Cleanup.
     sqlx::query("DELETE FROM dag_runs WHERE agent_session_id = $1")
@@ -78,8 +78,8 @@ async fn returns_none_when_no_suspended_run() {
     let root = format!("{}_root", chat);
     repo.save(&fake_state(&root, Some(chat), None, DagRunStatus::Completed)).await.unwrap();
 
-    let leaf = repo.find_suspended_leaf(chat).await.unwrap();
-    assert_eq!(leaf, None);
+    let entry = repo.find_resume_entry(chat).await.unwrap();
+    assert_eq!(entry, None);
 
     sqlx::query("DELETE FROM dag_runs WHERE agent_session_id = $1")
         .bind(chat)

@@ -1,0 +1,43 @@
+{
+  "comment": "Test 5 graph: root has a subgraph that internally suspends. After resume, child returns its answer, parent logs it.",
+  "nodes": {
+    "start": {
+      "type": "input",
+      "config": { "msg": "preparando consulta..." }
+    },
+    "inner_subgraph": {
+      "type": "subgraph",
+      "config": {
+        "child_graph_inline": {
+          "nodes": {
+            "step_a": {
+              "type": "input",
+              "config": { "context": "voy a preguntarle al usuario" }
+            },
+            "ask_user": {
+              "type": "suspend",
+              "config": {
+                "question": "¿Confirmás la transferencia de $100?"
+              }
+            },
+            "result_out": {
+              "type": "output",
+              "config": {}
+            }
+          },
+          "edges": [
+            { "from": "step_a", "to": "ask_user" },
+            { "from": "ask_user", "to": "result_out" }
+          ]
+        }
+      }
+    },
+    "final_log": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "start", "to": "inner_subgraph" },
+    { "from": "inner_subgraph", "to": "final_log" }
+  ]
+}
