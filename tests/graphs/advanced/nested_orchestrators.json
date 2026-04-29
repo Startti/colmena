@@ -1,0 +1,105 @@
+{
+  "comment": "Test 6a: orchestrator anidado dentro del agent de otro orchestrator. Sin suspend.",
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "prompt": "Plan a small team meeting: figure out the topic, then write a 2-line agenda."
+      }
+    },
+    "outer_orch": {
+      "type": "orchestrator",
+      "config": {
+        "max_phases": 3,
+        "verbose": false,
+        "include_extra_info": false,
+        "planner": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "system_message": "Break the user's request into exactly ONE task assigned to 'team_leader'."
+        },
+        "agents": {
+          "team_leader": {
+            "description": "Delegates work to specialists via its own internal orchestrator.",
+            "child_graph_inline": {
+              "nodes": {
+                "leader_in": { "type": "input", "config": {} },
+                "leader_orch": {
+                  "type": "orchestrator",
+                  "config": {
+                    "max_phases": 3,
+                    "verbose": false,
+                    "include_extra_info": false,
+                    "planner": {
+                      "provider": "gemini",
+                      "model": "gemini-2.5-flash",
+                      "api_key": "${GEMINI_API_KEY}",
+                      "system_message": "Break the request into exactly ONE task assigned to 'specialist'."
+                    },
+                    "agents": {
+                      "specialist": {
+                        "description": "Writes a 2-line meeting agenda.",
+                        "child_graph_inline": {
+                          "nodes": {
+                            "spec_in": { "type": "input", "config": {} },
+                            "spec_call": {
+                              "type": "llm_call",
+                              "config": {
+                                "provider": "gemini",
+                                "model": "gemini-2.5-flash",
+                                "api_key": "${GEMINI_API_KEY}",
+                                "system_message": "Write exactly 2 lines: agenda for the meeting."
+                              }
+                            },
+                            "spec_out": { "type": "output", "config": {} }
+                          },
+                          "edges": [
+                            { "from": "spec_in", "to": "spec_call" },
+                            { "from": "spec_call", "to": "spec_out" }
+                          ]
+                        }
+                      }
+                    },
+                    "phase_reactor": {
+                      "provider": "gemini",
+                      "model": "gemini-2.5-flash",
+                      "api_key": "${GEMINI_API_KEY}",
+                      "system_message": "Summarize phase results in ONE sentence. Set task_ok=true."
+                    },
+                    "final_reactor": {
+                      "provider": "gemini",
+                      "model": "gemini-2.5-flash",
+                      "api_key": "${GEMINI_API_KEY}",
+                      "system_message": "Final inner answer: brief summary."
+                    }
+                  }
+                },
+                "leader_out": { "type": "output", "config": {} }
+              },
+              "edges": [
+                { "from": "leader_in", "to": "leader_orch" },
+                { "from": "leader_orch", "to": "leader_out" }
+              ]
+            }
+          }
+        },
+        "phase_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "system_message": "Summarize phase results in ONE sentence. Set task_ok=true."
+        },
+        "final_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "system_message": "Final outer answer: combine into a brief, concrete recommendation."
+        }
+      }
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "outer_orch" }
+  ]
+}

@@ -1,0 +1,102 @@
+{
+  "comment": "Test 6b: 2 orchestrators anidados + suspend en el agente mas profundo. Ejercita el cascadeo recursivo a 3 niveles.",
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "prompt": "Plan a meeting and ask the user to confirm the date."
+      }
+    },
+    "outer_orch": {
+      "type": "orchestrator",
+      "config": {
+        "max_phases": 3,
+        "verbose": false,
+        "include_extra_info": false,
+        "planner": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "system_message": "Break the request into exactly ONE task assigned to 'team_leader'. The task is: ask the user to confirm the meeting date."
+        },
+        "agents": {
+          "team_leader": {
+            "description": "Delegates work to a confirmation specialist via its own internal orchestrator.",
+            "child_graph_inline": {
+              "nodes": {
+                "leader_in": { "type": "input", "config": {} },
+                "leader_orch": {
+                  "type": "orchestrator",
+                  "config": {
+                    "max_phases": 3,
+                    "verbose": false,
+                    "include_extra_info": false,
+                    "planner": {
+                      "provider": "gemini",
+                      "model": "gemini-2.5-flash",
+                      "api_key": "${GEMINI_API_KEY}",
+                      "system_message": "Break the request into exactly ONE task assigned to 'confirm_specialist'. The specialist will ask the user."
+                    },
+                    "agents": {
+                      "confirm_specialist": {
+                        "description": "Asks the user a confirmation question via a suspend node.",
+                        "child_graph_inline": {
+                          "nodes": {
+                            "spec_in": { "type": "input", "config": {} },
+                            "ask_user": {
+                              "type": "suspend",
+                              "config": {
+                                "question": "Please confirm: shall we schedule the meeting for Tuesday at 10am?"
+                              }
+                            },
+                            "spec_out": { "type": "output", "config": {} }
+                          },
+                          "edges": [
+                            { "from": "spec_in", "to": "ask_user" },
+                            { "from": "ask_user", "to": "spec_out" }
+                          ]
+                        }
+                      }
+                    },
+                    "phase_reactor": {
+                      "provider": "gemini",
+                      "model": "gemini-2.5-flash",
+                      "api_key": "${GEMINI_API_KEY}",
+                      "system_message": "Summarize phase results in ONE sentence. Set task_ok=true."
+                    },
+                    "final_reactor": {
+                      "provider": "gemini",
+                      "model": "gemini-2.5-flash",
+                      "api_key": "${GEMINI_API_KEY}",
+                      "system_message": "Final inner answer: state whether the user confirmed."
+                    }
+                  }
+                },
+                "leader_out": { "type": "output", "config": {} }
+              },
+              "edges": [
+                { "from": "leader_in", "to": "leader_orch" },
+                { "from": "leader_orch", "to": "leader_out" }
+              ]
+            }
+          }
+        },
+        "phase_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "system_message": "Summarize phase results in ONE sentence. Set task_ok=true."
+        },
+        "final_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "system_message": "Final outer answer: state the user's confirmation result."
+        }
+      }
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "outer_orch" }
+  ]
+}

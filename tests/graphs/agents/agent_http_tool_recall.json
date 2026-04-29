@@ -1,0 +1,55 @@
+{
+  "comment": "Run 2: same agent recalls the post it just created.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/recall",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "What was the title of the blog post you just created? And what was its id?"
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o-mini",
+        "system_message": "You are a blog post writer. Use the create_blog_post tool to create posts. Be concise. After the tool returns, briefly summarize the title and id you got back.",
+        "connection_url": "${DATABASE_URL}",
+        "enabled_tools": [
+          "create_blog_post"
+        ],
+        "tool_configurations": {
+          "create_blog_post": {
+            "name": "create_blog_post",
+            "node_type": "http_request",
+            "description": "Create a new blog post.",
+            "fixed_config": {
+              "base_url": "https://jsonplaceholder.typicode.com",
+              "endpoint": "/posts",
+              "method": "POST",
+              "headers": {
+                "Content-Type": "application/json",
+                "X-Request-ID": "$DYNAMIC"
+              },
+              "body": {
+                "userId": 1,
+                "author": "Fulanito",
+                "title": "$DYNAMIC",
+                "content": "$DYNAMIC"
+              }
+            }
+          }
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}

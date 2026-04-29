@@ -1,0 +1,19 @@
+{
+  "nodes": {
+    "chat": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o-mini",
+        "system_message": "You are a helpful assistant. Remember everything the user tells you.",
+        "connection_url": "${DATABASE_URL}",
+        "prompt": "What is my favorite color, and what is my profession?"
+      }
+    },
+    "out": { "type": "log" }
+  },
+  "edges": [
+    { "from": "chat", "to": "out" }
+  ]
+}
