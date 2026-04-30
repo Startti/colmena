@@ -627,7 +627,7 @@ impl ExecutableNode for LlmNode {
             .cloned()
             .or_else(|| config.get("documents").cloned())
         {
-            Some(doc_cfg) => match DocumentRuntime::from_config(&doc_cfg) {
+            Some(doc_cfg) => match DocumentRuntime::from_config(&doc_cfg).await {
                 Ok(rt) => {
                     let sid = session_id_str.clone();
                     Some(Arc::new(DocumentToolsContext {
@@ -939,7 +939,7 @@ impl ExecutableNode for LlmNode {
             config: llm_config,
             tools,
             tool_executor: &tool_executor,
-            max_iterations: Some(10), // Max iterations
+            max_iterations: Some(50), // Max iterations
             on_token,
         };
 

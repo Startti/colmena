@@ -453,24 +453,31 @@
     },
 
     "python_script": {
-      "summary": "Run a Python snippet as a tool. Two patterns: (1) Fixed code + LLM provides input variables. (2) LLM generates the code itself — use sandbox_mode: 'restricted' to validate it safely.",
+      "summary": "Run a Python snippet as a tool. Two patterns: (A) Fixed code + LLM provides input variables. (B) LLM generates the code itself — use sandbox_mode: 'restricted' to validate it safely.",
+      "see_also": "docs/developer_guide/26_python_node.md — full guide with architecture, threading model, troubleshooting.",
+      "reserved_keys": {
+        "description": "These three keys are consumed as node configuration and are NEVER injected as Python variables. Every other key in the schema becomes a global variable in the script.",
+        "keys": ["code", "sandbox_mode", "sandbox_timeout_secs"]
+      },
       "special_behaviors": [
-        "All inputs except 'code', 'sandbox_mode', and 'sandbox_timeout_secs' are injected as Python variables.",
-        "The script must assign its result to 'output'. Prefer dict output: output = {'count': 5, 'ids': [1,2,3]}.",
-        "When sandbox_mode is 'restricted': imports are validated against a whitelist; open/exec/eval/compile are blocked; execution is capped at sandbox_timeout_secs.",
-        "On sandbox violation the node returns an error string the LLM can read and retry with corrected code.",
-        "Markdown code-block wrappers (```python ... ```) are stripped automatically."
+        "All inputs except the reserved keys ('code', 'sandbox_mode', 'sandbox_timeout_secs') are injected as Python global variables.",
+        "The script must assign its result to a variable named 'output'. Prefer a dict: output = {'count': 5, 'ids': [1,2,3]}. Returning null is allowed by simply not assigning 'output'.",
+        "When sandbox_mode is 'restricted': imports are validated against a whitelist (math, json, re, datetime, collections, itertools, functools, string, decimal, statistics); banned builtins (open, exec, eval, compile, __import__) are blocked; execution is capped at sandbox_timeout_secs (default 10s).",
+        "When sandbox_mode is 'none' (default): full Python access, no AST check, no timeout. Only use for trusted code, never for LLM-authored code.",
+        "On sandbox violation the node returns an error string ('SandboxViolation: ...') the LLM can read and retry with corrected code. SyntaxError is also surfaced.",
+        "Markdown code-block wrappers (```python ... ```) at the start/end of the code are stripped automatically — safe to feed raw LLM output into the 'code' field.",
+        "JSON objects/arrays passed via inputs become Python dicts/lists. Access with item['key'], not item.key."
       ],
       "examples": {
         "fixed_code_llm_provides_variables": {
-          "description": "LLM provides a string; the script (fixed) transforms it. LLM never sees the code.",
+          "description": "Pattern A — LLM provides a string; the script (fixed) transforms it. LLM never sees the code.",
           "tool_configurations_entry": {
             "word_count": {
               "name": "word_count",
               "description": "Contar las palabras en un texto.",
               "node_type": "python_script",
               "node_schema": {
-                "sandbox_mode": { "type": "string", "fixed": "restricted" },
+                "sandbox_mode": { "type": "string", "fixed": "restricted", "valid_values": ["none", "restricted"] },
                 "code":         { "type": "string", "fixed": "output = {'count': len(text.split())}" },
                 "text":         { "type": "string", "required": true, "description": "Texto a analizar." }
               }
@@ -478,14 +485,14 @@
           }
         },
         "llm_generates_code": {
-          "description": "LLM writes Python code AND passes the data to process as a tool argument. The LLM has already seen the data in a previous tool call (e.g. an HTTP response in its message history) and now passes it back along with the code. sandbox_mode is fixed so the LLM cannot weaken it. The script accesses 'rows' as a Python variable (from the LLM-supplied tool argument).",
+          "description": "Pattern B — LLM writes Python code AND passes the data to process as a tool argument. The LLM has already seen the data in a previous tool call (e.g. an HTTP response in its message history) and now passes it back along with the code. sandbox_mode is fixed so the LLM cannot weaken it. The script accesses 'rows' as a Python variable (from the LLM-supplied tool argument).",
           "tool_configurations_entry": {
             "run_python": {
               "name": "run_python",
               "description": "Ejecuta código Python para procesar una lista de datos que tú mismo provees. Pasa la lista en el argumento 'rows' y el código en 'code'. Asigna el resultado a 'output' como diccionario. Ejemplo: output = {'active': len([r for r in rows if r['stock'] > 0])}.",
               "node_type": "python_script",
               "node_schema": {
-                "sandbox_mode":         { "type": "string", "fixed": "restricted" },
+                "sandbox_mode":         { "type": "string", "fixed": "restricted", "valid_values": ["none", "restricted"] },
                 "sandbox_timeout_secs": { "type": "number", "fixed": 10 },
                 "code": {
                   "type": "string",
@@ -503,10 +510,35 @@
           "notes": [
             "In the current architecture, upstream node outputs do NOT auto-flow into a tool call. The LLM must include the data as a tool argument. This means the LLM has already seen the raw data in a previous turn — token cost is the trade-off for this minimal sandbox feature.",
             "For token-efficient tool-to-tool piping (LLM never sees raw data), see the backlog: docs/superpowers/specs/python-tool-ideas-backlog.md.",
-            "Reserved keys (code, sandbox_mode, sandbox_timeout_secs) are the python_node config — everything else in the schema (e.g. 'rows') becomes a Python variable in the script."
+            "Reserved keys (code, sandbox_mode, sandbox_timeout_secs) are the python_node config — everything else in the schema (e.g. 'rows') becomes a Python variable in the script.",
+            "Always pin sandbox_mode and sandbox_timeout_secs with 'fixed' so the LLM cannot weaken them. Always describe the allowed-imports list in the 'code' description so the LLM stays inside the whitelist on the first try."
           ]
+        },
+        "fixed_logic_with_secret_constants": {
+          "description": "Variant of Pattern A — a fixed transform that uses constants the LLM should never see. Put the secret constants directly in 'code' as 'fixed', and only expose the user-facing argument.",
+          "tool_configurations_entry": {
+            "score_lead": {
+              "name": "score_lead",
+              "description": "Compute a normalized lead score from a raw value 0-100.",
+              "node_type": "python_script",
+              "node_schema": {
+                "sandbox_mode": { "type": "string", "fixed": "restricted" },
+                "code": {
+                  "type": "string",
+                  "fixed": "WEIGHT = 0.42\nBIAS = 7.5\noutput = {'score': max(0, min(100, raw * WEIGHT + BIAS))}"
+                },
+                "raw": { "type": "number", "required": true, "description": "Valor crudo entre 0 y 100." }
+              }
+            }
+          }
         }
-      }
+      },
+      "tips": [
+        "Prefer Pattern A when the transform is deterministic and known at design time. The LLM cannot break it.",
+        "Use Pattern B only when the transformation is open-ended (filtering, ad-hoc aggregation, JSON reshaping). Always fix sandbox_mode='restricted'.",
+        "For tools that need richer Python (numpy, pandas, requests) the python_script node is not the right tool — wrap your service in HTTP and use http_request as a tool.",
+        "Test sandboxed graphs locally with: cargo run --bin dag_engine -- run tests/graphs/agents/python_sandbox_tool_test.json"
+      ]
     },
 
     "math_nodes": {

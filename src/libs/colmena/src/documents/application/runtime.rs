@@ -20,6 +20,8 @@ use crate::documents::domain::{ArtifactStore, IRRenderer, IRValidator, IdGenerat
 use crate::documents::infrastructure::ids::UlidIdGenerator;
 use crate::documents::infrastructure::render::{ExcelRenderer, WordRenderer};
 use crate::documents::infrastructure::storage::LocalFsStore;
+#[cfg(feature = "gcs")]
+use crate::documents::infrastructure::storage::GcsArtifactStore;
 use crate::documents::infrastructure::validation::{ExcelValidator, WordValidator};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -53,7 +55,7 @@ impl DocumentRuntime {
     ///
     /// Unknown fields are ignored so future config can grow without breaking
     /// existing graphs.
-    pub fn from_config(config: &Value) -> Result<Arc<Self>, String> {
+    pub async fn from_config(config: &Value) -> Result<Arc<Self>, String> {
         let backend = config
             .get("storage_backend")
             .and_then(|v| v.as_str())
@@ -76,10 +78,29 @@ impl DocumentRuntime {
                 Arc::new(LocalFsStore::new(&root))
             }
             "gcs" => {
-                return Err(
-                    "storage_backend `gcs` is not yet implemented (Block B); use `localfs`"
-                        .into(),
-                );
+                #[cfg(feature = "gcs")]
+                {
+                    let bucket = config
+                        .get("gcs_bucket")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            "storage_backend `gcs` requires `gcs_bucket` in config".to_string()
+                        })?;
+                    let prefix = config
+                        .get("gcs_prefix")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("colmena/documents");
+                    let gcs = GcsArtifactStore::new(bucket, prefix).await?;
+                    Arc::new(gcs)
+                }
+                #[cfg(not(feature = "gcs"))]
+                {
+                    return Err(
+                        "storage_backend `gcs` requires the `gcs` feature flag — \
+                         rebuild with `--features gcs`"
+                            .into(),
+                    );
+                }
             }
             other => {
                 return Err(format!(
@@ -154,28 +175,29 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    #[test]
-    fn from_config_defaults_to_localfs() {
+    #[tokio::test]
+    async fn from_config_defaults_to_localfs() {
         let tmp = tempdir().unwrap();
         let cfg = json!({"storage_root": tmp.path().to_str().unwrap()});
-        let rt = DocumentRuntime::from_config(&cfg).unwrap();
+        let rt = DocumentRuntime::from_config(&cfg).await.unwrap();
         assert!(Arc::strong_count(&rt) >= 1);
     }
 
-    #[test]
-    fn from_config_rejects_gcs_until_block_b() {
+    #[cfg(not(feature = "gcs"))]
+    #[tokio::test]
+    async fn from_config_rejects_gcs_without_feature() {
         let cfg = json!({"storage_backend": "gcs"});
-        let err = match DocumentRuntime::from_config(&cfg) {
+        let err = match DocumentRuntime::from_config(&cfg).await {
             Err(e) => e,
-            Ok(_) => panic!("expected error for gcs backend"),
+            Ok(_) => panic!("expected error for gcs backend without feature"),
         };
-        assert!(err.contains("not yet implemented"));
+        assert!(err.contains("feature flag"), "got: {err}");
     }
 
-    #[test]
-    fn from_config_rejects_unknown_backend() {
+    #[tokio::test]
+    async fn from_config_rejects_unknown_backend() {
         let cfg = json!({"storage_backend": "s3"});
-        let err = match DocumentRuntime::from_config(&cfg) {
+        let err = match DocumentRuntime::from_config(&cfg).await {
             Err(e) => e,
             Ok(_) => panic!("expected error for unknown backend"),
         };
@@ -186,7 +208,7 @@ mod tests {
     async fn runtime_creates_and_reads_document() {
         let tmp = tempdir().unwrap();
         let cfg = json!({"storage_root": tmp.path().to_str().unwrap()});
-        let rt = DocumentRuntime::from_config(&cfg).unwrap();
+        let rt = DocumentRuntime::from_config(&cfg).await.unwrap();
 
         use crate::documents::application::create_document::CreateDocumentInput;
         use crate::documents::application::read_document::ReadDocumentInput;

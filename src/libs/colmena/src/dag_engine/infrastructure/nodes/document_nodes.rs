@@ -44,18 +44,17 @@ fn resolve_session_id(inputs: &NodeInputs, config: &Value) -> SessionId {
     SessionId::new(id)
 }
 
-fn build_runtime(
+async fn build_runtime(
     cell: &OnceCell<Arc<DocumentRuntime>>,
     config: &Value,
 ) -> Result<Arc<DocumentRuntime>, Box<dyn StdError + Send + Sync>> {
-    let rt = cell.get_or_try_init(|| {
-        std::future::ready(DocumentRuntime::from_config(config).map_err(DocNodeError::Config))
-    });
-    // `OnceCell::get_or_try_init` returns a future; we need to block on it
-    // synchronously since this helper is called from `async` contexts where
-    // we already have a runtime. The future resolves immediately because
-    // `from_config` is not async.
-    let rt = futures::executor::block_on(rt)?;
+    let rt = cell
+        .get_or_try_init(|| async {
+            DocumentRuntime::from_config(config)
+                .await
+                .map_err(DocNodeError::Config)
+        })
+        .await?;
     Ok(rt.clone())
 }
 
@@ -112,7 +111,7 @@ impl ExecutableNode for DocumentCreateNode {
         _state: &mut Value,
         _observer: Option<Arc<dyn ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
-        let runtime = build_runtime(&self.runtime, config)?;
+        let runtime = build_runtime(&self.runtime, config).await?;
 
         let kind_raw = inputs
             .get("kind")
@@ -239,7 +238,7 @@ impl ExecutableNode for DocumentEditNode {
         _state: &mut Value,
         _observer: Option<Arc<dyn ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
-        let runtime = build_runtime(&self.runtime, config)?;
+        let runtime = build_runtime(&self.runtime, config).await?;
 
         let artifact_id = inputs
             .get("artifact_id")
@@ -348,7 +347,7 @@ impl ExecutableNode for DocumentReadNode {
         _state: &mut Value,
         _observer: Option<Arc<dyn ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
-        let runtime = build_runtime(&self.runtime, config)?;
+        let runtime = build_runtime(&self.runtime, config).await?;
 
         let artifact_id = inputs
             .get("artifact_id")

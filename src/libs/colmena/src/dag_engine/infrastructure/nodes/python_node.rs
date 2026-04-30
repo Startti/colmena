@@ -186,30 +186,41 @@ impl ExecutableNode for PythonNode {
     fn schema(&self) -> Value {
         json!({
             "name": "python_script",
-            "description": "Executes Python code. Code can be provided via input 'code' or config 'code'. Inputs are injected as variables. Assign result to variable 'output'.",
+            "description": "Executes Python code. Code can be provided via input 'code' or config 'code' (input takes priority). Non-reserved inputs are injected as Python variables. The script must assign its result to a variable named 'output'.",
             "config": {
                 "code": {
                     "type": "string",
-                    "description": "Python script to execute (fallback if not in inputs)"
+                    "description": "Python script to execute (fallback if 'code' is not present in inputs)."
                 },
                 "sandbox_mode": {
                     "type": "string",
-                    "description": "'none' (default) or 'restricted'. Restricted mode validates imports and builtins via AST check and enforces a timeout."
+                    "description": "'none' (default) or 'restricted'. In 'restricted' mode the code is validated via AST: only whitelisted imports are allowed (math, json, re, datetime, collections, itertools, functools, string, decimal, statistics) and banned builtins (open, exec, eval, compile, __import__) are blocked. A timeout is also enforced."
                 },
                 "sandbox_timeout_secs": {
                     "type": "number",
-                    "description": "Max execution seconds in restricted mode. Default 10."
+                    "description": "Max execution seconds in 'restricted' mode. Default 10. Ignored when sandbox_mode is 'none'."
                 }
             },
             "inputs": {
                 "code": {
                     "type": "string",
-                    "description": "Python script to execute (optional, overrides config)"
+                    "description": "Reserved key. Python script to execute (overrides config.code). NOT injected as a Python variable."
                 },
-                "description": "Key-value pairs injected as global variables (sandbox_mode and sandbox_timeout_secs are reserved)"
+                "sandbox_mode": {
+                    "type": "string",
+                    "description": "Reserved key. Overrides config.sandbox_mode for this execution. NOT injected as a Python variable."
+                },
+                "sandbox_timeout_secs": {
+                    "type": "number",
+                    "description": "Reserved key. Overrides config.sandbox_timeout_secs for this execution. NOT injected as a Python variable."
+                },
+                "<any_key>": {
+                    "type": "any",
+                    "description": "Any input key OTHER than the reserved keys ('code', 'sandbox_mode', 'sandbox_timeout_secs') is injected into the script as a global Python variable. JSON objects/arrays are converted to Python dicts/lists."
+                }
             },
             "outputs": {
-                "output": "The value of the 'output' variable from the script"
+                "output": "The value of the Python 'output' variable after execution. Returns null if 'output' is not defined."
             }
         })
     }
