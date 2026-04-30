@@ -1,129 +1,182 @@
 # Colmena — Database Schema Reference
 
-All tables are created by versioned migrations in
-`src/libs/colmena/migrations/postgres/` and applied automatically at engine
-startup via `sqlx::migrate!()`. The migration runner uses the `_sqlx_migrations`
-system table to track which migrations have been applied; it is idempotent and
-safe to run on an already-initialized database.
+Colmena persists state in PostgreSQL (recommended) and supports SQLite as a
+lightweight alternative for the LLM conversation history. There are **two
+families of tables**:
+
+1. **Engine tables** — created by versioned migrations under
+   `src/libs/colmena/migrations/{postgres,sqlite}/`, applied at engine startup
+   via `sqlx::migrate!()` from [`engine.rs`](../../src/libs/colmena/src/dag_engine/engine.rs)
+   and the LLM `ConversationRepositoryFactory`
+   ([`repository_factory.rs`](../../src/libs/colmena/src/llm/infrastructure/persistence/repository_factory.rs)).
+   The migration runner uses the `_sqlx_migrations` system table to track
+   applied versions; it is idempotent and `ignore_missing` is enabled so the
+   engine boots cleanly against databases with old/consolidated history.
+2. **Sandbox tables** — created lazily on first use by the SQL node
+   infrastructure (`PgRegistryAdapter::ensure_schema()`), inside the
+   configurable sandbox schema (default: `sandbox`).
 
 ## Migration files
 
+All files live under `src/libs/colmena/migrations/`.
+
+### PostgreSQL (`migrations/postgres/`)
+
 | File | Purpose |
 |------|---------|
-| `20240101000000_initial_schema.sql` | Creates `llm_node_history`, `dag_runs` (base columns), `dag_task_memory`, `dag_phase_summaries` |
-| `20260425000001_dag_runs_state_columns.sql` | Adds 5 JSONB execution-state columns to `dag_runs` |
-| `20260425000002_secure_value_mappings.sql` | Enables `pgcrypto`, creates `secure_value_mappings` |
-| `20260428000001_dag_runs_agent_session_id.sql` | Adds `agent_session_id`, `parent_session_id` columns and indices to `dag_runs` |
-| `20260428000002_llm_history_agent_and_node.sql` | Adds `agent_session_id`, `node_id` columns and indices to `llm_node_history` |
+| `20240101000000_initial_schema.sql` | Drops legacy `chat_messages`, creates `llm_node_history`, `dag_runs` (base columns), `dag_task_memory`, `dag_phase_summaries` |
+| `20260425000001_dag_runs_state_columns.sql` | Adds the 5 JSONB execution-state columns to `dag_runs` (`active_queue`, `execution_history`, `global_calls`, `caller_specific_calls`, `global_shared_state`). Uses `ADD COLUMN IF NOT EXISTS` so it is safe on already-upgraded DBs |
+| `20260425000002_secure_value_mappings.sql` | Enables the `pgcrypto` extension and creates `secure_value_mappings` |
+| `20260428000001_dag_runs_agent_session_id.sql` | Adds `agent_session_id`, `parent_session_id` columns and 3 indices to `dag_runs` |
+| `20260428000002_llm_history_agent_and_node.sql` | Adds `agent_session_id`, `node_id` columns and 2 composite indices to `llm_node_history` |
 
-*SQLite tiene su propia migración espejo `20260428000001_llm_history_agent_and_node.sql` para las columnas de `llm_node_history`. SQLite no tiene tabla `dag_runs` — esa funcionalidad es exclusiva de PostgreSQL.*
+### SQLite (`migrations/sqlite/`)
+
+| File | Purpose |
+|------|---------|
+| `20240101000000_create_chat_messages.sql` | Drops legacy `chat_messages`, creates `llm_node_history` (TEXT-typed mirror of the Postgres table) |
+| `20260303000000_create_dag_task_memory.sql` | Creates the SQLite mirror of `dag_task_memory` (base columns only) |
+| `20260408000000_add_is_bridge_to_dag_task.sql` | Adds the missing `phase`, `parallel`, `context`, and `is_bridge` columns. SQLite does NOT support `ADD COLUMN IF NOT EXISTS`, so this file must only be applied on fresh schemas |
+| `20260428000001_llm_history_agent_and_node.sql` | Mirrors the Postgres llm-history migration: adds `agent_session_id`, `node_id`, and the two composite indices |
+
+> **SQLite scope**: SQLite is supported only for `llm_node_history` and
+> `dag_task_memory`. The DAG state machine (`dag_runs`, `dag_phase_summaries`,
+> `secure_value_mappings`) and the SQL sandbox tables are PostgreSQL-only —
+> features that depend on them (resume after suspend, secure values, the SQL
+> node's function registry) require a Postgres internal database.
+
+### Migration scope: where each set runs
+
+The same `migrations/postgres/` directory is applied in two places:
+
+| Database role | When migrated | Migrations applied |
+|---------------|---------------|--------------------|
+| **Internal database** (`DATABASE_URL`, set in `EngineConfig.internal_database_url`) | Once at engine startup (`ColmenaEngine::new`) | All Postgres migrations |
+| **External LLM database** (any `connection_url` configured on an `llm_call` node) | Lazily when the first `LlmConversationRepository` is built for that URL | All Postgres migrations (or all SQLite migrations if the URL is `sqlite://...`) |
+
+In practice this means *any* database the engine touches will end up with the
+full table set, but only the **internal** database is actually read from for
+DAG state, tasks, phase summaries, and secure values. External databases will
+typically only see writes to `llm_node_history`.
 
 ---
 
-## Tables
+## Engine tables
 
 ### `llm_node_history`
 
-Stores every message exchanged in an LLM conversation. One row per message.
-A conversation is identified by `session_id` (the `thread_id` configured on an
-`llm_call` node). Rows are ordered by `created_at` and loaded in full when
-the node needs to send conversation history to a provider.
+Stores every message exchanged in an LLM conversation. **One row per message.**
+Rows are loaded in full when an `llm_call` node needs to send conversation
+history to a provider, and ordered chronologically by `created_at`.
 
-| Column | Type | Nullable | Default | Description |
-|--------|------|----------|---------|-------------|
-| `id` | `UUID` | NO | `gen_random_uuid()` | Unique message identifier |
-| `session_id` | `TEXT` | NO | — | Conversation thread identifier (maps to `thread_id`/`session_id` in node config) |
-| `agent_session_id` | `TEXT` | YES | — | Chat handle. Set when the engine run carries an `agent_session_id`; NULL otherwise. |
-| `node_id` | `TEXT` | YES | — | Path-qualified identifier of the `llm_call` node that wrote this row (e.g. `"router"` or `"ventas/responder"`). NULL for pre-migration rows. |
-| `role` | `TEXT` | NO | — | Message author: `system`, `user`, `assistant`, or `tool` |
-| `content` | `TEXT` | NO | — | Message text body |
-| `tool_call_id` | `TEXT` | YES | — | Provider-assigned ID linking a `tool` message back to the `assistant` tool call that requested it |
-| `tool_calls` | `JSONB` | YES | — | Array of `ToolCall` objects serialized from an assistant response (present when role = `assistant` and the model requested tool execution) |
-| `created_at` | `TIMESTAMPTZ` | NO | `NOW()` | Wall-clock time when the message was appended |
+A conversation is identified by the tuple `(agent_session_id, node_id)`
+(post-migration, primary read path) or `(session_id, node_id)` (legacy
+fallback). See **Read semantics** below.
+
+| Column | Postgres type | SQLite type | Nullable | Default | Description |
+|--------|---------------|-------------|----------|---------|-------------|
+| `id` | `UUID` | `TEXT` | NO | `gen_random_uuid()` (PG only) | Unique message identifier (application-generated UUID on SQLite) |
+| `session_id` | `TEXT` | `TEXT` | NO | — | Conversation thread identifier (the node-config `thread_id` / `session_id`) |
+| `agent_session_id` | `TEXT` | `TEXT` | YES | — | Chat-scoped handle. Set when the engine run carries an `agent_session_id`; NULL otherwise |
+| `node_id` | `TEXT` | `TEXT` | YES | — | Path-qualified identifier of the `llm_call` node that wrote this row (e.g. `"router"` or `"orchestrator/sales/responder"`). NULL for pre-migration rows |
+| `role` | `TEXT` | `TEXT` | NO | — | Message author: `system`, `user`, `assistant`, or `tool` |
+| `content` | `TEXT` | `TEXT` | NO | — | Message text body |
+| `tool_call_id` | `TEXT` | `TEXT` | YES | — | Provider-assigned ID linking a `tool` message back to the `assistant` tool call that requested it |
+| `tool_calls` | `JSONB` | `TEXT` | YES | — | Array of `ToolCall` objects serialized from an assistant response (present when `role = assistant` and the model requested tool execution). On SQLite the JSON is stored as a text blob |
+| `created_at` | `TIMESTAMPTZ` | `TEXT` | NO | `NOW()` (PG) / app-set ISO-8601 (SQLite) | Wall-clock time when the message was appended |
 
 **Indexes**
-- `idx_llm_node_history_session_id` on `(session_id)` — fast conversation load
+
+- `idx_llm_node_history_session_id` on `(session_id)` — legacy conversation load
 - `idx_llm_node_history_created_at` on `(created_at)` — chronological ordering
-- `idx_llm_history_agent_node` on `(agent_session_id, node_id, created_at)` — primary read path when an agent_session_id is present
+- `idx_llm_history_agent_node` on `(agent_session_id, node_id, created_at)` — primary read path when an `agent_session_id` is present
 - `idx_llm_history_session_node` on `(session_id, node_id, created_at)` — fallback for legacy reads
 
-**Read semantics:**
+**Read semantics**
 
-- When the run carries an `agent_session_id`, reads filter by `(agent_session_id, node_id)` —
-  history persists across multiple runs of the same chat.
-- When `agent_session_id IS NULL` (legacy mode), reads fall back to `(session_id, node_id)` —
-  history is scoped to a single run.
+- When the run carries an `agent_session_id`, reads filter by
+  `(agent_session_id, node_id)` — history persists across multiple runs of the
+  same chat.
+- When `agent_session_id IS NULL` (legacy mode), reads fall back to
+  `(session_id, node_id)` — history is scoped to a single run.
 - Pre-migration rows where `node_id IS NULL` are excluded from new reads.
 
-Writes always include `session_id`, `node_id`, and `agent_session_id` (when set) so the
-row is fully attributed.
+**Write semantics**: writes always include `session_id`, `node_id`, and
+`agent_session_id` (when set) so each row is fully attributed.
 
 ---
 
-### `dag_runs`
+### `dag_runs`  *(PostgreSQL only)*
 
-Stores the complete execution state of one DAG run. One row per `session_id`.
-The row is upserted on every state transition (node start, suspend, complete).
-Used by the suspend/resume mechanism to reconstruct execution state after a
-HITL (Human-in-the-Loop) pause or process restart.
+Stores the complete execution state of one DAG run. **One row per
+`session_id`.** The row is upserted on every state transition (node start,
+suspend, complete) by `PostgresDagStateRepository`. It powers the
+suspend/resume mechanism, allowing the engine to reconstruct the in-flight
+execution after a HITL (Human-in-the-Loop) pause or a process restart.
 
 | Column | Type | Nullable | Default | Description |
 |--------|------|----------|---------|-------------|
 | `session_id` | `VARCHAR(255)` | NO | — | **Primary key.** Unique run identifier passed to the engine at startup |
-| `agent_session_id` | `VARCHAR(255)` | YES | — | Chat / conversation handle. Groups multiple runs (and their subgraph children) under the same external chat session. NULL for legacy runs that did not opt in. |
-| `parent_session_id` | `VARCHAR(255)` | YES | — | When this row is a subgraph child, the parent run's `session_id`. NULL for root runs. |
-| `graph_json` | `JSONB` | NO | — | Complete DAG graph definition as submitted to the engine |
+| `agent_session_id` | `VARCHAR(255)` | YES | — | Chat / conversation handle. Groups multiple runs (and their subgraph children) under the same external chat session. NULL for legacy runs that did not opt in |
+| `parent_session_id` | `VARCHAR(255)` | YES | — | When this row is a subgraph child, the parent run's `session_id`. NULL for root runs |
+| `graph_json` | `JSONB` | NO | — | Complete DAG graph definition as submitted to the engine — the source of truth used when resuming |
 | `all_outputs` | `JSONB` | NO | — | `HashMap<node_id, output_value>` — accumulated outputs from every node that has run |
 | `status` | `VARCHAR(50)` | NO | — | Run lifecycle state: `RUNNING`, `SUSPENDED`, `COMPLETED`, or `FAILED` |
-| `active_queue` | `JSONB` | NO | `[]` | `VecDeque<node_id>` — nodes still waiting to execute (serialized as a JSON array) |
-| `execution_history` | `JSONB` | NO | `[]` | `Vec<[caller_id, target_id]>` — ordered log of every node invocation |
-| `global_calls` | `JSONB` | NO | `{}` | `HashMap<node_id, count>` — total number of times each node has been called, used for global call-limit checks |
-| `caller_specific_calls` | `JSONB` | NO | `{}` | `HashMap<caller_id, HashMap<target_id, count>>` — per-caller invocation counts, used for caller-scoped call limits |
-| `global_shared_state` | `JSONB` | NO | `{}` | Persistent whiteboard object readable and writable by all nodes in the run |
+| `active_queue` | `JSONB` | NO | `'[]'::jsonb` | `VecDeque<node_id>` — nodes still waiting to execute, serialized as a JSON array |
+| `execution_history` | `JSONB` | NO | `'[]'::jsonb` | `Vec<[caller_id, target_id]>` — ordered log of every node invocation in the run |
+| `global_calls` | `JSONB` | NO | `'{}'::jsonb` | `HashMap<node_id, count>` — total number of times each node has been called; used for global call-limit checks |
+| `caller_specific_calls` | `JSONB` | NO | `'{}'::jsonb` | `HashMap<caller_id, HashMap<target_id, count>>` — per-caller invocation counts; used for caller-scoped call limits |
+| `global_shared_state` | `JSONB` | NO | `'{}'::jsonb` | Persistent whiteboard object readable and writable by every node in the run |
 | `created_at` | `TIMESTAMPTZ` | YES | `CURRENT_TIMESTAMP` | When the run row was first inserted |
 | `updated_at` | `TIMESTAMPTZ` | YES | `CURRENT_TIMESTAMP` | Timestamp of the most recent state save |
 
 **Indexes**
-- `idx_dag_runs_agent_session_id` on `(agent_session_id)`
-- `idx_dag_runs_parent_session_id` on `(parent_session_id)`
-- `idx_dag_runs_agent_status` on `(agent_session_id, status)` — fast leaf lookup
 
-**Tree linkage:** When `parent_session_id IS NOT NULL`, the row represents a subgraph
-child. All rows in a conversation tree share the same `agent_session_id`. The deepest
-SUSPENDED row (the one not referenced as a parent by any other SUSPENDED row) is the
-"leaf" — the run currently awaiting user input.
+- `idx_dag_runs_agent_session_id` on `(agent_session_id)`
+- `idx_dag_runs_parent_session_id` on `(parent_session_id)` — fast subgraph-tree walks
+- `idx_dag_runs_agent_status` on `(agent_session_id, status)` — fast leaf lookup (used by `find_suspended_leaf`)
+
+**Tree linkage and suspend resolution**
+
+When `parent_session_id IS NOT NULL`, the row represents a subgraph child. All
+rows in a single conversation tree share the same `agent_session_id`. When the
+engine receives a resume request for an `agent_session_id`, it walks the tree
+to find the **topmost** SUSPENDED row — the run currently awaiting user
+input — and replays it. (Earlier versions resumed from the deepest leaf; this
+was changed in commit `44fba1d` to fix nested-orchestrator resume.)
 
 ---
 
 ### `dag_task_memory`
 
 Tracks individual tasks within a multi-phase DAG loop (planner → agent →
-reactor pattern). One row per task. The planner node inserts tasks; agent
-nodes claim and complete them; the reactor node reads results and may create
-tasks for the next phase.
+reactor pattern). **One row per task.** The planner node inserts tasks; agent
+nodes claim and complete them; the reactor node reads results and may insert
+tasks for the next phase. Available on both PostgreSQL and SQLite.
 
-| Column | Type | Nullable | Default | Description |
-|--------|------|----------|---------|-------------|
-| `id` | `UUID` | NO | — | Unique task identifier (generated by the application) |
-| `session_id` | `VARCHAR(255)` | NO | — | Links the task to its DAG run |
-| `task_name` | `TEXT` | NO | — | Human-readable task label assigned by the planner |
-| `assigned_to` | `VARCHAR(255)` | NO | — | Node ID or agent name responsible for executing this task |
-| `completed` | `BOOLEAN` | NO | `FALSE` | `TRUE` once the agent has written a result |
-| `result` | `JSONB` | YES | — | Task output written by the agent node upon completion |
-| `phase` | `INT` | NO | `1` | Execution phase (1-based). Tasks with the same phase number may run in parallel; phase N+1 only starts after all phase-N tasks complete |
-| `parallel` | `BOOLEAN` | NO | `FALSE` | When `TRUE`, this task should run concurrently with other tasks in the same phase |
-| `context` | `TEXT` | YES | — | Semantic description of the task's purpose, provided by the planner for the agent's context |
-| `is_bridge` | `BOOLEAN` | NO | `FALSE` | When `TRUE`, this task is a prerequisite bridge task that must complete before the next phase is unlocked |
-| `created_at` | `TIMESTAMPTZ` | YES | `CURRENT_TIMESTAMP` | When the task was inserted |
-| `updated_at` | `TIMESTAMPTZ` | YES | `CURRENT_TIMESTAMP` | When the task was last modified (e.g., marked complete) |
+| Column | Postgres type | SQLite type | Nullable | Default | Description |
+|--------|---------------|-------------|----------|---------|-------------|
+| `id` | `UUID` | `TEXT` | NO | — | Unique task identifier (generated by the application) |
+| `session_id` | `VARCHAR(255)` | `TEXT` | NO | — | Links the task to its DAG run |
+| `task_name` | `TEXT` | `TEXT` | NO | — | Human-readable task label assigned by the planner |
+| `assigned_to` | `VARCHAR(255)` | `TEXT` | NO | — | Node ID or agent name responsible for executing this task |
+| `completed` | `BOOLEAN` | `BOOLEAN` (0/1) | NO | `FALSE` / `0` | `TRUE` once the agent has written a result |
+| `result` | `JSONB` | `TEXT` | YES | — | Task output written by the agent node upon completion |
+| `phase` | `INT` | `INTEGER` | NO | `1` | Execution phase (1-based). Tasks with the same phase number may run in parallel; phase N+1 only starts once all phase-N tasks complete |
+| `parallel` | `BOOLEAN` | `BOOLEAN` (0/1) | NO | `FALSE` / `0` | When `TRUE`, this task should run concurrently with other tasks in the same phase |
+| `context` | `TEXT` | `TEXT` | YES | — | Semantic description of the task's purpose, provided by the planner for the agent's context |
+| `is_bridge` | `BOOLEAN` | `BOOLEAN` (0/1) | NO | `FALSE` / `0` | When `TRUE`, this task is a prerequisite *bridge* task that must complete before the next phase is unlocked |
+| `created_at` | `TIMESTAMPTZ` | `DATETIME` | YES | `CURRENT_TIMESTAMP` | When the task was inserted |
+| `updated_at` | `TIMESTAMPTZ` | `DATETIME` | YES | `CURRENT_TIMESTAMP` | When the task was last modified (e.g., marked complete) |
 
 **Indexes**
+
 - `idx_dag_task_memory_session_id` on `(session_id)` — task list per run
-- `idx_dag_task_memory_phase` on `(session_id, phase, completed)` — phase-aware task routing
+- `idx_dag_task_memory_phase` on `(session_id, phase, completed)` *(Postgres only)* — phase-aware task routing
 
 ---
 
-### `dag_phase_summaries`
+### `dag_phase_summaries`  *(PostgreSQL only)*
 
 Stores the text summary produced by the reactor node at the end of each
 execution phase. Summaries are loaded by the `final_reactor` node so it can
@@ -138,61 +191,175 @@ produce a consolidated outcome across all phases.
 | `created_at` | `TIMESTAMPTZ` | YES | `CURRENT_TIMESTAMP` | When the summary was written |
 
 **Indexes**
+
 - `idx_dag_phase_summaries_session_id` on `(session_id)` — load all summaries for a run
 
 ---
 
-### `secure_value_mappings`
+### `secure_value_mappings`  *(PostgreSQL only)*
 
 Stores encrypted secrets (API keys, tokens, passwords) produced by
 `secure_value` nodes. Each secret is encrypted with `pgp_sym_encrypt` (AES-256
-via `pgcrypto`) using the key from the `SECURE_VALUES_KEY` environment variable.
-Rows expire after 1 hour and are deleted at session cleanup or by the background
-expiry sweeper.
+via `pgcrypto`) using the key from the `SECURE_VALUES_KEY` environment
+variable. Rows expire after 1 hour and are deleted at session cleanup or by
+the background expiry sweeper.
 
 | Column | Type | Nullable | Default | Description |
 |--------|------|----------|---------|-------------|
 | `id` | `UUID` | NO | `gen_random_uuid()` | Unique mapping identifier |
 | `session_id` | `VARCHAR(255)` | NO | — | Session that owns this secret; used for isolation and cleanup |
 | `source_node_id` | `VARCHAR(255)` | NO | — | ID of the `secure_value` node that produced this secret |
-| `hash_key` | `VARCHAR(255)` | NO | — | Deterministic hash of the secret (used as lookup key without exposing the plaintext) |
-| `encrypted_value` | `BYTEA` | NO | — | AES-256 encrypted ciphertext produced by `pgp_sym_encrypt` |
+| `hash_key` | `VARCHAR(255)` | NO | — | Deterministic hash of the secret (used as a lookup key without exposing the plaintext) |
+| `encrypted_value` | `BYTEA` | NO | — | AES-256 ciphertext produced by `pgp_sym_encrypt` |
 | `field_name` | `VARCHAR(255)` | YES | — | Name of the field this secret corresponds to (e.g., `api_key`, `Authorization`) |
 | `created_at` | `TIMESTAMPTZ` | YES | `NOW()` | When the secret was stored |
-| `expires_at` | `TIMESTAMPTZ` | YES | `NOW() + 1 hour` | Absolute expiry time; rows past this timestamp are eligible for deletion |
+| `expires_at` | `TIMESTAMPTZ` | YES | `NOW() + INTERVAL '1 hour'` | Absolute expiry time; rows past this timestamp are eligible for deletion |
 
 **Constraints**
-- `UNIQUE(session_id, hash_key)` — prevents duplicate secrets per session; an `ON CONFLICT` upsert refreshes the TTL
+
+- `UNIQUE(session_id, hash_key)` — prevents duplicate secrets per session; an
+  `ON CONFLICT` upsert refreshes the TTL.
 
 **Indexes**
+
 - `idx_secure_session_id` on `(session_id)` — session cleanup
 - `idx_secure_hash_key` on `(session_id, hash_key)` — fast decrypt lookup
 - `idx_secure_expires_at` on `(expires_at)` — expiry sweep
 
-**Required PostgreSQL extension**: `pgcrypto` (enabled by migration
-`20260425000002_secure_value_mappings.sql`).
+**Required PostgreSQL extension**: `pgcrypto`, enabled by migration
+`20260425000002_secure_value_mappings.sql`. The migration is a no-op if the
+extension is already present.
+
+---
+
+## SQL sandbox tables  *(PostgreSQL only, runtime-created)*
+
+These tables are **not** managed by `sqlx::migrate!()` — they are created
+lazily by the `sql` node infrastructure
+([`sql_function_registry.rs`](../../src/libs/colmena/src/dag_engine/infrastructure/sql_function_registry.rs))
+the first time a graph that uses the SQL function registry runs against a
+given database. They live inside the configurable sandbox schema (default
+`sandbox`, configurable via the `sandbox_schema` field on `sql` node
+permissions).
+
+The `PgRegistryAdapter::ensure_schema()` call:
+
+1. `CREATE SCHEMA IF NOT EXISTS <sandbox_schema>`
+2. `CREATE TABLE IF NOT EXISTS <sandbox_schema>.function_registry (…)`
+3. `COMMENT ON TABLE function_registry IS '…'`
+4. `CREATE TABLE IF NOT EXISTS <sandbox_schema>.query_feedback (…)`
+5. `COMMENT ON TABLE query_feedback IS '…'`
+
+All five statements are issued one-by-one (sqlx forbids mixing DDL with
+`COMMENT` in a single multi-statement query).
+
+### `<sandbox>.function_registry`
+
+Catalogs SQL functions created by AI agents inside the sandbox schema. The
+agent can list previously-registered helper functions and reuse them rather
+than re-deriving the same SQL from scratch.
+
+| Column | Type | Nullable | Default | Description |
+|--------|------|----------|---------|-------------|
+| `id` | `SERIAL` | NO | auto | Surrogate primary key |
+| `function_name` | `TEXT` | NO | — | Name of the registered function (without schema prefix) |
+| `schema_name` | `TEXT` | NO | `'<sandbox_schema>'` | Schema where the function lives — defaulted to the configured sandbox schema |
+| `parameters` | `TEXT` | YES | — | Free-form parameter signature (e.g. `"id INT, name TEXT"`) |
+| `return_type` | `TEXT` | YES | — | Free-form return type description |
+| `description` | `TEXT` | NO | — | Natural-language description of what the function does |
+| `created_by_session` | `TEXT` | YES | — | `session_id` of the run that registered this function |
+| `created_at` | `TIMESTAMPTZ` | YES | `NOW()` | When the function was first registered. The `register_function` upsert resets this on conflict |
+| `last_used_at` | `TIMESTAMPTZ` | YES | — | Reserved for future hit-tracking; not currently written |
+| `usage_count` | `INT` | YES | `0` | Reserved for future hit-tracking; not currently written |
+
+**Constraints**
+
+- `UNIQUE(schema_name, function_name)` — drives the upsert in
+  `register_function`: registering an existing name overwrites parameters,
+  return type, description, and `created_by_session`.
+
+### `<sandbox>.query_feedback`
+
+History of feedback emitted on agent-generated queries. Feedback comes from
+two sources: the static SQL validator (rejects, warnings) and the LLM critic
+(quality / correctness opinions). Used by the agent to improve subsequent
+attempts.
+
+| Column | Type | Nullable | Default | Description |
+|--------|------|----------|---------|-------------|
+| `id` | `SERIAL` | NO | auto | Surrogate primary key |
+| `session_id` | `TEXT` | NO | — | Run that produced the offending query |
+| `query_text` | `TEXT` | NO | — | The SQL that the feedback applies to |
+| `feedback_type` | `TEXT` | NO | — | Category — e.g. `error`, `warning`, `suggestion` (free-form, set by the caller) |
+| `source` | `TEXT` | NO | — | Origin of the feedback — e.g. `static_validator`, `llm_critic` |
+| `message` | `TEXT` | NO | — | Human-readable feedback text |
+| `created_at` | `TIMESTAMPTZ` | YES | `NOW()` | When the feedback was recorded |
+
+No indexes are declared — the table is small and accessed by
+`session_id`/recency at most.
+
+---
+
+## Row-Level Security on user-created tables
+
+When a graph executes `CREATE TABLE` against a database where the SQL node has
+`auto_rls = true` (default for the `restricted` permission profile),
+`PgPoolAdapter::setup_rls_for_new_table` is invoked immediately after the DDL
+([`nodes/sql.rs:391`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs)).
+This is *not* a schema migration but a runtime side-effect — included here
+for completeness because it changes the shape of every user table.
+
+Behavior depends on whether the table includes the configured tenant column
+(default `user_id`):
+
+| Has tenant column? | Action taken | Resulting policy |
+|--------------------|--------------|------------------|
+| Yes | Enable + force RLS, set column default to `current_setting('app.current_user_id')` | `colmena_tenant_isolation` — `USING/WITH CHECK (tenant_col = current_setting('app.current_user_id'))` |
+| No | Auto-add tenant column with the same `DEFAULT`, then proceed as above | `colmena_tenant_isolation` (after column injection) |
+| No (and auto-injection disabled) | Enable + force RLS only | `colmena_shared_read` — `FOR SELECT USING (true)` (read-only) |
+
+Both `ENABLE ROW LEVEL SECURITY` and `FORCE ROW LEVEL SECURITY` are issued so
+the table owner cannot bypass the policy. The tenant context is set per-query
+via `SELECT set_config('app.current_user_id', $1, true)` inside the
+transaction that wraps every executed statement.
+
+The two engine-managed sandbox tables (`function_registry`, `query_feedback`)
+are **not** RLS-protected — they are registry/log tables shared across
+sessions.
 
 ---
 
 ## Entity relationships
 
 ```
-dag_runs ──< dag_task_memory     (dag_runs.session_id = dag_task_memory.session_id)
-dag_runs ──< dag_phase_summaries (dag_runs.session_id = dag_phase_summaries.session_id)
+dag_runs ──< dag_task_memory       (dag_runs.session_id = dag_task_memory.session_id)
+dag_runs ──< dag_phase_summaries   (dag_runs.session_id = dag_phase_summaries.session_id)
 dag_runs ──< secure_value_mappings (dag_runs.session_id = secure_value_mappings.session_id)
+dag_runs ──< dag_runs              (parent_session_id → session_id)   subgraph child tree
 
-llm_node_history  ── standalone; new reads keyed by (agent_session_id, node_id), legacy reads by (session_id, node_id)
-dag_runs ──< dag_runs (parent_session_id → session_id) — subgraph child tree
+llm_node_history ── standalone
+                    new reads keyed by (agent_session_id, node_id)
+                    legacy reads by (session_id, node_id)
+
+sandbox.function_registry  ── standalone, shared across sessions
+sandbox.query_feedback     ── standalone, scoped by session_id (column, no FK)
 ```
+
+There are **no foreign-key constraints** between any of these tables. All
+links are by convention on `session_id` / `agent_session_id`. This keeps
+cross-database flexibility (e.g. `llm_node_history` may live in a different
+Postgres instance than `dag_runs`) and avoids cascade-delete surprises during
+HITL retries.
 
 ---
 
 ## Connection configuration
 
-The engine uses `DATABASE_URL` (environment variable) as its **internal
-database** — the one where DAG state, tasks, phase summaries, and secure values
-are stored. Any PostgreSQL URL configured on an `llm_call` node's
-`connection_url` field gets the same migrations applied and stores only
+The engine uses `DATABASE_URL` (environment variable, mapped to
+`EngineConfig.internal_database_url`) as its **internal database** — the one
+where DAG state, tasks, phase summaries, and secure values are stored. Any
+PostgreSQL URL configured on an `llm_call` node's `connection_url` field gets
+the same migrations applied lazily, but in practice will only store
 `llm_node_history` rows.
 
 Set `DATABASE_URL` before starting the engine:
@@ -205,9 +372,13 @@ Pool behaviour is controlled by:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `COLMENA_POOL_MAX_ENTRIES` | 100 | Maximum number of distinct connection pools |
+| `COLMENA_POOL_MAX_ENTRIES` | 100 | Maximum number of distinct connection pools held by `PgPoolRegistry` |
 | `COLMENA_POOL_MAX_CONN_PER_URL` | 2 | Connections per pool |
 | `COLMENA_POOL_MIN_CONN_PER_URL` | 0 | Always-open connections per pool |
 | `COLMENA_POOL_IDLE_TIMEOUT_SEC` | 30 | Idle connection timeout (seconds) |
 | `COLMENA_POOL_MAX_LIFETIME_SEC` | 600 | Max connection lifetime (seconds) |
 | `COLMENA_POOL_ACQUIRE_TIMEOUT_SEC` | 10 | Timeout waiting for a connection from the pool |
+
+The internal pool is *pinned* at engine startup (`registry.pin(...)`) so it
+survives idle eviction; node-specific pools obtained via `get_or_create` are
+subject to the eviction policy above.
