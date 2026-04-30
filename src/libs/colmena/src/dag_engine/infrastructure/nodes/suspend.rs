@@ -62,12 +62,12 @@ impl ExecutableNode for SuspendNode {
         question_obj.insert("id".to_string(), Value::String(id));
         question_obj.insert("question".to_string(), Value::String(question.clone()));
         question_obj.insert("type".to_string(), Value::String(question_type));
-        if let Some(opts) = options {
-            question_obj.insert(
-                "options".to_string(),
-                Value::Array(opts.into_iter().map(Value::String).collect()),
-            );
-        }
+        question_obj.insert(
+            "options".to_string(),
+            options
+                .map(|opts| Value::Array(opts.into_iter().map(Value::String).collect()))
+                .unwrap_or(Value::Null),
+        );
 
         Ok(json!({
             "__colmena_status": "SUSPENDED",
@@ -116,7 +116,7 @@ mod tests {
         assert_eq!(out["__colmena_status"], "SUSPENDED");
         assert_eq!(out["question"], "Confirm?");
         assert_eq!(out["questions"][0]["type"], "open");
-        assert!(out["questions"][0].get("options").is_none() || out["questions"][0]["options"].is_null());
+        assert_eq!(out["questions"][0]["options"], Value::Null);
     }
 
     #[tokio::test]
