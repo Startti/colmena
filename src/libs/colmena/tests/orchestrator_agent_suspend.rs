@@ -200,3 +200,83 @@ async fn orchestrator_resumes_agent_suspend_end_to_end() {
     cleanup(chat).await;
     eng.shutdown().await;
 }
+
+/// E2E with the pre-existing fixture at tests/graphs/advanced/nested_orchestrators_suspend.json.
+/// That graph has 3 levels: outer_orch → team_leader subgraph → leader_orch → confirm_specialist
+/// subgraph → ask_user (suspend). Tests that the resume cascade unwinds 3 levels in one
+/// invocation with just --agent-session-id and --answer.
+#[tokio::test]
+async fn nested_orchestrators_suspend_cascades_3_levels() {
+    let chat = "test_nested_3_levels";
+    cleanup(chat).await;
+
+    // The fixture lives at the workspace root; CARGO_MANIFEST_DIR points to the
+    // crate root (src/libs/colmena), so we traverse three levels up.
+    let graph_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../tests/graphs/advanced/nested_orchestrators_suspend.json"
+    );
+    let raw = tokio::fs::read_to_string(graph_path)
+        .await
+        .expect("graph file must exist");
+    let graph: Graph = serde_json::from_str(&raw).expect("parse graph");
+
+    let eng = engine().await;
+
+    // Run 1: should suspend with 3 SUSPENDED rows.
+    let mut s1 = Box::pin(eng.execute_stream(
+        graph.clone(),
+        None,
+        None,
+        false,
+        None,
+        Some(chat.into()),
+    ));
+    while s1.next().await.is_some() {}
+    drop(s1);
+
+    let url = std::env::var("DATABASE_URL").unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    let suspended_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM dag_runs WHERE agent_session_id = $1 AND status = 'SUSPENDED'"
+    )
+    .bind(chat)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(suspended_count.0, 3, "expected 3 SUSPENDED rows after run 1 (root + 2 subgraphs)");
+
+    // Run 2: resume.
+    let mut s2 = Box::pin(eng.execute_stream(
+        graph,
+        None,
+        Some("Yes, Tuesday at 10am works for me.".into()),
+        false,
+        None,
+        Some(chat.into()),
+    ));
+    while s2.next().await.is_some() {}
+    drop(s2);
+
+    // All 3 rows should now be COMPLETED.
+    let still_suspended: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM dag_runs WHERE agent_session_id = $1 AND status = 'SUSPENDED'"
+    )
+    .bind(chat)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(still_suspended.0, 0, "all rows should be COMPLETED after resume");
+
+    let total: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM dag_runs WHERE agent_session_id = $1"
+    )
+    .bind(chat)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(total.0 >= 3, "expected at least 3 dag_runs rows in the chat tree");
+
+    cleanup(chat).await;
+    eng.shutdown().await;
+}
