@@ -799,6 +799,15 @@ impl ExecutableNode for OrchestratorNode {
 
         let mut suspend_meta = read_suspend_meta(_state);
 
+        // Capture this immutably BEFORE any clear_suspend_meta calls below — we
+        // need it later (Task 4 Step 2) when building task_inputs to decide
+        // whether to preserve __colmena_resume_answer for cascading into the
+        // agent's subgraph_node.
+        let resuming_agent_suspend: bool = matches!(
+            (&resume_answer, &suspend_meta),
+            (Some(_), Some((sa, _, _, _))) if sa == "agent"
+        );
+
         // If resuming from a suspend, handle based on where we suspended.
         if let (Some(ref ans), Some((ref sa, _, _, ref questions))) =
             (&resume_answer, &suspend_meta)
@@ -1397,10 +1406,17 @@ impl ExecutableNode for OrchestratorNode {
                             // Build the single prompt text that the agent receives.
                             // task + context are combined here — the agent only needs `prompt`.
                             let mut task_inputs = inputs.clone();
-                            // Strip __colmena_resume_answer so subgraph agents being executed
-                            // for the first time don't mistakenly try to resume a non-existent
-                            // child session. The orchestrator already consumed this key above.
-                            task_inputs.remove("__colmena_resume_answer");
+                            // For legacy suspend sources (planner, critic, phase_reactor), the orchestrator
+                            // already consumed the resume_answer at its own level (e.g. injected into the
+                            // planner's system_message). Stripping the key here prevents fresh agents
+                            // from accidentally entering their resume path.
+                            //
+                            // For agent-suspend resumes (spec §7), however, the answer is FOR the
+                            // SuspendNode at the leaf — it must flow through the subgraph_node so that
+                            // node enters its resume path and cascades down to find_suspended_child.
+                            if !resuming_agent_suspend {
+                                task_inputs.remove("__colmena_resume_answer");
+                            }
                             // Unique __node_id per agent so SubGraphNode generates distinct
                             // child_session_ids: "{session_id}_sub_{agent_name}"
                             task_inputs.insert(
