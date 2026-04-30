@@ -861,6 +861,18 @@ impl ExecutableNode for OrchestratorNode {
                 }
                 clear_suspend_meta(_state);
                 // NO return — fall-through to re-execute the planner (existing_tasks is still empty)
+            } else if sa == "agent" {
+                colmena_log!(
+                    "▶️  [OrchestratorNode] Resuming from agent suspend. Re-dispatching pending tasks; \
+                     the resume_answer will flow to the suspended agent via task_inputs (preserved \
+                     because resuming_agent_suspend=true)."
+                );
+                clear_suspend_meta(_state);
+                // No injection here. The answer rides on __colmena_resume_answer
+                // through task_inputs (Task 4) into subgraph_node.execute, which
+                // detects it and enters its resume path → find_suspended_child →
+                // cascade down to the actual SuspendNode at the leaf.
+                let _ = ans; // intentionally unused in this arm
             }
         }
 
