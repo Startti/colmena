@@ -864,8 +864,8 @@ impl ExecutableNode for OrchestratorNode {
             } else if sa == "agent" {
                 colmena_log!(
                     "▶️  [OrchestratorNode] Resuming from agent suspend. Re-dispatching pending tasks; \
-                     the resume_answer will flow to the suspended agent via task_inputs (preserved \
-                     because resuming_agent_suspend=true)."
+                     the dispatch loop will preserve __colmena_resume_answer in task_inputs \
+                     (resuming_agent_suspend flag set above)."
                 );
                 clear_suspend_meta(_state);
                 // No injection here. The answer rides on __colmena_resume_answer
@@ -2082,10 +2082,27 @@ fn propagate_agent_suspend(
     phase: i32,
     state: &mut Value,
 ) -> Value {
-    // Prefer canonical `questions` array (covers nested orchestrators that
-    // already produced canonical output AND the new SuspendNode shape).
-    let questions: Vec<SuspendQuestion> = if let Some(qs_val) = agent_result.get("questions") {
-        serde_json::from_value(qs_val.clone()).unwrap_or_default()
+    // Try canonical `questions` array first. Covers nested orchestrators
+    // (which already produced canonical output) AND the new SuspendNode shape.
+    // If deserialization fails (malformed metadata), log and fall through.
+    let canonical_questions: Option<Vec<SuspendQuestion>> = agent_result
+        .get("questions")
+        .and_then(|qs_val| {
+            match serde_json::from_value::<Vec<SuspendQuestion>>(qs_val.clone()) {
+                Ok(qs) => Some(qs),
+                Err(e) => {
+                    colmena_log!(
+                        "⚠️  [propagate_agent_suspend] Agent '{}' emitted malformed 'questions' \
+                         array (will fall back to legacy 'question' string): {}",
+                        task.assigned_to, e
+                    );
+                    None
+                }
+            }
+        });
+
+    let questions: Vec<SuspendQuestion> = if let Some(qs) = canonical_questions {
+        qs
     } else if let Some(q_str) = agent_result.get("question").and_then(|v| v.as_str()) {
         // Fallback: agent emitted only legacy single-string. Wrap as one open question.
         vec![SuspendQuestion {
