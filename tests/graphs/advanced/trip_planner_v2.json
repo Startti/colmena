@@ -3,7 +3,7 @@
     "trigger": {
       "type": "input",
       "config": {
-        "prompt": "Hola"
+        "prompt": "I'm going to Aspen for a 3-day ski trip in February. Plan what I need: clothing, ski gear, and a rough budget."
       }
     },
     "aewrxhj7wd1k7bhsp8gbe8p8": {
