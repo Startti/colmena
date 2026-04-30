@@ -2,10 +2,23 @@
   "comment": "Trip Assistant: Full orchestrated travel planner with flights, hotels, weather/clothing, activities, and budget agents. Uses Amadeus API for real data. All LLMs on Gemini 2.5 Flash.",
   "metadata": {
     "category": "advanced",
-    "features": ["orchestrator", "planner", "phase_reactor", "final_reactor", "child_graph_inline", "Amadeus", "multi-agent", "parallel-phases"],
+    "features": [
+      "orchestrator",
+      "planner",
+      "phase_reactor",
+      "final_reactor",
+      "child_graph_inline",
+      "Amadeus",
+      "multi-agent",
+      "parallel-phases"
+    ],
     "provider": "gemini",
     "difficulty": "advanced",
-    "requires_env": ["GEMINI_API_KEY", "AMADEUS_CLIENT_ID", "AMADEUS_CLIENT_SECRET"]
+    "requires_env": [
+      "GEMINI_API_KEY",
+      "AMADEUS_CLIENT_ID",
+      "AMADEUS_CLIENT_SECRET"
+    ]
   },
   "nodes": {
     "trigger": {
@@ -39,6 +52,7 @@
                   "config": {
                     "base_url": "https://api.amadeus.com/v1/security/oauth2/token",
                     "method": "POST",
+                    "secure": true,
                     "headers": {
                       "Content-Type": "application/x-www-form-urlencoded"
                     },
@@ -53,7 +67,9 @@
                     "api_key": "${GEMINI_API_KEY}",
                     "system_message": "You are a flight search specialist. Use the search_flights tool to find available flights matching the user's request. Extract origin IATA code, destination IATA code, departure date (YYYY-MM-DD), and number of adults from the task. Return a clear summary of the top 3 flight options found, including airline, departure time, duration, number of stops, and price per person in USD. If no flights are found, say so clearly.",
                     "temperature": 0.1,
-                    "enabled_tools": ["search_flights"],
+                    "enabled_tools": [
+                      "search_flights"
+                    ],
                     "tool_configurations": {
                       "search_flights": {
                         "name": "search_flights",
@@ -130,10 +146,22 @@
                 }
               },
               "edges": [
-                { "from": "in", "to": "get_amadeus_token" },
-                { "from": "in", "to": "flight_llm" },
-                { "from": "get_amadeus_token.access_token", "to": "flight_llm.context.amadeus_token" },
-                { "from": "flight_llm", "to": "out" }
+                {
+                  "from": "in",
+                  "to": "get_amadeus_token"
+                },
+                {
+                  "from": "in",
+                  "to": "flight_llm"
+                },
+                {
+                  "from": "get_amadeus_token.access_token",
+                  "to": "flight_llm.context.amadeus_token"
+                },
+                {
+                  "from": "flight_llm",
+                  "to": "out"
+                }
               ]
             }
           },
@@ -161,8 +189,14 @@
                 }
               },
               "edges": [
-                { "from": "in", "to": "weather_llm" },
-                { "from": "weather_llm", "to": "out" }
+                {
+                  "from": "in",
+                  "to": "weather_llm"
+                },
+                {
+                  "from": "weather_llm",
+                  "to": "out"
+                }
               ]
             }
           },
@@ -193,7 +227,9 @@
                     "api_key": "${GEMINI_API_KEY}",
                     "system_message": "You are a hotel search specialist. Use the search_hotels tool to find hotels in the destination city. Extract the destination city IATA code from the task. After getting the hotel list, select the top 5 most relevant options and present them clearly with hotel name and any available details. Also estimate a typical nightly price range for mid-range hotels in that city based on your knowledge, and calculate the estimated total hotel cost for the stay duration.",
                     "temperature": 0.1,
-                    "enabled_tools": ["search_hotels"],
+                    "enabled_tools": [
+                      "search_hotels"
+                    ],
                     "tool_configurations": {
                       "search_hotels": {
                         "name": "search_hotels",
@@ -252,10 +288,22 @@
                 }
               },
               "edges": [
-                { "from": "in", "to": "get_amadeus_token" },
-                { "from": "in", "to": "hotels_llm" },
-                { "from": "get_amadeus_token.access_token", "to": "hotels_llm.context.amadeus_token" },
-                { "from": "hotels_llm", "to": "out" }
+                {
+                  "from": "in",
+                  "to": "get_amadeus_token"
+                },
+                {
+                  "from": "in",
+                  "to": "hotels_llm"
+                },
+                {
+                  "from": "get_amadeus_token.access_token",
+                  "to": "hotels_llm.context.amadeus_token"
+                },
+                {
+                  "from": "hotels_llm",
+                  "to": "out"
+                }
               ]
             }
           },
@@ -286,7 +334,9 @@
                     "api_key": "${GEMINI_API_KEY}",
                     "system_message": "You are a travel activities specialist. Use the search_activities tool to find tours and activities at the destination. For Barcelona, use latitude=41.3851 and longitude=2.1734. After getting the results, curate a list of the top 5 most interesting activities, including name, description if available, and estimated price. Also add 2-3 free or very cheap activities you know about in that city that complement the paid ones.",
                     "temperature": 0.3,
-                    "enabled_tools": ["search_activities"],
+                    "enabled_tools": [
+                      "search_activities"
+                    ],
                     "tool_configurations": {
                       "search_activities": {
                         "name": "search_activities",
@@ -340,10 +390,22 @@
                 }
               },
               "edges": [
-                { "from": "in", "to": "get_amadeus_token" },
-                { "from": "in", "to": "activities_llm" },
-                { "from": "get_amadeus_token.access_token", "to": "activities_llm.context.amadeus_token" },
-                { "from": "activities_llm", "to": "out" }
+                {
+                  "from": "in",
+                  "to": "get_amadeus_token"
+                },
+                {
+                  "from": "in",
+                  "to": "activities_llm"
+                },
+                {
+                  "from": "get_amadeus_token.access_token",
+                  "to": "activities_llm.context.amadeus_token"
+                },
+                {
+                  "from": "activities_llm",
+                  "to": "out"
+                }
               ]
             }
           },
@@ -371,8 +433,14 @@
                 }
               },
               "edges": [
-                { "from": "in", "to": "budget_llm" },
-                { "from": "budget_llm", "to": "out" }
+                {
+                  "from": "in",
+                  "to": "budget_llm"
+                },
+                {
+                  "from": "budget_llm",
+                  "to": "out"
+                }
               ]
             }
           }
@@ -397,7 +465,13 @@
     }
   },
   "edges": [
-    { "from": "trigger", "to": "orchestrator_node" },
-    { "from": "orchestrator_node", "to": "final_output" }
+    {
+      "from": "trigger",
+      "to": "orchestrator_node"
+    },
+    {
+      "from": "orchestrator_node",
+      "to": "final_output"
+    }
   ]
 }

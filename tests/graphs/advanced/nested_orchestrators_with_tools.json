@@ -1,0 +1,143 @@
+{
+  "comment": "Two nested orchestrators (outer + inner) each with critic + phase_reactor + final_reactor active. Inner orchestrator dispatches 2 agents in parallel; each agent has math tools (multiply) to compute trip cost components.",
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "prompt": "Estimate the cost for a 3-day ski trip: 3 nights of lodging at $200 per night, and 3 days of ski rentals at $80 per day. Show the breakdown and grand total."
+      }
+    },
+    "outer_orch": {
+      "type": "orchestrator",
+      "config": {
+        "max_phases": 3,
+        "verbose": false,
+        "include_extra_info": false,
+        "planner": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "system_message": "Assign exactly ONE task to 'cost_team'. The task should ask cost_team to compute the trip cost based on the user's prompt and report the final breakdown plus grand total."
+        },
+        "agents": {
+          "cost_team": {
+            "description": "Internal cost-research team. Computes per-component trip costs and aggregates the grand total.",
+            "child_graph_inline": {
+              "nodes": {
+                "team_in": { "type": "input", "config": {} },
+                "inner_orch": {
+                  "type": "orchestrator",
+                  "config": {
+                    "max_phases": 3,
+                    "verbose": false,
+                    "include_extra_info": false,
+                    "planner": {
+                      "provider": "gemini",
+                      "model": "gemini-2.5-flash",
+                      "api_key": "${GEMINI_API_KEY}",
+                      "system_message": "Break the task into exactly TWO parallel subtasks: one for 'lodging_calc' (compute total lodging cost using nightly rate * nights) and one for 'gear_calc' (compute total gear rental cost using daily rate * days). Both tasks should run in parallel. Set parallel=true on each."
+                    },
+                    "agents": {
+                      "lodging_calc": {
+                        "description": "Computes total lodging cost using the multiply tool.",
+                        "child_graph_inline": {
+                          "nodes": {
+                            "lodging_in": { "type": "input", "config": {} },
+                            "lodging_llm": {
+                              "type": "llm_call",
+                              "config": {
+                                "provider": "gemini",
+                                "model": "gemini-2.5-flash",
+                                "api_key": "${GEMINI_API_KEY}",
+                                "system_message": "You compute lodging costs. Always use the multiply tool to perform the calculation. Show your work concisely and end with the dollar total.",
+                                "enabled_tools": ["multiply"]
+                              }
+                            },
+                            "lodging_out": { "type": "output", "config": {} }
+                          },
+                          "edges": [
+                            { "from": "lodging_in", "to": "lodging_llm" },
+                            { "from": "lodging_llm", "to": "lodging_out" }
+                          ]
+                        }
+                      },
+                      "gear_calc": {
+                        "description": "Computes total gear rental cost using the multiply tool.",
+                        "child_graph_inline": {
+                          "nodes": {
+                            "gear_in": { "type": "input", "config": {} },
+                            "gear_llm": {
+                              "type": "llm_call",
+                              "config": {
+                                "provider": "gemini",
+                                "model": "gemini-2.5-flash",
+                                "api_key": "${GEMINI_API_KEY}",
+                                "system_message": "You compute gear rental costs. Always use the multiply tool to perform the calculation. Show your work concisely and end with the dollar total.",
+                                "enabled_tools": ["multiply"]
+                              }
+                            },
+                            "gear_out": { "type": "output", "config": {} }
+                          },
+                          "edges": [
+                            { "from": "gear_in", "to": "gear_llm" },
+                            { "from": "gear_llm", "to": "gear_out" }
+                          ]
+                        }
+                      }
+                    },
+                    "critic": {
+                      "provider": "gemini",
+                      "model": "gemini-2.5-flash",
+                      "api_key": "${GEMINI_API_KEY}",
+                      "system_message": "Review the agent's calculation. Set task_ok=true if it shows the multiplication explicitly and arrives at a correct dollar total. Set task_ok=false only if the math is wrong or the total is missing.",
+                      "max_retries": 2
+                    },
+                    "phase_reactor": {
+                      "provider": "gemini",
+                      "model": "gemini-2.5-flash",
+                      "api_key": "${GEMINI_API_KEY}",
+                      "system_message": "Summarize the phase results in ONE sentence. Always set task_ok=true."
+                    },
+                    "final_reactor": {
+                      "provider": "gemini",
+                      "model": "gemini-2.5-flash",
+                      "api_key": "${GEMINI_API_KEY}",
+                      "system_message": "Combine the lodging and gear cost calculations into a concise breakdown. Compute the grand total by adding both. Output should be: 'Lodging: $X. Gear: $Y. Grand total: $X+Y'."
+                    }
+                  }
+                },
+                "team_out": { "type": "output", "config": {} }
+              },
+              "edges": [
+                { "from": "team_in", "to": "inner_orch" },
+                { "from": "inner_orch", "to": "team_out" }
+              ]
+            }
+          }
+        },
+        "critic": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "system_message": "Review the cost team's output. Set task_ok=true if the response includes a clear breakdown (lodging + gear) and a grand total dollar amount. Set task_ok=false only if those are missing.",
+          "max_retries": 2
+        },
+        "phase_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "system_message": "Summarize the phase results in ONE sentence. Always set task_ok=true."
+        },
+        "final_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "system_message": "Provide the user with the final trip cost estimate. Cite the breakdown from the cost team and the grand total."
+        }
+      }
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "outer_orch" }
+  ]
+}

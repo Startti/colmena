@@ -31,7 +31,7 @@
       "to": "llm_gen"
     },
     {
-      "from": "llm_gen.content",
+      "from": "llm_gen.result",
       "to": "python_exec.code"
     },
     {
