@@ -1497,6 +1497,33 @@ impl ExecutableNode for OrchestratorNode {
                                 "─".repeat(60)
                             );
 
+                            // ── Agent suspend propagation (spec §5) ──
+                            // If the agent's subgraph internally suspended, do NOT run the critic, do NOT
+                            // mark the task completed, do NOT continue the phase. Just propagate up.
+                            //
+                            // Note on allow_suspend: agents already have a SUSPENDED dag_runs row at this
+                            // point — we cannot ignore the suspend without leaving an orphan. We log and
+                            // propagate regardless of the flag.
+                            if agent_result
+                                .get("__colmena_status")
+                                .and_then(|v| v.as_str())
+                                == Some("SUSPENDED")
+                            {
+                                if !allow_suspend_for(&subgraph_cfg) {
+                                    colmena_log!(
+                                        "⚠️  [OrchestratorNode] Agent '{}' has allow_suspend=false, but its \
+                                         subgraph already suspended. Flag has no safe effect for agents — \
+                                         propagating suspend.",
+                                        task.assigned_to
+                                    );
+                                }
+                                colmena_log!(
+                                    "⏸️  [OrchestratorNode] Agent '{}' suspended (task '{}'). Propagating up.",
+                                    task.assigned_to, task.task_name
+                                );
+                                return Ok(propagate_agent_suspend(&agent_result, &task, current_phase, _state));
+                            }
+
                             // ── Crítica ──
                             let stash_key = format!("__orch_pending_{}", task.id);
                             let mut is_ok = true;
