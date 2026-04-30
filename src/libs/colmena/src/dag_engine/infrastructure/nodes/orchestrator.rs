@@ -2008,6 +2008,50 @@ fn make_suspend_response(
     json!({ "__colmena_status": "SUSPENDED", "questions": qs_val })
 }
 
+/// Propagates a SUSPENDED status from an agent's child subgraph back through
+/// the orchestrator. The agent's child run is already SUSPENDED in dag_runs;
+/// our job is to:
+///   1. extract user-facing questions from `agent_result` (canonical
+///      `questions` array if present, else wrap the legacy `question` string),
+///   2. emit a SUSPENDED response of our own via `make_suspend_response`,
+///   3. with `suspended_at = "agent"` so the resume detection block knows
+///      this came from an agent dispatch.
+///
+/// Note: caller is responsible for NOT marking the task `completed=true` —
+/// the task stays incomplete in `dag_task_memory`, so it gets re-dispatched
+/// on resume; the subgraph node's resume path then cascades the answer down
+/// to the existing SUSPENDED child via `find_suspended_child`.
+fn propagate_agent_suspend(
+    agent_result: &Value,
+    task: &DagTask,
+    phase: i32,
+    state: &mut Value,
+) -> Value {
+    // Prefer canonical `questions` array (covers nested orchestrators that
+    // already produced canonical output AND the new SuspendNode shape).
+    let questions: Vec<SuspendQuestion> = if let Some(qs_val) = agent_result.get("questions") {
+        serde_json::from_value(qs_val.clone()).unwrap_or_default()
+    } else if let Some(q_str) = agent_result.get("question").and_then(|v| v.as_str()) {
+        // Fallback: agent emitted only legacy single-string. Wrap as one open question.
+        vec![SuspendQuestion {
+            id: format!("agent_{}", task.assigned_to),
+            question: q_str.to_string(),
+            question_type: "open".to_string(),
+            options: None,
+        }]
+    } else {
+        // Degenerate: SUSPENDED but no questions metadata at all.
+        vec![SuspendQuestion {
+            id: format!("agent_{}", task.assigned_to),
+            question: format!("Agent '{}' requires user input.", task.assigned_to),
+            question_type: "open".to_string(),
+            options: None,
+        }]
+    };
+
+    make_suspend_response(state, "agent", phase, Some(&task.id), questions)
+}
+
 /// Removes the orchestrator suspend metadata from `global_shared_state` after a successful resume.
 fn clear_suspend_meta(state: &mut Value) {
     if let Some(obj) = state.as_object_mut() {
