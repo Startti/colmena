@@ -101,13 +101,22 @@ output = {"greeting": greeting}
 
 ---
 
-## Output Port
+## Output
 
-| Port | Type | Description |
-|---|---|---|
-| `output` | any (JSON-serializable) | The value of the Python `output` variable after execution. `null` if `output` was never assigned. |
+The node emits the **raw value** of the Python `output` variable. There is no wrapper object — what you assign is what downstream nodes receive.
 
-The default output port is `output`, so a downstream edge can be written implicitly: `{ "from": "py", "to": "next" }`.
+| Script does                       | Node output                | Type                |
+|-----------------------------------|----------------------------|---------------------|
+| `output = 52`                     | `52`                       | number              |
+| `output = "hello"`                | `"hello"`                  | string              |
+| `output = [1, 2, 3]`              | `[1, 2, 3]`                | array               |
+| `output = {"count": 5}`           | `{"count": 5}`             | object              |
+| `output = {"output": 52}`         | `{"output": 52}`           | object (literal)    |
+| *(no `output` assignment)*        | `null`                     | null                |
+
+`default_output` is intentionally `None`. An implicit edge `{ "from": "py", "to": "next" }` passes the raw value through unchanged. The engine will not try to extract a sub-field named `output` from the result — declaring a default would cause scalar outputs (number/string/bool) to silently drop to `null` because they don't have a `.output` field.
+
+If the downstream node has a `default_input` (e.g. `log` → `input`, `llm_call` → `prompt`), the raw value lands in that field. If both nodes lack defaults, you must use explicit edges (`{ "from": "py", "to": "next.field" }`).
 
 ---
 
@@ -312,8 +321,72 @@ output = item if item.get('active') else None
 | No filesystem / network access | Not enforced in `none` mode. In `restricted` mode `open` is banned and the import whitelist excludes `socket`, `urllib`, `os`, etc. |
 | No subprocess / fork | Not enforced in `none` mode. In `restricted` mode the import whitelist excludes `subprocess`, `os`. |
 | Script size | No hard limit — keep snippets short for readability and token cost when used as a tool. |
+| **Python → JSON conversion of `output`** | The `output` value is converted to JSON before leaving the node. Anything that is not JSON-serializable will fail at the boundary — see the section below. |
 
 If you need a stronger sandbox (process isolation, resource limits, separate kernel namespace) consider running the script as a subprocess in a container outside of Colmena and integrating via `http_request`.
+
+---
+
+## The Python ↔ JSON Boundary (intrinsic limitation)
+
+The node sits between two type systems: **Python** (rich, dynamic) and **JSON** (the wire format used between DAG nodes). Inputs are converted Python via `pythonize`; the `output` variable is converted back via `depythonize`. The bridge is lossy in one direction: anything Python supports that JSON does not will raise a serialization error at the moment the node returns.
+
+This is **not a bug in Colmena** — it is the contract of JSON. The same constraint applies to any system that exposes Python results over an HTTP/JSON boundary.
+
+### What works
+
+| Python value | JSON output |
+|---|---|
+| `int`, `float` | number |
+| `str` | string |
+| `bool` | boolean |
+| `None` | `null` |
+| `list`, `tuple` | array |
+| `dict` **with string keys** | object |
+| Nested combinations of the above | recursive object/array |
+
+### What does NOT work
+
+| Python value | What happens |
+|---|---|
+| `dict` with non-string keys (e.g. `{5: "x"}`, `{("a","b"): 1}`) | **Error** at return: `'int' object cannot be converted to 'PyString'` |
+| `set`, `frozenset` | **Error** — JSON has no set type |
+| `bytes`, `bytearray` | **Error** — JSON has no binary type |
+| `datetime`, `date`, `Decimal` | **Error** — no native JSON equivalent |
+| Custom class instances | **Error** — only built-in types are bridged |
+| Functions, generators, file handles | **Error** |
+| `float('inf')`, `float('nan')` | **Error** — JSON does not allow these |
+| Circular references (`a = []; a.append(a)`) | **Error** |
+
+### The dict-key gotcha (most common case)
+
+In a Python dict literal:
+
+```python
+output = {'a': b}     # 'a' is a STRING key (quoted), b is a VALUE (variable)
+output = {a: b}       # a is a VARIABLE used as KEY → only works if a happens to be a string
+```
+
+If `a = 5` and `b = 6`:
+
+| Code | Python value | JSON output |
+|---|---|---|
+| `output = {'a': b}` | `{"a": 6}` | `{"a": 6}` ✅ |
+| `output = {a: b}` | `{5: 6}` | **Error** — int is not a valid JSON key ❌ |
+| `output = {str(a): b}` | `{"5": 6}` | `{"5": 6}` ✅ (forced to string) |
+| `output = {a: b, 'a': 99}` | `{5: 6, "a": 99}` | **Error** — first key is int |
+
+**Workaround:** if you need to use a non-string key, coerce it explicitly: `str(key)`, `key.isoformat()` for dates, `float(decimal)` for `Decimal`, etc. Or restructure the output as a list of pairs: `output = [{'key': k, 'value': v} for k, v in my_dict.items()]`.
+
+### Why we don't auto-coerce
+
+We could silently call `str()` on every dict key before serializing. We don't, because:
+
+- It would mask bugs (a typo where you forgot quotes around a key would never be caught).
+- Different callers expect different coercions (`Decimal` → string vs float depends on context).
+- The error message "int cannot be converted to PyString" is a clear, immediate signal that points at the exact line. Silent coercion would push the bug downstream where it is harder to diagnose.
+
+Treat the JSON boundary as part of the contract: the script's `output` must be a tree of JSON-native types. If you need richer types, convert them explicitly.
 
 ---
 
@@ -347,6 +420,16 @@ The script took longer than `sandbox_timeout_secs`. Either:
 ### `Python execution error: NameError: name 'X' is not defined`
 
 The script references `X` as a Python variable, but no edge sent it. Double-check the upstream edges and whether the source node actually emits a field named `X`. If the source emits a nested object, you may need to extract: `{ "from": "source.field", "to": "py.X" }`.
+
+### `Failed to convert Python 'output' to JSON: 'int' object cannot be converted to 'PyString'`
+
+(or `'set' object`, `'datetime' object`, etc.) — the `output` variable contains a value that JSON cannot represent. The most common cause is a dict with non-string keys: `output = {a: b}` where `a` is a number. See **The Python ↔ JSON Boundary** section above for the full list of unsupported types and how to coerce them. Quick fixes:
+
+- Dict with int/non-string keys → `output = {str(k): v for k, v in my_dict.items()}`
+- `set` → `output = list(my_set)`
+- `bytes` → `output = my_bytes.decode('utf-8')` (or hex/base64)
+- `datetime` → `output = my_dt.isoformat()`
+- `Decimal` → `output = float(my_decimal)` or `str(my_decimal)`
 
 ### Inputs arrive as `dict` when you expected an attribute
 

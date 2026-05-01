@@ -146,7 +146,23 @@ impl ExecutableNode for PythonNode {
                 py.run_bound(&code, Some(&locals), Some(&locals))
                     .map_err(|e| format!("Python execution error: {}", e))?;
 
-                // 4d. Extract result from 'output' variable
+                // 4d. Extract result from 'output' variable.
+                //
+                // Intrinsic Python ↔ JSON limitation: depythonize fails when
+                // `output` contains a value JSON cannot represent — most commonly
+                // a dict with non-string keys (e.g. `output = {5: "x"}`), but
+                // also `set`, `bytes`, `datetime`, `Decimal`, custom classes,
+                // `float('nan')`/`float('inf')`, and circular references.
+                //
+                // We do NOT auto-coerce. Silent str()-on-keys would mask typos
+                // (forgetting quotes on a literal key) and would push the bug
+                // downstream where the cause is harder to diagnose. The user is
+                // expected to convert non-JSON types explicitly:
+                //   {str(k): v for k, v in d.items()}, list(my_set),
+                //   bytes.decode(), datetime.isoformat(), float(Decimal), ...
+                //
+                // See: docs/developer_guide/26_python_node.md → "The Python ↔
+                // JSON Boundary" for the full list and recommended coercions.
                 match locals.get_item("output") {
                     Ok(Some(output_obj)) => {
                         let json_output: Value =
@@ -180,7 +196,12 @@ impl ExecutableNode for PythonNode {
     }
 
     fn default_output(&self) -> Option<&str> {
-        Some("output")
+        // The node returns the raw value of the Python `output` variable, NOT a
+        // wrapper like { "output": <value> }. Returning None here tells the edge
+        // resolver to pass the raw value through instead of trying to extract a
+        // non-existent "output" field — otherwise scalar outputs (number, string,
+        // bool) get silently dropped to null on implicit edges.
+        None
     }
 
     fn schema(&self) -> Value {
@@ -220,7 +241,7 @@ impl ExecutableNode for PythonNode {
                 }
             },
             "outputs": {
-                "output": "The value of the Python 'output' variable after execution. Returns null if 'output' is not defined."
+                "<raw>": "The node emits the RAW value of the Python 'output' variable (number, string, bool, list, dict, or null). NOT wrapped in { 'output': ... }. default_output is None so implicit edges pass the value through unchanged."
             }
         })
     }

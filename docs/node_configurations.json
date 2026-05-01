@@ -964,7 +964,7 @@
           "type": "string",
           "required": false,
           "default": null,
-          "description": "The Python code to execute. Can be a single expression (e.g., 'output = x * y + 2') or a multi-line script with imports, functions, loops, etc. The code runs in an isolated namespace where all input values are available as variables. You MUST assign the result to a variable called 'output' — this is the convention the node uses to extract the return value. If 'output' is not defined after execution, the node returns null. The code input port takes priority over this config field, allowing LLMs or upstream nodes to dynamically provide code.",
+          "description": "The Python code to execute. Can be a single expression (e.g., 'output = x * y + 2') or a multi-line script with imports, functions, loops, etc. The code runs in an isolated namespace where all input values are available as variables. You MUST assign the result to a variable called 'output' — this is the convention the node uses to extract the return value. If 'output' is not defined after execution, the node returns null. The code input port takes priority over this config field, allowing LLMs or upstream nodes to dynamically provide code. INTRINSIC LIMITATION (Python → JSON): the value of 'output' is converted to JSON before leaving the node, so it must be JSON-serializable — only dicts with STRING keys are valid (e.g. `output = {'a': b}` works, `output = {a: b}` fails when `a` is a number); types like set, bytes, datetime, Decimal, custom classes, NaN/Infinity, and circular references must be coerced explicitly (str(), list(), .isoformat(), .decode(), etc.). See docs/developer_guide/26_python_node.md → 'The Python ↔ JSON Boundary' for the full table and workarounds.",
           "example": "import math\noutput = math.sqrt(x ** 2 + y ** 2)"
         },
         "sandbox_mode": {
@@ -1003,13 +1003,14 @@
         }
       },
       "output_ports": {
-        "output": {
+        "<raw>": {
           "type": "any",
-          "description": "The value of the Python 'output' variable after script execution. Can be any JSON-serializable type (number, string, list, dict, boolean, null). If the script doesn't define 'output', returns null."
+          "description": "The node emits the RAW value of the Python 'output' variable, NOT a wrapper object. If the script does 'output = 52', the node's output is the number 52. If the script does 'output = {\"count\": 5}', the node's output is the dict {\"count\": 5}. If the script doesn't define 'output', the node emits null. Downstream edges connect via implicit form ({ \"from\": \"py\", \"to\": \"next\" }) — the raw value is passed through unchanged."
         }
       },
       "default_input": null,
-      "default_output": "output",
+      "default_output": null,
+      "default_output_note": "default_output is intentionally null. The node returns the raw 'output' value, NOT a { 'output': ... } wrapper. Declaring a default_output of 'output' would make the engine try to extract a non-existent sub-field on every implicit edge — scalar outputs (numbers, strings, booleans) would silently drop to null. With default_output = null the edge resolver passes the raw value through.",
       "requires": ["python"],
       "supports_env_vars": false
     },

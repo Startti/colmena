@@ -20,7 +20,7 @@
           "type": "string",
           "required": true,
           "description": "DAG node type to execute when the LLM calls this tool. Must be a registered node type.",
-          "valid_values": ["http_request", "sql_query", "python_script", "add", "subtract", "multiply", "divide", "exponential", "tavily_client"]
+          "valid_values": ["http_request", "socketio_request", "sql_query", "python_script", "add", "subtract", "multiply", "divide", "exponential", "tavily_client"]
         },
         "node_schema": {
           "type": "object",
@@ -374,6 +374,168 @@
       "reference_graphs": [
         "tests/graphs/agents/sql_query_readonly_test.json",
         "tests/graphs/agents/sql_rls_todo_test.json"
+      ]
+    },
+
+    "socketio_request": {
+      "summary": "Connect to a Socket.IO (WebSocket) server, emit an event with a JSON payload, and receive the response. The real-time counterpart to http_request — use it for event-driven APIs that use the Socket.IO protocol. As an LLM tool, fix url/namespace/event/cookies/timeout_ms in node_schema and expose only the dynamic payload fields the LLM should fill in.",
+      "see_also": "docs/developer_guide/21_socketio_node.md — full guide with config reference, response patterns, pre_events, and troubleshooting.",
+      "special_behaviors": [
+        "Stateless per execution: each tool call opens a fresh Socket.IO connection, emits, collects the response, and disconnects.",
+        "Two response patterns: ack mode (default — server replies via the Socket.IO acknowledgment callback) or wait-event mode (set 'wait_event' to listen for a separate named server event).",
+        "All string values support '${ENV_VAR}' resolution, including strings nested inside the payload (resolved recursively).",
+        "Errors are returned as an envelope, not exceptions: { success: false, event, error, exception? }. This lets downstream nodes branch on success.",
+        "pre_events: optional ordered list of events emitted on the SAME connection BEFORE the main event. Essential for servers that scope state per-socket (e.g., room subscriptions, sessions). On any pre-event failure the node aborts and never emits the main event — the envelope includes 'failed_pre_event' and the 'pre_responses' that did complete.",
+        "When in doubt about where to put non-LLM-visible fields, use node_schema with 'fixed' (the canonical pattern) — including the entire pre_events array, which the LLM should never see or modify."
+      ],
+      "examples": {
+        "load_canvas_state_with_wait_event": {
+          "description": "LLM tool that loads a canvas in one round-trip. The server replies via a separate broadcast event ('canvas_state_loaded'), so wait_event is set. All connection details are fixed; the LLM only triggers the call (no dynamic fields).",
+          "tool_configurations_entry": {
+            "load_canvas": {
+              "name": "load_canvas",
+              "description": "Load the current canvas state for the environment. Returns all existing nodes, edges, and groups.",
+              "node_type": "socketio_request",
+              "node_schema": {
+                "url":        { "type": "string",  "fixed": "${ADP_API_URL}" },
+                "namespace":  { "type": "string",  "fixed": "/canvas" },
+                "event":      { "type": "string",  "fixed": "load_canvas_state" },
+                "wait_event": { "type": "string",  "fixed": "canvas_state_loaded" },
+                "cookies":    { "type": "string",  "fixed": "__Secure-better-auth.session_token=${ADP_SESSION_TOKEN}" },
+                "timeout_ms": { "type": "integer", "fixed": 15000 },
+                "payload": {
+                  "type": "object",
+                  "properties": {
+                    "environmentId": { "type": "string", "fixed": "${ADP_ENVIRONMENT_ID}" }
+                  }
+                }
+              }
+            }
+          }
+        },
+
+        "mutation_with_pre_events": {
+          "description": "LLM tool that creates a node on a Socket.IO canvas. Because the server scopes mutation broadcasts to the room joined by the socket, the tool emits 'join_environment_room' as a pre_event on the SAME connection BEFORE 'create_node'. The pre_events array is fixed so the LLM cannot modify the auth/setup logic. The LLM only fills in the 'node' object inside payload.",
+          "tool_configurations_entry": {
+            "create_canvas_node": {
+              "name": "create_canvas_node",
+              "description": "Create a new node on the canvas. Returns the created node with its generated ID.",
+              "node_type": "socketio_request",
+              "node_schema": {
+                "url":        { "type": "string",  "fixed": "${ADP_API_URL}" },
+                "namespace":  { "type": "string",  "fixed": "/canvas" },
+                "event":      { "type": "string",  "fixed": "create_node" },
+                "cookies":    { "type": "string",  "fixed": "__Secure-better-auth.session_token=${ADP_SESSION_TOKEN}" },
+                "timeout_ms": { "type": "integer", "fixed": 15000 },
+                "pre_events": {
+                  "type": "array",
+                  "fixed": [
+                    {
+                      "event": "join_environment_room",
+                      "payload": { "environmentId": "${ADP_ENVIRONMENT_ID}" }
+                    }
+                  ]
+                },
+                "payload": {
+                  "type": "object",
+                  "properties": {
+                    "environmentId": { "type": "string", "fixed": "${ADP_ENVIRONMENT_ID}" },
+                    "node": {
+                      "type": "object",
+                      "required": true,
+                      "description": "Node object: { type, category, position: {x,y}, data: { label, config? } }"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+
+        "ack_mode_simple": {
+          "description": "Minimal ack-mode tool — no wait_event, no pre_events. The server responds via the acknowledgment callback. Use this when the server's reply for the emitted event arrives via ack and no per-socket setup is needed.",
+          "tool_configurations_entry": {
+            "ping_server": {
+              "name": "ping_server",
+              "description": "Send a ping to the realtime server and get back its current load metrics.",
+              "node_type": "socketio_request",
+              "node_schema": {
+                "url":        { "type": "string",  "fixed": "${REALTIME_URL}" },
+                "namespace":  { "type": "string",  "fixed": "/" },
+                "event":      { "type": "string",  "fixed": "ping" },
+                "timeout_ms": { "type": "integer", "fixed": 5000 },
+                "payload": {
+                  "type": "object",
+                  "properties": {
+                    "client": {
+                      "type": "string",
+                      "required": true,
+                      "description": "Client identifier (free-form string, e.g. 'colmena-agent')."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+
+        "pre_events_with_wait_event_per_step": {
+          "description": "Two pre-events on the same socket, each with its OWN wait_event (one authenticates and waits for 'auth_ok', the other joins a room and waits for 'joined_room'), then the main event runs. Demonstrates per-step wait_event and per-step timeout_ms.",
+          "tool_configurations_entry": {
+            "send_chat_message": {
+              "name": "send_chat_message",
+              "description": "Send a chat message to a private room.",
+              "node_type": "socketio_request",
+              "node_schema": {
+                "url":        { "type": "string",  "fixed": "${CHAT_URL}" },
+                "namespace":  { "type": "string",  "fixed": "/chat" },
+                "event":      { "type": "string",  "fixed": "send_message" },
+                "timeout_ms": { "type": "integer", "fixed": 10000 },
+                "pre_events": {
+                  "type": "array",
+                  "fixed": [
+                    {
+                      "event": "authenticate",
+                      "payload": { "token": "${CHAT_TOKEN}" },
+                      "wait_event": "auth_ok",
+                      "timeout_ms": 5000
+                    },
+                    {
+                      "event": "join_room",
+                      "payload": { "room": "${CHAT_ROOM_ID}" },
+                      "wait_event": "joined_room",
+                      "timeout_ms": 5000
+                    }
+                  ]
+                },
+                "payload": {
+                  "type": "object",
+                  "properties": {
+                    "room": { "type": "string", "fixed": "${CHAT_ROOM_ID}" },
+                    "text": {
+                      "type": "string",
+                      "required": true,
+                      "description": "Message text to send to the room."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "tips": [
+        "Default to node_schema + 'fixed' for url/namespace/event/cookies/timeout_ms — the LLM should never alter connection-level fields.",
+        "Use ack mode (omit wait_event) when the server replies via the Socket.IO acknowledgment callback. Use wait_event when the server emits a separate broadcast event as the response.",
+        "When the server scopes state per-socket (rooms, subscriptions, sessions), use pre_events to set up that state on the SAME connection before the main emit. Two separate socketio_request nodes will each open a fresh socket and lose the setup.",
+        "The pre_events array goes inside node_schema with 'fixed' so the LLM cannot disable or alter the auth/setup chain. Failure of any pre_event aborts the call cleanly with success=false and failed_pre_event.",
+        "Inputs override config fields with the same name — useful when chaining: a previous node can dynamically supply 'url' or 'payload' via edges while the rest stays fixed.",
+        "On error the node returns { success: false, event, error, ... } instead of throwing. Branch on success in downstream nodes if you want the LLM to react to failures."
+      ],
+      "reference_graphs": [
+        "tests/graphs/external/socketio_pre_events.json",
+        "tests/graphs/external/socketio_canvas_builder.json",
+        "tests/graphs/external/socketio_canvas_test.json"
       ]
     },
 

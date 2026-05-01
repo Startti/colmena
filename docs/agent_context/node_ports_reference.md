@@ -84,7 +84,7 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 | **http_request** | — | `body` | **Requires explicit `url`, `method`, etc.** |
 | **socketio_request** | — | `response` | **Requires explicit `url`, `event`, etc.** |
 | `sql_query` | `query` | `output` | SQL query execution — permission control, validation, RLS |
-| `python_script` | — | `output` | **Dynamic inputs** — all inputs flattened as Python variables |
+| `python_script` | — | — | **Dynamic inputs & outputs** — all inputs flattened as Python variables; output is the raw value of the `output` variable (not wrapped in `{ output: ... }`), so edges pass it through unchanged |
 | `planner` | — | `result` | **Dynamic inputs** — any input is treated as text for planning |
 | `critic` | — | `result` | **Dynamic inputs** — `texts.*` inputs reviewed by LLM |
 | `information_extraction` | — | `result` | **Dynamic inputs** — `texts.*` inputs extracted per schema |
