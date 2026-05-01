@@ -33,6 +33,7 @@ All config fields support `${VAR_NAME}` environment variable resolution in strin
 | `wait_event` | string | No | `null` | If set, listen for this server event instead of using ack callback |
 | `timeout_ms` | integer | No | `10000` | Timeout in ms for the response |
 | `transport` | string | No | `"any"` | Transport type: `"any"`, `"websocket"`, or `"polling"` |
+| `pre_events` | array | No | `[]` | Sequence of events emitted on the SAME connection BEFORE the main event. See [Pre-events](#pre-events-multi-event-sequence-on-the-same-connection) |
 
 ---
 
@@ -59,9 +60,11 @@ All input ports mirror the config fields. **Inputs take priority over config** �
 
 | Port | Type | Description |
 |---|---|---|
-| `success` | boolean | `true` if the server responded, `false` on timeout/exception/error |
+| `success` | boolean | `true` if the server responded, `false` on timeout/exception/error (including pre-event failure) |
 | `event` | string | The event name that was emitted (echoed back for identification) |
 | `response` | any | The server response data (**default output port**) |
+| `pre_responses` | array | Only present when `pre_events` were configured and at least one completed. Items: `{ event, response }` in execution order |
+| `failed_pre_event` | string | Only present when a pre-event failed. The main event was NOT emitted in this case |
 
 **Default output:** `response` — downstream nodes connected with implicit edges receive this value.
 
@@ -132,6 +135,118 @@ Client                    Server
 ```
 
 Use wait-event mode when the server responds by emitting a different event name (e.g., emit `load_canvas_state`, wait for `canvas_state_loaded`).
+
+---
+
+## Pre-events: multi-event sequence on the same connection
+
+Some Socket.IO servers scope state per-socket — for example, room subscriptions in NestJS gateways: a client must `join_room` (or equivalent) over a given socket before mutations on that socket are routed to the right room. Because `socketio_request` is stateless (each execution opens a fresh connection and disconnects), chaining two `socketio_request` nodes in the DAG won't work for this case — each socket would have to re-join.
+
+The `pre_events` array solves this by emitting an ordered sequence of events on the **same** connection **before** the main event:
+
+```json
+"pre_events": [
+  {
+    "event": "join_environment_room",         // required
+    "payload": { "environmentId": "abc123" }, // optional, default {}
+    "wait_event": "joined_environment_room",  // optional; if absent, uses ack
+    "timeout_ms": 5000                          // optional; if absent, inherits node timeout_ms
+  }
+]
+```
+
+**Execution order:**
+1. Connect once.
+2. Emit each entry of `pre_events` in array order, waiting for its ack or `wait_event` before moving on.
+3. Emit the main `event`.
+4. Disconnect.
+
+```
+Client                       Server
+  │                            │
+  │── emit("join_room") ──────►│
+  │                            │
+  │◄── ack(joined) ────────────│   ← pre_events[0]
+  │                            │
+  │── emit("create_canvas") ──►│
+  │                            │
+  │◄── ack(canvas_id) ─────────│   ← main event
+  │                            │
+  │── disconnect ─────────────►│
+```
+
+**Per-step `payload` env-var resolution:** strings inside each pre-event payload are resolved recursively, identical to the main payload.
+
+### Successful output (with pre_events)
+
+```json
+{
+  "success": true,
+  "event": "create_canvas",
+  "response": { "canvasId": "..." },
+  "pre_responses": [
+    { "event": "join_environment_room", "response": { "success": true, "environmentId": "abc123" } }
+  ]
+}
+```
+
+### Failure: pre-event aborts the main emit
+
+If any pre-event times out, returns a server `exception`, or fails to emit, the node **stops immediately**:
+- The main event is **not** emitted.
+- The connection is closed.
+- The output is a failure envelope including which pre-event failed and the responses already collected:
+
+```json
+{
+  "success": false,
+  "event": "create_canvas",
+  "failed_pre_event": "join_environment_room",
+  "error": "Timeout waiting for ack on 'join_environment_room' after 5000ms",
+  "pre_responses": []
+}
+```
+
+If a pre-event succeeds and a later step fails, `pre_responses` will contain everything that completed before the failure.
+
+### Backward compatibility
+
+If `pre_events` is absent or empty, the node behaves exactly as before — no `pre_responses` field is added to the output. Existing graphs are unaffected.
+
+### Use as an LLM tool
+
+Lock `pre_events` away from the LLM by declaring it as a `fixed` field in `node_schema`. The LLM never sees the auth/setup logic and only controls the dynamic fields you expose. Example for an ADP canvas mutation tool:
+
+```json
+"create_canvas_node": {
+  "name": "create_canvas_node",
+  "node_type": "socketio_request",
+  "description": "Create a new node on the canvas...",
+  "node_schema": {
+    "url":        { "type": "string", "fixed": "${ADP_API_URL}" },
+    "namespace":  { "type": "string", "fixed": "/canvas" },
+    "event":      { "type": "string", "fixed": "create_node" },
+    "cookies":    { "type": "string", "fixed": "__Secure-better-auth.session_token=${ADP_SESSION_TOKEN}" },
+    "timeout_ms": { "type": "integer", "fixed": 15000 },
+    "pre_events": {
+      "type": "array",
+      "fixed": [
+        {
+          "event": "join_environment_room",
+          "payload": { "environmentId": "${ADP_ENVIRONMENT_ID}" }
+        }
+      ]
+    },
+    "payload": {
+      "type": "object",
+      "properties": {
+        "environmentId": { "type": "string", "fixed": "${ADP_ENVIRONMENT_ID}" },
+        "node":          { "type": "object", "required": true, "description": "..." }
+      }
+    }
+  }
+}
+```
 
 ---
 
@@ -341,6 +456,20 @@ A graph where an LLM agent uses `socketio_request` as a tool via `tool_configura
 - The `exception` field in the error envelope contains the server's error details
 - Common causes: invalid payload format, missing required fields, authentication failure
 - Check the server's expected payload format
+
+### A pre-event failed — the main event never fired
+
+**Cause:** A `pre_events` entry timed out, returned a server exception, or the channel closed unexpectedly. The node aborts on first pre-event failure and does NOT emit the main event.
+
+**What to check:**
+- The `failed_pre_event` field in the envelope tells you which pre-event aborted the chain.
+- The `error` field contains the underlying message (timeout / server exception / emit failure).
+- The `pre_responses` array shows which pre-events did complete before the failure — useful when the failing pre-event depends on an earlier one.
+
+**Common fixes:**
+- Wrong `wait_event` name in the pre-event → use ack mode (omit `wait_event`) if the server replies via the ack callback.
+- `timeout_ms` too low for the operation → bump it on the offending pre-event.
+- Auth / access denied (e.g., `validateEnvironmentAccess` rejected the join) → verify the cookies/headers and the `environmentId` payload.
 
 ### Connection fails silently
 

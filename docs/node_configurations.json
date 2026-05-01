@@ -753,6 +753,19 @@
           "description": "The transport type for the Socket.IO connection. 'any' (default) lets the client choose automatically (usually starts with polling, upgrades to WebSocket). 'websocket' forces WebSocket-only. 'polling' forces HTTP long-polling only.",
           "valid_values": ["any", "websocket", "polling"],
           "example": "websocket"
+        },
+        "pre_events": {
+          "type": "array",
+          "required": false,
+          "default": [],
+          "description": "Optional sequence of events to emit on the SAME connection BEFORE the main event. Useful for servers that scope state per-socket (e.g., room subscriptions, sessions). Each item is an object: { event: string (required), payload?: any (default {}), wait_event?: string (optional, listen for a separate ack event), timeout_ms?: integer (optional, falls back to the node's timeout_ms) }. String values inside each item's payload support '${VAR_NAME}' resolution. Pre-events are executed sequentially in order. If any pre-event fails (timeout, server exception, channel error), the node aborts: it disconnects, does NOT emit the main event, and returns an envelope with success=false, failed_pre_event=<name>, error=<msg>, and pre_responses listing the pre-events that did complete. On success the output includes pre_responses: [{event, response}, ...] alongside the main response. Backward-compatible: if absent or empty, behavior is identical to the legacy single-event flow.",
+          "supports_env_vars": true,
+          "example": [
+            {
+              "event": "join_environment_room",
+              "payload": { "environmentId": "${ENVIRONMENT_ID}" }
+            }
+          ]
         }
       },
       "input_ports": {
@@ -763,12 +776,13 @@
         "headers": { "type": "object", "description": "Dynamic headers. Overrides config headers." },
         "cookies": { "type": "string", "description": "Dynamic cookie string. Overrides config." },
         "wait_event": { "type": "string", "description": "Dynamic wait_event. Overrides config." },
-        "timeout_ms": { "type": "integer", "description": "Dynamic timeout in ms. Overrides config." }
+        "timeout_ms": { "type": "integer", "description": "Dynamic timeout in ms. Overrides config." },
+        "pre_events": { "type": "array", "description": "Dynamic pre_events sequence. Overrides config entirely." }
       },
       "output_ports": {
         "success": {
           "type": "boolean",
-          "description": "Whether the request completed successfully. True when the server responded via ack or wait_event. False on timeout, server exception, or channel error."
+          "description": "Whether the request completed successfully. True when the server responded via ack or wait_event. False on timeout, server exception, or channel error (including pre-event failure)."
         },
         "event": {
           "type": "string",
@@ -777,15 +791,25 @@
         "response": {
           "type": "any",
           "description": "The server response data. In ack mode, this is the acknowledgment payload. In wait-event mode, this is the data from the waited event. This is the default output port — downstream nodes connected without specifying a field get this value. On error, this field is absent and 'error' contains the error message."
+        },
+        "pre_responses": {
+          "type": "array",
+          "description": "Only present when pre_events were configured. Array of { event: string, response: any } objects in the order the pre-events executed. On a pre-event failure, contains only the entries that completed before the failing one."
+        },
+        "failed_pre_event": {
+          "type": "string",
+          "description": "Only present when a pre_event failed. Names the pre-event whose ack/wait_event timed out or whose server emitted an exception. The main event is NOT emitted in this case."
         }
       },
       "error_envelope": {
-        "description": "On failure (timeout, server exception, channel error), the node returns an error envelope instead of throwing. This allows downstream nodes to handle errors gracefully.",
+        "description": "On failure (timeout, server exception, channel error), the node returns an error envelope instead of throwing. This allows downstream nodes to handle errors gracefully. When pre_events are involved, the envelope additionally carries failed_pre_event (if a pre-event failed) and pre_responses (the entries that did complete).",
         "schema": {
           "success": false,
-          "event": "string (the emitted event name)",
+          "event": "string (the main event name)",
           "error": "string (human-readable error message)",
-          "exception": "any (optional, present only for server-side exceptions caught via the 'exception' event)"
+          "exception": "any (optional, present only for server-side exceptions caught via the 'exception' event)",
+          "failed_pre_event": "string (optional, present when a pre_event failed — the main event was NOT emitted)",
+          "pre_responses": "array (optional, present when at least one pre_event completed)"
         }
       },
       "default_input": null,

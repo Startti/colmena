@@ -1,0 +1,60 @@
+{
+  "comment": "Smoke test for socketio_request 'pre_events': join_environment_room (ack) before load_canvas_state (wait_event canvas_state_loaded), all over the SAME socket. Demonstrates the multi-event-on-one-connection feature against an ADP /canvas server. Expected stdout order: connecting → join_environment_room → load_canvas_state → canvas_state_loaded. Output should include pre_responses[0].event == 'join_environment_room' and the canvas state in 'response'.",
+  "metadata": {
+    "category": "external",
+    "features": [
+      "socketio_pre_events"
+    ],
+    "requires_env": [
+      "ADP_API_URL",
+      "ADP_SESSION_TOKEN",
+      "ADP_ENVIRONMENT_ID"
+    ]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "message": "Probe ADP /canvas with pre_events"
+      }
+    },
+    "load_canvas_with_join": {
+      "type": "socketio_request",
+      "config": {
+        "url": "${ADP_API_URL}",
+        "namespace": "/canvas",
+        "event": "load_canvas_state",
+        "wait_event": "canvas_state_loaded",
+        "cookies": "__Secure-better-auth.session_token=${ADP_SESSION_TOKEN}",
+        "timeout_ms": 15000,
+        "transport": "websocket",
+        "payload": {
+          "environmentId": "${ADP_ENVIRONMENT_ID}"
+        },
+        "pre_events": [
+          {
+            "event": "join_environment_room",
+            "payload": {
+              "environmentId": "${ADP_ENVIRONMENT_ID}"
+            },
+            "wait_event": "joined_environment_room",
+            "timeout_ms": 5000
+          }
+        ]
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "load_canvas_with_join"
+    },
+    {
+      "from": "load_canvas_with_join",
+      "to": "log_result"
+    }
+  ]
+}

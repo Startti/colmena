@@ -1,5 +1,5 @@
 {
-  "comment": "Test: LLM agent that builds ADP canvas graphs using on-demand skills (one reference per node type) instead of dumping all node configs into the system prompt.",
+  "comment": "Test: LLM agent that builds ADP canvas graphs using on-demand skills (one reference per node type) instead of dumping all node configs into the system prompt. Every mutation tool (create/update/delete node/edge) emits 'join_environment_room' as a pre_event on the same socket so the ADP /canvas gateway scopes the broadcast to the correct room. 'load_canvas' is intentionally WITHOUT a pre_event because 'load_canvas_state' already joins the room and returns state in a single round-trip.",
   "metadata": {
     "category": "external",
     "features": [
@@ -94,6 +94,15 @@
                 "type": "string",
                 "fixed": "create_node"
               },
+              "pre_events": {
+                "type": "array",
+                "fixed": [
+                  {
+                    "event": "join_environment_room",
+                    "payload": { "environmentId": "${ADP_ENVIRONMENT_ID}" }
+                  }
+                ]
+              },
               "cookies": {
                 "type": "string",
                 "fixed": "__Secure-better-auth.session_token=${ADP_SESSION_TOKEN}"
@@ -134,6 +143,15 @@
               "event": {
                 "type": "string",
                 "fixed": "update_node"
+              },
+              "pre_events": {
+                "type": "array",
+                "fixed": [
+                  {
+                    "event": "join_environment_room",
+                    "payload": { "environmentId": "${ADP_ENVIRONMENT_ID}" }
+                  }
+                ]
               },
               "cookies": {
                 "type": "string",
@@ -181,6 +199,15 @@
                 "type": "string",
                 "fixed": "delete_node"
               },
+              "pre_events": {
+                "type": "array",
+                "fixed": [
+                  {
+                    "event": "join_environment_room",
+                    "payload": { "environmentId": "${ADP_ENVIRONMENT_ID}" }
+                  }
+                ]
+              },
               "cookies": {
                 "type": "string",
                 "fixed": "__Secure-better-auth.session_token=${ADP_SESSION_TOKEN}"
@@ -221,6 +248,15 @@
               "event": {
                 "type": "string",
                 "fixed": "create_edge"
+              },
+              "pre_events": {
+                "type": "array",
+                "fixed": [
+                  {
+                    "event": "join_environment_room",
+                    "payload": { "environmentId": "${ADP_ENVIRONMENT_ID}" }
+                  }
+                ]
               },
               "cookies": {
                 "type": "string",
@@ -300,6 +336,15 @@
                 "type": "string",
                 "fixed": "update_edge"
               },
+              "pre_events": {
+                "type": "array",
+                "fixed": [
+                  {
+                    "event": "join_environment_room",
+                    "payload": { "environmentId": "${ADP_ENVIRONMENT_ID}" }
+                  }
+                ]
+              },
               "cookies": {
                 "type": "string",
                 "fixed": "__Secure-better-auth.session_token=${ADP_SESSION_TOKEN}"
@@ -345,6 +390,15 @@
               "event": {
                 "type": "string",
                 "fixed": "delete_edge"
+              },
+              "pre_events": {
+                "type": "array",
+                "fixed": [
+                  {
+                    "event": "join_environment_room",
+                    "payload": { "environmentId": "${ADP_ENVIRONMENT_ID}" }
+                  }
+                ]
               },
               "cookies": {
                 "type": "string",

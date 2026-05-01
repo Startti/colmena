@@ -2,12 +2,20 @@
 //!
 //! ## Standalone use
 //! Configure via `config`: `url`, `namespace`, `event`, `payload`, `headers`, `cookies`,
-//! `wait_event`, `timeout_ms`, `transport`. All string values support `${ENV_VAR}` resolution.
-//! Input edges override config values (inputs take priority over config).
+//! `wait_event`, `timeout_ms`, `transport`, `pre_events`. All string values support
+//! `${ENV_VAR}` resolution. Input edges override config values (inputs take priority
+//! over config).
+//!
+//! ## Pre-events (multi-event sequence on the same connection)
+//! Use `pre_events: [{event, payload?, wait_event?, timeout_ms?}, ...]` to emit a
+//! sequence of events BEFORE the main event over the SAME connection. Useful for
+//! servers that scope state per-socket (e.g., room subscriptions, sessions).
+//! On any pre-event failure the node aborts, returns an error envelope with
+//! `failed_pre_event`, and never emits the main event.
 //!
 //! ## As an LLM tool (via `tool_configurations`)
 //! When invoked by `DagToolExecutor`, the LLM provides the dynamic fields (e.g., `payload`)
-//! while fixed fields (url, namespace, auth) are pre-configured in `node_schema`.
+//! while fixed fields (url, namespace, auth, pre_events) are pre-configured in `node_schema`.
 //!
 //! ## Response patterns
 //! - **Ack mode** (default): Uses Socket.IO acknowledgment callback for the response.
@@ -15,17 +23,34 @@
 //!
 //! ## Outputs
 //! Returns `{ "success": bool, "event": string, "response": Value }`.
+//! With `pre_events`, also includes `pre_responses: [{event, response}, ...]`.
+//! On pre-event failure: `{ "success": false, "event", "failed_pre_event", "error", "pre_responses" }`.
 //! The default output port is `response`.
 
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use futures::FutureExt;
-use rust_socketio::asynchronous::ClientBuilder;
+use rust_socketio::asynchronous::{Client, ClientBuilder};
 use rust_socketio::{Payload, TransportType};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, oneshot, Mutex};
+
+/// Routing map: wait_event name → currently-installed sender for the active step.
+/// One entry exists only while a step is awaiting that event; the handler removes it
+/// on fire and the step removes it on timeout/exception cleanup.
+type WaitSlots = Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>;
+
+/// One entry of the `pre_events` array.
+#[derive(Debug)]
+struct PreEventSpec {
+    event: String,
+    payload: Value,
+    wait_event: Option<String>,
+    timeout_ms: Option<u64>,
+}
 
 /// Emits Socket.IO events and collects responses. Implements [`ExecutableNode`].
 /// Stateless — each execution creates a fresh connection.
@@ -111,6 +136,168 @@ impl SocketIoNode {
             .and_then(|v| v.as_u64())
             .or_else(|| config.get(key).and_then(|v| v.as_u64()))
     }
+
+    /// Parse the `pre_events` value into a typed list. Absent / null / empty array
+    /// all yield `Ok(vec![])`. Anything else that isn't an array of objects with a
+    /// non-empty string `event` returns `Err` (configuration error).
+    fn parse_pre_events(val: Option<&Value>) -> Result<Vec<PreEventSpec>, String> {
+        let arr = match val {
+            None => return Ok(Vec::new()),
+            Some(Value::Null) => return Ok(Vec::new()),
+            Some(Value::Array(arr)) => arr,
+            Some(_) => return Err("socketio_request: 'pre_events' must be an array".to_string()),
+        };
+        let mut out = Vec::with_capacity(arr.len());
+        for (i, item) in arr.iter().enumerate() {
+            let obj = item
+                .as_object()
+                .ok_or_else(|| format!("socketio_request: pre_events[{}] must be an object", i))?;
+            let event = obj
+                .get("event")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "socketio_request: pre_events[{}] requires non-empty 'event' string",
+                        i
+                    )
+                })?
+                .to_string();
+            let payload = obj.get("payload").cloned().unwrap_or_else(|| json!({}));
+            let wait_event = obj
+                .get("wait_event")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            let timeout_ms = obj.get("timeout_ms").and_then(|v| v.as_u64());
+            out.push(PreEventSpec {
+                event,
+                payload,
+                wait_event,
+                timeout_ms,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Emit one event over an existing connection and collect its response.
+    /// Used for pre-events and the main event. Races ack / wait_event vs
+    /// the shared exception channel vs timeout. Returns the parsed response on
+    /// success or a plain error message (caller wraps into an envelope).
+    async fn emit_step(
+        client: &Client,
+        event: &str,
+        payload: &Value,
+        wait_event: Option<&str>,
+        timeout_ms: u64,
+        exc_rx: &mut mpsc::UnboundedReceiver<Value>,
+        wait_slots: &WaitSlots,
+    ) -> Result<Value, String> {
+        let resolved_payload = Self::resolve_env_vars_in_value(payload)?;
+        let timeout_dur = Duration::from_millis(timeout_ms);
+
+        println!(
+            "[SocketIoNode] → {} (wait_event: {:?}, timeout: {}ms)",
+            event, wait_event, timeout_ms
+        );
+        println!(
+            "[SocketIoNode] 📤 payload: {}",
+            serde_json::to_string_pretty(&resolved_payload)
+                .unwrap_or_else(|_| format!("{:?}", resolved_payload))
+        );
+
+        if let Some(wait_name) = wait_event {
+            // ---- Wait-event mode ----
+            let (tx, rx) = oneshot::channel::<Value>();
+            {
+                let mut map = wait_slots.lock().await;
+                map.insert(wait_name.to_string(), tx);
+            }
+
+            let emit_res = client
+                .emit(event.to_string(), resolved_payload)
+                .await
+                .map_err(|e| format!("failed to emit '{}': {}", event, e));
+
+            let result: Result<Value, String> = match emit_res {
+                Err(e) => Err(e),
+                Ok(()) => {
+                    tokio::select! {
+                        r = rx => r.map_err(|_| {
+                            format!("wait_event channel for '{}' closed unexpectedly", wait_name)
+                        }),
+                        Some(exc_val) = exc_rx.recv() => {
+                            let msg = exc_val
+                                .get("message")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("Server exception")
+                                .to_string();
+                            Err(format!("server exception: {}", msg))
+                        }
+                        _ = tokio::time::sleep(timeout_dur) => {
+                            Err(format!(
+                                "Timeout waiting for '{}' after {}ms",
+                                wait_name, timeout_ms
+                            ))
+                        }
+                    }
+                }
+            };
+
+            // Cleanup slot regardless of outcome (idempotent if already removed by handler).
+            let mut map = wait_slots.lock().await;
+            map.remove(wait_name);
+            result
+        } else {
+            // ---- Ack mode ----
+            let (ack_tx, ack_rx) = oneshot::channel::<Value>();
+            let ack_tx = Arc::new(Mutex::new(Some(ack_tx)));
+
+            let emit_res = client
+                .emit_with_ack(
+                    event.to_string(),
+                    resolved_payload,
+                    timeout_dur,
+                    move |payload: Payload, _client| {
+                        let ack_tx = ack_tx.clone();
+                        async move {
+                            if let Some(sender) = ack_tx.lock().await.take() {
+                                let val = Self::payload_to_value(payload);
+                                let _ = sender.send(val);
+                            }
+                        }
+                        .boxed()
+                    },
+                )
+                .await
+                .map_err(|e| format!("failed to emit_with_ack '{}': {}", event, e));
+
+            match emit_res {
+                Err(e) => Err(e),
+                Ok(()) => {
+                    tokio::select! {
+                        r = ack_rx => r.map_err(|_| {
+                            format!("ack channel for '{}' closed unexpectedly", event)
+                        }),
+                        Some(exc_val) = exc_rx.recv() => {
+                            let msg = exc_val
+                                .get("message")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("Server exception")
+                                .to_string();
+                            Err(format!("server exception: {}", msg))
+                        }
+                        _ = tokio::time::sleep(timeout_dur) => {
+                            Err(format!(
+                                "Timeout waiting for ack on '{}' after {}ms",
+                                event, timeout_ms
+                            ))
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -122,7 +309,7 @@ impl ExecutableNode for SocketIoNode {
         _state: &mut Value,
         _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
-        // 1. Resolve configuration (inputs > config)
+        // ---- 1. Resolve top-level config (inputs > config) ----
         let url_raw =
             Self::get_str(inputs, config, "url").ok_or("socketio_request: 'url' is required")?;
         let url = Self::resolve_env_vars(url_raw).map_err(|e| {
@@ -140,33 +327,44 @@ impl ExecutableNode for SocketIoNode {
             .ok_or("socketio_request: 'event' is required")?
             .to_string();
 
-        let wait_event = Self::get_str(inputs, config, "wait_event").map(|s| s.to_string());
+        let main_wait_event = Self::get_str(inputs, config, "wait_event")
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
         let timeout_ms = Self::get_u64(inputs, config, "timeout_ms").unwrap_or(10000);
         let transport = Self::get_str(inputs, config, "transport").unwrap_or("any");
 
-        // Resolve payload (inputs > config, with env var resolution)
-        let payload_val = inputs
+        // Main payload (inputs > config). Env vars resolved later in emit_step.
+        let main_payload = inputs
             .get("payload")
             .or_else(|| config.get("payload"))
             .cloned()
             .unwrap_or(json!({}));
-        let payload_val = Self::resolve_env_vars_in_value(&payload_val).map_err(|e| {
+
+        // ---- 2. Parse pre_events ----
+        let pre_events_val = inputs
+            .get("pre_events")
+            .or_else(|| config.get("pre_events"));
+        let pre_events = Self::parse_pre_events(pre_events_val).map_err(|e| {
             Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
                 as Box<dyn StdError + Send + Sync>
         })?;
 
-        println!(
-            "[SocketIoNode] → {} {} (namespace: {}, wait_event: {:?})",
-            event_name, url, namespace, wait_event
-        );
-        // Debug: log the full payload being sent
-        println!(
-            "[SocketIoNode] 📤 payload: {}",
-            serde_json::to_string_pretty(&payload_val)
-                .unwrap_or_else(|_| format!("{:?}", payload_val))
-        );
+        // ---- 3. Collect unique wait_event names (pre_events ∪ main) ----
+        let mut unique_wait_names: Vec<String> = Vec::new();
+        for pe in &pre_events {
+            if let Some(w) = &pe.wait_event {
+                if !unique_wait_names.contains(w) {
+                    unique_wait_names.push(w.clone());
+                }
+            }
+        }
+        if let Some(w) = &main_wait_event {
+            if !unique_wait_names.contains(w) {
+                unique_wait_names.push(w.clone());
+            }
+        }
 
-        // 2. Build client
+        // ---- 4. Build client ----
         let transport_type = match transport {
             "websocket" => TransportType::Websocket,
             "polling" => TransportType::Polling,
@@ -178,7 +376,6 @@ impl ExecutableNode for SocketIoNode {
             .transport_type(transport_type)
             .reconnect(false);
 
-        // Apply cookies as opening header
         if let Some(cookies_raw) = Self::get_str(inputs, config, "cookies") {
             let cookies = Self::resolve_env_vars(cookies_raw).map_err(|e| {
                 Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
@@ -187,7 +384,6 @@ impl ExecutableNode for SocketIoNode {
             builder = builder.opening_header("Cookie", cookies);
         }
 
-        // Apply custom headers
         let headers_val = inputs.get("headers").or_else(|| config.get("headers"));
         if let Some(headers) = headers_val.and_then(|v| v.as_object()) {
             for (k, v) in headers {
@@ -201,7 +397,7 @@ impl ExecutableNode for SocketIoNode {
             }
         }
 
-        // 3. Debug handlers — log connection lifecycle events
+        // Lifecycle/debug handlers
         builder = builder.on("error", |payload, _client| {
             async move {
                 println!("[SocketIoNode] ⚠ server error event: {:?}", payload);
@@ -221,9 +417,8 @@ impl ExecutableNode for SocketIoNode {
             .boxed()
         });
 
-        // 4. Exception handler — catch server-side errors and fail fast
-        let (exc_tx, exc_rx) = tokio::sync::oneshot::channel::<Value>();
-        let exc_tx = Arc::new(Mutex::new(Some(exc_tx)));
+        // ---- 5. Exception channel (mpsc, drained per step) ----
+        let (exc_tx, mut exc_rx) = mpsc::unbounded_channel::<Value>();
         builder = builder.on("exception", move |payload, _client| {
             let exc_tx = exc_tx.clone();
             async move {
@@ -232,37 +427,32 @@ impl ExecutableNode for SocketIoNode {
                     "[SocketIoNode] ⚠ exception: {}",
                     serde_json::to_string(&val).unwrap_or_else(|_| format!("{:?}", val))
                 );
-                if let Some(sender) = exc_tx.lock().await.take() {
-                    let _ = sender.send(val);
-                }
+                let _ = exc_tx.send(val);
             }
             .boxed()
         });
-        let exc_rx = Arc::new(Mutex::new(Some(exc_rx)));
 
-        // 5. Set up wait_event listener if needed
-        let response_rx = if let Some(ref wait_ev) = wait_event {
-            let (tx, rx) = tokio::sync::oneshot::channel::<Value>();
-            let tx = Arc::new(Mutex::new(Some(tx)));
-            let wait_ev_clone = wait_ev.clone();
-
-            builder = builder.on(wait_ev_clone, move |payload, _client| {
-                let tx = tx.clone();
+        // ---- 6. Wait-event routing: register one handler per unique name ----
+        let wait_slots: WaitSlots = Arc::new(Mutex::new(HashMap::new()));
+        for w in &unique_wait_names {
+            let w_owned = w.clone();
+            let slots = wait_slots.clone();
+            builder = builder.on(w_owned.clone(), move |payload, _client| {
+                let slots = slots.clone();
+                let event_name = w_owned.clone();
                 async move {
-                    println!("[SocketIoNode] ✓ received wait_event, forwarding to channel");
-                    if let Some(sender) = tx.lock().await.take() {
+                    println!("[SocketIoNode] ✓ received wait_event '{}'", event_name);
+                    let mut map = slots.lock().await;
+                    if let Some(sender) = map.remove(&event_name) {
                         let val = Self::payload_to_value(payload);
                         let _ = sender.send(val);
                     }
                 }
                 .boxed()
             });
-            Some(rx)
-        } else {
-            None
-        };
+        }
 
-        // Catch-all handler for debugging: log any unhandled event
+        // ---- 7. Catch-all debug handler ----
         builder = builder.on_any(move |event, payload, _client| {
             async move {
                 let preview = match &payload {
@@ -281,7 +471,11 @@ impl ExecutableNode for SocketIoNode {
             .boxed()
         });
 
-        // 6. Connect
+        // ---- 8. Connect ----
+        println!(
+            "[SocketIoNode] connecting to {} (namespace: {}, transport: {})",
+            url, namespace, transport
+        );
         let client = builder.connect().await.map_err(|e| {
             format!(
                 "socketio_request: failed to connect to {} (namespace {}): {}",
@@ -289,199 +483,93 @@ impl ExecutableNode for SocketIoNode {
             )
         })?;
 
-        // Small delay to let the connection fully establish
+        // Small delay to let the connection fully establish.
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // 7. Emit and wait for response (racing against exception channel)
-        let timeout_dur = Duration::from_millis(timeout_ms);
-        let event_name_clone = event_name.clone();
-
-        let result: Result<Value, Box<dyn StdError + Send + Sync>> = if let Some(rx) = response_rx {
-            // Wait-event mode: emit, then race wait_event vs exception vs timeout
-            client
-                .emit(event_name.clone(), payload_val)
-                .await
-                .map_err(|e| format!("socketio_request: failed to emit '{}': {}", event_name, e))?;
-
-            let exc_rx_opt = exc_rx.lock().await.take();
-            if let Some(exc_rx_inner) = exc_rx_opt {
-                tokio::select! {
-                    response = rx => {
-                        match response {
-                            Ok(val) => Ok(val),
-                            Err(_) => Ok(json!({
-                                "success": false,
-                                "event": event_name_clone,
-                                "error": "wait_event channel closed unexpectedly"
-                            })),
-                        }
-                    }
-                    exception = exc_rx_inner => {
-                        match exception {
-                            Ok(val) => {
-                                let msg = val.get("message").and_then(|m| m.as_str())
-                                    .unwrap_or("Server exception");
-                                Ok(json!({
-                                    "success": false,
-                                    "event": event_name_clone,
-                                    "error": msg,
-                                    "exception": val
-                                }))
-                            }
-                            Err(_) => Ok(json!({
-                                "success": false,
-                                "event": event_name_clone,
-                                "error": "exception channel closed unexpectedly"
-                            })),
-                        }
-                    }
-                    _ = tokio::time::sleep(timeout_dur) => {
-                        Ok(json!({
-                            "success": false,
-                            "event": event_name_clone,
-                            "error": format!(
-                                "Timeout waiting for '{}' after {}ms",
-                                wait_event.as_deref().unwrap_or("?"),
-                                timeout_ms
-                            )
-                        }))
-                    }
+        // ---- 9. Run pre_events sequentially ----
+        let mut pre_responses: Vec<Value> = Vec::new();
+        for pe in pre_events {
+            // Drain any stale exceptions queued before this step starts.
+            while exc_rx.try_recv().is_ok() {}
+            let step_timeout = pe.timeout_ms.unwrap_or(timeout_ms);
+            match Self::emit_step(
+                &client,
+                &pe.event,
+                &pe.payload,
+                pe.wait_event.as_deref(),
+                step_timeout,
+                &mut exc_rx,
+                &wait_slots,
+            )
+            .await
+            {
+                Ok(val) => {
+                    pre_responses.push(json!({
+                        "event": pe.event,
+                        "response": val,
+                    }));
                 }
-            } else {
-                match tokio::time::timeout(timeout_dur, rx).await {
-                    Ok(Ok(val)) => Ok(val),
-                    Ok(Err(_)) => Ok(json!({
+                Err(msg) => {
+                    println!("[SocketIoNode] ✗ pre_event '{}' failed: {}", pe.event, msg);
+                    let _ = client.disconnect().await;
+                    return Ok(json!({
                         "success": false,
-                        "event": event_name_clone,
-                        "error": "wait_event channel closed unexpectedly"
-                    })),
-                    Err(_) => Ok(json!({
-                        "success": false,
-                        "event": event_name_clone,
-                        "error": format!(
-                            "Timeout waiting for '{}' after {}ms",
-                            wait_event.as_deref().unwrap_or("?"),
-                            timeout_ms
-                        )
-                    })),
+                        "event": event_name,
+                        "failed_pre_event": pe.event,
+                        "error": msg,
+                        "pre_responses": pre_responses,
+                    }));
                 }
             }
-        } else {
-            // Ack mode: emit_with_ack, race ack vs exception vs timeout
-            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<Value>();
-            let ack_tx = Arc::new(Mutex::new(Some(ack_tx)));
+        }
 
-            client
-                .emit_with_ack(
-                    event_name.clone(),
-                    payload_val,
-                    timeout_dur,
-                    move |payload: Payload, _client| {
-                        let ack_tx = ack_tx.clone();
-                        async move {
-                            if let Some(sender) = ack_tx.lock().await.take() {
-                                let val = Self::payload_to_value(payload);
-                                let _ = sender.send(val);
-                            }
-                        }
-                        .boxed()
-                    },
-                )
-                .await
-                .map_err(|e| {
-                    format!(
-                        "socketio_request: failed to emit_with_ack '{}': {}",
-                        event_name, e
-                    )
-                })?;
+        // ---- 10. Run main event ----
+        while exc_rx.try_recv().is_ok() {}
+        let main_result = Self::emit_step(
+            &client,
+            &event_name,
+            &main_payload,
+            main_wait_event.as_deref(),
+            timeout_ms,
+            &mut exc_rx,
+            &wait_slots,
+        )
+        .await;
 
-            let exc_rx_opt = exc_rx.lock().await.take();
-            if let Some(exc_rx_inner) = exc_rx_opt {
-                tokio::select! {
-                    ack = ack_rx => {
-                        match ack {
-                            Ok(val) => Ok(val),
-                            Err(_) => Ok(json!({
-                                "success": false,
-                                "event": event_name_clone,
-                                "error": "ack channel closed unexpectedly"
-                            })),
-                        }
-                    }
-                    exception = exc_rx_inner => {
-                        match exception {
-                            Ok(val) => {
-                                let msg = val.get("message").and_then(|m| m.as_str())
-                                    .unwrap_or("Server exception");
-                                Ok(json!({
-                                    "success": false,
-                                    "event": event_name_clone,
-                                    "error": msg,
-                                    "exception": val
-                                }))
-                            }
-                            Err(_) => Ok(json!({
-                                "success": false,
-                                "event": event_name_clone,
-                                "error": "exception channel closed unexpectedly"
-                            })),
-                        }
-                    }
-                    _ = tokio::time::sleep(timeout_dur) => {
-                        Ok(json!({
-                            "success": false,
-                            "event": event_name_clone,
-                            "error": format!("Timeout waiting for ack on '{}' after {}ms", event_name_clone, timeout_ms)
-                        }))
-                    }
-                }
-            } else {
-                match tokio::time::timeout(timeout_dur, ack_rx).await {
-                    Ok(Ok(val)) => Ok(val),
-                    Ok(Err(_)) => Ok(json!({
-                        "success": false,
-                        "event": event_name_clone,
-                        "error": "ack channel closed unexpectedly"
-                    })),
-                    Err(_) => Ok(json!({
-                        "success": false,
-                        "event": event_name_clone,
-                        "error": format!("Timeout waiting for ack on '{}' after {}ms", event_name_clone, timeout_ms)
-                    })),
-                }
-            }
-        };
-
-        // 6. Disconnect
+        // ---- 11. Disconnect (always) ----
         let _ = client.disconnect().await;
 
-        // 7. Build output
-        match result {
+        // ---- 12. Build output envelope ----
+        let pre_responses_val = if pre_responses.is_empty() {
+            None
+        } else {
+            Some(Value::Array(pre_responses))
+        };
+
+        match main_result {
             Ok(val) => {
-                // Check if the value is already a failure envelope we built
-                if val.get("success").and_then(|v| v.as_bool()) == Some(false) {
-                    println!(
-                        "[SocketIoNode] ← error: {}",
-                        val.get("error")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown")
-                    );
-                    Ok(val)
-                } else {
-                    println!(
-                        "[SocketIoNode] ← response received for '{}'",
-                        event_name_clone
-                    );
-                    Ok(json!({
-                        "success": true,
-                        "event": event_name_clone,
-                        "response": val
-                    }))
+                println!("[SocketIoNode] ← response received for '{}'", event_name);
+                let mut out = json!({
+                    "success": true,
+                    "event": event_name,
+                    "response": val,
+                });
+                if let Some(pre) = pre_responses_val {
+                    out["pre_responses"] = pre;
                 }
+                Ok(out)
             }
-            Err(e) => {
-                println!("[SocketIoNode] ← error: {}", e);
-                Err(e)
+            Err(msg) => {
+                println!("[SocketIoNode] ← error: {}", msg);
+                let mut out = json!({
+                    "success": false,
+                    "event": event_name,
+                    "error": msg,
+                });
+                if let Some(pre) = pre_responses_val {
+                    out["pre_responses"] = pre;
+                }
+                Ok(out)
             }
         }
     }
@@ -490,7 +578,8 @@ impl ExecutableNode for SocketIoNode {
         Some(
             "Connect to a Socket.IO server, emit an event with a JSON payload, \
              and receive the response via acknowledgment callback or a separate server event. \
-             Supports namespaces, cookie-based authentication, and custom headers.",
+             Supports namespaces, cookie-based authentication, custom headers, and an \
+             optional `pre_events` sequence emitted on the same connection before the main event.",
         )
     }
 
@@ -510,7 +599,8 @@ impl ExecutableNode for SocketIoNode {
                 "cookies": "string (optional, shorthand for Cookie header, supports ${ENV_VAR})",
                 "wait_event": "string (optional, listen for this server event instead of using ack)",
                 "timeout_ms": "integer (default: 10000)",
-                "transport": "string (any|websocket|polling, default: any)"
+                "transport": "string (any|websocket|polling, default: any)",
+                "pre_events": "array<{event, payload?, wait_event?, timeout_ms?}> (optional, sequence emitted on the same connection BEFORE the main event)"
             },
             "inputs": {
                 "url": "string (optional override)",
@@ -520,13 +610,124 @@ impl ExecutableNode for SocketIoNode {
                 "headers": "map<string, string> (optional override)",
                 "cookies": "string (optional override)",
                 "wait_event": "string (optional override)",
-                "timeout_ms": "integer (optional override)"
+                "timeout_ms": "integer (optional override)",
+                "pre_events": "array (optional override)"
             },
             "outputs": {
                 "success": "boolean",
                 "event": "string",
-                "response": "any"
+                "response": "any",
+                "pre_responses": "array<{event, response}> (only present when pre_events were used)",
+                "failed_pre_event": "string (only present when a pre_event failed)",
+                "error": "string (only present on failure)"
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_pre_events_none() {
+        let result = SocketIoNode::parse_pre_events(None).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_pre_events_null() {
+        let v = Value::Null;
+        let result = SocketIoNode::parse_pre_events(Some(&v)).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_pre_events_empty_array() {
+        let v = json!([]);
+        let result = SocketIoNode::parse_pre_events(Some(&v)).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_pre_events_valid_minimal() {
+        let v = json!([{ "event": "join_room" }]);
+        let result = SocketIoNode::parse_pre_events(Some(&v)).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].event, "join_room");
+        assert_eq!(result[0].payload, json!({}));
+        assert!(result[0].wait_event.is_none());
+        assert!(result[0].timeout_ms.is_none());
+    }
+
+    #[test]
+    fn parse_pre_events_valid_full() {
+        let v = json!([
+            {
+                "event": "join_room",
+                "payload": { "room": "abc" },
+                "wait_event": "joined",
+                "timeout_ms": 5000
+            },
+            {
+                "event": "subscribe",
+                "payload": { "topic": "x" }
+            }
+        ]);
+        let result = SocketIoNode::parse_pre_events(Some(&v)).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].event, "join_room");
+        assert_eq!(result[0].payload, json!({ "room": "abc" }));
+        assert_eq!(result[0].wait_event.as_deref(), Some("joined"));
+        assert_eq!(result[0].timeout_ms, Some(5000));
+        assert_eq!(result[1].event, "subscribe");
+        assert!(result[1].wait_event.is_none());
+    }
+
+    #[test]
+    fn parse_pre_events_missing_event() {
+        let v = json!([{ "payload": {} }]);
+        let result = SocketIoNode::parse_pre_events(Some(&v));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("requires non-empty 'event'"));
+    }
+
+    #[test]
+    fn parse_pre_events_empty_event_string() {
+        let v = json!([{ "event": "" }]);
+        let result = SocketIoNode::parse_pre_events(Some(&v));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_pre_events_not_array() {
+        let v = json!({ "event": "join_room" });
+        let result = SocketIoNode::parse_pre_events(Some(&v));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must be an array"));
+    }
+
+    #[test]
+    fn parse_pre_events_item_not_object() {
+        let v = json!(["join_room"]);
+        let result = SocketIoNode::parse_pre_events(Some(&v));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must be an object"));
+    }
+
+    #[test]
+    fn resolve_env_vars_in_value_recursive() {
+        std::env::set_var("TEST_PRE_EVENT_VAR", "my-room");
+        let v = json!({
+            "room": "${TEST_PRE_EVENT_VAR}",
+            "nested": { "topic": "${TEST_PRE_EVENT_VAR}" },
+            "list": ["${TEST_PRE_EVENT_VAR}", 42]
+        });
+        let resolved = SocketIoNode::resolve_env_vars_in_value(&v).unwrap();
+        assert_eq!(resolved["room"], "my-room");
+        assert_eq!(resolved["nested"]["topic"], "my-room");
+        assert_eq!(resolved["list"][0], "my-room");
+        assert_eq!(resolved["list"][1], 42);
+        std::env::remove_var("TEST_PRE_EVENT_VAR");
     }
 }
