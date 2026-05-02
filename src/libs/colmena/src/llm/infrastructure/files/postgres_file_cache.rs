@@ -124,6 +124,10 @@ impl FileCacheRepository for PostgresFileCache {
         }))
     }
 
+    /// On INSERT, `last_used_at` from the entry is honored.
+    /// On UPDATE (conflict on `(document_id, provider)`), `last_used_at` is set
+    /// to `NOW()` regardless of the value passed in `entry.last_used_at`.
+    /// This treats every upsert as a "touch" of the cache row.
     async fn upsert(&self, entry: &CachedFileEntry) -> Result<(), LlmError> {
         let provider_str = entry.provider.to_string();
         sqlx::query(
@@ -183,9 +187,13 @@ mod tests {
 
     /// Helper: crea una instancia con PG real. Requiere TEST_DATABASE_URL.
     /// Skip si no está set.
+    ///
+    /// Each invocation generates a unique `test-<uuid>-` prefix so parallel
+    /// test execution does not race on shared cleanup. The closure receives
+    /// the cache and the prefix; cleanup deletes only rows under that prefix.
     async fn with_cache<F, Fut>(f: F)
     where
-        F: FnOnce(PostgresFileCache) -> Fut,
+        F: FnOnce(PostgresFileCache, String) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
         let url = match std::env::var("TEST_DATABASE_URL") {
@@ -204,12 +212,14 @@ mod tests {
             .await
             .unwrap();
         let cache = PostgresFileCache::new(registry, &url).await.unwrap();
-        // Clean state.
-        sqlx::query("DELETE FROM provider_file_cache WHERE document_id LIKE 'test-%'")
+        let prefix = format!("test-{}-", uuid::Uuid::new_v4());
+        // Clean state for this prefix only (parallel-safe).
+        sqlx::query("DELETE FROM provider_file_cache WHERE document_id LIKE $1")
+            .bind(format!("{}%", prefix))
             .execute(&*pool)
             .await
             .unwrap();
-        f(cache).await;
+        f(cache, prefix).await;
     }
 
     fn fixture(doc_id: &str) -> CachedFileEntry {
@@ -229,9 +239,9 @@ mod tests {
 
     #[tokio::test]
     async fn lookup_miss_returns_none() {
-        with_cache(|cache| async move {
+        with_cache(|cache, prefix| async move {
             let r = cache
-                .lookup("test-not-exist", ProviderKind::Anthropic)
+                .lookup(&format!("{}missing", prefix), ProviderKind::Anthropic)
                 .await
                 .unwrap();
             assert!(r.is_none());
@@ -241,11 +251,12 @@ mod tests {
 
     #[tokio::test]
     async fn upsert_then_lookup_returns_entry() {
-        with_cache(|cache| async move {
-            let entry = fixture("test-1");
+        with_cache(|cache, prefix| async move {
+            let doc_id = format!("{}1", prefix);
+            let entry = fixture(&doc_id);
             cache.upsert(&entry).await.unwrap();
             let got = cache
-                .lookup("test-1", ProviderKind::Anthropic)
+                .lookup(&doc_id, ProviderKind::Anthropic)
                 .await
                 .unwrap();
             assert!(got.is_some());
@@ -255,33 +266,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upsert_twice_updates() {
-        with_cache(|cache| async move {
-            let mut entry = fixture("test-2");
+    async fn upsert_twice_updates_and_touches_last_used_at() {
+        with_cache(|cache, prefix| async move {
+            let doc_id = format!("{}2", prefix);
+            let mut entry = fixture(&doc_id);
+            let original_last_used = entry.last_used_at;
             cache.upsert(&entry).await.unwrap();
+            // Force a small delay so NOW() advances.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             entry.provider_file_id = "file_xyz".into();
+            // Pass a stale last_used_at to confirm the DB ignores it.
+            entry.last_used_at = original_last_used;
             cache.upsert(&entry).await.unwrap();
             let got = cache
-                .lookup("test-2", ProviderKind::Anthropic)
+                .lookup(&doc_id, ProviderKind::Anthropic)
                 .await
                 .unwrap()
                 .unwrap();
             assert_eq!(got.provider_file_id, "file_xyz");
+            assert!(
+                got.last_used_at > original_last_used,
+                "last_used_at should be touched by NOW(), got {} vs original {}",
+                got.last_used_at,
+                original_last_used
+            );
         })
         .await;
     }
 
     #[tokio::test]
     async fn invalidate_removes() {
-        with_cache(|cache| async move {
-            let entry = fixture("test-3");
+        with_cache(|cache, prefix| async move {
+            let doc_id = format!("{}3", prefix);
+            let entry = fixture(&doc_id);
             cache.upsert(&entry).await.unwrap();
             cache
-                .invalidate("test-3", ProviderKind::Anthropic)
+                .invalidate(&doc_id, ProviderKind::Anthropic)
                 .await
                 .unwrap();
             let got = cache
-                .lookup("test-3", ProviderKind::Anthropic)
+                .lookup(&doc_id, ProviderKind::Anthropic)
                 .await
                 .unwrap();
             assert!(got.is_none());
