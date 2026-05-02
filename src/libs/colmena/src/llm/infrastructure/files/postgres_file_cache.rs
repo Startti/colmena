@@ -6,7 +6,8 @@
 use crate::dag_engine::infrastructure::pool_registry::PgPoolRegistry;
 use crate::llm::domain::{CachedFileEntry, FileCacheRepository, LlmError, ProviderKind};
 use async_trait::async_trait;
-use sqlx::PgPool;
+use chrono::{DateTime, Utc};
+use sqlx::{PgPool, Row};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -38,71 +39,116 @@ impl FileCacheRepository for PostgresFileCache {
         provider: ProviderKind,
     ) -> Result<Option<CachedFileEntry>, LlmError> {
         let provider_str = provider.to_string();
-        let row = sqlx::query!(
-            r#"
-            SELECT document_id, provider, provider_file_id, mime_type, filename,
-                   size_bytes, uploaded_at, expires_at, last_used_at
-              FROM provider_file_cache
-             WHERE document_id = $1 AND provider = $2
-            "#,
-            document_id,
-            provider_str
+        let row = sqlx::query(
+            "SELECT document_id, provider, provider_file_id, mime_type, filename, \
+                    size_bytes, uploaded_at, expires_at, last_used_at \
+               FROM provider_file_cache \
+              WHERE document_id = $1 AND provider = $2",
         )
+        .bind(document_id)
+        .bind(&provider_str)
         .fetch_optional(&*self.pool)
         .await
         .map_err(|e| LlmError::RequestFailed {
             message: format!("provider_file_cache lookup failed: {}", e),
         })?;
 
-        Ok(row.map(|r| {
-            let provider = ProviderKind::from_str(&r.provider).unwrap_or_else(|_| {
-                eprintln!(
-                    "PostgresFileCache: unknown provider '{}' in row for document_id={}, falling back to Mock",
-                    r.provider, r.document_id
-                );
-                ProviderKind::Mock
-            });
-            CachedFileEntry {
-                document_id: r.document_id,
-                provider,
-                provider_file_id: r.provider_file_id,
-                mime_type: r.mime_type,
-                filename: r.filename,
-                size_bytes: r.size_bytes,
-                uploaded_at: r.uploaded_at,
-                expires_at: r.expires_at,
-                last_used_at: r.last_used_at,
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let document_id: String =
+            row.try_get::<String, _>("document_id")
+                .map_err(|e| LlmError::RequestFailed {
+                    message: format!("provider_file_cache lookup decode failed: {}", e),
+                })?;
+        let provider_db: String =
+            row.try_get::<String, _>("provider")
+                .map_err(|e| LlmError::RequestFailed {
+                    message: format!("provider_file_cache lookup decode failed: {}", e),
+                })?;
+        let provider_file_id: String = row
+            .try_get::<String, _>("provider_file_id")
+            .map_err(|e| LlmError::RequestFailed {
+                message: format!("provider_file_cache lookup decode failed: {}", e),
+            })?;
+        let mime_type: String =
+            row.try_get::<String, _>("mime_type")
+                .map_err(|e| LlmError::RequestFailed {
+                    message: format!("provider_file_cache lookup decode failed: {}", e),
+                })?;
+        let filename: String =
+            row.try_get::<String, _>("filename")
+                .map_err(|e| LlmError::RequestFailed {
+                    message: format!("provider_file_cache lookup decode failed: {}", e),
+                })?;
+        let size_bytes: Option<i64> = row.try_get::<Option<i64>, _>("size_bytes").map_err(|e| {
+            LlmError::RequestFailed {
+                message: format!("provider_file_cache lookup decode failed: {}", e),
             }
+        })?;
+        let uploaded_at: DateTime<Utc> = row
+            .try_get::<DateTime<Utc>, _>("uploaded_at")
+            .map_err(|e| LlmError::RequestFailed {
+                message: format!("provider_file_cache lookup decode failed: {}", e),
+            })?;
+        let expires_at: Option<DateTime<Utc>> = row
+            .try_get::<Option<DateTime<Utc>>, _>("expires_at")
+            .map_err(|e| LlmError::RequestFailed {
+                message: format!("provider_file_cache lookup decode failed: {}", e),
+            })?;
+        let last_used_at: DateTime<Utc> = row
+            .try_get::<DateTime<Utc>, _>("last_used_at")
+            .map_err(|e| LlmError::RequestFailed {
+                message: format!("provider_file_cache lookup decode failed: {}", e),
+            })?;
+
+        let provider = ProviderKind::from_str(&provider_db).unwrap_or_else(|_| {
+            eprintln!(
+                "PostgresFileCache: unknown provider '{}' in row for document_id={}, falling back to Mock",
+                provider_db, document_id
+            );
+            ProviderKind::Mock
+        });
+
+        Ok(Some(CachedFileEntry {
+            document_id,
+            provider,
+            provider_file_id,
+            mime_type,
+            filename,
+            size_bytes,
+            uploaded_at,
+            expires_at,
+            last_used_at,
         }))
     }
 
     async fn upsert(&self, entry: &CachedFileEntry) -> Result<(), LlmError> {
         let provider_str = entry.provider.to_string();
-        sqlx::query!(
-            r#"
-            INSERT INTO provider_file_cache
-                (document_id, provider, provider_file_id, mime_type, filename,
-                 size_bytes, uploaded_at, expires_at, last_used_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT (document_id, provider) DO UPDATE SET
-                provider_file_id = EXCLUDED.provider_file_id,
-                mime_type        = EXCLUDED.mime_type,
-                filename         = EXCLUDED.filename,
-                size_bytes       = EXCLUDED.size_bytes,
-                uploaded_at      = EXCLUDED.uploaded_at,
-                expires_at       = EXCLUDED.expires_at,
-                last_used_at     = NOW()
-            "#,
-            entry.document_id,
-            provider_str,
-            entry.provider_file_id,
-            entry.mime_type,
-            entry.filename,
-            entry.size_bytes,
-            entry.uploaded_at,
-            entry.expires_at,
-            entry.last_used_at,
+        sqlx::query(
+            "INSERT INTO provider_file_cache \
+                (document_id, provider, provider_file_id, mime_type, filename, \
+                 size_bytes, uploaded_at, expires_at, last_used_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+             ON CONFLICT (document_id, provider) DO UPDATE SET \
+                provider_file_id = EXCLUDED.provider_file_id, \
+                mime_type        = EXCLUDED.mime_type, \
+                filename         = EXCLUDED.filename, \
+                size_bytes       = EXCLUDED.size_bytes, \
+                uploaded_at      = EXCLUDED.uploaded_at, \
+                expires_at       = EXCLUDED.expires_at, \
+                last_used_at     = NOW()",
         )
+        .bind(&entry.document_id)
+        .bind(&provider_str)
+        .bind(&entry.provider_file_id)
+        .bind(&entry.mime_type)
+        .bind(&entry.filename)
+        .bind(entry.size_bytes)
+        .bind(entry.uploaded_at)
+        .bind(entry.expires_at)
+        .bind(entry.last_used_at)
         .execute(&*self.pool)
         .await
         .map_err(|e| LlmError::RequestFailed {
@@ -117,17 +163,14 @@ impl FileCacheRepository for PostgresFileCache {
         provider: ProviderKind,
     ) -> Result<(), LlmError> {
         let provider_str = provider.to_string();
-        sqlx::query!(
-            r#"DELETE FROM provider_file_cache
-                WHERE document_id = $1 AND provider = $2"#,
-            document_id,
-            provider_str
-        )
-        .execute(&*self.pool)
-        .await
-        .map_err(|e| LlmError::RequestFailed {
-            message: format!("provider_file_cache invalidate failed: {}", e),
-        })?;
+        sqlx::query("DELETE FROM provider_file_cache WHERE document_id = $1 AND provider = $2")
+            .bind(document_id)
+            .bind(&provider_str)
+            .execute(&*self.pool)
+            .await
+            .map_err(|e| LlmError::RequestFailed {
+                message: format!("provider_file_cache invalidate failed: {}", e),
+            })?;
         Ok(())
     }
 }
@@ -162,7 +205,7 @@ mod tests {
             .unwrap();
         let cache = PostgresFileCache::new(registry, &url).await.unwrap();
         // Clean state.
-        sqlx::query!("DELETE FROM provider_file_cache WHERE document_id LIKE 'test-%'")
+        sqlx::query("DELETE FROM provider_file_cache WHERE document_id LIKE 'test-%'")
             .execute(&*pool)
             .await
             .unwrap();
