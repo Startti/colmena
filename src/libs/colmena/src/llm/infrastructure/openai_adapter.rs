@@ -36,87 +36,88 @@ impl OpenAiAdapter {
         }
     }
 
-    fn build_messages(&self, request: &LlmRequest) -> Vec<serde_json::Value> {
-        request
-            .messages()
-            .iter()
-            .map(|msg| {
-                let mut message_json = json!({
-                    "role": msg.role().as_str(),
-                });
+    fn build_messages(&self, request: &LlmRequest) -> Result<Vec<serde_json::Value>, LlmError> {
+        let mut out = Vec::with_capacity(request.messages().len());
+        for msg in request.messages() {
+            let mut message_json = json!({
+                "role": msg.role().as_str(),
+            });
 
-                if let Some(files) = msg.files() {
-                    let mut content_arr = vec![json!({
-                        "type": "text",
-                        "text": msg.content()
-                    })];
+            if let Some(files) = msg.files() {
+                let mut content_arr = vec![json!({
+                    "type": "text",
+                    "text": msg.content()
+                })];
 
-                    use base64::{engine::general_purpose::STANDARD, Engine as _};
-                    for file in files {
-                        // TODO(large-files Task 13/14/15): handle SignedUrl and Uploaded variants here.
-                        // Currently only InlineBytes reaches the adapter; non-inline sources are warned
-                        // and skipped because LlmCallUseCase has not yet been extended to resolve them.
-                        let bytes = match &file.source {
-                            FileSource::InlineBytes { bytes } => bytes,
-                            _ => {
-                                eprintln!(
-                                    "WARN: OpenAI chat completions adapter currently only supports inline-bytes file sources. Skipping {}",
-                                    file.filename
-                                );
-                                continue;
+                use base64::{engine::general_purpose::STANDARD, Engine as _};
+                for file in files {
+                    if file.mime_type.starts_with("image/") {
+                        let image_url = match &file.source {
+                            FileSource::InlineBytes { bytes } => {
+                                let b64 = STANDARD.encode(bytes);
+                                json!({ "url": format!("data:{};base64,{}", file.mime_type, b64) })
+                            }
+                            FileSource::Uploaded(r) => {
+                                json!({ "file_id": r.provider_file_id })
+                            }
+                            FileSource::SignedUrl(_) => {
+                                return Err(LlmError::InternalError {
+                                    message: format!(
+                                        "OpenAI chat completions adapter received unresolved SignedUrl for '{}'. \
+                                         LlmCallUseCase::resolve_files must run before reaching the adapter.",
+                                        file.filename
+                                    ),
+                                });
                             }
                         };
-                        if file.mime_type.starts_with("image/") {
-                            let b64 = STANDARD.encode(bytes);
-                            let data_uri = format!("data:{};base64,{}", file.mime_type, b64);
-
-                            content_arr.push(json!({
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": data_uri
-                                }
-                            }));
-                        } else {
-                            eprintln!("WARN: OpenAI chat completions only support image files via inline upload. Ignoring {}", file.mime_type);
-                        }
+                        content_arr.push(json!({
+                            "type": "image_url",
+                            "image_url": image_url,
+                        }));
+                    } else {
+                        eprintln!(
+                            "WARN: OpenAI chat completions only support image files. Ignoring '{}' (mime '{}')",
+                            file.filename, file.mime_type
+                        );
                     }
-                    message_json["content"] = json!(content_arr);
-                } else {
-                    message_json["content"] = json!(msg.content());
                 }
+                message_json["content"] = json!(content_arr);
+            } else {
+                message_json["content"] = json!(msg.content());
+            }
 
-                // Add tool_calls for assistant messages
-                if let Some(tool_calls) = msg.tool_calls() {
-                    let openai_tool_calls: Vec<serde_json::Value> = tool_calls
-                        .iter()
-                        .map(|tc| {
-                            json!({
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.function.name,
-                                    "arguments": tc.function.arguments
-                                }
-                            })
+            // Add tool_calls for assistant messages
+            if let Some(tool_calls) = msg.tool_calls() {
+                let openai_tool_calls: Vec<serde_json::Value> = tool_calls
+                    .iter()
+                    .map(|tc| {
+                        json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments
+                            }
                         })
-                        .collect();
-                    message_json["tool_calls"] = json!(openai_tool_calls);
-                }
+                    })
+                    .collect();
+                message_json["tool_calls"] = json!(openai_tool_calls);
+            }
 
-                // Add tool_call_id for tool messages
-                if let Some(tool_call_id) = msg.tool_call_id() {
-                    message_json["tool_call_id"] = json!(tool_call_id);
-                }
+            // Add tool_call_id for tool messages
+            if let Some(tool_call_id) = msg.tool_call_id() {
+                message_json["tool_call_id"] = json!(tool_call_id);
+            }
 
-                message_json
-            })
-            .collect()
+            out.push(message_json);
+        }
+        Ok(out)
     }
 
-    fn build_request_body(&self, request: &LlmRequest) -> serde_json::Value {
+    fn build_request_body(&self, request: &LlmRequest) -> Result<serde_json::Value, LlmError> {
         let mut body = json!({
             "model": request.config().model(),
-            "messages": self.build_messages(request),
+            "messages": self.build_messages(request)?,
             "stream": request.stream()
         });
 
@@ -182,7 +183,7 @@ impl OpenAiAdapter {
             body["reasoning_effort"] = json!(effort);
         }
 
-        body
+        Ok(body)
     }
 
     fn is_responses_api_required(&self, request: &LlmRequest) -> bool {
@@ -196,7 +197,7 @@ impl OpenAiAdapter {
     }
 
     async fn call_chat_completions(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
-        let body = self.build_request_body(&request);
+        let body = self.build_request_body(&request)?;
 
         let response = self
             .client
@@ -287,7 +288,7 @@ impl OpenAiAdapter {
     }
 
     async fn stream_chat_completions(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
-        let body = self.build_request_body(&request);
+        let body = self.build_request_body(&request)?;
 
         let response = self
             .client
@@ -625,47 +626,58 @@ where
 }
 
 impl OpenAiAdapter {
-    fn build_responses_request_body(&self, request: &LlmRequest) -> serde_json::Value {
-        let mut body = json!({
-            "model": request.config().model(),
-            "input": request.messages().iter().map(|msg| {
-                let mut content_arr = vec![];
-                content_arr.push(json!({
-                    "type": "input_text",
-                    "text": msg.content()
-                }));
+    fn build_responses_request_body(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<serde_json::Value, LlmError> {
+        let mut input_msgs = Vec::with_capacity(request.messages().len());
+        for msg in request.messages() {
+            let mut content_arr = vec![json!({
+                "type": "input_text",
+                "text": msg.content()
+            })];
 
-                if let Some(files) = msg.files() {
-                    use base64::{engine::general_purpose::STANDARD, Engine as _};
-                    for file in files {
-                        // TODO(large-files Task 13/14/15): handle SignedUrl and Uploaded variants here.
-                        // Currently only InlineBytes reaches the adapter; non-inline sources are warned
-                        // and skipped because LlmCallUseCase has not yet been extended to resolve them.
-                        let bytes = match &file.source {
-                            FileSource::InlineBytes { bytes } => bytes,
-                            _ => {
-                                eprintln!(
-                                    "WARN: OpenAI responses adapter currently only supports inline-bytes file sources. Skipping {}",
-                                    file.filename
-                                );
-                                continue;
-                            }
-                        };
-                        let b64 = STANDARD.encode(bytes);
-                        let data_uri = format!("data:{};base64,{}", file.mime_type, b64);
-                        content_arr.push(json!({
+            if let Some(files) = msg.files() {
+                use base64::{engine::general_purpose::STANDARD, Engine as _};
+                for file in files {
+                    let file_part = match &file.source {
+                        FileSource::InlineBytes { bytes } => {
+                            let b64 = STANDARD.encode(bytes);
+                            let data_uri = format!("data:{};base64,{}", file.mime_type, b64);
+                            json!({
+                                "type": "input_file",
+                                "filename": file.filename,
+                                "file_data": data_uri,
+                            })
+                        }
+                        FileSource::Uploaded(r) => json!({
                             "type": "input_file",
                             "filename": file.filename,
-                            "file_data": data_uri
-                        }));
-                    }
+                            "file_id": r.provider_file_id,
+                        }),
+                        FileSource::SignedUrl(_) => {
+                            return Err(LlmError::InternalError {
+                                message: format!(
+                                    "OpenAI responses adapter received unresolved SignedUrl for '{}'. \
+                                     LlmCallUseCase::resolve_files must run before reaching the adapter.",
+                                    file.filename
+                                ),
+                            });
+                        }
+                    };
+                    content_arr.push(file_part);
                 }
+            }
 
-                json!({
-                    "role": msg.role().as_str(),
-                    "content": content_arr
-                })
-            }).collect::<Vec<_>>()
+            input_msgs.push(json!({
+                "role": msg.role().as_str(),
+                "content": content_arr
+            }));
+        }
+
+        let mut body = json!({
+            "model": request.config().model(),
+            "input": input_msgs,
         });
 
         if let Some(temp) = request.config().temperature() {
@@ -678,11 +690,11 @@ impl OpenAiAdapter {
             body["top_p"] = json!(top_p);
         }
 
-        body
+        Ok(body)
     }
 
     async fn call_responses(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
-        let body = self.build_responses_request_body(&request);
+        let body = self.build_responses_request_body(&request)?;
 
         let response = self
             .client
@@ -757,7 +769,7 @@ impl OpenAiAdapter {
         request: LlmRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, LlmError>> + Send>>, LlmError>
     {
-        let mut body = self.build_responses_request_body(&request);
+        let mut body = self.build_responses_request_body(&request)?;
         body["stream"] = json!(true);
 
         let response = self
@@ -845,5 +857,113 @@ impl OpenAiAdapter {
         };
 
         Ok(Box::pin(sse_stream))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn responses_serializes_uploaded_pdf_with_file_id() {
+        use crate::llm::domain::{
+            FileData, FileSource, LlmConfig, LlmMessage, LlmProvider, LlmRequest,
+            ProviderFileRef, ProviderKind,
+        };
+        let file = FileData {
+            document_id: Some("doc-1".into()),
+            mime_type: "application/pdf".into(),
+            filename: "x.pdf".into(),
+            size_hint: None,
+            source: FileSource::Uploaded(ProviderFileRef {
+                provider: ProviderKind::OpenAi,
+                provider_file_id: "file-abc".into(),
+                mime_type: "application/pdf".into(),
+                filename: "x.pdf".into(),
+                expires_at: None,
+            }),
+        };
+        let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
+        let provider =
+            LlmProvider::new(ProviderKind::OpenAi, "k".into(), Some("gpt-5".into())).unwrap();
+        let config = LlmConfig::new(provider);
+        let request = LlmRequest::new(vec![msg], config, false).unwrap();
+
+        let adapter = OpenAiAdapter::new();
+        let body = adapter.build_responses_request_body(&request).unwrap();
+        let input = &body["input"];
+        let content = &input[0]["content"];
+        let file_part = content
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["type"] == "input_file")
+            .unwrap();
+        assert_eq!(file_part["file_id"], "file-abc");
+        assert!(
+            file_part.get("file_data").is_none() || file_part["file_data"].is_null()
+        );
+    }
+
+    #[test]
+    fn responses_returns_error_on_signed_url() {
+        use crate::llm::domain::{
+            FileData, FileSource, LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind,
+        };
+        let file = FileData {
+            document_id: Some("doc-1".into()),
+            mime_type: "application/pdf".into(),
+            filename: "x.pdf".into(),
+            size_hint: None,
+            source: FileSource::SignedUrl("https://example/x?sig=y".into()),
+        };
+        let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
+        let provider =
+            LlmProvider::new(ProviderKind::OpenAi, "k".into(), Some("gpt-5".into())).unwrap();
+        let config = LlmConfig::new(provider);
+        let request = LlmRequest::new(vec![msg], config, false).unwrap();
+
+        let adapter = OpenAiAdapter::new();
+        let err = adapter.build_responses_request_body(&request).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::llm::domain::LlmError::InternalError { .. }
+        ));
+    }
+
+    #[test]
+    fn chat_completions_serializes_uploaded_image_with_file_id() {
+        use crate::llm::domain::{
+            FileData, FileSource, LlmConfig, LlmMessage, LlmProvider, LlmRequest,
+            ProviderFileRef, ProviderKind,
+        };
+        let file = FileData {
+            document_id: Some("doc-1".into()),
+            mime_type: "image/png".into(),
+            filename: "x.png".into(),
+            size_hint: None,
+            source: FileSource::Uploaded(ProviderFileRef {
+                provider: ProviderKind::OpenAi,
+                provider_file_id: "file-img".into(),
+                mime_type: "image/png".into(),
+                filename: "x.png".into(),
+                expires_at: None,
+            }),
+        };
+        let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
+        let provider =
+            LlmProvider::new(ProviderKind::OpenAi, "k".into(), Some("gpt-4o".into())).unwrap();
+        let config = LlmConfig::new(provider);
+        let request = LlmRequest::new(vec![msg], config, false).unwrap();
+
+        let adapter = OpenAiAdapter::new();
+        let body = adapter.build_request_body(&request).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        let content = messages[0]["content"].as_array().unwrap();
+        let img = content.iter().find(|c| c["type"] == "image_url").unwrap();
+        assert_eq!(img["image_url"]["file_id"], "file-img");
+        assert!(
+            img["image_url"].get("url").is_none() || img["image_url"]["url"].is_null()
+        );
     }
 }
