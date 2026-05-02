@@ -61,7 +61,8 @@ El emisor (sistema upstream que genera el JSON del DAG) decide cómo transportar
 
 Reglas:
 
-- `id` siempre presente, único por documento.
+- `id` siempre presente, **único por llamada** (el emisor garantiza que no hay concurrencia con el mismo `id`).
+- `id` es la clave del cache `(document_id, provider)` para verificar si ya se subió o expiró. **No reemplaza ni se relaciona con `filename`**: `filename` es el nombre humano del archivo y se usa como tal en el upload al provider; `id` es solo una llave técnica de cache.
 - `data` y `url` son mutuamente excluyentes en payloads válidos (preferir `data` si por bug llegan ambos).
 - `data` es base64 puro (sin prefijo `data:mime;base64,`). Si arriba con `size_bytes > 30 MB` → error de violación de contrato.
 - `url` es una signed URL HTTPS a `storage.googleapis.com`. TTL típico 6 h.
@@ -423,7 +424,9 @@ CREATE INDEX idx_provider_file_cache_expires
     WHERE expires_at IS NOT NULL;
 ```
 
-Implementación con `sqlx`. Conexión: lee `DATABASE_URL` desde env. **Diferencia con memory_postgres**: este último toma `connection_url` por nodo en el JSON del DAG; el cache de archivos en cambio es transversal y siempre usa `DATABASE_URL`. Si `DATABASE_URL` y la `connection_url` de un nodo de memoria coinciden, se puede reutilizar pool vía la `RepositoryFactory` existente; si difieren, el cache mantiene su propio pool. Para evitar duplicación de lógica, exponer un helper compartido `get_or_create_pg_pool(url)` que cachee pools por URL.
+Implementación con `sqlx`. Conexión: **siempre lee `DATABASE_URL` desde env** (el mismo que usa el resto del DAG runtime para metadatos de nodos). El cache de archivos es transversal y obligatorio independiente de si los nodos de `llm_call` configuran o no memoria de conversación.
+
+**Reuso de código**: extraer la lógica de creación de pool Postgres del `RepositoryFactory` actual (`llm/infrastructure/persistence/repository_factory.rs`) a un helper compartido `pg_pool::get_or_create(url) -> PgPool` que cachee pools por URL. Tanto `memory_postgres` como `PostgresFileCache` lo consumen. Sin duplicación.
 
 `upsert`:
 ```sql
@@ -468,22 +471,32 @@ para cada file_obj en files_arr:
 
 Resiliencia por archivo: si el parsing/materialización de un archivo falla, log warning y continuar con los demás. Solo abortamos si **todos** los archivos fallan o si la lista era no-vacía y queda vacía tras los errores.
 
-### Wiring (LlmProviderFactory + composición)
+### Wiring — dos factories separadas
 
-El `LlmProviderFactory` actual (`llm_provider_factory.rs`) instancia el `LlmRepository` por proveedor. Extender para que también componga el `FileProviderRepository` correspondiente:
+Mantenemos `LlmProviderFactory` actual sin cambios (sigue devolviendo `Arc<dyn LlmRepository>`). Agregamos una factory hermana, separada por mantenibilidad:
 
 ```rust
-pub struct LlmContext {
-    pub llm_repo: Arc<dyn LlmRepository>,
-    pub file_provider_repo: Arc<dyn FileProviderRepository>,
-}
+// llm/infrastructure/files/file_provider_factory.rs
+pub struct FileProviderFactory;
 
-impl LlmProviderFactory {
-    pub fn create(provider: LlmProvider) -> LlmContext { ... }
+impl FileProviderFactory {
+    pub fn create(kind: ProviderKind) -> Arc<dyn FileProviderRepository> {
+        match kind {
+            ProviderKind::Gemini    => Arc::new(GeminiFilesApiAdapter::new(...)),
+            ProviderKind::Anthropic => Arc::new(AnthropicFilesApiAdapter::new(...)),
+            ProviderKind::OpenAI    => Arc::new(OpenAiFilesApiAdapter::new(...)),
+        }
+    }
 }
 ```
 
-El `FileCacheRepository` se inyecta una sola vez al `LlmCallUseCase` desde el container compartido (es el mismo para todos los providers).
+Ventajas:
+
+- Sin cambios breaking en callers de `LlmProviderFactory`.
+- Cada factory evoluciona independientemente.
+- Tests pueden mockear `FileProviderRepository` sin tocar el `LlmRepository`.
+
+El `LlmCallUseCase` recibe ambas factories vía constructor (o las invoca una vez al inicio según el `ProviderKind` del nodo). El `FileCacheRepository` se inyecta una sola vez (transversal, no per-provider).
 
 ## Manejo de errores
 
@@ -537,7 +550,7 @@ Nuevos en `tests/graphs/media/`:
 - `pdf_url_gemini.json` — idem Gemini.
 - `pdf_url_openai.json` — idem OpenAI.
 
-Fixture: subir un PDF de prueba a un bucket GCS conocido, generar URL firmada con `gsutil`, embeber en el JSON. Las URLs duran 6 h, así que estos tests requieren regeneración periódica o un script helper que firme on-the-fly.
+Fixture: subir un PDF de prueba a un bucket GCS conocido, generar URL firmada con `gsutil signurl`, embeber en el JSON. **Regeneración manual** cuando expire la URL (6 h TTL). No automatizamos firma on-the-fly en esta iteración — los tests son ad-hoc, ejecutados manualmente cuando se valida el flujo completo. Documentar en un README dentro de `tests/graphs/media/` los pasos exactos para regenerar.
 
 ### Tests de cache
 
@@ -586,7 +599,8 @@ Detallado se desarrollará en writing-plans. Resumen:
 | 1 | Tres providers en una sola pasada de diseño | Solicitado, hexagonal lo facilita |
 | 2 | Sin auto-threshold en egreso | El emisor ya decidió a 30 MB |
 | 3 | Cache persistido en PostgreSQL por `(document_id, provider)` | Stateless por DAG, sesiones cruzan ejecuciones |
-| 4 | Reutilizar `DATABASE_URL` y pool de memory_postgres | Consistencia con resto del proyecto |
+| 4 | Cache siempre en `DATABASE_URL` (env), no per-node | Cache transversal independiente de si los nodos configuran memoria |
+| 4b | Dos factories separadas (`LlmProviderFactory` y `FileProviderFactory`) | Mantenibilidad y cero breaking changes en callers |
 | 5 | Streaming pipe end-to-end | RAM/disco constantes bajo alta concurrencia |
 | 6 | Validación heurística por `expires_at` + retry on 404 | Cero round-trips en happy path, recovery automático |
 | 7 | `data > 30 MB` y `path > 30 MB` → error de contrato | Confianza en la decisión del emisor |
