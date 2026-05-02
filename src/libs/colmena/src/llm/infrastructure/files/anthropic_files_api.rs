@@ -39,6 +39,7 @@ impl AnthropicFilesApiAdapter {
     /// Creates an adapter with a custom `base_url` (typically a
     /// wiremock server in tests).
     pub fn with_base_url(api_key: String, base_url: String) -> Self {
+        let base_url = base_url.trim_end_matches('/').to_string();
         Self {
             client: Self::default_client(),
             base_url,
@@ -75,7 +76,7 @@ impl FileProviderRepository for AnthropicFilesApiAdapter {
             .mime_str(mime_type)
             .map_err(|e| LlmError::FileApiUploadFailed {
                 provider: "anthropic".into(),
-                message: format!("invalid mime: {}", e),
+                message: format!("precondition: invalid mime '{}': {}", mime_type, e),
             })?;
 
         let form = Form::new().part("file", part);
