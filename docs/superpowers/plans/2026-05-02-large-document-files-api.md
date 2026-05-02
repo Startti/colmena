@@ -41,10 +41,15 @@
 
 ⚠ **Deuda no implementada** (registrada para follow-ups):
 
-- C2: retry on `ProviderFileNotFound` no recupera (`reset_uploaded_files_with_id` es no-op). Best-effort, documentado.
+Lista completa con severidad, soluciones propuestas y estimaciones en:
+
+📋 **[Deuda técnica](./2026-05-02-large-document-files-api-tech-debt.md)** (sibling del spec).
+
+10 items registrados; ningún bloqueante. Resumen de los 4 más relevantes:
+- C2: retry on `ProviderFileNotFound` no recupera (no-op).
 - `last_used_at` no se actualiza en cache hit (solo en upsert).
-- Layer leak: `LlmCallUseCase` (application) importa de `infrastructure::files`. Debería ser vía puerto.
-- Filas huérfanas en cache cuando cambian estrategias mid-feature (e.g., el upload de imagen OpenAI antes del short-circuit).
+- Layer leak: `LlmCallUseCase` importa de `infrastructure::files`.
+- Filas huérfanas en cache cuando cambian estrategias mid-feature.
 
 ---
 

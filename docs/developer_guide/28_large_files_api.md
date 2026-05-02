@@ -201,10 +201,25 @@ src/libs/colmena/src/llm/
 
 Wiring en producción: el nodo `llm_call` (`dag_engine/infrastructure/nodes/llm.rs`) construye el cache y la file provider, y rutea las entradas con `FileSource::SignedUrl` por `LlmCallUseCase::resolve_files` antes de llamar a `AgentService`.
 
-## Deuda registrada (no implementada)
+## Deuda técnica y trabajo por hacer
 
-- **Retry on `ProviderFileNotFound`** (C2): el wrapper invalida cache pero no reconvierte `Uploaded → SignedUrl`, así que el segundo intento sigue fallando. Best-effort.
-- **`last_used_at` no se actualiza en cache hit**: solo en upsert. Las filas pueden parecer "viejas" aunque se usen mucho.
-- **Layer leak**: `LlmCallUseCase` (application) importa de `infrastructure::files`. Debería ser inyectado vía puerto.
-- **Filas huérfanas**: cuando se cambian estrategias mid-feature (e.g., short-circuit de OpenAI imágenes después de un upload exitoso), las filas viejas quedan apuntando a `provider_file_id` válidos pero nunca referenciados.
-- **Janitor**: no hay limpieza automática de archivos huérfanos en el provider (Anthropic/OpenAI no expiran solos). Cuando el volumen lo justifique.
+Documento dedicado con lista priorizada, severidad y plan de solución por item:
+
+📋 **[Deuda técnica del feature](../superpowers/specs/2026-05-02-large-document-files-api-tech-debt.md)**
+
+Resumen ejecutivo:
+
+| Item | Severidad |
+|------|-----------|
+| Retry on `ProviderFileNotFound` no recupera (no-op) | Alta |
+| `last_used_at` no se actualiza en cache hit | Baja |
+| Layer leak: `LlmCallUseCase` importa de `infrastructure` | Media |
+| Filas huérfanas en cache cuando cambian estrategias | Baja |
+| Janitor de archivos huérfanos en proveedores | Media |
+| `ProviderKind::Mock` fallback silencioso en lookup | Baja |
+| Mime malformado clasificado como upload error | Baja |
+| Tests de integración E2E reproducibles (sin signed URLs) | Media |
+| Métricas Prometheus para cache hit-rate | Baja |
+| Cache hit cross-session por `sha256` (YAGNI) | Muy baja |
+
+**Ningún item es bloqueante.** Ver el doc para detalles, soluciones propuestas y estimaciones.

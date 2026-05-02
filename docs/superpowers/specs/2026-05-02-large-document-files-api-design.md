@@ -662,10 +662,18 @@ El plan asumió que `LlmCallUseCase::resolve_files` sería invocado por el path 
 
 ### 8. Deuda registrada (no implementada)
 
-- **C2 (retry on `ProviderFileNotFound`)**: el wrapper `call_with_file_retry` invalida cache pero `reset_uploaded_files_with_id` es no-op — el segundo intento sigue con `Uploaded` apuntando al `file_id` muerto. Recovery es best-effort, no funciona. Documentado como follow-up.
-- **`last_used_at` en cache hit**: no se actualiza, solo en upsert. Las filas conservan `uploaded_at` como `last_used_at` aunque sean accedidas miles de veces.
-- **Layer leak**: `LlmCallUseCase` (application) importa `SignedUrlDownloader` y `FileProviderFactory` (infrastructure). Debería ser inyectado vía port.
+Listado completo, priorizado y con soluciones propuestas en:
+
+📋 **[Deuda técnica del feature](./2026-05-02-large-document-files-api-tech-debt.md)** (sibling de este spec).
+
+Resumen de los items más relevantes:
+
+- **C2 (retry on `ProviderFileNotFound`)**: el wrapper `call_with_file_retry` invalida cache pero `reset_uploaded_files_with_id` es no-op — el segundo intento sigue con `Uploaded` apuntando al `file_id` muerto. Best-effort, no funciona en la práctica.
+- **`last_used_at` en cache hit**: no se actualiza, solo en upsert.
+- **Layer leak**: `LlmCallUseCase` (application) importa `SignedUrlDownloader` y `FileProviderFactory` (infrastructure).
 - **Filas huérfanas**: cuando se cambian estrategias (e.g., short-circuit OpenAI imágenes después de un upload exitoso), las filas viejas quedan apuntando a `provider_file_id` válidos pero nunca referenciados.
+
+10 items totales; ningún bloqueante.
 
 ## Decisiones clave (resumen)
 
