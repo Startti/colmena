@@ -60,6 +60,10 @@ mod tests {
         fn provider(&self) -> ProviderKind { ProviderKind::Mock }
     }
 
+    const _: fn() = || {
+        fn _dyn_safe(_: &dyn FileProviderRepository) {}
+    };
+
     #[tokio::test]
     async fn mock_provider_returns_ref() {
         let p = MockProvider;
@@ -67,5 +71,7 @@ mod tests {
         let r = p.upload_streaming(stream, "application/pdf", "x.pdf").await.unwrap();
         assert_eq!(r.provider_file_id, "mock-id");
         assert_eq!(r.provider, ProviderKind::Mock);
+        assert_eq!(p.provider(), ProviderKind::Mock);
+        assert!(p.ttl().is_none());
     }
 }
