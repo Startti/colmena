@@ -1,65 +1,70 @@
 # Test graphs con signed URLs
 
-Los archivos `pdf_url_anthropic.json`, `pdf_url_openai.json` y `pdf_url_gemini.json`
-contienen placeholders `REPLACE_WITH_*` porque las signed URLs de GCS expiran a las
-6 horas. **Hay que regenerarlas manualmente antes de cada corrida.**
+Estos graphs validan el path de archivos grandes con la nueva schema `id`+`url`.
 
-## Pasos para regenerar
+## Test files
 
-1. Subir un PDF de prueba (puedes usar `tests/graphs/media/fixtures/tiny.pdf`) a un
-   bucket GCS al que tengas acceso:
+- `image_url_anthropic.json` / `image_url_openai.json` / `image_url_gemini.json` — imágenes JPEG vía signed URL. Path URL passthrough en Anthropic+OpenAI; Files API en Gemini.
+- `pdf_url_anthropic.json` / `pdf_url_openai.json` / `pdf_url_gemini.json` — PDFs ≥ 30 MB vía signed URL. Path Files API en los 3 providers.
 
-   ```sh
-   gsutil cp tests/graphs/media/fixtures/tiny.pdf gs://<your-bucket>/test/tiny.pdf
-   ```
+Las signed URLs de GCS tienen TTL típico de 6 h. **Hay que regenerarlas manualmente antes de cada corrida.**
 
-2. Generar la signed URL con TTL de 6 horas:
+## Pasos para regenerar la URL firmada
+
+1. Subir un archivo de prueba a un bucket GCS al que tengas acceso:
 
    ```sh
-   gsutil signurl -d 6h <your-service-account.json> \
-       gs://<your-bucket>/test/tiny.pdf
+   gsutil cp tu-archivo.pdf gs://<your-bucket>/test/
    ```
 
-   El comando emite la URL completa
-   (`https://storage.googleapis.com/...?X-Goog-Signature=...`).
+2. Generar la signed URL con TTL de 6 h:
 
-3. Reemplazar en cada `pdf_url_*.json`:
-   - `REPLACE_WITH_GCS_SIGNED_URL` → la URL recién firmada.
-   - `REPLACE_WITH_UNIQUE_DOC_ID` → un id único (ej. `tiny-2026-05-02`). Mismo id
-     en los 3 archivos si quieres que el cache cubra los tres providers, o ids
-     distintos para forzar uploads independientes por provider.
-   - `size_bytes` → tamaño real del archivo en bytes (`stat -c%s tiny.pdf` en Linux).
+   ```sh
+   gsutil signurl -d 6h <your-service-account.json> gs://<your-bucket>/test/tu-archivo.pdf
+   ```
 
-4. Cargar las API keys del `.env` y ejecutar:
+   El comando emite la URL completa (`https://storage.googleapis.com/...?X-Goog-Signature=...`).
+
+3. Reemplazar en el JSON correspondiente:
+   - `url` → la URL recién firmada.
+   - `id` → un id único (ej. `tu-doc-2026-05-02`). Usar el mismo en los 3 archivos si quieres validar cache cross-provider, o distintos para forzar uploads independientes.
+   - `size_bytes` → tamaño real en bytes (`stat -c%s archivo.pdf` en Linux).
+
+4. Cargar las API keys del `.env` y ejecutar (con verbose para ver los logs `[file-resolve]`):
 
    ```sh
    set -a; source .env; set +a
-   cargo run --bin dag_engine -- run tests/graphs/media/pdf_url_anthropic.json
+   COLMENA_VERBOSE=1 cargo run --bin dag_engine -- run tests/graphs/media/pdf_url_anthropic.json
    ```
 
 ## Qué valida cada graph
 
-- **Primera corrida**: cache miss → download GCS → upload a la Files API del provider →
-  llamada al LLM con `file_id` referenciado.
-- **Segunda corrida con el mismo `id`** (sin cambiar el JSON, mientras la URL siga
-  válida y la fila de cache exista): cache hit, el use case **no** descarga ni sube
-  de nuevo.
-- **Después de 48h con Gemini**: cache hit pero `expires_at` pasado → re-upload
-  automático.
-- **Si Anthropic/OpenAI borran el archivo manualmente**: el LLM devuelve
-  `ProviderFileNotFound` → invalidate cache + 1 retry duro automático.
+- **Primera corrida**: cache miss → download GCS → (URL passthrough o upload a Files API según provider+mime) → respuesta del LLM.
+- **Segunda corrida con el mismo `id`**: cache HIT alive → skip download/upload completos. Solo se hace la llamada al LLM con el `provider_file_id` cacheado.
+- **48h+ con Gemini**: cache HIT pero `expires_at` pasado → re-upload automático.
+- **Si el provider borra el archivo manualmente**: el LLM devuelve `ProviderFileNotFound` → invalidate cache + 1 retry duro (best-effort, ver deuda en `docs/developer_guide/28_large_files_api.md`).
 
-## Verificar la fila de cache
-
-Con `DATABASE_URL` apuntando al mismo Postgres usado por el runtime:
+## Verificar la fila en Postgres
 
 ```sh
-psql "$DATABASE_URL" -c "SELECT document_id, provider, provider_file_id, expires_at FROM provider_file_cache;"
+psql "$DATABASE_URL" -c "SELECT document_id, provider, provider_file_id, expires_at, last_used_at FROM provider_file_cache;"
 ```
 
-## Regenerar el fixture base (opcional)
+## Límites de producto observados (no del transporte, sino de cada API)
 
-Si `tests/graphs/media/fixtures/tiny.pdf` no existe, ya hay otros PDFs en
-`tests/graphs/media/fixtures/`. Cualquier archivo > 30 MB válido sirve para
-ejercitar la ruta de signed URL (la ruta de `data` inline ya está cubierta por
-los graphs `pdf_anthropic.json`, `pdf_openai.json`, `pdf_gemini.json`).
+Si tu archivo excede el límite del modelo, el upload se hace bien pero la generación falla:
+
+| Provider | Límite del modelo |
+|----------|-------------------|
+| Anthropic | 100 páginas máx por PDF; ventana de contexto ~200k tokens en Haiku 4.5 |
+| OpenAI | 32 MB de pull interno tras Files API; gpt-4o-mini procesa ~1M tokens vía `file_id` en Responses |
+| Gemini | 3000 páginas teóricas; algunos modelos rechazan referencias > 20 MB con "files bytes too large to be read" |
+
+La integración nuestra es correcta; lo que falla en esos casos es el modelo. Para documentos muy grandes la estrategia recomendada es RAG (extracción de chunks de texto antes del LLM call).
+
+## Más detalles
+
+Para el comportamiento completo del manejo de archivos, ver:
+
+- `docs/developer_guide/28_large_files_api.md` — guía de usuario.
+- `docs/superpowers/specs/2026-05-02-large-document-files-api-design.md` — diseño + sección "Hallazgos de integración real".

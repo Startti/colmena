@@ -6,7 +6,7 @@
         "path": "/agent-demo",
         "method": "POST",
         "test_payload": {
-          "prompt": "Resume el documento en una frase."
+          "prompt": "¿De qué trata este libro? Dame el título, autor y un resumen de 3 frases."
         }
       }
     },
@@ -17,15 +17,15 @@
         "model": "gpt-4o-mini",
         "api_key": "${OPENAI_API_KEY}",
         "stream": false,
-        "system_message": "Eres un analista que lee PDFs y responde brevemente.",
+        "system_message": "Eres un asistente que analiza documentos PDF y responde con precisión.",
         "temperature": 0.0,
         "files": [
           {
-            "id": "REPLACE_WITH_UNIQUE_DOC_ID",
+            "id": "test-pdf-99p-2026-05-02",
             "mime_type": "application/pdf",
-            "filename": "report.pdf",
-            "url": "REPLACE_WITH_GCS_SIGNED_URL",
-            "size_bytes": 41943040
+            "filename": "time-series-99p.pdf",
+            "url": "https://storage.googleapis.com/adp-reference-develop-startti-dev/chat-attachments/TDHJFNetyHT95CdG9OlEhcytLvEa4h2x/_pending/q0l0mv0ddp5ggdq9dauvgqd7-time-series-99p.pdf?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=adp-backend-sa-develop%40startti-dev.iam.gserviceaccount.com%2F20260502%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260502T205520Z&X-Goog-Expires=3600&X-Goog-SignedHeaders=host&X-Goog-Signature=3cfb51762fb53849d82d2bc9820c4ef04df0dff1bff7249a2e8d21a3d088a7d5140bce5d20b764d60ee5d2fe56dcbf91d6f6fac3c26e1f429fac449e7d951ac2266e937c59777ae4668e2d6f9379f58ec3b85f0d523cca5c31d2e70bc7c31b0ab78abbb30d9f91bc751f941450a61e2459128293120cabfad3246e9d9ed31f600ec588852f8bbe3832fbe115e0a42d39583ba0b86da9f2add2aebe254a6ebe9358edfd98004f390f5aefecbe0abf07dbde1789fc524dd32fb020075235cd89f98afd0ab7436a29546cab9fe9fcc70e5b4833eae4947b09e3a046c86a223e9d246bbd4511a1b24f1c1ba236d5f5c5b06bffa9dc8d87431c61cac08804262c2b5b",
+            "size_bytes": 12582912
           }
         ]
       }

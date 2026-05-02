@@ -12,6 +12,42 @@
 
 ---
 
+## Estado de implementación (actualizado 2026-05-02)
+
+✅ **19 tareas planeadas completadas** en commits `3a560a0`..`1b7db65`.
+
+🔧 **Fixes adicionales descubiertos en testing real con APIs en producción**:
+
+| Commit | Cambio |
+|--------|--------|
+| `5090720` | `feat(dag/llm): minimal C1` — wire file resolution into the production node path that bypasses `LlmCallUseCase` |
+| `d779158` | `feat(llm): wire PostgresFileCache + observability logs` — production cache wiring + `COLMENA_VERBOSE=1` traceability |
+| `d98095d` | `fix(llm/anthropic): use url source for images instead of file_id` — Anthropic rejects `file` source for image content |
+| `3f5e574` | `fix(llm/openai): use url for chat-completions images` — OpenAI chat completions doesn't accept `file_id` in `image_url` |
+| `25fd639` | `feat(llm/anthropic): send files-api beta header on messages call` — beta header required on `/v1/messages`, not just upload |
+| `9a61923` | `fix(llm/openai): omit filename when using file_id in Responses API` — `file_id` and `filename` are mutually exclusive |
+| `71168f9` | `fix(llm/gemini-files): respect 8 MB chunk granularity in resumable upload` — non-final chunks must be exact multiples of CHUNK_SIZE |
+
+📋 **Tests reales realizados**:
+
+- Imagen JPEG (~1 MB) en los 3 providers → todos respondieron con descripción correcta.
+- PDF 99 páginas (12 MB) en los 3 providers → OpenAI y Gemini respondieron con resumen correcto; Anthropic Haiku hit context-window (208k > 200k).
+- PDF 55 MB en los 3 providers → todos hicieron upload exitoso pero hit límites de modelo en generación (100 páginas Anthropic, 32MB pull OpenAI, "files bytes too large" Gemini).
+- Cache hit verificado: segunda corrida con mismo `id` skipea download/upload completos.
+
+📍 **Para detalles completos de los hallazgos**, ver la sección "Hallazgos de integración real (post-implementación)" en `docs/superpowers/specs/2026-05-02-large-document-files-api-design.md`.
+
+📚 **Guía de usuario**: `docs/developer_guide/28_large_files_api.md`.
+
+⚠ **Deuda no implementada** (registrada para follow-ups):
+
+- C2: retry on `ProviderFileNotFound` no recupera (`reset_uploaded_files_with_id` es no-op). Best-effort, documentado.
+- `last_used_at` no se actualiza en cache hit (solo en upsert).
+- Layer leak: `LlmCallUseCase` (application) importa de `infrastructure::files`. Debería ser vía puerto.
+- Filas huérfanas en cache cuando cambian estrategias mid-feature (e.g., el upload de imagen OpenAI antes del short-circuit).
+
+---
+
 ## File Structure
 
 ### Files a crear

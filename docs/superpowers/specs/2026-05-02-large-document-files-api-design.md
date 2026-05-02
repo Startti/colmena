@@ -592,6 +592,81 @@ Detallado se desarrollará en writing-plans. Resumen:
 8. Test graphs, integration tests.
 9. Documentación: `docs/developer_guide/` nueva sección sobre archivos grandes.
 
+## Hallazgos de integración real (post-implementación)
+
+Esta sección documenta desviaciones descubiertas durante el testing end-to-end contra las APIs reales en `2026-05-02`. Reflejan el comportamiento real de cada proveedor, no el ideal del diseño original.
+
+### 1. Anthropic
+
+**Imágenes**: Anthropic NO acepta `{"type": "file", "file_id": "..."}` como `image.source.type`. Solo acepta `base64` o `url`. Solución: para imágenes con `FileSource::SignedUrl + Anthropic`, **omitir el upload a Files API** y pasar la URL firmada directamente como `{"type": "url", "url": "..."}`. Anthropic la baja sola.
+
+**PDFs**: el `file` source type SÍ funciona para documentos, **pero requiere el header `anthropic-beta: files-api-2025-04-14` también en la llamada a `/v1/messages`**, no solo en el upload. La spec original solo lo tenía en upload.
+
+**Implementación**: short-circuit en `LlmCallUseCase::resolve_one` para `(provider == Anthropic && mime starts_with "image/")`. El adapter emite `image.source.type=url` para `SignedUrl` de imágenes.
+
+### 2. OpenAI
+
+**Imágenes**: la API de Chat Completions **rechaza `file_id` dentro de `image_url`**. Solo acepta `image_url.url` (puede ser `data:` URI o HTTPS URL). `file_id` para imágenes solo funciona en la Responses API. Solución: short-circuit igual que Anthropic — pasar URL firmada directa.
+
+**PDFs**: la Responses API SÍ acepta `{"type": "input_file", "file_id": "..."}`, **pero `file_id` y `filename` son mutuamente excluyentes**. Cuando se usa `file_id` hay que omitir `filename`.
+
+**Implementación**: short-circuit para `(provider == OpenAi && mime starts_with "image/")`. El adapter para Responses omite `filename` cuando hay `file_id`.
+
+### 3. Gemini
+
+**Resumable upload — chunk granularity estricta**: los chunks intermedios deben ser **exactamente** múltiplos de `CHUNK_SIZE` (8 MB). El acumulador inicial podía pasar el límite cuando un chunk del stream del downloader era más grande que el espacio restante en el buffer. Si esto pasaba, Gemini respondía:
+
+```
+HTTP 400: The client sent N bytes, which is not a multiple of the
+8388608 byte chunk granularity.
+```
+
+**Solución**: cuando `buffer.len() >= CHUNK_SIZE` y el stream sigue abierto, hacer `buffer.split_to(CHUNK_SIZE)` en lugar de tomar todo el buffer. El último chunk (después de `stream_done`) sí puede ser de cualquier tamaño.
+
+### 4. Tabla unificada de comportamientos por proveedor
+
+| Provider  | Imagen | PDF |
+|-----------|--------|-----|
+| Anthropic | URL passthrough (skip Files API) | Files API + `file_id`, requiere beta header en messages |
+| OpenAI    | URL passthrough en chat completions (skip Files API) | Files API + `file_id` en Responses API (sin `filename`) |
+| Gemini    | Files API + `fileData` con `fileUri` (URL completo con `/v1beta/`) | Files API resumable + `fileData` |
+
+### 5. Límites de producto descubiertos
+
+Independientes del transporte; aplican al modelo. Si excedes, el upload va bien pero la generación falla:
+
+| Provider  | Límite del modelo |
+|-----------|-------------------|
+| Anthropic | 100 páginas máx por PDF; ventana de contexto de 200k tokens (Haiku 4.5) |
+| OpenAI    | 32 MB de pull interno tras Files API; gpt-4o-mini procesa ~1M tokens vía file_id en Responses |
+| Gemini    | 3000 páginas teóricas; en práctica `2.0-flash` rechaza files >>20MB referenciados con "files bytes too large to be read" |
+
+### 6. Serde tagging
+
+El plan original especificaba `#[serde(tag = "kind")]` (internal tagging) para `FileSource`. Esto rompe con `SignedUrl(String)` y `Uploaded(ProviderFileRef)` porque internal tagging no soporta variantes newtype. **Cambiamos a tagging adyacente** `#[serde(tag = "kind", content = "data")]` que funciona uniformemente para los tres variants. Forma JSON resultante:
+
+```json
+{ "kind": "inline_bytes", "data": { "bytes": [...] } }
+{ "kind": "signed_url", "data": "https://..." }
+{ "kind": "uploaded", "data": { "provider": "anthropic", "provider_file_id": "...", ... } }
+```
+
+### 7. Wiring en producción (C1 mínimo)
+
+El plan asumió que `LlmCallUseCase::resolve_files` sería invocado por el path de producción del nodo `llm_call`. En la práctica, el nodo usa `AgentService` y bypassea el use case. La solución pragmática (commit `5090720` + `d779158`):
+
+- En `dag_engine/infrastructure/nodes/llm.rs`, antes de `AgentService`, inyectar resolución inline:
+  - Si `DATABASE_URL` está set, construir `PostgresFileCache` y rutar por `LlmCallUseCase::resolve_files`.
+  - Si no, hacer download+upload directos (sin cache).
+- `LlmCallUseCase` queda con `with_file_cache` builder; el use case full-blown queda como punto de entrada alternativo si en el futuro se decide refactorear `AgentService`.
+
+### 8. Deuda registrada (no implementada)
+
+- **C2 (retry on `ProviderFileNotFound`)**: el wrapper `call_with_file_retry` invalida cache pero `reset_uploaded_files_with_id` es no-op — el segundo intento sigue con `Uploaded` apuntando al `file_id` muerto. Recovery es best-effort, no funciona. Documentado como follow-up.
+- **`last_used_at` en cache hit**: no se actualiza, solo en upsert. Las filas conservan `uploaded_at` como `last_used_at` aunque sean accedidas miles de veces.
+- **Layer leak**: `LlmCallUseCase` (application) importa `SignedUrlDownloader` y `FileProviderFactory` (infrastructure). Debería ser inyectado vía port.
+- **Filas huérfanas**: cuando se cambian estrategias (e.g., short-circuit OpenAI imágenes después de un upload exitoso), las filas viejas quedan apuntando a `provider_file_id` válidos pero nunca referenciados.
+
 ## Decisiones clave (resumen)
 
 | # | Decisión | Justificación |
