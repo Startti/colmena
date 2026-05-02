@@ -267,6 +267,20 @@ impl LlmCallUseCase {
                     }
                 };
 
+                // Anthropic does not accept file_id for image content. Pass the
+                // signed URL through to the adapter, which emits source.type=url.
+                // Skips download + upload entirely. No cache (URL is per-request).
+                if provider_kind == ProviderKind::Anthropic
+                    && file.mime_type.starts_with("image/")
+                {
+                    crate::colmena_log!(
+                        "[file-resolve] '{}' (id={}) image + Anthropic — passing signed URL directly to adapter (no upload)",
+                        file.filename,
+                        doc_id
+                    );
+                    return Ok(file);
+                }
+
                 // Intra-request dedup
                 if let Some(r) = dedup.get(doc_id) {
                     crate::colmena_log!(
@@ -650,6 +664,39 @@ mod resolve_files_tests {
         )
         .await;
         assert!(matches!(r, Err(LlmError::AllFilesFailedToResolve)));
+    }
+
+    #[tokio::test]
+    async fn anthropic_image_signed_url_skips_upload() {
+        let cache = Arc::new(StubCache::new());
+        let provider = Arc::new(StubProvider::new());
+        let downloader = SignedUrlDownloader::new();
+
+        let mut files = vec![FileData {
+            document_id: Some("img-1".into()),
+            mime_type: "image/jpeg".into(),
+            filename: "x.jpeg".into(),
+            size_hint: None,
+            source: FileSource::SignedUrl("https://example/img?sig=y".into()),
+        }];
+
+        LlmCallUseCase::resolve_files(
+            &mut files,
+            ProviderKind::Anthropic,
+            provider.clone(),
+            cache.clone(),
+            &downloader,
+        )
+        .await
+        .unwrap();
+
+        // No upload happened.
+        assert_eq!(*provider.upload_count.lock().unwrap(), 0);
+        // Source stays as SignedUrl (no Uploaded conversion).
+        match &files[0].source {
+            FileSource::SignedUrl(_) => {}
+            _ => panic!("expected SignedUrl to be preserved"),
+        }
     }
 
     #[tokio::test]

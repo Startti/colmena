@@ -60,19 +60,35 @@ impl AnthropicAdapter {
                                     media_type: Some(file.mime_type.clone()),
                                     data: Some(STANDARD.encode(bytes)),
                                     file_id: None,
+                                    url: None,
                                 },
                                 FileSource::Uploaded(r) => AnthropicMediaSource {
                                     source_type: "file".to_string(),
                                     media_type: None,
                                     data: None,
                                     file_id: Some(r.provider_file_id.clone()),
+                                    url: None,
                                 },
+                                FileSource::SignedUrl(url)
+                                    if file.mime_type.starts_with("image/") =>
+                                {
+                                    // Anthropic does not accept file_id for images. Pass the
+                                    // signed URL directly; Anthropic fetches it server-side.
+                                    AnthropicMediaSource {
+                                        source_type: "url".to_string(),
+                                        media_type: None,
+                                        data: None,
+                                        file_id: None,
+                                        url: Some(url.clone()),
+                                    }
+                                }
                                 FileSource::SignedUrl(_) => {
                                     return Err(LlmError::InternalError {
                                         message: format!(
-                                            "Anthropic adapter received unresolved SignedUrl for '{}'. \
-                                             LlmCallUseCase::resolve_files must run before reaching the adapter.",
-                                            file.filename
+                                            "Anthropic adapter received unresolved SignedUrl for non-image file '{}' \
+                                             (mime '{}'). Non-image SignedUrl files must be resolved via Files API \
+                                             by LlmCallUseCase::resolve_files before reaching the adapter.",
+                                            file.filename, file.mime_type
                                         ),
                                     });
                                 }
@@ -594,6 +610,8 @@ struct AnthropicMediaSource {
     data: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     file_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
 }
 
 // Response structures for Anthropic API
@@ -832,6 +850,71 @@ mod tests {
         let adapter = AnthropicAdapter::new();
         let err = adapter.convert_messages(&request).unwrap_err();
         assert!(matches!(err, LlmError::InternalError { .. }));
+    }
+
+    #[test]
+    fn convert_messages_serializes_signed_url_image_as_url_source() {
+        use crate::llm::domain::{
+            FileData, FileSource, LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind,
+        };
+        let file = FileData {
+            document_id: Some("doc-img-1".into()),
+            mime_type: "image/jpeg".into(),
+            filename: "x.jpeg".into(),
+            size_hint: None,
+            source: FileSource::SignedUrl(
+                "https://storage.googleapis.com/bucket/x?sig=y".into(),
+            ),
+        };
+        let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
+        let provider =
+            LlmProvider::new(ProviderKind::Anthropic, "k".into(), Some("claude-3".into()))
+                .unwrap();
+        let config = LlmConfig::new(provider);
+        let request = LlmRequest::new(vec![msg], config, false).unwrap();
+
+        let adapter = AnthropicAdapter::new();
+        let (_sys, anth_messages) = adapter.convert_messages(&request).unwrap();
+        let json = serde_json::to_value(&anth_messages).unwrap();
+        let blocks = json[0]["content"].as_array().unwrap();
+        let img_block = blocks.iter().find(|b| b["type"] == "image").unwrap();
+        assert_eq!(img_block["source"]["type"], "url");
+        assert_eq!(
+            img_block["source"]["url"],
+            "https://storage.googleapis.com/bucket/x?sig=y"
+        );
+        assert!(
+            img_block["source"].get("file_id").is_none()
+                || img_block["source"]["file_id"].is_null()
+        );
+        assert!(
+            img_block["source"].get("data").is_none()
+                || img_block["source"]["data"].is_null()
+        );
+    }
+
+    #[test]
+    fn convert_messages_returns_error_on_signed_url_for_non_image() {
+        use crate::llm::domain::{
+            FileData, FileSource, LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind,
+        };
+        let file = FileData {
+            document_id: Some("doc-pdf-1".into()),
+            mime_type: "application/pdf".into(),
+            filename: "x.pdf".into(),
+            size_hint: None,
+            source: FileSource::SignedUrl("https://example/x?sig=y".into()),
+        };
+        let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
+        let provider =
+            LlmProvider::new(ProviderKind::Anthropic, "k".into(), Some("claude-3".into()))
+                .unwrap();
+        let config = LlmConfig::new(provider);
+        let request = LlmRequest::new(vec![msg], config, false).unwrap();
+
+        let adapter = AnthropicAdapter::new();
+        let err = adapter.convert_messages(&request).unwrap_err();
+        assert!(matches!(err, crate::llm::domain::LlmError::InternalError { .. }));
     }
 
     #[test]
