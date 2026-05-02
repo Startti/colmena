@@ -182,6 +182,10 @@ impl LlmMessage {
         self.files.as_deref()
     }
 
+    pub fn files_mut(&mut self) -> Option<&mut Vec<FileData>> {
+        self.files.as_mut()
+    }
+
     pub fn timestamp(&self) -> &DateTime<Utc> {
         &self.timestamp
     }
