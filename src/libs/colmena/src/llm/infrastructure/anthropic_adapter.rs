@@ -38,7 +38,10 @@ impl AnthropicAdapter {
         }
     }
 
-    fn convert_messages(&self, request: &LlmRequest) -> (Option<String>, Vec<AnthropicMessage>) {
+    fn convert_messages(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<(Option<String>, Vec<AnthropicMessage>), LlmError> {
         let mut system_message = None;
         let mut messages = Vec::new();
 
@@ -51,35 +54,33 @@ impl AnthropicAdapter {
                     if let Some(files) = message.files() {
                         let mut blocks: Vec<AnthropicContentBlock> = Vec::new();
                         for file in files {
-                            // TODO(large-files Task 13/14/15): handle SignedUrl and Uploaded variants here.
-                            // Currently only InlineBytes reaches the adapter; non-inline sources are warned
-                            // and skipped because LlmCallUseCase has not yet been extended to resolve them.
-                            let bytes = match &file.source {
-                                FileSource::InlineBytes { bytes } => bytes,
-                                _ => {
-                                    eprintln!(
-                                        "WARN: Anthropic adapter currently only supports inline-bytes file sources. Skipping file '{}'.",
-                                        file.filename
-                                    );
-                                    continue;
+                            let source = match &file.source {
+                                FileSource::InlineBytes { bytes } => AnthropicMediaSource {
+                                    source_type: "base64".to_string(),
+                                    media_type: Some(file.mime_type.clone()),
+                                    data: Some(STANDARD.encode(bytes)),
+                                    file_id: None,
+                                },
+                                FileSource::Uploaded(r) => AnthropicMediaSource {
+                                    source_type: "file".to_string(),
+                                    media_type: None,
+                                    data: None,
+                                    file_id: Some(r.provider_file_id.clone()),
+                                },
+                                FileSource::SignedUrl(_) => {
+                                    return Err(LlmError::InternalError {
+                                        message: format!(
+                                            "Anthropic adapter received unresolved SignedUrl for '{}'. \
+                                             LlmCallUseCase::resolve_files must run before reaching the adapter.",
+                                            file.filename
+                                        ),
+                                    });
                                 }
                             };
                             if file.mime_type.starts_with("image/") {
-                                blocks.push(AnthropicContentBlock::Image {
-                                    source: AnthropicMediaSource {
-                                        source_type: "base64".to_string(),
-                                        media_type: file.mime_type.clone(),
-                                        data: STANDARD.encode(bytes),
-                                    },
-                                });
+                                blocks.push(AnthropicContentBlock::Image { source });
                             } else if file.mime_type == "application/pdf" {
-                                blocks.push(AnthropicContentBlock::Document {
-                                    source: AnthropicMediaSource {
-                                        source_type: "base64".to_string(),
-                                        media_type: file.mime_type.clone(),
-                                        data: STANDARD.encode(bytes),
-                                    },
-                                });
+                                blocks.push(AnthropicContentBlock::Document { source });
                             } else {
                                 eprintln!(
                                     "WARN: Anthropic adapter does not support media type '{}'. Skipping file '{}'.",
@@ -150,11 +151,11 @@ impl AnthropicAdapter {
             }
         }
 
-        (system_message, messages)
+        Ok((system_message, messages))
     }
 
-    fn build_request_body(&self, request: &LlmRequest) -> serde_json::Value {
-        let (system_message, messages) = self.convert_messages(request);
+    fn build_request_body(&self, request: &LlmRequest) -> Result<serde_json::Value, LlmError> {
+        let (system_message, messages) = self.convert_messages(request)?;
 
         let mut body = json!({
             "model": request.config().model(),
@@ -211,14 +212,14 @@ impl AnthropicAdapter {
             }
         }
 
-        body
+        Ok(body)
     }
 }
 
 #[async_trait]
 impl LlmRepository for AnthropicAdapter {
     async fn call(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
-        let body = self.build_request_body(&request);
+        let body = self.build_request_body(&request)?;
 
         let response = self
             .client
@@ -298,7 +299,7 @@ impl LlmRepository for AnthropicAdapter {
     }
 
     async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
-        let body = self.build_request_body(&request);
+        let body = self.build_request_body(&request)?;
 
         let response = self
             .client
@@ -583,12 +584,16 @@ enum AnthropicContentBlock {
     },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 struct AnthropicMediaSource {
     #[serde(rename = "type")]
     source_type: String,
-    media_type: String,
-    data: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    media_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_id: Option<String>,
 }
 
 // Response structures for Anthropic API
@@ -758,5 +763,99 @@ where
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_request_with_file(file: crate::llm::domain::FileData) -> LlmRequest {
+        use crate::llm::domain::{
+            LlmConfig, LlmMessage, LlmProvider, ProviderKind,
+        };
+        let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
+        let provider =
+            LlmProvider::new(ProviderKind::Anthropic, "k".into(), Some("claude-3".into()))
+                .unwrap();
+        let config = LlmConfig::new(provider);
+        LlmRequest::new(vec![msg], config, false).unwrap()
+    }
+
+    #[test]
+    fn convert_messages_serializes_uploaded_pdf_as_file_id() {
+        use crate::llm::domain::{FileData, FileSource, ProviderFileRef, ProviderKind};
+        let file = FileData {
+            document_id: Some("doc-1".into()),
+            mime_type: "application/pdf".into(),
+            filename: "x.pdf".into(),
+            size_hint: None,
+            source: FileSource::Uploaded(ProviderFileRef {
+                provider: ProviderKind::Anthropic,
+                provider_file_id: "file_01abc".into(),
+                mime_type: "application/pdf".into(),
+                filename: "x.pdf".into(),
+                expires_at: None,
+            }),
+        };
+        let request = build_request_with_file(file);
+
+        let adapter = AnthropicAdapter::new();
+        let (_sys, anth_messages) = adapter.convert_messages(&request).unwrap();
+        let json = serde_json::to_value(&anth_messages).unwrap();
+        let blocks = json[0]["content"].as_array().unwrap();
+        let doc_block = blocks.iter().find(|b| b["type"] == "document").unwrap();
+        assert_eq!(doc_block["source"]["type"], "file");
+        assert_eq!(doc_block["source"]["file_id"], "file_01abc");
+        assert!(
+            doc_block["source"].get("data").is_none()
+                || doc_block["source"]["data"].is_null()
+        );
+        assert!(
+            doc_block["source"].get("media_type").is_none()
+                || doc_block["source"]["media_type"].is_null()
+        );
+    }
+
+    #[test]
+    fn convert_messages_returns_error_on_signed_url() {
+        use crate::llm::domain::{FileData, FileSource};
+        let file = FileData {
+            document_id: Some("doc-1".into()),
+            mime_type: "application/pdf".into(),
+            filename: "x.pdf".into(),
+            size_hint: None,
+            source: FileSource::SignedUrl("https://example/x?sig=y".into()),
+        };
+        let request = build_request_with_file(file);
+
+        let adapter = AnthropicAdapter::new();
+        let err = adapter.convert_messages(&request).unwrap_err();
+        assert!(matches!(err, LlmError::InternalError { .. }));
+    }
+
+    #[test]
+    fn convert_messages_serializes_inline_pdf_as_base64() {
+        use crate::llm::domain::{FileData, FileSource};
+        let file = FileData {
+            document_id: None,
+            mime_type: "application/pdf".into(),
+            filename: "x.pdf".into(),
+            size_hint: None,
+            source: FileSource::InlineBytes {
+                bytes: b"%PDF-1.4 hello".to_vec(),
+            },
+        };
+        let request = build_request_with_file(file);
+
+        let adapter = AnthropicAdapter::new();
+        let (_sys, anth_messages) = adapter.convert_messages(&request).unwrap();
+        let json = serde_json::to_value(&anth_messages).unwrap();
+        let blocks = json[0]["content"].as_array().unwrap();
+        let doc_block = blocks.iter().find(|b| b["type"] == "document").unwrap();
+        assert_eq!(doc_block["source"]["type"], "base64");
+        assert_eq!(doc_block["source"]["media_type"], "application/pdf");
+        assert!(doc_block["source"]["data"].is_string());
+        assert!(doc_block["source"].get("file_id").is_none());
     }
 }
