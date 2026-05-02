@@ -1,4 +1,5 @@
 pub mod anthropic_adapter;
+pub mod files;
 pub mod gemini_adapter;
 pub mod llm_provider_factory;
 pub mod mock_adapter;
