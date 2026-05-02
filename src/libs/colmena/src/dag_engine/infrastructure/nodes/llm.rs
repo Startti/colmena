@@ -484,61 +484,7 @@ impl ExecutableNode for LlmNode {
         // Check if there are any files passed in the node inputs
         if let Some(files_val) = inputs.get("files").or_else(|| config.get("files")) {
             if let Some(files_arr) = files_val.as_array() {
-                for file_obj in files_arr {
-                    if let Some(obj) = file_obj.as_object() {
-                        let mime_type = obj
-                            .get("mime_type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("application/octet-stream")
-                            .to_string();
-
-                        if let Some(data) = obj.get("data").and_then(|v| v.as_str()) {
-                            use base64::{engine::general_purpose::STANDARD, Engine as _};
-
-                            // It's a base64 inline string. Remove data URI scheme if present:
-                            let base64_data = if data.starts_with("data:") {
-                                data.find(',').map(|idx| &data[idx + 1..]).unwrap_or(data)
-                            } else {
-                                data
-                            };
-
-                            let filename = obj
-                                .get("filename")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("upload.file")
-                                .to_string();
-
-                            if let Ok(bytes) = STANDARD.decode(base64_data) {
-                                resolved_files.push(crate::llm::domain::FileData::inline(
-                                    mime_type, filename, bytes,
-                                ));
-                            } else {
-                                colmena_log!("WARN: Failed to decode base64 file data");
-                            }
-                        } else if let Some(path_str) = obj.get("path").and_then(|v| v.as_str()) {
-                            let filename = obj
-                                .get("filename")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_else(|| {
-                                    std::path::Path::new(path_str)
-                                        .file_name()
-                                        .unwrap_or_default()
-                                        .to_str()
-                                        .unwrap_or("upload.file")
-                                })
-                                .to_string();
-
-                            // Read from local filesystem
-                            if let Ok(bytes) = std::fs::read(path_str) {
-                                resolved_files.push(crate::llm::domain::FileData::inline(
-                                    mime_type, filename, bytes,
-                                ));
-                            } else {
-                                colmena_log!("WARN: Failed to read file from path: {}", path_str);
-                            }
-                        }
-                    }
-                }
+                resolved_files = parse_file_entries(files_arr)?;
             }
         }
 
@@ -1134,5 +1080,245 @@ impl ExecutableNode for LlmNode {
                 "tool_calls": "array (optional)"
             }
         })
+    }
+}
+
+const FILE_DATA_LIMIT_BYTES: u64 = 30 * 1024 * 1024;
+
+/// Parses a JSON array of FileEntry objects into `Vec<FileData>`.
+///
+/// Schema (per emitter contract):
+/// ```json
+/// {
+///   "id": "doc-123",                    // required when url is present
+///   "mime_type": "application/pdf",     // required, defaults to octet-stream
+///   "filename": "x.pdf",                // optional, defaults to "upload.file"
+///   "size_bytes": 123,                  // hint, not validated as ground truth
+///   "data": "base64...",                // for files < 30 MB
+///   "url": "https://...",               // for files >= 30 MB (signed URL)
+///   "path": "/local/path"               // legacy, < 30 MB only, dev/test
+/// }
+/// ```
+///
+/// Priority when multiple sources are present: data > url > path.
+/// Returns `Vec<FileData>`. Per-file errors are logged and skipped; only the
+/// hard-limit errors (`DataFieldTooLarge`, `PathFieldTooLarge`,
+/// `UrlWithoutDocumentId`) propagate.
+pub(crate) fn parse_file_entries(
+    arr: &[serde_json::Value],
+) -> Result<Vec<crate::llm::domain::FileData>, crate::llm::domain::LlmError> {
+    use crate::llm::domain::{FileData, FileSource, LlmError};
+    let mut out = Vec::with_capacity(arr.len());
+
+    for file_obj in arr {
+        let Some(obj) = file_obj.as_object() else {
+            continue;
+        };
+
+        let mime_type = obj
+            .get("mime_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let filename = obj
+            .get("filename")
+            .and_then(|v| v.as_str())
+            .unwrap_or("upload.file")
+            .to_string();
+        let document_id = obj
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let size_hint = obj.get("size_bytes").and_then(|v| v.as_u64());
+
+        let data_present = obj
+            .get("data")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        let url_present = obj
+            .get("url")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        let path_present = obj
+            .get("path")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+
+        let source = if let Some(data) = data_present {
+            // Validate hint size first (cheap check before decode).
+            if let Some(n) = size_hint {
+                if n > FILE_DATA_LIMIT_BYTES {
+                    return Err(LlmError::DataFieldTooLarge { size: n });
+                }
+            }
+            use base64::{engine::general_purpose::STANDARD, Engine as _};
+            let stripped = if data.starts_with("data:") {
+                data.find(',').map(|i| &data[i + 1..]).unwrap_or(data)
+            } else {
+                data
+            };
+            let bytes = match STANDARD.decode(stripped) {
+                Ok(b) => b,
+                Err(e) => {
+                    crate::colmena_log!("WARN: failed to decode base64 file data: {}", e);
+                    continue;
+                }
+            };
+            // Validate against actual decoded bytes.
+            if bytes.len() as u64 > FILE_DATA_LIMIT_BYTES {
+                return Err(LlmError::DataFieldTooLarge {
+                    size: bytes.len() as u64,
+                });
+            }
+            FileSource::InlineBytes { bytes }
+        } else if let Some(url) = url_present {
+            if document_id.is_none() {
+                return Err(LlmError::UrlWithoutDocumentId);
+            }
+            FileSource::SignedUrl(url.to_string())
+        } else if let Some(path) = path_present {
+            let metadata = match std::fs::metadata(path) {
+                Ok(m) => m,
+                Err(e) => {
+                    crate::colmena_log!("WARN: path stat failed for {}: {}", path, e);
+                    continue;
+                }
+            };
+            let size = metadata.len();
+            if size > FILE_DATA_LIMIT_BYTES {
+                return Err(LlmError::PathFieldTooLarge { size });
+            }
+            let bytes = match std::fs::read(path) {
+                Ok(b) => b,
+                Err(e) => {
+                    crate::colmena_log!("WARN: path read failed for {}: {}", path, e);
+                    continue;
+                }
+            };
+            FileSource::InlineBytes { bytes }
+        } else {
+            crate::colmena_log!("WARN: file entry has no data/url/path; skipping");
+            continue;
+        };
+
+        out.push(FileData {
+            document_id,
+            mime_type,
+            filename,
+            size_hint,
+            source,
+        });
+    }
+
+    Ok(out)
+}
+
+#[cfg(test)]
+mod files_parser_tests {
+    use super::*;
+    use crate::llm::domain::{FileSource, LlmError};
+    use serde_json::json;
+
+    fn parse(files: serde_json::Value) -> Result<Vec<crate::llm::domain::FileData>, LlmError> {
+        let arr = files.as_array().expect("array");
+        parse_file_entries(arr)
+    }
+
+    #[test]
+    fn data_under_30mb_becomes_inline() {
+        let files = json!([{
+            "id": "doc-1",
+            "mime_type": "application/pdf",
+            "filename": "x.pdf",
+            "data": "aGVsbG8=", // "hello" base64
+            "size_bytes": 5
+        }]);
+        let parsed = parse(files).unwrap();
+        assert_eq!(parsed.len(), 1);
+        match &parsed[0].source {
+            FileSource::InlineBytes { bytes } => assert_eq!(bytes, b"hello"),
+            _ => panic!("expected InlineBytes"),
+        }
+        assert_eq!(parsed[0].document_id.as_deref(), Some("doc-1"));
+    }
+
+    #[test]
+    fn data_over_30mb_errors() {
+        let files = json!([{
+            "id": "doc-1",
+            "mime_type": "application/pdf",
+            "filename": "x.pdf",
+            "data": "aGVsbG8=",
+            "size_bytes": 50_000_000_u64
+        }]);
+        let r = parse(files);
+        assert!(matches!(r, Err(LlmError::DataFieldTooLarge { .. })));
+    }
+
+    #[test]
+    fn url_without_id_errors() {
+        let files = json!([{
+            "mime_type": "application/pdf",
+            "filename": "x.pdf",
+            "url": "https://storage.googleapis.com/bucket/x?sig=y",
+            "size_bytes": 50_000_000_u64
+        }]);
+        let r = parse(files);
+        assert!(matches!(r, Err(LlmError::UrlWithoutDocumentId)));
+    }
+
+    #[test]
+    fn url_with_id_becomes_signed_url() {
+        let files = json!([{
+            "id": "doc-1",
+            "mime_type": "application/pdf",
+            "filename": "x.pdf",
+            "url": "https://storage.googleapis.com/bucket/x?sig=y",
+            "size_bytes": 50_000_000_u64
+        }]);
+        let parsed = parse(files).unwrap();
+        match &parsed[0].source {
+            FileSource::SignedUrl(u) => assert!(u.contains("storage.googleapis.com")),
+            _ => panic!("expected SignedUrl"),
+        }
+        assert_eq!(parsed[0].document_id.as_deref(), Some("doc-1"));
+    }
+
+    #[test]
+    fn data_and_url_present_prefers_data() {
+        let files = json!([{
+            "id": "doc-1",
+            "mime_type": "application/pdf",
+            "filename": "x.pdf",
+            "data": "aGVsbG8=",
+            "url": "https://x",
+            "size_bytes": 5
+        }]);
+        let parsed = parse(files).unwrap();
+        assert!(matches!(parsed[0].source, FileSource::InlineBytes { .. }));
+    }
+
+    #[test]
+    fn legacy_data_without_id_works() {
+        // Backward compat: a JSON without `id` and only `data` should still parse.
+        let files = json!([{
+            "mime_type": "application/pdf",
+            "filename": "x.pdf",
+            "data": "aGVsbG8="
+        }]);
+        let parsed = parse(files).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].document_id.is_none());
+        assert!(matches!(parsed[0].source, FileSource::InlineBytes { .. }));
+    }
+
+    #[test]
+    fn malformed_entry_skipped() {
+        let files = json!([
+            {"mime_type": "application/pdf"},  // no data/url/path -> skipped
+            {"data": "aGVsbG8="}                // valid -> kept
+        ]);
+        let parsed = parse(files).unwrap();
+        assert_eq!(parsed.len(), 1);
     }
 }
