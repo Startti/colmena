@@ -488,47 +488,93 @@ impl ExecutableNode for LlmNode {
             }
         }
 
-        // Minimal C1: resolve FileSource::SignedUrl entries inline (download → upload → reference).
-        // No cache: re-uploads every run. Full cache wiring is a follow-up task.
+        // C1: resolve FileSource::SignedUrl entries via cache + download + upload pipe.
+        // Uses the canonical LlmCallUseCase::resolve_files orchestration when DATABASE_URL
+        // is available; falls back to a bare download+upload loop otherwise.
         if resolved_files.iter().any(|f| matches!(
             f.source,
             crate::llm::domain::FileSource::SignedUrl(_)
         )) {
-            use crate::llm::domain::FileSource;
+            use crate::llm::application::LlmCallUseCase;
             use crate::llm::infrastructure::files::{
-                FileProviderFactory, SignedUrlDownloader,
+                FileProviderFactory, PostgresFileCache, SignedUrlDownloader,
             };
+            use std::sync::Arc;
 
-            let file_provider = FileProviderFactory::create(
-                provider_kind.clone(),
-                api_key.clone(),
-            )?;
+            // Build cache from DATABASE_URL env (graceful degradation if missing).
+            let database_url = std::env::var("DATABASE_URL").ok();
+            let cache: Option<Arc<dyn crate::llm::domain::FileCacheRepository>> =
+                match database_url.as_deref() {
+                    Some(url) => {
+                        crate::colmena_log!(
+                            "[file-resolve] DATABASE_URL set — building PostgresFileCache for provider_file_cache table"
+                        );
+                        use crate::dag_engine::infrastructure::pool_registry::{
+                            PgPoolRegistry, PoolConfig,
+                        };
+                        let registry = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+                        // Run migrations to ensure provider_file_cache table exists.
+                        let pool = registry
+                            .get_or_create(url)
+                            .await
+                            .map_err(|e| format!("failed to build PG pool: {}", e))?;
+                        sqlx::migrate!("migrations/postgres")
+                            .set_ignore_missing(true)
+                            .run(&*pool)
+                            .await
+                            .map_err(|e| format!("migration failed: {}", e))?;
+                        let pg_cache = PostgresFileCache::new(registry, url).await?;
+                        Some(Arc::new(pg_cache))
+                    }
+                    None => {
+                        crate::colmena_log!(
+                            "[file-resolve] DATABASE_URL not set — running WITHOUT cache (every run re-uploads)"
+                        );
+                        None
+                    }
+                };
+
+            let file_provider =
+                FileProviderFactory::create(provider_kind.clone(), api_key.clone())?;
             let downloader = SignedUrlDownloader::new();
 
-            let mut new_files = Vec::with_capacity(resolved_files.len());
-            for file in resolved_files.drain(..) {
-                match &file.source {
-                    FileSource::SignedUrl(url) => {
-                        let url_owned = url.clone();
-                        let mime_type = file.mime_type.clone();
-                        let filename = file.filename.clone();
-                        let document_id = file.document_id.clone();
-                        let size_hint = file.size_hint;
+            if let Some(cache) = cache {
+                // Use the canonical resolve_files orchestration.
+                LlmCallUseCase::resolve_files(
+                    &mut resolved_files,
+                    provider_kind.clone(),
+                    file_provider,
+                    cache,
+                    &downloader,
+                )
+                .await?;
+            } else {
+                // No cache: bare download+upload. Logs flow events at INFO.
+                use crate::llm::domain::FileSource;
+                let mut new_files = Vec::with_capacity(resolved_files.len());
+                for file in resolved_files.drain(..) {
+                    match &file.source {
+                        FileSource::SignedUrl(url) => {
+                            let url_owned = url.clone();
+                            let mime_type = file.mime_type.clone();
+                            let filename = file.filename.clone();
+                            let document_id = file.document_id.clone();
+                            let size_hint = file.size_hint;
 
-                        colmena_log!(
-                            "INFO: resolving signed URL for file '{}' (mime={}) — downloading + uploading to {} Files API",
-                            filename, mime_type, provider_kind
-                        );
+                            crate::colmena_log!(
+                                "[file-resolve-no-cache] '{}' downloading + uploading to {} Files API",
+                                filename, provider_kind
+                            );
 
-                        match downloader.stream(&url_owned).await {
-                            Ok(stream) => {
-                                match file_provider.upload_streaming(
-                                    stream, &mime_type, &filename
-                                ).await {
+                            match downloader.stream(&url_owned).await {
+                                Ok(stream) => match file_provider
+                                    .upload_streaming(stream, &mime_type, &filename)
+                                    .await
+                                {
                                     Ok(provider_ref) => {
-                                        colmena_log!(
-                                            "INFO: uploaded '{}' to {} as id '{}'",
-                                            filename, provider_kind, provider_ref.provider_file_id
+                                        crate::colmena_log!(
+                                            "[file-resolve-no-cache] '{}' uploaded as id '{}'",
+                                            filename, provider_ref.provider_file_id
                                         );
                                         new_files.push(crate::llm::domain::FileData {
                                             document_id,
@@ -539,25 +585,25 @@ impl ExecutableNode for LlmNode {
                                         });
                                     }
                                     Err(e) => {
-                                        colmena_log!(
-                                            "WARN: upload to {} Files API failed for '{}': {}; skipping",
-                                            provider_kind, filename, e
+                                        crate::colmena_log!(
+                                            "[file-resolve-no-cache] WARN upload failed for '{}': {}",
+                                            filename, e
                                         );
                                     }
+                                },
+                                Err(e) => {
+                                    crate::colmena_log!(
+                                        "[file-resolve-no-cache] WARN download failed for '{}': {}",
+                                        filename, e
+                                    );
                                 }
                             }
-                            Err(e) => {
-                                colmena_log!(
-                                    "WARN: download of signed URL for '{}' failed: {}; skipping",
-                                    filename, e
-                                );
-                            }
                         }
+                        _ => new_files.push(file),
                     }
-                    _ => new_files.push(file),
                 }
+                resolved_files = new_files;
             }
-            resolved_files = new_files;
         }
 
         let user_message = if resolved_files.is_empty() {

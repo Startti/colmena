@@ -190,6 +190,12 @@ impl LlmCallUseCase {
             return Ok(());
         }
 
+        crate::colmena_log!(
+            "[file-resolve] resolving {} file(s) for provider {}",
+            files.len(),
+            provider_kind
+        );
+
         let initial_count = files.len();
         let mut session_dedup: HashMap<String, ProviderFileRef> = HashMap::new();
         let mut errors_per_file = 0usize;
@@ -232,35 +238,107 @@ impl LlmCallUseCase {
         dedup: &mut HashMap<String, ProviderFileRef>,
     ) -> Result<FileData, LlmError> {
         match &file.source {
-            FileSource::InlineBytes { .. } | FileSource::Uploaded(_) => Ok(file),
+            FileSource::InlineBytes { .. } => {
+                crate::colmena_log!(
+                    "[file-resolve] '{}' is inline bytes ({}), passing through unchanged",
+                    file.filename,
+                    file.mime_type
+                );
+                Ok(file)
+            }
+            FileSource::Uploaded(r) => {
+                crate::colmena_log!(
+                    "[file-resolve] '{}' already Uploaded(provider={}, file_id={}), passing through",
+                    file.filename,
+                    r.provider,
+                    r.provider_file_id
+                );
+                Ok(file)
+            }
             FileSource::SignedUrl(url) => {
-                let doc_id = file
-                    .document_id
-                    .as_deref()
-                    .ok_or(LlmError::UrlWithoutDocumentId)?;
+                let doc_id = match file.document_id.as_deref() {
+                    Some(id) => id,
+                    None => {
+                        crate::colmena_log!(
+                            "[file-resolve] '{}' has SignedUrl but no document_id; emitting UrlWithoutDocumentId",
+                            file.filename
+                        );
+                        return Err(LlmError::UrlWithoutDocumentId);
+                    }
+                };
 
                 // Intra-request dedup
                 if let Some(r) = dedup.get(doc_id) {
+                    crate::colmena_log!(
+                        "[file-resolve] '{}' (id={}) intra-request dedup HIT — reusing file_id {}",
+                        file.filename,
+                        doc_id,
+                        r.provider_file_id
+                    );
                     file.source = FileSource::Uploaded(r.clone());
                     return Ok(file);
                 }
 
                 // Cache lookup
+                crate::colmena_log!(
+                    "[file-resolve] '{}' (id={}) looking up cache for provider {}",
+                    file.filename,
+                    doc_id,
+                    provider_kind
+                );
                 if let Some(entry) = cache.lookup(doc_id, provider_kind.clone()).await? {
                     if entry.is_likely_alive(Utc::now()) {
+                        crate::colmena_log!(
+                            "[file-resolve] '{}' (id={}) cache HIT alive (file_id={}, expires_at={:?}) — skipping download/upload",
+                            file.filename,
+                            doc_id,
+                            entry.provider_file_id,
+                            entry.expires_at
+                        );
                         let r = entry.into_ref();
                         dedup.insert(doc_id.to_string(), r.clone());
                         file.source = FileSource::Uploaded(r);
                         return Ok(file);
                     }
+                    crate::colmena_log!(
+                        "[file-resolve] '{}' (id={}) cache HIT but EXPIRED (expires_at={:?} < now+5min) — invalidating and re-uploading",
+                        file.filename,
+                        doc_id,
+                        entry.expires_at
+                    );
                     cache.invalidate(doc_id, provider_kind.clone()).await?;
+                } else {
+                    crate::colmena_log!(
+                        "[file-resolve] '{}' (id={}) cache MISS — will download + upload",
+                        file.filename,
+                        doc_id
+                    );
                 }
 
                 // Download → upload
+                crate::colmena_log!(
+                    "[file-resolve] '{}' (id={}) opening signed-URL stream from GCS",
+                    file.filename,
+                    doc_id
+                );
                 let stream: BoxedByteStream = downloader.stream(url).await?;
+
+                crate::colmena_log!(
+                    "[file-resolve] '{}' (id={}) piping stream → {} Files API upload",
+                    file.filename,
+                    doc_id,
+                    provider_kind
+                );
                 let r = provider
                     .upload_streaming(stream, &file.mime_type, &file.filename)
                     .await?;
+
+                crate::colmena_log!(
+                    "[file-resolve] '{}' (id={}) upload complete: provider_file_id={}",
+                    file.filename,
+                    doc_id,
+                    r.provider_file_id
+                );
 
                 // Persist
                 let now = Utc::now();
@@ -280,6 +358,12 @@ impl LlmCallUseCase {
                         last_used_at: now,
                     })
                     .await?;
+                crate::colmena_log!(
+                    "[file-resolve] '{}' (id={}) cache upserted (expires_at={:?})",
+                    file.filename,
+                    doc_id,
+                    expires_at
+                );
 
                 dedup.insert(doc_id.to_string(), r.clone());
                 file.source = FileSource::Uploaded(r);
