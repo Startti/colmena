@@ -660,7 +660,6 @@ impl OpenAiAdapter {
                         }
                         FileSource::Uploaded(r) => json!({
                             "type": "input_file",
-                            "filename": file.filename,
                             "file_id": r.provider_file_id,
                         }),
                         FileSource::SignedUrl(_) => {
@@ -910,6 +909,11 @@ mod tests {
         assert_eq!(file_part["file_id"], "file-abc");
         assert!(
             file_part.get("file_data").is_none() || file_part["file_data"].is_null()
+        );
+        // OpenAI Responses API requires mutually-exclusive file_id XOR filename;
+        // when using file_id we must NOT include filename.
+        assert!(
+            file_part.get("filename").is_none() || file_part["filename"].is_null()
         );
     }
 
