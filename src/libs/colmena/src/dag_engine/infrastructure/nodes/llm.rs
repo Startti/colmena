@@ -432,7 +432,7 @@ impl ExecutableNode for LlmNode {
 
         // --- 2. Prepare LLM Request ---
 
-        let provider = LlmProvider::new(provider_kind.clone(), api_key, model)?;
+        let provider = LlmProvider::new(provider_kind.clone(), api_key.clone(), model)?;
         let mut llm_config = LlmConfig::new(provider); // Add extra config params here if needed
 
         // Optional Params
@@ -486,6 +486,78 @@ impl ExecutableNode for LlmNode {
             if let Some(files_arr) = files_val.as_array() {
                 resolved_files = parse_file_entries(files_arr)?;
             }
+        }
+
+        // Minimal C1: resolve FileSource::SignedUrl entries inline (download → upload → reference).
+        // No cache: re-uploads every run. Full cache wiring is a follow-up task.
+        if resolved_files.iter().any(|f| matches!(
+            f.source,
+            crate::llm::domain::FileSource::SignedUrl(_)
+        )) {
+            use crate::llm::domain::FileSource;
+            use crate::llm::infrastructure::files::{
+                FileProviderFactory, SignedUrlDownloader,
+            };
+
+            let file_provider = FileProviderFactory::create(
+                provider_kind.clone(),
+                api_key.clone(),
+            )?;
+            let downloader = SignedUrlDownloader::new();
+
+            let mut new_files = Vec::with_capacity(resolved_files.len());
+            for file in resolved_files.drain(..) {
+                match &file.source {
+                    FileSource::SignedUrl(url) => {
+                        let url_owned = url.clone();
+                        let mime_type = file.mime_type.clone();
+                        let filename = file.filename.clone();
+                        let document_id = file.document_id.clone();
+                        let size_hint = file.size_hint;
+
+                        colmena_log!(
+                            "INFO: resolving signed URL for file '{}' (mime={}) — downloading + uploading to {} Files API",
+                            filename, mime_type, provider_kind
+                        );
+
+                        match downloader.stream(&url_owned).await {
+                            Ok(stream) => {
+                                match file_provider.upload_streaming(
+                                    stream, &mime_type, &filename
+                                ).await {
+                                    Ok(provider_ref) => {
+                                        colmena_log!(
+                                            "INFO: uploaded '{}' to {} as id '{}'",
+                                            filename, provider_kind, provider_ref.provider_file_id
+                                        );
+                                        new_files.push(crate::llm::domain::FileData {
+                                            document_id,
+                                            mime_type,
+                                            filename,
+                                            size_hint,
+                                            source: FileSource::Uploaded(provider_ref),
+                                        });
+                                    }
+                                    Err(e) => {
+                                        colmena_log!(
+                                            "WARN: upload to {} Files API failed for '{}': {}; skipping",
+                                            provider_kind, filename, e
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                colmena_log!(
+                                    "WARN: download of signed URL for '{}' failed: {}; skipping",
+                                    filename, e
+                                );
+                            }
+                        }
+                    }
+                    _ => new_files.push(file),
+                }
+            }
+            resolved_files = new_files;
         }
 
         let user_message = if resolved_files.is_empty() {

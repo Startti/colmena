@@ -1,0 +1,35 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/agent-demo",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Describe en detalle qué ves en la imagen adjunta."
+        }
+      }
+    },
+    "agent_llm": {
+      "type": "llm_call",
+      "config": {
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5-20251001",
+        "api_key": "${ANTHROPIC_API_KEY}",
+        "stream": false,
+        "system_message": "Eres un asistente que describe imágenes con detalle.",
+        "temperature": 0.0,
+        "files": [
+          {
+            "id": "test-jpeg-2026-05-02",
+            "mime_type": "image/jpeg",
+            "filename": "whatsapp-image.jpeg",
+            "url": "https://storage.googleapis.com/adp-reference-develop-startti-dev/chat-attachments/yc8NL2HvfNJ5WlAodQUhfCkC8gNIOCyO/cmon1uecf000001s62hk2yh38/s9mjbg3jm5w91qb3dhstgbg9-WhatsApp%20Image%202026-04-24%20at%2019.31.10.jpeg?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=adp-backend-sa-develop%40startti-dev.iam.gserviceaccount.com%2F20260502%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260502T194717Z&X-Goog-Expires=3600&X-Goog-SignedHeaders=host&X-Goog-Signature=8ddd55fc1c75daacdce8279b94fe7b0580ee29a4eda75a238c059d4eb14855d6352a3fedbc84a9fb76f828587e43d45ff8462cc7939a14c68e4ab1c40006e30491855aad1a85bf8d36dd4952fc5e76f5147da3a3f5caf9f9b636746a208ce56cf53e951dc334db8c9ad428998d64286f9bb6c7951d6b80485d4d0d561464ff2ca00d097d2aa67ec0050cbc653af71b677d53903629b7b90f18dbaddfa69d4bacafb91fce4550ac8d21339fd68d2305f4e6b61d905cfebb6d6e5e7e87d1f06ef3d23d606fa451e4d20ed720772443ea80eaa56731bf2d6c88eecd23b4f62d899886be012d3722f551f162445169f3b3765ea7e03e002b2d726bbcb6851c8b462b",
+            "size_bytes": 0
+          }
+        ]
+      }
+    }
+  },
+  "edges": [{ "from": "trigger", "to": "agent_llm" }]
+}
