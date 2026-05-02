@@ -77,6 +77,28 @@ pub enum LlmError {
 
     #[error("Max iterations reached: {max} iterations exceeded in ReAct loop")]
     MaxIterationsReached { max: usize },
+
+    // File handling errors (Files API integration)
+    #[error("data field exceeds 30 MB limit (got {size} bytes); emitter must use url for large files")]
+    DataFieldTooLarge { size: u64 },
+
+    #[error("path file exceeds 30 MB limit (got {size} bytes); use url for large files")]
+    PathFieldTooLarge { size: u64 },
+
+    #[error("url field requires id field to enable cache lookup")]
+    UrlWithoutDocumentId,
+
+    #[error("signed URL fetch failed with status {status}")]
+    SignedUrlFetchFailed { status: u16 },
+
+    #[error("file upload to {provider} Files API failed: {message}")]
+    FileApiUploadFailed { provider: String, message: String },
+
+    #[error("provider rejected file with id {provider_file_id}: not found")]
+    ProviderFileNotFound { provider_file_id: String },
+
+    #[error("all files in the request failed to materialize")]
+    AllFilesFailedToResolve,
 }
 
 impl LlmError {
@@ -145,5 +167,29 @@ impl LlmError {
 
     pub fn max_iterations_reached(max: usize) -> Self {
         Self::MaxIterationsReached { max }
+    }
+}
+
+#[cfg(test)]
+mod files_error_tests {
+    use super::*;
+
+    #[test]
+    fn data_field_too_large_message() {
+        let e = LlmError::DataFieldTooLarge { size: 50_000_000 };
+        assert!(format!("{}", e).contains("30"));
+        assert!(format!("{}", e).contains("50000000"));
+    }
+
+    #[test]
+    fn url_without_document_id_message() {
+        let e = LlmError::UrlWithoutDocumentId;
+        assert!(format!("{}", e).to_lowercase().contains("id"));
+    }
+
+    #[test]
+    fn provider_file_not_found_carries_id() {
+        let e = LlmError::ProviderFileNotFound { provider_file_id: "file_abc".into() };
+        assert!(format!("{}", e).contains("file_abc"));
     }
 }
