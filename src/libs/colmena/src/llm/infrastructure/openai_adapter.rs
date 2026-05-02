@@ -1,6 +1,6 @@
 use crate::llm::domain::{
-    FunctionCall, LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk,
-    LlmStreamPart, LlmUsage, ToolCall, ToolCallChunk,
+    FileSource, FunctionCall, LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream,
+    LlmStreamChunk, LlmStreamPart, LlmUsage, ToolCall, ToolCallChunk,
 };
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -53,8 +53,18 @@ impl OpenAiAdapter {
 
                     use base64::{engine::general_purpose::STANDARD, Engine as _};
                     for file in files {
+                        let bytes = match &file.source {
+                            FileSource::InlineBytes { bytes } => bytes,
+                            _ => {
+                                println!(
+                                    "WARN: OpenAI chat completions adapter currently only supports inline-bytes file sources. Skipping {}",
+                                    file.filename
+                                );
+                                continue;
+                            }
+                        };
                         if file.mime_type.starts_with("image/") {
-                            let b64 = STANDARD.encode(&file.bytes);
+                            let b64 = STANDARD.encode(bytes);
                             let data_uri = format!("data:{};base64,{}", file.mime_type, b64);
 
                             content_arr.push(json!({
@@ -625,7 +635,17 @@ impl OpenAiAdapter {
                 if let Some(files) = msg.files() {
                     use base64::{engine::general_purpose::STANDARD, Engine as _};
                     for file in files {
-                        let b64 = STANDARD.encode(&file.bytes);
+                        let bytes = match &file.source {
+                            FileSource::InlineBytes { bytes } => bytes,
+                            _ => {
+                                println!(
+                                    "WARN: OpenAI responses adapter currently only supports inline-bytes file sources. Skipping {}",
+                                    file.filename
+                                );
+                                continue;
+                            }
+                        };
+                        let b64 = STANDARD.encode(bytes);
                         let data_uri = format!("data:{};base64,{}", file.mime_type, b64);
                         content_arr.push(json!({
                             "type": "input_file",

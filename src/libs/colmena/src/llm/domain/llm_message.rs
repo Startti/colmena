@@ -1,4 +1,5 @@
 use crate::llm::domain::LlmError;
+use crate::llm::domain::ProviderKind;
 use chrono::{DateTime, Utc};
 #[cfg(test)]
 use derivative::Derivative;
@@ -49,9 +50,51 @@ impl MessageRole {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(PartialEq))]
 pub struct FileData {
+    /// Identificador único enviado por el emisor. Requerido cuando `source` es `SignedUrl`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_id: Option<String>,
     pub mime_type: String,
     pub filename: String,
-    pub bytes: Vec<u8>,
+    /// Hint del campo `size_bytes` del JSON. No es ground truth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_hint: Option<u64>,
+    pub source: FileSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(PartialEq))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FileSource {
+    /// Bytes ya en RAM (vino como `data` base64 < 30 MB, o `path` < 30 MB).
+    InlineBytes { bytes: Vec<u8> },
+    /// Signed URL pendiente de descarga + upload al provider.
+    SignedUrl(String),
+    /// Ya subido al provider.
+    Uploaded(ProviderFileRef),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct ProviderFileRef {
+    pub provider: ProviderKind,
+    pub provider_file_id: String,
+    pub mime_type: String,
+    pub filename: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl FileData {
+    /// Constructor retrocompatible: bytes ya en memoria.
+    pub fn inline(mime_type: String, filename: String, bytes: Vec<u8>) -> Self {
+        Self {
+            document_id: None,
+            mime_type,
+            filename,
+            size_hint: None,
+            source: FileSource::InlineBytes { bytes },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,5 +237,37 @@ mod tests {
             }
             _ => panic!("Expected InvalidMessageRole error"),
         }
+    }
+
+    #[test]
+    fn test_file_data_with_signed_url_source() {
+        let file = FileData {
+            document_id: Some("doc-123".to_string()),
+            mime_type: "application/pdf".to_string(),
+            filename: "report.pdf".to_string(),
+            size_hint: Some(47_185_920),
+            source: FileSource::SignedUrl("https://storage.googleapis.com/bucket/x?sig=abc".to_string()),
+        };
+        assert_eq!(file.document_id.as_deref(), Some("doc-123"));
+        match &file.source {
+            FileSource::SignedUrl(u) => assert!(u.contains("storage.googleapis.com")),
+            _ => panic!("expected SignedUrl variant"),
+        }
+    }
+
+    #[test]
+    fn test_provider_file_ref_construction() {
+        use crate::llm::domain::ProviderFileRef;
+        use crate::llm::domain::ProviderKind;
+        use chrono::Utc;
+        let r = ProviderFileRef {
+            provider: ProviderKind::Anthropic,
+            provider_file_id: "file_abc".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "x.pdf".to_string(),
+            expires_at: None,
+        };
+        assert_eq!(r.provider_file_id, "file_abc");
+        let _ = Utc::now();
     }
 }

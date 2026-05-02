@@ -1,6 +1,6 @@
 use crate::llm::domain::{
-    FunctionCall, LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk,
-    LlmStreamPart, LlmUsage, MessageRole, ToolCall, ToolCallChunk,
+    FileSource, FunctionCall, LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream,
+    LlmStreamChunk, LlmStreamPart, LlmUsage, MessageRole, ToolCall, ToolCallChunk,
 };
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -51,12 +51,22 @@ impl AnthropicAdapter {
                     if let Some(files) = message.files() {
                         let mut blocks: Vec<AnthropicContentBlock> = Vec::new();
                         for file in files {
+                            let bytes = match &file.source {
+                                FileSource::InlineBytes { bytes } => bytes,
+                                _ => {
+                                    eprintln!(
+                                        "WARN: Anthropic adapter currently only supports inline-bytes file sources. Skipping file '{}'.",
+                                        file.filename
+                                    );
+                                    continue;
+                                }
+                            };
                             if file.mime_type.starts_with("image/") {
                                 blocks.push(AnthropicContentBlock::Image {
                                     source: AnthropicMediaSource {
                                         source_type: "base64".to_string(),
                                         media_type: file.mime_type.clone(),
-                                        data: STANDARD.encode(&file.bytes),
+                                        data: STANDARD.encode(bytes),
                                     },
                                 });
                             } else if file.mime_type == "application/pdf" {
@@ -64,7 +74,7 @@ impl AnthropicAdapter {
                                     source: AnthropicMediaSource {
                                         source_type: "base64".to_string(),
                                         media_type: file.mime_type.clone(),
-                                        data: STANDARD.encode(&file.bytes),
+                                        data: STANDARD.encode(bytes),
                                     },
                                 });
                             } else {

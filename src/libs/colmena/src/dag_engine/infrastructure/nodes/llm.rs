@@ -509,11 +509,9 @@ impl ExecutableNode for LlmNode {
                                 .to_string();
 
                             if let Ok(bytes) = STANDARD.decode(base64_data) {
-                                resolved_files.push(crate::llm::domain::FileData {
-                                    mime_type,
-                                    filename,
-                                    bytes,
-                                });
+                                resolved_files.push(crate::llm::domain::FileData::inline(
+                                    mime_type, filename, bytes,
+                                ));
                             } else {
                                 colmena_log!("WARN: Failed to decode base64 file data");
                             }
@@ -532,11 +530,9 @@ impl ExecutableNode for LlmNode {
 
                             // Read from local filesystem
                             if let Ok(bytes) = std::fs::read(path_str) {
-                                resolved_files.push(crate::llm::domain::FileData {
-                                    mime_type,
-                                    filename,
-                                    bytes,
-                                });
+                                resolved_files.push(crate::llm::domain::FileData::inline(
+                                    mime_type, filename, bytes,
+                                ));
                             } else {
                                 colmena_log!("WARN: Failed to read file from path: {}", path_str);
                             }

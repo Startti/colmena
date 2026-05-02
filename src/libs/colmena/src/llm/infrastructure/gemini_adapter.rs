@@ -1,6 +1,6 @@
 use crate::llm::domain::{
-    FunctionCall, LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk,
-    LlmStreamPart, LlmUsage, MessageRole, ToolCall, ToolCallChunk,
+    FileSource, FunctionCall, LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream,
+    LlmStreamChunk, LlmStreamPart, LlmUsage, MessageRole, ToolCall, ToolCallChunk,
 };
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -63,13 +63,23 @@ impl GeminiAdapter {
                     if let Some(files) = message.files() {
                         use base64::{engine::general_purpose::STANDARD, Engine as _};
                         for file in files {
+                            let bytes = match &file.source {
+                                FileSource::InlineBytes { bytes } => bytes,
+                                _ => {
+                                    eprintln!(
+                                        "WARN: Gemini adapter currently only supports inline-bytes file sources. Skipping file '{}'.",
+                                        file.filename
+                                    );
+                                    continue;
+                                }
+                            };
                             parts.push(GeminiPart {
                                 text: None,
                                 function_call: None,
                                 function_response: None,
                                 inline_data: Some(GeminiInlineData {
                                     mime_type: file.mime_type.clone(),
-                                    data: STANDARD.encode(&file.bytes),
+                                    data: STANDARD.encode(bytes),
                                 }),
                                 thought: None,
                             });
