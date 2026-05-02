@@ -5,19 +5,50 @@ use crate::llm::domain::{BoxedByteStream, LlmError};
 use futures::TryStreamExt;
 use reqwest::Client;
 
+/// HTTP downloader for GCS V4 signed URLs.
+///
+/// Issues GET requests *without* an `Authorization` header — the signature
+/// is encoded in the URL query parameters and any auth header would
+/// invalidate it.
 pub struct SignedUrlDownloader {
     client: Client,
 }
 
 impl SignedUrlDownloader {
+    /// Creates a downloader with a default `reqwest::Client` configured
+    /// with sensible timeouts.
     pub fn new() -> Self {
-        Self { client: Client::new() }
+        Self {
+            client: Self::default_client(),
+        }
     }
 
+    fn default_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            // 600s = 10 min. Generous for files up to ~500 MB on slow connections.
+            .timeout(std::time::Duration::from_secs(600))
+            .user_agent(concat!("colmena/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("default reqwest client should build")
+    }
+
+    /// Creates a downloader reusing an existing `reqwest::Client`.
+    /// Recommended in production to share the connection pool. The caller
+    /// owns the timeout policy of the supplied client.
     pub fn with_client(client: Client) -> Self {
         Self { client }
     }
 
+    /// Streams the response body of a signed URL as a `BoxedByteStream`.
+    ///
+    /// Dropping the returned stream early aborts the underlying request
+    /// and releases the HTTP connection. The downloader does not retry —
+    /// retry policy belongs in the use-case layer.
+    ///
+    /// # Errors
+    /// - [`LlmError::NetworkError`] on transport failure (DNS, TCP, TLS, timeout).
+    /// - [`LlmError::SignedUrlFetchFailed`] on any non-2xx HTTP status.
     pub async fn stream(&self, url: &str) -> Result<BoxedByteStream, LlmError> {
         let response = self
             .client
