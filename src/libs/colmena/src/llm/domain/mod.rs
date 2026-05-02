@@ -1,3 +1,4 @@
+pub mod file_cache_repository;
 pub mod file_provider_repository;
 pub mod llm_config;
 pub mod llm_error;
@@ -12,6 +13,7 @@ pub mod tools;
 
 pub mod value_objects;
 
+pub use file_cache_repository::{CachedFileEntry, FileCacheRepository};
 pub use file_provider_repository::{BoxedByteStream, FileProviderRepository};
 pub use llm_config::{LlmConfig, LlmUsage};
 pub use llm_error::LlmError;
