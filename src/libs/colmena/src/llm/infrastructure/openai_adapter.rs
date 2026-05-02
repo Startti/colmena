@@ -57,15 +57,23 @@ impl OpenAiAdapter {
                                 let b64 = STANDARD.encode(bytes);
                                 json!({ "url": format!("data:{};base64,{}", file.mime_type, b64) })
                             }
-                            FileSource::Uploaded(r) => {
-                                json!({ "file_id": r.provider_file_id })
+                            FileSource::SignedUrl(url) => {
+                                // OpenAI's chat completions image_url requires `url`
+                                // (no `file_id` support — that's Responses API only).
+                                // Pass the signed URL through; OpenAI fetches it server-side.
+                                json!({ "url": url })
                             }
-                            FileSource::SignedUrl(_) => {
+                            FileSource::Uploaded(r) => {
+                                // chat completions image_url does NOT accept file_id;
+                                // only the Responses API does. If we're here for an
+                                // image, the use case did not short-circuit (unexpected).
+                                // Surface the bug explicitly via InternalError.
                                 return Err(LlmError::InternalError {
                                     message: format!(
-                                        "OpenAI chat completions adapter received unresolved SignedUrl for '{}'. \
-                                         LlmCallUseCase::resolve_files must run before reaching the adapter.",
-                                        file.filename
+                                        "OpenAI chat completions adapter received Uploaded image '{}' (file_id={}). \
+                                         image_url does not accept file_id; only Responses API does. \
+                                         The use case should have short-circuited image+OpenAI to keep SignedUrl.",
+                                        file.filename, r.provider_file_id
                                     ),
                                 });
                             }
@@ -932,7 +940,43 @@ mod tests {
     }
 
     #[test]
-    fn chat_completions_serializes_uploaded_image_with_file_id() {
+    fn chat_completions_serializes_signed_url_image_as_url() {
+        use crate::llm::domain::{
+            FileData, FileSource, LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind,
+        };
+        let file = FileData {
+            document_id: Some("doc-img-1".into()),
+            mime_type: "image/png".into(),
+            filename: "x.png".into(),
+            size_hint: None,
+            source: FileSource::SignedUrl(
+                "https://storage.googleapis.com/bucket/x?sig=y".into(),
+            ),
+        };
+        let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
+        let provider =
+            LlmProvider::new(ProviderKind::OpenAi, "k".into(), Some("gpt-4o-mini".into()))
+                .unwrap();
+        let config = LlmConfig::new(provider);
+        let request = LlmRequest::new(vec![msg], config, false).unwrap();
+
+        let adapter = OpenAiAdapter::new();
+        let body = adapter.build_request_body(&request).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        let content = messages[0]["content"].as_array().unwrap();
+        let img = content.iter().find(|c| c["type"] == "image_url").unwrap();
+        assert_eq!(
+            img["image_url"]["url"],
+            "https://storage.googleapis.com/bucket/x?sig=y"
+        );
+        assert!(
+            img["image_url"].get("file_id").is_none()
+                || img["image_url"]["file_id"].is_null()
+        );
+    }
+
+    #[test]
+    fn chat_completions_returns_error_on_uploaded_image() {
         use crate::llm::domain::{
             FileData, FileSource, LlmConfig, LlmMessage, LlmProvider, LlmRequest,
             ProviderFileRef, ProviderKind,
@@ -944,7 +988,7 @@ mod tests {
             size_hint: None,
             source: FileSource::Uploaded(ProviderFileRef {
                 provider: ProviderKind::OpenAi,
-                provider_file_id: "file-img".into(),
+                provider_file_id: "file-abc".into(),
                 mime_type: "image/png".into(),
                 filename: "x.png".into(),
                 expires_at: None,
@@ -952,18 +996,16 @@ mod tests {
         };
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
         let provider =
-            LlmProvider::new(ProviderKind::OpenAi, "k".into(), Some("gpt-4o".into())).unwrap();
+            LlmProvider::new(ProviderKind::OpenAi, "k".into(), Some("gpt-4o-mini".into()))
+                .unwrap();
         let config = LlmConfig::new(provider);
         let request = LlmRequest::new(vec![msg], config, false).unwrap();
 
         let adapter = OpenAiAdapter::new();
-        let body = adapter.build_request_body(&request).unwrap();
-        let messages = body["messages"].as_array().unwrap();
-        let content = messages[0]["content"].as_array().unwrap();
-        let img = content.iter().find(|c| c["type"] == "image_url").unwrap();
-        assert_eq!(img["image_url"]["file_id"], "file-img");
-        assert!(
-            img["image_url"].get("url").is_none() || img["image_url"]["url"].is_null()
-        );
+        let err = adapter.build_request_body(&request).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::llm::domain::LlmError::InternalError { .. }
+        ));
     }
 }

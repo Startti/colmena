@@ -267,16 +267,20 @@ impl LlmCallUseCase {
                     }
                 };
 
-                // Anthropic does not accept file_id for image content. Pass the
-                // signed URL through to the adapter, which emits source.type=url.
+                // Anthropic does not accept file_id for image content, and OpenAI
+                // chat-completions image_url requires `url` (file_id only works in
+                // the Responses API). Pass the signed URL through to the adapter.
                 // Skips download + upload entirely. No cache (URL is per-request).
-                if provider_kind == ProviderKind::Anthropic
-                    && file.mime_type.starts_with("image/")
-                {
+                let is_url_passthrough_provider = matches!(
+                    provider_kind,
+                    ProviderKind::Anthropic | ProviderKind::OpenAi
+                );
+                if is_url_passthrough_provider && file.mime_type.starts_with("image/") {
                     crate::colmena_log!(
-                        "[file-resolve] '{}' (id={}) image + Anthropic — passing signed URL directly to adapter (no upload)",
+                        "[file-resolve] '{}' (id={}) image + {} — passing signed URL directly to adapter (no upload)",
                         file.filename,
-                        doc_id
+                        doc_id,
+                        provider_kind
                     );
                     return Ok(file);
                 }
@@ -696,6 +700,37 @@ mod resolve_files_tests {
         match &files[0].source {
             FileSource::SignedUrl(_) => {}
             _ => panic!("expected SignedUrl to be preserved"),
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_image_signed_url_skips_upload() {
+        let cache = Arc::new(StubCache::new());
+        let provider = Arc::new(StubProvider::new());
+        let downloader = SignedUrlDownloader::new();
+
+        let mut files = vec![FileData {
+            document_id: Some("img-2".into()),
+            mime_type: "image/png".into(),
+            filename: "x.png".into(),
+            size_hint: None,
+            source: FileSource::SignedUrl("https://example/img?sig=y".into()),
+        }];
+
+        LlmCallUseCase::resolve_files(
+            &mut files,
+            ProviderKind::OpenAi,
+            provider.clone(),
+            cache.clone(),
+            &downloader,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(*provider.upload_count.lock().unwrap(), 0);
+        match &files[0].source {
+            FileSource::SignedUrl(_) => {}
+            _ => panic!("expected SignedUrl preserved for OpenAI image"),
         }
     }
 
