@@ -243,6 +243,7 @@ impl LlmRepository for AnthropicAdapter {
             .header("x-api-key", request.config().api_key())
             .header("Content-Type", "application/json")
             .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta", "files-api-2025-04-14")
             .json(&body)
             .send()
             .await
@@ -323,6 +324,7 @@ impl LlmRepository for AnthropicAdapter {
             .header("x-api-key", request.config().api_key())
             .header("Content-Type", "application/json")
             .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta", "files-api-2025-04-14")
             .json(&body)
             .send()
             .await
