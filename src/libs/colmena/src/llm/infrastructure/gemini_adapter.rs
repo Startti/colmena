@@ -57,35 +57,47 @@ impl GeminiAdapter {
                         function_call: None,
                         function_response: None,
                         inline_data: None,
+                        file_data: None,
                         thought: None,
                     });
 
                     if let Some(files) = message.files() {
                         use base64::{engine::general_purpose::STANDARD, Engine as _};
                         for file in files {
-                            // TODO(large-files Task 13/14/15): handle SignedUrl and Uploaded variants here.
-                            // Currently only InlineBytes reaches the adapter; non-inline sources are warned
-                            // and skipped because LlmCallUseCase has not yet been extended to resolve them.
-                            let bytes = match &file.source {
-                                FileSource::InlineBytes { bytes } => bytes,
-                                _ => {
-                                    eprintln!(
-                                        "WARN: Gemini adapter currently only supports inline-bytes file sources. Skipping file '{}'.",
-                                        file.filename
-                                    );
-                                    continue;
+                            let part = match &file.source {
+                                FileSource::InlineBytes { bytes } => GeminiPart {
+                                    text: None,
+                                    function_call: None,
+                                    function_response: None,
+                                    inline_data: Some(GeminiInlineData {
+                                        mime_type: file.mime_type.clone(),
+                                        data: STANDARD.encode(bytes),
+                                    }),
+                                    file_data: None,
+                                    thought: None,
+                                },
+                                FileSource::Uploaded(r) => GeminiPart {
+                                    text: None,
+                                    function_call: None,
+                                    function_response: None,
+                                    inline_data: None,
+                                    file_data: Some(GeminiFileData {
+                                        mime_type: r.mime_type.clone(),
+                                        file_uri: r.provider_file_id.clone(),
+                                    }),
+                                    thought: None,
+                                },
+                                FileSource::SignedUrl(_) => {
+                                    return Err(LlmError::InternalError {
+                                        message: format!(
+                                            "Gemini adapter received unresolved SignedUrl for '{}'. \
+                                             LlmCallUseCase::resolve_files must run before reaching the adapter.",
+                                            file.filename
+                                        ),
+                                    });
                                 }
                             };
-                            parts.push(GeminiPart {
-                                text: None,
-                                function_call: None,
-                                function_response: None,
-                                inline_data: Some(GeminiInlineData {
-                                    mime_type: file.mime_type.clone(),
-                                    data: STANDARD.encode(bytes),
-                                }),
-                                thought: None,
-                            });
+                            parts.push(part);
                         }
                     }
 
@@ -104,6 +116,7 @@ impl GeminiAdapter {
                             function_call: None,
                             function_response: None,
                             inline_data: None,
+                            file_data: None,
                             thought: None,
                         });
                     }
@@ -119,6 +132,7 @@ impl GeminiAdapter {
                                 }),
                                 function_response: None,
                                 inline_data: None,
+                                file_data: None,
                                 thought: None,
                             });
                         }
@@ -131,6 +145,7 @@ impl GeminiAdapter {
                             function_call: None,
                             function_response: None,
                             inline_data: None,
+                            file_data: None,
                             thought: None,
                         });
                     }
@@ -169,6 +184,7 @@ impl GeminiAdapter {
                                 "response": parsed_content
                             })),
                             inline_data: None,
+                            file_data: None,
                             thought: None,
                         }]),
                         text: None,
@@ -690,6 +706,8 @@ struct GeminiPart {
     function_response: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "inlineData")]
     inline_data: Option<GeminiInlineData>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "fileData")]
+    file_data: Option<GeminiFileData>,
     /// Present and `true` on thought/reasoning parts from Gemini 2.5+ models.
     #[serde(skip_serializing_if = "Option::is_none")]
     thought: Option<bool>,
@@ -700,6 +718,14 @@ struct GeminiInlineData {
     #[serde(rename = "mimeType")]
     mime_type: String,
     data: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GeminiFileData {
+    #[serde(rename = "mimeType")]
+    mime_type: String,
+    #[serde(rename = "fileUri")]
+    file_uri: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -815,5 +841,97 @@ where
                 Poll::Pending => return Poll::Pending,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_request_body_serializes_uploaded_pdf_as_file_data() {
+        use crate::llm::domain::{
+            FileData, FileSource, LlmConfig, LlmMessage, LlmProvider, LlmRequest,
+            ProviderFileRef, ProviderKind,
+        };
+        let file = FileData {
+            document_id: Some("doc-1".into()),
+            mime_type: "application/pdf".into(),
+            filename: "x.pdf".into(),
+            size_hint: None,
+            source: FileSource::Uploaded(ProviderFileRef {
+                provider: ProviderKind::Gemini,
+                provider_file_id:
+                    "https://generativelanguage.googleapis.com/v1beta/files/abc".into(),
+                mime_type: "application/pdf".into(),
+                filename: "x.pdf".into(),
+                expires_at: None,
+            }),
+        };
+        let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
+        let provider =
+            LlmProvider::new(ProviderKind::Gemini, "k".into(), Some("gemini-1.5-pro".into()))
+                .unwrap();
+        let config = LlmConfig::new(provider);
+        let request = LlmRequest::new(vec![msg], config, false).unwrap();
+
+        let adapter = GeminiAdapter::new();
+        let body = adapter.build_request_body(&request).unwrap();
+        let parts = body["contents"][0]["parts"].as_array().unwrap();
+        let file_part = parts.iter().find(|p| p.get("fileData").is_some()).unwrap();
+        assert_eq!(file_part["fileData"]["mimeType"], "application/pdf");
+        assert_eq!(
+            file_part["fileData"]["fileUri"],
+            "https://generativelanguage.googleapis.com/v1beta/files/abc"
+        );
+    }
+
+    #[test]
+    fn build_request_body_returns_error_on_signed_url() {
+        use crate::llm::domain::{
+            FileData, FileSource, LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind,
+        };
+        let file = FileData {
+            document_id: Some("doc-1".into()),
+            mime_type: "application/pdf".into(),
+            filename: "x.pdf".into(),
+            size_hint: None,
+            source: FileSource::SignedUrl("https://example/x?sig=y".into()),
+        };
+        let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
+        let provider =
+            LlmProvider::new(ProviderKind::Gemini, "k".into(), Some("gemini-1.5-pro".into()))
+                .unwrap();
+        let config = LlmConfig::new(provider);
+        let request = LlmRequest::new(vec![msg], config, false).unwrap();
+
+        let adapter = GeminiAdapter::new();
+        let err = adapter.build_request_body(&request).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::llm::domain::LlmError::InternalError { .. }
+        ));
+    }
+
+    #[test]
+    fn build_request_body_serializes_inline_pdf_as_inline_data() {
+        use crate::llm::domain::{
+            FileData, LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind,
+        };
+        let file =
+            FileData::inline("application/pdf".into(), "x.pdf".into(), b"PDF".to_vec());
+        let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
+        let provider =
+            LlmProvider::new(ProviderKind::Gemini, "k".into(), Some("gemini-1.5-pro".into()))
+                .unwrap();
+        let config = LlmConfig::new(provider);
+        let request = LlmRequest::new(vec![msg], config, false).unwrap();
+
+        let adapter = GeminiAdapter::new();
+        let body = adapter.build_request_body(&request).unwrap();
+        let parts = body["contents"][0]["parts"].as_array().unwrap();
+        let file_part = parts.iter().find(|p| p.get("inlineData").is_some()).unwrap();
+        assert_eq!(file_part["inlineData"]["mimeType"], "application/pdf");
+        assert!(file_part["inlineData"]["data"].is_string());
     }
 }
