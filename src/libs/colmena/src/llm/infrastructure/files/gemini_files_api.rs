@@ -198,9 +198,18 @@ impl FileProviderRepository for GeminiFilesApiAdapter {
                 }
             }
 
-            let chunk_bytes = buffer.split().freeze();
+            // Gemini requires non-final chunks to be EXACTLY multiples of CHUNK_SIZE.
+            // If the buffer has more than CHUNK_SIZE (because the last extend pushed
+            // it over) and the stream is still open, take only CHUNK_SIZE and leave
+            // the rest for the next iteration. If the stream is done, take the whole
+            // remaining buffer as the final (finalize) chunk — its size can be anything.
+            let chunk_bytes = if !stream_done && buffer.len() >= CHUNK_SIZE {
+                buffer.split_to(CHUNK_SIZE).freeze()
+            } else {
+                buffer.split().freeze()
+            };
             let chunk_len = chunk_bytes.len() as u64;
-            let is_last = stream_done;
+            let is_last = stream_done && buffer.is_empty();
 
             let result = self
                 .put_chunk(&upload_url, offset, chunk_bytes, is_last)
