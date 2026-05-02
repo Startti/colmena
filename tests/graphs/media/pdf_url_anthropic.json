@@ -1,0 +1,35 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/agent-demo",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Resume el documento en una frase."
+        }
+      }
+    },
+    "agent_llm": {
+      "type": "llm_call",
+      "config": {
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5-20251001",
+        "api_key": "${ANTHROPIC_API_KEY}",
+        "stream": false,
+        "system_message": "Eres un analista que lee PDFs y responde brevemente.",
+        "temperature": 0.0,
+        "files": [
+          {
+            "id": "REPLACE_WITH_UNIQUE_DOC_ID",
+            "mime_type": "application/pdf",
+            "filename": "report.pdf",
+            "url": "REPLACE_WITH_GCS_SIGNED_URL",
+            "size_bytes": 41943040
+          }
+        ]
+      }
+    }
+  },
+  "edges": [{ "from": "trigger", "to": "agent_llm" }]
+}
