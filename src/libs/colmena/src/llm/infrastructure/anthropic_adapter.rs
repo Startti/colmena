@@ -51,6 +51,9 @@ impl AnthropicAdapter {
                     if let Some(files) = message.files() {
                         let mut blocks: Vec<AnthropicContentBlock> = Vec::new();
                         for file in files {
+                            // TODO(large-files Task 13/14/15): handle SignedUrl and Uploaded variants here.
+                            // Currently only InlineBytes reaches the adapter; non-inline sources are warned
+                            // and skipped because LlmCallUseCase has not yet been extended to resolve them.
                             let bytes = match &file.source {
                                 FileSource::InlineBytes { bytes } => bytes,
                                 _ => {

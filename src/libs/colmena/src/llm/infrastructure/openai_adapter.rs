@@ -53,10 +53,13 @@ impl OpenAiAdapter {
 
                     use base64::{engine::general_purpose::STANDARD, Engine as _};
                     for file in files {
+                        // TODO(large-files Task 13/14/15): handle SignedUrl and Uploaded variants here.
+                        // Currently only InlineBytes reaches the adapter; non-inline sources are warned
+                        // and skipped because LlmCallUseCase has not yet been extended to resolve them.
                         let bytes = match &file.source {
                             FileSource::InlineBytes { bytes } => bytes,
                             _ => {
-                                println!(
+                                eprintln!(
                                     "WARN: OpenAI chat completions adapter currently only supports inline-bytes file sources. Skipping {}",
                                     file.filename
                                 );
@@ -74,7 +77,7 @@ impl OpenAiAdapter {
                                 }
                             }));
                         } else {
-                            println!("WARN: OpenAI chat completions only support image files via inline upload. Ignoring {}", file.mime_type);
+                            eprintln!("WARN: OpenAI chat completions only support image files via inline upload. Ignoring {}", file.mime_type);
                         }
                     }
                     message_json["content"] = json!(content_arr);
@@ -635,10 +638,13 @@ impl OpenAiAdapter {
                 if let Some(files) = msg.files() {
                     use base64::{engine::general_purpose::STANDARD, Engine as _};
                     for file in files {
+                        // TODO(large-files Task 13/14/15): handle SignedUrl and Uploaded variants here.
+                        // Currently only InlineBytes reaches the adapter; non-inline sources are warned
+                        // and skipped because LlmCallUseCase has not yet been extended to resolve them.
                         let bytes = match &file.source {
                             FileSource::InlineBytes { bytes } => bytes,
                             _ => {
-                                println!(
+                                eprintln!(
                                     "WARN: OpenAI responses adapter currently only supports inline-bytes file sources. Skipping {}",
                                     file.filename
                                 );

@@ -63,7 +63,7 @@ pub struct FileData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(PartialEq))]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum FileSource {
     /// Bytes ya en RAM (vino como `data` base64 < 30 MB, o `path` < 30 MB).
     InlineBytes { bytes: Vec<u8> },
@@ -259,7 +259,6 @@ mod tests {
     fn test_provider_file_ref_construction() {
         use crate::llm::domain::ProviderFileRef;
         use crate::llm::domain::ProviderKind;
-        use chrono::Utc;
         let r = ProviderFileRef {
             provider: ProviderKind::Anthropic,
             provider_file_id: "file_abc".to_string(),
@@ -268,6 +267,39 @@ mod tests {
             expires_at: None,
         };
         assert_eq!(r.provider_file_id, "file_abc");
-        let _ = Utc::now();
+    }
+
+    #[test]
+    fn test_file_source_serde_round_trip_inline() {
+        let src = FileSource::InlineBytes { bytes: vec![1, 2, 3] };
+        let json = serde_json::to_string(&src).unwrap();
+        let parsed: FileSource = serde_json::from_str(&json).unwrap();
+        assert_eq!(src, parsed);
+        assert!(json.contains("\"kind\":\"inline_bytes\""));
+    }
+
+    #[test]
+    fn test_file_source_serde_round_trip_signed_url() {
+        let src = FileSource::SignedUrl("https://storage.googleapis.com/x?sig=y".to_string());
+        let json = serde_json::to_string(&src).unwrap();
+        let parsed: FileSource = serde_json::from_str(&json).unwrap();
+        assert_eq!(src, parsed);
+        assert!(json.contains("\"kind\":\"signed_url\""));
+    }
+
+    #[test]
+    fn test_file_source_serde_round_trip_uploaded() {
+        use crate::llm::domain::{ProviderFileRef, ProviderKind};
+        let src = FileSource::Uploaded(ProviderFileRef {
+            provider: ProviderKind::Anthropic,
+            provider_file_id: "file_abc".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "x.pdf".to_string(),
+            expires_at: None,
+        });
+        let json = serde_json::to_string(&src).unwrap();
+        let parsed: FileSource = serde_json::from_str(&json).unwrap();
+        assert_eq!(src, parsed);
+        assert!(json.contains("\"kind\":\"uploaded\""));
     }
 }
