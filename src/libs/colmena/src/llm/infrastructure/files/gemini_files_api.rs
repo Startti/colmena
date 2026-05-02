@@ -244,7 +244,7 @@ mod tests {
     use bytes::Bytes;
     use futures::stream;
     use serde_json::json;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{header_regex, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn fake_stream(content: &[u8]) -> BoxedByteStream {
@@ -272,6 +272,7 @@ mod tests {
         // 2. Finalize PUT returns file metadata.
         Mock::given(method("PUT"))
             .and(path(upload_path))
+            .and(header_regex("X-Goog-Upload-Command", r"upload,\s*finalize"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "file": { "name": "files/abcd1234" }
             })))
