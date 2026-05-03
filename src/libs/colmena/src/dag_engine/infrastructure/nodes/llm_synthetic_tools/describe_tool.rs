@@ -69,13 +69,32 @@ fn collect_visible_fields(cfg: &ToolConfiguration) -> Vec<(String, &NodeSchemaFi
     out
 }
 
+/// Dispatch a `describe_tool` call. `lookup` is the slice of currently-configured
+/// `ToolConfiguration` entries. Returns the curated markdown for the requested
+/// tool, or an "Error: ..." string if the name is not found.
 pub async fn dispatch_describe_tool(
-    _tool_call: &ToolCall,
-    _lookup: &[ToolConfiguration],
+    tool_call: &ToolCall,
+    lookup: &[ToolConfiguration],
 ) -> Result<DescribeToolDispatchResult, LlmError> {
+    let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)
+        .map_err(|e| LlmError::InvalidToolCall {
+            reason: format!("describe_tool: invalid arguments JSON: {}", e),
+        })?;
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| LlmError::InvalidToolCall {
+            reason: "describe_tool: missing required parameter 'name'".to_string(),
+        })?;
+
+    let cfg = lookup.iter().find(|c| c.name == name);
+    let output = match cfg {
+        Some(c) => generate_tool_markdown(c),
+        None => format!("Error: Tool '{}' not found in catalog", name),
+    };
     Ok(DescribeToolDispatchResult {
-        output: String::new(),
-        tool_name: String::new(),
+        output,
+        tool_name: name.to_string(),
     })
 }
 
@@ -191,6 +210,55 @@ mod tests {
         let md = generate_tool_markdown(&cfg);
         assert!(!md.contains("base_url"));
         assert!(md.contains("path"));
+    }
+
+    use crate::llm::domain::tools::{FunctionCall, ToolCall};
+
+    fn mk_call(args: serde_json::Value) -> ToolCall {
+        ToolCall::new(
+            "call_1".to_string(),
+            FunctionCall::new(DESCRIBE_TOOL_NAME.to_string(), args.to_string()),
+        )
+    }
+
+    #[tokio::test]
+    async fn dispatch_returns_markdown_for_known_tool() {
+        let cfg = cfg_minimal("search_orders", "Search the orders table");
+        let lookup = vec![cfg];
+        let call = mk_call(json!({ "name": "search_orders" }));
+        let r = dispatch_describe_tool(&call, &lookup).await.unwrap();
+        assert_eq!(r.tool_name, "search_orders");
+        assert!(r.output.contains("# search_orders"));
+        assert!(r.output.contains("now available"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_tool_returns_error_output() {
+        let cfg = cfg_minimal("search_orders", "Search the orders table");
+        let lookup = vec![cfg];
+        let call = mk_call(json!({ "name": "deleted_tool" }));
+        let r = dispatch_describe_tool(&call, &lookup).await.unwrap();
+        assert!(r.output.starts_with("Error:"));
+        assert!(r.output.contains("not found in catalog"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_missing_name_arg_is_invalid_tool_call() {
+        let cfg = cfg_minimal("search_orders", "Search");
+        let lookup = vec![cfg];
+        let call = mk_call(json!({}));
+        let err = dispatch_describe_tool(&call, &lookup).await.unwrap_err();
+        assert!(matches!(err, LlmError::InvalidToolCall { .. }));
+    }
+
+    #[test]
+    fn into_tool_result_marks_failure_when_output_starts_with_error() {
+        let r = DescribeToolDispatchResult {
+            output: "Error: Tool 'X' not found in catalog".into(),
+            tool_name: "X".into(),
+        };
+        let tr = into_tool_result("call_1", &r);
+        assert!(!tr.success);
     }
 
     #[test]
