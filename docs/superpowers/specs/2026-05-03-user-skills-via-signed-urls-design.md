@@ -530,6 +530,92 @@ Documented for tracking, not part of this scope:
 7. **Per-agent host whitelist override.** Useful if different ADP tenants need different storage backends.
 8. **Cross-instance shared cache.** Out of scope unless a high-traffic agent demonstrates that the warm-cache hit ratio is below acceptable.
 
+## Multiple Skill Sources
+
+A graph can pull skills from three independent origins. All three coexist in the same `skills` block of an `llm_call`, and Colmena merges them transparently into a single catalog the LLM sees through `load_skill`.
+
+### The three origins
+
+| Origin | Where it lives | How it lands in the JSON |
+|---|---|---|
+| **Built-in (Rust-compiled into Colmena)** | Inside the `colmena` crate (`src/libs/colmena/src/skills/builtin/...`) | Listed by name in `skills.builtin: ["python-expert", ...]`. The ADP frontend chooses which ones apply. |
+| **ADP baseline (filesystem of the worker container)** | Files baked into the worker image at build time, e.g. `/app/skills/adp-node-catalog/` | Listed by absolute path in `skills.paths: ["/app/skills/adp-node-catalog", ...]`. The ADP frontend chooses which baselines apply per graph type (canvas builder, chat agent, code reviewer, ...). |
+| **User-declared (signed URL or inline)** | Per-agent content in GCS or directly inline in the JSON | Listed in the new `skills.declared: [...]` block (this design). The worker preprocessor materializes each entry to `<cache_root>/<agent_id>/<version>/<skill>/` and appends those paths into `skills.paths`. |
+
+### How the assembled JSON looks before vs after preprocessing
+
+**Before** (what the ADP frontend POSTs to `/api/v1/executions`):
+
+```jsonc
+"skills": {
+  "builtin": ["python-expert"],
+  "paths":   ["/app/skills/adp-node-catalog"],
+  "declared": [
+    { "name": "amadeus-flights", "version": "v1", "skill_md": {"url":"..."}, "references": [...] },
+    { "name": "internal-policies", "version": "v1", "skill_md": {"content": "..."} }
+  ]
+}
+```
+
+**After** (what Colmena's `LlmNode` sees, post-preprocessor):
+
+```jsonc
+"skills": {
+  "builtin": ["python-expert"],
+  "paths": [
+    "/app/skills/adp-node-catalog",
+    "/tmp/colmena-skills-cache/<agent_id>/v1/amadeus-flights",
+    "/tmp/colmena-skills-cache/<agent_id>/v1/internal-policies"
+  ]
+  // "declared" removed
+}
+```
+
+Colmena's `CompositeSkillRepository` then merges `builtin` (1 skill) + filesystem paths (3 skills) into a single 4-skill catalog visible to the LLM.
+
+### Responsibility split
+
+| Concern | Owner |
+|---|---|
+| Choosing which built-in skills apply per graph type | ADP frontend |
+| Choosing which baseline skills (filesystem of worker) apply per graph type | ADP frontend |
+| Sending `agent_id` and per-user `declared` skills | ADP frontend |
+| Materializing each `declared` entry to a unique cache path | Worker preprocessor |
+| Preserving the user-supplied `builtin` and `paths` untouched | Worker preprocessor |
+| Merging all three origins into a unified catalog | Colmena (`CompositeSkillRepository`) |
+| Enforcing the 50-skill global cap (`MAX_ACTIVE_SKILLS`) | Colmena |
+
+### Preprocessor invariant
+
+After preprocessing, the rewritten JSON satisfies:
+
+```
+out.builtin == in.builtin                                  # untouched
+out.paths   == in.paths ++ [materialized_path_per_declared] # appended, in declared order
+out.declared is absent                                      # removed
+```
+
+Implementation hint:
+
+```rust
+// node.config.skills is a Value object
+let mut skills_obj = node.config.skills.as_object_mut()?;
+let mut existing_paths: Vec<Value> = skills_obj
+    .remove("paths")
+    .and_then(|v| v.as_array().cloned())
+    .unwrap_or_default();
+for entry in &declared_entries_for_this_node {
+    let cache_path = cache::path_for(...).to_string_lossy().into_owned();
+    existing_paths.push(Value::String(cache_path));
+}
+skills_obj.insert("paths".to_string(), Value::Array(existing_paths));
+skills_obj.remove("declared");
+```
+
+### What happens if the same skill name comes from two origins
+
+Colmena's `CompositeSkillRepository::new` rejects builtin/filesystem name collisions at construction time (`SkillError::SkillNameCollision`), and `FilesystemSkillRepository::from_paths` rejects collisions within `paths`. The graph fails to start with a clear error. The validator in the preprocessor mirrors this rule for `declared` (a duplicate `name` across the same node's `declared`, `paths`, or `builtin` is rejected before materialization) so the failure surfaces earlier, before any I/O.
+
 ## Required Changes (verified against code)
 
 This section enumerates every file/module/env change required to land the feature, separated by repo. The list was cross-checked against the actual code as of `develop` on 2026-05-03.
