@@ -15,8 +15,9 @@ use std::sync::Arc;
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
-    build_all_document_tools, build_load_skill_tool_definition, DocumentToolsContext,
-    DOCUMENTS_SYSTEM_PRELUDE,
+    build_all_document_tools, build_describe_tool_definition, build_load_skill_tool_definition,
+    reconstruct_discovered_set, summary_for_catalog, CatalogEntry, DescribeToolDispatchResult,
+    DocumentToolsContext, DOCUMENTS_SYSTEM_PRELUDE,
 };
 use crate::documents::application::DocumentRuntime;
 use crate::documents::domain::ids::SessionId as DocSessionId;
@@ -678,6 +679,51 @@ impl ExecutableNode for LlmNode {
         let skills_used_log: Arc<std::sync::Mutex<Vec<SkillLoadedLogEntry>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
 
+        // ---- Lazy tool loading config -------------------------------------------------
+        let lazy_tool_loading: bool = inputs
+            .get("lazy_tool_loading")
+            .or_else(|| config.get("lazy_tool_loading"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Build the catalog (CatalogEntry list) and the lookup snapshot for
+        // describe_tool. Both are populated only when lazy mode is on AND the
+        // tool is not eager: true. Eager tools always carry their own full schema
+        // and never enter the catalog.
+        let mut catalog: Vec<CatalogEntry> = Vec::new();
+        let mut lookup_for_describe: Vec<ToolConfiguration> = Vec::new();
+        if lazy_tool_loading {
+            if tool_configurations.is_empty() {
+                colmena_log!(
+                    "WARN: lazy_tool_loading: true but tool_configurations is empty — feature will no-op."
+                );
+            }
+            for cfg in tool_configurations.values() {
+                if cfg.eager {
+                    continue;
+                }
+                if let Some(s) = &cfg.summary {
+                    if s.chars().count() > 200 {
+                        colmena_log!(
+                            "WARN: tool '{}' summary > 200 chars; will be truncated.",
+                            cfg.name
+                        );
+                    }
+                }
+                catalog.push(CatalogEntry {
+                    name: cfg.name.clone(),
+                    summary: summary_for_catalog(cfg.summary.as_deref(), &cfg.description),
+                });
+                lookup_for_describe.push(cfg.clone());
+            }
+        }
+
+        // Tools the LLM node has discovered via describe_tool during this execution
+        // (in-memory log; the cross-session reconstruction is done from messages
+        // each ReAct iteration, but this log feeds the final extra_info summary).
+        let tools_discovered_log: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+
         // Build documents context if the LLM node was configured with a `documents`
         // block. The seven `document_*` synthetic tools are exposed and dispatched
         // through the runtime built here. Session id is resolved from the same
@@ -745,6 +791,28 @@ impl ExecutableNode for LlmNode {
                                         crate::skills::domain::SkillSource::Path => "path".to_string(),
                                     },
                                     size_bytes: result.size_bytes,
+                                },
+                            );
+                        }
+                    },
+                ));
+            }
+            if lazy_tool_loading && !lookup_for_describe.is_empty() {
+                executor = executor.with_describe_tool_lookup(lookup_for_describe.clone());
+                let log_clone = tools_discovered_log.clone();
+                let observer_clone = _observer.clone();
+                executor = executor.with_describe_tool_observer(Arc::new(
+                    move |result: &DescribeToolDispatchResult| {
+                        if let Ok(mut log) = log_clone.lock() {
+                            if !log.contains(&result.tool_name) {
+                                log.push(result.tool_name.clone());
+                            }
+                        }
+                        if let Some(obs) = &observer_clone {
+                            obs.on_event(
+                                crate::dag_engine::domain::observer::NodeEvent::ToolDescribed {
+                                    tool_id: String::new(),
+                                    tool_name: result.tool_name.clone(),
                                 },
                             );
                         }
@@ -991,6 +1059,56 @@ impl ExecutableNode for LlmNode {
                 None
             };
 
+        // Build a dynamic tools_provider closure when lazy mode is on. The closure
+        // is called fresh at each ReAct iteration: it derives `discovered_set` from
+        // the current message history (rule 1: prior describe_tool calls; rule 2:
+        // prior direct calls to a still-cataloged tool), then composes `tools[]`
+        // as: [describe_tool if pending] + [non-catalog tools] + [discovered catalog tools].
+        let tools_provider: Option<
+            Box<
+                dyn Fn(&[crate::llm::domain::LlmMessage]) -> Vec<crate::llm::domain::ToolDefinition>
+                    + Send
+                    + Sync,
+            >,
+        > = if lazy_tool_loading && !catalog.is_empty() {
+            let catalog = catalog.clone();
+            let static_snapshot = tools.clone();
+            Some(Box::new(move |messages: &[crate::llm::domain::LlmMessage]| {
+                let discovered = reconstruct_discovered_set(messages, &catalog);
+                let pending: Vec<&CatalogEntry> = catalog
+                    .iter()
+                    .filter(|e| !discovered.contains(&e.name))
+                    .collect();
+
+                let catalog_names: std::collections::HashSet<&str> =
+                    catalog.iter().map(|e| e.name.as_str()).collect();
+                let mut out: Vec<crate::llm::domain::ToolDefinition> = Vec::new();
+
+                // Tools defined OUTSIDE the lazy catalog (eager-flagged ones,
+                // load_skill, document_*, toolkit subtools) are always present.
+                for td in &static_snapshot {
+                    if !catalog_names.contains(td.name.as_str()) {
+                        out.push(td.clone());
+                    }
+                }
+                // describe_tool only when there is something left to discover.
+                if !pending.is_empty() {
+                    out.push(build_describe_tool_definition(&pending));
+                }
+                // Discovered lazy tools enter with their full schema.
+                for td in &static_snapshot {
+                    if catalog_names.contains(td.name.as_str())
+                        && discovered.contains(&td.name)
+                    {
+                        out.push(td.clone());
+                    }
+                }
+                out
+            }))
+        } else {
+            None
+        };
+
         // Create AgentService parameters
         let params = crate::llm::application::AgentRunParams {
             session_id: &conversation_key,
@@ -1001,7 +1119,7 @@ impl ExecutableNode for LlmNode {
             tool_executor: &tool_executor,
             max_iterations: Some(50), // Max iterations
             on_token,
-            tools_provider: None, // populated when lazy_tool_loading is enabled (Task 11)
+            tools_provider,
         };
 
         if verbose {
@@ -1139,6 +1257,15 @@ impl ExecutableNode for LlmNode {
         };
         if let Some(skills_used) = skills_used_summary {
             extra_info["skills_used"] = skills_used;
+        }
+
+        // tools_discovered (lazy_tool_loading): array of names in discovery order.
+        if let Ok(log) = tools_discovered_log.lock() {
+            if !log.is_empty() {
+                extra_info["tools_discovered"] = Value::Array(
+                    log.iter().cloned().map(Value::String).collect(),
+                );
+            }
         }
 
         // Output format

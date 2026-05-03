@@ -5,6 +5,7 @@ use crate::llm::domain::tools::{ParameterProperty, ToolDefinition, ToolParameter
 use crate::llm::domain::LlmMessage;
 use std::collections::{HashMap, HashSet};
 
+#[derive(Clone)]
 pub struct CatalogEntry {
     pub name: String,
     pub summary: String,
