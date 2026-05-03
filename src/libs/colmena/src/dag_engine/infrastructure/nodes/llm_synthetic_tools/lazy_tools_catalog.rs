@@ -86,14 +86,48 @@ fn truncate_at_word_boundary(s: &str, max_chars: usize) -> String {
     }
 }
 
-pub fn build_describe_tool_definition(_pending: &[&CatalogEntry]) -> ToolDefinition {
+/// Build the `describe_tool` ToolDefinition for the LLM. The `pending` slice
+/// must be the catalog filtered by `discovered_set` — callers are responsible
+/// for that filtering.
+///
+/// Pre-condition: `pending` is non-empty. Callers must omit `describe_tool`
+/// from `tools[]` entirely when there is nothing pending.
+pub fn build_describe_tool_definition(pending: &[&CatalogEntry]) -> ToolDefinition {
+    let mut sorted: Vec<&&CatalogEntry> = pending.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let names: Vec<String> = sorted.iter().map(|e| e.name.clone()).collect();
+    let catalog_lines: Vec<String> = sorted
+        .iter()
+        .map(|e| format!("- {}: {}", e.name, e.summary))
+        .collect();
+
+    let description = format!(
+        "Reveal the full parameter schema and usage notes for one of the tools below. \
+Call this BEFORE invoking a tool so you know its parameters and return shape. \
+Available tools:\n{}\n\n\
+Only call describe_tool when you've decided you actually need the tool — not preemptively for every tool. \
+After calling describe_tool, the revealed tool will appear in your available tools on your next turn.",
+        catalog_lines.join("\n")
+    );
+
+    let mut properties: HashMap<String, ParameterProperty> = HashMap::new();
+    properties.insert(
+        "name".to_string(),
+        ParameterProperty::new(
+            "string".to_string(),
+            "The name of the tool whose schema you want to reveal".to_string(),
+        )
+        .with_enum(names),
+    );
+
     ToolDefinition {
         name: super::DESCRIBE_TOOL_NAME.to_string(),
-        description: String::new(),
+        description,
         parameters: ToolParameters {
             schema_type: "object".to_string(),
-            properties: HashMap::new(),
-            required: vec![],
+            properties,
+            required: vec!["name".to_string()],
         },
         input_schema_override: None,
     }
@@ -207,5 +241,49 @@ mod tests {
         assert!(set.contains("a"));
         assert!(set.contains("b"));
         assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn definition_lists_pending_in_alphabetical_order() {
+        let entries = vec![entry("zebra"), entry("apple"), entry("mango")];
+        let pending: Vec<&CatalogEntry> = entries.iter().collect();
+        let td = build_describe_tool_definition(&pending);
+        let enum_values = td
+            .parameters
+            .properties
+            .get("name")
+            .unwrap()
+            .enum_values
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            enum_values,
+            &vec!["apple".to_string(), "mango".to_string(), "zebra".to_string()]
+        );
+        let pos_a = td.description.find("apple").unwrap();
+        let pos_m = td.description.find("mango").unwrap();
+        let pos_z = td.description.find("zebra").unwrap();
+        assert!(pos_a < pos_m && pos_m < pos_z);
+    }
+
+    #[test]
+    fn definition_description_includes_summaries() {
+        let entries = vec![CatalogEntry {
+            name: "search_orders".into(),
+            summary: "Find orders. Use for past purchases.".into(),
+        }];
+        let pending: Vec<&CatalogEntry> = entries.iter().collect();
+        let td = build_describe_tool_definition(&pending);
+        assert!(td.description.contains("search_orders"));
+        assert!(td.description.contains("Find orders. Use for past purchases."));
+    }
+
+    #[test]
+    fn definition_required_param_is_name() {
+        let entries = vec![entry("a")];
+        let pending: Vec<&CatalogEntry> = entries.iter().collect();
+        let td = build_describe_tool_definition(&pending);
+        assert_eq!(td.parameters.required, vec!["name".to_string()]);
+        assert_eq!(td.name, "describe_tool");
     }
 }
