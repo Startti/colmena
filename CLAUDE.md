@@ -127,6 +127,13 @@ cargo run --bin dag_engine -- serve tests/graphs/agents/llm_call.json
 # Servidor disponible en http://localhost:3000
 ```
 
+### Regla — Grafos JSON con tools reales (no mocks)
+Cuando crees un grafo JSON para probar funcionalidad (LLM tool calling, lazy loading, agents, etc.):
+- **Siempre** usa `node_type` de nodos registrados reales (`current_time`, `add`, `multiply`, `http_request`, `tavily_client`, `sql_query`, `python_script`, etc.) o referencia tools existentes en `enabled_tools`.
+- **Nunca** uses `node_type: "log"` (u otro placeholder) como backing de un tool en `tool_configurations` solo para llenar la lista — eso convierte la prueba en un mock y oculta fallos reales (validación de schema, ejecución, parseo de outputs).
+- Si el tool que necesitas no existe, créalo como un `ExecutableNode` real y regístralo en `registry.rs` antes de usarlo en el grafo.
+- Verifica que cada `node_type` esté en `src/libs/colmena/src/dag_engine/infrastructure/registry.rs` antes de ejecutar el grafo.
+
 ## Architecture Rules
 - Domain layer has **ZERO** infrastructure dependencies
 - All external integrations go through traits (ports) defined in domain

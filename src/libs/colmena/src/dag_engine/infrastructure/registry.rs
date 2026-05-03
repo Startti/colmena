@@ -4,8 +4,9 @@ use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::ExecutableNode;
 use crate::dag_engine::domain::toolkit_node::ToolkitNode;
 use crate::dag_engine::infrastructure::nodes::{
-    debug::*, document_nodes::*, http::*, input::*, llm::*, math::*, orchestrator::*, output::*,
-    python_node::*, socketio::*, sql::*, subgraph::*, task_memory_writer::*, trigger::*,
+    current_time::*, debug::*, document_nodes::*, http::*, input::*, llm::*, math::*,
+    orchestrator::*, output::*, python_node::*, socketio::*, sql::*, subgraph::*,
+    task_memory_writer::*, trigger::*,
 }; // Importa nuestros nodos
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -61,6 +62,9 @@ impl HashMapNodeRegistry {
             nodes.insert("divide".to_string(), Arc::new(DivideNode));
 
             nodes.insert("exponential".to_string(), Arc::new(ExponentialNode));
+
+            // --- Registrar Nodo de Tiempo ---
+            nodes.insert("current_time".to_string(), Arc::new(CurrentTimeNode));
 
             // --- Registrar Nodos de Trigger ---
             nodes.insert("trigger_webhook".to_string(), Arc::new(TriggerWebhookNode));

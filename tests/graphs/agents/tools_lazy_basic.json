@@ -6,7 +6,7 @@
         "path": "/test-lazy-tools",
         "method": "POST",
         "test_payload": {
-          "prompt": "What's the current time, and can you find me orders from last month?"
+          "prompt": "First tell me the current time, then compute 25 + 17, and finally multiply that result by 3."
         }
       }
     },
@@ -16,29 +16,31 @@
         "provider": "openai",
         "api_key": "${OPENAI_API_KEY}",
         "model": "gpt-4o-mini",
-        "system_message": "You are a helpful assistant. Use the tools available.",
+        "temperature": 0.0,
+        "system_message": "You are a careful assistant. You MUST use the available tools for any calculation or to obtain the current time. Do not compute mentally. Always call describe_tool before using a tool whose schema you do not yet know.",
         "lazy_tool_loading": true,
+        "include_extra_info": true,
         "tool_configurations": {
           "current_time": {
             "name": "current_time",
-            "description": "Return the current UTC timestamp.",
+            "description": "Return the current UTC timestamp as ISO-8601. Takes no parameters.",
             "summary": "Returns current UTC timestamp.",
-            "node_type": "log",
+            "node_type": "current_time",
             "eager": true,
             "fixed_config": {}
           },
-          "search_orders": {
-            "name": "search_orders",
-            "description": "Search historical orders by date range.",
-            "summary": "Find historical orders. Use when the user asks about past purchases.",
-            "node_type": "log",
+          "add": {
+            "name": "add",
+            "description": "Add two numbers. Inputs: a (number), b (number). Returns a + b.",
+            "summary": "Sum of two numbers a and b.",
+            "node_type": "add",
             "fixed_config": {}
           },
-          "send_email": {
-            "name": "send_email",
-            "description": "Send a transactional email.",
-            "summary": "Send transactional email. Use when explicitly asked.",
-            "node_type": "log",
+          "multiply": {
+            "name": "multiply",
+            "description": "Multiply two numbers. Inputs: a (number), b (number). Returns a * b.",
+            "summary": "Product of two numbers a and b.",
+            "node_type": "multiply",
             "fixed_config": {}
           }
         }
@@ -47,7 +49,7 @@
     "log": { "type": "log" }
   },
   "edges": [
-    {"from": "trigger", "to": "agent"},
-    {"from": "agent", "to": "log"}
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
   ]
 }
