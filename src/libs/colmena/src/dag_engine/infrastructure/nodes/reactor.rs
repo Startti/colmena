@@ -301,6 +301,7 @@ impl ExecutableNode for ReactorNode {
             tool_executor: &EmptyToolExecutor,
             max_iterations: Some(1),
             on_token,
+            tools_provider: None,
         };
 
         let response = agent_service.run(params).await?;

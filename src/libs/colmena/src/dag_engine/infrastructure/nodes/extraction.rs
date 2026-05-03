@@ -201,6 +201,7 @@ impl ExecutableNode for ExtractionNode {
             tool_executor: &empty_executor,
             max_iterations: Some(1),
             on_token: None,
+            tools_provider: None,
         };
 
         let response = agent_service.run(params).await?;

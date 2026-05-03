@@ -15,6 +15,11 @@ pub struct AgentRunParams<'a> {
     pub tool_executor: &'a dyn ToolExecutor,
     pub max_iterations: Option<usize>,
     pub on_token: Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>>,
+    /// Optional dynamic tools provider, called fresh at each ReAct iteration.
+    /// When `Some`, its return value REPLACES `tools` for that iteration.
+    /// When `None`, `tools` is used unchanged each iteration (default).
+    pub tools_provider:
+        Option<Box<dyn Fn(&[LlmMessage]) -> Vec<ToolDefinition> + Send + Sync>>,
 }
 
 /// Agent service implementing the ReAct (Reasoning + Acting) pattern
@@ -55,6 +60,7 @@ impl AgentService {
         let tools = params.tools;
         let tool_executor = params.tool_executor;
         let on_token = params.on_token;
+        let tools_provider = params.tools_provider;
 
         // 1. Load conversation history
         let conversation = self.conversation_repository.get_by_id(session_id).await?;
@@ -89,9 +95,13 @@ impl AgentService {
 
             // A. Call LLM with tools
             let should_stream = on_token.is_some();
+            let iteration_tools: Vec<ToolDefinition> = match &tools_provider {
+                Some(p) => p(&messages),
+                None => tools.clone(),
+            };
             let mut request = LlmRequest::new(messages.clone(), config.clone(), should_stream)?;
-            if !tools.is_empty() {
-                request = request.with_tools(tools.clone());
+            if !iteration_tools.is_empty() {
+                request = request.with_tools(iteration_tools);
             }
 
             // Decide between call() and stream()
@@ -399,6 +409,7 @@ mod tests {
                 tool_executor: &mock_tool_exec,
                 max_iterations: None,
                 on_token: None,
+                tools_provider: None,
             })
             .await;
 
@@ -499,6 +510,7 @@ mod tests {
                 tool_executor: &mock_tool_exec,
                 max_iterations: None,
                 on_token: None,
+                tools_provider: None,
             })
             .await;
 
@@ -569,6 +581,7 @@ mod tests {
                 tool_executor: &mock_tool_exec,
                 max_iterations: Some(3), // Max 3 iterations
                 on_token: None,
+                tools_provider: None,
             })
             .await;
 

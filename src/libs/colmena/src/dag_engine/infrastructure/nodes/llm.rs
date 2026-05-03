@@ -1001,6 +1001,7 @@ impl ExecutableNode for LlmNode {
             tool_executor: &tool_executor,
             max_iterations: Some(50), // Max iterations
             on_token,
+            tools_provider: None, // populated when lazy_tool_loading is enabled (Task 11)
         };
 
         if verbose {
