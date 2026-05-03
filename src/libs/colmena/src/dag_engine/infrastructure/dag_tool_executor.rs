@@ -41,6 +41,15 @@ pub type SkillObserver = Arc<
         + Sync,
 >;
 
+/// Callback fired when a `describe_tool` call succeeds. The enclosing LLM node
+/// uses this to add the tool name to its discovered set and emit SSE events.
+pub type ToolDescribeObserver = Arc<
+    dyn Fn(
+            &crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::DescribeToolDispatchResult,
+        ) + Send
+        + Sync,
+>;
+
 /// Executes DAG nodes on behalf of LLM tool calls.
 ///
 /// Constructed via [`DagToolExecutor::new`] and optionally configured with
@@ -66,6 +75,12 @@ pub struct DagToolExecutor {
     documents_context: Option<
         Arc<crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::DocumentToolsContext>,
     >,
+    /// Snapshot of `ToolConfiguration` entries available for `describe_tool`
+    /// to look up. When `Some(...)`, the executor intercepts `describe_tool`
+    /// calls and dispatches against this slice; absent → describe_tool falls
+    /// through and is treated as an unknown tool by the rest of the executor.
+    describe_tool_lookup: Option<Vec<ToolConfiguration>>,
+    describe_tool_observer: Option<ToolDescribeObserver>,
 }
 
 impl DagToolExecutor {
@@ -128,6 +143,8 @@ impl DagToolExecutor {
             skill_repository: None,
             skill_observer: None,
             documents_context: None,
+            describe_tool_lookup: None,
+            describe_tool_observer: None,
         }
     }
 
@@ -164,6 +181,20 @@ impl DagToolExecutor {
         ctx: Arc<crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::DocumentToolsContext>,
     ) -> Self {
         self.documents_context = Some(ctx);
+        self
+    }
+
+    /// Attach a snapshot of `ToolConfiguration` entries so `describe_tool`
+    /// calls can be intercepted and resolved against this lookup.
+    pub fn with_describe_tool_lookup(mut self, lookup: Vec<ToolConfiguration>) -> Self {
+        self.describe_tool_lookup = Some(lookup);
+        self
+    }
+
+    /// Attach an observer callback that fires after a successful
+    /// `describe_tool` dispatch.
+    pub fn with_describe_tool_observer(mut self, cb: ToolDescribeObserver) -> Self {
+        self.describe_tool_observer = Some(cb);
         self
     }
 
@@ -454,7 +485,8 @@ impl ToolExecutor for DagToolExecutor {
     #[allow(deprecated)]
     async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, LlmError> {
         use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
-            dispatch_load_skill, into_tool_result, LOAD_SKILL_TOOL_NAME,
+            describe_tool_into_tool_result, dispatch_describe_tool, dispatch_load_skill,
+            into_tool_result, DESCRIBE_TOOL_NAME, LOAD_SKILL_TOOL_NAME,
         };
 
         if tool_call.function.name == LOAD_SKILL_TOOL_NAME {
@@ -469,6 +501,19 @@ impl ToolExecutor for DagToolExecutor {
                 obs(&result);
             }
             return Ok(into_tool_result(&tool_call.id, &result));
+        }
+
+        if tool_call.function.name == DESCRIBE_TOOL_NAME {
+            let lookup = self.describe_tool_lookup.as_ref().ok_or_else(|| {
+                LlmError::ToolNotFound {
+                    name: DESCRIBE_TOOL_NAME.to_string(),
+                }
+            })?;
+            let result = dispatch_describe_tool(tool_call, lookup).await?;
+            if let Some(obs) = &self.describe_tool_observer {
+                obs(&result);
+            }
+            return Ok(describe_tool_into_tool_result(&tool_call.id, &result));
         }
 
         // --- Synthetic document tools (document_create, document_edit, etc.) ---
@@ -1730,6 +1775,89 @@ mod tests {
         let result = executor.execute(&call).await.unwrap();
         assert!(result.output.contains("BODY"));
         assert!(result.success);
+    }
+
+    #[tokio::test]
+    async fn intercepts_describe_tool_when_lookup_attached() {
+        let registry = Arc::new(MockRegistry::new());
+        let cfg = ToolConfiguration {
+            name: "search_orders".to_string(),
+            description: "Search the orders table".to_string(),
+            node_type: "noop".to_string(),
+            fixed_config: HashMap::new(),
+            #[allow(deprecated)]
+            exposed_inputs: None,
+            #[allow(deprecated)]
+            parameters: None,
+            #[allow(deprecated)]
+            mergeable_fields: None,
+            #[allow(deprecated)]
+            field_mapping: None,
+            node_schema: None,
+            node_config: None,
+            expose_sub_tools: None,
+            summary: None,
+            eager: false,
+        };
+        let executor = DagToolExecutor::new(registry, HashMap::new())
+            .with_describe_tool_lookup(vec![cfg]);
+
+        let call = ToolCall::new(
+            "c_describe".to_string(),
+            FunctionCall::new(
+                "describe_tool".to_string(),
+                serde_json::json!({"name":"search_orders"}).to_string(),
+            ),
+        );
+
+        let result = executor.execute(&call).await.unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("# search_orders"));
+        assert!(result.output.contains("now available"));
+    }
+
+    #[tokio::test]
+    async fn describe_tool_observer_fires_with_dispatched_payload() {
+        let registry = Arc::new(MockRegistry::new());
+        let cfg = ToolConfiguration {
+            name: "search_orders".to_string(),
+            description: "Search".to_string(),
+            node_type: "noop".to_string(),
+            fixed_config: HashMap::new(),
+            #[allow(deprecated)]
+            exposed_inputs: None,
+            #[allow(deprecated)]
+            parameters: None,
+            #[allow(deprecated)]
+            mergeable_fields: None,
+            #[allow(deprecated)]
+            field_mapping: None,
+            node_schema: None,
+            node_config: None,
+            expose_sub_tools: None,
+            summary: None,
+            eager: false,
+        };
+
+        let observed: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_clone = observed.clone();
+
+        let executor = DagToolExecutor::new(registry, HashMap::new())
+            .with_describe_tool_lookup(vec![cfg])
+            .with_describe_tool_observer(Arc::new(move |result| {
+                observed_clone.lock().unwrap().push(result.tool_name.clone());
+            }));
+
+        let call = ToolCall::new(
+            "c1".to_string(),
+            FunctionCall::new(
+                "describe_tool".to_string(),
+                serde_json::json!({"name":"search_orders"}).to_string(),
+            ),
+        );
+        executor.execute(&call).await.unwrap();
+        assert_eq!(observed.lock().unwrap().as_slice(), &["search_orders"]);
     }
 
     #[tokio::test]
