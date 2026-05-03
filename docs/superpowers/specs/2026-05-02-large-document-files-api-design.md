@@ -660,20 +660,28 @@ El plan asumió que `LlmCallUseCase::resolve_files` sería invocado por el path 
   - Si no, hacer download+upload directos (sin cache).
 - `LlmCallUseCase` queda con `with_file_cache` builder; el use case full-blown queda como punto de entrada alternativo si en el futuro se decide refactorear `AgentService`.
 
-### 8. Deuda registrada (no implementada)
+### 8. Deuda registrada y trabajo de cleanup posterior
 
-Listado completo, priorizado y con soluciones propuestas en:
+Listado completo, con análisis profundo y soluciones propuestas en:
 
 📋 **[Deuda técnica del feature](./2026-05-02-large-document-files-api-tech-debt.md)** (sibling de este spec).
 
-Resumen de los items más relevantes:
+**Sesión de cleanup 2026-05-03**: 5 items resueltos en 6 commits sobre `develop`:
 
-- **C2 (retry on `ProviderFileNotFound`)**: el wrapper `call_with_file_retry` invalida cache pero `reset_uploaded_files_with_id` es no-op — el segundo intento sigue con `Uploaded` apuntando al `file_id` muerto. Best-effort, no funciona en la práctica.
-- **`last_used_at` en cache hit**: no se actualiza, solo en upsert.
-- **Layer leak**: `LlmCallUseCase` (application) importa `SignedUrlDownloader` y `FileProviderFactory` (infrastructure).
-- **Filas huérfanas**: cuando se cambian estrategias (e.g., short-circuit OpenAI imágenes después de un upload exitoso), las filas viejas quedan apuntando a `provider_file_id` válidos pero nunca referenciados.
+- ✅ **C2 (retry on `ProviderFileNotFound`)**: ahora recupera real. `LlmCallUseCase::execute` toma snapshot `(document_id → SignedUrl)` antes de la primera resolución; en el 404, `reset_uploaded_files_with_id` revierte `Uploaded(bad_id)` → `SignedUrl(orig)` → re-resolve → re-upload.
+- ✅ **`last_used_at` en cache hit**: `lookup` cambió de `SELECT` a `UPDATE ... RETURNING *`. La columna ahora refleja la realidad y habilita futuras métricas LRU.
+- ✅ **Layer leak hexagonal**: dos puertos nuevos en `domain/` — `SignedUrlFetcher` (descarga) y `FileProviderFactoryPort` (build per-kind). `LlmCallUseCase` no importa nada de `infrastructure/` en producción.
+- ✅ **`ProviderKind::Mock` fallback silencioso**: `parse_provider_from_row` con fail-fast (`LlmError::RequestFailed`) y `tracing::error!` estructurado. Bonus: arreglada la asimetría latente de `ProviderKind::from_str("mock")`.
+- ✅ **Mime malformado**: variante nueva `LlmError::InvalidMimeType { mime, message }` separa la precondición (mime mal formado) del fallo de upload HTTP. Adapters Anthropic + OpenAI mapean correctamente.
 
-10 items totales; ningún bloqueante.
+**Items abiertos** (4 de 10):
+
+- **#4 + #5 — Huérfanos en cache + provider**: análisis profundo registrado (Vector A vs Vector B, 4 opciones consideradas). Implementación pospuesta hasta tomar 5 decisiones (dónde corre el janitor, TTL para LRU, frecuencia, Gemini sí/no, migración retroactiva).
+- **#8 — Tests E2E reproducibles sin signed URLs**: requiere stubs wiremock de los 3 providers; CI no detecta regresiones del feature hoy.
+- **#9 — Métricas Prometheus** para cache hit-rate / upload duration / etc.
+- **#10 — Cache hit cross-session por `sha256`**: descartado por spec (YAGNI hasta ver volumen).
+
+Ningún item abierto es bloqueante.
 
 ## Decisiones clave (resumen)
 

@@ -39,17 +39,24 @@
 
 📚 **Guía de usuario**: `docs/developer_guide/28_large_files_api.md`.
 
-⚠ **Deuda no implementada** (registrada para follow-ups):
+⚠ **Deuda registrada y trabajo de cleanup posterior**
 
-Lista completa con severidad, soluciones propuestas y estimaciones en:
+Lista completa con severidad, soluciones y estimaciones en:
 
 📋 **[Deuda técnica](./2026-05-02-large-document-files-api-tech-debt.md)** (sibling del spec).
 
-10 items registrados; ningún bloqueante. Resumen de los 4 más relevantes:
-- C2: retry on `ProviderFileNotFound` no recupera (no-op).
-- `last_used_at` no se actualiza en cache hit (solo en upsert).
-- Layer leak: `LlmCallUseCase` importa de `infrastructure::files`.
-- Filas huérfanas en cache cuando cambian estrategias mid-feature.
+**Sesión 2026-05-03**: 5 items resueltos en 6 commits sobre `develop`:
+
+| Commit | Item | Descripción |
+|--------|------|-------------|
+| `3634b20` | #1 + #3 | Recovery del retry on `ProviderFileNotFound` (snapshot SignedUrl) + dos puertos hexagonales nuevos (`SignedUrlFetcher`, `FileProviderFactoryPort`) |
+| `9516a10` | extra | Eliminado `with_secure_values(pool)` muerto de `DagRunUseCase` (otro layer leak) |
+| `cc3063b` | #2 | `last_used_at` ahora se actualiza en cache hit vía `UPDATE...RETURNING *` |
+| `062b989` | #6 | Fail-fast en provider corrupto + `tracing` estructurado + simetría `from_str("mock")` |
+| `30c8b4a` | #7 | Variante `LlmError::InvalidMimeType` separa precondición de upload failure |
+| `2477c00` | docs | Wrap-up de docs |
+
+**4 items abiertos**: #4+#5 (huérfanos cache + provider — análisis profundo registrado, decisiones P1-P5 abiertas), #8 (E2E reproducibles), #9 (métricas), #10 (sha256 cross-session, descartado YAGNI). Ningún bloqueante.
 
 ---
 
