@@ -1,0 +1,53 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/test-lazy-tools",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "What's the current time, and can you find me orders from last month?"
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o-mini",
+        "system_message": "You are a helpful assistant. Use the tools available.",
+        "lazy_tool_loading": true,
+        "tool_configurations": {
+          "current_time": {
+            "name": "current_time",
+            "description": "Return the current UTC timestamp.",
+            "summary": "Returns current UTC timestamp.",
+            "node_type": "log",
+            "eager": true,
+            "fixed_config": {}
+          },
+          "search_orders": {
+            "name": "search_orders",
+            "description": "Search historical orders by date range.",
+            "summary": "Find historical orders. Use when the user asks about past purchases.",
+            "node_type": "log",
+            "fixed_config": {}
+          },
+          "send_email": {
+            "name": "send_email",
+            "description": "Send a transactional email.",
+            "summary": "Send transactional email. Use when explicitly asked.",
+            "node_type": "log",
+            "fixed_config": {}
+          }
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    {"from": "trigger", "to": "agent"},
+    {"from": "agent", "to": "log"}
+  ]
+}
