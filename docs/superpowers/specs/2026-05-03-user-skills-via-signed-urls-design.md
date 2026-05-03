@@ -168,9 +168,9 @@ The preprocessor performs all validations **before** any download. If any fails,
 | `skill_md` or any reference has both `url` and `content`, or has neither | `BadRequest: skill 'X' source must be exactly one of url/content` |
 | `url` is malformed or scheme is not `https` | `BadRequest: invalid url for skill 'X'` |
 | URL host is not in `COLMENA_SKILLS_ALLOWED_HOSTS` | `Forbidden: host '<host>' not allowed` |
-| Downloaded file > `COLMENA_SKILLS_MAX_FILE_BYTES` (default 256 KB) | `PayloadTooLarge: skill 'X' file 'Y' exceeded N bytes` |
+| Downloaded file > `COLMENA_SKILLS_MAX_FILE_BYTES` (default 64 KB, bound by Colmena) | `PayloadTooLarge: skill 'X' file 'Y' exceeded N bytes` |
 | Inline `content` > same limit | `BadRequest: inline content for skill 'X' too large` |
-| Total bytes per skill > 2 MB | `PayloadTooLarge: skill 'X' total exceeded 2097152 bytes` |
+| Total bytes per skill > 512 KB | `PayloadTooLarge: skill 'X' total exceeded 524288 bytes` |
 | HTTP GET fails (non-2xx, timeout, network error) | `BadGateway: failed to fetch skill 'X' file 'Y' from <host>: <reason>` |
 | `version` is empty or > 64 chars | `BadRequest: skill 'X' version invalid` |
 | SKILL.md content has frontmatter and its `name` ≠ JSON `name` | `BadRequest: skill 'X' frontmatter name mismatch` |
@@ -188,11 +188,11 @@ If the env var is unset, the whitelist is empty and **all URL-based skills fail*
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `COLMENA_SKILLS_MAX_FILE_BYTES` | `262144` (256 KB) | Per-file ceiling, applies to download and inline. |
-| `COLMENA_SKILLS_MAX_TOTAL_BYTES` | `2097152` (2 MB) | Per-skill aggregate ceiling. |
+| `COLMENA_SKILLS_MAX_FILE_BYTES` | `65536` (64 KB) | Per-file ceiling, applies to download and inline. **Bound by Colmena's hardcoded `MAX_FILE_SIZE_BYTES = 64 KB` in `FilesystemSkillRepository`** — setting the worker cap higher would cause Colmena to reject the materialized file after the worker accepted it. Raising this requires bumping the Colmena constant first (out of scope for this design). |
+| `COLMENA_SKILLS_MAX_TOTAL_BYTES` | `524288` (512 KB) | Per-skill aggregate ceiling (SKILL.md + all references). |
 | `COLMENA_SKILLS_HTTP_TIMEOUT_MS` | `15000` (15 s) | Per-file HTTP timeout. |
 | `COLMENA_SKILLS_ALLOWED_HOSTS` | unset (deny all) | Comma-separated host whitelist. |
-| `COLMENA_SKILLS_CACHE_ROOT` | `/tmp/colmena-skills-cache` | Cache base path. |
+| `COLMENA_SKILLS_CACHE_ROOT` | `/tmp/colmena-skills-cache` | Cache base path. Must also be listed in Colmena's `COLMENA_SKILLS_ALLOWED_DIRS` env var on the same container. |
 
 ## Preprocessor Algorithm
 
@@ -529,6 +529,67 @@ Documented for tracking, not part of this scope:
 6. **Prometheus metrics** as listed in the Observability section.
 7. **Per-agent host whitelist override.** Useful if different ADP tenants need different storage backends.
 8. **Cross-instance shared cache.** Out of scope unless a high-traffic agent demonstrates that the warm-cache hit ratio is below acceptable.
+
+## Required Changes (verified against code)
+
+This section enumerates every file/module/env change required to land the feature, separated by repo. The list was cross-checked against the actual code as of `develop` on 2026-05-03.
+
+### Colmena repo (`/home/daniel-garcia4/startti/colmena/`) — **zero code changes**
+
+The design intentionally avoids touching Colmena. The existing `FilesystemSkillRepository::from_paths` accepts the materialized cache layout because:
+
+| Colmena requirement | Where checked | How the spec satisfies it |
+|---|---|---|
+| Each `path` entry is a directory containing `SKILL.md` | `filesystem_skill_repository.rs:73-80` | Worker writes one cache directory per skill containing `SKILL.md` + `references/`. |
+| Path is absolute or relative to graph dir | `filesystem_skill_repository.rs:55-60` | Worker injects absolute paths. |
+| Path is canonicalized and `starts_with` an allowed root | `filesystem_skill_repository.rs:62-71` | Operator must add `/tmp/colmena-skills-cache` (or whatever `COLMENA_SKILLS_CACHE_ROOT` is set to) to `COLMENA_SKILLS_ALLOWED_DIRS`. **Deploy-time config, no code change.** |
+| Frontmatter `name` matches the directory leaf name | `filesystem_skill_repository.rs:103-115` | Layout `<cache_root>/<agent_id>/<version>/<skill>/` makes `<skill>` the leaf. The worker's `normalize_skill_md` either validates that user-provided frontmatter name == `<skill>` or generates a frontmatter using `<skill>`. |
+| Each declared reference exists as `references/{name}.md` | `filesystem_skill_repository.rs:117-138` | Worker writes one `.md` per reference under `references/` named after the JSON's `references[i].name`. |
+| Each file ≤ 64 KB (`MAX_FILE_SIZE_BYTES = 64 * 1024`) | `filesystem_skill_repository.rs:88-94` | Worker's `COLMENA_SKILLS_MAX_FILE_BYTES` defaults to **64 KB exactly**, ensuring no file passes the worker only to be rejected by Colmena. |
+
+**Note on `graph_dir`:** When the worker invokes `engine.execute_stream`, no `__colmena_graph_path` is injected, so Colmena falls back to `cwd()` for `graph_dir`. This is irrelevant to absolute cache paths but documented here so future maintainers do not assume `graph_dir` is meaningful in worker context.
+
+### ADP repo (`/home/daniel-garcia4/startti/adp/apps/service/ia/platform/`)
+
+#### Code changes
+
+| File | Change |
+|---|---|
+| `shared/src/lib.rs` | Add `pub agent_id: Option<String>` (with `#[serde(default)]`) to `JobRequest`. |
+| `api/src/handlers.rs` | Add `pub agent_id: Option<String>` to `CreateExecutionRequest`. In `create_execution`, copy `payload.agent_id` into the constructed `JobRequest`. |
+| `worker/src/skills/mod.rs` | New module. Public `preprocess(graph_json, agent_id, runtime)` entry. |
+| `worker/src/skills/parser.rs` | Walk `graph_json["nodes"]`, extract per-`llm_call` `skills.declared` lists; rewrite to `skills.paths` after materialization. |
+| `worker/src/skills/validator.rs` | All shape and limit validations from the **Validations** section. |
+| `worker/src/skills/cache.rs` | `path_for(...)`, `ensure_materialized(...)` with `DashMap<PathBuf, Arc<Mutex<()>>>` for in-process serialization. |
+| `worker/src/skills/downloader.rs` | `reqwest`-based fetcher; whitelist check; size cap; timeout. |
+| `worker/src/skills/materializer.rs` | `write_atomic(...)` using temp-dir + `fs::rename`; `normalize_skill_md(...)`; `sanitize_reference_name(...)`. |
+| `worker/src/skills/error.rs` (or in `mod.rs`) | `PreprocessError` enum mapping to the typed error prefixes. |
+| `worker/src/main.rs` | Build `SkillsRuntime::from_env()` once at startup; add to `AppState`. In `process_job`, call `skills::preprocess(&mut graph_json, job.agent_id.as_deref(), &state.skills_runtime)` between input injection and graph deserialization. |
+| `worker/Cargo.toml` | Add `dashmap`, `tempfile` (or `rand` for suffix), and confirm `reqwest` already present. `sha2` only if a hash helper is needed for tests. |
+
+#### Deploy / env config (Cloud Run)
+
+The container running the worker must export both worker-side and Colmena-side variables. These are deploy-time, not code:
+
+```yaml
+# worker container env
+COLMENA_SKILLS_CACHE_ROOT: /tmp/colmena-skills-cache
+COLMENA_SKILLS_ALLOWED_HOSTS: storage.googleapis.com
+COLMENA_SKILLS_MAX_FILE_BYTES: "65536"        # optional override (default = 64 KB)
+COLMENA_SKILLS_MAX_TOTAL_BYTES: "524288"      # optional override (default = 512 KB)
+COLMENA_SKILLS_HTTP_TIMEOUT_MS: "15000"       # optional override
+
+# Colmena's own check; worker's cache root MUST be inside this set
+COLMENA_SKILLS_ALLOWED_DIRS: /tmp/colmena-skills-cache
+```
+
+If `COLMENA_SKILLS_ALLOWED_DIRS` does **not** include the cache root, every materialized skill will fail Colmena's path-allow check with `PathNotAllowed` after the worker successfully wrote the files. This is the single most important deploy-time configuration item.
+
+#### Frontend (out of scope for this implementation)
+
+- The ADP frontend that calls `POST /api/v1/executions` must include `agent_id` in the request body. Existing top-level fields are accepted; this is a new typed field.
+- The skill editor UI must compute or assign a `version` value when the user saves a skill, and bump it on every content change.
+- Signed-URL generation pipeline at the ADP backend (the agent-create / agent-update path) must produce URLs that point to a host listed in `COLMENA_SKILLS_ALLOWED_HOSTS`.
 
 ## References
 
