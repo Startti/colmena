@@ -15,8 +15,7 @@ Esta tabla agrupa el trabajo pendiente y la deuda registrada durante la implemen
 | 1 | ~~Retry on `ProviderFileNotFound` no recupera (no-op)~~ ✅ Resuelto | Alta | No (best-effort documentado) | 1-2 días |
 | 2 | ~~`last_used_at` no se actualiza en cache hit~~ ✅ Resuelto | Baja | No | 30 min |
 | 3 | ~~Layer leak: `LlmCallUseCase` importa de `infrastructure`~~ ✅ Resuelto | Media | No (compila y funciona) | 1 día |
-| 4 | Filas huérfanas en cache cuando se cambian estrategias | Baja | No | 1 día (con limpieza retroactiva) |
-| 5 | Janitor de archivos huérfanos en proveedores | Media | No | 2-3 días |
+| 4+5 | Huérfanos (cache + provider) — análisis profundo hecho, implementación pendiente | Media | No | 3-5 días |
 | 6 | ~~`ProviderKind::Mock` fallback silencioso en `PostgresFileCache::lookup`~~ ✅ Resuelto | Baja | No | 30 min |
 | 7 | ~~Error de mime malformado clasificado como `FileApiUploadFailed`~~ ✅ Resuelto | Baja | No | 1 hora |
 | 8 | Tests de integración E2E reproducibles (sin signed URLs) | Media | No | 2 días |
@@ -130,58 +129,155 @@ Los `use crate::llm::infrastructure::files::*` que quedan en el archivo del use 
 
 ---
 
-## 4. Filas huérfanas en cache
+## 4 + 5. Huérfanos (cache rows + provider files)
 
-**Síntoma**
+**Estado**: análisis profundo hecho en sesión 2026-05-03, **implementación pospuesta** hasta tener input del owner sobre las decisiones abiertas (ver "Decisiones requeridas" abajo).
 
-Cuando una estrategia cambia mid-feature (e.g., introducimos el short-circuit de OpenAI imágenes después de un upload exitoso), las filas existentes en cache quedan apuntando a `provider_file_id` válidos pero nunca referenciados de nuevo.
+### Reframing: ¿qué es realmente un huérfano?
 
-Ejemplo real observado:
+Un huérfano es un archivo del provider que ya nadie consulta. El ciclo de vida tiene **dos vectores** donde se generan:
+
+#### Vector A — UPSERT sobreescribe
+
+Re-upload tras expiry o tras retry de 404 sin recovery exitoso:
+
+```
+provider_file_cache row apunta a file_OLD
+    cache.upsert(new_entry)
+    ON CONFLICT DO UPDATE
+provider_file_cache row ahora apunta a file_NEW
+→ file_OLD vive en el provider, ya no en ninguna fila de Colmena.
+```
+
+Mismo cuando `invalidate(doc, provider)` se llama — el `provider_file_id` queda colgado en el provider.
+
+#### Vector B — Strategy change sin invalidate
+
+Ejemplo real: el short-circuit de imágenes OpenAI introducido en commit `3f5e574`. Antes del commit, las imágenes JPEG con OpenAI subían a la Files API y la fila quedaba en cache. Después del commit, ese path va por URL passthrough — el código nuevo nunca hace `cache.lookup` para ese caso. La fila Y el archivo del provider quedan vivos pero inalcanzables.
+
+Ejemplo observable hoy:
 ```
 test-jpeg-2026-05-02 | openai    | file-M7YUj2Dd68bje3u636vqaA | NULL
 ```
 
-Esa fila se creó antes del fix `3f5e574`. Ahora OpenAI imágenes hacen short-circuit y nunca pasan por cache lookup. La fila vive ahí inútil.
+### Insight clave
 
-### Solución
+El almacenamiento de la fila en Postgres es despreciable (~200 bytes). El **costo real** está en el provider (cuota org). Limpiar la fila SIN limpiar el archivo del provider no resuelve nada → **#4 y #5 son el mismo problema visto desde dos lados**, conviene tratarlos juntos.
 
-Migración one-shot de limpieza:
+### Espacio de soluciones
 
-```sql
-DELETE FROM provider_file_cache
-WHERE provider IN ('openai', 'anthropic')
-  AND mime_type LIKE 'image/%';
+Cuatro enfoques considerados:
+
+#### Opción A — List-and-compare
+
+```pseudo
+files_provider := GET /v1/files
+ids_cache := SELECT provider_file_id FROM provider_file_cache
+huérfanos := files_provider - ids_cache
+for f in huérfanos: DELETE /v1/files/{f}
 ```
 
-Y aplicar lógica preventiva en el use case: cuando entra un short-circuit, verificar si hay fila vieja y opcionalmente borrarla con `cache.invalidate(...)` por consistencia.
+| Pro | Contra |
+|-----|--------|
+| Captura Vector A automáticamente. | **Riesgo de nuke cross-system**: si otro team usa la misma API key (CI, otro feature), borramos sus archivos. |
+| Sin cambios en `upsert`/`invalidate`. | Mitigación obligatoria: filtrar por `display_name` o `purpose` (los adapters no setean esos fields hoy). |
+| | No captura Vector B: el `id` existe en provider y existe en cache → no es huérfano según este algoritmo, aunque nadie lo consulte. |
 
----
+#### Opción B — Cola de cleanup determinística
 
-## 5. Janitor de archivos huérfanos en proveedores
+Tabla nueva:
+```sql
+CREATE TABLE provider_file_cleanup_queue (
+  id BIGSERIAL PRIMARY KEY,
+  provider TEXT NOT NULL,
+  provider_file_id TEXT NOT NULL,
+  queued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  attempts INT NOT NULL DEFAULT 0,
+  last_attempt_at TIMESTAMPTZ,
+  last_error TEXT
+);
+```
 
-**Síntoma**
+`upsert`/`invalidate` encolan el `provider_file_id` viejo dentro de la misma transacción del cambio en cache. Janitor procesa la cola: `DELETE` en provider → saca de la cola.
 
-Cuando el cache se invalida o se sobrescribe (UPSERT race), el `provider_file_id` viejo sigue vivo en el provider:
+| Pro | Contra |
+|-----|--------|
+| **Surgical**: solo tocamos archivos que NOSOTROS subimos. Cero riesgo cross-system. | Tabla extra + cambios transaccionales en `upsert`/`invalidate`. |
+| Captura Vector A perfectamente. | No captura Vector B (filas que nunca pasan por upsert/invalidate). |
+| Trail auditable: quién encoló, cuántos intentos, último error. | Más código. |
 
-- **Anthropic**: persiste indefinidamente, cuenta contra cuota org (500 GB).
-- **OpenAI**: persiste indefinidamente, cuenta contra cuota usuario.
-- **Gemini**: expira solo a 48h (no requiere janitor).
+#### Opción C — LRU eviction por `last_used_at`
 
-Para producción a alto volumen, esto puede saturar la cuota del provider.
+Ahora que #2 está resuelto y `last_used_at` se actualiza en cada hit:
 
-### Solución
+```sql
+WITH stale AS (
+  SELECT * FROM provider_file_cache WHERE last_used_at < NOW() - INTERVAL '30 days'
+)
+-- Encolar para borrado en provider, luego borrar fila.
+```
 
-Background job (cron de Colmena, o agente externo) que:
+| Pro | Contra |
+|-----|--------|
+| Captura **Vector B** perfectamente: si nadie consulta la fila por X días, muere. | TTL es heurístico — un archivo legítimo poco usado podría morir y forzar un re-upload. |
+| Una sola query SQL, simple. | No captura Vector A solo (las filas reescritas por upsert son nuevas, no stale). |
+| Auto-cleaning sin código en el flujo normal. | |
 
-1. Lista archivos en cada provider via `GET /v1/files`.
-2. Compara con la tabla `provider_file_cache.provider_file_id`.
-3. Borra los que no aparecen.
+#### Opción D — Híbrida (B + C) ← recomendada
 
-Posibles casos de borrado equivocado:
-- Si otro sistema usa la misma API key y sus archivos no están en nuestro cache, los borraríamos.
-- Mitigación: filtrar por `display_name` o `purpose` para acotar a archivos creados por Colmena.
+- **Cola** (Opción B) para Vector A — determinística, capta todo lo que pasa por upsert/invalidate.
+- **LRU sweep** (Opción C) para Vector B — heurística, captura strategy-change orphans.
+- **Migración one-shot** para huérfanos visibles HOY (filas tipo `test-jpeg-...`).
 
-Out of scope hasta ver volumen real (spec).
+Janitor único corre los 3 algoritmos.
+
+### Cambios requeridos en el código
+
+1. **Trait `FileProviderRepository`**: agregar `async fn delete_file(&self, provider_file_id: &str) -> Result<(), LlmError>`. Implementar en los 3 adapters (~2h).
+2. **Tabla `provider_file_cleanup_queue`**: nueva migración SQL.
+3. **`PostgresFileCache::upsert`**: leer fila existente, encolar el viejo `provider_file_id`, luego UPSERT — todo en transacción.
+4. **`PostgresFileCache::invalidate`**: idem.
+5. **Janitor**: nueva función o binario que procesa la cola + ejecuta el LRU sweep.
+6. **Migración retroactiva** (script standalone, NO automático): encolar las filas huérfanas conocidas (image rows en OpenAI/Anthropic).
+
+### Decisiones requeridas (input del owner pendiente)
+
+**P1. ¿Dónde corre el janitor?**
+
+| Opción | Pro | Contra |
+|--------|-----|--------|
+| Como nodo DAG `cleanup_provider_files` invocable por cron externo | Usa infra existente | Depende de armar el graph |
+| Tarea background dentro del binario `dag_engine serve` (tokio interval) | Simple, siempre activo | Race con múltiples instancias del server |
+| Binario separado `colmena_janitor` ejecutado por cron OS / k8s | Idempotente, controlable | Nuevo bin, nuevo deploy |
+
+**Default sugerido**: binario separado por simplicidad operacional.
+
+**P2. TTL para LRU eviction**
+
+- Si los PDFs se reusan típicamente 1-2 semanas → 30 días es seguro.
+- Si los docs son one-shot (sube, lee, nunca más) → 7 días sobra.
+
+Define el upper bound de re-upload aceptable. Default sugerido: **30 días**.
+
+**P3. Frecuencia del janitor**
+
+Default sugerido: cada **15 minutos** para la cola (low-latency cleanup), **diaria** para el LRU sweep.
+
+**P4. ¿Gemini en el janitor?**
+
+Gemini auto-expira a 48h. Encolar Gemini probablemente lleva a `DELETE` que devuelve 404. **Default sugerido: skipear Gemini en la cola**, tratar 404 como éxito si igual lo procesa.
+
+**P5. Migración retroactiva**
+
+Ejecutar como **script standalone manual**, NO como migración automática. Una migración que borra archivos del provider en cada deploy es peligrosa.
+
+### Tests requeridos
+
+- Cola: encolado correcto en `upsert` (sobreescritura) y `invalidate` (DELETE). Idempotencia (re-encolar mismo id).
+- Janitor: procesa entries, marca attempts en fallas, reintenta hasta N veces.
+- Adapter `delete_file`: 200 ok, 404 (tratar como ok), 5xx (error).
+- LRU sweep: respeta `last_used_at`, no borra activos.
+- Integration: simular Vector A y B, verificar que el janitor los limpia.
 
 ---
 

@@ -102,7 +102,9 @@ Heurística TTL `is_likely_alive` (margen de 5 min de seguridad por skew de relo
 - **Gemini**: `expires_at = uploaded_at + 48h` (Gemini Files API expira a 48h).
 - **Anthropic** y **OpenAI**: `expires_at = NULL` (no expiran).
 
-UPSERT idempotente con `ON CONFLICT (document_id, provider) DO UPDATE`: si dos requests concurrentes con mismo `id` ambos hacen miss y suben, el segundo gana en cache; el archivo del primero queda huérfano en el provider. Aceptable según volumen real.
+UPSERT idempotente con `ON CONFLICT (document_id, provider) DO UPDATE`: si dos requests concurrentes con mismo `id` ambos hacen miss y suben, el segundo gana en cache; el archivo del primero queda huérfano en el provider (ver [deuda técnica #4+#5](../superpowers/specs/2026-05-02-large-document-files-api-tech-debt.md#4--5-huérfanos-cache-rows--provider-files)).
+
+`lookup` usa `UPDATE ... RETURNING *` (no `SELECT`) para que `last_used_at` se actualice en cada cache hit — base para futuras métricas LRU y janitor. Si la fila no existe, devuelve 0 rows = MISS (mismo resultado que el SELECT anterior).
 
 ## Streaming pipe end-to-end
 
@@ -175,8 +177,9 @@ Si tu archivo excede el límite del modelo, el error es del provider, no del có
 | `PathFieldTooLarge { size }` | `path` apunta a archivo local > 30MB. | Parser del nodo |
 | `UrlWithoutDocumentId` | `url` presente sin `id`. Bug de contrato. | Parser del nodo |
 | `SignedUrlFetchFailed { status }` | GCS rechazó GET (URL expirada, archivo no existe). | `SignedUrlDownloader` |
-| `FileApiUploadFailed { provider, message }` | El provider rechazó upload (cuota, formato, key inválida). | Files API adapter |
-| `ProviderFileNotFound { provider_file_id }` | Cache stale: el archivo fue borrado del provider. Retry best-effort (ver deuda). | Adapter del LLM |
+| `FileApiUploadFailed { provider, message }` | El provider rechazó upload (cuota, formato, key inválida). HTTP failure real. | Files API adapter |
+| `InvalidMimeType { mime, message }` | Mime malformado — violación de precondición del caller, no falla de upload (no se hizo HTTP). | Files API adapter (Anthropic, OpenAI) |
+| `ProviderFileNotFound { provider_file_id }` | Cache stale: el archivo fue borrado del provider. **Recovery automático**: snapshot de la SignedUrl original + reset + re-upload + 1 retry. | Adapter del LLM |
 | `AllFilesFailedToResolve` | Todos los archivos del request fallaron en materializar. | `LlmCallUseCase::resolve_files` |
 | `InternalError` | `SignedUrl` llegó al adapter sin haber sido resuelto por el use case. Bug de wiring. | Adapter del LLM |
 
@@ -184,22 +187,41 @@ Si tu archivo excede el límite del modelo, el error es del provider, no del có
 
 ```
 src/libs/colmena/src/llm/
-├── domain/
+├── domain/                                ← cero dependencias de infrastructure
 │   ├── llm_message.rs                    ← FileData con FileSource enum
 │   ├── file_provider_repository.rs       ← puerto + BoxedByteStream
-│   └── file_cache_repository.rs          ← puerto + CachedFileEntry::is_likely_alive
-├── application/
-│   └── llm_call_use_case.rs              ← resolve_files + retry on 404 (best-effort)
-└── infrastructure/files/
-    ├── signed_url_downloader.rs          ← HTTP GET streaming sin Authorization
+│   ├── file_cache_repository.rs          ← puerto + CachedFileEntry::is_likely_alive
+│   ├── signed_url_fetcher.rs             ← puerto SignedUrlFetcher (descarga streaming)
+│   └── file_provider_factory_port.rs     ← puerto FileProviderFactoryPort (build per-kind)
+├── application/                           ← solo depende de puertos del domain
+│   └── llm_call_use_case.rs              ← resolve_files + snapshot SignedUrl + retry recovery
+└── infrastructure/files/                  ← implementaciones concretas
+    ├── signed_url_downloader.rs          ← impl SignedUrlFetcher (reqwest)
     ├── anthropic_files_api.rs            ← multipart + beta header
     ├── openai_files_api.rs               ← multipart + purpose=user_data
     ├── gemini_files_api.rs               ← resumable 3-fase (start, chunks 8MB, finalize)
     ├── postgres_file_cache.rs            ← lookup/upsert/invalidate vía sqlx
-    └── file_provider_factory.rs          ← composición por ProviderKind
+    └── file_provider_factory.rs          ← impl FileProviderFactoryPort
 ```
 
-Wiring en producción: el nodo `llm_call` (`dag_engine/infrastructure/nodes/llm.rs`) construye el cache y la file provider, y rutea las entradas con `FileSource::SignedUrl` por `LlmCallUseCase::resolve_files` antes de llamar a `AgentService`.
+**Arquitectura hexagonal estricta**: la capa `application/` no tiene `use crate::llm::infrastructure::*` en producción (las únicas referencias quedan en bloques `#[cfg(test)]` como fixtures). El use case recibe los adapters concretos vía builders:
+
+```rust
+LlmCallUseCase::new(repo)
+    .with_file_cache(Arc::new(postgres_cache))
+    .with_file_provider_factory(Arc::new(FileProviderFactory::new()))
+    .with_signed_url_fetcher(Arc::new(SignedUrlDownloader::new()));
+```
+
+Wiring en producción: el nodo `llm_call` (`dag_engine/infrastructure/nodes/llm.rs`) — que es código de infraestructura — construye los concretos y los pasa a `LlmCallUseCase::resolve_files`.
+
+**Recovery del 404 (`ProviderFileNotFound`)**: el use case toma un snapshot `(document_id → SignedUrl)` antes de la primera resolución. Si el LLM falla con `ProviderFileNotFound { provider_file_id }`:
+1. Invalida la fila del cache.
+2. `reset_uploaded_files_with_id` revierte `Uploaded(bad_id)` → `SignedUrl(orig)` consultando el snapshot.
+3. `resolve_files` corre de nuevo: cache MISS → re-download → re-upload.
+4. Un único retry al LLM.
+
+Si el archivo originalmente vino como `Uploaded` directo (sin SignedUrl), no hay URL para recuperar y el retry no ayuda — best-effort en ese único caso.
 
 ## Deuda técnica y trabajo por hacer
 
@@ -209,17 +231,16 @@ Documento dedicado con lista priorizada, severidad y plan de solución por item:
 
 Resumen ejecutivo:
 
-| Item | Severidad |
-|------|-----------|
-| Retry on `ProviderFileNotFound` no recupera (no-op) | Alta |
-| `last_used_at` no se actualiza en cache hit | Baja |
-| Layer leak: `LlmCallUseCase` importa de `infrastructure` | Media |
-| Filas huérfanas en cache cuando cambian estrategias | Baja |
-| Janitor de archivos huérfanos en proveedores | Media |
-| `ProviderKind::Mock` fallback silencioso en lookup | Baja |
-| Mime malformado clasificado como upload error | Baja |
-| Tests de integración E2E reproducibles (sin signed URLs) | Media |
-| Métricas Prometheus para cache hit-rate | Baja |
-| Cache hit cross-session por `sha256` (YAGNI) | Muy baja |
+| Item | Severidad | Estado |
+|------|-----------|--------|
+| Retry on `ProviderFileNotFound` no recupera | Alta | ✅ Resuelto (snapshot + reset) |
+| `last_used_at` no se actualiza en cache hit | Baja | ✅ Resuelto (UPDATE...RETURNING) |
+| Layer leak: `LlmCallUseCase` importa de `infrastructure` | Media | ✅ Resuelto (puertos `SignedUrlFetcher` + `FileProviderFactoryPort`) |
+| Huérfanos en cache + provider | Media | 🔍 Análisis profundo hecho, implementación pospuesta |
+| `ProviderKind::Mock` fallback silencioso en lookup | Baja | ✅ Resuelto (fail-fast + tracing estructurado) |
+| Mime malformado clasificado como upload error | Baja | ✅ Resuelto (variante `InvalidMimeType`) |
+| Tests de integración E2E reproducibles (sin signed URLs) | Media | Pendiente |
+| Métricas Prometheus para cache hit-rate | Baja | Pendiente |
+| Cache hit cross-session por `sha256` (YAGNI) | Muy baja | Pendiente (descartado por spec) |
 
-**Ningún item es bloqueante.** Ver el doc para detalles, soluciones propuestas y estimaciones.
+**Ningún item pendiente es bloqueante.** Ver el doc para detalles, soluciones propuestas y decisiones requeridas.
