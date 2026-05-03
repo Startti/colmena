@@ -5,7 +5,7 @@
 
 - **RAM**: 2GB mínimo, 4GB recomendado
 - **CPU**: x86_64 o ARM64
-- **Rust**: 1.70+ (recomendado 1.75+)
+- **Rust**: pineado a `1.95.0` vía [`rust-toolchain.toml`](../../rust-toolchain.toml) en la raíz. Si tienes `rustup` instalado, la versión correcta se auto-instala al ejecutar `cargo` por primera vez. Ver [Toolchain de Rust en la guía de Testing](./05_testing.md#-toolchain-de-rust--local-vs-ci).
 - **Python**: 3.8+ (recomendado 3.11+)
 
 ## 🔧 Instalación por Sistema Operativo

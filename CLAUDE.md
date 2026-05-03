@@ -152,6 +152,10 @@ Cuando crees un grafo JSON para probar funcionalidad (LLM tool calling, lazy loa
 - Integration tests: `tests/` (Rust), `python/tests/` (Python)
 - Mocking: `mockall` crate, `MockAdapter` for LLM tests without API calls
 - Test graphs: `tests/graphs/` JSON files
+- **CI vs local**: CI runs `cargo test --verbose` (unit + integration + doctests). `cargo test --lib` only runs unit tests — use `--verbose` before pushing to catch doctest failures.
+- **`#[ignore]` convention**: tests that read required env vars (e.g. `DATABASE_URL`, `TAVILY_API_KEY`) MUST be marked `#[ignore = "requires X — run with \`cargo test -- --ignored\`"]`. Otherwise they panic in CI where `.env` is not available. Run them locally with `source .env && cargo test -- --ignored`.
+- **Rust toolchain**: pinned to `1.95.0` via `rust-toolchain.toml` at repo root. CI workflows use `actions-rust-lang/setup-rust-toolchain@v1` which reads the toml automatically — local and CI are always aligned.
+- Full guide: [docs/developer_guide/05_testing.md](docs/developer_guide/05_testing.md)
 
 ## Conventions
 - **Rust**: PascalCase types, snake_case functions, `///` doc comments on all public items
