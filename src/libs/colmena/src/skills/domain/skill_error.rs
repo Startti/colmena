@@ -40,6 +40,9 @@ pub enum SkillError {
     #[error("path '{0}' is not a directory")]
     NotADirectory(String),
 
+    #[error("path '{0}' has no SKILL.md and contains no skill subdirectories")]
+    EmptyRoot(String),
+
     #[error("too many skills active: {count} exceeds limit of {limit}")]
     TooManySkills { count: usize, limit: usize },
 
@@ -87,5 +90,14 @@ mod tests {
         let s = err.to_string();
         assert!(s.contains("99999"));
         assert!(s.contains("65536"));
+    }
+
+    #[test]
+    fn empty_root_display_contains_path() {
+        let err = SkillError::EmptyRoot("/tmp/skills-cache".to_string());
+        let s = err.to_string();
+        assert!(s.contains("/tmp/skills-cache"));
+        assert!(s.contains("no SKILL.md"));
+        assert!(s.contains("subdirectories"));
     }
 }
