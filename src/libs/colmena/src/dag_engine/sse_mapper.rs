@@ -50,12 +50,12 @@ impl SseMapper {
 
         // Phase 1: state management — open/close text blocks, accumulate tokens
         match event {
-            DagExecutionEvent::LlmToken { node_id, .. } => {
-                if !self.text_block_ids.contains_key(node_id) {
-                    let part_id = format!("txt_{}", Uuid::new_v4());
-                    parts.push(json!({ "type": "text-start", "id": part_id }));
-                    self.text_block_ids.insert(node_id.clone(), part_id);
-                }
+            DagExecutionEvent::LlmToken { node_id, .. }
+                if !self.text_block_ids.contains_key(node_id) =>
+            {
+                let part_id = format!("txt_{}", Uuid::new_v4());
+                parts.push(json!({ "type": "text-start", "id": part_id }));
+                self.text_block_ids.insert(node_id.clone(), part_id);
             }
             DagExecutionEvent::NodeFinish { node_id, .. }
             | DagExecutionEvent::SubgraphNodeFinish { node_id, .. } => {
@@ -79,23 +79,21 @@ impl SseMapper {
             }
             DagExecutionEvent::LlmToolCall {
                 tool_id, tool_name, ..
-            } => {
-                if self.seen_top_tool_ids.insert(tool_id.clone()) {
-                    parts.push(json!({
-                        "type": "tool-input-start",
-                        "toolCallId": tool_id,
-                        "toolName": tool_name
-                    }));
-                }
+            } if self.seen_top_tool_ids.insert(tool_id.clone()) => {
+                parts.push(json!({
+                    "type": "tool-input-start",
+                    "toolCallId": tool_id,
+                    "toolName": tool_name
+                }));
             }
             DagExecutionEvent::SubgraphWrapped { inner } => match inner.as_ref() {
                 DagExecutionEvent::LlmToken { node_id, .. }
-                | DagExecutionEvent::ThinkingToken { node_id, .. } => {
-                    if !self.text_block_ids.contains_key(node_id) {
-                        let part_id = format!("txt_{}", Uuid::new_v4());
-                        parts.push(json!({ "type": "subgraph-text-start", "id": part_id }));
-                        self.text_block_ids.insert(node_id.clone(), part_id);
-                    }
+                | DagExecutionEvent::ThinkingToken { node_id, .. }
+                    if !self.text_block_ids.contains_key(node_id) =>
+                {
+                    let part_id = format!("txt_{}", Uuid::new_v4());
+                    parts.push(json!({ "type": "subgraph-text-start", "id": part_id }));
+                    self.text_block_ids.insert(node_id.clone(), part_id);
                 }
                 DagExecutionEvent::NodeFinish { node_id, .. }
                 | DagExecutionEvent::SubgraphNodeFinish { node_id, .. } => {
@@ -119,14 +117,12 @@ impl SseMapper {
                 }
                 DagExecutionEvent::LlmToolCall {
                     tool_id, tool_name, ..
-                } => {
-                    if self.seen_sub_tool_ids.insert(tool_id.clone()) {
-                        parts.push(json!({
-                            "type": "subgraph-tool-input-start",
-                            "toolCallId": tool_id,
-                            "toolName": tool_name
-                        }));
-                    }
+                } if self.seen_sub_tool_ids.insert(tool_id.clone()) => {
+                    parts.push(json!({
+                        "type": "subgraph-tool-input-start",
+                        "toolCallId": tool_id,
+                        "toolName": tool_name
+                    }));
                 }
                 _ => {}
             },

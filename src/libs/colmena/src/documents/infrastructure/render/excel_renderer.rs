@@ -57,10 +57,7 @@ impl ExcelRenderer {
                     }
                 }
 
-                let vt = cell
-                    .value_type
-                    .clone()
-                    .unwrap_or_else(|| infer_type(&cell.value));
+                let vt = cell.value_type.unwrap_or_else(|| infer_type(&cell.value));
                 write_cell(ws, row, col, &cell.value, vt, &fmt)?;
             }
 

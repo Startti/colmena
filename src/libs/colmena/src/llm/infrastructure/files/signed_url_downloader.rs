@@ -67,9 +67,7 @@ impl SignedUrlDownloader {
             });
         }
 
-        let stream = response
-            .bytes_stream()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+        let stream = response.bytes_stream().map_err(std::io::Error::other);
 
         Ok(Box::pin(stream))
     }

@@ -31,6 +31,7 @@ pub trait NodeRegistryPort: Send + Sync {
 /// su grafo hijo interno. Esto evita la dependencia circular entre
 /// la capa de Nodos y el DagRunUseCase.
 #[async_trait::async_trait]
+#[allow(clippy::too_many_arguments)]
 pub trait SubGraphExecutorPort: Send + Sync {
     /// Ejecuta un subgrafo desde cero.
     async fn run_subgraph(

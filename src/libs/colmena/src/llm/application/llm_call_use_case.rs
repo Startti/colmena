@@ -259,7 +259,7 @@ impl LlmCallUseCase {
         let mut errors_per_file = 0usize;
         let mut resolved: Vec<FileData> = Vec::with_capacity(files.len());
 
-        let drained: Vec<FileData> = files.drain(..).collect();
+        let drained: Vec<FileData> = std::mem::take(files);
         for file in drained {
             match Self::resolve_one(
                 file,
