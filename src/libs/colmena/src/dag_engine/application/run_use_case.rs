@@ -4,7 +4,6 @@ use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::error::DagError;
 use crate::dag_engine::domain::graph::{Edge, Graph};
 use crate::dag_engine::domain::node::NodeInputs;
-use crate::dag_engine::infrastructure::persistence::PostgresSecureValueRepository;
 
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -41,9 +40,8 @@ impl DagRunUseCase {
     /// can be notified when the engine considers a conversation finished.
     ///
     /// **Order matters:** this is a builder-style method (takes `self` and returns `Self`),
-    /// so it must be called AFTER any `with_secure_values*` constructor. Calling one of
-    /// those constructors afterwards produces a fresh instance and will silently drop
-    /// the bus.
+    /// so it must be called AFTER `with_secure_values_and_service`. Calling that
+    /// constructor afterwards produces a fresh instance and will silently drop the bus.
     pub fn with_conversation_lifecycle(
         mut self,
         bus: crate::web::domain::ConversationLifecycleBus,
@@ -52,31 +50,11 @@ impl DagRunUseCase {
         self
     }
 
-    /// Creates a new DagRunUseCase with secure values support (using an existing pool).
-    ///
-    /// Note: this is a fresh constructor — it does not preserve a previously attached
-    /// `ConversationLifecycleBus`. Chain `.with_conversation_lifecycle(...)` after this
-    /// call if you need lifecycle notifications.
-    pub fn with_secure_values(
-        registry: Arc<dyn NodeRegistryPort>,
-        state_repository: Option<Arc<dyn DagStateRepository>>,
-        pool: sqlx::PgPool,
-    ) -> Self {
-        let secure_value_repo = Arc::new(PostgresSecureValueRepository::new(pool));
-        let secure_value_service = Arc::new(SecureValueService::new(secure_value_repo));
-
-        Self {
-            registry,
-            state_repository,
-            secure_value_service: Some(secure_value_service),
-            conversation_lifecycle: None,
-        }
-    }
-
     /// Creates a new DagRunUseCase with a pre-built SecureValueService (shared with the registry).
     ///
-    /// Prefer this over `with_secure_values` when you need the **same service instance** to be
-    /// shared between LlmNode (for tool calling) and DagRunUseCase (for regular node execution).
+    /// Esta es la única vía oficial para inyectar secure values. La aplicación
+    /// no debe tocar `infrastructure/`: el caller construye el adapter
+    /// concreto (`PostgresSecureValueRepository`) y arma el service afuera.
     ///
     /// Note: this is a fresh constructor — it does not preserve a previously attached
     /// `ConversationLifecycleBus`. Chain `.with_conversation_lifecycle(...)` after this
