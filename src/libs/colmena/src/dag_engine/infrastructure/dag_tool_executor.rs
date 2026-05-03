@@ -1009,6 +1009,7 @@ impl ToolExecutor for DagToolExecutor {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // Tests intentionally exercise legacy ToolConfiguration fields for backward-compat coverage.
 mod tests {
     use super::*;
     use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
@@ -1913,13 +1914,13 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // Tests intentionally exercise legacy ToolConfiguration fields for backward-compat coverage.
 mod toolkit_runtime_tests {
     use super::*;
     use crate::dag_engine::domain::node::ExecutableNode;
     use crate::dag_engine::domain::tool_configuration::{SubToolFilter, ToolConfiguration};
     use crate::dag_engine::domain::toolkit_node::ToolkitNode;
     use crate::dag_engine::infrastructure::nodes::echo_toolkit::EchoToolkitNode;
-    use async_trait::async_trait;
     use serde_json::json;
     use std::sync::Arc;
 

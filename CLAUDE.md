@@ -155,6 +155,7 @@ Cuando crees un grafo JSON para probar funcionalidad (LLM tool calling, lazy loa
 - **CI vs local**: CI runs `cargo test --verbose` (unit + integration + doctests). `cargo test --lib` only runs unit tests — use `--verbose` before pushing to catch doctest failures.
 - **`#[ignore]` convention**: tests that read required env vars (e.g. `DATABASE_URL`, `TAVILY_API_KEY`) MUST be marked `#[ignore = "requires X — run with \`cargo test -- --ignored\`"]`. Otherwise they panic in CI where `.env` is not available. Run them locally with `source .env && cargo test -- --ignored`.
 - **Rust toolchain**: pinned to `1.95.0` via `rust-toolchain.toml` at repo root. CI workflows use `actions-rust-lang/setup-rust-toolchain@v1` which reads the toml automatically — local and CI are always aligned.
+- **Deny-warnings**: `Cargo.toml` has `[lints.rust] warnings = "deny"`. Any rustc warning fails the build (unused import, dead code, deprecated API). For tests that intentionally exercise a `#[deprecated]` API (backward-compat coverage), put `#[allow(deprecated)]` on the test module — never on production code.
 - Full guide: [docs/developer_guide/05_testing.md](docs/developer_guide/05_testing.md)
 
 ## Conventions

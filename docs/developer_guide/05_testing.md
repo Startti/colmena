@@ -158,6 +158,31 @@ cargo run --bin dag_engine -- run tests/graphs/external/http_request.json
 
 ---
 
+## ⚠️ Warnings tratados como errores (deny-warnings)
+
+El crate tiene `[lints.rust] warnings = "deny"` en [`Cargo.toml`](../../src/libs/colmena/Cargo.toml). **Cualquier warning de rustc rompe el build**, tanto en local como en CI. Esto previene que warnings se acumulen sin que nadie los note.
+
+**Implicaciones prácticas:**
+- `cargo build` / `cargo test` falla si hay un warning nuevo (unused import, dead code, deprecated API, etc.)
+- El scope es solo nuestro crate — las deps externas pueden tener warnings sin afectar
+- En CI, además, `actions-rust-lang/setup-rust-toolchain@v1` setea `RUSTFLAGS=-D warnings`, redundante pero refuerza el comportamiento
+
+### Patrón para usar API deprecada en tests de backward-compat
+
+Si un test ejercita intencionalmente una API marcada `#[deprecated]` (porque el código real soporta ambos paths viejo/nuevo y queremos cobertura del legacy), usa `#[allow(deprecated)]` a nivel del módulo de test:
+
+```rust
+#[cfg(test)]
+#[allow(deprecated)] // Tests intentionally exercise legacy ToolConfiguration fields for backward-compat coverage.
+mod tests {
+    // tests usando los campos deprecados sin que el build falle
+}
+```
+
+**No uses `#[allow(deprecated)]` en código de producción.** Si el código real depende del API deprecado, hay que migrarlo, no silenciar el warning.
+
+---
+
 ## 🦀 Toolchain de Rust — local vs CI
 
 La versión de Rust está pineada en [`rust-toolchain.toml`](../../rust-toolchain.toml) en la raíz:
