@@ -279,6 +279,16 @@ impl SseMapper {
                 "source": source,
                 "sizeBytes": size_bytes,
             })),
+            DagExecutionEvent::ToolDescribed {
+                node_id,
+                tool_id,
+                tool_name,
+            } => Some(json!({
+                "type": "tool-described",
+                "nodeId": node_id,
+                "toolCallId": tool_id,
+                "toolName": tool_name,
+            })),
             DagExecutionEvent::SubgraphWrapped { inner } => match inner.as_ref() {
                 DagExecutionEvent::NodeStart { node_id, node_type, inputs, config } => {
                     self.node_types.insert(node_id.clone(), node_type.clone());

@@ -93,8 +93,33 @@ pub enum DagExecutionEvent {
         source: String,
         size_bytes: usize,
     },
+    /// Emitted when the synthetic describe_tool reveals a tool's schema.
+    /// Fires alongside llm_tool_call_start/finish so frontends can render a discovery-specific UI.
+    #[serde(rename = "tool_described")]
+    ToolDescribed {
+        node_id: String,
+        tool_id: String,
+        tool_name: String,
+    },
     /// Wraps a DagExecutionEvent emitted from inside a subgraph execution.
     /// The frontend receives these with a "subgraph-" prefix on the event type.
     #[serde(rename = "subgraph_wrapped")]
     SubgraphWrapped { inner: Box<DagExecutionEvent> },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_described_serializes_with_event_tag() {
+        let ev = DagExecutionEvent::ToolDescribed {
+            node_id: "n1".to_string(),
+            tool_id: "call_1".to_string(),
+            tool_name: "search_orders".to_string(),
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["event"], "tool_described");
+        assert_eq!(json["data"]["tool_name"], "search_orders");
+    }
 }

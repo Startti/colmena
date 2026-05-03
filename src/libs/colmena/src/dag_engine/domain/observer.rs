@@ -39,6 +39,12 @@ pub enum NodeEvent {
         source: String, // "builtin" | "path"
         size_bytes: usize,
     },
+    /// Emitted when the synthetic `describe_tool` successfully reveals a tool's schema.
+    /// Fires alongside LlmToolCallStart/Finish so frontends can render a discovery-specific UI.
+    ToolDescribed {
+        tool_id: String,
+        tool_name: String,
+    },
     LlmMessageStart,
     LlmMessageFinish(Option<crate::llm::domain::LlmUsage>),
     /// Streaming token from an internal "thinking" LLM call (planner, critic, reactor, agent subgraphs).
@@ -73,6 +79,20 @@ pub trait ExecutionObserver: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_described_variant_constructible() {
+        let ev = NodeEvent::ToolDescribed {
+            tool_id: "call_1".to_string(),
+            tool_name: "search_orders".to_string(),
+        };
+        match ev {
+            NodeEvent::ToolDescribed { tool_name, .. } => {
+                assert_eq!(tool_name, "search_orders");
+            }
+            _ => panic!("expected ToolDescribed"),
+        }
+    }
 
     #[test]
     fn skill_loaded_variant_constructible() {
