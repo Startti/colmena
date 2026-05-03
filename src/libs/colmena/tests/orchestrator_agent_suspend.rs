@@ -96,6 +96,7 @@ fn single_agent_suspend_graph() -> Graph {
 }
 
 #[tokio::test]
+#[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
 async fn orchestrator_propagates_agent_suspend() {
     let chat = "test_orch_agent_suspend";
     cleanup(chat).await;
@@ -146,6 +147,7 @@ async fn orchestrator_propagates_agent_suspend() {
 }
 
 #[tokio::test]
+#[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
 async fn orchestrator_resumes_agent_suspend_end_to_end() {
     let chat = "test_orch_resume_e2e";
     cleanup(chat).await;
@@ -209,6 +211,7 @@ async fn orchestrator_resumes_agent_suspend_end_to_end() {
 /// subgraph → ask_user (suspend). Tests that the resume cascade unwinds 3 levels in one
 /// invocation with just --agent-session-id and --answer.
 #[tokio::test]
+#[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
 async fn nested_orchestrators_suspend_cascades_3_levels() {
     let chat = "test_nested_3_levels";
     cleanup(chat).await;

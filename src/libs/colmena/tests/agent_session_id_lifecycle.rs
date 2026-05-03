@@ -36,6 +36,7 @@ async fn cleanup(chat: &str) {
 }
 
 #[tokio::test]
+#[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
 async fn first_run_under_new_chat_creates_root_with_agent_id() {
     let chat = "test_first_run";
     cleanup(chat).await;
@@ -65,6 +66,7 @@ async fn first_run_under_new_chat_creates_root_with_agent_id() {
 }
 
 #[tokio::test]
+#[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
 async fn second_run_same_chat_after_completed_creates_new_run() {
     let chat = "test_second_run";
     cleanup(chat).await;
@@ -101,6 +103,7 @@ async fn second_run_same_chat_after_completed_creates_new_run() {
 }
 
 #[tokio::test]
+#[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
 async fn conflict_between_session_id_and_agent_session_id_errors() {
     let chat_a = "test_conflict_chat_a";
     let chat_b = "test_conflict_chat_b";

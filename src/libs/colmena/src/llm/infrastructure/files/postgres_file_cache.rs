@@ -252,6 +252,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
     async fn lookup_miss_returns_none() {
         with_cache(|cache, prefix| async move {
             let r = cache
@@ -264,6 +265,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
     async fn upsert_then_lookup_returns_entry() {
         with_cache(|cache, prefix| async move {
             let doc_id = format!("{}1", prefix);
@@ -280,6 +282,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
     async fn upsert_twice_updates_and_touches_last_used_at() {
         with_cache(|cache, prefix| async move {
             let doc_id = format!("{}2", prefix);
@@ -309,6 +312,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
     async fn lookup_advances_last_used_at_on_cache_hit() {
         with_cache(|cache, prefix| async move {
             let doc_id = format!("{}touch", prefix);
@@ -365,6 +369,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
     async fn invalidate_removes() {
         with_cache(|cache, prefix| async move {
             let doc_id = format!("{}3", prefix);

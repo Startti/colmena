@@ -11,6 +11,7 @@ fn database_url() -> Option<String> {
 }
 
 #[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
 async fn engine_boots_with_pinned_pool_and_migrates() {
     let Some(db) = database_url() else {
         eprintln!("skip: TEST_DATABASE_URL not set");
@@ -35,6 +36,7 @@ async fn engine_boots_with_pinned_pool_and_migrates() {
 }
 
 #[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
 async fn shutdown_is_idempotent() {
     let Some(db) = database_url() else {
         return;

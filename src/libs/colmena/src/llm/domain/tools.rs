@@ -9,28 +9,24 @@ use std::collections::HashMap;
 /// # Example
 /// ```rust
 /// use colmena::llm::domain::tools::{ToolDefinition, ToolParameters, ParameterProperty};
-/// use std::collections::HashMap;
 ///
-/// let mut properties = HashMap::new();
-/// properties.insert(
-///     "a".to_string(),
-///     ParameterProperty {
-///         property_type: "number".to_string(),
-///         description: "First number".to_string(),
-///         enum_values: None,
-///         pattern: None,
-///     }
+/// let params = ToolParameters::new()
+///     .with_property(
+///         "a".to_string(),
+///         ParameterProperty::new("number".to_string(), "First number".to_string()),
+///     )
+///     .with_property(
+///         "b".to_string(),
+///         ParameterProperty::new("number".to_string(), "Second number".to_string()),
+///     )
+///     .with_required("a".to_string())
+///     .with_required("b".to_string());
+///
+/// let tool = ToolDefinition::new(
+///     "add".to_string(),
+///     "Add two numbers together".to_string(),
+///     params,
 /// );
-///
-/// let tool = ToolDefinition {
-///     name: "add".to_string(),
-///     description: "Add two numbers together".to_string(),
-///     parameters: ToolParameters {
-///         schema_type: "object".to_string(),
-///         properties,
-///         required: vec!["a".to_string(), "b".to_string()],
-///     },
-/// };
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolDefinition {

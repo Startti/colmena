@@ -28,6 +28,7 @@ fn fake_state(
 }
 
 #[tokio::test]
+#[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
 async fn finds_topmost_in_three_level_chain() {
     dotenvy::dotenv().ok();
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
@@ -83,6 +84,7 @@ async fn finds_topmost_in_three_level_chain() {
 }
 
 #[tokio::test]
+#[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
 async fn returns_none_when_no_suspended_run() {
     dotenvy::dotenv().ok();
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
