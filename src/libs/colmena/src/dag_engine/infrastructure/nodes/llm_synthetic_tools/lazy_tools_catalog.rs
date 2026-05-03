@@ -1,19 +1,51 @@
 //! Catalog management for lazy tool loading. Pure data types and pure functions
 //! over conversation messages — no I/O, no provider awareness.
 
-use crate::llm::domain::tools::{ToolDefinition, ToolParameters};
-use std::collections::HashMap;
+use crate::llm::domain::tools::{ParameterProperty, ToolDefinition, ToolParameters};
+use crate::llm::domain::LlmMessage;
+use std::collections::{HashMap, HashSet};
 
 pub struct CatalogEntry {
     pub name: String,
     pub summary: String,
 }
 
+/// Args shape of a `describe_tool` call. Only `name` is used.
+#[derive(serde::Deserialize)]
+struct DescribeArgs {
+    name: String,
+}
+
+/// Compute the set of tool names that count as "already discovered" in this
+/// session, given the current message history and the tool catalog. A name
+/// enters the set when:
+/// - rule (1) the assistant called `describe_tool` with `name = X`, OR
+/// - rule (2) the assistant directly called a tool whose name matches an entry in `catalog`.
+///
+/// Rule (2) handles three edge cases:
+///   - aggressive truncation that drops the original `describe_tool` call
+///   - sessions that switched from eager mode to lazy mode mid-flight
+///   - manually seeded conversation histories
 pub fn reconstruct_discovered_set(
-    _messages: &[crate::llm::domain::LlmMessage],
-    _catalog: &[CatalogEntry],
-) -> std::collections::HashSet<String> {
-    std::collections::HashSet::new()
+    messages: &[LlmMessage],
+    catalog: &[CatalogEntry],
+) -> HashSet<String> {
+    let catalog_names: HashSet<&str> = catalog.iter().map(|e| e.name.as_str()).collect();
+    let mut set = HashSet::new();
+    for msg in messages {
+        if let Some(calls) = msg.tool_calls() {
+            for tc in calls {
+                if tc.function.name == super::DESCRIBE_TOOL_NAME {
+                    if let Ok(args) = serde_json::from_str::<DescribeArgs>(&tc.function.arguments) {
+                        set.insert(args.name);
+                    }
+                } else if catalog_names.contains(tc.function.name.as_str()) {
+                    set.insert(tc.function.name.clone());
+                }
+            }
+        }
+    }
+    set
 }
 
 /// Maximum length of a catalog summary entry, in chars.
@@ -98,5 +130,82 @@ mod tests {
     fn returns_empty_string_when_neither_summary_nor_description() {
         let s = summary_for_catalog(None, "");
         assert_eq!(s, "");
+    }
+
+    use crate::llm::domain::{FunctionCall, ToolCall};
+
+    fn entry(name: &str) -> CatalogEntry {
+        CatalogEntry {
+            name: name.to_string(),
+            summary: format!("desc of {}", name),
+        }
+    }
+
+    fn assistant_with_call(tool_name: &str, args_json: &str) -> LlmMessage {
+        let tc = ToolCall::new(
+            "call_x".to_string(),
+            FunctionCall::new(tool_name.to_string(), args_json.to_string()),
+        );
+        LlmMessage::assistant_with_tool_calls("".to_string(), vec![tc]).unwrap()
+    }
+
+    #[test]
+    fn empty_history_yields_empty_set() {
+        let set = reconstruct_discovered_set(&[], &[entry("a")]);
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn rule1_describe_tool_call_adds_named_tool() {
+        let msg = assistant_with_call(
+            super::super::DESCRIBE_TOOL_NAME,
+            r#"{"name":"search_orders"}"#,
+        );
+        let set = reconstruct_discovered_set(&[msg], &[entry("search_orders")]);
+        assert!(set.contains("search_orders"));
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn rule2_direct_call_to_cataloged_tool_adds_it() {
+        let msg = assistant_with_call("search_orders", r#"{"start":"2026-01-01"}"#);
+        let set = reconstruct_discovered_set(&[msg], &[entry("search_orders")]);
+        assert!(set.contains("search_orders"));
+    }
+
+    #[test]
+    fn rule2_ignores_calls_to_uncataloged_tools() {
+        let msg = assistant_with_call("legacy_tool", r#"{}"#);
+        let set = reconstruct_discovered_set(&[msg], &[entry("search_orders")]);
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn rule1_records_unknown_describe_tool_target() {
+        // describe_tool faithfully records whatever name was passed; a later
+        // catalog mismatch is the rebuild step's responsibility, not ours.
+        let msg = assistant_with_call(
+            super::super::DESCRIBE_TOOL_NAME,
+            r#"{"name":"deleted_tool"}"#,
+        );
+        let set = reconstruct_discovered_set(&[msg], &[entry("search_orders")]);
+        assert!(set.contains("deleted_tool"));
+    }
+
+    #[test]
+    fn malformed_describe_tool_args_are_skipped_silently() {
+        let msg = assistant_with_call(super::super::DESCRIBE_TOOL_NAME, r#"not-json"#);
+        let set = reconstruct_discovered_set(&[msg], &[entry("search_orders")]);
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn unions_rule1_and_rule2_across_messages() {
+        let m1 = assistant_with_call(super::super::DESCRIBE_TOOL_NAME, r#"{"name":"a"}"#);
+        let m2 = assistant_with_call("b", r#"{}"#);
+        let set = reconstruct_discovered_set(&[m1, m2], &[entry("a"), entry("b")]);
+        assert!(set.contains("a"));
+        assert!(set.contains("b"));
+        assert_eq!(set.len(), 2);
     }
 }
