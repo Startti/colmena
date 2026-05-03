@@ -1094,6 +1094,13 @@
           "description": "Controls which tools are available for the LLM to call. Can be: (1) '*' (wildcard string) — enables ALL tools defined in tool_configurations, (2) An array of specific tool names — enables only those tools, (3) A single tool name string — enables just that one tool, (4) Not specified — no tools available (simple prompt-response mode). The LLM decides when and which tools to call based on the prompt and tool descriptions.",
           "example": ["search_flights", "get_weather"]
         },
+        "lazy_tool_loading": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "When true, tools in tool_configurations are exposed via a lightweight catalog inside the synthetic describe_tool; full schemas are revealed on demand. Tools with `eager: true` in their ToolConfiguration remain always-on. See developer_guide/29_lazy_tool_loading.md.",
+          "example": true
+        },
         "tool_configurations": {
           "type": "object",
           "required": false,

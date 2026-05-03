@@ -106,6 +106,10 @@ Level 3 (Default): Environment variables o valores por defecto
 
 The LLM node supports an optional `skills` config field that exposes built-in and/or user-provided markdown skill packages via a synthetic `load_skill` tool. The LLM decides at runtime which skills to activate. See [24_skills.md](24_skills.md) for the full guide.
 
+#### `lazy_tool_loading` (on-demand tool schemas)
+
+Boolean optional flag (`true | false`, default `false`). When enabled, tools in `tool_configurations` are exposed via a lightweight catalog inside the synthetic `describe_tool`; full schemas are revealed on demand and the discovered tool becomes callable on the next turn. Tools with `eager: true` remain always-on. See [29_lazy_tool_loading.md](29_lazy_tool_loading.md) for the full guide.
+
 #### `instructions`
 - **Tipo:** `string` (opcional)
 - **Fuente:** `config.instructions`
