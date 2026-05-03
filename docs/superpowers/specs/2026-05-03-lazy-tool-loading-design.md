@@ -30,7 +30,7 @@ tools[] = [describe_tool if any pending]   // synthetic loader
 
 The `describe_tool` interception happens in `DagToolExecutor::execute`, before the node-type lookup, exactly mirroring how `load_skill` is intercepted. An observer callback notifies `LlmNode` to insert the discovered name into `discovered_set` and emit an SSE event.
 
-Backwards compatibility is total: when `tool_loading` is absent or set to `"eager"`, the engine behaves identically to today. The lazy path is opt-in at the `llm_call` level.
+Backwards compatibility is total: when `lazy_tool_loading` is absent or `false`, the engine behaves identically to today. The lazy path is opt-in at the `llm_call` level.
 
 ## Configuration schema
 
@@ -42,14 +42,14 @@ One new optional field:
 {
   "type": "llm_call",
   "config": {
-    "tool_loading": "lazy",       // absent | "eager" | "lazy"
+    "lazy_tool_loading": true,    // absent | false | true
     "tool_configurations": { ... }
   }
 }
 ```
 
-- Absent or `"eager"` → current behavior. `describe_tool` is not registered. `discovered_set` does not exist.
-- `"lazy"` → activates the feature.
+- Absent or `false` → current behavior. `describe_tool` is not registered. `discovered_set` does not exist.
+- `true` → activates the feature.
 
 ### `ToolConfiguration`
 
@@ -68,16 +68,16 @@ Two new fields, both optional:
 ```
 
 - **`summary`** (optional, string) — used in the catalog inside `describe_tool`'s description. Must be ≤ 200 chars; longer values trigger a warning at graph load and are truncated.
-- **`eager`** (optional, boolean, default `false`) — only meaningful when `tool_loading: "lazy"`. A tool with `eager: true` is registered with its full schema in every request and does **not** appear in the `describe_tool` catalog. Use for tools called in (almost) every turn.
+- **`eager`** (optional, boolean, default `false`) — only meaningful when `lazy_tool_loading: true`. A tool with `eager: true` is registered with its full schema in every request and does **not** appear in the `describe_tool` catalog. Use for tools called in (almost) every turn.
 
 ### Validation rules at graph load
 
 | Condition | Action |
 |-----------|--------|
-| `tool_loading: "lazy"` and `tool_configurations` empty | Warning. `describe_tool` is not injected; lazy mode silently no-ops. |
+| `lazy_tool_loading: true` and `tool_configurations` empty | Warning. `describe_tool` is not injected; lazy mode silently no-ops. |
 | `summary` > 200 chars | Warning. Truncated to 200 chars (word boundary). |
 | `summary` absent | Fallback: first ~120 chars of `description`, cut on word boundary. |
-| `eager: true` without `tool_loading: "lazy"` | Silently ignored. Flag has no effect outside lazy mode. |
+| `eager: true` without `lazy_tool_loading: true` | Silently ignored. Flag has no effect outside lazy mode. |
 
 `enabled_tools` continues to work unchanged: it filters which tool configurations participate. Tools filtered out by `enabled_tools` enter neither the catalog nor the eager list.
 
@@ -167,7 +167,7 @@ The `enum` in the `name` parameter excludes already-discovered tools, so the LLM
 The `LlmNode` already rebuilds the request on every iteration of the ReAct loop in `AgentService`. The change is local to `tools[]` construction:
 
 ```rust
-let tools = if tool_loading == ToolLoading::Lazy {
+let tools = if lazy_tool_loading {
     let pending: Vec<&CatalogEntry> = catalog.iter()
         .filter(|e| !discovered_set.contains(&e.name))
         .collect();
@@ -191,18 +191,45 @@ let tools = if tool_loading == ToolLoading::Lazy {
 
 ### Persistence with memory
 
-When the `llm_call` has `session_id` + `connection_url`, the conversation history is loaded at the start of the call. Reconstruction of `discovered_set` is a derived view over that history:
+When the `llm_call` has `session_id` + `connection_url`, the conversation history is loaded at the start of the call. Reconstruction of `discovered_set` is a derived view over that history — no new database schema:
 
 ```rust
-let discovered_set: HashSet<String> = messages.iter()
-    .flat_map(|msg| msg.tool_calls.iter())
-    .filter(|tc| tc.tool_name == DESCRIBE_TOOL_NAME)
-    .filter_map(|tc| serde_json::from_str::<DescribeArgs>(&tc.arguments).ok())
-    .map(|args| args.name)
-    .collect();
+fn reconstruct_discovered_set(
+    messages: &[Message],
+    catalog: &[CatalogEntry],
+) -> HashSet<String> {
+    let catalog_names: HashSet<&str> =
+        catalog.iter().map(|e| e.name.as_str()).collect();
+    let mut set = HashSet::new();
+    for msg in messages {
+        for tc in &msg.tool_calls {
+            // (1) describe_tool calls reveal a tool by name
+            if tc.tool_name == DESCRIBE_TOOL_NAME {
+                if let Ok(args) = serde_json::from_str::<DescribeArgs>(&tc.arguments) {
+                    set.insert(args.name);
+                }
+            }
+            // (2) past direct calls to a still-cataloged tool count as discovered
+            else if catalog_names.contains(tc.tool_name.as_str()) {
+                set.insert(tc.tool_name.clone());
+            }
+        }
+    }
+    set
+}
 ```
 
-No new database schema. If the conversation is rolled (truncation policy), tools that fall out of the visible window leave `discovered_set` and the LLM re-discovers them naturally the next time it needs them.
+**Why we scan both `describe_tool` calls AND direct tool calls.** The naive version (only describe_tool calls) breaks in three scenarios where the LLM has already used a tool in the past but the original `describe_tool` call is no longer visible:
+
+1. **Truncation / rolling window**: an older `describe_tool` call gets evicted while a newer direct call to the same tool survives.
+2. **Config change between sessions**: the session began with `lazy_tool_loading: false`, so the LLM called the tool directly without ever needing `describe_tool`. The flag was later flipped to `true`.
+3. **Manually seeded conversation history**: external code or imports pre-populate the history with direct tool calls.
+
+In any of these, the LLM looking at its own history correctly concludes "I already used this tool" and tries to call it directly. Without rule (2), the tool would not be in `tools[]` and the provider would reject the call as "unknown tool", wasting a turn. With rule (2), any tool the model has previously interacted with — by either path — becomes discovered again.
+
+The `catalog_names` filter prevents stale entries: if a tool was renamed or removed from `tool_configurations` between sessions, its old name will not be in the current catalog and is excluded from the set. Only tools that still exist in the current configuration are eligible to be reconstructed.
+
+If the conversation is rolled aggressively enough that *both* the `describe_tool` call and any direct invocations fall out of the visible window, the tool leaves `discovered_set` and the LLM re-discovers it via `describe_tool` the next time it needs it — natural and desirable.
 
 ### Edge case: same-turn discover-and-call
 
@@ -246,7 +273,7 @@ Frontends can render this as an intermediate step ("Discovering tool: search_ord
 }
 ```
 
-Present only when `tool_loading: "lazy"` and at least one tool was discovered. Plain array of names in discovery order. `load_count` is not tracked because the `enum` makes `describe_tool` calls effectively unique per name within a session.
+Present only when `lazy_tool_loading: true` and at least one tool was discovered. Plain array of names in discovery order. `load_count` is not tracked because the `enum` makes `describe_tool` calls effectively unique per name within a session.
 
 ## Internal architecture: shared infrastructure with skills
 
@@ -276,7 +303,7 @@ Rationale for keeping API separate (rejecting unified loader): skills produce te
 - Reconstruction: build a conversation with prior `describe_tool` calls, instantiate a fresh `LlmNode`, assert `discovered_set` matches.
 
 **E2E:**
-- `tests/graphs/agents/tools_lazy_basic.json` — `tool_loading: "lazy"` with 3 tools (1 eager, 2 lazy). Prompt that only triggers one of the lazy tools. Verify SSE stream contains `tool-described` for that one tool only, and final summary has `tools_discovered: ["..."]`.
+- `tests/graphs/agents/tools_lazy_basic.json` — `lazy_tool_loading: true` with 3 tools (1 eager, 2 lazy). Prompt that only triggers one of the lazy tools. Verify SSE stream contains `tool-described` for that one tool only, and final summary has `tools_discovered: ["..."]`.
 
 ## Errors and validation summary
 
@@ -284,7 +311,7 @@ Recapped from earlier sections, all in one table for cross-reference:
 
 | Case | Severity | Action |
 |------|----------|--------|
-| `tool_loading: "lazy"` with empty `tool_configurations` | Warning | Lazy mode no-ops; `describe_tool` not injected. |
+| `lazy_tool_loading: true` with empty `tool_configurations` | Warning | Lazy mode no-ops; `describe_tool` not injected. |
 | `summary` > 200 chars | Warning | Truncate at 200 chars on word boundary. |
 | `summary` absent | Info (no log) | Fallback to first ~120 chars of `description`. |
 | `eager: true` without lazy mode | Info (no log) | Flag ignored. |
