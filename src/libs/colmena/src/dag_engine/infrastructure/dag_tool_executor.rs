@@ -1113,6 +1113,8 @@ mod tests {
                 node_schema: None,
                 node_config: None,
                 expose_sub_tools: None,
+                summary: None,
+                eager: false,
             },
         );
 
@@ -1155,6 +1157,8 @@ mod tests {
                 node_schema: None,
                 node_config: None,
                 expose_sub_tools: None,
+                summary: None,
+                eager: false,
             },
         );
 
@@ -1198,6 +1202,8 @@ mod tests {
                 node_schema: None,
                 node_config: None,
                 expose_sub_tools: None,
+                summary: None,
+                eager: false,
             },
         );
 
@@ -1245,6 +1251,8 @@ mod tests {
                 field_mapping: Some(field_mapping),
                 node_config: None,
                 expose_sub_tools: None,
+                summary: None,
+                eager: false,
             },
         );
 
@@ -1298,6 +1306,8 @@ mod tests {
                 field_mapping: Some(field_mapping),
                 node_config: None,
                 expose_sub_tools: None,
+                summary: None,
+                eager: false,
             },
         );
 
@@ -1348,6 +1358,8 @@ mod tests {
                 field_mapping: Some(field_mapping),
                 node_config: None,
                 expose_sub_tools: None,
+                summary: None,
+                eager: false,
             },
         );
 
@@ -1395,6 +1407,8 @@ mod tests {
                 node_schema: None,
                 node_config: None,
                 expose_sub_tools: None,
+                summary: None,
+                eager: false,
             },
         );
 
@@ -1451,6 +1465,8 @@ mod tests {
                 node_schema: None,
                 node_config: None,
                 expose_sub_tools: None,
+                summary: None,
+                eager: false,
             },
         );
 
@@ -1519,6 +1535,8 @@ mod tests {
                 node_schema: None,
                 node_config: None,
                 expose_sub_tools: None,
+                summary: None,
+                eager: false,
             },
         );
 
@@ -1575,6 +1593,8 @@ mod tests {
                 node_schema: None,
                 node_config: None,
                 expose_sub_tools: None,
+                summary: None,
+                eager: false,
             },
         );
 
@@ -1639,6 +1659,8 @@ mod tests {
                 node_schema: None,
                 node_config: None,
                 expose_sub_tools: None,
+                summary: None,
+                eager: false,
             },
         );
 
@@ -1739,6 +1761,8 @@ mod tests {
                 field_mapping: Some(field_mapping),
                 node_config: None,
                 expose_sub_tools: None,
+                summary: None,
+                eager: false,
             },
         );
 
@@ -1826,6 +1850,8 @@ mod toolkit_runtime_tests {
                 node_schema: None,
                 node_config: Some(json!({})),
                 expose_sub_tools: Some(SubToolFilter::all()),
+                summary: None,
+                eager: false,
             },
         );
         DagToolExecutor::new(registry, configs)
@@ -1907,6 +1933,8 @@ mod toolkit_runtime_tests {
                 node_schema: None,
                 node_config: None,
                 expose_sub_tools: Some(SubToolFilter::List(vec!["echo".to_string()])),
+                summary: None,
+                eager: false,
             },
         );
         let exec = DagToolExecutor::new(registry, configs);

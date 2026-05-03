@@ -171,6 +171,18 @@ pub struct ToolConfiguration {
     /// is treated as a toolkit entry and the generator expands it into N ToolDefinitions.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub expose_sub_tools: Option<SubToolFilter>,
+
+    /// Optional short catalog entry shown when this tool is exposed via the
+    /// lazy-loading catalog. ≤ 200 chars; longer values are truncated with a warning.
+    /// Ignored when `lazy_tool_loading` is disabled.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub summary: Option<String>,
+
+    /// When `lazy_tool_loading` is enabled on the parent llm_call, an `eager: true`
+    /// tool is registered in every request with its full schema and does NOT appear
+    /// in the `describe_tool` catalog. No effect when lazy_tool_loading is disabled.
+    #[serde(default)]
+    pub eager: bool,
 }
 
 impl ToolConfiguration {
@@ -865,5 +877,31 @@ mod tests {
             parsed.param_to_container.get("x_request_id"),
             Some(&"headers".to_string())
         );
+    }
+
+    #[test]
+    fn deserializes_summary_and_eager_when_present() {
+        let json = serde_json::json!({
+            "name": "search_orders",
+            "description": "Search the orders table",
+            "node_type": "sql_query",
+            "summary": "Find orders. Use when user asks about purchases.",
+            "eager": true
+        });
+        let cfg: ToolConfiguration = serde_json::from_value(json).unwrap();
+        assert_eq!(cfg.summary.as_deref(), Some("Find orders. Use when user asks about purchases."));
+        assert!(cfg.eager);
+    }
+
+    #[test]
+    fn defaults_summary_to_none_and_eager_to_false() {
+        let json = serde_json::json!({
+            "name": "send_email",
+            "description": "Send email",
+            "node_type": "http_request"
+        });
+        let cfg: ToolConfiguration = serde_json::from_value(json).unwrap();
+        assert!(cfg.summary.is_none());
+        assert!(!cfg.eager);
     }
 }
