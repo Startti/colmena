@@ -88,8 +88,16 @@ impl FilesystemSkillRepository {
                         source: e,
                     })?;
                     let sub = entry.path();
-                    if sub.is_dir() && sub.join("SKILL.md").exists() {
-                        Self::load_skill_dir(&sub, &mut skills)?;
+                    // Resolve symlinks and confirm the child is still inside an allowed root.
+                    // Children that fail to canonicalize, escape the allowed set, or lack a
+                    // SKILL.md are silently skipped — only present, in-tree skill directories
+                    // count toward `found`.
+                    let Ok(sub_canonical) = sub.canonicalize() else { continue };
+                    if !allowed.iter().any(|root| sub_canonical.starts_with(root)) {
+                        continue;
+                    }
+                    if sub_canonical.is_dir() && sub_canonical.join("SKILL.md").exists() {
+                        Self::load_skill_dir(&sub_canonical, &mut skills)?;
                         found += 1;
                     }
                 }
@@ -580,6 +588,43 @@ mod tests {
         assert!(names.contains("ground"));
         assert!(names.contains("user-skill"));
         assert_eq!(names.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn from_paths_root_scan_skips_symlinked_child_outside_allowed() {
+        // Build the layout:
+        //   <root_outside>/leaked/SKILL.md     (NOT inside the allowed scan root)
+        //   <scan_root>/legit/SKILL.md         (a normal child, valid)
+        //   <scan_root>/escape -> <root_outside>/leaked   (symlink that escapes)
+        let outside = tempfile::tempdir().unwrap();
+        let leaked = outside.path().join("leaked");
+        std::fs::create_dir_all(&leaked).unwrap();
+        std::fs::write(
+            leaked.join("SKILL.md"),
+            "---\nname: leaked\ndescription: x\n---\nbody\n",
+        )
+        .unwrap();
+
+        let scan = tempfile::tempdir().unwrap();
+        let legit = scan.path().join("legit");
+        std::fs::create_dir_all(&legit).unwrap();
+        std::fs::write(
+            legit.join("SKILL.md"),
+            "---\nname: legit\ndescription: x\n---\nbody\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&leaked, scan.path().join("escape")).unwrap();
+
+        // Allowed roots: only the scan dir. The symlink's target resolves outside.
+        let repo = FilesystemSkillRepository::from_paths(
+            &[scan.path().to_string_lossy().into_owned()],
+            scan.path(),
+            &[],
+        )
+        .expect("scan must succeed and silently skip the symlink that escapes");
+        let names: Vec<String> = repo.list_available().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, vec!["legit".to_string()]);
     }
 
     #[test]
