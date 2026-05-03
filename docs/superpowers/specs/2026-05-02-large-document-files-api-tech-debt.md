@@ -18,7 +18,7 @@ Esta tabla agrupa el trabajo pendiente y la deuda registrada durante la implemen
 | 4 | Filas huérfanas en cache cuando se cambian estrategias | Baja | No | 1 día (con limpieza retroactiva) |
 | 5 | Janitor de archivos huérfanos en proveedores | Media | No | 2-3 días |
 | 6 | ~~`ProviderKind::Mock` fallback silencioso en `PostgresFileCache::lookup`~~ ✅ Resuelto | Baja | No | 30 min |
-| 7 | Error de mime malformado clasificado como `FileApiUploadFailed` | Baja | No | 1 hora |
+| 7 | ~~Error de mime malformado clasificado como `FileApiUploadFailed`~~ ✅ Resuelto | Baja | No | 1 hora |
 | 8 | Tests de integración E2E reproducibles (sin signed URLs) | Media | No | 2 días |
 | 9 | Métricas/observabilidad (Prometheus) para cache hit-rate | Baja | No | 1 día |
 | 10 | Cache hit cross-session por `sha256` (sin coordinación con emisor) | Muy baja | No (YAGNI hasta ver volumen) | 3-5 días |
@@ -215,30 +215,34 @@ Filas con provider string corrupto se devolvían como `ProviderKind::Mock`. El `
 
 ---
 
-## 7. Mime malformado clasificado como `FileApiUploadFailed`
+## 7. Mime malformado clasificado como `FileApiUploadFailed` ✅ RESUELTO
 
-**Ubicación**: los 3 adapters Files API (Anthropic, OpenAI, Gemini).
+**Ubicación**: adapters de Anthropic y OpenAI Files API (Gemini no aplica — no hace pre-validación local del mime, lo manda como header HTTP).
 
-### Síntoma
+### Síntoma original
 
-Si `Part::stream(body).mime_str(mime_type)` falla porque el mime es inválido, el error se mapea a:
+`Part::stream(body).mime_str(mime_type)` fallaba cuando el mime era inválido y se mapeaba a:
 
 ```rust
 LlmError::FileApiUploadFailed { provider, message: "precondition: invalid mime '...': ..." }
 ```
 
-Pero esto es una violación de precondición del caller, no un error de upload (no se hizo HTTP call siquiera). Mezclarlos confunde retry policies.
+Pero esto era violación de precondición del caller (mime mal formado), no error de upload — ni siquiera salió el HTTP. La mezcla confundía retry policies.
 
-### Solución
+### Solución implementada
 
-Agregar variante específica:
+1. **Nueva variante** `LlmError::InvalidMimeType { mime: String, message: String }`.
+2. **Anthropic adapter** ([anthropic_files_api.rs](src/libs/colmena/src/llm/infrastructure/files/anthropic_files_api.rs)) y **OpenAI adapter** ([openai_files_api.rs](src/libs/colmena/src/llm/infrastructure/files/openai_files_api.rs)) ahora mapean el error de `mime_str` a `InvalidMimeType` con el mime original y el mensaje detallado del parser.
+3. **Gemini** no requiere cambio: pasa el mime como header `X-Goog-Upload-Header-Content-Type` directamente sin validación local — si es inválido, el server lo rechaza con 400 (que ya es `FileApiUploadFailed`, correcto en ese caso porque sí fue HTTP failure).
 
-```rust
-#[error("invalid mime type '{mime}': {message}")]
-InvalidMimeType { mime: String, message: String },
-```
+### Tests
 
-Y mapear en los 3 adapters. Mantener el prefijo `precondition:` por compatibilidad de logs antiguos.
+- `anthropic_files_api::tests::upload_classifies_invalid_mime_as_invalid_mime_type`: pasa `"not a real mime"` a `upload_streaming`, verifica `LlmError::InvalidMimeType { mime: "not a real mime", .. }`. No necesita servidor: el error fires antes de cualquier HTTP.
+- `openai_files_api::tests::upload_classifies_invalid_mime_as_invalid_mime_type`: idéntico para OpenAI.
+
+### Follow-up opcional
+
+Validar el mime también en `parse_file_entries` del nodo `llm_call` para fallar aún más temprano (en parse JSON, no en upload). No es crítico — la nueva variante ya distingue el error correctamente en cualquier path.
 
 ---
 

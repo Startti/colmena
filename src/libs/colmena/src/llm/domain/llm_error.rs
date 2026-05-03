@@ -94,6 +94,9 @@ pub enum LlmError {
     #[error("file upload to {provider} Files API failed: {message}")]
     FileApiUploadFailed { provider: String, message: String },
 
+    #[error("invalid mime type '{mime}': {message}")]
+    InvalidMimeType { mime: String, message: String },
+
     #[error("provider rejected file with id {provider_file_id}: not found")]
     ProviderFileNotFound { provider_file_id: String },
 

@@ -71,12 +71,15 @@ impl FileProviderRepository for AnthropicFilesApiAdapter {
         filename: &str,
     ) -> Result<ProviderFileRef, LlmError> {
         let body = Body::wrap_stream(stream);
+        // Falla de `mime_str` es violación de precondición del caller (mime
+        // string mal formado), no error de upload — clasificarla como
+        // `InvalidMimeType` permite que retry policies la distingan.
         let part = Part::stream(body)
             .file_name(filename.to_string())
             .mime_str(mime_type)
-            .map_err(|e| LlmError::FileApiUploadFailed {
-                provider: "anthropic".into(),
-                message: format!("precondition: invalid mime '{}': {}", mime_type, e),
+            .map_err(|e| LlmError::InvalidMimeType {
+                mime: mime_type.to_string(),
+                message: e.to_string(),
             })?;
 
         let form = Form::new().part("file", part);
@@ -193,5 +196,25 @@ mod tests {
     fn ttl_is_none() {
         let a = AnthropicFilesApiAdapter::new("k".into());
         assert!(a.ttl().is_none());
+    }
+
+    #[tokio::test]
+    async fn upload_classifies_invalid_mime_as_invalid_mime_type() {
+        // No need to start a server: the error fires in `mime_str` before
+        // any HTTP traffic.
+        let adapter = AnthropicFilesApiAdapter::with_base_url(
+            "k".into(),
+            "http://example.invalid".into(),
+        );
+        let err = adapter
+            .upload_streaming(fake_stream(b"data"), "not a real mime", "x.pdf")
+            .await
+            .unwrap_err();
+        match err {
+            LlmError::InvalidMimeType { mime, .. } => {
+                assert_eq!(mime, "not a real mime");
+            }
+            other => panic!("expected InvalidMimeType, got {:?}", other),
+        }
     }
 }

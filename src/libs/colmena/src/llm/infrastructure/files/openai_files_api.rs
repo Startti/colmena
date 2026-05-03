@@ -67,12 +67,14 @@ impl FileProviderRepository for OpenAiFilesApiAdapter {
         filename: &str,
     ) -> Result<ProviderFileRef, LlmError> {
         let body = Body::wrap_stream(stream);
+        // Mismo razonamiento que en `AnthropicFilesApiAdapter`: precondición
+        // del caller (mime mal formado), no falla de upload.
         let file_part = Part::stream(body)
             .file_name(filename.to_string())
             .mime_str(mime_type)
-            .map_err(|e| LlmError::FileApiUploadFailed {
-                provider: "openai".into(),
-                message: format!("precondition: invalid mime '{}': {}", mime_type, e),
+            .map_err(|e| LlmError::InvalidMimeType {
+                mime: mime_type.to_string(),
+                message: e.to_string(),
             })?;
 
         let form = Form::new()
@@ -191,5 +193,23 @@ mod tests {
     fn ttl_is_none() {
         let a = OpenAiFilesApiAdapter::new("k".into());
         assert!(a.ttl().is_none());
+    }
+
+    #[tokio::test]
+    async fn upload_classifies_invalid_mime_as_invalid_mime_type() {
+        let adapter = OpenAiFilesApiAdapter::with_base_url(
+            "k".into(),
+            "http://example.invalid".into(),
+        );
+        let err = adapter
+            .upload_streaming(fake_stream(b"data"), "not a real mime", "x.pdf")
+            .await
+            .unwrap_err();
+        match err {
+            LlmError::InvalidMimeType { mime, .. } => {
+                assert_eq!(mime, "not a real mime");
+            }
+            other => panic!("expected InvalidMimeType, got {:?}", other),
+        }
     }
 }
