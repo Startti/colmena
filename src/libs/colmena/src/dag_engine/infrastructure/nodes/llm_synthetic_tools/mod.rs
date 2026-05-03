@@ -1,11 +1,13 @@
 //! Synthetic tools for the LLM node — tools that don't map to DAG nodes.
 
+pub mod describe_tool;
 pub mod document_tools;
+pub mod lazy_tools_catalog;
 pub mod load_skill_tool;
 
-pub use load_skill_tool::{
-    build_load_skill_tool_definition, dispatch_load_skill, into_tool_result,
-    LoadSkillDispatchResult, LOAD_SKILL_TOOL_NAME,
+pub use describe_tool::{
+    dispatch_describe_tool, into_tool_result as describe_tool_into_tool_result,
+    DescribeToolDispatchResult, DESCRIBE_TOOL_NAME,
 };
 
 pub use document_tools::{
@@ -18,4 +20,13 @@ pub use document_tools::{
     DOCUMENT_APPLY_PATCH_TOOL, DOCUMENT_CREATE_TOOL, DOCUMENT_GET_HEAD_TOOL,
     DOCUMENT_LIST_MY_ARTIFACTS_TOOL, DOCUMENT_LIST_VERSIONS_TOOL, DOCUMENT_READ_TOOL,
     DOCUMENT_ROLLBACK_TOOL,
+};
+
+pub use lazy_tools_catalog::{
+    build_describe_tool_definition, reconstruct_discovered_set, summary_for_catalog, CatalogEntry,
+};
+
+pub use load_skill_tool::{
+    build_load_skill_tool_definition, dispatch_load_skill, into_tool_result,
+    LoadSkillDispatchResult, LOAD_SKILL_TOOL_NAME,
 };
