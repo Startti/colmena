@@ -814,7 +814,7 @@ impl ExecutableNode for LlmNode {
                         if let Some(obs) = &observer_clone {
                             obs.on_event(
                                 crate::dag_engine::domain::observer::NodeEvent::ToolDescribed {
-                                    tool_id: String::new(),
+                                    tool_id: result.tool_call_id.clone(),
                                     tool_name: result.tool_name.clone(),
                                 },
                             );
@@ -964,12 +964,27 @@ impl ExecutableNode for LlmNode {
                 sections.push(DOCUMENTS_SYSTEM_PRELUDE.to_string());
             }
             if !tools.is_empty() {
-                let tool_names: Vec<String> =
-                    tools.iter().map(|t| format!("- {}", t.name)).collect();
-                sections.push(format!(
-                    "## Tool Use Instructions\nYou have access to the following tools:\n{}\n\nRules:\n- ALWAYS use the available tools to answer questions that require real or live data. Never answer from your own knowledge when a tool can provide the data.\n- Call the most relevant tool before responding. Do not skip tool calls.\n- If a tool call fails, report the error clearly instead of guessing an answer.\n- Only respond without a tool call when the user's request is purely conversational and no tool is needed.",
-                    tool_names.join("\n")
-                ));
+                // In lazy mode, hide cataloged tool names from the system prompt —
+                // they are advertised through `describe_tool` instead. Listing them
+                // alongside "ALWAYS use the available tools" would mislead the LLM
+                // into emitting calls for tools that are not actually registered
+                // in the current request's `tools[]`.
+                let lazy_catalog_names: std::collections::HashSet<&str> = if lazy_tool_loading {
+                    catalog.iter().map(|e| e.name.as_str()).collect()
+                } else {
+                    std::collections::HashSet::new()
+                };
+                let tool_names: Vec<String> = tools
+                    .iter()
+                    .filter(|t| !lazy_catalog_names.contains(t.name.as_str()))
+                    .map(|t| format!("- {}", t.name))
+                    .collect();
+                if !tool_names.is_empty() {
+                    sections.push(format!(
+                        "## Tool Use Instructions\nYou have access to the following tools:\n{}\n\nRules:\n- ALWAYS use the available tools to answer questions that require real or live data. Never answer from your own knowledge when a tool can provide the data.\n- Call the most relevant tool before responding. Do not skip tool calls.\n- If a tool call fails, report the error clearly instead of guessing an answer.\n- Only respond without a tool call when the user's request is purely conversational and no tool is needed.",
+                        tool_names.join("\n")
+                    ));
+                }
             }
             if !sections.is_empty() {
                 messages.push(LlmMessage::system(sections.join("\n\n---\n"))?);

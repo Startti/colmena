@@ -8,6 +8,9 @@ pub const DESCRIBE_TOOL_NAME: &str = "describe_tool";
 
 #[derive(Debug)]
 pub struct DescribeToolDispatchResult {
+    /// id of the originating describe_tool call — surfaced so SSE consumers can
+    /// correlate the ToolDescribed event with the surrounding tool-call lifecycle.
+    pub tool_call_id: String,
     pub output: String,
     pub tool_name: String,
 }
@@ -98,6 +101,7 @@ pub async fn dispatch_describe_tool(
         None => format!("Error: Tool '{}' not found in catalog", name),
     };
     Ok(DescribeToolDispatchResult {
+        tool_call_id: tool_call.id.clone(),
         output,
         tool_name: name.to_string(),
     })
@@ -259,6 +263,7 @@ mod tests {
     #[test]
     fn into_tool_result_marks_failure_when_output_starts_with_error() {
         let r = DescribeToolDispatchResult {
+            tool_call_id: "call_1".into(),
             output: "Error: Tool 'X' not found in catalog".into(),
             tool_name: "X".into(),
         };
