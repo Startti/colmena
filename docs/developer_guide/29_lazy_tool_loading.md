@@ -73,6 +73,97 @@ El summary final (`extra_info`) incluye:
 ```
 solo cuando `lazy_tool_loading: true` y al menos una tool fue descubierta.
 
+## Tools prefabricadas y lazy
+
+El motor expone tools al LLM por dos vías independientes; **solo una participa del lazy**.
+
+### `enabled_tools` — atajo eager para nodos prefabricados
+
+```json
+"enabled_tools": ["add", "multiply", "current_time"]
+```
+
+- Cada string debe coincidir con un `node_type` registrado en [`registry.rs`](../../src/libs/colmena/src/dag_engine/infrastructure/registry.rs).
+- Para cada nombre, el `DagToolExecutor` genera la `ToolDefinition` automáticamente:
+  - `description` ← `node.description()`
+  - `parameters` ← `node.schema().inputs`
+- **No existe slot para `summary`, `eager`, `fixed_config` ni nombre custom.**
+- Tools expuestas por esta vía van **siempre eager**: aparecen tipadas en `tools[]` desde el primer turno y nunca pasan por `describe_tool`.
+
+### `tool_configurations` — control completo (única vía lazy-capable)
+
+```jsonc
+"tool_configurations": {
+  "add": {
+    "name": "add",            // nombre que ve el LLM (puede ser distinto de node_type)
+    "description": "...",
+    "summary": "...",         // catálogo lazy
+    "node_type": "add",       // backing real registrado en registry.rs
+    "eager": false,           // false → entra al catálogo lazy
+    "fixed_config": {}
+  }
+}
+```
+
+- El campo `node_type` apunta al mismo nodo prefabricado: el código ejecutado es exactamente el mismo (`AddNode`, `MultiplyNode`, `CurrentTimeNode`, etc.).
+- Es la única vía donde puedes definir `summary` y `eager` — y por tanto la única que el motor lazy considera al construir el catálogo.
+
+### Regla de oro
+
+> El sistema lazy **solo mira `tool_configurations`**. Cualquier tool listada en `enabled_tools` sale eager, sin importar el valor de `lazy_tool_loading`.
+
+Implementación en [`llm.rs`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs) (resumido):
+
+```rust
+for cfg in tool_configurations.values() {
+    if cfg.eager { continue; }
+    catalog.push(CatalogEntry { name: cfg.name.clone(), summary: ... });
+}
+```
+
+### Patrones recomendados
+
+| Quiero… | Configuración |
+|---|---|
+| Exponer un nodo prefabricado tal cual, eager, sin custom | `"enabled_tools": ["add"]` |
+| Lo mismo, pero renombrado o con `fixed_config` | `tool_configurations` con `eager: true` |
+| Hacer un nodo prefabricado lazy | `tool_configurations` con `node_type: "<built-in>"` y `eager: false` |
+| Mezclar ambos | Usar las dos secciones; se hacen union/dedup por nombre |
+
+### Ejemplo combinado
+
+```json
+{
+  "type": "llm_call",
+  "config": {
+    "lazy_tool_loading": true,
+    "enabled_tools": ["current_time"],
+    "tool_configurations": {
+      "add": {
+        "name": "add",
+        "description": "Add two numbers. Inputs: a (number), b (number). Returns a + b.",
+        "summary": "Sum of two numbers a and b.",
+        "node_type": "add",
+        "fixed_config": {}
+      },
+      "multiply": {
+        "name": "multiply",
+        "description": "Multiply two numbers. Inputs: a (number), b (number). Returns a * b.",
+        "summary": "Product of two numbers a and b.",
+        "node_type": "multiply",
+        "fixed_config": {}
+      }
+    }
+  }
+}
+```
+
+Resultado:
+- `current_time` aparece tipada desde el turno 1 (entró por `enabled_tools` → eager).
+- `add` y `multiply` viven solo en el catálogo del `describe_tool`. Cuando el LLM las descubre, suben a `tools[]` tipadas en el turno siguiente.
+
+Grafo completo verificado: [`tests/graphs/agents/tools_lazy_basic.json`](../../tests/graphs/agents/tools_lazy_basic.json).
+
 ## Edge cases conocidos
 
 - **LLM emite describe_tool y el tool real en el mismo turno**: algunos modelos pueden emitir tool calls paralelos. Si el LLM intenta llamar `X` en el mismo turno que llamó `describe_tool("X")`, el provider rechaza la segunda call (porque `X` no estaba en `tools[]` ese turno). El turno siguiente sí la verá tipada. La descripción del tool sintético dice explícitamente "Call it directly on your next turn" para reforzar el comportamiento. Es raro en práctica.
