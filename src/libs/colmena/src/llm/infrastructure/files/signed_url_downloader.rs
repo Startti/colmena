@@ -1,7 +1,8 @@
 //! Descarga streaming de signed URLs (GCS) sin Authorization header.
 //! La firma viaja en query params; añadir Authorization invalidaría la firma.
 
-use crate::llm::domain::{BoxedByteStream, LlmError};
+use crate::llm::domain::{BoxedByteStream, LlmError, SignedUrlFetcher};
+use async_trait::async_trait;
 use futures::TryStreamExt;
 use reqwest::Client;
 
@@ -77,6 +78,13 @@ impl SignedUrlDownloader {
 impl Default for SignedUrlDownloader {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[async_trait]
+impl SignedUrlFetcher for SignedUrlDownloader {
+    async fn stream(&self, url: &str) -> Result<BoxedByteStream, LlmError> {
+        SignedUrlDownloader::stream(self, url).await
     }
 }
 

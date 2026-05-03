@@ -1,41 +1,60 @@
 use crate::llm::domain::{
-    BoxedByteStream, CachedFileEntry, FileCacheRepository, FileData, FileProviderRepository,
-    FileSource, LlmConfig, LlmError, LlmMessage, LlmRepository, LlmRequest, LlmResponse,
-    ProviderFileRef, ProviderKind,
+    BoxedByteStream, CachedFileEntry, FileCacheRepository, FileData, FileProviderFactoryPort,
+    FileProviderRepository, FileSource, LlmConfig, LlmError, LlmMessage, LlmRepository, LlmRequest,
+    LlmResponse, ProviderFileRef, ProviderKind, SignedUrlFetcher,
 };
-use crate::llm::infrastructure::files::{FileProviderFactory, SignedUrlDownloader};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Orquesta una llamada al LLM, resolviendo `FileSource::SignedUrl` →
+/// `FileSource::Uploaded` antes de llegar al adapter.
+///
+/// Sigue arquitectura hexagonal estricta: solo depende de puertos del
+/// `domain/`. Los adapters concretos (`SignedUrlDownloader`,
+/// `FileProviderFactory`, `PostgresFileCache`) se inyectan vía builders.
 pub struct LlmCallUseCase {
     repository: Arc<dyn LlmRepository>,
     file_cache: Option<Arc<dyn FileCacheRepository>>,
-    downloader: Arc<SignedUrlDownloader>,
+    file_provider_factory: Option<Arc<dyn FileProviderFactoryPort>>,
+    signed_url_fetcher: Option<Arc<dyn SignedUrlFetcher>>,
 }
 
 impl LlmCallUseCase {
-    /// Constructs the use case with no file cache. Files using
-    /// `FileSource::SignedUrl` will fail with `LlmError::InternalError`
-    /// because they cannot be resolved without a cache.
+    /// Construye un use case sin capacidad de resolver `SignedUrl`.
+    /// Para activar la resolución hay que inyectar las 3 dependencias:
+    /// `with_file_cache`, `with_file_provider_factory`, `with_signed_url_fetcher`.
     pub fn new(repository: Arc<dyn LlmRepository>) -> Self {
         Self {
             repository,
             file_cache: None,
-            downloader: Arc::new(SignedUrlDownloader::new()),
+            file_provider_factory: None,
+            signed_url_fetcher: None,
         }
     }
 
-    /// Adds a `FileCacheRepository` so that files arriving as `SignedUrl`
-    /// can be downloaded and uploaded to the provider's Files API.
+    /// Inyecta el cache de Files API. Necesario (junto con factory + fetcher)
+    /// para que la resolución de `SignedUrl` funcione.
     pub fn with_file_cache(mut self, cache: Arc<dyn FileCacheRepository>) -> Self {
         self.file_cache = Some(cache);
         self
     }
 
-    /// Override the downloader (mainly for tests).
-    pub fn with_downloader(mut self, downloader: Arc<SignedUrlDownloader>) -> Self {
-        self.downloader = downloader;
+    /// Inyecta la factory que construye `FileProviderRepository` por provider.
+    pub fn with_file_provider_factory(
+        mut self,
+        factory: Arc<dyn FileProviderFactoryPort>,
+    ) -> Self {
+        self.file_provider_factory = Some(factory);
+        self
+    }
+
+    /// Inyecta el fetcher que descarga el contenido de signed URLs.
+    pub fn with_signed_url_fetcher(
+        mut self,
+        fetcher: Arc<dyn SignedUrlFetcher>,
+    ) -> Self {
+        self.signed_url_fetcher = Some(fetcher);
         self
     }
 
@@ -51,12 +70,19 @@ impl LlmCallUseCase {
         let provider_kind = config.provider().kind().clone();
         let api_key = config.provider().api_key().to_string();
 
-        // Build the file provider once (reused across retry).
-        let provider_files = self
-            .file_cache
-            .as_ref()
-            .map(|_| FileProviderFactory::create(provider_kind.clone(), api_key.clone()))
-            .transpose()?;
+        // Build the file provider once (reused across retry). Solo si las
+        // 3 dependencias de resolución están inyectadas.
+        let provider_files = match (&self.file_cache, &self.file_provider_factory) {
+            (Some(_), Some(factory)) => {
+                Some(factory.build(provider_kind.clone(), api_key.clone())?)
+            }
+            _ => None,
+        };
+
+        // Snapshot the original SignedUrl for each document_id BEFORE resolve_files
+        // mutates the message into FileSource::Uploaded. Needed to recover the URL
+        // on a ProviderFileNotFound retry.
+        let url_snapshot = Self::snapshot_signed_urls(&messages);
 
         // First resolution.
         self.resolve_files_in_messages(
@@ -83,7 +109,11 @@ impl LlmCallUseCase {
                 }
 
                 // Reset Uploaded → SignedUrl for files matching the bad id, so resolve_files re-uploads.
-                self.reset_uploaded_files_with_id(&mut messages, &provider_file_id);
+                Self::reset_uploaded_files_with_id(
+                    &mut messages,
+                    &provider_file_id,
+                    &url_snapshot,
+                );
 
                 // Re-resolve.
                 self.resolve_files_in_messages(
@@ -107,8 +137,10 @@ impl LlmCallUseCase {
         provider_kind: ProviderKind,
         provider_files: Option<Arc<dyn FileProviderRepository>>,
     ) -> Result<(), LlmError> {
-        let (Some(cache), Some(provider_files)) = (&self.file_cache, provider_files) else {
-            return Ok(()); // No cache configured: nothing to resolve.
+        let (Some(cache), Some(provider_files), Some(fetcher)) =
+            (&self.file_cache, provider_files, &self.signed_url_fetcher)
+        else {
+            return Ok(()); // No file-resolution deps configured: nothing to resolve.
         };
 
         for msg in messages.iter_mut() {
@@ -118,7 +150,7 @@ impl LlmCallUseCase {
                     provider_kind.clone(),
                     provider_files.clone(),
                     cache.clone(),
-                    self.downloader.as_ref(),
+                    fetcher.as_ref(),
                 )
                 .await?;
             }
@@ -151,27 +183,63 @@ impl LlmCallUseCase {
         }
     }
 
-    /// Replaces FileSource::Uploaded entries whose provider_file_id matches
-    /// the bad id with the original SignedUrl so resolve_files re-uploads.
-    /// If the file was originally InlineBytes (no SignedUrl to revert to),
-    /// it stays as Uploaded — the retry won't help, but won't make it worse.
+    /// Captures `(document_id → original signed URL)` for every file that
+    /// arrives as `FileSource::SignedUrl`. The map is consulted on a
+    /// `ProviderFileNotFound` retry to revert an `Uploaded` ref back to its
+    /// originating URL, so `resolve_files` re-downloads and re-uploads.
     ///
-    /// NOTE: This implementation cannot recover the original SignedUrl from
-    /// an Uploaded source. We rely on cache invalidation. The retry's
-    /// resolve_files call will see the invalidated cache row and re-upload
-    /// from the SignedUrl ONLY IF the original FileSource was SignedUrl. If
-    /// the caller already sent FileSource::Uploaded directly, we cannot
-    /// re-upload because there's no source. The retry will fail, and the
-    /// original error propagates.
+    /// Files that arrived already as `Uploaded` (caller-provided file_id) or
+    /// as `InlineBytes` are not in the snapshot — there is no source URL to
+    /// recover for them, and the retry will not help.
+    fn snapshot_signed_urls(messages: &[LlmMessage]) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        for msg in messages {
+            if let Some(files) = msg.files() {
+                for file in files {
+                    if let FileSource::SignedUrl(url) = &file.source {
+                        if let Some(doc_id) = &file.document_id {
+                            map.insert(doc_id.clone(), url.clone());
+                        }
+                    }
+                }
+            }
+        }
+        map
+    }
+
+    /// Replaces `FileSource::Uploaded` entries whose `provider_file_id`
+    /// matches the bad id with the original `SignedUrl` from the snapshot,
+    /// so the next `resolve_files` call sees the URL again and re-uploads.
     ///
-    /// This is a deliberate trade-off: the spec accepts that retries are
-    /// best-effort. See docs/superpowers/specs/2026-05-02-large-document-files-api-design.md
+    /// Files without a snapshot entry stay as `Uploaded` — they were either
+    /// caller-provided as `Uploaded` (no source URL exists) or arrived as
+    /// `InlineBytes` (impossible to be Uploaded with that bad id, but
+    /// guarded anyway). The retry is best-effort in those cases.
     fn reset_uploaded_files_with_id(
-        &self,
-        _messages: &mut [LlmMessage],
-        _provider_file_id: &str,
+        messages: &mut [LlmMessage],
+        provider_file_id: &str,
+        snapshot: &HashMap<String, String>,
     ) {
-        // No-op: see doc comment above.
+        for msg in messages.iter_mut() {
+            let Some(files) = msg.files_mut() else {
+                continue;
+            };
+            for file in files.iter_mut() {
+                let matches = match &file.source {
+                    FileSource::Uploaded(r) => r.provider_file_id == provider_file_id,
+                    _ => false,
+                };
+                if !matches {
+                    continue;
+                }
+                let Some(doc_id) = file.document_id.as_deref() else {
+                    continue;
+                };
+                if let Some(url) = snapshot.get(doc_id) {
+                    file.source = FileSource::SignedUrl(url.clone());
+                }
+            }
+        }
     }
 
     /// Resolves `FileSource::SignedUrl` entries into `FileSource::Uploaded`
@@ -184,7 +252,7 @@ impl LlmCallUseCase {
         provider_kind: ProviderKind,
         provider: Arc<dyn FileProviderRepository>,
         cache: Arc<dyn FileCacheRepository>,
-        downloader: &SignedUrlDownloader,
+        fetcher: &dyn SignedUrlFetcher,
     ) -> Result<(), LlmError> {
         if files.is_empty() {
             return Ok(());
@@ -208,7 +276,7 @@ impl LlmCallUseCase {
                 provider_kind.clone(),
                 &provider,
                 &cache,
-                downloader,
+                fetcher,
                 &mut session_dedup,
             )
             .await
@@ -234,7 +302,7 @@ impl LlmCallUseCase {
         provider_kind: ProviderKind,
         provider: &Arc<dyn FileProviderRepository>,
         cache: &Arc<dyn FileCacheRepository>,
-        downloader: &SignedUrlDownloader,
+        fetcher: &dyn SignedUrlFetcher,
         dedup: &mut HashMap<String, ProviderFileRef>,
     ) -> Result<FileData, LlmError> {
         match &file.source {
@@ -339,7 +407,7 @@ impl LlmCallUseCase {
                     file.filename,
                     doc_id
                 );
-                let stream: BoxedByteStream = downloader.stream(url).await?;
+                let stream: BoxedByteStream = fetcher.stream(url).await?;
 
                 crate::colmena_log!(
                     "[file-resolve] '{}' (id={}) piping stream → {} Files API upload",
@@ -476,6 +544,9 @@ mod resolve_files_tests {
         BoxedByteStream, CachedFileEntry, FileCacheRepository, FileData,
         FileProviderRepository, FileSource, LlmError, ProviderFileRef, ProviderKind,
     };
+    // Tests pueden importar adapters concretos para fixtures: la regla "domain
+    // sin infrastructure" aplica al código de producción, no a tests.
+    use crate::llm::infrastructure::files::SignedUrlDownloader;
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use std::sync::{Arc, Mutex};
@@ -765,58 +836,238 @@ mod resolve_files_tests {
 }
 
 #[cfg(test)]
+mod snapshot_and_reset_tests {
+    use super::*;
+    use crate::llm::domain::{FileData, FileSource, LlmMessage, ProviderFileRef, ProviderKind};
+
+    fn signed_file(doc_id: &str, url: &str) -> FileData {
+        FileData {
+            document_id: Some(doc_id.into()),
+            mime_type: "application/pdf".into(),
+            filename: "x.pdf".into(),
+            size_hint: None,
+            source: FileSource::SignedUrl(url.into()),
+        }
+    }
+
+    fn uploaded_file(doc_id: Option<&str>, file_id: &str) -> FileData {
+        FileData {
+            document_id: doc_id.map(|s| s.to_string()),
+            mime_type: "application/pdf".into(),
+            filename: "x.pdf".into(),
+            size_hint: None,
+            source: FileSource::Uploaded(ProviderFileRef {
+                provider: ProviderKind::Anthropic,
+                provider_file_id: file_id.into(),
+                mime_type: "application/pdf".into(),
+                filename: "x.pdf".into(),
+                expires_at: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn snapshot_collects_signed_url_per_document_id() {
+        let messages = vec![
+            LlmMessage::user_with_files(
+                "first".into(),
+                vec![
+                    signed_file("doc-1", "https://gcs/one"),
+                    signed_file("doc-2", "https://gcs/two"),
+                ],
+            )
+            .unwrap(),
+            LlmMessage::user_with_files(
+                "second".into(),
+                vec![FileData::inline(
+                    "application/pdf".into(),
+                    "y.pdf".into(),
+                    b"x".to_vec(),
+                )],
+            )
+            .unwrap(),
+        ];
+
+        let snapshot = LlmCallUseCase::snapshot_signed_urls(&messages);
+        assert_eq!(snapshot.get("doc-1").map(|s| s.as_str()), Some("https://gcs/one"));
+        assert_eq!(snapshot.get("doc-2").map(|s| s.as_str()), Some("https://gcs/two"));
+        assert_eq!(snapshot.len(), 2);
+    }
+
+    #[test]
+    fn snapshot_skips_uploaded_and_inline() {
+        let messages = vec![LlmMessage::user_with_files(
+            "x".into(),
+            vec![
+                uploaded_file(Some("doc-1"), "file-abc"),
+                FileData::inline("application/pdf".into(), "y.pdf".into(), b"x".to_vec()),
+            ],
+        )
+        .unwrap()];
+
+        let snapshot = LlmCallUseCase::snapshot_signed_urls(&messages);
+        assert!(snapshot.is_empty());
+    }
+
+    #[test]
+    fn reset_replaces_uploaded_with_signed_url_from_snapshot() {
+        let mut messages = vec![LlmMessage::user_with_files(
+            "x".into(),
+            vec![uploaded_file(Some("doc-1"), "lost")],
+        )
+        .unwrap()];
+
+        let mut snapshot = HashMap::new();
+        snapshot.insert("doc-1".to_string(), "https://gcs/orig".to_string());
+
+        LlmCallUseCase::reset_uploaded_files_with_id(&mut messages, "lost", &snapshot);
+
+        let files = messages[0].files().unwrap();
+        match &files[0].source {
+            FileSource::SignedUrl(url) => assert_eq!(url, "https://gcs/orig"),
+            other => panic!("expected SignedUrl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn reset_leaves_uploaded_intact_when_id_does_not_match() {
+        let mut messages = vec![LlmMessage::user_with_files(
+            "x".into(),
+            vec![uploaded_file(Some("doc-1"), "good")],
+        )
+        .unwrap()];
+
+        let mut snapshot = HashMap::new();
+        snapshot.insert("doc-1".to_string(), "https://gcs/orig".to_string());
+
+        LlmCallUseCase::reset_uploaded_files_with_id(&mut messages, "lost", &snapshot);
+
+        match &messages[0].files().unwrap()[0].source {
+            FileSource::Uploaded(r) => assert_eq!(r.provider_file_id, "good"),
+            other => panic!("expected Uploaded preserved, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn reset_no_op_when_snapshot_has_no_entry_for_doc_id() {
+        // Caller-provided Uploaded with no SignedUrl history: nothing to recover.
+        let mut messages = vec![LlmMessage::user_with_files(
+            "x".into(),
+            vec![uploaded_file(Some("doc-1"), "lost")],
+        )
+        .unwrap()];
+
+        let snapshot = HashMap::new();
+        LlmCallUseCase::reset_uploaded_files_with_id(&mut messages, "lost", &snapshot);
+
+        match &messages[0].files().unwrap()[0].source {
+            FileSource::Uploaded(r) => assert_eq!(r.provider_file_id, "lost"),
+            other => panic!("expected Uploaded preserved, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn reset_no_op_when_file_has_no_document_id() {
+        let mut messages = vec![LlmMessage::user_with_files(
+            "x".into(),
+            vec![uploaded_file(None, "lost")],
+        )
+        .unwrap()];
+
+        let mut snapshot = HashMap::new();
+        snapshot.insert("doc-1".to_string(), "https://gcs/orig".to_string());
+
+        LlmCallUseCase::reset_uploaded_files_with_id(&mut messages, "lost", &snapshot);
+
+        match &messages[0].files().unwrap()[0].source {
+            FileSource::Uploaded(r) => assert_eq!(r.provider_file_id, "lost"),
+            other => panic!("expected Uploaded preserved, got {:?}", other),
+        }
+    }
+}
+
+#[cfg(test)]
 mod retry_tests {
     use super::resolve_files_tests::*;
     use super::*;
     use crate::llm::domain::{
-        LlmConfig, LlmError, LlmMessage, LlmProvider, LlmResponse, MockLlmRepository,
-        ProviderKind,
+        FileData, FileSource, LlmConfig, LlmError, LlmMessage, LlmProvider, LlmResponse,
+        MockLlmRepository, ProviderKind,
     };
+    // Tests pueden usar adapters reales como fixture cuando el escenario es
+    // E2E-like (wiremock + cache real + provider real con key inválida).
+    use crate::llm::infrastructure::files::{FileProviderFactory, SignedUrlDownloader};
     use std::sync::Arc;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn config_for(provider: ProviderKind) -> LlmConfig {
         let p = LlmProvider::new(provider, "k".into(), Some("model".into())).unwrap();
         LlmConfig::new(p)
     }
 
+    /// After a `ProviderFileNotFound`, `execute` must:
+    ///   1. Invalidate the cached row for the bad `provider_file_id`.
+    ///   2. Revert `Uploaded(bad_id)` to the original `SignedUrl` (snapshot).
+    ///   3. Re-run `resolve_files` so the URL is hit again.
+    ///
+    /// We assert (3) by counting GETs on a wiremock-served URL: with the fix
+    /// it must be exactly 1 (cache HIT shorts the first resolve, retry hits
+    /// it after the reset). Before the fix it was 0 (the no-op `reset` left
+    /// the file as `Uploaded`, so resolve short-circuited a second time).
     #[tokio::test]
-    async fn retries_once_on_provider_file_not_found_with_cached_signed_url() {
-        // Setup: cache hit returns a stale ref (file_id="lost"). First call
-        // fails with ProviderFileNotFound; second call would be triggered.
-        // We verify the retry was attempted via mockall expectations.
+    async fn retries_redownload_after_provider_file_not_found() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/doc.pdf"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"fake-pdf"))
+            .mount(&server)
+            .await;
+        let url = format!("{}/doc.pdf?sig=x", server.uri());
+
         let mut mock_repo = MockLlmRepository::new();
         mock_repo.expect_call().times(1).returning(|_req| {
             Err(LlmError::ProviderFileNotFound {
                 provider_file_id: "lost".to_string(),
             })
         });
-        mock_repo.expect_call().times(1).returning(|req| {
-            LlmResponse::new(
-                req.id().clone(),
-                "ok".into(),
-                req.config().provider().clone(),
-            )
-        });
+        // Second LLM call is unreachable: after the reset, resolve_files
+        // re-downloads (good) but then tries to upload to the real Anthropic
+        // Files API with a fake key, which fails. resolve_files returns
+        // AllFilesFailedToResolve before any second LLM call. We don't
+        // expect_call() a second time.
 
         let cache = Arc::new(StubCache::new());
-        // Pre-populate with the stale entry that will be returned for doc-1.
         cache.populate(cached_entry("doc-1", "lost", None));
 
-        let use_case =
-            LlmCallUseCase::new(Arc::new(mock_repo)).with_file_cache(cache.clone());
+        let use_case = LlmCallUseCase::new(Arc::new(mock_repo))
+            .with_file_cache(cache.clone())
+            .with_file_provider_factory(Arc::new(FileProviderFactory::new()))
+            .with_signed_url_fetcher(Arc::new(SignedUrlDownloader::new()));
 
-        let file = signed_url("doc-1");
+        let file = FileData {
+            document_id: Some("doc-1".into()),
+            mime_type: "application/pdf".into(),
+            filename: "x.pdf".into(),
+            size_hint: Some(40_000_000),
+            source: FileSource::SignedUrl(url.clone()),
+        };
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
 
-        let result = use_case
+        let _ = use_case
             .execute(vec![msg], config_for(ProviderKind::Anthropic))
             .await;
 
-        // The retry call should have been attempted (mockall verifies via Drop).
-        // The result may be Ok or Err depending on whether the second
-        // resolve_files succeeded against the real (invalid) URL — we don't
-        // assert on it. The important thing is that .times(1) twice is met.
-        let _ = result;
+        let received = server.received_requests().await.unwrap();
+        let hits = received
+            .iter()
+            .filter(|r| r.url.path() == "/doc.pdf")
+            .count();
+        assert_eq!(
+            hits, 1,
+            "expected exactly 1 GET during retry redownload, got {}",
+            hits
+        );
     }
 
     #[tokio::test]

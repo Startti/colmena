@@ -2,7 +2,7 @@
 //! de Files API por proveedor. Se mantiene separada para que
 //! cambios en uno no toquen al otro.
 
-use crate::llm::domain::{FileProviderRepository, LlmError, ProviderKind};
+use crate::llm::domain::{FileProviderFactoryPort, FileProviderRepository, LlmError, ProviderKind};
 use crate::llm::infrastructure::files::{
     AnthropicFilesApiAdapter, GeminiFilesApiAdapter, OpenAiFilesApiAdapter,
 };
@@ -11,9 +11,18 @@ use std::sync::Arc;
 /// Factory that builds the right `FileProviderRepository` for a given
 /// `ProviderKind`. Sister of `LlmProviderFactory`; kept separate so
 /// changes to either path don't disturb the other.
+///
+/// Implementa el puerto `FileProviderFactoryPort` para que el use case
+/// `LlmCallUseCase` pueda inyectarlo sin importar tipos concretos.
 pub struct FileProviderFactory;
 
 impl FileProviderFactory {
+    /// Constructor explícito (la struct es unit, pero exponemos `new` para
+    /// que los call sites no instancien `Self` directamente).
+    pub fn new() -> Self {
+        Self
+    }
+
     /// Builds an `Arc<dyn FileProviderRepository>` for the given provider.
     /// Returns `LlmError::ProviderLimitation` for `Mock` (no Files API).
     pub fn create(
@@ -31,6 +40,22 @@ impl FileProviderFactory {
                 feature: "Files API".into(),
             }),
         }
+    }
+}
+
+impl Default for FileProviderFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FileProviderFactoryPort for FileProviderFactory {
+    fn build(
+        &self,
+        kind: ProviderKind,
+        api_key: String,
+    ) -> Result<Arc<dyn FileProviderRepository>, LlmError> {
+        Self::create(kind, api_key)
     }
 }
 

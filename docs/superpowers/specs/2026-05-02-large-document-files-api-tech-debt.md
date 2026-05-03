@@ -12,9 +12,9 @@ Esta tabla agrupa el trabajo pendiente y la deuda registrada durante la implemen
 
 | # | Item | Severidad | Bloqueante? | Estimación |
 |---|------|-----------|-------------|-------------|
-| 1 | Retry on `ProviderFileNotFound` no recupera (no-op) | Alta | No (best-effort documentado) | 1-2 días |
+| 1 | ~~Retry on `ProviderFileNotFound` no recupera (no-op)~~ ✅ Resuelto | Alta | No (best-effort documentado) | 1-2 días |
 | 2 | `last_used_at` no se actualiza en cache hit | Baja | No | 30 min |
-| 3 | Layer leak: `LlmCallUseCase` importa de `infrastructure` | Media | No (compila y funciona) | 1 día |
+| 3 | ~~Layer leak: `LlmCallUseCase` importa de `infrastructure`~~ ✅ Resuelto | Media | No (compila y funciona) | 1 día |
 | 4 | Filas huérfanas en cache cuando se cambian estrategias | Baja | No | 1 día (con limpieza retroactiva) |
 | 5 | Janitor de archivos huérfanos en proveedores | Media | No | 2-3 días |
 | 6 | `ProviderKind::Mock` fallback silencioso en `PostgresFileCache::lookup` | Baja | No | 30 min |
@@ -25,59 +25,40 @@ Esta tabla agrupa el trabajo pendiente y la deuda registrada durante la implemen
 
 ---
 
-## 1. Retry on `ProviderFileNotFound` no recupera
+## 1. Retry on `ProviderFileNotFound` no recupera ✅ RESUELTO
 
-**Ubicación**: `src/libs/colmena/src/llm/application/llm_call_use_case.rs::reset_uploaded_files_with_id`.
+**Ubicación**: `src/libs/colmena/src/llm/application/llm_call_use_case.rs::{snapshot_signed_urls, reset_uploaded_files_with_id}`.
 
-### Síntoma
+### Síntoma original
 
-Cuando el LLM falla con `ProviderFileNotFound { provider_file_id }` (porque el archivo se borró del provider, ya sea por TTL Gemini agotado o cleanup manual en Anthropic/OpenAI), el wrapper `call_with_file_retry`:
+Cuando el LLM fallaba con `ProviderFileNotFound { provider_file_id }` (archivo borrado por TTL Gemini agotado o cleanup manual), el flujo de retry:
 
-1. ✅ Invalida la fila correspondiente del cache.
-2. ❌ **NO** convierte `FileSource::Uploaded(ref)` de vuelta a `FileSource::SignedUrl(url)` en los mensajes.
-3. Re-ejecuta `resolve_files_in_messages`, pero ve `Uploaded` y short-circuit (ya está resuelto), no re-sube.
-4. Re-llama al LLM con el mismo `file_id` muerto → mismo error.
+1. ✅ Invalidaba la fila correspondiente del cache.
+2. ❌ **NO** convertía `FileSource::Uploaded(ref)` de vuelta a `FileSource::SignedUrl(url)`.
+3. Re-ejecutaba `resolve_files_in_messages`, pero veía `Uploaded` y hacía short-circuit (ya estaba resuelto), no re-subía.
+4. Re-llamaba al LLM con el mismo `file_id` muerto → mismo error.
 
-El comentario actual en `reset_uploaded_files_with_id` lo admite explícitamente:
+### Solución implementada
 
-> "We rely on cache invalidation. The retry's resolve_files call will see the invalidated cache row and re-upload from the SignedUrl ONLY IF the original FileSource was SignedUrl. If the caller already sent FileSource::Uploaded directly, we cannot re-upload because there's no source. The retry will fail, and the original error propagates."
-
-### Solución propuesta
-
-Antes de la primera llamada al LLM, snapshot las URLs originales:
+Snapshot de las URLs originales antes de la primera resolución, indexado por `document_id`:
 
 ```rust
-// In execute(), after resolve_files_in_messages:
-let signed_url_snapshot: HashMap<String /* provider_file_id */, String /* original_url */> = ...;
+// En execute(), antes de resolve_files_in_messages:
+let url_snapshot = Self::snapshot_signed_urls(&messages);
 ```
 
-En `reset_uploaded_files_with_id`:
+En el manejo del 404 se invoca el reset con el snapshot:
 
 ```rust
-fn reset_uploaded_files_with_id(
-    messages: &mut [LlmMessage],
-    provider_file_id: &str,
-    snapshot: &HashMap<String, String>,
-) {
-    if let Some(original_url) = snapshot.get(provider_file_id) {
-        for msg in messages.iter_mut() {
-            if let Some(files) = msg.files_mut() {
-                for file in files.iter_mut() {
-                    if let FileSource::Uploaded(r) = &file.source {
-                        if r.provider_file_id == provider_file_id {
-                            file.source = FileSource::SignedUrl(original_url.clone());
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
+Self::reset_uploaded_files_with_id(&mut messages, &provider_file_id, &url_snapshot);
 ```
 
-### Test que falta
+`reset_uploaded_files_with_id` recorre los mensajes y, para cada `Uploaded` con `provider_file_id` igual al perdido, busca el `document_id` en el snapshot y lo reescribe como `SignedUrl(url_original)`. Si el archivo llegó originalmente como `Uploaded` directo (sin URL en el snapshot), se mantiene tal cual — best-effort para ese caso.
 
-`retries_once_on_provider_file_not_found_recovers_with_resolved_signed_url`: dispatch de mock que devuelve 404 la primera vez, success la segunda; verificar que el `provider.upload_count` aumentó (re-upload real ocurrió, no solo recall).
+### Tests
+
+- Unit tests en `snapshot_and_reset_tests` (módulo nuevo) cubren las funciones puras: snapshot toma SignedUrl pero ignora Uploaded/Inline; reset reescribe match exacto; reset es no-op cuando no hay match en snapshot, cuando el id no coincide o cuando falta document_id.
+- `retry_tests::retries_redownload_after_provider_file_not_found` levanta un `wiremock::MockServer`, fuerza un cache HIT con el `file_id` "lost", y verifica que tras el 404 se hace exactamente 1 GET a la URL durante el retry. Antes del fix esto era 0 GETs (el reset era no-op).
 
 ---
 
@@ -111,36 +92,41 @@ Riesgo: el `UPDATE` puede ser un poco más lento que `SELECT` por write-lock, pe
 
 ---
 
-## 3. Layer leak: `LlmCallUseCase` importa de `infrastructure`
+## 3. Layer leak: `LlmCallUseCase` importa de `infrastructure` ✅ RESUELTO
 
-**Ubicación**: `src/libs/colmena/src/llm/application/llm_call_use_case.rs:6`.
+**Ubicación**: `src/libs/colmena/src/llm/application/llm_call_use_case.rs`.
 
-### Síntoma
+### Síntoma original
 
 ```rust
 use crate::llm::infrastructure::files::{FileProviderFactory, SignedUrlDownloader};
 ```
 
-`LlmCallUseCase` está en la capa de aplicación. Por las reglas de la arquitectura hexagonal del proyecto (`CLAUDE.md`: "Domain layer has ZERO infrastructure dependencies"), las capas superiores tampoco deberían depender directamente de infraestructura — deben recibir las dependencias inyectadas vía puertos.
+El use case en la capa de aplicación importaba dos tipos concretos de `infrastructure/`. Violaba la regla hexagonal del proyecto (`CLAUDE.md`: "Domain layer has ZERO infrastructure dependencies"; capas superiores tampoco deben depender de adapters concretos).
 
-### Solución
+### Solución implementada
 
-1. Definir un nuevo puerto en `domain/`:
-   ```rust
-   #[async_trait]
-   pub trait SignedUrlFetcher: Send + Sync {
-       async fn stream(&self, url: &str) -> Result<BoxedByteStream, LlmError>;
-   }
-   ```
-2. `SignedUrlDownloader` implementa este trait.
-3. `LlmCallUseCase` recibe `Arc<dyn SignedUrlFetcher>` (vía `with_downloader` que ya existe pero importa el tipo concreto).
-4. Eliminar `FileProviderFactory` del use case: el caller (el nodo) construye el `Arc<dyn FileProviderRepository>` y lo inyecta vía un nuevo método del use case (`execute_with_file_provider(...)`) o vía `with_file_provider(provider)` builder.
+1. **Dos puertos nuevos en `domain/`**:
+   - `SignedUrlFetcher` — `async fn stream(&self, url: &str) -> Result<BoxedByteStream, LlmError>`.
+   - `FileProviderFactoryPort` — `fn build(&self, kind, api_key) -> Result<Arc<dyn FileProviderRepository>, LlmError>`.
+2. **Adapters existentes implementan los puertos**:
+   - `SignedUrlDownloader` impls `SignedUrlFetcher` (delega al método inherente).
+   - `FileProviderFactory` impls `FileProviderFactoryPort` (delega al associated `create`).
+3. **`LlmCallUseCase` refactorizado**:
+   - Cero `use crate::llm::infrastructure` en el bloque de imports de producción.
+   - Campos: `Option<Arc<dyn FileCacheRepository>>`, `Option<Arc<dyn FileProviderFactoryPort>>`, `Option<Arc<dyn SignedUrlFetcher>>`.
+   - Builders: `with_file_cache`, `with_file_provider_factory`, `with_signed_url_fetcher`.
+   - `execute()` solo arma el provider si los 3 puertos están inyectados; sin ellos, la resolución se omite silenciosamente (mismo comportamiento que antes con `file_cache=None`).
+   - El método estático `resolve_files(...)` ahora recibe `fetcher: &dyn SignedUrlFetcher` (antes `&SignedUrlDownloader`).
+4. **Sites de composición** (legítimos en `infrastructure/`): el nodo `dag_engine/infrastructure/nodes/llm.rs` sigue construyendo los concretos y pasándolos al use case — eso es exactamente la responsabilidad de la capa de infraestructura.
 
-### Beneficios
+### Beneficios obtenidos
 
-- Tests de `LlmCallUseCase` no dependen de `reqwest`.
-- Bindings (PyO3, napi-rs) pueden inyectar implementaciones custom (e.g., para tests).
+- Tests de `LlmCallUseCase` ya no dependen de `reqwest` para los path sin HTTP.
+- Bindings (PyO3, napi-rs) pueden inyectar implementaciones custom.
 - Cumple con la regla hexagonal del proyecto.
+
+Los `use crate::llm::infrastructure::files::*` que quedan en el archivo del use case (líneas 549, 999) están dentro de bloques `#[cfg(test)]` y son fixtures, no código de producción — esa excepción está documentada inline.
 
 ---
 
