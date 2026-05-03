@@ -38,12 +38,18 @@ impl FileCacheRepository for PostgresFileCache {
         document_id: &str,
         provider: ProviderKind,
     ) -> Result<Option<CachedFileEntry>, LlmError> {
+        // `UPDATE ... RETURNING` toca `last_used_at` cada cache hit en una
+        // sola query. Si la fila no existe, devuelve 0 rows → mismo resultado
+        // que un SELECT MISS. Coste: row-lock en lugar de share-lock, pero la
+        // concurrencia por `(document_id, provider)` es baja (un mismo doc
+        // está en un solo request a la vez), así que no causa contención.
         let provider_str = provider.to_string();
         let row = sqlx::query(
-            "SELECT document_id, provider, provider_file_id, mime_type, filename, \
-                    size_bytes, uploaded_at, expires_at, last_used_at \
-               FROM provider_file_cache \
-              WHERE document_id = $1 AND provider = $2",
+            "UPDATE provider_file_cache \
+                SET last_used_at = NOW() \
+              WHERE document_id = $1 AND provider = $2 \
+          RETURNING document_id, provider, provider_file_id, mime_type, filename, \
+                    size_bytes, uploaded_at, expires_at, last_used_at",
         )
         .bind(document_id)
         .bind(&provider_str)
@@ -290,6 +296,37 @@ mod tests {
                 got.last_used_at,
                 original_last_used
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn lookup_advances_last_used_at_on_cache_hit() {
+        with_cache(|cache, prefix| async move {
+            let doc_id = format!("{}touch", prefix);
+            let entry = fixture(&doc_id);
+            let original_last_used = entry.last_used_at;
+            cache.upsert(&entry).await.unwrap();
+
+            // Force NOW() to advance past the upsert timestamp.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+            let got = cache
+                .lookup(&doc_id, ProviderKind::Anthropic)
+                .await
+                .unwrap()
+                .expect("should hit");
+
+            assert!(
+                got.last_used_at > original_last_used,
+                "lookup should touch last_used_at via UPDATE...RETURNING; got {} vs original {}",
+                got.last_used_at,
+                original_last_used
+            );
+            // last_used_at must be strictly after uploaded_at — confirms the
+            // UPDATE didn't accidentally rewrite uploaded_at.
+            assert!(got.last_used_at > got.uploaded_at);
+            assert_eq!(got.provider_file_id, "file_abc");
         })
         .await;
     }

@@ -13,7 +13,7 @@ Esta tabla agrupa el trabajo pendiente y la deuda registrada durante la implemen
 | # | Item | Severidad | Bloqueante? | Estimación |
 |---|------|-----------|-------------|-------------|
 | 1 | ~~Retry on `ProviderFileNotFound` no recupera (no-op)~~ ✅ Resuelto | Alta | No (best-effort documentado) | 1-2 días |
-| 2 | `last_used_at` no se actualiza en cache hit | Baja | No | 30 min |
+| 2 | ~~`last_used_at` no se actualiza en cache hit~~ ✅ Resuelto | Baja | No | 30 min |
 | 3 | ~~Layer leak: `LlmCallUseCase` importa de `infrastructure`~~ ✅ Resuelto | Media | No (compila y funciona) | 1 día |
 | 4 | Filas huérfanas en cache cuando se cambian estrategias | Baja | No | 1 día (con limpieza retroactiva) |
 | 5 | Janitor de archivos huérfanos en proveedores | Media | No | 2-3 días |
@@ -62,19 +62,17 @@ Self::reset_uploaded_files_with_id(&mut messages, &provider_file_id, &url_snapsh
 
 ---
 
-## 2. `last_used_at` no se actualiza en cache hit
+## 2. `last_used_at` no se actualiza en cache hit ✅ RESUELTO
 
 **Ubicación**: `src/libs/colmena/src/llm/infrastructure/files/postgres_file_cache.rs::lookup`.
 
-### Síntoma
+### Síntoma original
 
-`last_used_at` solo se escribe en `INSERT` y `ON CONFLICT DO UPDATE`. En cache hit nunca se hace `UPDATE`. Las filas conservan `last_used_at = uploaded_at` aunque sean accedidas miles de veces.
+`last_used_at` solo se escribía en `INSERT` y `ON CONFLICT DO UPDATE`. En cache hit nunca se hacía `UPDATE`. Las filas conservaban `last_used_at = uploaded_at` aunque fueran accedidas miles de veces — rompía métricas de "qué archivos están activos" y cualquier futuro janitor LRU.
 
-Esto rompe métricas de "qué archivos están activos" y cualquier futuro janitor que use `last_used_at` para LRU.
+### Solución implementada
 
-### Solución
-
-Hacer `lookup` ejecutar un `UPDATE ... SET last_used_at = NOW() RETURNING *` en lugar del `SELECT`. Una sola query.
+`lookup` ahora ejecuta un `UPDATE ... RETURNING *` en lugar del `SELECT`. Una sola query, mismo resultado lógico, ahora la columna refleja la realidad.
 
 ```sql
 UPDATE provider_file_cache
@@ -84,11 +82,13 @@ RETURNING document_id, provider, provider_file_id, mime_type, filename,
           size_bytes, uploaded_at, expires_at, last_used_at;
 ```
 
-Riesgo: el `UPDATE` puede ser un poco más lento que `SELECT` por write-lock, pero en esta tabla la concurrencia es baja (cada `(document_id, provider)` se actualiza desde un solo request).
+Si la fila no existe, `UPDATE` devuelve 0 rows → mismo resultado que un SELECT MISS.
 
-### Test que falta
+Trade-off: el `UPDATE` toma row-lock en lugar de share-lock, pero la concurrencia por `(document_id, provider)` es baja (un mismo doc lo procesa un solo request a la vez), no causa contención observable.
 
-`lookup_advances_last_used_at`: insertar fila, dormir 50ms, lookup, verificar `last_used_at > uploaded_at`.
+### Test
+
+`lookup_advances_last_used_at_on_cache_hit`: insertar fila, dormir 50 ms, hacer lookup, verificar `got.last_used_at > original_last_used` y `got.last_used_at > got.uploaded_at` (esto último confirma que el UPDATE no toca `uploaded_at` por error).
 
 ---
 
