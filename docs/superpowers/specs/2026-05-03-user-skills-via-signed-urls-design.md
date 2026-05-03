@@ -74,8 +74,9 @@ Pushing user skills as files on the filesystem of every Cloud Run instance is op
 - `platform-api/src/handlers.rs`: add `agent_id: Option<String>` to `CreateExecutionRequest`; copy through to `JobRequest`.
 - `platform-worker/src/skills/`: new module (`mod.rs`, `parser.rs`, `validator.rs`, `cache.rs`, `downloader.rs`, `materializer.rs`).
 - `platform-worker/src/main.rs`: build `SkillsRuntime` at startup, attach to `AppState`, call `preprocess` from `process_job` between input injection and graph deserialization.
-- Colmena: no changes.
-- Docker / deploy: ensure `COLMENA_SKILLS_ALLOWED_DIRS` includes `/tmp/colmena-skills-cache/` so `FilesystemSkillRepository` accepts the materialized paths.
+- `colmena/src/libs/colmena/src/skills/infrastructure/filesystem_skill_repository.rs`: extend `from_paths` to auto-detect single-skill vs root directories. Backward-compatible.
+- `colmena/src/libs/colmena/src/skills/domain/skill_error.rs`: new `EmptyRoot` variant.
+- Docker / deploy: ensure `COLMENA_SKILLS_ALLOWED_DIRS` includes `/tmp/colmena-skills-cache/` (for materialized user skills) and `/app/skills/` (for ADP baseline roots) so `FilesystemSkillRepository` accepts both shapes.
 
 ## JSON Shape
 
@@ -460,6 +461,18 @@ Documented as future work, not implemented:
 
 ## Testing Strategy
 
+### Colmena unit tests (`src/libs/colmena/src/skills/infrastructure/filesystem_skill_repository.rs`)
+
+Net new behaviors of `from_paths` to cover:
+
+- **Single skill at the path** (current behavior, regression coverage): `path/SKILL.md` exists → loaded.
+- **Root with N skills**: `path` has no `SKILL.md`; `path/a/SKILL.md`, `path/b/SKILL.md` both exist → both loaded; LLM catalog has 2 entries.
+- **Root with mixed children**: `path` has subdirs `a/` (with SKILL.md) and `b/` (without) and a stray file `notes.txt` → only `a/` loaded; no error.
+- **Empty root**: `path` is a directory with no skill children → `SkillError::EmptyRoot`.
+- **Mixed root + per-skill in the same `paths[]` array**: the array `["/app/skills", "/tmp/.../amadeus"]` works — root is scanned, single skill is loaded directly, all merged.
+- **Name collision across roots and per-skill entries**: same skill name from a root and from a per-skill path → `SkillNameCollision`. Existing dedup logic must apply across the expanded set, not just the literal path entries.
+- **Non-existent root**: `path` does not exist → `Io { source: NotFound }` (existing canonicalize behavior).
+
 ### Unit tests (`platform-worker/src/skills/`)
 
 - `parser`: extract `declared` from various graph shapes (single `llm_call`, multiple, nested in subgraphs, absent).
@@ -539,7 +552,7 @@ A graph can pull skills from three independent origins. All three coexist in the
 | Origin | Where it lives | How it lands in the JSON |
 |---|---|---|
 | **Built-in (Rust-compiled into Colmena)** | Inside the `colmena` crate (`src/libs/colmena/src/skills/builtin/...`) | Listed by name in `skills.builtin: ["python-expert", ...]`. The ADP frontend chooses which ones apply. |
-| **ADP baseline (filesystem of the worker container)** | Files baked into the worker image at build time, e.g. `/app/skills/adp-node-catalog/` | Listed by absolute path in `skills.paths: ["/app/skills/adp-node-catalog", ...]`. The ADP frontend chooses which baselines apply per graph type (canvas builder, chat agent, code reviewer, ...). |
+| **ADP baseline (filesystem of the worker container)** | Files baked into the worker image at build time, e.g. `/app/skills/adp-node-catalog/`, `/app/skills/another-baseline/` | Listed in `skills.paths`. Two equivalent forms: enumerate each skill (`["/app/skills/adp-node-catalog", "/app/skills/another-baseline"]`) **or** point at the root (`["/app/skills"]`) and let Colmena's auto-detection load every immediate child that has `SKILL.md`. The ADP repo guarantees the files exist and that versions/contents are correct. |
 | **User-declared (signed URL or inline)** | Per-agent content in GCS or directly inline in the JSON | Listed in the new `skills.declared: [...]` block (this design). The worker preprocessor materializes each entry to `<cache_root>/<agent_id>/<version>/<skill>/` and appends those paths into `skills.paths`. |
 
 ### How the assembled JSON looks before vs after preprocessing
@@ -549,7 +562,7 @@ A graph can pull skills from three independent origins. All three coexist in the
 ```jsonc
 "skills": {
   "builtin": ["python-expert"],
-  "paths":   ["/app/skills/adp-node-catalog"],
+  "paths":   ["/app/skills"],          // root → Colmena scans for SKILL.md children
   "declared": [
     { "name": "amadeus-flights", "version": "v1", "skill_md": {"url":"..."}, "references": [...] },
     { "name": "internal-policies", "version": "v1", "skill_md": {"content": "..."} }
@@ -563,15 +576,20 @@ A graph can pull skills from three independent origins. All three coexist in the
 "skills": {
   "builtin": ["python-expert"],
   "paths": [
-    "/app/skills/adp-node-catalog",
-    "/tmp/colmena-skills-cache/<agent_id>/v1/amadeus-flights",
-    "/tmp/colmena-skills-cache/<agent_id>/v1/internal-policies"
+    "/app/skills",                                                  // root, Colmena expands
+    "/tmp/colmena-skills-cache/<agent_id>/v1/amadeus-flights",     // per-skill (worker)
+    "/tmp/colmena-skills-cache/<agent_id>/v1/internal-policies"    // per-skill (worker)
   ]
   // "declared" removed
 }
 ```
 
-Colmena's `CompositeSkillRepository` then merges `builtin` (1 skill) + filesystem paths (3 skills) into a single 4-skill catalog visible to the LLM.
+Colmena's `FilesystemSkillRepository::from_paths`:
+- Path `/app/skills` has no `SKILL.md` directly → it's a root → scan immediate children → load `adp-node-catalog`, `another-baseline`, etc.
+- The two `<cache>/...` paths have `SKILL.md` directly → loaded as single skills (one each).
+- All loaded skills merge into one `HashMap<String, SkillEntry>`.
+
+`CompositeSkillRepository` then merges `builtin` + the resulting filesystem set into a unified catalog visible to the LLM.
 
 ### Responsibility split
 
@@ -620,9 +638,61 @@ Colmena's `CompositeSkillRepository::new` rejects builtin/filesystem name collis
 
 This section enumerates every file/module/env change required to land the feature, separated by repo. The list was cross-checked against the actual code as of `develop` on 2026-05-03.
 
-### Colmena repo (`/home/daniel-garcia4/startti/colmena/`) — **zero code changes**
+### Colmena repo (`/home/daniel-garcia4/startti/colmena/`) — **one small change**
 
-The design intentionally avoids touching Colmena. The existing `FilesystemSkillRepository::from_paths` accepts the materialized cache layout because:
+A single, contained change to `FilesystemSkillRepository::from_paths`: each `paths[]` entry is now auto-detected as either a **single skill directory** or a **root containing many skill directories**. This lets the ADP frontend point at `"/app/skills"` instead of enumerating every baseline by hand. Backward-compatible: existing graphs pointing directly at a skill dir keep working unchanged.
+
+**File:** `src/libs/colmena/src/skills/infrastructure/filesystem_skill_repository.rs`
+
+**New behavior per path entry:**
+
+| Disk shape | Treatment |
+|---|---|
+| `<path>/SKILL.md` exists | Single skill directory — load it (existing behavior). |
+| `<path>` is a directory and at least one immediate child has `SKILL.md` | Root — load each child that has `SKILL.md`. Children without `SKILL.md` are silently ignored (allows a root to coexist with helper files). |
+| `<path>` is a directory and no child has `SKILL.md` | New error `SkillError::EmptyRoot(path)` — surfaces a misconfiguration loudly. |
+
+**Sketch of the new loop:**
+
+```rust
+for raw_path in paths {
+    let canonical = path_buf.canonicalize()?;
+    if !canonical.is_dir() { return Err(SkillError::NotADirectory(...)); }
+    if !is_allowed(&canonical, &allowed) { return Err(SkillError::PathNotAllowed(...)); }
+
+    if canonical.join("SKILL.md").exists() {
+        load_skill_dir(&canonical, &mut skills)?;          // single
+    } else {
+        let mut count = 0;
+        for entry in std::fs::read_dir(&canonical)? {
+            let sub = entry?.path();
+            if sub.is_dir() && sub.join("SKILL.md").exists() {
+                load_skill_dir(&sub, &mut skills)?;        // expanded
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return Err(SkillError::EmptyRoot(canonical.display().to_string()));
+        }
+    }
+}
+```
+
+`load_skill_dir` is the existing per-skill validation block extracted into a helper (frontmatter parse, name == dir_name check, references presence + size, dedup against the `skills` map). No semantics change — just shared between the two branches.
+
+**Why root-scan is restricted to the immediate children:** keeps the contract obvious. A root is "a directory of skills"; recursive scanning invites confusion about how deep to go and what to do when SKILL.md collides at multiple levels. Immediate-children-only is unambiguous and matches how the ADP and the worker actually lay out their files.
+
+**New error variant:**
+
+```rust
+// src/libs/colmena/src/skills/domain/skill_error.rs
+#[error("path '{0}' has no SKILL.md and contains no skill subdirectories")]
+EmptyRoot(String),
+```
+
+**Why user-declared cache cannot use root-scan:** the worker materializes each user skill at `<cache_root>/<agent_id>/<version>/<skill>/`. Different skills can have different versions and must coexist (warm cache + a freshly bumped version). Collapsing them under a single scan-able root would lose version coexistence. The worker therefore still enumerates one `paths[]` entry per declared skill. Root-scan is the right tool for **ADP baselines** (one directory of unversioned files), not for the worker's per-skill cache.
+
+The other Colmena requirements remain identical and are still satisfied by the materialized layout:
 
 | Colmena requirement | Where checked | How the spec satisfies it |
 |---|---|---|
