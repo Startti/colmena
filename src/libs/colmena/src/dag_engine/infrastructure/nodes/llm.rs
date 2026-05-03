@@ -2,8 +2,8 @@ use crate::colmena_log;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
 use crate::llm::domain::{
-    AgentSessionId, ConversationKey, LlmConfig, LlmMessage, LlmProvider, LlmStreamPart,
-    NodeIdPath, ProviderKind, SessionId, ToolExecutor,
+    AgentSessionId, ConversationKey, LlmConfig, LlmMessage, LlmProvider, LlmStreamPart, NodeIdPath,
+    ProviderKind, SessionId, ToolExecutor,
 };
 use crate::llm::infrastructure::{ConversationRepositoryFactory, LlmProviderFactory};
 use async_trait::async_trait;
@@ -492,10 +492,10 @@ impl ExecutableNode for LlmNode {
         // C1: resolve FileSource::SignedUrl entries via cache + download + upload pipe.
         // Uses the canonical LlmCallUseCase::resolve_files orchestration when DATABASE_URL
         // is available; falls back to a bare download+upload loop otherwise.
-        if resolved_files.iter().any(|f| matches!(
-            f.source,
-            crate::llm::domain::FileSource::SignedUrl(_)
-        )) {
+        if resolved_files
+            .iter()
+            .any(|f| matches!(f.source, crate::llm::domain::FileSource::SignedUrl(_)))
+        {
             use crate::llm::application::LlmCallUseCase;
             use crate::llm::infrastructure::files::{
                 FileProviderFactory, PostgresFileCache, SignedUrlDownloader,
@@ -504,36 +504,37 @@ impl ExecutableNode for LlmNode {
 
             // Build cache from DATABASE_URL env (graceful degradation if missing).
             let database_url = std::env::var("DATABASE_URL").ok();
-            let cache: Option<Arc<dyn crate::llm::domain::FileCacheRepository>> =
-                match database_url.as_deref() {
-                    Some(url) => {
-                        crate::colmena_log!(
+            let cache: Option<Arc<dyn crate::llm::domain::FileCacheRepository>> = match database_url
+                .as_deref()
+            {
+                Some(url) => {
+                    crate::colmena_log!(
                             "[file-resolve] DATABASE_URL set — building PostgresFileCache for provider_file_cache table"
                         );
-                        use crate::dag_engine::infrastructure::pool_registry::{
-                            PgPoolRegistry, PoolConfig,
-                        };
-                        let registry = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
-                        // Run migrations to ensure provider_file_cache table exists.
-                        let pool = registry
-                            .get_or_create(url)
-                            .await
-                            .map_err(|e| format!("failed to build PG pool: {}", e))?;
-                        sqlx::migrate!("migrations/postgres")
-                            .set_ignore_missing(true)
-                            .run(&*pool)
-                            .await
-                            .map_err(|e| format!("migration failed: {}", e))?;
-                        let pg_cache = PostgresFileCache::new(registry, url).await?;
-                        Some(Arc::new(pg_cache))
-                    }
-                    None => {
-                        crate::colmena_log!(
+                    use crate::dag_engine::infrastructure::pool_registry::{
+                        PgPoolRegistry, PoolConfig,
+                    };
+                    let registry = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+                    // Run migrations to ensure provider_file_cache table exists.
+                    let pool = registry
+                        .get_or_create(url)
+                        .await
+                        .map_err(|e| format!("failed to build PG pool: {}", e))?;
+                    sqlx::migrate!("migrations/postgres")
+                        .set_ignore_missing(true)
+                        .run(&*pool)
+                        .await
+                        .map_err(|e| format!("migration failed: {}", e))?;
+                    let pg_cache = PostgresFileCache::new(registry, url).await?;
+                    Some(Arc::new(pg_cache))
+                }
+                None => {
+                    crate::colmena_log!(
                             "[file-resolve] DATABASE_URL not set — running WITHOUT cache (every run re-uploads)"
                         );
-                        None
-                    }
-                };
+                    None
+                }
+            };
 
             let file_provider =
                 FileProviderFactory::create(provider_kind.clone(), api_key.clone())?;
@@ -575,7 +576,8 @@ impl ExecutableNode for LlmNode {
                                     Ok(provider_ref) => {
                                         crate::colmena_log!(
                                             "[file-resolve-no-cache] '{}' uploaded as id '{}'",
-                                            filename, provider_ref.provider_file_id
+                                            filename,
+                                            provider_ref.provider_file_id
                                         );
                                         new_files.push(crate::llm::domain::FileData {
                                             document_id,
@@ -595,7 +597,8 @@ impl ExecutableNode for LlmNode {
                                 Err(e) => {
                                     crate::colmena_log!(
                                         "[file-resolve-no-cache] WARN download failed for '{}': {}",
-                                        filename, e
+                                        filename,
+                                        e
                                     );
                                 }
                             }
@@ -1064,50 +1067,47 @@ impl ExecutableNode for LlmNode {
         // the current message history (rule 1: prior describe_tool calls; rule 2:
         // prior direct calls to a still-cataloged tool), then composes `tools[]`
         // as: [describe_tool if pending] + [non-catalog tools] + [discovered catalog tools].
-        let tools_provider: Option<
-            Box<
-                dyn Fn(&[crate::llm::domain::LlmMessage]) -> Vec<crate::llm::domain::ToolDefinition>
-                    + Send
-                    + Sync,
-            >,
-        > = if lazy_tool_loading && !catalog.is_empty() {
-            let catalog = catalog.clone();
-            let static_snapshot = tools.clone();
-            Some(Box::new(move |messages: &[crate::llm::domain::LlmMessage]| {
-                let discovered = reconstruct_discovered_set(messages, &catalog);
-                let pending: Vec<&CatalogEntry> = catalog
-                    .iter()
-                    .filter(|e| !discovered.contains(&e.name))
-                    .collect();
+        let tools_provider: Option<crate::llm::application::agent_service::ToolsProvider> =
+            if lazy_tool_loading && !catalog.is_empty() {
+                let catalog = catalog.clone();
+                let static_snapshot = tools.clone();
+                Some(Box::new(
+                    move |messages: &[crate::llm::domain::LlmMessage]| {
+                        let discovered = reconstruct_discovered_set(messages, &catalog);
+                        let pending: Vec<&CatalogEntry> = catalog
+                            .iter()
+                            .filter(|e| !discovered.contains(&e.name))
+                            .collect();
 
-                let catalog_names: std::collections::HashSet<&str> =
-                    catalog.iter().map(|e| e.name.as_str()).collect();
-                let mut out: Vec<crate::llm::domain::ToolDefinition> = Vec::new();
+                        let catalog_names: std::collections::HashSet<&str> =
+                            catalog.iter().map(|e| e.name.as_str()).collect();
+                        let mut out: Vec<crate::llm::domain::ToolDefinition> = Vec::new();
 
-                // Tools defined OUTSIDE the lazy catalog (eager-flagged ones,
-                // load_skill, document_*, toolkit subtools) are always present.
-                for td in &static_snapshot {
-                    if !catalog_names.contains(td.name.as_str()) {
-                        out.push(td.clone());
-                    }
-                }
-                // describe_tool only when there is something left to discover.
-                if !pending.is_empty() {
-                    out.push(build_describe_tool_definition(&pending));
-                }
-                // Discovered lazy tools enter with their full schema.
-                for td in &static_snapshot {
-                    if catalog_names.contains(td.name.as_str())
-                        && discovered.contains(&td.name)
-                    {
-                        out.push(td.clone());
-                    }
-                }
-                out
-            }))
-        } else {
-            None
-        };
+                        // Tools defined OUTSIDE the lazy catalog (eager-flagged ones,
+                        // load_skill, document_*, toolkit subtools) are always present.
+                        for td in &static_snapshot {
+                            if !catalog_names.contains(td.name.as_str()) {
+                                out.push(td.clone());
+                            }
+                        }
+                        // describe_tool only when there is something left to discover.
+                        if !pending.is_empty() {
+                            out.push(build_describe_tool_definition(&pending));
+                        }
+                        // Discovered lazy tools enter with their full schema.
+                        for td in &static_snapshot {
+                            if catalog_names.contains(td.name.as_str())
+                                && discovered.contains(&td.name)
+                            {
+                                out.push(td.clone());
+                            }
+                        }
+                        out
+                    },
+                ))
+            } else {
+                None
+            };
 
         // Create AgentService parameters
         let params = crate::llm::application::AgentRunParams {
@@ -1262,9 +1262,8 @@ impl ExecutableNode for LlmNode {
         // tools_discovered (lazy_tool_loading): array of names in discovery order.
         if let Ok(log) = tools_discovered_log.lock() {
             if !log.is_empty() {
-                extra_info["tools_discovered"] = Value::Array(
-                    log.iter().cloned().map(Value::String).collect(),
-                );
+                extra_info["tools_discovered"] =
+                    Value::Array(log.iter().cloned().map(Value::String).collect());
             }
         }
 

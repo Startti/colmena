@@ -259,7 +259,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             enum_values,
-            &vec!["apple".to_string(), "mango".to_string(), "zebra".to_string()]
+            &vec![
+                "apple".to_string(),
+                "mango".to_string(),
+                "zebra".to_string()
+            ]
         );
         let pos_a = td.description.find("apple").unwrap();
         let pos_m = td.description.find("mango").unwrap();
@@ -276,7 +280,9 @@ mod tests {
         let pending: Vec<&CatalogEntry> = entries.iter().collect();
         let td = build_describe_tool_definition(&pending);
         assert!(td.description.contains("search_orders"));
-        assert!(td.description.contains("Find orders. Use for past purchases."));
+        assert!(td
+            .description
+            .contains("Find orders. Use for past purchases."));
     }
 
     #[test]

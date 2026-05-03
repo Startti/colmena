@@ -46,9 +46,30 @@ async fn finds_topmost_in_three_level_chain() {
     let sub = format!("{}_sub", chat);
     let subsub = format!("{}_subsub", chat);
 
-    repo.save(&fake_state(&root, Some(chat), None, DagRunStatus::Suspended)).await.unwrap();
-    repo.save(&fake_state(&sub,  Some(chat), Some(&root),    DagRunStatus::Suspended)).await.unwrap();
-    repo.save(&fake_state(&subsub, Some(chat), Some(&sub),  DagRunStatus::Suspended)).await.unwrap();
+    repo.save(&fake_state(
+        &root,
+        Some(chat),
+        None,
+        DagRunStatus::Suspended,
+    ))
+    .await
+    .unwrap();
+    repo.save(&fake_state(
+        &sub,
+        Some(chat),
+        Some(&root),
+        DagRunStatus::Suspended,
+    ))
+    .await
+    .unwrap();
+    repo.save(&fake_state(
+        &subsub,
+        Some(chat),
+        Some(&sub),
+        DagRunStatus::Suspended,
+    ))
+    .await
+    .unwrap();
 
     let entry = repo.find_resume_entry(chat).await.unwrap();
     assert_eq!(entry, Some(root.clone())); // now expects ROOT, not subsub
@@ -76,7 +97,14 @@ async fn returns_none_when_no_suspended_run() {
         .ok();
 
     let root = format!("{}_root", chat);
-    repo.save(&fake_state(&root, Some(chat), None, DagRunStatus::Completed)).await.unwrap();
+    repo.save(&fake_state(
+        &root,
+        Some(chat),
+        None,
+        DagRunStatus::Completed,
+    ))
+    .await
+    .unwrap();
 
     let entry = repo.find_resume_entry(chat).await.unwrap();
     assert_eq!(entry, None);

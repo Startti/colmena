@@ -19,9 +19,9 @@ use crate::documents::application::rollback::RollbackUseCase;
 use crate::documents::domain::{ArtifactStore, IRRenderer, IRValidator, IdGenerator};
 use crate::documents::infrastructure::ids::UlidIdGenerator;
 use crate::documents::infrastructure::render::{ExcelRenderer, WordRenderer};
-use crate::documents::infrastructure::storage::LocalFsStore;
 #[cfg(feature = "gcs")]
 use crate::documents::infrastructure::storage::GcsArtifactStore;
+use crate::documents::infrastructure::storage::LocalFsStore;
 use crate::documents::infrastructure::validation::{ExcelValidator, WordValidator};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -69,9 +69,8 @@ impl DocumentRuntime {
                     .map(PathBuf::from)
                     .unwrap_or_else(|| PathBuf::from(DEFAULT_STORAGE_ROOT));
                 if let Some(parent) = root.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| {
-                        format!("creating storage parent {:?}: {e}", parent)
-                    })?;
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("creating storage parent {:?}: {e}", parent))?;
                 }
                 std::fs::create_dir_all(&root)
                     .map_err(|e| format!("creating storage root {:?}: {e}", root))?;
@@ -95,11 +94,9 @@ impl DocumentRuntime {
                 }
                 #[cfg(not(feature = "gcs"))]
                 {
-                    return Err(
-                        "storage_backend `gcs` requires the `gcs` feature flag — \
+                    return Err("storage_backend `gcs` requires the `gcs` feature flag — \
                          rebuild with `--features gcs`"
-                            .into(),
-                    );
+                        .into());
                 }
             }
             other => {

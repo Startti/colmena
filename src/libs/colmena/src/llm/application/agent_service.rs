@@ -5,6 +5,11 @@ use crate::llm::domain::{
 };
 use std::sync::Arc;
 
+/// A closure that derives the tool list to send on each ReAct iteration from
+/// the current message history. Used to implement lazy tool loading without
+/// teaching `AgentService` about lazy mode itself.
+pub type ToolsProvider = Box<dyn Fn(&[LlmMessage]) -> Vec<ToolDefinition> + Send + Sync>;
+
 /// Parameters for running the agent
 pub struct AgentRunParams<'a> {
     pub session_id: &'a ConversationKey,
@@ -18,8 +23,7 @@ pub struct AgentRunParams<'a> {
     /// Optional dynamic tools provider, called fresh at each ReAct iteration.
     /// When `Some`, its return value REPLACES `tools` for that iteration.
     /// When `None`, `tools` is used unchanged each iteration (default).
-    pub tools_provider:
-        Option<Box<dyn Fn(&[LlmMessage]) -> Vec<ToolDefinition> + Send + Sync>>,
+    pub tools_provider: Option<ToolsProvider>,
 }
 
 /// Agent service implementing the ReAct (Reasoning + Acting) pattern

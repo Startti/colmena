@@ -456,7 +456,10 @@ mod tests {
             .execute(&make_inputs(), &create_cfg, &mut state, None)
             .await
             .unwrap();
-        let artifact_id = created["output"]["artifact_id"].as_str().unwrap().to_string();
+        let artifact_id = created["output"]["artifact_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         let read_node = DocumentReadNode::new();
         let read_cfg = json!({
@@ -492,7 +495,10 @@ mod tests {
             .execute(&make_inputs(), &create_cfg, &mut state, None)
             .await
             .unwrap();
-        let artifact_id = created["output"]["artifact_id"].as_str().unwrap().to_string();
+        let artifact_id = created["output"]["artifact_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         let edit_node = DocumentEditNode::new();
         let edit_cfg = json!({
@@ -528,7 +534,10 @@ mod tests {
             .execute(&make_inputs(), &create_cfg, &mut state, None)
             .await
             .unwrap();
-        let artifact_id = created["output"]["artifact_id"].as_str().unwrap().to_string();
+        let artifact_id = created["output"]["artifact_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         let edit_cfg = json!({
             "artifact_id": artifact_id,

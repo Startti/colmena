@@ -90,8 +90,16 @@ mod tests {
     fn validate_rejects_slash_in_node_id() {
         let g = graph_with_node_id("router/inner");
         let err = g.validate().unwrap_err().to_string();
-        assert!(err.contains("router/inner"), "error should name the offending id, got: {}", err);
-        assert!(err.contains("'/'"), "error should mention the forbidden char, got: {}", err);
+        assert!(
+            err.contains("router/inner"),
+            "error should name the offending id, got: {}",
+            err
+        );
+        assert!(
+            err.contains("'/'"),
+            "error should mention the forbidden char, got: {}",
+            err
+        );
     }
 
     #[test]

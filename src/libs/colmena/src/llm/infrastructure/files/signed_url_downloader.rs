@@ -130,7 +130,10 @@ mod tests {
             Ok(_) => panic!("expected error, got Ok"),
             Err(e) => e,
         };
-        assert!(matches!(err, LlmError::SignedUrlFetchFailed { status: 403 }));
+        assert!(matches!(
+            err,
+            LlmError::SignedUrlFetchFailed { status: 403 }
+        ));
     }
 
     #[tokio::test]
@@ -148,7 +151,10 @@ mod tests {
             Ok(_) => panic!("expected error, got Ok"),
             Err(e) => e,
         };
-        assert!(matches!(err, LlmError::SignedUrlFetchFailed { status: 404 }));
+        assert!(matches!(
+            err,
+            LlmError::SignedUrlFetchFailed { status: 404 }
+        ));
     }
 
     #[tokio::test]
@@ -166,7 +172,10 @@ mod tests {
         assert!(result.is_ok());
         // Validar via received requests:
         let received = server.received_requests().await.unwrap();
-        let req = received.iter().find(|r| r.url.path() == "/no-auth.pdf").unwrap();
+        let req = received
+            .iter()
+            .find(|r| r.url.path() == "/no-auth.pdf")
+            .unwrap();
         assert!(req.headers.get("authorization").is_none());
     }
 }

@@ -296,7 +296,8 @@ impl OrchestratorNode {
                     "provider": reactor_cfg_owned.get("provider").cloned().unwrap_or(Value::Null),
                 }),
             );
-            let phase_reactor_obs = direct_thinking_observer(KEY_PHASE_REACTOR, NODE_TYPE_REACTOR, &observer);
+            let phase_reactor_obs =
+                direct_thinking_observer(KEY_PHASE_REACTOR, NODE_TYPE_REACTOR, &observer);
             let reactor_res = reactor_node
                 .execute(
                     &reactor_inputs,
@@ -662,7 +663,8 @@ impl OrchestratorNode {
         ];
 
         // Streaming callback — always stream, emits llm_token (user-facing response)
-        let final_obs = direct_thinking_observer(KEY_FINAL_REACTOR, NODE_TYPE_FINAL_REACTOR, &observer);
+        let final_obs =
+            direct_thinking_observer(KEY_FINAL_REACTOR, NODE_TYPE_FINAL_REACTOR, &observer);
         let on_token: Option<Box<dyn Fn(crate::llm::domain::LlmStreamPart) + Send + Sync>> =
             if let Some(obs) = final_obs {
                 Some(Box::new(
@@ -734,7 +736,11 @@ impl OrchestratorNode {
         let response = agent_service.run(params).await?;
         let final_text = response.content().to_string();
 
-        emit_internal_node_finish(&observer, KEY_FINAL_REACTOR, json!({ "result": final_text }));
+        emit_internal_node_finish(
+            &observer,
+            KEY_FINAL_REACTOR,
+            json!({ "result": final_text }),
+        );
 
         colmena_log!(
             "✅ [OrchestratorNode] Final response generated ({} chars).",
@@ -957,7 +963,8 @@ impl ExecutableNode for OrchestratorNode {
                             "provider": internal_planner_cfg.get("provider").cloned().unwrap_or(Value::Null),
                         }),
                     );
-                    let planner_obs = direct_thinking_observer(KEY_PLANNER, NODE_TYPE_PLANNER, &_observer);
+                    let planner_obs =
+                        direct_thinking_observer(KEY_PLANNER, NODE_TYPE_PLANNER, &_observer);
                     let planner_result = planner_node
                         .execute(inputs, &internal_planner_cfg, _state, planner_obs)
                         .await?;
@@ -1550,7 +1557,12 @@ impl ExecutableNode for OrchestratorNode {
                                     "⏸️  [OrchestratorNode] Agent '{}' suspended (task '{}'). Propagating up.",
                                     task.assigned_to, task.task_name
                                 );
-                                return Ok(propagate_agent_suspend(&agent_result, &task, current_phase, _state));
+                                return Ok(propagate_agent_suspend(
+                                    &agent_result,
+                                    &task,
+                                    current_phase,
+                                    _state,
+                                ));
                             }
 
                             // ── Crítica ──
@@ -1572,8 +1584,9 @@ impl ExecutableNode for OrchestratorNode {
                                     "🔎 [OrchestratorNode] Internal Critique for task '{}' (attempt {}/{})...",
                                     task.task_name, current_retries + 1, max_retries
                                 );
-                                let critic_node =
-                                    registry.get_node(KEY_CRITIC).ok_or("critic node not found")?;
+                                let critic_node = registry
+                                    .get_node(KEY_CRITIC)
+                                    .ok_or("critic node not found")?;
 
                                 let mut critic_inputs = task_inputs.clone();
                                 critic_inputs
@@ -1600,7 +1613,11 @@ impl ExecutableNode for OrchestratorNode {
                                         "provider": critic_cfg.get("provider").cloned().unwrap_or(Value::Null),
                                     }),
                                 );
-                                let critic_obs = direct_thinking_observer(&critic_node_id, NODE_TYPE_CRITIC, &_observer);
+                                let critic_obs = direct_thinking_observer(
+                                    &critic_node_id,
+                                    NODE_TYPE_CRITIC,
+                                    &_observer,
+                                );
                                 let critic_res = critic_node
                                     .execute(&critic_inputs, critic_cfg, _state, critic_obs)
                                     .await?;
@@ -2086,16 +2103,16 @@ fn propagate_agent_suspend(
     // Try canonical `questions` array first. Covers nested orchestrators
     // (which already produced canonical output) AND the new SuspendNode shape.
     // If deserialization fails (malformed metadata), log and fall through.
-    let canonical_questions: Option<Vec<SuspendQuestion>> = agent_result
-        .get("questions")
-        .and_then(|qs_val| {
+    let canonical_questions: Option<Vec<SuspendQuestion>> =
+        agent_result.get("questions").and_then(|qs_val| {
             match serde_json::from_value::<Vec<SuspendQuestion>>(qs_val.clone()) {
                 Ok(qs) => Some(qs),
                 Err(e) => {
                     colmena_log!(
                         "⚠️  [propagate_agent_suspend] Agent '{}' emitted malformed 'questions' \
                          array (will fall back to legacy 'question' string): {}",
-                        task.assigned_to, e
+                        task.assigned_to,
+                        e
                     );
                     None
                 }

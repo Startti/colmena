@@ -49,11 +49,7 @@ pub trait FileCacheRepository: Send + Sync {
 
     async fn upsert(&self, entry: &CachedFileEntry) -> Result<(), LlmError>;
 
-    async fn invalidate(
-        &self,
-        document_id: &str,
-        provider: ProviderKind,
-    ) -> Result<(), LlmError>;
+    async fn invalidate(&self, document_id: &str, provider: ProviderKind) -> Result<(), LlmError>;
 }
 
 #[cfg(test)]
@@ -163,10 +159,7 @@ mod tests {
             .unwrap()
             .is_none());
         cache.upsert(&entry).await.unwrap();
-        let got = cache
-            .lookup("doc-1", ProviderKind::Gemini)
-            .await
-            .unwrap();
+        let got = cache.lookup("doc-1", ProviderKind::Gemini).await.unwrap();
         assert!(got.is_some());
         assert_eq!(got.unwrap().provider_file_id, "files/abc");
         cache

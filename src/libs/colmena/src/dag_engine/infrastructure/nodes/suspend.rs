@@ -45,7 +45,12 @@ impl ExecutableNode for SuspendNode {
             .get("id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
-            .or_else(|| inputs.get("__node_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .or_else(|| {
+                inputs
+                    .get("__node_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
             .unwrap_or_else(|| "suspend".to_string());
 
         let question_type = config
@@ -111,7 +116,10 @@ mod tests {
         let inputs = inputs_with_node_id("ask_user");
         let cfg = json!({ "question": "Confirm?" });
         let mut state = Value::Null;
-        let out = node.execute(&inputs, &cfg, &mut state, empty_observer()).await.unwrap();
+        let out = node
+            .execute(&inputs, &cfg, &mut state, empty_observer())
+            .await
+            .unwrap();
 
         assert_eq!(out["__colmena_status"], "SUSPENDED");
         assert_eq!(out["question"], "Confirm?");
@@ -129,7 +137,10 @@ mod tests {
             "options": ["a", "b", "c"]
         });
         let mut state = Value::Null;
-        let out = node.execute(&inputs, &cfg, &mut state, empty_observer()).await.unwrap();
+        let out = node
+            .execute(&inputs, &cfg, &mut state, empty_observer())
+            .await
+            .unwrap();
 
         assert_eq!(out["questions"][0]["type"], "choice");
         assert_eq!(out["questions"][0]["options"], json!(["a", "b", "c"]));
@@ -141,7 +152,10 @@ mod tests {
         let inputs = inputs_with_node_id("ask_user");
         let cfg = json!({ "question": "Confirm?" });
         let mut state = Value::Null;
-        let out = node.execute(&inputs, &cfg, &mut state, empty_observer()).await.unwrap();
+        let out = node
+            .execute(&inputs, &cfg, &mut state, empty_observer())
+            .await
+            .unwrap();
 
         assert_eq!(out["questions"][0]["id"], "ask_user");
     }
@@ -152,7 +166,10 @@ mod tests {
         let inputs = inputs_with_node_id("ask_user");
         let cfg = json!({ "id": "confirm_transfer", "question": "Confirm?" });
         let mut state = Value::Null;
-        let out = node.execute(&inputs, &cfg, &mut state, empty_observer()).await.unwrap();
+        let out = node
+            .execute(&inputs, &cfg, &mut state, empty_observer())
+            .await
+            .unwrap();
 
         assert_eq!(out["questions"][0]["id"], "confirm_transfer");
     }
@@ -161,9 +178,13 @@ mod tests {
     async fn suspend_preserves_legacy_question_field() {
         let node = SuspendNode;
         let inputs = inputs_with_node_id("ask_user");
-        let cfg = json!({ "question": "Confirm?", "question_type": "choice", "options": ["a","b"] });
+        let cfg =
+            json!({ "question": "Confirm?", "question_type": "choice", "options": ["a","b"] });
         let mut state = Value::Null;
-        let out = node.execute(&inputs, &cfg, &mut state, empty_observer()).await.unwrap();
+        let out = node
+            .execute(&inputs, &cfg, &mut state, empty_observer())
+            .await
+            .unwrap();
 
         // Legacy field still present alongside the canonical questions array.
         assert_eq!(out["question"], "Confirm?");
@@ -174,10 +195,16 @@ mod tests {
     async fn resume_path_unchanged() {
         let node = SuspendNode;
         let mut inputs: NodeInputs = HashMap::new();
-        inputs.insert("__colmena_resume_answer".to_string(), Value::String("yes".to_string()));
+        inputs.insert(
+            "__colmena_resume_answer".to_string(),
+            Value::String("yes".to_string()),
+        );
         let cfg = json!({ "question": "Confirm?" });
         let mut state = Value::Null;
-        let out = node.execute(&inputs, &cfg, &mut state, empty_observer()).await.unwrap();
+        let out = node
+            .execute(&inputs, &cfg, &mut state, empty_observer())
+            .await
+            .unwrap();
 
         assert_eq!(out["status"], "resumed");
         assert_eq!(out["answer_received"], "yes");

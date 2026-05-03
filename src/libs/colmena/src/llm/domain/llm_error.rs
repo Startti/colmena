@@ -79,7 +79,9 @@ pub enum LlmError {
     MaxIterationsReached { max: usize },
 
     // File handling errors (Files API integration)
-    #[error("data field exceeds 30 MB limit (got {size} bytes); emitter must use url for large files")]
+    #[error(
+        "data field exceeds 30 MB limit (got {size} bytes); emitter must use url for large files"
+    )]
     DataFieldTooLarge { size: u64 },
 
     #[error("path file exceeds 30 MB limit (got {size} bytes); use url for large files")]
@@ -192,7 +194,9 @@ mod files_error_tests {
 
     #[test]
     fn provider_file_not_found_carries_id() {
-        let e = LlmError::ProviderFileNotFound { provider_file_id: "file_abc".into() };
+        let e = LlmError::ProviderFileNotFound {
+            provider_file_id: "file_abc".into(),
+        };
         assert!(format!("{}", e).contains("file_abc"));
     }
 }

@@ -38,7 +38,10 @@ pub fn generate_tool_markdown(cfg: &ToolConfiguration) -> String {
                 "no"
             };
             let desc = field.description.as_deref().unwrap_or("");
-            out.push_str(&format!("| {} | {} | {} | {} |\n", name, ty, required, desc));
+            out.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                name, ty, required, desc
+            ));
         }
         out.push('\n');
     }
@@ -76,16 +79,18 @@ pub async fn dispatch_describe_tool(
     tool_call: &ToolCall,
     lookup: &[ToolConfiguration],
 ) -> Result<DescribeToolDispatchResult, LlmError> {
-    let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)
-        .map_err(|e| LlmError::InvalidToolCall {
-            reason: format!("describe_tool: invalid arguments JSON: {}", e),
+    let args: serde_json::Value =
+        serde_json::from_str(&tool_call.function.arguments).map_err(|e| {
+            LlmError::InvalidToolCall {
+                reason: format!("describe_tool: invalid arguments JSON: {}", e),
+            }
         })?;
-    let name = args
-        .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| LlmError::InvalidToolCall {
-            reason: "describe_tool: missing required parameter 'name'".to_string(),
-        })?;
+    let name =
+        args.get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| LlmError::InvalidToolCall {
+                reason: "describe_tool: missing required parameter 'name'".to_string(),
+            })?;
 
     let cfg = lookup.iter().find(|c| c.name == name);
     let output = match cfg {

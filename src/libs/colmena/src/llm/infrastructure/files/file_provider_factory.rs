@@ -30,9 +30,7 @@ impl FileProviderFactory {
         api_key: String,
     ) -> Result<Arc<dyn FileProviderRepository>, LlmError> {
         match kind {
-            ProviderKind::Anthropic => {
-                Ok(Arc::new(AnthropicFilesApiAdapter::new(api_key)))
-            }
+            ProviderKind::Anthropic => Ok(Arc::new(AnthropicFilesApiAdapter::new(api_key))),
             ProviderKind::OpenAi => Ok(Arc::new(OpenAiFilesApiAdapter::new(api_key))),
             ProviderKind::Gemini => Ok(Arc::new(GeminiFilesApiAdapter::new(api_key))),
             ProviderKind::Mock => Err(LlmError::ProviderLimitation {

@@ -851,8 +851,8 @@ mod tests {
     #[test]
     fn build_request_body_serializes_uploaded_pdf_as_file_data() {
         use crate::llm::domain::{
-            FileData, FileSource, LlmConfig, LlmMessage, LlmProvider, LlmRequest,
-            ProviderFileRef, ProviderKind,
+            FileData, FileSource, LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderFileRef,
+            ProviderKind,
         };
         let file = FileData {
             document_id: Some("doc-1".into()),
@@ -861,17 +861,20 @@ mod tests {
             size_hint: None,
             source: FileSource::Uploaded(ProviderFileRef {
                 provider: ProviderKind::Gemini,
-                provider_file_id:
-                    "https://generativelanguage.googleapis.com/v1beta/files/abc".into(),
+                provider_file_id: "https://generativelanguage.googleapis.com/v1beta/files/abc"
+                    .into(),
                 mime_type: "application/pdf".into(),
                 filename: "x.pdf".into(),
                 expires_at: None,
             }),
         };
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
-        let provider =
-            LlmProvider::new(ProviderKind::Gemini, "k".into(), Some("gemini-1.5-pro".into()))
-                .unwrap();
+        let provider = LlmProvider::new(
+            ProviderKind::Gemini,
+            "k".into(),
+            Some("gemini-1.5-pro".into()),
+        )
+        .unwrap();
         let config = LlmConfig::new(provider);
         let request = LlmRequest::new(vec![msg], config, false).unwrap();
 
@@ -899,9 +902,12 @@ mod tests {
             source: FileSource::SignedUrl("https://example/x?sig=y".into()),
         };
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
-        let provider =
-            LlmProvider::new(ProviderKind::Gemini, "k".into(), Some("gemini-1.5-pro".into()))
-                .unwrap();
+        let provider = LlmProvider::new(
+            ProviderKind::Gemini,
+            "k".into(),
+            Some("gemini-1.5-pro".into()),
+        )
+        .unwrap();
         let config = LlmConfig::new(provider);
         let request = LlmRequest::new(vec![msg], config, false).unwrap();
 
@@ -918,19 +924,24 @@ mod tests {
         use crate::llm::domain::{
             FileData, LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind,
         };
-        let file =
-            FileData::inline("application/pdf".into(), "x.pdf".into(), b"PDF".to_vec());
+        let file = FileData::inline("application/pdf".into(), "x.pdf".into(), b"PDF".to_vec());
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
-        let provider =
-            LlmProvider::new(ProviderKind::Gemini, "k".into(), Some("gemini-1.5-pro".into()))
-                .unwrap();
+        let provider = LlmProvider::new(
+            ProviderKind::Gemini,
+            "k".into(),
+            Some("gemini-1.5-pro".into()),
+        )
+        .unwrap();
         let config = LlmConfig::new(provider);
         let request = LlmRequest::new(vec![msg], config, false).unwrap();
 
         let adapter = GeminiAdapter::new();
         let body = adapter.build_request_body(&request).unwrap();
         let parts = body["contents"][0]["parts"].as_array().unwrap();
-        let file_part = parts.iter().find(|p| p.get("inlineData").is_some()).unwrap();
+        let file_part = parts
+            .iter()
+            .find(|p| p.get("inlineData").is_some())
+            .unwrap();
         assert_eq!(file_part["inlineData"]["mimeType"], "application/pdf");
         assert!(file_part["inlineData"]["data"].is_string());
     }

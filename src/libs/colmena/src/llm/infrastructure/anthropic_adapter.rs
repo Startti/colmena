@@ -791,13 +791,10 @@ mod tests {
     use super::*;
 
     fn build_request_with_file(file: crate::llm::domain::FileData) -> LlmRequest {
-        use crate::llm::domain::{
-            LlmConfig, LlmMessage, LlmProvider, ProviderKind,
-        };
+        use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, ProviderKind};
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
         let provider =
-            LlmProvider::new(ProviderKind::Anthropic, "k".into(), Some("claude-3".into()))
-                .unwrap();
+            LlmProvider::new(ProviderKind::Anthropic, "k".into(), Some("claude-3".into())).unwrap();
         let config = LlmConfig::new(provider);
         LlmRequest::new(vec![msg], config, false).unwrap()
     }
@@ -827,10 +824,7 @@ mod tests {
         let doc_block = blocks.iter().find(|b| b["type"] == "document").unwrap();
         assert_eq!(doc_block["source"]["type"], "file");
         assert_eq!(doc_block["source"]["file_id"], "file_01abc");
-        assert!(
-            doc_block["source"].get("data").is_none()
-                || doc_block["source"]["data"].is_null()
-        );
+        assert!(doc_block["source"].get("data").is_none() || doc_block["source"]["data"].is_null());
         assert!(
             doc_block["source"].get("media_type").is_none()
                 || doc_block["source"]["media_type"].is_null()
@@ -864,14 +858,11 @@ mod tests {
             mime_type: "image/jpeg".into(),
             filename: "x.jpeg".into(),
             size_hint: None,
-            source: FileSource::SignedUrl(
-                "https://storage.googleapis.com/bucket/x?sig=y".into(),
-            ),
+            source: FileSource::SignedUrl("https://storage.googleapis.com/bucket/x?sig=y".into()),
         };
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
         let provider =
-            LlmProvider::new(ProviderKind::Anthropic, "k".into(), Some("claude-3".into()))
-                .unwrap();
+            LlmProvider::new(ProviderKind::Anthropic, "k".into(), Some("claude-3".into())).unwrap();
         let config = LlmConfig::new(provider);
         let request = LlmRequest::new(vec![msg], config, false).unwrap();
 
@@ -889,10 +880,7 @@ mod tests {
             img_block["source"].get("file_id").is_none()
                 || img_block["source"]["file_id"].is_null()
         );
-        assert!(
-            img_block["source"].get("data").is_none()
-                || img_block["source"]["data"].is_null()
-        );
+        assert!(img_block["source"].get("data").is_none() || img_block["source"]["data"].is_null());
     }
 
     #[test]
@@ -909,14 +897,16 @@ mod tests {
         };
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
         let provider =
-            LlmProvider::new(ProviderKind::Anthropic, "k".into(), Some("claude-3".into()))
-                .unwrap();
+            LlmProvider::new(ProviderKind::Anthropic, "k".into(), Some("claude-3".into())).unwrap();
         let config = LlmConfig::new(provider);
         let request = LlmRequest::new(vec![msg], config, false).unwrap();
 
         let adapter = AnthropicAdapter::new();
         let err = adapter.convert_messages(&request).unwrap_err();
-        assert!(matches!(err, crate::llm::domain::LlmError::InternalError { .. }));
+        assert!(matches!(
+            err,
+            crate::llm::domain::LlmError::InternalError { .. }
+        ));
     }
 
     #[test]

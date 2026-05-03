@@ -11,9 +11,7 @@
 //! the JSON, it is silently ignored by the typed structs below.
 
 use crate::documents::application::apply_patch::{ApplyPatchInput, ApplyPatchUseCase};
-use crate::documents::application::create_document::{
-    CreateDocumentInput, CreateDocumentUseCase,
-};
+use crate::documents::application::create_document::{CreateDocumentInput, CreateDocumentUseCase};
 use crate::documents::application::get_head::{GetHeadInput, GetHeadUseCase};
 use crate::documents::application::list_versions::ListVersionsUseCase;
 use crate::documents::application::read_document::{ReadDocumentInput, ReadDocumentUseCase};
@@ -143,8 +141,8 @@ pub struct DocumentListMyArtifactsArgs {}
 /// the override verbatim when present.
 fn build_synthetic_tool<T: JsonSchema>(name: &str, description: &str) -> ToolDefinition {
     let schema = schemars::schema_for!(T);
-    let mut schema_json = serde_json::to_value(schema)
-        .expect("schemars schema must serialize to JSON Value");
+    let mut schema_json =
+        serde_json::to_value(schema).expect("schemars schema must serialize to JSON Value");
     sanitize_schema_for_llm_providers(&mut schema_json);
     ToolDefinition {
         name: name.to_string(),
@@ -377,7 +375,6 @@ new content; check `diff_summary` after each patch.
 - Report the `artifact_id` so the user can reference the artifact in
   follow-up requests."##;
 
-
 pub struct DocumentToolsContext {
     pub create: Arc<CreateDocumentUseCase>,
     pub apply: Arc<ApplyPatchUseCase>,
@@ -458,9 +455,7 @@ pub async fn dispatch_document_apply_patch(
         }
         Err(e) => match &e {
             crate::documents::domain::DocumentError::VersionConflict {
-                current,
-                conflicts,
-                ..
+                current, conflicts, ..
             } => json!({
                 "error": "VersionConflict",
                 "current_version": current.0,

@@ -111,7 +111,13 @@ pub async fn run_dag(
             Ok(final_output)
         } else {
             engine
-                .run_dag(graph, resume_id, resume_answer, include_extra_info, agent_session_id.clone())
+                .run_dag(
+                    graph,
+                    resume_id,
+                    resume_answer,
+                    include_extra_info,
+                    agent_session_id.clone(),
+                )
                 .await
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
         }

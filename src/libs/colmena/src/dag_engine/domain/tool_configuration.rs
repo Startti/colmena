@@ -889,7 +889,10 @@ mod tests {
             "eager": true
         });
         let cfg: ToolConfiguration = serde_json::from_value(json).unwrap();
-        assert_eq!(cfg.summary.as_deref(), Some("Find orders. Use when user asks about purchases."));
+        assert_eq!(
+            cfg.summary.as_deref(),
+            Some("Find orders. Use when user asks about purchases.")
+        );
         assert!(cfg.eager);
     }
 

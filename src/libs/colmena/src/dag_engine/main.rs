@@ -89,8 +89,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut mapper = SseMapper::new();
 
                 // The new active_queue engine natively handles both linear and cyclic graphs
-                let s =
-                    engine.execute_stream(graph, session_id.clone(), answer, include_extra_info, None, agent_session_id.clone());
+                let s = engine.execute_stream(
+                    graph,
+                    session_id.clone(),
+                    answer,
+                    include_extra_info,
+                    None,
+                    agent_session_id.clone(),
+                );
                 let stream = Box::pin(s);
                 tokio::pin!(stream);
 
@@ -113,7 +119,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 println!("data: [DONE]\n");
                 Ok(())
-            }.await;
+            }
+            .await;
 
             // Always shut down the engine (closes all pools), even if the graph execution failed
             engine.shutdown().await;

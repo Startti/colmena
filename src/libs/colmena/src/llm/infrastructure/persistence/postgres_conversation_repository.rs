@@ -131,13 +131,11 @@ impl ConversationRepository for PostgresConversationRepository {
 
     async fn delete(&self, key: &ConversationKey) -> Result<(), LlmError> {
         let res = if let Some(agent) = &key.agent_session_id {
-            sqlx::query(
-                "DELETE FROM llm_node_history WHERE agent_session_id = $1 AND node_id = $2",
-            )
-            .bind(&agent.0)
-            .bind(&key.node_id.0)
-            .execute(&self.pool)
-            .await
+            sqlx::query("DELETE FROM llm_node_history WHERE agent_session_id = $1 AND node_id = $2")
+                .bind(&agent.0)
+                .bind(&key.node_id.0)
+                .execute(&self.pool)
+                .await
         } else {
             sqlx::query("DELETE FROM llm_node_history WHERE session_id = $1 AND node_id = $2")
                 .bind(&key.session_id.0)

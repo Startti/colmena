@@ -38,11 +38,8 @@ pub trait ConversationRepository: Send + Sync {
     /// Appends a single message to the thread.
     /// Always writes `session_id` and `node_id`; `agent_session_id` is written
     /// when present.
-    async fn add_message(
-        &self,
-        key: &ConversationKey,
-        message: LlmMessage,
-    ) -> Result<(), LlmError>;
+    async fn add_message(&self, key: &ConversationKey, message: LlmMessage)
+        -> Result<(), LlmError>;
 
     /// Deletes all messages for the given thread (matches the same filter as `get_by_id`).
     async fn delete(&self, key: &ConversationKey) -> Result<(), LlmError>;

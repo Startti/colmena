@@ -164,8 +164,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let adapter =
-            AnthropicFilesApiAdapter::with_base_url("test-key".into(), server.uri());
+        let adapter = AnthropicFilesApiAdapter::with_base_url("test-key".into(), server.uri());
         let r = adapter
             .upload_streaming(fake_stream(b"PDF-CONTENT"), "application/pdf", "x.pdf")
             .await
@@ -202,10 +201,8 @@ mod tests {
     async fn upload_classifies_invalid_mime_as_invalid_mime_type() {
         // No need to start a server: the error fires in `mime_str` before
         // any HTTP traffic.
-        let adapter = AnthropicFilesApiAdapter::with_base_url(
-            "k".into(),
-            "http://example.invalid".into(),
-        );
+        let adapter =
+            AnthropicFilesApiAdapter::with_base_url("k".into(), "http://example.invalid".into());
         let err = adapter
             .upload_streaming(fake_stream(b"data"), "not a real mime", "x.pdf")
             .await

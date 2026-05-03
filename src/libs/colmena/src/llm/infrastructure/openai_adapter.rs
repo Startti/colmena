@@ -187,7 +187,13 @@ impl OpenAiAdapter {
         // o-series reasoning models: map thinking_budget → reasoning_effort.
         // OpenAI does not surface reasoning content, so no stream changes needed.
         if let Some(budget) = request.config().thinking_budget() {
-            let effort = if budget <= 1000 { "low" } else if budget <= 5000 { "medium" } else { "high" };
+            let effort = if budget <= 1000 {
+                "low"
+            } else if budget <= 5000 {
+                "medium"
+            } else {
+                "high"
+            };
             body["reasoning_effort"] = json!(effort);
         }
 
@@ -557,7 +563,10 @@ struct OpenAiStreamFunctionCall {
 // SSE Parser implementation
 fn openai_usage_to_llm_usage(u: OpenAiUsage) -> LlmUsage {
     let mut usage = LlmUsage::new(u.prompt_tokens, u.completion_tokens);
-    if let Some(r) = u.completion_tokens_details.filter(|d| d.reasoning_tokens > 0) {
+    if let Some(r) = u
+        .completion_tokens_details
+        .filter(|d| d.reasoning_tokens > 0)
+    {
         usage = usage.with_thinking_tokens(r.reasoning_tokens);
     }
     if let Some(p) = u.prompt_tokens_details.filter(|d| d.cached_tokens > 0) {
@@ -874,8 +883,8 @@ mod tests {
     #[test]
     fn responses_serializes_uploaded_pdf_with_file_id() {
         use crate::llm::domain::{
-            FileData, FileSource, LlmConfig, LlmMessage, LlmProvider, LlmRequest,
-            ProviderFileRef, ProviderKind,
+            FileData, FileSource, LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderFileRef,
+            ProviderKind,
         };
         let file = FileData {
             document_id: Some("doc-1".into()),
@@ -907,14 +916,10 @@ mod tests {
             .find(|c| c["type"] == "input_file")
             .unwrap();
         assert_eq!(file_part["file_id"], "file-abc");
-        assert!(
-            file_part.get("file_data").is_none() || file_part["file_data"].is_null()
-        );
+        assert!(file_part.get("file_data").is_none() || file_part["file_data"].is_null());
         // OpenAI Responses API requires mutually-exclusive file_id XOR filename;
         // when using file_id we must NOT include filename.
-        assert!(
-            file_part.get("filename").is_none() || file_part["filename"].is_null()
-        );
+        assert!(file_part.get("filename").is_none() || file_part["filename"].is_null());
     }
 
     #[test]
@@ -953,14 +958,11 @@ mod tests {
             mime_type: "image/png".into(),
             filename: "x.png".into(),
             size_hint: None,
-            source: FileSource::SignedUrl(
-                "https://storage.googleapis.com/bucket/x?sig=y".into(),
-            ),
+            source: FileSource::SignedUrl("https://storage.googleapis.com/bucket/x?sig=y".into()),
         };
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
         let provider =
-            LlmProvider::new(ProviderKind::OpenAi, "k".into(), Some("gpt-4o-mini".into()))
-                .unwrap();
+            LlmProvider::new(ProviderKind::OpenAi, "k".into(), Some("gpt-4o-mini".into())).unwrap();
         let config = LlmConfig::new(provider);
         let request = LlmRequest::new(vec![msg], config, false).unwrap();
 
@@ -973,17 +975,14 @@ mod tests {
             img["image_url"]["url"],
             "https://storage.googleapis.com/bucket/x?sig=y"
         );
-        assert!(
-            img["image_url"].get("file_id").is_none()
-                || img["image_url"]["file_id"].is_null()
-        );
+        assert!(img["image_url"].get("file_id").is_none() || img["image_url"]["file_id"].is_null());
     }
 
     #[test]
     fn chat_completions_returns_error_on_uploaded_image() {
         use crate::llm::domain::{
-            FileData, FileSource, LlmConfig, LlmMessage, LlmProvider, LlmRequest,
-            ProviderFileRef, ProviderKind,
+            FileData, FileSource, LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderFileRef,
+            ProviderKind,
         };
         let file = FileData {
             document_id: Some("doc-1".into()),
@@ -1000,8 +999,7 @@ mod tests {
         };
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
         let provider =
-            LlmProvider::new(ProviderKind::OpenAi, "k".into(), Some("gpt-4o-mini".into()))
-                .unwrap();
+            LlmProvider::new(ProviderKind::OpenAi, "k".into(), Some("gpt-4o-mini".into())).unwrap();
         let config = LlmConfig::new(provider);
         let request = LlmRequest::new(vec![msg], config, false).unwrap();
 

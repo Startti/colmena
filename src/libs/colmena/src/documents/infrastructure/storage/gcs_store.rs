@@ -95,7 +95,11 @@ impl GcsArtifactStore {
     }
 
     fn patch_key(&self, id: &ArtifactId, v: &VersionId) -> String {
-        format!("{}/versions/{}/patch_applied.json", self.art_prefix(id), v.0)
+        format!(
+            "{}/versions/{}/patch_applied.json",
+            self.art_prefix(id),
+            v.0
+        )
     }
 
     fn blob_key(&self, id: &ArtifactId, v: &VersionId, name: &str) -> String {
@@ -130,12 +134,12 @@ impl GcsArtifactStore {
             .await;
         match result {
             Ok(obj) => Ok(obj.generation),
-            Err(e) if e.http_status_code() == Some(412) => {
-                Err(StorageError::PreconditionFailed(format!(
-                    "object already exists: {key}"
-                )))
-            }
-            Err(e) => Err(StorageError::Backend(format!("gcs write_create {key}: {e}"))),
+            Err(e) if e.http_status_code() == Some(412) => Err(StorageError::PreconditionFailed(
+                format!("object already exists: {key}"),
+            )),
+            Err(e) => Err(StorageError::Backend(format!(
+                "gcs write_create {key}: {e}"
+            ))),
         }
     }
 
@@ -155,11 +159,9 @@ impl GcsArtifactStore {
             .await;
         match result {
             Ok(obj) => Ok(obj.generation),
-            Err(e) if e.http_status_code() == Some(412) => {
-                Err(StorageError::PreconditionFailed(format!(
-                    "CAS failed for {key}: expected gen {expected_gen}"
-                )))
-            }
+            Err(e) if e.http_status_code() == Some(412) => Err(StorageError::PreconditionFailed(
+                format!("CAS failed for {key}: expected gen {expected_gen}"),
+            )),
             Err(e) => Err(StorageError::Backend(format!("gcs write_cas {key}: {e}"))),
         }
     }
@@ -249,8 +251,12 @@ impl ArtifactStore for GcsArtifactStore {
     async fn create_artifact(&self, meta: &ArtifactMeta) -> Result<(), StorageError> {
         let bytes = serde_json::to_vec_pretty(meta)
             .map_err(|e| StorageError::Backend(format!("ser meta: {e}")))?;
-        self.write(&self.meta_key(&meta.artifact_id), &bytes, "application/json")
-            .await?;
+        self.write(
+            &self.meta_key(&meta.artifact_id),
+            &bytes,
+            "application/json",
+        )
+        .await?;
         // Empty initial manifest.
         self.write_manifest(&meta.artifact_id, &VersionManifest::default())
             .await?;
@@ -283,8 +289,12 @@ impl ArtifactStore for GcsArtifactStore {
 
         let patch_bytes = serde_json::to_vec_pretty(&data.patch_applied)
             .map_err(|e| StorageError::Backend(format!("ser patch: {e}")))?;
-        self.write(&self.patch_key(id, version), &patch_bytes, "application/json")
-            .await?;
+        self.write(
+            &self.patch_key(id, version),
+            &patch_bytes,
+            "application/json",
+        )
+        .await?;
 
         for (name, blob_bytes) in &data.blobs {
             self.write(
@@ -413,9 +423,7 @@ impl ArtifactStore for GcsArtifactStore {
         let _ = self
             .write(&self.head_key(id), tombstone, "text/plain")
             .await;
-        let _ = self
-            .write_manifest(id, &VersionManifest::default())
-            .await;
+        let _ = self.write_manifest(id, &VersionManifest::default()).await;
         Ok(())
     }
 }

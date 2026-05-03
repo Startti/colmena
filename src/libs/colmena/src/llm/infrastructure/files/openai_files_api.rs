@@ -103,12 +103,14 @@ impl FileProviderRepository for OpenAiFilesApiAdapter {
             });
         }
 
-        let parsed: UploadResponse = response.json().await.map_err(|e| {
-            LlmError::FileApiUploadFailed {
-                provider: "openai".into(),
-                message: format!("invalid JSON response: {}", e),
-            }
-        })?;
+        let parsed: UploadResponse =
+            response
+                .json()
+                .await
+                .map_err(|e| LlmError::FileApiUploadFailed {
+                    provider: "openai".into(),
+                    message: format!("invalid JSON response: {}", e),
+                })?;
 
         Ok(ProviderFileRef {
             provider: ProviderKind::OpenAi,
@@ -156,10 +158,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let adapter = OpenAiFilesApiAdapter::with_base_url(
-            "sk-test".into(),
-            server.uri(),
-        );
+        let adapter = OpenAiFilesApiAdapter::with_base_url("sk-test".into(), server.uri());
         let r = adapter
             .upload_streaming(fake_stream(b"PDF"), "application/pdf", "x.pdf")
             .await
@@ -197,10 +196,8 @@ mod tests {
 
     #[tokio::test]
     async fn upload_classifies_invalid_mime_as_invalid_mime_type() {
-        let adapter = OpenAiFilesApiAdapter::with_base_url(
-            "k".into(),
-            "http://example.invalid".into(),
-        );
+        let adapter =
+            OpenAiFilesApiAdapter::with_base_url("k".into(), "http://example.invalid".into());
         let err = adapter
             .upload_streaming(fake_stream(b"data"), "not a real mime", "x.pdf")
             .await

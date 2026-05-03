@@ -64,15 +64,8 @@ impl GeminiFilesApiAdapter {
             .expect("default reqwest client should build")
     }
 
-    async fn start_session(
-        &self,
-        mime_type: &str,
-        filename: &str,
-    ) -> Result<String, LlmError> {
-        let url = format!(
-            "{}/upload/v1beta/files?key={}",
-            self.base_url, self.api_key
-        );
+    async fn start_session(&self, mime_type: &str, filename: &str) -> Result<String, LlmError> {
+        let url = format!("{}/upload/v1beta/files?key={}", self.base_url, self.api_key);
         let resp = self
             .client
             .post(&url)
@@ -114,7 +107,11 @@ impl GeminiFilesApiAdapter {
         chunk: Bytes,
         finalize: bool,
     ) -> Result<Option<UploadFinalizeResponse>, LlmError> {
-        let cmd = if finalize { "upload, finalize" } else { "upload" };
+        let cmd = if finalize {
+            "upload, finalize"
+        } else {
+            "upload"
+        };
         let resp = self
             .client
             .put(upload_url)
@@ -139,12 +136,13 @@ impl GeminiFilesApiAdapter {
         }
 
         if finalize {
-            let parsed: UploadFinalizeResponse = resp.json().await.map_err(|e| {
-                LlmError::FileApiUploadFailed {
-                    provider: "gemini".into(),
-                    message: format!("invalid finalize JSON: {}", e),
-                }
-            })?;
+            let parsed: UploadFinalizeResponse =
+                resp.json()
+                    .await
+                    .map_err(|e| LlmError::FileApiUploadFailed {
+                        provider: "gemini".into(),
+                        message: format!("invalid finalize JSON: {}", e),
+                    })?;
             Ok(Some(parsed))
         } else {
             Ok(None)
@@ -288,8 +286,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let adapter =
-            GeminiFilesApiAdapter::with_base_url("KEY".into(), server.uri());
+        let adapter = GeminiFilesApiAdapter::with_base_url("KEY".into(), server.uri());
         let r = adapter
             .upload_streaming(fake_stream(b"hello world"), "application/pdf", "x.pdf")
             .await
@@ -308,8 +305,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let adapter =
-            GeminiFilesApiAdapter::with_base_url("KEY".into(), server.uri());
+        let adapter = GeminiFilesApiAdapter::with_base_url("KEY".into(), server.uri());
         let err = match adapter
             .upload_streaming(fake_stream(b"x"), "application/pdf", "x.pdf")
             .await

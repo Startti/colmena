@@ -215,10 +215,7 @@ impl DagStateRepository for PostgresDagStateRepository {
         Ok(())
     }
 
-    async fn find_resume_entry(
-        &self,
-        agent_session_id: &str,
-    ) -> Result<Option<String>, DagError> {
+    async fn find_resume_entry(&self, agent_session_id: &str) -> Result<Option<String>, DagError> {
         let rows = sqlx::query(
             "SELECT session_id FROM dag_runs \
              WHERE agent_session_id = $1 \
@@ -229,7 +226,7 @@ impl DagStateRepository for PostgresDagStateRepository {
                        SELECT session_id FROM dag_runs \
                         WHERE agent_session_id = $1 AND status = 'SUSPENDED' \
                    ) \
-               )"
+               )",
         )
         .bind(agent_session_id)
         .fetch_all(&self.pool)

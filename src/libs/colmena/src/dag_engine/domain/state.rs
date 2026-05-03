@@ -95,10 +95,7 @@ pub trait DagStateRepository: Send + Sync {
     /// Returns `None` if no run is currently suspended for that chat.
     /// Returns `Err` if more than one entry exists (concurrent suspended
     /// chains under the same chat — out of scope for this design; defensive).
-    async fn find_resume_entry(
-        &self,
-        agent_session_id: &str,
-    ) -> Result<Option<String>, DagError>;
+    async fn find_resume_entry(&self, agent_session_id: &str) -> Result<Option<String>, DagError>;
 
     /// Returns the session_id of a SUSPENDED child run whose parent_session_id
     /// matches the input. There must be at most one such child per parent in

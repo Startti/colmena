@@ -77,7 +77,9 @@ impl SseMapper {
                 self.total_cache_read_tokens += cache_read_tokens.unwrap_or(0) as u64;
                 self.total_cache_write_tokens += cache_write_tokens.unwrap_or(0) as u64;
             }
-            DagExecutionEvent::LlmToolCall { tool_id, tool_name, .. } => {
+            DagExecutionEvent::LlmToolCall {
+                tool_id, tool_name, ..
+            } => {
                 if self.seen_top_tool_ids.insert(tool_id.clone()) {
                     parts.push(json!({
                         "type": "tool-input-start",
@@ -115,7 +117,9 @@ impl SseMapper {
                     self.total_cache_read_tokens += cache_read_tokens.unwrap_or(0) as u64;
                     self.total_cache_write_tokens += cache_write_tokens.unwrap_or(0) as u64;
                 }
-                DagExecutionEvent::LlmToolCall { tool_id, tool_name, .. } => {
+                DagExecutionEvent::LlmToolCall {
+                    tool_id, tool_name, ..
+                } => {
                     if self.seen_sub_tool_ids.insert(tool_id.clone()) {
                         parts.push(json!({
                             "type": "subgraph-tool-input-start",
@@ -131,7 +135,12 @@ impl SseMapper {
 
         // Phase 2: map event → protocol JSON
         let protocol: Option<Value> = match event {
-            DagExecutionEvent::NodeStart { node_id, node_type, config, inputs } => {
+            DagExecutionEvent::NodeStart {
+                node_id,
+                node_type,
+                config,
+                inputs,
+            } => {
                 self.node_types.insert(node_id.clone(), node_type.clone());
                 Some(json!({
                     "type": "node-start",
@@ -167,7 +176,11 @@ impl SseMapper {
             }
             // ThinkingToken is emitted by the orchestrator node when internal planner/critic/reactor
             // LLMs stream tokens. Distinct from user-facing LlmToken.
-            DagExecutionEvent::ThinkingToken { node_id, node_type, token } => Some(json!({
+            DagExecutionEvent::ThinkingToken {
+                node_id,
+                node_type,
+                token,
+            } => Some(json!({
                 "type": "thinking-delta",
                 "node_id": node_id,
                 "node_type": node_type,
@@ -191,12 +204,21 @@ impl SseMapper {
                 "type": "usage-summary",
                 "nodes": entries
             })),
-            DagExecutionEvent::LlmToolCall { tool_id, args_chunk, .. } => Some(json!({
+            DagExecutionEvent::LlmToolCall {
+                tool_id,
+                args_chunk,
+                ..
+            } => Some(json!({
                 "type": "tool-input-delta",
                 "toolCallId": tool_id,
                 "inputTextDelta": args_chunk
             })),
-            DagExecutionEvent::LlmToolCallStart { tool_id, tool_name, tool_args, .. } => {
+            DagExecutionEvent::LlmToolCallStart {
+                tool_id,
+                tool_name,
+                tool_args,
+                ..
+            } => {
                 let input = serde_json::from_str::<Value>(tool_args)
                     .unwrap_or_else(|_| Value::String(tool_args.clone()));
                 Some(json!({
@@ -206,7 +228,9 @@ impl SseMapper {
                     "input": input
                 }))
             }
-            DagExecutionEvent::LlmToolCallFinish { tool_id, output, .. } => {
+            DagExecutionEvent::LlmToolCallFinish {
+                tool_id, output, ..
+            } => {
                 let out = serde_json::from_str::<Value>(output)
                     .unwrap_or_else(|_| Value::String(output.clone()));
                 Some(json!({
@@ -232,7 +256,13 @@ impl SseMapper {
                             .and_then(|e| e.get("__colmena_status"))
                     })
                     .and_then(|s| s.as_str())
-                    .map(|s| if s == "SUSPENDED" { "suspended" } else { "stop" })
+                    .map(|s| {
+                        if s == "SUSPENDED" {
+                            "suspended"
+                        } else {
+                            "stop"
+                        }
+                    })
                     .unwrap_or("stop");
 
                 let mut usage_obj = json!({
@@ -290,7 +320,12 @@ impl SseMapper {
                 "toolName": tool_name,
             })),
             DagExecutionEvent::SubgraphWrapped { inner } => match inner.as_ref() {
-                DagExecutionEvent::NodeStart { node_id, node_type, inputs, config } => {
+                DagExecutionEvent::NodeStart {
+                    node_id,
+                    node_type,
+                    inputs,
+                    config,
+                } => {
                     self.node_types.insert(node_id.clone(), node_type.clone());
                     Some(json!({
                         "type": "subgraph-node-start",
@@ -323,20 +358,35 @@ impl SseMapper {
                         .unwrap_or_else(|| node_id.clone());
                     Some(json!({ "type": "subgraph-text-delta", "id": part_id, "delta": token }))
                 }
-                DagExecutionEvent::ThinkingToken { node_id, node_type, token } => {
+                DagExecutionEvent::ThinkingToken {
+                    node_id,
+                    node_type,
+                    token,
+                } => {
                     let part_id = self
                         .text_block_ids
                         .get(node_id)
                         .cloned()
                         .unwrap_or_else(|| node_id.clone());
-                    Some(json!({ "type": "subgraph-text-delta", "id": part_id, "node_id": node_id, "node_type": node_type, "delta": token }))
+                    Some(
+                        json!({ "type": "subgraph-text-delta", "id": part_id, "node_id": node_id, "node_type": node_type, "delta": token }),
+                    )
                 }
-                DagExecutionEvent::LlmToolCall { tool_id, args_chunk, .. } => Some(json!({
+                DagExecutionEvent::LlmToolCall {
+                    tool_id,
+                    args_chunk,
+                    ..
+                } => Some(json!({
                     "type": "subgraph-tool-input-delta",
                     "toolCallId": tool_id,
                     "inputTextDelta": args_chunk
                 })),
-                DagExecutionEvent::LlmToolCallStart { tool_id, tool_name, tool_args, .. } => {
+                DagExecutionEvent::LlmToolCallStart {
+                    tool_id,
+                    tool_name,
+                    tool_args,
+                    ..
+                } => {
                     let input = serde_json::from_str::<Value>(tool_args)
                         .unwrap_or_else(|_| Value::String(tool_args.clone()));
                     Some(json!({
@@ -346,7 +396,9 @@ impl SseMapper {
                         "input": input
                     }))
                 }
-                DagExecutionEvent::LlmToolCallFinish { tool_id, output, .. } => {
+                DagExecutionEvent::LlmToolCallFinish {
+                    tool_id, output, ..
+                } => {
                     let out = serde_json::from_str::<Value>(output)
                         .unwrap_or_else(|_| Value::String(output.clone()));
                     Some(json!({
@@ -456,7 +508,11 @@ mod tests {
         let events = tool_call_sequence();
 
         let parts = mapper.map(&events[0]);
-        assert_eq!(parts.len(), 2, "expected [tool-input-start, tool-input-delta]");
+        assert_eq!(
+            parts.len(),
+            2,
+            "expected [tool-input-start, tool-input-delta]"
+        );
         assert_eq!(parts[0]["type"], "tool-input-start");
         assert_eq!(parts[0]["toolCallId"], "call_abc");
         assert_eq!(parts[0]["toolName"], "getWeather");
@@ -543,7 +599,11 @@ mod tests {
             }),
         };
         let sub_parts = mapper.map(&sub_event);
-        assert_eq!(sub_parts.len(), 2, "subgraph tool-input-start must not be suppressed by top-level seen_tool_ids");
+        assert_eq!(
+            sub_parts.len(),
+            2,
+            "subgraph tool-input-start must not be suppressed by top-level seen_tool_ids"
+        );
         assert_eq!(sub_parts[0]["type"], "subgraph-tool-input-start");
     }
 }

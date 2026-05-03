@@ -41,8 +41,11 @@ again with the `reference` parameter to load that additional material.",
     let mut properties: HashMap<String, ParameterProperty> = HashMap::new();
     properties.insert(
         "name".to_string(),
-        ParameterProperty::new("string".to_string(), "The name of the skill to load".to_string())
-            .with_enum(names),
+        ParameterProperty::new(
+            "string".to_string(),
+            "The name of the skill to load".to_string(),
+        )
+        .with_enum(names),
     );
     properties.insert(
         "reference".to_string(),

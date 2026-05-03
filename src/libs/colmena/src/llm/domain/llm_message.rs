@@ -250,7 +250,9 @@ mod tests {
             mime_type: "application/pdf".to_string(),
             filename: "report.pdf".to_string(),
             size_hint: Some(47_185_920),
-            source: FileSource::SignedUrl("https://storage.googleapis.com/bucket/x?sig=abc".to_string()),
+            source: FileSource::SignedUrl(
+                "https://storage.googleapis.com/bucket/x?sig=abc".to_string(),
+            ),
         };
         assert_eq!(file.document_id.as_deref(), Some("doc-123"));
         match &file.source {
@@ -275,7 +277,9 @@ mod tests {
 
     #[test]
     fn test_file_source_serde_round_trip_inline() {
-        let src = FileSource::InlineBytes { bytes: vec![1, 2, 3] };
+        let src = FileSource::InlineBytes {
+            bytes: vec![1, 2, 3],
+        };
         let json = serde_json::to_string(&src).unwrap();
         let parsed: FileSource = serde_json::from_str(&json).unwrap();
         assert_eq!(src, parsed);

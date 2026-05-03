@@ -3,8 +3,8 @@
 //! Requires `DATABASE_URL` to be set and reachable. Each test cleans up
 //! its own `dag_runs` rows.
 
-use colmena::dag_engine::engine::{ColmenaEngine, EngineConfig};
 use colmena::dag_engine::domain::graph::Graph;
+use colmena::dag_engine::engine::{ColmenaEngine, EngineConfig};
 use futures::StreamExt;
 use serde_json::json;
 
@@ -41,14 +41,8 @@ async fn first_run_under_new_chat_creates_root_with_agent_id() {
     cleanup(chat).await;
 
     let eng = engine().await;
-    let mut s = Box::pin(eng.execute_stream(
-        trivial_graph(),
-        None,
-        None,
-        false,
-        None,
-        Some(chat.into()),
-    ));
+    let mut s =
+        Box::pin(eng.execute_stream(trivial_graph(), None, None, false, None, Some(chat.into())));
     while s.next().await.is_some() {}
     drop(s);
 
@@ -78,40 +72,29 @@ async fn second_run_same_chat_after_completed_creates_new_run() {
     let eng = engine().await;
 
     // First run.
-    let mut s1 = Box::pin(eng.execute_stream(
-        trivial_graph(),
-        None,
-        None,
-        false,
-        None,
-        Some(chat.into()),
-    ));
+    let mut s1 =
+        Box::pin(eng.execute_stream(trivial_graph(), None, None, false, None, Some(chat.into())));
     while s1.next().await.is_some() {}
     drop(s1);
 
     // Second run (no SUSPENDED state, so a fresh root run with same chat).
-    let mut s2 = Box::pin(eng.execute_stream(
-        trivial_graph(),
-        None,
-        None,
-        false,
-        None,
-        Some(chat.into()),
-    ));
+    let mut s2 =
+        Box::pin(eng.execute_stream(trivial_graph(), None, None, false, None, Some(chat.into())));
     while s2.next().await.is_some() {}
     drop(s2);
 
     dotenvy::dotenv().ok();
     let url = std::env::var("DATABASE_URL").unwrap();
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
-    let count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM dag_runs WHERE agent_session_id = $1",
-    )
-    .bind(chat)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(count.0, 2, "two distinct runs should exist under the same chat");
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM dag_runs WHERE agent_session_id = $1")
+        .bind(chat)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count.0, 2,
+        "two distinct runs should exist under the same chat"
+    );
 
     cleanup(chat).await;
     eng.shutdown().await;
@@ -142,13 +125,12 @@ async fn conflict_between_session_id_and_agent_session_id_errors() {
     dotenvy::dotenv().ok();
     let url = std::env::var("DATABASE_URL").unwrap();
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
-    let (sid,): (String,) = sqlx::query_as(
-        "SELECT session_id FROM dag_runs WHERE agent_session_id = $1 LIMIT 1",
-    )
-    .bind(chat_a)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let (sid,): (String,) =
+        sqlx::query_as("SELECT session_id FROM dag_runs WHERE agent_session_id = $1 LIMIT 1")
+            .bind(chat_a)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
 
     // Now try to resume that session_id while passing chat_b → must error.
     let mut s2 = Box::pin(eng.execute_stream(

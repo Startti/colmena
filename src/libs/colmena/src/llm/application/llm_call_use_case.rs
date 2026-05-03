@@ -41,19 +41,13 @@ impl LlmCallUseCase {
     }
 
     /// Inyecta la factory que construye `FileProviderRepository` por provider.
-    pub fn with_file_provider_factory(
-        mut self,
-        factory: Arc<dyn FileProviderFactoryPort>,
-    ) -> Self {
+    pub fn with_file_provider_factory(mut self, factory: Arc<dyn FileProviderFactoryPort>) -> Self {
         self.file_provider_factory = Some(factory);
         self
     }
 
     /// Inyecta el fetcher que descarga el contenido de signed URLs.
-    pub fn with_signed_url_fetcher(
-        mut self,
-        fetcher: Arc<dyn SignedUrlFetcher>,
-    ) -> Self {
+    pub fn with_signed_url_fetcher(mut self, fetcher: Arc<dyn SignedUrlFetcher>) -> Self {
         self.signed_url_fetcher = Some(fetcher);
         self
     }
@@ -109,11 +103,7 @@ impl LlmCallUseCase {
                 }
 
                 // Reset Uploaded → SignedUrl for files matching the bad id, so resolve_files re-uploads.
-                Self::reset_uploaded_files_with_id(
-                    &mut messages,
-                    &provider_file_id,
-                    &url_snapshot,
-                );
+                Self::reset_uploaded_files_with_id(&mut messages, &provider_file_id, &url_snapshot);
 
                 // Re-resolve.
                 self.resolve_files_in_messages(
@@ -541,8 +531,8 @@ mod tests {
 mod resolve_files_tests {
     use super::*;
     use crate::llm::domain::{
-        BoxedByteStream, CachedFileEntry, FileCacheRepository, FileData,
-        FileProviderRepository, FileSource, LlmError, ProviderFileRef, ProviderKind,
+        BoxedByteStream, CachedFileEntry, FileCacheRepository, FileData, FileProviderRepository,
+        FileSource, LlmError, ProviderFileRef, ProviderKind,
     };
     // Tests pueden importar adapters concretos para fixtures: la regla "domain
     // sin infrastructure" aplica al código de producción, no a tests.
@@ -585,11 +575,7 @@ mod resolve_files_tests {
             v.push(e.clone());
             Ok(())
         }
-        async fn invalidate(
-            &self,
-            doc_id: &str,
-            p: ProviderKind,
-        ) -> Result<(), LlmError> {
+        async fn invalidate(&self, doc_id: &str, p: ProviderKind) -> Result<(), LlmError> {
             self.entries
                 .lock()
                 .unwrap()
@@ -889,8 +875,14 @@ mod snapshot_and_reset_tests {
         ];
 
         let snapshot = LlmCallUseCase::snapshot_signed_urls(&messages);
-        assert_eq!(snapshot.get("doc-1").map(|s| s.as_str()), Some("https://gcs/one"));
-        assert_eq!(snapshot.get("doc-2").map(|s| s.as_str()), Some("https://gcs/two"));
+        assert_eq!(
+            snapshot.get("doc-1").map(|s| s.as_str()),
+            Some("https://gcs/one")
+        );
+        assert_eq!(
+            snapshot.get("doc-2").map(|s| s.as_str()),
+            Some("https://gcs/two")
+        );
         assert_eq!(snapshot.len(), 2);
     }
 
@@ -968,11 +960,10 @@ mod snapshot_and_reset_tests {
 
     #[test]
     fn reset_no_op_when_file_has_no_document_id() {
-        let mut messages = vec![LlmMessage::user_with_files(
-            "x".into(),
-            vec![uploaded_file(None, "lost")],
-        )
-        .unwrap()];
+        let mut messages =
+            vec![
+                LlmMessage::user_with_files("x".into(), vec![uploaded_file(None, "lost")]).unwrap(),
+            ];
 
         let mut snapshot = HashMap::new();
         snapshot.insert("doc-1".to_string(), "https://gcs/orig".to_string());

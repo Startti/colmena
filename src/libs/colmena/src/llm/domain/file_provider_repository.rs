@@ -13,8 +13,7 @@ use std::time::Duration;
 
 /// Stream de bytes que el adapter consume para hacer upload.
 /// Se construye típicamente desde `reqwest::Response::bytes_stream()`.
-pub type BoxedByteStream =
-    Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
+pub type BoxedByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
 
 #[async_trait]
 pub trait FileProviderRepository: Send + Sync {
@@ -56,8 +55,12 @@ mod tests {
                 expires_at: None,
             })
         }
-        fn ttl(&self) -> Option<Duration> { None }
-        fn provider(&self) -> ProviderKind { ProviderKind::Mock }
+        fn ttl(&self) -> Option<Duration> {
+            None
+        }
+        fn provider(&self) -> ProviderKind {
+            ProviderKind::Mock
+        }
     }
 
     const _: fn() = || {
@@ -68,7 +71,10 @@ mod tests {
     async fn mock_provider_returns_ref() {
         let p = MockProvider;
         let stream: BoxedByteStream = Box::pin(futures::stream::empty());
-        let r = p.upload_streaming(stream, "application/pdf", "x.pdf").await.unwrap();
+        let r = p
+            .upload_streaming(stream, "application/pdf", "x.pdf")
+            .await
+            .unwrap();
         assert_eq!(r.provider_file_id, "mock-id");
         assert_eq!(r.provider, ProviderKind::Mock);
         assert_eq!(p.provider(), ProviderKind::Mock);

@@ -119,14 +119,17 @@ async fn orchestrator_propagates_agent_suspend() {
         }
     }
     drop(s);
-    assert!(saw_suspended, "orchestrator should bubble up SUSPENDED GraphFinish event");
+    assert!(
+        saw_suspended,
+        "orchestrator should bubble up SUSPENDED GraphFinish event"
+    );
 
     // Verify dag_runs: the orchestrator's root run AND the asker subgraph run
     // should both be SUSPENDED.
     let url = std::env::var("DATABASE_URL").unwrap();
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
     let suspended_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM dag_runs WHERE agent_session_id = $1 AND status = 'SUSPENDED'"
+        "SELECT COUNT(*) FROM dag_runs WHERE agent_session_id = $1 AND status = 'SUSPENDED'",
     )
     .bind(chat)
     .fetch_one(&pool)
@@ -177,7 +180,7 @@ async fn orchestrator_resumes_agent_suspend_end_to_end() {
     let url = std::env::var("DATABASE_URL").unwrap();
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
     let still_suspended: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM dag_runs WHERE agent_session_id = $1 AND status = 'SUSPENDED'"
+        "SELECT COUNT(*) FROM dag_runs WHERE agent_session_id = $1 AND status = 'SUSPENDED'",
     )
     .bind(chat)
     .fetch_one(&pool)
@@ -189,7 +192,7 @@ async fn orchestrator_resumes_agent_suspend_end_to_end() {
     );
 
     let completed: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM dag_runs WHERE agent_session_id = $1 AND status = 'COMPLETED'"
+        "SELECT COUNT(*) FROM dag_runs WHERE agent_session_id = $1 AND status = 'COMPLETED'",
     )
     .bind(chat)
     .fetch_one(&pool)
@@ -224,27 +227,24 @@ async fn nested_orchestrators_suspend_cascades_3_levels() {
     let eng = engine().await;
 
     // Run 1: should suspend with 3 SUSPENDED rows.
-    let mut s1 = Box::pin(eng.execute_stream(
-        graph.clone(),
-        None,
-        None,
-        false,
-        None,
-        Some(chat.into()),
-    ));
+    let mut s1 =
+        Box::pin(eng.execute_stream(graph.clone(), None, None, false, None, Some(chat.into())));
     while s1.next().await.is_some() {}
     drop(s1);
 
     let url = std::env::var("DATABASE_URL").unwrap();
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
     let suspended_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM dag_runs WHERE agent_session_id = $1 AND status = 'SUSPENDED'"
+        "SELECT COUNT(*) FROM dag_runs WHERE agent_session_id = $1 AND status = 'SUSPENDED'",
     )
     .bind(chat)
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(suspended_count.0, 3, "expected 3 SUSPENDED rows after run 1 (root + 2 subgraphs)");
+    assert_eq!(
+        suspended_count.0, 3,
+        "expected 3 SUSPENDED rows after run 1 (root + 2 subgraphs)"
+    );
 
     // Run 2: resume.
     let mut s2 = Box::pin(eng.execute_stream(
@@ -260,22 +260,26 @@ async fn nested_orchestrators_suspend_cascades_3_levels() {
 
     // All 3 rows should now be COMPLETED.
     let still_suspended: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM dag_runs WHERE agent_session_id = $1 AND status = 'SUSPENDED'"
+        "SELECT COUNT(*) FROM dag_runs WHERE agent_session_id = $1 AND status = 'SUSPENDED'",
     )
     .bind(chat)
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(still_suspended.0, 0, "all rows should be COMPLETED after resume");
+    assert_eq!(
+        still_suspended.0, 0,
+        "all rows should be COMPLETED after resume"
+    );
 
-    let total: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM dag_runs WHERE agent_session_id = $1"
-    )
-    .bind(chat)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert!(total.0 >= 3, "expected at least 3 dag_runs rows in the chat tree");
+    let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM dag_runs WHERE agent_session_id = $1")
+        .bind(chat)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        total.0 >= 3,
+        "expected at least 3 dag_runs rows in the chat tree"
+    );
 
     cleanup(chat).await;
     eng.shutdown().await;

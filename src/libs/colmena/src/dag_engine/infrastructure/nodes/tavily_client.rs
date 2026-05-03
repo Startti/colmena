@@ -326,7 +326,10 @@ fn search_sub_tool() -> SubToolDefinition {
     );
     props.insert(
         "max_results".into(),
-        ParameterProperty::new("integer".into(), "Number of results (1-10). Default 5.".into()),
+        ParameterProperty::new(
+            "integer".into(),
+            "Number of results (1-10). Default 5.".into(),
+        ),
     );
     props.insert(
         "include_content".into(),
@@ -355,8 +358,16 @@ fn search_sub_tool() -> SubToolDefinition {
     );
     props.insert(
         "time_range".into(),
-        ParameterProperty::new("string".into(), "Restrict to content from this recency window.".into())
-            .with_enum(vec!["day".into(), "week".into(), "month".into(), "year".into()]),
+        ParameterProperty::new(
+            "string".into(),
+            "Restrict to content from this recency window.".into(),
+        )
+        .with_enum(vec![
+            "day".into(),
+            "week".into(),
+            "month".into(),
+            "year".into(),
+        ]),
     );
 
     SubToolDefinition {

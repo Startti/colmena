@@ -165,10 +165,9 @@ impl ExecutableNode for PythonNode {
                 // JSON Boundary" for the full list and recommended coercions.
                 match locals.get_item("output") {
                     Ok(Some(output_obj)) => {
-                        let json_output: Value =
-                            depythonize_bound(output_obj).map_err(|e| {
-                                format!("Failed to convert Python 'output' to JSON: {}", e)
-                            })?;
+                        let json_output: Value = depythonize_bound(output_obj).map_err(|e| {
+                            format!("Failed to convert Python 'output' to JSON: {}", e)
+                        })?;
                         Ok(json_output)
                     }
                     _ => Ok(Value::Null),
@@ -178,16 +177,16 @@ impl ExecutableNode for PythonNode {
 
         // 5. Apply timeout in restricted mode; plain await otherwise
         let output_json = if sandbox_mode == "restricted" {
-            tokio::time::timeout(
-                std::time::Duration::from_secs(timeout_secs),
-                blocking_task,
-            )
-            .await
-            .map_err(|_| {
-                format!("SandboxTimeout: execution exceeded {} seconds", timeout_secs)
-            })?
-            .map_err(|e| format!("Task join error: {e}"))?
-            .map_err(|e| -> Box<dyn StdError + Send + Sync> { e.into() })?
+            tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), blocking_task)
+                .await
+                .map_err(|_| {
+                    format!(
+                        "SandboxTimeout: execution exceeded {} seconds",
+                        timeout_secs
+                    )
+                })?
+                .map_err(|e| format!("Task join error: {e}"))?
+                .map_err(|e| -> Box<dyn StdError + Send + Sync> { e.into() })?
         } else {
             blocking_task.await??
         };
@@ -261,7 +260,10 @@ mod tests {
         inputs.insert("y".to_string(), json!(5));
         let config = json!({ "code": "output = x * y + 2" });
         let mut state = json!({});
-        let result = node.execute(&inputs, &config, &mut state, None).await.unwrap();
+        let result = node
+            .execute(&inputs, &config, &mut state, None)
+            .await
+            .unwrap();
         assert_eq!(result, 52);
     }
 
@@ -272,7 +274,10 @@ mod tests {
         let inputs = HashMap::new();
         let config = json!({ "code": "import math\noutput = math.sqrt(16)" });
         let mut state = json!({});
-        let result = node.execute(&inputs, &config, &mut state, None).await.unwrap();
+        let result = node
+            .execute(&inputs, &config, &mut state, None)
+            .await
+            .unwrap();
         assert_eq!(result, 4.0);
     }
 
@@ -283,7 +288,10 @@ mod tests {
         let inputs = HashMap::new();
         let config = json!({ "code": "output = 2 + 2", "sandbox_mode": "restricted" });
         let mut state = json!({});
-        let result = node.execute(&inputs, &config, &mut state, None).await.unwrap();
+        let result = node
+            .execute(&inputs, &config, &mut state, None)
+            .await
+            .unwrap();
         assert_eq!(result, 4);
     }
 
@@ -297,7 +305,10 @@ mod tests {
             "sandbox_mode": "restricted"
         });
         let mut state = json!({});
-        let result = node.execute(&inputs, &config, &mut state, None).await.unwrap();
+        let result = node
+            .execute(&inputs, &config, &mut state, None)
+            .await
+            .unwrap();
         assert_eq!(result, 4.0);
     }
 
@@ -311,7 +322,10 @@ mod tests {
             "sandbox_mode": "restricted"
         });
         let mut state = json!({});
-        let err = node.execute(&inputs, &config, &mut state, None).await.unwrap_err();
+        let err = node
+            .execute(&inputs, &config, &mut state, None)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("SandboxViolation"), "got: {err}");
         assert!(err.to_string().contains("'os'"), "got: {err}");
         assert!(err.to_string().contains("Allowed imports:"), "got: {err}");
@@ -327,7 +341,10 @@ mod tests {
             "sandbox_mode": "restricted"
         });
         let mut state = json!({});
-        let err = node.execute(&inputs, &config, &mut state, None).await.unwrap_err();
+        let err = node
+            .execute(&inputs, &config, &mut state, None)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("SandboxViolation"), "got: {err}");
         assert!(err.to_string().contains("'open'"), "got: {err}");
     }
@@ -342,7 +359,10 @@ mod tests {
             "sandbox_mode": "restricted"
         });
         let mut state = json!({});
-        let err = node.execute(&inputs, &config, &mut state, None).await.unwrap_err();
+        let err = node
+            .execute(&inputs, &config, &mut state, None)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("SandboxViolation"), "got: {err}");
         assert!(err.to_string().contains("'eval'"), "got: {err}");
     }
@@ -357,7 +377,10 @@ mod tests {
             "sandbox_mode": "none"
         });
         let mut state = json!({});
-        let result = node.execute(&inputs, &config, &mut state, None).await.unwrap();
+        let result = node
+            .execute(&inputs, &config, &mut state, None)
+            .await
+            .unwrap();
         assert_eq!(result, "module");
     }
 
@@ -370,7 +393,10 @@ mod tests {
             "code": "import os\noutput = type(os).__name__"
         });
         let mut state = json!({});
-        let result = node.execute(&inputs, &config, &mut state, None).await.unwrap();
+        let result = node
+            .execute(&inputs, &config, &mut state, None)
+            .await
+            .unwrap();
         assert_eq!(result, "module");
     }
 
@@ -393,7 +419,10 @@ mod tests {
         inputs.insert("sandbox_mode".to_string(), json!("restricted"));
         let config = json!({ "code": "output = x * 2" });
         let mut state = json!({});
-        let result = node.execute(&inputs, &config, &mut state, None).await.unwrap();
+        let result = node
+            .execute(&inputs, &config, &mut state, None)
+            .await
+            .unwrap();
         assert_eq!(result, 14);
     }
 }

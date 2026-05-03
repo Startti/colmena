@@ -178,7 +178,9 @@ impl DagToolExecutor {
     /// tool calls dispatch to the document runtime.
     pub fn with_documents(
         mut self,
-        ctx: Arc<crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::DocumentToolsContext>,
+        ctx: Arc<
+            crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::DocumentToolsContext,
+        >,
     ) -> Self {
         self.documents_context = Some(ctx);
         self
@@ -504,11 +506,12 @@ impl ToolExecutor for DagToolExecutor {
         }
 
         if tool_call.function.name == DESCRIBE_TOOL_NAME {
-            let lookup = self.describe_tool_lookup.as_ref().ok_or_else(|| {
-                LlmError::ToolNotFound {
-                    name: DESCRIBE_TOOL_NAME.to_string(),
-                }
-            })?;
+            let lookup =
+                self.describe_tool_lookup
+                    .as_ref()
+                    .ok_or_else(|| LlmError::ToolNotFound {
+                        name: DESCRIBE_TOOL_NAME.to_string(),
+                    })?;
             let result = dispatch_describe_tool(tool_call, lookup).await?;
             if let Some(obs) = &self.describe_tool_observer {
                 obs(&result);
@@ -545,35 +548,27 @@ impl ToolExecutor for DagToolExecutor {
                 } else {
                     serde_json::from_str(&tool_call.function.arguments).map_err(|e| {
                         LlmError::InvalidToolCall {
-                            reason: format!(
-                                "Failed to parse arguments for tool {}: {}",
-                                name, e
-                            ),
+                            reason: format!("Failed to parse arguments for tool {}: {}", name, e),
                         }
                     })?
                 };
 
                 let result = match name {
-                    n if n == DOCUMENT_CREATE_TOOL => {
-                        dispatch_document_create(ctx, args).await
-                    }
+                    n if n == DOCUMENT_CREATE_TOOL => dispatch_document_create(ctx, args).await,
                     n if n == DOCUMENT_APPLY_PATCH_TOOL => {
                         dispatch_document_apply_patch(ctx, args).await
                     }
                     n if n == DOCUMENT_READ_TOOL => dispatch_document_read(ctx, args).await,
-                    n if n == DOCUMENT_GET_HEAD_TOOL => {
-                        dispatch_document_get_head(ctx, args).await
-                    }
+                    n if n == DOCUMENT_GET_HEAD_TOOL => dispatch_document_get_head(ctx, args).await,
                     n if n == DOCUMENT_LIST_VERSIONS_TOOL => {
                         dispatch_document_list_versions(ctx, args).await
                     }
-                    n if n == DOCUMENT_ROLLBACK_TOOL => {
-                        dispatch_document_rollback(ctx, args).await
-                    }
+                    n if n == DOCUMENT_ROLLBACK_TOOL => dispatch_document_rollback(ctx, args).await,
                     _ => dispatch_document_list_my_artifacts(ctx, args).await,
                 };
 
-                let success = !matches!(&result, serde_json::Value::Object(m) if m.contains_key("error"));
+                let success =
+                    !matches!(&result, serde_json::Value::Object(m) if m.contains_key("error"));
                 return Ok(crate::llm::domain::ToolResult {
                     tool_call_id: tool_call.id.clone(),
                     output: result.to_string(),
@@ -1799,8 +1794,8 @@ mod tests {
             summary: None,
             eager: false,
         };
-        let executor = DagToolExecutor::new(registry, HashMap::new())
-            .with_describe_tool_lookup(vec![cfg]);
+        let executor =
+            DagToolExecutor::new(registry, HashMap::new()).with_describe_tool_lookup(vec![cfg]);
 
         let call = ToolCall::new(
             "c_describe".to_string(),
@@ -1846,7 +1841,10 @@ mod tests {
         let executor = DagToolExecutor::new(registry, HashMap::new())
             .with_describe_tool_lookup(vec![cfg])
             .with_describe_tool_observer(Arc::new(move |result| {
-                observed_clone.lock().unwrap().push(result.tool_name.clone());
+                observed_clone
+                    .lock()
+                    .unwrap()
+                    .push(result.tool_name.clone());
             }));
 
         let call = ToolCall::new(

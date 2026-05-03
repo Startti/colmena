@@ -19,10 +19,7 @@ pub struct PostgresFileCache {
 /// si la fila tiene un valor que no mapea al enum — antes el fallback
 /// silencioso a `ProviderKind::Mock` ocultaba la corrupción y producía
 /// errores opacos al usar el `provider_file_id` con el kind equivocado.
-fn parse_provider_from_row(
-    provider_db: &str,
-    document_id: &str,
-) -> Result<ProviderKind, LlmError> {
+fn parse_provider_from_row(provider_db: &str, document_id: &str) -> Result<ProviderKind, LlmError> {
     ProviderKind::from_str(provider_db).map_err(|e| {
         tracing::error!(
             provider = %provider_db,
@@ -39,16 +36,14 @@ fn parse_provider_from_row(
 }
 
 impl PostgresFileCache {
-    pub async fn new(
-        registry: Arc<PgPoolRegistry>,
-        database_url: &str,
-    ) -> Result<Self, LlmError> {
-        let pool = registry
-            .get_or_create(database_url)
-            .await
-            .map_err(|e| LlmError::RequestFailed {
-                message: format!("Failed to get Postgres pool: {}", e),
-            })?;
+    pub async fn new(registry: Arc<PgPoolRegistry>, database_url: &str) -> Result<Self, LlmError> {
+        let pool =
+            registry
+                .get_or_create(database_url)
+                .await
+                .map_err(|e| LlmError::RequestFailed {
+                    message: format!("Failed to get Postgres pool: {}", e),
+                })?;
 
         Ok(Self { pool })
     }
@@ -96,11 +91,11 @@ impl FileCacheRepository for PostgresFileCache {
                 .map_err(|e| LlmError::RequestFailed {
                     message: format!("provider_file_cache lookup decode failed: {}", e),
                 })?;
-        let provider_file_id: String = row
-            .try_get::<String, _>("provider_file_id")
-            .map_err(|e| LlmError::RequestFailed {
-                message: format!("provider_file_cache lookup decode failed: {}", e),
-            })?;
+        let provider_file_id: String =
+            row.try_get::<String, _>("provider_file_id")
+                .map_err(|e| LlmError::RequestFailed {
+                    message: format!("provider_file_cache lookup decode failed: {}", e),
+                })?;
         let mime_type: String =
             row.try_get::<String, _>("mime_type")
                 .map_err(|e| LlmError::RequestFailed {
@@ -111,26 +106,26 @@ impl FileCacheRepository for PostgresFileCache {
                 .map_err(|e| LlmError::RequestFailed {
                     message: format!("provider_file_cache lookup decode failed: {}", e),
                 })?;
-        let size_bytes: Option<i64> = row.try_get::<Option<i64>, _>("size_bytes").map_err(|e| {
-            LlmError::RequestFailed {
-                message: format!("provider_file_cache lookup decode failed: {}", e),
-            }
-        })?;
-        let uploaded_at: DateTime<Utc> = row
-            .try_get::<DateTime<Utc>, _>("uploaded_at")
-            .map_err(|e| LlmError::RequestFailed {
-                message: format!("provider_file_cache lookup decode failed: {}", e),
-            })?;
+        let size_bytes: Option<i64> =
+            row.try_get::<Option<i64>, _>("size_bytes")
+                .map_err(|e| LlmError::RequestFailed {
+                    message: format!("provider_file_cache lookup decode failed: {}", e),
+                })?;
+        let uploaded_at: DateTime<Utc> =
+            row.try_get::<DateTime<Utc>, _>("uploaded_at")
+                .map_err(|e| LlmError::RequestFailed {
+                    message: format!("provider_file_cache lookup decode failed: {}", e),
+                })?;
         let expires_at: Option<DateTime<Utc>> = row
             .try_get::<Option<DateTime<Utc>>, _>("expires_at")
             .map_err(|e| LlmError::RequestFailed {
                 message: format!("provider_file_cache lookup decode failed: {}", e),
             })?;
-        let last_used_at: DateTime<Utc> = row
-            .try_get::<DateTime<Utc>, _>("last_used_at")
-            .map_err(|e| LlmError::RequestFailed {
-                message: format!("provider_file_cache lookup decode failed: {}", e),
-            })?;
+        let last_used_at: DateTime<Utc> =
+            row.try_get::<DateTime<Utc>, _>("last_used_at")
+                .map_err(|e| LlmError::RequestFailed {
+                    message: format!("provider_file_cache lookup decode failed: {}", e),
+                })?;
 
         let provider = parse_provider_from_row(&provider_db, &document_id)?;
 
@@ -184,11 +179,7 @@ impl FileCacheRepository for PostgresFileCache {
         Ok(())
     }
 
-    async fn invalidate(
-        &self,
-        document_id: &str,
-        provider: ProviderKind,
-    ) -> Result<(), LlmError> {
+    async fn invalidate(&self, document_id: &str, provider: ProviderKind) -> Result<(), LlmError> {
         let provider_str = provider.to_string();
         sqlx::query("DELETE FROM provider_file_cache WHERE document_id = $1 AND provider = $2")
             .bind(document_id)
