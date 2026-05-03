@@ -138,6 +138,74 @@ The LLM node supports an optional `skills` config field that exposes built-in an
 - **Tipo:** `number` (-2.0 a 2.0)
 - **Descripción:** Penalizaciones para tokens frecuentes/vistos
 
+#### `files` (adjuntos: imágenes y documentos)
+- **Tipo:** `array<FileEntry>` (opcional)
+- **Fuente:** `inputs.files` → `config.files`
+- **Descripción:** Archivos adjuntos al request — imágenes para visión, PDFs para extracción/análisis de documentos. Soporta inline (base64), URL firmada (GCS) y path local (legacy).
+- **Schema de cada entrada:**
+  ```json
+  {
+    "id":         "doc-abc-123",       // requerido si usas `url` (clave de cache)
+    "mime_type":  "application/pdf",
+    "filename":   "report.pdf",
+    "size_bytes": 47185920,            // hint, no ground truth
+    "data":       null,                // base64 puro, < 30 MB
+    "url":        "https://storage.googleapis.com/.../path?X-Goog-Signature=..."
+    // alternativa: "path": "/local/path.pdf" (solo dev/tests, < 30 MB)
+  }
+  ```
+- **Reglas (mutuamente excluyentes, prioridad `data > url > path`):**
+  - `data`: inline base64 — solo válido si raw < 30 MB. El emisor decide el threshold a 30 MB.
+  - `url`: signed URL HTTPS a GCS. **Requiere `id`** (es la llave de cache `(document_id, provider)`). TTL típico de la URL: 6 h.
+  - `path`: legacy local, solo dev/tests, < 30 MB.
+- **Comportamiento por provider** (auto-detectado):
+
+  | Provider  | Imagen | PDF / documento |
+  |-----------|--------|-----------------|
+  | Anthropic | URL passthrough (no upload) | Files API + `file_id` |
+  | OpenAI    | URL passthrough en chat completions | Files API + `file_id` en Responses API |
+  | Gemini    | Files API resumable upload | Files API resumable (chunks de 8 MB) |
+
+- **Cache**: si `DATABASE_URL` está set, los uploads se cachean por `(id, provider)` en la tabla `provider_file_cache`. Re-runs con el mismo `id` saltan el download/upload completos. Si `DATABASE_URL` no está set, cada run sube de nuevo (degradación graceful).
+- **Errores específicos**:
+  - `DataFieldTooLarge { size }` — `data` con `size_bytes > 30 MB`. Bug del emisor.
+  - `UrlWithoutDocumentId` — `url` presente sin `id`. Bug de contrato.
+  - `SignedUrlFetchFailed { status }` — GCS rechazó GET (URL expirada).
+  - `InvalidMimeType { mime, message }` — mime mal formado (precondición del caller).
+  - `FileApiUploadFailed { provider, message }` — provider rechazó upload (cuota, key inválida).
+  - `ProviderFileNotFound { provider_file_id }` — archivo borrado del provider; se recupera automáticamente con snapshot+retry.
+  - `AllFilesFailedToResolve` — todos los archivos del request fallaron.
+- **Ejemplos:**
+  ```json
+  {
+    "config": {
+      "files": [
+        {
+          "id": "report-q1-2026",
+          "mime_type": "application/pdf",
+          "filename": "q1.pdf",
+          "size_bytes": 52428800,
+          "url": "https://storage.googleapis.com/bucket/q1.pdf?X-Goog-Signature=..."
+        }
+      ]
+    }
+  }
+  ```
+
+  Inline para archivos chicos:
+  ```json
+  {
+    "files": [
+      {
+        "mime_type": "image/jpeg",
+        "filename": "screenshot.jpg",
+        "data": "<base64-sin-prefijo-data:>"
+      }
+    ]
+  }
+  ```
+- **Más detalle**: ver [28_large_files_api.md](28_large_files_api.md) para arquitectura interna, flujo de resolución, límites de modelo por provider, y trazabilidad con `COLMENA_VERBOSE=1`.
+
 ---
 
 ### **NIVEL 3: PARÁMETROS DE MEMORIA CONVERSACIONAL**
