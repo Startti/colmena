@@ -15,6 +15,29 @@ pub struct PostgresFileCache {
     pool: Arc<PgPool>,
 }
 
+/// Convierte el string de la columna `provider` a `ProviderKind`. Fail-fast
+/// si la fila tiene un valor que no mapea al enum — antes el fallback
+/// silencioso a `ProviderKind::Mock` ocultaba la corrupción y producía
+/// errores opacos al usar el `provider_file_id` con el kind equivocado.
+fn parse_provider_from_row(
+    provider_db: &str,
+    document_id: &str,
+) -> Result<ProviderKind, LlmError> {
+    ProviderKind::from_str(provider_db).map_err(|e| {
+        tracing::error!(
+            provider = %provider_db,
+            document_id = %document_id,
+            "provider_file_cache: corrupted provider in cache row"
+        );
+        LlmError::RequestFailed {
+            message: format!(
+                "provider_file_cache: corrupted provider '{}' for document_id={}: {}",
+                provider_db, document_id, e
+            ),
+        }
+    })
+}
+
 impl PostgresFileCache {
     pub async fn new(
         registry: Arc<PgPoolRegistry>,
@@ -109,13 +132,7 @@ impl FileCacheRepository for PostgresFileCache {
                 message: format!("provider_file_cache lookup decode failed: {}", e),
             })?;
 
-        let provider = ProviderKind::from_str(&provider_db).unwrap_or_else(|_| {
-            eprintln!(
-                "PostgresFileCache: unknown provider '{}' in row for document_id={}, falling back to Mock",
-                provider_db, document_id
-            );
-            ProviderKind::Mock
-        });
+        let provider = parse_provider_from_row(&provider_db, &document_id)?;
 
         Ok(Some(CachedFileEntry {
             document_id,
@@ -329,6 +346,31 @@ mod tests {
             assert_eq!(got.provider_file_id, "file_abc");
         })
         .await;
+    }
+
+    #[test]
+    fn parse_provider_from_row_accepts_known_kinds() {
+        for s in ["anthropic", "openai", "gemini", "mock"] {
+            let parsed = parse_provider_from_row(s, "doc-1").unwrap();
+            assert_eq!(parsed.to_string(), s);
+        }
+    }
+
+    #[test]
+    fn parse_provider_from_row_fails_on_corrupted_string() {
+        // Antes: este caso devolvía silenciosamente `ProviderKind::Mock`. Ahora
+        // propaga `LlmError::RequestFailed` con el provider y el document_id
+        // en el mensaje, para que el operador pueda invalidar la fila a mano.
+        let err = parse_provider_from_row("definitely-not-a-provider", "doc-corrupt")
+            .expect_err("corrupted provider must fail-fast");
+        match err {
+            LlmError::RequestFailed { message } => {
+                assert!(message.contains("corrupted provider"));
+                assert!(message.contains("definitely-not-a-provider"));
+                assert!(message.contains("doc-corrupt"));
+            }
+            other => panic!("expected RequestFailed, got {:?}", other),
+        }
     }
 
     #[tokio::test]

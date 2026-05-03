@@ -30,6 +30,7 @@ impl FromStr for ProviderKind {
             "openai" => Ok(ProviderKind::OpenAi),
             "gemini" => Ok(ProviderKind::Gemini),
             "anthropic" => Ok(ProviderKind::Anthropic),
+            "mock" => Ok(ProviderKind::Mock),
             _ => Err(LlmError::UnsupportedProvider {
                 provider: s.to_string(),
             }),

@@ -283,7 +283,7 @@ impl LlmCallUseCase {
             {
                 Ok(f) => resolved.push(f),
                 Err(e) => {
-                    eprintln!("WARN: file resolution failed: {}", e);
+                    tracing::warn!(error = %e, "file resolution failed; skipping file");
                     errors_per_file += 1;
                 }
             }

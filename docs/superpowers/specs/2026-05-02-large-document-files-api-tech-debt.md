@@ -17,7 +17,7 @@ Esta tabla agrupa el trabajo pendiente y la deuda registrada durante la implemen
 | 3 | ~~Layer leak: `LlmCallUseCase` importa de `infrastructure`~~ ✅ Resuelto | Media | No (compila y funciona) | 1 día |
 | 4 | Filas huérfanas en cache cuando se cambian estrategias | Baja | No | 1 día (con limpieza retroactiva) |
 | 5 | Janitor de archivos huérfanos en proveedores | Media | No | 2-3 días |
-| 6 | `ProviderKind::Mock` fallback silencioso en `PostgresFileCache::lookup` | Baja | No | 30 min |
+| 6 | ~~`ProviderKind::Mock` fallback silencioso en `PostgresFileCache::lookup`~~ ✅ Resuelto | Baja | No | 30 min |
 | 7 | Error de mime malformado clasificado como `FileApiUploadFailed` | Baja | No | 1 hora |
 | 8 | Tests de integración E2E reproducibles (sin signed URLs) | Media | No | 2 días |
 | 9 | Métricas/observabilidad (Prometheus) para cache hit-rate | Baja | No | 1 día |
@@ -185,11 +185,11 @@ Out of scope hasta ver volumen real (spec).
 
 ---
 
-## 6. `ProviderKind::Mock` fallback silencioso
+## 6. `ProviderKind::Mock` fallback silencioso ✅ RESUELTO
 
-**Ubicación**: `src/libs/colmena/src/llm/infrastructure/files/postgres_file_cache.rs::lookup`.
+**Ubicación**: `src/libs/colmena/src/llm/infrastructure/files/postgres_file_cache.rs::parse_provider_from_row`.
 
-### Síntoma
+### Síntoma original
 
 ```rust
 provider: ProviderKind::from_str(&r.provider).unwrap_or_else(|_| {
@@ -198,16 +198,20 @@ provider: ProviderKind::from_str(&r.provider).unwrap_or_else(|_| {
 }),
 ```
 
-Si una fila tiene un provider string corrupto o desconocido, se devuelve como `ProviderKind::Mock`. El `eprintln!` es invisible en producción con structured logging.
+Filas con provider string corrupto se devolvían como `ProviderKind::Mock`. El `eprintln!` era invisible bajo structured logging. El caller usaba el `provider_file_id` con un kind equivocado y obtenía errores opacos en el LLM call.
 
-Riesgos:
-- Lookup retorna fila con provider mismatched, se usa el `provider_file_id` con un provider equivocado, falla en el LLM call.
+### Solución implementada
 
-### Solución
+1. **Parsing extraído a función pura `parse_provider_from_row(provider_db, document_id)`** — fácil de unit-testear sin Postgres.
+2. **Fail-fast** con `LlmError::RequestFailed { message: "provider_file_cache: corrupted provider '<value>' for document_id=<id>: <error>" }`. El operador puede invalidar la fila a mano.
+3. **`tracing::error!`** estructurado en lugar de `eprintln!` (campos `provider`, `document_id` capturados en JSON estructurado para alertas).
+4. **`eprintln!("WARN: file resolution failed: {e}")` en `LlmCallUseCase::resolve_files` también pasó a `tracing::warn!`** — coherencia del feature.
+5. **Bug latente de simetría arreglado**: `ProviderKind::from_str` no aceptaba `"mock"` (solo `to_string()` lo emitía). Ahora `from_str("mock") = Ok(Mock)`. Si el factory algún día insertara una fila Mock, el round-trip funciona.
 
-Cambiar a `Err(LlmError::RequestFailed { message: "corrupted provider in cache row" })`. Hacer fail-fast en lugar de silent corruption.
+### Tests
 
-Adicional: usar `tracing::warn!` en lugar de `eprintln!` en TODO el código del feature (varios sitios).
+- `parse_provider_from_row_accepts_known_kinds`: round-trip de `anthropic`, `openai`, `gemini`, `mock`.
+- `parse_provider_from_row_fails_on_corrupted_string`: assert `RequestFailed` con `message` que contiene el string corrupto y el `document_id`.
 
 ---
 
