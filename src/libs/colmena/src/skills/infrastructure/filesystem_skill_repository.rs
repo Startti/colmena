@@ -28,15 +28,16 @@ struct SkillEntry {
 impl FilesystemSkillRepository {
     /// Build from a list of user-supplied paths plus the directory of the graph JSON.
     ///
-    /// - `paths`: the literal strings from `config.skills.paths`.
-    /// - `graph_dir`: the canonical directory containing the graph JSON file.
-    /// - `extra_allowed_dirs`: additional canonical allowed roots (from `COLMENA_SKILLS_ALLOWED_DIRS`).
+    /// Each path is auto-detected as one of:
+    /// - **single skill directory** if it contains `SKILL.md`,
+    /// - **root of skills** if it does not — every immediate child that contains
+    ///   `SKILL.md` is loaded; non-skill children are silently ignored. A root
+    ///   with zero skill children returns `SkillError::EmptyRoot`.
     pub fn from_paths(
         paths: &[String],
         graph_dir: &Path,
         extra_allowed_dirs: &[PathBuf],
     ) -> Result<Self, SkillError> {
-        // Canonicalize the allowed set. graph_dir is always allowed.
         let mut allowed: Vec<PathBuf> = Vec::new();
         let graph_canonical = graph_dir.canonicalize().map_err(|e| SkillError::Io {
             path: graph_dir.display().to_string(),
@@ -47,7 +48,6 @@ impl FilesystemSkillRepository {
             if let Ok(canon) = p.canonicalize() {
                 allowed.push(canon);
             }
-            // Silently skip allowed dirs that don't exist — not an error, just unused.
         }
 
         let mut skills: HashMap<String, SkillEntry> = HashMap::new();
@@ -74,85 +74,110 @@ impl FilesystemSkillRepository {
                 return Err(SkillError::NotADirectory(canonical.display().to_string()));
             }
 
-            let skill_md_path = canonical.join("SKILL.md");
-            if !skill_md_path.exists() {
-                return Err(SkillError::SkillMdMissing(canonical.display().to_string()));
-            }
-
-            let md_size = std::fs::metadata(&skill_md_path)
-                .map_err(|e| SkillError::Io {
-                    path: skill_md_path.display().to_string(),
-                    source: e,
-                })?
-                .len();
-            if md_size > MAX_FILE_SIZE_BYTES {
-                return Err(SkillError::FileTooLarge {
-                    path: skill_md_path.display().to_string(),
-                    size: md_size,
-                    limit: MAX_FILE_SIZE_BYTES,
-                });
-            }
-
-            let md_content =
-                std::fs::read_to_string(&skill_md_path).map_err(|e| SkillError::Io {
-                    path: skill_md_path.display().to_string(),
+            if canonical.join("SKILL.md").exists() {
+                Self::load_skill_dir(&canonical, &mut skills)?;
+            } else {
+                let mut found = 0usize;
+                let read = std::fs::read_dir(&canonical).map_err(|e| SkillError::Io {
+                    path: canonical.display().to_string(),
                     source: e,
                 })?;
-            let parsed = parse_skill_md(&md_content, &skill_md_path.display().to_string())?;
-
-            // Validate: frontmatter name must match the directory name.
-            let dir_name = canonical
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("<unknown>")
-                .to_string();
-            if parsed.name != dir_name {
-                return Err(SkillError::NameMismatch {
-                    name: parsed.name,
-                    dir: dir_name,
-                    path: canonical.display().to_string(),
-                });
-            }
-
-            // Validate each declared reference file exists and is within size limit.
-            for r in &parsed.references {
-                let ref_path = canonical.join("references").join(format!("{}.md", r.name));
-                if !ref_path.exists() {
-                    return Err(SkillError::ReferenceFileMissing {
-                        skill: parsed.name.clone(),
-                        path: ref_path.display().to_string(),
-                    });
-                }
-                let ref_size = std::fs::metadata(&ref_path)
-                    .map_err(|e| SkillError::Io {
-                        path: ref_path.display().to_string(),
+                for entry in read {
+                    let entry = entry.map_err(|e| SkillError::Io {
+                        path: canonical.display().to_string(),
                         source: e,
-                    })?
-                    .len();
-                if ref_size > MAX_FILE_SIZE_BYTES {
-                    return Err(SkillError::FileTooLarge {
-                        path: ref_path.display().to_string(),
-                        size: ref_size,
-                        limit: MAX_FILE_SIZE_BYTES,
-                    });
+                    })?;
+                    let sub = entry.path();
+                    if sub.is_dir() && sub.join("SKILL.md").exists() {
+                        Self::load_skill_dir(&sub, &mut skills)?;
+                        found += 1;
+                    }
+                }
+                if found == 0 {
+                    return Err(SkillError::EmptyRoot(canonical.display().to_string()));
                 }
             }
-
-            if skills.contains_key(&parsed.name) {
-                return Err(SkillError::SkillNameCollision { name: parsed.name });
-            }
-
-            skills.insert(
-                parsed.name.clone(),
-                SkillEntry {
-                    canonical_dir: canonical,
-                    description: parsed.description,
-                    references: parsed.references,
-                },
-            );
         }
 
         Ok(Self { skills })
+    }
+
+    /// Load a single skill from a canonical directory containing `SKILL.md`.
+    /// Caller must have already verified that the path is allowed and is a directory.
+    fn load_skill_dir(
+        canonical: &Path,
+        skills: &mut HashMap<String, SkillEntry>,
+    ) -> Result<(), SkillError> {
+        let skill_md_path = canonical.join("SKILL.md");
+        let md_size = std::fs::metadata(&skill_md_path)
+            .map_err(|e| SkillError::Io {
+                path: skill_md_path.display().to_string(),
+                source: e,
+            })?
+            .len();
+        if md_size > MAX_FILE_SIZE_BYTES {
+            return Err(SkillError::FileTooLarge {
+                path: skill_md_path.display().to_string(),
+                size: md_size,
+                limit: MAX_FILE_SIZE_BYTES,
+            });
+        }
+
+        let md_content = std::fs::read_to_string(&skill_md_path).map_err(|e| SkillError::Io {
+            path: skill_md_path.display().to_string(),
+            source: e,
+        })?;
+        let parsed = parse_skill_md(&md_content, &skill_md_path.display().to_string())?;
+
+        let dir_name = canonical
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("<unknown>")
+            .to_string();
+        if parsed.name != dir_name {
+            return Err(SkillError::NameMismatch {
+                name: parsed.name,
+                dir: dir_name,
+                path: canonical.display().to_string(),
+            });
+        }
+
+        for r in &parsed.references {
+            let ref_path = canonical.join("references").join(format!("{}.md", r.name));
+            if !ref_path.exists() {
+                return Err(SkillError::ReferenceFileMissing {
+                    skill: parsed.name.clone(),
+                    path: ref_path.display().to_string(),
+                });
+            }
+            let ref_size = std::fs::metadata(&ref_path)
+                .map_err(|e| SkillError::Io {
+                    path: ref_path.display().to_string(),
+                    source: e,
+                })?
+                .len();
+            if ref_size > MAX_FILE_SIZE_BYTES {
+                return Err(SkillError::FileTooLarge {
+                    path: ref_path.display().to_string(),
+                    size: ref_size,
+                    limit: MAX_FILE_SIZE_BYTES,
+                });
+            }
+        }
+
+        if skills.contains_key(&parsed.name) {
+            return Err(SkillError::SkillNameCollision { name: parsed.name });
+        }
+
+        skills.insert(
+            parsed.name.clone(),
+            SkillEntry {
+                canonical_dir: canonical.to_path_buf(),
+                description: parsed.description,
+                references: parsed.references,
+            },
+        );
+        Ok(())
     }
 }
 
@@ -313,7 +338,9 @@ mod tests {
         let err =
             FilesystemSkillRepository::from_paths(&["./empty-skill".to_string()], tmp.path(), &[])
                 .unwrap_err();
-        assert!(matches!(err, SkillError::SkillMdMissing(_)));
+        // A directory without SKILL.md is treated as a root-of-skills scan target.
+        // An empty root (no skill subdirectories) returns EmptyRoot.
+        assert!(matches!(err, SkillError::EmptyRoot(_)));
     }
 
     #[tokio::test]
@@ -412,12 +439,8 @@ mod tests {
         let err =
             FilesystemSkillRepository::from_paths(&["./not-a-dir.md".to_string()], tmp.path(), &[])
                 .unwrap_err();
-        // Could fail with NotADirectory or SkillMdMissing depending on canonicalize behavior.
-        // We just verify it fails.
-        assert!(matches!(
-            err,
-            SkillError::NotADirectory(_) | SkillError::SkillMdMissing(_)
-        ));
+        // A path that is a file (not a directory) must return NotADirectory.
+        assert!(matches!(err, SkillError::NotADirectory(_)));
     }
 
     #[tokio::test]
@@ -441,5 +464,155 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, SkillError::NameMismatch { .. }));
+    }
+
+    #[test]
+    fn from_paths_scans_root_directory_with_multiple_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let skill_a = root.join("alpha");
+        std::fs::create_dir_all(skill_a.join("references")).unwrap();
+        std::fs::write(
+            skill_a.join("SKILL.md"),
+            "---\nname: alpha\ndescription: a desc\n---\nbody A\n",
+        )
+        .unwrap();
+        let skill_b = root.join("beta");
+        std::fs::create_dir_all(&skill_b).unwrap();
+        std::fs::write(
+            skill_b.join("SKILL.md"),
+            "---\nname: beta\ndescription: b desc\n---\nbody B\n",
+        )
+        .unwrap();
+        // A non-skill child must be ignored, not error.
+        std::fs::write(root.join("notes.txt"), "ignored").unwrap();
+
+        let repo = FilesystemSkillRepository::from_paths(
+            &[root.to_string_lossy().into_owned()],
+            tmp.path(),
+            &[],
+        )
+        .expect("root with two skill children must load");
+
+        let names: std::collections::HashSet<String> =
+            repo.list_available().into_iter().map(|e| e.name).collect();
+        assert!(names.contains("alpha"));
+        assert!(names.contains("beta"));
+        assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn from_paths_empty_root_returns_empty_root_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("empty");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("notes.txt"), "no skills here").unwrap();
+
+        let err = FilesystemSkillRepository::from_paths(
+            &[root.to_string_lossy().into_owned()],
+            tmp.path(),
+            &[],
+        )
+        .expect_err("empty root should error");
+
+        match err {
+            SkillError::EmptyRoot(p) => {
+                assert!(p.contains("empty"));
+            }
+            other => panic!("expected EmptyRoot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_paths_single_skill_still_works() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("solo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: solo\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+
+        let repo = FilesystemSkillRepository::from_paths(
+            &[dir.to_string_lossy().into_owned()],
+            tmp.path(),
+            &[],
+        )
+        .expect("single skill directory must still load");
+        let names: Vec<String> = repo.list_available().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, vec!["solo".to_string()]);
+    }
+
+    #[test]
+    fn from_paths_root_and_single_in_same_array() {
+        let tmp = tempfile::tempdir().unwrap();
+        // root with one skill
+        let root = tmp.path().join("baseline");
+        let baseline_skill = root.join("ground");
+        std::fs::create_dir_all(&baseline_skill).unwrap();
+        std::fs::write(
+            baseline_skill.join("SKILL.md"),
+            "---\nname: ground\ndescription: g\n---\nx\n",
+        )
+        .unwrap();
+        // separate single skill directory
+        let single = tmp.path().join("user-skill");
+        std::fs::create_dir_all(&single).unwrap();
+        std::fs::write(
+            single.join("SKILL.md"),
+            "---\nname: user-skill\ndescription: u\n---\nx\n",
+        )
+        .unwrap();
+
+        let repo = FilesystemSkillRepository::from_paths(
+            &[
+                root.to_string_lossy().into_owned(),
+                single.to_string_lossy().into_owned(),
+            ],
+            tmp.path(),
+            &[],
+        )
+        .expect("mixed array must load");
+
+        let names: std::collections::HashSet<String> =
+            repo.list_available().into_iter().map(|e| e.name).collect();
+        assert!(names.contains("ground"));
+        assert!(names.contains("user-skill"));
+        assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn from_paths_collision_across_root_and_single_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("baseline");
+        let baseline = root.join("dup");
+        std::fs::create_dir_all(&baseline).unwrap();
+        std::fs::write(
+            baseline.join("SKILL.md"),
+            "---\nname: dup\ndescription: g\n---\nx\n",
+        )
+        .unwrap();
+        let single = tmp.path().join("dup");
+        std::fs::create_dir_all(&single).unwrap();
+        std::fs::write(
+            single.join("SKILL.md"),
+            "---\nname: dup\ndescription: u\n---\nx\n",
+        )
+        .unwrap();
+
+        let err = FilesystemSkillRepository::from_paths(
+            &[
+                root.to_string_lossy().into_owned(),
+                single.to_string_lossy().into_owned(),
+            ],
+            tmp.path(),
+            &[],
+        )
+        .expect_err("collision across root expansion + single must error");
+        match err {
+            SkillError::SkillNameCollision { name } => assert_eq!(name, "dup"),
+            other => panic!("expected SkillNameCollision, got {other:?}"),
+        }
     }
 }
