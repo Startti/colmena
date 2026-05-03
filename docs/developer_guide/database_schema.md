@@ -29,6 +29,7 @@ All files live under `src/libs/colmena/migrations/`.
 | `20260425000002_secure_value_mappings.sql` | Enables the `pgcrypto` extension and creates `secure_value_mappings` |
 | `20260428000001_dag_runs_agent_session_id.sql` | Adds `agent_session_id`, `parent_session_id` columns and 3 indices to `dag_runs` |
 | `20260428000002_llm_history_agent_and_node.sql` | Adds `agent_session_id`, `node_id` columns and 2 composite indices to `llm_node_history` |
+| `20260502000001_provider_file_cache.sql` | Creates `provider_file_cache` for the Files API caching feature (large documents via signed URL) |
 
 ### SQLite (`migrations/sqlite/`)
 
@@ -232,6 +233,69 @@ extension is already present.
 
 ---
 
+### `provider_file_cache`  *(PostgreSQL only)*
+
+Caches uploads to provider Files APIs (Anthropic, OpenAI, Gemini) keyed by
+`(document_id, provider)`. Lets the engine reuse a previously-uploaded
+`provider_file_id` across runs and sessions instead of re-uploading the same
+multi-MB document on every LLM call. Backs the large-files feature (signed
+URLs ≥ 30 MB) — see [`28_large_files_api.md`](28_large_files_api.md) for the
+full flow.
+
+| Column | Type | Nullable | Default | Description |
+|--------|------|----------|---------|-------------|
+| `document_id` | `TEXT` | NO | — | Caller-provided identifier (the `id` field in the `files` array of the `llm_call` node config). Stable across runs |
+| `provider` | `TEXT` | NO | — | Lowercase provider name (`anthropic`, `openai`, `gemini`, `mock`). Validated by `parse_provider_from_row` — fail-fast on corrupted strings |
+| `provider_file_id` | `TEXT` | NO | — | Opaque identifier returned by the provider's Files API after a successful upload (e.g., Anthropic `file_01abc`, OpenAI `file-...`, Gemini `files/...`) |
+| `mime_type` | `TEXT` | NO | — | MIME type the file was uploaded with |
+| `filename` | `TEXT` | NO | — | Filename submitted to the provider (used by some adapters for display) |
+| `size_bytes` | `BIGINT` | YES | — | Hint from the emitter; not authoritative ground truth |
+| `uploaded_at` | `TIMESTAMPTZ` | NO | `NOW()` | Wall-clock time of the successful upload |
+| `expires_at` | `TIMESTAMPTZ` | YES | — | When the provider expires the file. Set to `uploaded_at + 48h` for Gemini; `NULL` for Anthropic/OpenAI (no expiry) |
+| `last_used_at` | `TIMESTAMPTZ` | NO | `NOW()` | Touched on **every** cache hit via `UPDATE ... RETURNING` (not just on upsert). Foundation for future LRU eviction and activity metrics |
+
+**Constraints**
+
+- `PRIMARY KEY (document_id, provider)` — same document can live in multiple
+  providers' caches simultaneously.
+
+**Read semantics**
+
+`lookup(document_id, provider)` runs:
+
+```sql
+UPDATE provider_file_cache
+   SET last_used_at = NOW()
+ WHERE document_id = $1 AND provider = $2
+RETURNING document_id, provider, provider_file_id, mime_type, filename,
+          size_bytes, uploaded_at, expires_at, last_used_at;
+```
+
+Touching `last_used_at` atomically with the read keeps the column accurate
+without a second round-trip. If no row matches, `UPDATE` returns 0 rows —
+same outcome as a `SELECT` MISS. The `is_likely_alive` heuristic
+(`expires_at - NOW() > 5 min`) is applied in code, not SQL, so the
+heuristic margin can evolve without touching the DB.
+
+**Write semantics**
+
+`upsert` uses `INSERT ... ON CONFLICT (document_id, provider) DO UPDATE SET ...`
+with `last_used_at = NOW()` — every write is also a "touch". `invalidate`
+deletes the row outright; the file in the provider stays alive (orphaned,
+tracked in [tech-debt #4+#5](../superpowers/specs/2026-05-02-large-document-files-api-tech-debt.md#4--5-huérfanos-cache-rows--provider-files)).
+
+**Connection scope**
+
+Always uses `DATABASE_URL` (the engine's internal pool, via
+`PgPoolRegistry`), regardless of any per-node `connection_url`. The cache is
+transversal to all `llm_call` nodes and runs.
+
+If `DATABASE_URL` is not set, `PostgresFileCache` is not built and the
+feature degrades gracefully: every `llm_call` re-uploads on every run (no
+cache hits), but other paths keep working.
+
+---
+
 ## SQL sandbox tables  *(PostgreSQL only, runtime-created)*
 
 These tables are **not** managed by `sqlx::migrate!()` — they are created
@@ -340,6 +404,10 @@ dag_runs ──< dag_runs              (parent_session_id → session_id)   subg
 llm_node_history ── standalone
                     new reads keyed by (agent_session_id, node_id)
                     legacy reads by (session_id, node_id)
+
+provider_file_cache ── standalone
+                       keyed by (document_id, provider) — caller-supplied id,
+                       orthogonal to dag_runs sessions
 
 sandbox.function_registry  ── standalone, shared across sessions
 sandbox.query_feedback     ── standalone, scoped by session_id (column, no FK)
