@@ -32,7 +32,6 @@ const KEY_CRITIC: &str = "critic";
 // Node type names for SSE events (match the Rust node registry names).
 const NODE_TYPE_PLANNER: &str = "planner";
 const NODE_TYPE_REACTOR: &str = "reactor";
-const NODE_TYPE_FINAL_REACTOR: &str = "llm_call";
 const NODE_TYPE_CRITIC: &str = "critic";
 
 fn emit_internal_node_start(
@@ -662,9 +661,14 @@ impl OrchestratorNode {
             crate::llm::domain::LlmMessage::user(user_message)?,
         ];
 
-        // Streaming callback — always stream, emits llm_token (user-facing response)
-        let final_obs =
-            direct_thinking_observer(KEY_FINAL_REACTOR, NODE_TYPE_FINAL_REACTOR, &observer);
+        // Streaming callback — always stream, emits llm_token (user-facing response).
+        // The final_reactor is the user-facing response of the orchestrator, so its
+        // tokens are forwarded to the parent observer as plain `LlmToken` (NOT
+        // `ThinkingToken`). The run_use_case stamps them with the orchestrator's own
+        // `node_id`, so the SseMapper renders them as top-level `text-delta`
+        // (or `subgraph-text-delta` automatically when the orchestrator is wrapped
+        // inside a `subgraph` node).
+        let final_obs = observer.clone();
         let on_token: Option<Box<dyn Fn(crate::llm::domain::LlmStreamPart) + Send + Sync>> =
             if let Some(obs) = final_obs {
                 Some(Box::new(
@@ -711,15 +715,9 @@ impl OrchestratorNode {
             }
         }
 
-        emit_internal_node_start(
-            &observer,
-            KEY_FINAL_REACTOR,
-            NODE_TYPE_FINAL_REACTOR,
-            json!({
-                "model": final_reactor_cfg.get("model").cloned().unwrap_or(Value::Null),
-                "provider": final_reactor_cfg.get("provider").cloned().unwrap_or(Value::Null),
-            }),
-        );
+        // No `subgraph-node-start` framing for the final_reactor: its tokens flow
+        // as the orchestrator's own user-facing text stream (text-delta /
+        // subgraph-text-delta), not as a separate internal sub-node.
 
         let params = crate::llm::application::AgentRunParams {
             session_id: &tid,
@@ -735,12 +733,6 @@ impl OrchestratorNode {
 
         let response = agent_service.run(params).await?;
         let final_text = response.content().to_string();
-
-        emit_internal_node_finish(
-            &observer,
-            KEY_FINAL_REACTOR,
-            json!({ "result": final_text }),
-        );
 
         colmena_log!(
             "✅ [OrchestratorNode] Final response generated ({} chars).",

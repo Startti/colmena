@@ -119,7 +119,9 @@ Emitido cuando el LLM invoca la herramienta sintética `load_skill`.
 
 ### Thinking — LLMs internos del nodo `orchestrator`
 
-Los sub-componentes internos del `orchestrator` (`planner`, `phase_reactor`, `critic`, `final_reactor`) emiten sus tokens como `thinking-delta`. **No** son eventos de subgrafo.
+Los sub-componentes internos del `orchestrator` (`planner`, `phase_reactor`, `critic`) emiten sus tokens como `thinking-delta`. **No** son eventos de subgrafo.
+
+> El `final_reactor` es la excepción: como produce la respuesta final dirigida al usuario, sus tokens se emiten como `text-delta` (top-level) o `subgraph-text-delta` (cuando el orchestrator está anidado dentro de un `subgraph`), no como `thinking-delta`. Ver sección [Final reactor — respuesta al usuario](#final-reactor--respuesta-al-usuario) más abajo.
 
 | Evento | Campos | Cuándo |
 |--------|--------|--------|
@@ -140,10 +142,45 @@ Los `node_id` y `node_type` posibles para thinking-delta:
 |-----------|-------------|----------------|
 | `"planner"` | `"planner"` | Planificador de tareas |
 | `"phase_reactor"` | `"reactor"` | Reactor de fin de fase |
-| `"final_reactor"` | `"llm_call"` | Reactor final (respuesta al usuario) |
 | `"critic_<agente>"` | `"critic"` | Crítico para un agente específico |
 
 > `thinking-delta` **solo** se emite si el sub-componente tiene `"streaming": true` en su config. Sin streaming, el token llega completo en el `output` del `subgraph-node-end`.
+
+---
+
+### Final reactor — respuesta al usuario
+
+A diferencia de los demás sub-componentes del `orchestrator`, el `final_reactor` **no** emite `subgraph-node-start` / `subgraph-node-end` ni `thinking-delta`. Sus tokens fluyen como el stream de texto del propio orchestrator:
+
+| Contexto del orchestrator | Eventos emitidos por el final_reactor |
+|--------------------------|---------------------------------------|
+| Top-level (orchestrator en el grafo principal) | `text-start` → `text-delta*` → `text-end` |
+| Dentro de un nodo `subgraph` | `subgraph-text-start` → `subgraph-text-delta*` → `subgraph-text-end` |
+
+El `id` del bloque de texto es el del **orchestrator** (no `"final_reactor"`), y el `text-end` / `subgraph-text-end` se cierra con el `node-end` / `subgraph-node-end` del propio orchestrator.
+
+Top-level:
+```json
+{ "type": "node-start", "node_id": "orch_1", "node_type": "orchestrator" }
+…
+{ "type": "text-start", "id": "txt_xxx" }
+{ "type": "text-delta", "id": "txt_xxx", "delta": "Plan de viaje" }
+{ "type": "text-delta", "id": "txt_xxx", "delta": " listo." }
+{ "type": "text-end",   "id": "txt_xxx" }
+{ "type": "node-end",   "node_id": "orch_1", "output": { "final_response": "Plan de viaje listo.", "all_tasks": [...] } }
+```
+
+Anidado dentro de un `subgraph`:
+```json
+{ "type": "subgraph-node-start", "node_id": "orch_1", "node_type": "orchestrator" }
+…
+{ "type": "subgraph-text-start", "id": "txt_xxx" }
+{ "type": "subgraph-text-delta", "id": "txt_xxx", "delta": "Plan de viaje" }
+{ "type": "subgraph-text-end",   "id": "txt_xxx" }
+{ "type": "subgraph-node-end",   "node_id": "orch_1", "output": { "final_response": "Plan de viaje listo.", ... } }
+```
+
+El texto completo también queda disponible en `output.final_response` del `node-end`/`subgraph-node-end` del orchestrator.
 
 ---
 
@@ -356,7 +393,7 @@ node-start  { node_id: "orch_1", node_type: "orchestrator" }
 node-end    { node_id: "orch_1", node_type: "orchestrator", output: { final_response: "..." } }
 ```
 
-**2. Sus LLMs internos (`planner`, `critic`, `phase_reactor`, `final_reactor`) como subgrafos con thinking-delta:**
+**2. Sus LLMs internos `planner`, `critic`, `phase_reactor` como subgrafos con thinking-delta:**
 
 ```
 subgraph-node-start  { node_id: "planner", node_type: "planner", ... }
@@ -366,6 +403,8 @@ subgraph-node-end    { node_id: "planner", node_type: "planner", output: { resul
 ```
 
 > El `node_id` en `thinking-delta` **siempre coincide** con el del `subgraph-node-start` que lo enmarca. Esto permite al frontend correlacionarlos.
+
+> **El `final_reactor` no aparece como subgrafo ni emite `thinking-delta`** — sus tokens son la respuesta final al usuario y se emiten como `text-delta` (top-level) o `subgraph-text-delta` (orchestrator anidado). Ver sección [Final reactor — respuesta al usuario](#final-reactor--respuesta-al-usuario).
 
 **3. Sus agentes-tarea como subgrafos completos:**
 
@@ -426,11 +465,12 @@ node-start              { node_id: "orch_1", node_type: "orchestrator" }
   subgraph-usage-summary           { nodes: [...] }
 
   ── Reactor final ────────────────────────────────────────────
-  subgraph-node-start   { node_id: "final_reactor", node_type: "llm_call" }
-  thinking-delta        { node_id: "final_reactor", node_type: "llm_call", delta: "Plan de viaje..." }
-  subgraph-node-end     { node_id: "final_reactor", node_type: "llm_call", output: { result: "..." } }
+  text-start            { id: "txt_final" }
+  text-delta            { id: "txt_final", delta: "Plan de viaje" }
+  text-delta            { id: "txt_final", delta: " listo." }
+  text-end              { id: "txt_final" }
 
-node-end        { node_id: "orch_1", node_type: "orchestrator", output: { final_response: "..." } }
+node-end        { node_id: "orch_1", node_type: "orchestrator", output: { final_response: "Plan de viaje listo.", ... } }
 
 usage-summary   { nodes: [...] }
 finish          { finishReason: "stop", usage: {...}, output: {...} }

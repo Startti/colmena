@@ -1,0 +1,84 @@
+{
+  "_comment": "Verifies that the final_reactor's tokens are emitted as top-level text-delta events (and NOT as thinking-delta wrapped in subgraph-node-start/end). Run and confirm in stdout: (1) you SHOULD see 'text-start' / 'text-delta' / 'text-end' near the end; (2) you should NOT see any 'thinking-delta' with node_id=\"final_reactor\"; (3) you should NOT see 'subgraph-node-start' or 'subgraph-node-end' with node_id=\"final_reactor\".",
+  "_test_instructions": [
+    "Run:",
+    "  source .env && cargo run --bin dag_engine -- run tests/graphs/advanced/final_reactor_text_delta_test.json",
+    "",
+    "Verify in the SSE stream (stdout):",
+    "  1. The final_reactor tokens appear as top-level events: type=text-start, type=text-delta, type=text-end.",
+    "  2. No event of type=thinking-delta has node_id=final_reactor.",
+    "  3. No subgraph-node-start / subgraph-node-end carries node_id=final_reactor.",
+    "  4. The text-end is followed by node-end of the orchestrator carrying output.final_response."
+  ],
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "prompt": "Recommend one tourist activity for a 1-day visit to Madrid."
+      }
+    },
+    "orchestrator_node": {
+      "type": "orchestrator",
+      "config": {
+        "verbose": false,
+        "include_extra_info": false,
+        "max_phases": 1,
+        "planner": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "streaming": false,
+          "system_message": "Create exactly ONE task: assign 'Recommend one tourist activity for Madrid' to madrid_agent in phase 1. Output ONLY a JSON array with one item."
+        },
+        "agents": {
+          "madrid_agent": {
+            "description": "Recommends a single tourist activity for Madrid.",
+            "child_graph_inline": {
+              "nodes": {
+                "in": { "type": "input", "config": {} },
+                "llm": {
+                  "type": "llm_call",
+                  "config": {
+                    "provider": "gemini",
+                    "model": "gemini-2.5-flash",
+                    "api_key": "${GEMINI_API_KEY}",
+                    "system_message": "Recommend exactly ONE tourist activity for a 1-day visit to Madrid. One sentence only."
+                  }
+                },
+                "out": { "type": "output", "config": {} }
+              },
+              "edges": [
+                { "from": "in", "to": "llm" },
+                { "from": "llm", "to": "out" }
+              ]
+            }
+          }
+        },
+        "phase_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "streaming": false,
+          "system_message": "The task is complete. Set requires_replanning=false."
+        },
+        "final_reactor": {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "Write a single friendly sentence to the user with the recommended Madrid activity. Use the agent's response. Do not add disclaimers."
+        }
+      }
+    },
+    "final_output": {
+      "type": "output",
+      "trigger_on": "FINISHED"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "orchestrator_node" },
+    { "from": "orchestrator_node", "to": "final_output" }
+  ]
+}
