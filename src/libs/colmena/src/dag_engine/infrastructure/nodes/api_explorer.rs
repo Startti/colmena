@@ -382,11 +382,21 @@ fn format_spec_error(e: crate::web::domain::WebDomainError) -> Value {
             "searched_for": searched_for,
             "did_you_mean": did_you_mean,
         }),
-        E::MissingRequiredParams { missing, hints } => json!({
-            "error": "missing_required_params",
-            "missing": missing,
-            "hints": hints,
-        }),
+        E::MissingRequiredParams { missing, hints } => {
+            // Build a concrete `example_params` skeleton so the LLM can see
+            // the exact shape it must put into the `params` argument on retry.
+            let example: serde_json::Map<String, Value> = missing
+                .iter()
+                .map(|name| (name.clone(), Value::String(format!("<value for {name}>"))))
+                .collect();
+            json!({
+                "error": "missing_required_params",
+                "missing": missing,
+                "hints": hints,
+                "example_params": example,
+                "next_action": "Call build_http_request again with `params` set to an object that includes every name in `missing` mapped to a real value. Do NOT repeat the same call without changing params.",
+            })
+        }
         E::InvalidParamType { param, expected_type, got } => json!({
             "error": "invalid_param_type",
             "param": param,
@@ -738,9 +748,13 @@ fn build_http_request_sub_tool() -> SubToolDefinition {
         "params".into(),
         ParameterProperty {
             property_type: "object".into(),
-            description: "A flat map of parameter values. Path params, query params, header \
-                params, and body fields are all resolved from the same map. The node routes each \
-                to the right location based on the spec."
+            description: "Flat object mapping every parameter name (from get_endpoint_details) \
+                to its value. Path params, query params, header params, and body fields ALL go \
+                here together — the node routes each one based on the spec. \
+                Example shape: { \"<param_name>\": \"<value>\", ... }. \
+                If you omit this and the endpoint declares required parameters, the response \
+                will be a `missing_required_params` error listing the names — copy each missing \
+                name into params with the appropriate value, then call again."
                 .into(),
             enum_values: None,
             pattern: None,
@@ -761,10 +775,16 @@ fn build_http_request_sub_tool() -> SubToolDefinition {
     SubToolDefinition {
         name: "build_http_request".into(),
         description: "Build a validated HTTP-request configuration for a specific endpoint. \
-            The output is a JSON object in the exact shape the `http_request` node accepts — \
-            pass it as the input to an `http_request` call to execute. Missing required \
-            parameters or wrong types return an error with hints; do not invent values to make \
-            the error go away — the hint tells you exactly what to ask the user for."
+            The output is a JSON object in the exact shape the `http_request` node accepts \
+            (fields: url, method, headers, query_params, body) — pass it verbatim to an \
+            `http_request` call (or `execute_http`-style tool) to actually run the API call. \
+            \n\nProvide all parameter values via the `params` argument as a flat object: \
+            { \"<name>\": <value>, ... }. The node figures out from the spec which name belongs \
+            to path / query / header / body and routes accordingly. \
+            \n\nIf required parameters are missing, the response is a structured \
+            `missing_required_params` error listing exactly which names you need to add — copy \
+            them into `params` and retry. Never call this tool twice with the same arguments \
+            after an error; always read the error JSON and adjust."
             .into(),
         properties: props,
         required: vec!["spec_url".into(), "operation_id".into()],
