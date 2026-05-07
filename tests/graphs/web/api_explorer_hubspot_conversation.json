@@ -1,15 +1,22 @@
 {
-  "comment": "Conversational HubSpot demo. Single llm_call node — re-invoke with the same --session-id and a different --answer each turn. Toolkits: web (tavily_client) for the catalog index + apis (api_explorer) for individual specs. Multiple specs coexist in the cache; the agent picks which spec_url to query.",
+  "comment": "Conversational HubSpot demo. Single llm_call node \u2014 re-invoke with the same --session-id and a different --answer each turn. Toolkits: web (tavily_client) for the catalog index + apis (api_explorer) for individual specs. Multiple specs coexist in the cache; the agent picks which spec_url to query.",
   "metadata": {
     "category": "web",
-    "features": ["api_explorer", "tavily_client", "memory"],
-    "requires_env": ["GEMINI_API_KEY", "TAVILY_API_KEY"]
+    "features": [
+      "api_explorer",
+      "tavily_client",
+      "memory"
+    ],
+    "requires_env": [
+      "GEMINI_API_KEY",
+      "TAVILY_API_KEY"
+    ]
   },
   "nodes": {
     "ask": {
       "type": "input",
       "config": {
-        "default": "Without unloading the contacts spec, also load the spec for CRM Deals (you saw its URL in the catalog earlier) and find the endpoint that creates a single deal. Tell me its operation_id and full URL. Then confirm both specs are still queryable: give me the contact-create operation_id and the deal-create operation_id side by side, with their respective spec_url values."
+        "default": "There is a HubSpot spec catalog at https://api.hubapi.com/public/api/spec/v1/specs (a JSON list, NOT an OpenAPI doc). Fetch it with web__fetch and give me a short list of (group name, spec URL) pairs from the first ~10 entries."
       }
     },
     "agent": {
@@ -18,21 +25,45 @@
         "provider": "gemini",
         "api_key": "${GEMINI_API_KEY}",
         "model": "gemini-2.5-flash",
-        "session_id": "hubspot_demo_v2",
+        "session_id": "hubspot_demo_001",
         "connection_url": "${DATABASE_URL}",
         "temperature": 0.2,
         "stream": false,
-        "system_message": "You are a HubSpot integration agent. Use your tools to discover and document HubSpot APIs as the user requests. Read every tool result carefully — when a result contains an `error` field, the JSON tells you what to fix before retrying.",
+        "system_message": "You are a HubSpot integration agent. Use your tools to discover and document HubSpot APIs as the user requests. Read every tool result carefully \u2014 when a result contains an `error` field, the JSON tells you what to fix before retrying.",
         "tool_configurations": {
-          "web":  { "name": "web",  "description": "Web search and fetch via Tavily.", "node_type": "tavily_client", "node_config": { "api_key": "${TAVILY_API_KEY}" }, "expose_sub_tools": "all" },
-          "apis": { "name": "apis", "description": "OpenAPI / Swagger 2.0 discovery.", "node_type": "api_explorer",  "node_config": {}, "expose_sub_tools": "all" }
+          "web": {
+            "name": "web",
+            "description": "Web search and fetch via Tavily.",
+            "node_type": "tavily_client",
+            "node_config": {
+              "api_key": "${TAVILY_API_KEY}"
+            },
+            "expose_sub_tools": "all"
+          },
+          "apis": {
+            "name": "apis",
+            "description": "OpenAPI / Swagger 2.0 discovery.",
+            "node_type": "api_explorer",
+            "node_config": {},
+            "expose_sub_tools": "all"
+          }
         }
       }
     },
-    "sink": { "type": "output", "config": {} }
+    "sink": {
+      "type": "output",
+      "config": {}
+    }
   },
   "edges": [
-    { "from": "ask",   "to": "agent", "field": "prompt" },
-    { "from": "agent", "to": "sink" }
+    {
+      "from": "ask",
+      "to": "agent",
+      "field": "prompt"
+    },
+    {
+      "from": "agent",
+      "to": "sink"
+    }
   ]
 }
