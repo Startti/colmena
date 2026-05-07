@@ -47,6 +47,13 @@ pub struct ParsedSpec {
     pub endpoints: Vec<Endpoint>,
     pub security_schemes: HashMap<String, SecurityScheme>,
     pub tags: Vec<String>,
+    /// Verbatim copy of `components.schemas` from the spec (or the
+    /// equivalent `definitions` block for Swagger 2.0). Used by
+    /// `get_endpoint_details` to inline `$ref` references — Gemini's
+    /// strict tool-response validator rejects strings that look like
+    /// `#/components/schemas/X`, so we resolve them before they reach
+    /// the model.
+    pub components_schemas: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,6 +259,7 @@ mod tests {
             endpoints: Vec::new(),
             security_schemes: HashMap::new(),
             tags: Vec::new(),
+            components_schemas: std::collections::HashMap::new(),
         };
         let c = p.clone();
         assert_eq!(c.title, "T");

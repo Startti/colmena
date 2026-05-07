@@ -289,6 +289,12 @@ fn parse_oas3_value(
 
     let security_schemes = extract_security_schemes(&v);
     let endpoints = extract_endpoints(&v)?;
+    let components_schemas = v
+        .get("components")
+        .and_then(|c| c.get("schemas"))
+        .and_then(|s| s.as_object())
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
 
     Ok(ParsedSpec {
         resolved_url: resolved_url.to_string(),
@@ -302,6 +308,7 @@ fn parse_oas3_value(
         endpoints,
         security_schemes,
         tags,
+        components_schemas,
     })
 }
 

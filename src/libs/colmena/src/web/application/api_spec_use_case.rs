@@ -463,7 +463,7 @@ pub fn get_endpoint_details(
         json!({
             "content_type": rb.content_type,
             "required": rb.required,
-            "schema": rb.schema,
+            "schema": resolve_refs(&rb.schema, &spec.components_schemas, &mut Vec::new()),
         })
     });
 
@@ -473,7 +473,12 @@ pub fn get_endpoint_details(
             let content: serde_json::Map<String, Value> = r
                 .content
                 .iter()
-                .map(|(ct, schema)| (ct.clone(), schema.clone()))
+                .map(|(ct, schema)| {
+                    (
+                        ct.clone(),
+                        resolve_refs(schema, &spec.components_schemas, &mut Vec::new()),
+                    )
+                })
                 .collect();
             m.insert(
                 code.clone(),
@@ -508,6 +513,66 @@ pub fn get_endpoint_details(
         "responses": responses,
         "security": security,
     }))
+}
+
+/// Walk a JSON schema and replace `{"$ref": "#/components/schemas/X"}`
+/// occurrences with the inlined schema from `components`.
+///
+/// Why: Gemini's tool-response validator interprets strings starting with
+/// `#/` as references to function `display_name`s and rejects the request
+/// if no such name exists. Inlining the schema both satisfies Gemini and
+/// gives the LLM a more useful, self-contained shape (no need to know
+/// the catalog).
+///
+/// Cycles are broken by `path` (the chain of currently-being-resolved
+/// names): if we re-enter the same name we leave a sanitized leaf
+/// marker instead of recursing.
+pub(crate) fn resolve_refs(
+    value: &Value,
+    components: &std::collections::HashMap<String, Value>,
+    path: &mut Vec<String>,
+) -> Value {
+    const REF_PREFIX: &str = "#/components/schemas/";
+    match value {
+        Value::Object(obj) => {
+            // Single-key object whose only key is "$ref" pointing to a known
+            // component → inline. Otherwise walk children.
+            if obj.len() == 1 {
+                if let Some(Value::String(s)) = obj.get("$ref") {
+                    if let Some(name) = s.strip_prefix(REF_PREFIX) {
+                        if path.iter().any(|p| p == name) {
+                            // Cycle — leave a safe placeholder.
+                            return json!({
+                                "type": "object",
+                                "x-cycle-to": name,
+                            });
+                        }
+                        if let Some(target) = components.get(name) {
+                            path.push(name.to_string());
+                            let resolved = resolve_refs(target, components, path);
+                            path.pop();
+                            return resolved;
+                        }
+                        // Unknown ref — keep a sanitized marker (no leading `#`)
+                        // so Gemini doesn't reject and the LLM still sees the name.
+                        return json!({
+                            "type": "object",
+                            "x-unresolved-ref": name,
+                        });
+                    }
+                }
+            }
+            let mut new_obj = serde_json::Map::with_capacity(obj.len());
+            for (k, v) in obj {
+                new_obj.insert(k.clone(), resolve_refs(v, components, path));
+            }
+            Value::Object(new_obj)
+        }
+        Value::Array(arr) => Value::Array(
+            arr.iter().map(|v| resolve_refs(v, components, path)).collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 fn explain_match(query: &str, ep: &Endpoint) -> String {
@@ -953,6 +1018,7 @@ mod tests_build_http_request {
             }],
             security_schemes,
             tags: Vec::new(),
+            components_schemas: std::collections::HashMap::new(),
         }
     }
 
@@ -989,6 +1055,7 @@ mod tests_build_http_request {
             }],
             security_schemes: HashMap::new(),
             tags: Vec::new(),
+            components_schemas: std::collections::HashMap::new(),
         }
     }
 
@@ -1025,6 +1092,7 @@ mod tests_build_http_request {
             }],
             security_schemes: HashMap::new(),
             tags: Vec::new(),
+            components_schemas: std::collections::HashMap::new(),
         }
     }
 
@@ -1297,6 +1365,7 @@ mod tests {
             }],
             security_schemes: HashMap::new(),
             tags: Vec::new(),
+            components_schemas: std::collections::HashMap::new(),
         }
     }
 
@@ -1442,6 +1511,7 @@ mod tests_list_and_search {
             endpoints,
             security_schemes: HashMap::new(),
             tags: vec!["pet".into(), "store".into()],
+            components_schemas: std::collections::HashMap::new(),
         }
     }
 
@@ -1631,6 +1701,7 @@ mod tests_details {
             }],
             security_schemes: HashMap::new(),
             tags: Vec::new(),
+            components_schemas: std::collections::HashMap::new(),
         }
     }
 
@@ -1669,5 +1740,89 @@ mod tests_details {
             }
             other => panic!("expected EndpointNotFound, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests_resolve_refs {
+    use super::resolve_refs;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    #[test]
+    fn inlines_simple_ref() {
+        let mut comps = HashMap::new();
+        comps.insert(
+            "Pet".to_string(),
+            json!({
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": ["name"]
+            }),
+        );
+        let input = json!({ "$ref": "#/components/schemas/Pet" });
+        let out = resolve_refs(&input, &comps, &mut Vec::new());
+        assert_eq!(out["type"], "object");
+        assert_eq!(out["properties"]["name"]["type"], "string");
+        // No `$ref` survives — Gemini-safe.
+        assert!(!out.to_string().contains("$ref"));
+        assert!(!out.to_string().contains("#/components"));
+    }
+
+    #[test]
+    fn handles_unknown_ref_with_safe_marker() {
+        let comps = HashMap::new();
+        let input = json!({ "$ref": "#/components/schemas/Missing" });
+        let out = resolve_refs(&input, &comps, &mut Vec::new());
+        assert_eq!(out["type"], "object");
+        assert_eq!(out["x-unresolved-ref"], "Missing");
+        // Critical: no leading `#` survives — that's what Gemini chokes on.
+        assert!(!out.to_string().contains("#/"));
+    }
+
+    #[test]
+    fn detects_self_referential_cycle() {
+        let mut comps = HashMap::new();
+        // Tree<Tree>: Tree.children: array of Tree
+        comps.insert(
+            "Tree".to_string(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "children": {
+                        "type": "array",
+                        "items": { "$ref": "#/components/schemas/Tree" }
+                    }
+                }
+            }),
+        );
+        let input = json!({ "$ref": "#/components/schemas/Tree" });
+        let out = resolve_refs(&input, &comps, &mut Vec::new());
+        // First level resolves; cycle leaves a placeholder.
+        assert_eq!(out["properties"]["children"]["items"]["x-cycle-to"], "Tree");
+        assert!(!out.to_string().contains("#/"));
+    }
+
+    #[test]
+    fn walks_nested_refs_in_arrays_and_objects() {
+        let mut comps = HashMap::new();
+        comps.insert(
+            "Address".to_string(),
+            json!({ "type": "object", "properties": { "city": { "type": "string" } } }),
+        );
+        let input = json!({
+            "type": "object",
+            "properties": {
+                "primary": { "$ref": "#/components/schemas/Address" },
+                "history": {
+                    "type": "array",
+                    "items": { "$ref": "#/components/schemas/Address" }
+                }
+            }
+        });
+        let out = resolve_refs(&input, &comps, &mut Vec::new());
+        assert_eq!(out["properties"]["primary"]["type"], "object");
+        assert_eq!(out["properties"]["history"]["items"]["properties"]["city"]["type"], "string");
+        assert!(!out.to_string().contains("$ref"));
     }
 }

@@ -962,6 +962,7 @@ mod tests {
             }],
             security_schemes,
             tags: vec!["pets".into()],
+            components_schemas: std::collections::HashMap::new(),
         }
     }
 

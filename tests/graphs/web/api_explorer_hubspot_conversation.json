@@ -9,7 +9,7 @@
     "ask": {
       "type": "input",
       "config": {
-        "default": "There is a HubSpot spec catalog at https://api.hubapi.com/public/api/spec/v1/specs (a JSON list, NOT an OpenAPI doc). Fetch it with web__fetch and tell me what spec groups are available — list (group name, spec URL) pairs."
+        "default": "Without unloading the contacts spec, also load the spec for CRM Deals (you saw its URL in the catalog earlier) and find the endpoint that creates a single deal. Tell me its operation_id and full URL. Then confirm both specs are still queryable: give me the contact-create operation_id and the deal-create operation_id side by side, with their respective spec_url values."
       }
     },
     "agent": {
@@ -18,8 +18,8 @@
         "provider": "gemini",
         "api_key": "${GEMINI_API_KEY}",
         "model": "gemini-2.5-flash",
-        "session_id": "hubspot_demo_001",
-        "connection_url": "sqlite://colmena_memory.db",
+        "session_id": "hubspot_demo_v2",
+        "connection_url": "${DATABASE_URL}",
         "temperature": 0.2,
         "stream": false,
         "system_message": "You are a HubSpot integration agent. Use your tools to discover and document HubSpot APIs as the user requests. Read every tool result carefully — when a result contains an `error` field, the JSON tells you what to fix before retrying.",
