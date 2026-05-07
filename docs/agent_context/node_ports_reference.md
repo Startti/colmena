@@ -1019,9 +1019,11 @@ Nodo de herramientas expuesto a un `llm_call`. Cinco sub-herramientas que permit
 | `list_endpoints` | `spec_url` (req), `tag` (str), `limit` (1-200, default 50), `offset` (default 0) |
 | `search_endpoint` | `spec_url` (req), `query` (req), `method` (str), `max_results` (1-50, default 10) |
 | `get_endpoint_details` | `spec_url` (req), `operation_id` (req) |
-| `build_http_request` | `spec_url` (req), `operation_id` (req), `params` (object req), `auth_secret_ref` (opt) |
+| `build_http_request` | `spec_url` (req), `operation_id` (req), `params` (object opt, default `{}`), `auth_secret_ref` (opt) |
 
 **Outputs (`output`):** envelope JSON específico por sub-tool. `load_spec` devuelve `{ spec_url_input, resolved_url, original_format, internal_format, title, version, description, server_url, endpoints_count, tags, security_schemes, cached }`. Los demás devuelven la representación documental directa (`{ endpoints, total }`, `{ query, results }`, detalles del endpoint, o el objeto `http_request`-shaped). Ver el spec C para el contrato exacto.
+
+**Resolución de `$ref`:** los schemas de `request_body` y `responses[].content[]` que devuelve `get_endpoint_details` tienen los `{"$ref": "#/components/schemas/X"}` **inlinados** desde `components.schemas` (con detección de ciclos via path tracking; cycles dejan `{"x-cycle-to": "X"}`, refs desconocidas dejan `{"x-unresolved-ref": "X"}`). Esto es crítico para Gemini — su validador estricto rechaza strings que empiezan con `#/` —, y de paso el LLM ve la forma real del schema sin tener que seguir referencias.
 
 **Errores recuperables (entregados al LLM como JSON):** `rate_limit`, `timeout`, `upstream`, `spec_parse_failed`, `unsupported_spec_format`, `endpoint_not_found` (con `did_you_mean`), `missing_required_params`, `invalid_param_type`, `missing_auth`, `spec_not_loaded`, `unexpected_html_response`, `swagger2_conversion_failed`. Errores de configuración (`InvalidConfig`, `AdapterInit`, `SpecTooLarge`) crashean el DAG.
 

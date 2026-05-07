@@ -123,7 +123,7 @@ Ver el schema canónico en `docs/node_configurations.json` (clave `api_explorer`
     "name": "apis",
     "description": "OpenAPI spec discovery + request builder",
     "node_type": "api_explorer",
-    "node_config": { "fuzzy_match_threshold": 0.3 },
+    "node_config": {},
     "expose_sub_tools": "all"
   }
 }
@@ -182,6 +182,22 @@ Los headers de auth usan el placeholder `${SECURE:<ref>}` que el nodo `http_requ
 
 Las specs cacheadas viven en un `SessionRegistry<Arc<SpecCache>>` indexado por `conversation_id`. El orquestador del DAG suscribe cada instancia de `api_explorer` al `ConversationLifecycleBus`, así que las specs de una conversación cerrada se evictan inmediatamente sin esperar al TTL.
 
+Cada `load_spec` indexa la spec **bajo dos llaves**: el `input_url` que pasó el LLM y el `resolved_url` post-normalización (cuando difieren, p. ej. tras un rewrite de Git-forge). Esto evita que un sub-tool subsecuente que use cualquiera de las dos formas tenga que reabrir la red.
+
+**Múltiples specs en paralelo:** el cache por conversación es un LRU (default 100 entradas). El LLM puede llamar `load_spec` con N URLs distintas y luego pasar `spec_url` distinto a cada `list_endpoints`/`search_endpoint`/`get_endpoint_details` — las specs no se mezclan; cada query consulta exactamente la spec indicada. Útil para flujos como "navegar el catálogo de specs de HubSpot, luego cargar Contacts y Deals juntas".
+
+### Resolución inline de `$ref`
+
+`get_endpoint_details` **resuelve inline** las referencias `{"$ref": "#/components/schemas/X"}` dentro de `request_body.schema` y `responses[].content[]`, reemplazándolas con el schema concreto de `components.schemas`.
+
+| Caso | Resultado |
+|---|---|
+| Ref válida y no cíclica | Schema completo inlinado |
+| Ciclo detectado (vía path-tracking) | `{"type": "object", "x-cycle-to": "X"}` |
+| Ref desconocida | `{"type": "object", "x-unresolved-ref": "X"}` |
+
+Por qué importa: (1) Gemini rechaza con 400 cualquier `function_response` que contenga strings empezando por `#/` — es su validador estricto interpretándolas como referencias a `display_name`s. (2) El LLM ve directamente la forma del schema sin tener que seguir referencias por separado.
+
 ### Manejo de errores
 
 Recuperables (devueltos al LLM como JSON estructurado): `rate_limit`, `timeout`, `upstream`, `spec_parse_failed`, `unsupported_spec_format`, `endpoint_not_found` (con `did_you_mean`), `missing_required_params`, `invalid_param_type`, `missing_auth`, `spec_not_loaded`, `unexpected_html_response`, `swagger2_conversion_failed`.
@@ -192,6 +208,15 @@ Crashean el DAG: `InvalidConfig`, `AdapterInit`, `SpecTooLarge`.
 
 - `tests/graphs/web/api_explorer_petstore.json` — flow completo OpenAPI 3.0 (Petstore).
 - `tests/graphs/web/api_explorer_amadeus_swagger2.json` — ejercita el rewrite GitHub → raw + conversión Swagger 2.0 → OpenAPI 3.0.
+- `tests/graphs/web/api_explorer_hubspot_conversation.json` — demo conversacional multi-turn contra el catálogo de specs de HubSpot (`web__fetch` para el índice + `apis__*` para cada sub-spec). Memoria persistente vía `${DATABASE_URL}` y `--session-id`.
+
+### Uso conversacional (memoria multi-turn)
+
+Para un agente que mantiene contexto entre invocaciones del grafo:
+
+1. **Una sola** instancia del nodo `llm_call` con `session_id` + `connection_url` (Postgres recomendado).
+2. Re-ejecutar el grafo cambiando el campo `nodes.<input>.config.default` en el JSON entre turnos. El flag `--session-id` debe matchear el del config para que la memoria persista.
+3. La cache de specs en `SessionRegistry` vive en proceso, así que **se reinicia entre `cargo run`s**. El LLM, recordando del turno previo qué URLs cargó, simplemente vuelve a llamar `load_spec` (la red puede aprovechar ETags si el server los soporta).
 
 ### Referencia
 
