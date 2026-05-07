@@ -8,7 +8,7 @@ pub use search_use_case::{SearchUseCase, SearchUseCaseConfig};
 
 pub mod api_spec_use_case;
 pub use api_spec_use_case::{
-    ApiSpecUseCase, ApiSpecUseCaseConfig, CachedSpec, EndpointListPage,
-    EndpointSearchHit, EndpointSummary, SpecCache, build_http_request,
-    get_endpoint_details, list_endpoints, search_endpoint,
+    build_http_request, get_endpoint_details, list_endpoints, search_endpoint, ApiSpecUseCase,
+    ApiSpecUseCaseConfig, CachedSpec, EndpointListPage, EndpointSearchHit, EndpointSummary,
+    SpecCache,
 };

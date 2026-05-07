@@ -15,12 +15,12 @@ use serde_json::{json, Map, Value};
 /// Returns `Err(WebDomainError::Swagger2ConversionFailed)` if the document
 /// uses a feature with no OAS 3.0 equivalent (e.g. `collectionFormat: tsv`).
 pub fn convert_swagger2_to_openapi3(input: &Value) -> Result<Value, WebDomainError> {
-    let root = input.as_object().ok_or_else(|| {
-        WebDomainError::Swagger2ConversionFailed {
+    let root = input
+        .as_object()
+        .ok_or_else(|| WebDomainError::Swagger2ConversionFailed {
             reason: "root is not a JSON object".into(),
             unsupported_feature: None,
-        }
-    })?;
+        })?;
 
     let mut out = Map::new();
     out.insert("openapi".into(), Value::String("3.0.3".into()));
@@ -62,13 +62,22 @@ pub fn convert_swagger2_to_openapi3(input: &Value) -> Result<Value, WebDomainErr
         components.insert("schemas".into(), rewrite_refs_recursive(defs.clone()));
     }
     if let Some(global_params) = root.get("parameters") {
-        components.insert("parameters".into(), rewrite_refs_recursive(global_params.clone()));
+        components.insert(
+            "parameters".into(),
+            rewrite_refs_recursive(global_params.clone()),
+        );
     }
     if let Some(global_responses) = root.get("responses") {
-        components.insert("responses".into(), rewrite_refs_recursive(global_responses.clone()));
+        components.insert(
+            "responses".into(),
+            rewrite_refs_recursive(global_responses.clone()),
+        );
     }
     if let Some(sec_defs) = root.get("securityDefinitions") {
-        components.insert("securitySchemes".into(), convert_security_definitions(sec_defs)?);
+        components.insert(
+            "securitySchemes".into(),
+            convert_security_definitions(sec_defs)?,
+        );
     }
     if !components.is_empty() {
         out.insert("components".into(), Value::Object(components));
@@ -93,7 +102,11 @@ fn build_servers(root: &Map<String, Value>) -> Vec<Value> {
     let schemes: Vec<String> = root
         .get("schemes")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_else(|| vec!["https".into()]);
 
     if host.is_empty() {
@@ -107,21 +120,22 @@ fn build_servers(root: &Map<String, Value>) -> Vec<Value> {
 }
 
 fn convert_security_definitions(sec_defs: &Value) -> Result<Value, WebDomainError> {
-    let map = sec_defs.as_object().ok_or_else(|| {
-        WebDomainError::Swagger2ConversionFailed {
+    let map = sec_defs
+        .as_object()
+        .ok_or_else(|| WebDomainError::Swagger2ConversionFailed {
             reason: "securityDefinitions is not an object".into(),
             unsupported_feature: None,
-        }
-    })?;
+        })?;
 
     let mut out = Map::new();
     for (name, scheme_val) in map {
-        let scheme = scheme_val.as_object().ok_or_else(|| {
-            WebDomainError::Swagger2ConversionFailed {
-                reason: format!("security scheme '{name}' is not an object"),
-                unsupported_feature: None,
-            }
-        })?;
+        let scheme =
+            scheme_val
+                .as_object()
+                .ok_or_else(|| WebDomainError::Swagger2ConversionFailed {
+                    reason: format!("security scheme '{name}' is not an object"),
+                    unsupported_feature: None,
+                })?;
 
         let ty = scheme.get("type").and_then(|v| v.as_str()).unwrap_or("");
         let mut converted = Map::new();
@@ -210,9 +224,7 @@ pub fn rewrite_refs_recursive(v: Value) -> Value {
             }
             Value::Object(map)
         }
-        Value::Array(arr) => {
-            Value::Array(arr.into_iter().map(rewrite_refs_recursive).collect())
-        }
+        Value::Array(arr) => Value::Array(arr.into_iter().map(rewrite_refs_recursive).collect()),
         other => other,
     }
 }
@@ -240,14 +252,20 @@ fn convert_operations(
     };
     let path_keys: Vec<String> = path_map.keys().cloned().collect();
     for path_key in path_keys {
-        let Some(path_item) = path_map.get_mut(&path_key) else { continue };
-        let Value::Object(item_map) = path_item else { continue };
+        let Some(path_item) = path_map.get_mut(&path_key) else {
+            continue;
+        };
+        let Value::Object(item_map) = path_item else {
+            continue;
+        };
         let method_keys: Vec<String> = item_map.keys().cloned().collect();
         for method_key in method_keys {
             if !is_http_method(&method_key) {
                 continue;
             }
-            let Some(op_val) = item_map.get_mut(&method_key) else { continue };
+            let Some(op_val) = item_map.get_mut(&method_key) else {
+                continue;
+            };
             let Value::Object(op) = op_val else { continue };
             convert_single_operation(op, global_consumes, global_produces)?;
         }
@@ -310,9 +328,7 @@ fn convert_single_operation(
 
     // body → requestBody
     if let Some(Value::Object(mut bp)) = body_param {
-        let required = bp
-            .remove("required")
-            .unwrap_or(Value::Bool(false));
+        let required = bp.remove("required").unwrap_or(Value::Bool(false));
         let description = bp.remove("description");
         let schema = bp.remove("schema").unwrap_or(json!({}));
 
@@ -333,9 +349,9 @@ fn convert_single_operation(
 
     // formData → requestBody (urlencoded or multipart)
     if !form_data.is_empty() {
-        let has_file = form_data.iter().any(|p| {
-            p.get("type").and_then(|v| v.as_str()) == Some("file")
-        });
+        let has_file = form_data
+            .iter()
+            .any(|p| p.get("type").and_then(|v| v.as_str()) == Some("file"));
         let media_type = if has_file {
             "multipart/form-data"
         } else {
@@ -371,7 +387,11 @@ fn convert_single_operation(
             if let Some(desc) = p_obj.get("description") {
                 prop.insert("description".into(), desc.clone());
             }
-            if p_obj.get("required").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if p_obj
+                .get("required")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 required_names.push(Value::String(name.clone()));
             }
             properties.insert(name, Value::Object(prop));
@@ -426,7 +446,9 @@ fn pick_first_content_type(list: &[Value], default: &str) -> String {
 fn pick_first_consume_for_form(list: &[Value]) -> Option<&'static str> {
     for v in list {
         match v.as_str() {
-            Some("application/x-www-form-urlencoded") => return Some("application/x-www-form-urlencoded"),
+            Some("application/x-www-form-urlencoded") => {
+                return Some("application/x-www-form-urlencoded")
+            }
             Some("multipart/form-data") => return Some("multipart/form-data"),
             _ => {}
         }
@@ -554,10 +576,7 @@ mod tests_root {
             }
         });
         let out = convert_swagger2_to_openapi3(&input).unwrap();
-        assert_eq!(
-            out["components"]["schemas"]["Pet"]["type"],
-            "object"
-        );
+        assert_eq!(out["components"]["schemas"]["Pet"]["type"], "object");
     }
 
     #[test]
@@ -578,7 +597,8 @@ mod tests_root {
         });
         let out = convert_swagger2_to_openapi3(&input).unwrap();
         // After operation conversion, schema moves into content.<media-type>.schema
-        let r = &out["paths"]["/pet"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"];
+        let r = &out["paths"]["/pet"]["get"]["responses"]["200"]["content"]["application/json"]
+            ["schema"]["$ref"];
         assert_eq!(r, "#/components/schemas/Pet");
     }
 
@@ -593,8 +613,14 @@ mod tests_root {
             }
         });
         let out = convert_swagger2_to_openapi3(&input).unwrap();
-        assert_eq!(out["components"]["securitySchemes"]["BasicAuth"]["type"], "http");
-        assert_eq!(out["components"]["securitySchemes"]["BasicAuth"]["scheme"], "basic");
+        assert_eq!(
+            out["components"]["securitySchemes"]["BasicAuth"]["type"],
+            "http"
+        );
+        assert_eq!(
+            out["components"]["securitySchemes"]["BasicAuth"]["scheme"],
+            "basic"
+        );
     }
 
     #[test]
@@ -651,10 +677,7 @@ mod tests_root {
             }
         });
         let out = convert_swagger2_to_openapi3(&input).unwrap();
-        assert_eq!(
-            out["components"]["parameters"]["SkipParam"]["name"],
-            "skip"
-        );
+        assert_eq!(out["components"]["parameters"]["SkipParam"]["name"], "skip");
     }
 
     #[test]
@@ -713,7 +736,10 @@ mod tests_operations {
     fn body_param_becomes_request_body() {
         let out = convert_swagger2_to_openapi3(&petstore_post_with_body()).unwrap();
         let op = &out["paths"]["/pet"]["post"];
-        assert!(op["parameters"].as_array().map(|a| a.is_empty()).unwrap_or(true));
+        assert!(op["parameters"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(true));
         let rb = &op["requestBody"];
         assert_eq!(rb["required"], true);
         assert_eq!(
@@ -902,7 +928,10 @@ mod tests_operations {
         });
         let err = convert_swagger2_to_openapi3(&input).unwrap_err();
         match err {
-            WebDomainError::Swagger2ConversionFailed { unsupported_feature, .. } => {
+            WebDomainError::Swagger2ConversionFailed {
+                unsupported_feature,
+                ..
+            } => {
                 assert_eq!(unsupported_feature.as_deref(), Some("collectionFormat.tsv"));
             }
             other => panic!("expected Swagger2ConversionFailed, got {other:?}"),
@@ -930,6 +959,9 @@ mod tests_operations {
         let out = convert_swagger2_to_openapi3(&input).unwrap();
         let rb = &out["paths"]["/form"]["post"]["requestBody"];
         assert!(rb["content"]["application/x-www-form-urlencoded"].is_object());
-        assert!(rb.get("content").and_then(|c| c.get("application/json")).is_none());
+        assert!(rb
+            .get("content")
+            .and_then(|c| c.get("application/json"))
+            .is_none());
     }
 }

@@ -196,9 +196,7 @@ pub enum SecurityScheme {
         flows: serde_json::Value,
     },
     /// OpenID Connect — same contract as OAuth2 from the build-request POV.
-    OpenIdConnect {
-        openid_connect_url: String,
-    },
+    OpenIdConnect { openid_connect_url: String },
 }
 
 #[derive(Debug, Clone)]

@@ -27,22 +27,34 @@ pub fn normalize_forge_url(input: &str) -> NormalizedUrl {
     // GitHub blob / tree
     if let Some(rest) = input.strip_prefix("https://github.com/") {
         if let Some(rewritten) = rewrite_github(rest) {
-            return NormalizedUrl { resolved: rewritten, rewritten: true };
+            return NormalizedUrl {
+                resolved: rewritten,
+                rewritten: true,
+            };
         }
     }
     // GitLab -/blob
     if let Some(rest) = input.strip_prefix("https://gitlab.com/") {
         if let Some(rewritten) = rewrite_gitlab(rest) {
-            return NormalizedUrl { resolved: rewritten, rewritten: true };
+            return NormalizedUrl {
+                resolved: rewritten,
+                rewritten: true,
+            };
         }
     }
     // Bitbucket src
     if let Some(rest) = input.strip_prefix("https://bitbucket.org/") {
         if let Some(rewritten) = rewrite_bitbucket(rest) {
-            return NormalizedUrl { resolved: rewritten, rewritten: true };
+            return NormalizedUrl {
+                resolved: rewritten,
+                rewritten: true,
+            };
         }
     }
-    NormalizedUrl { resolved: input.to_string(), rewritten: false }
+    NormalizedUrl {
+        resolved: input.to_string(),
+        rewritten: false,
+    }
 }
 
 fn rewrite_github(rest: &str) -> Option<String> {
@@ -109,9 +121,7 @@ mod tests {
 
     #[test]
     fn gitlab_blob_url_is_rewritten_to_raw() {
-        let n = normalize_forge_url(
-            "https://gitlab.com/some/repo/-/blob/main/spec/openapi.yaml",
-        );
+        let n = normalize_forge_url("https://gitlab.com/some/repo/-/blob/main/spec/openapi.yaml");
         assert!(n.rewritten);
         assert_eq!(
             n.resolved,
@@ -121,9 +131,7 @@ mod tests {
 
     #[test]
     fn bitbucket_src_url_is_rewritten_to_raw() {
-        let n = normalize_forge_url(
-            "https://bitbucket.org/team/repo/src/main/openapi.yaml",
-        );
+        let n = normalize_forge_url("https://bitbucket.org/team/repo/src/main/openapi.yaml");
         assert!(n.rewritten);
         assert_eq!(
             n.resolved,
@@ -168,9 +176,7 @@ mod tests {
     #[test]
     fn github_url_with_query_is_preserved_verbatim() {
         // Query strings are not stripped — URLs we rewrite include the full tail.
-        let n = normalize_forge_url(
-            "https://github.com/foo/bar/blob/main/openapi.yaml?raw=1",
-        );
+        let n = normalize_forge_url("https://github.com/foo/bar/blob/main/openapi.yaml?raw=1");
         assert!(n.rewritten);
         assert_eq!(
             n.resolved,

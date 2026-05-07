@@ -14,9 +14,7 @@ use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use crate::dag_engine::domain::toolkit_node::{SubToolDefinition, ToolkitNode, SUB_TOOL_INPUT_KEY};
 use crate::llm::domain::ParameterProperty;
-use crate::web::application::api_spec_use_case::{
-    ApiSpecUseCase, ApiSpecUseCaseConfig, SpecCache,
-};
+use crate::web::application::api_spec_use_case::{ApiSpecUseCase, ApiSpecUseCaseConfig, SpecCache};
 use crate::web::domain::api_spec_port::ApiSpecPort;
 use crate::web::domain::lifecycle::ConversationLifecycleSubscriber;
 use crate::web::domain::{SessionRegistry, TtlConfig};
@@ -179,10 +177,7 @@ impl ApiExplorerNode {
             .and_then(|v| v.as_u64())
             .unwrap_or(50)
             .clamp(1, 200) as usize;
-        let offset = inputs
-            .get("offset")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
+        let offset = inputs.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
         match self
             .use_case
@@ -350,9 +345,14 @@ fn format_spec_error(e: crate::web::domain::WebDomainError) -> Value {
     use crate::web::domain::WebDomainError as E;
     match e {
         // Non-recoverable — callers should have returned Err before reaching here.
-        E::InvalidConfig(msg) => panic!("api_explorer InvalidConfig (DAG should have crashed): {msg}"),
-        E::AdapterInit(msg)   => panic!("api_explorer AdapterInit (DAG should have crashed): {msg}"),
-        E::SpecTooLarge { size_bytes, limit_bytes } => panic!(
+        E::InvalidConfig(msg) => {
+            panic!("api_explorer InvalidConfig (DAG should have crashed): {msg}")
+        }
+        E::AdapterInit(msg) => panic!("api_explorer AdapterInit (DAG should have crashed): {msg}"),
+        E::SpecTooLarge {
+            size_bytes,
+            limit_bytes,
+        } => panic!(
             "api_explorer SpecTooLarge {size_bytes} > {limit_bytes} (DAG should have crashed)"
         ),
         E::SpecParseFailed { details } => json!({
@@ -366,7 +366,10 @@ fn format_spec_error(e: crate::web::domain::WebDomainError) -> Value {
             "resolved_url": resolved_url,
             "message": "URL returned HTML. If this is a Git-forge blob URL for a lesser-known host, use the raw content URL instead."
         }),
-        E::Swagger2ConversionFailed { reason, unsupported_feature } => json!({
+        E::Swagger2ConversionFailed {
+            reason,
+            unsupported_feature,
+        } => json!({
             "error": "swagger2_conversion_failed",
             "reason": reason,
             "unsupported_feature": unsupported_feature,
@@ -377,7 +380,10 @@ fn format_spec_error(e: crate::web::domain::WebDomainError) -> Value {
             "detected": detected,
             "message": "api_explorer supports OpenAPI 3.x and Swagger 2.0 only."
         }),
-        E::EndpointNotFound { searched_for, did_you_mean } => json!({
+        E::EndpointNotFound {
+            searched_for,
+            did_you_mean,
+        } => json!({
             "error": "endpoint_not_found",
             "searched_for": searched_for,
             "did_you_mean": did_you_mean,
@@ -397,7 +403,11 @@ fn format_spec_error(e: crate::web::domain::WebDomainError) -> Value {
                 "next_action": "Call build_http_request again with `params` set to an object that includes every name in `missing` mapped to a real value. Do NOT repeat the same call without changing params.",
             })
         }
-        E::InvalidParamType { param, expected_type, got } => json!({
+        E::InvalidParamType {
+            param,
+            expected_type,
+            got,
+        } => json!({
             "error": "invalid_param_type",
             "param": param,
             "expected_type": expected_type,
@@ -434,7 +444,11 @@ fn format_spec_error(e: crate::web::domain::WebDomainError) -> Value {
             "error": "session_lost",
             "last_known_url": last_known_url,
         }),
-        E::SelectorNotFound { selector, page_url, hints } => json!({
+        E::SelectorNotFound {
+            selector,
+            page_url,
+            hints,
+        } => json!({
             "error": "selector_not_found",
             "selector": selector,
             "page_url": page_url,
@@ -461,7 +475,9 @@ impl Default for ApiExplorerNode {
 #[async_trait]
 impl ConversationLifecycleSubscriber for ApiExplorerNode {
     async fn on_conversation_closed(&self, conversation_id: &str) {
-        self.registry.cleanup_conversation(conversation_id, |_v| {}).await;
+        self.registry
+            .cleanup_conversation(conversation_id, |_v| {})
+            .await;
     }
 }
 
@@ -481,7 +497,10 @@ impl ExecutableNode for ApiExplorerNode {
         let conversation_id = Self::extract_conversation_id(inputs);
 
         match sub {
-            "load_spec" => self.handle_load_spec(inputs, config, &conversation_id).await,
+            "load_spec" => {
+                self.handle_load_spec(inputs, config, &conversation_id)
+                    .await
+            }
             "list_endpoints" => self.handle_list_endpoints(inputs, &conversation_id).await,
             "search_endpoint" => self.handle_search_endpoint(inputs, &conversation_id).await,
             "get_endpoint_details" => {
@@ -653,7 +672,8 @@ fn search_endpoint_sub_tool() -> SubToolDefinition {
         "query".into(),
         ParameterProperty {
             property_type: "string".into(),
-            description: "Free-text query, e.g. \"create subscription\", \"list customers\".".into(),
+            description: "Free-text query, e.g. \"create subscription\", \"list customers\"."
+                .into(),
             enum_values: None,
             pattern: None,
             items: None,
@@ -983,10 +1003,8 @@ mod tests {
             fuzzy_match_threshold: 0.05,
             ..ApiSpecUseCaseConfig::default()
         };
-        let node = ApiExplorerNode::new_with_port_and_config(
-            port.clone() as Arc<dyn ApiSpecPort>,
-            cfg,
-        );
+        let node =
+            ApiExplorerNode::new_with_port_and_config(port.clone() as Arc<dyn ApiSpecPort>, cfg);
         (port, node)
     }
 
@@ -1104,7 +1122,9 @@ mod tests {
         load.insert("url".into(), json!("https://x/spec.yaml"));
         load.insert("conversation_id".into(), json!("c-list"));
         let mut state = json!({});
-        node.execute(&load, &json!({}), &mut state, None).await.unwrap();
+        node.execute(&load, &json!({}), &mut state, None)
+            .await
+            .unwrap();
 
         let mut list: NodeInputs = HashMap::new();
         list.insert(SUB_TOOL_INPUT_KEY.into(), json!("list_endpoints"));
@@ -1121,10 +1141,7 @@ mod tests {
             eps[0].get("operation_id").and_then(|v| v.as_str()),
             Some("listPets")
         );
-        assert_eq!(
-            eps[0].get("method").and_then(|v| v.as_str()),
-            Some("GET")
-        );
+        assert_eq!(eps[0].get("method").and_then(|v| v.as_str()), Some("GET"));
     }
 
     #[tokio::test]
@@ -1153,7 +1170,9 @@ mod tests {
         load.insert("url".into(), json!("https://x/spec.yaml"));
         load.insert("conversation_id".into(), json!("c-search"));
         let mut state = json!({});
-        node.execute(&load, &json!({}), &mut state, None).await.unwrap();
+        node.execute(&load, &json!({}), &mut state, None)
+            .await
+            .unwrap();
 
         let mut search: NodeInputs = HashMap::new();
         search.insert(SUB_TOOL_INPUT_KEY.into(), json!("search_endpoint"));
@@ -1181,7 +1200,9 @@ mod tests {
         load.insert("url".into(), json!("https://x/spec.yaml"));
         load.insert("conversation_id".into(), json!("c-det"));
         let mut state = json!({});
-        node.execute(&load, &json!({}), &mut state, None).await.unwrap();
+        node.execute(&load, &json!({}), &mut state, None)
+            .await
+            .unwrap();
 
         let mut det: NodeInputs = HashMap::new();
         det.insert(SUB_TOOL_INPUT_KEY.into(), json!("get_endpoint_details"));
@@ -1208,7 +1229,9 @@ mod tests {
         load.insert("url".into(), json!("https://x/spec.yaml"));
         load.insert("conversation_id".into(), json!("c-miss"));
         let mut state = json!({});
-        node.execute(&load, &json!({}), &mut state, None).await.unwrap();
+        node.execute(&load, &json!({}), &mut state, None)
+            .await
+            .unwrap();
 
         let mut det: NodeInputs = HashMap::new();
         det.insert(SUB_TOOL_INPUT_KEY.into(), json!("get_endpoint_details"));
@@ -1235,7 +1258,9 @@ mod tests {
         load.insert("url".into(), json!("https://x/spec.yaml"));
         load.insert("conversation_id".into(), json!("c-build"));
         let mut state = json!({});
-        node.execute(&load, &json!({}), &mut state, None).await.unwrap();
+        node.execute(&load, &json!({}), &mut state, None)
+            .await
+            .unwrap();
 
         let mut build: NodeInputs = HashMap::new();
         build.insert(SUB_TOOL_INPUT_KEY.into(), json!("build_http_request"));
@@ -1268,7 +1293,9 @@ mod tests {
         load.insert("url".into(), json!("https://x/spec.yaml"));
         load.insert("conversation_id".into(), json!("c-auth"));
         let mut state = json!({});
-        node.execute(&load, &json!({}), &mut state, None).await.unwrap();
+        node.execute(&load, &json!({}), &mut state, None)
+            .await
+            .unwrap();
 
         let mut build: NodeInputs = HashMap::new();
         build.insert(SUB_TOOL_INPUT_KEY.into(), json!("build_http_request"));
@@ -1294,7 +1321,9 @@ mod tests {
         load.insert("url".into(), json!("https://x/spec.yaml"));
         load.insert("conversation_id".into(), json!("c-bad-params"));
         let mut state = json!({});
-        node.execute(&load, &json!({}), &mut state, None).await.unwrap();
+        node.execute(&load, &json!({}), &mut state, None)
+            .await
+            .unwrap();
 
         let mut build: NodeInputs = HashMap::new();
         build.insert(SUB_TOOL_INPUT_KEY.into(), json!("build_http_request"));
@@ -1320,7 +1349,9 @@ mod tests {
         load.insert("url".into(), json!("https://x/spec.yaml"));
         load.insert("conversation_id".into(), json!("c-method"));
         let mut state = json!({});
-        node.execute(&load, &json!({}), &mut state, None).await.unwrap();
+        node.execute(&load, &json!({}), &mut state, None)
+            .await
+            .unwrap();
 
         let mut search: NodeInputs = HashMap::new();
         search.insert(SUB_TOOL_INPUT_KEY.into(), json!("search_endpoint"));

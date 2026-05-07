@@ -392,13 +392,19 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for SmokeTaskMemo
     async fn get_tasks_for_run(
         &self,
         _session_id: &str,
-    ) -> Result<Vec<crate::dag_engine::domain::state::DagTask>, crate::dag_engine::domain::error::DagError> {
+    ) -> Result<
+        Vec<crate::dag_engine::domain::state::DagTask>,
+        crate::dag_engine::domain::error::DagError,
+    > {
         Ok(vec![])
     }
     async fn get_first_uncompleted_task(
         &self,
         _session_id: &str,
-    ) -> Result<Option<crate::dag_engine::domain::state::DagTask>, crate::dag_engine::domain::error::DagError> {
+    ) -> Result<
+        Option<crate::dag_engine::domain::state::DagTask>,
+        crate::dag_engine::domain::error::DagError,
+    > {
         Ok(None)
     }
     async fn delete_task(
@@ -423,7 +429,10 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for SmokeTaskMemo
         &self,
         _session_id: &str,
         _phase: i32,
-    ) -> Result<Vec<crate::dag_engine::domain::state::DagTask>, crate::dag_engine::domain::error::DagError> {
+    ) -> Result<
+        Vec<crate::dag_engine::domain::state::DagTask>,
+        crate::dag_engine::domain::error::DagError,
+    > {
         Ok(vec![])
     }
     async fn save_phase_summary(
@@ -437,7 +446,10 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for SmokeTaskMemo
     async fn get_phase_summaries(
         &self,
         _session_id: &str,
-    ) -> Result<Vec<crate::dag_engine::domain::state::DagPhaseSummary>, crate::dag_engine::domain::error::DagError> {
+    ) -> Result<
+        Vec<crate::dag_engine::domain::state::DagPhaseSummary>,
+        crate::dag_engine::domain::error::DagError,
+    > {
         Ok(vec![])
     }
 }

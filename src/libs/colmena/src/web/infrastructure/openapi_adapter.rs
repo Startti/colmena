@@ -64,7 +64,10 @@ impl OpenApiAdapter {
         if_none_match: Option<&str>,
         if_modified_since: Option<&str>,
     ) -> Result<FetchRawResult, WebDomainError> {
-        let NormalizedUrl { resolved, rewritten: _ } = normalize_forge_url(input_url);
+        let NormalizedUrl {
+            resolved,
+            rewritten: _,
+        } = normalize_forge_url(input_url);
 
         let mut req = self.client.get(&resolved);
         if let Some(etag) = if_none_match {
@@ -76,7 +79,9 @@ impl OpenApiAdapter {
 
         let resp = req.send().await.map_err(|e| {
             if e.is_timeout() {
-                WebDomainError::Timeout { ms: self.config.timeout.as_millis() as u64 }
+                WebDomainError::Timeout {
+                    ms: self.config.timeout.as_millis() as u64,
+                }
             } else {
                 WebDomainError::Upstream {
                     status: 0,
@@ -143,10 +148,7 @@ impl OpenApiAdapter {
 
         // If content-type was absent, sniff body: HTML bodies usually start with '<'.
         if content_type.is_none() {
-            let first = buf
-                .iter()
-                .copied()
-                .find(|b| !b.is_ascii_whitespace());
+            let first = buf.iter().copied().find(|b| !b.is_ascii_whitespace());
             if matches!(first, Some(b'<')) {
                 return Err(WebDomainError::UnexpectedHtmlResponse {
                     url: input_url.to_string(),
@@ -233,17 +235,16 @@ pub(crate) fn parse_body_to_spec(
     };
 
     let as_value: serde_json::Value = match fmt {
-        BodyFormat::Json => serde_json::from_slice(body).map_err(|e| {
-            WebDomainError::SpecParseFailed {
+        BodyFormat::Json => {
+            serde_json::from_slice(body).map_err(|e| WebDomainError::SpecParseFailed {
                 details: format!("json parse: {e}"),
-            }
-        })?,
+            })?
+        }
         BodyFormat::Yaml => {
-            let y: serde_yaml::Value = serde_yaml::from_slice(body).map_err(|e| {
-                WebDomainError::SpecParseFailed {
+            let y: serde_yaml::Value =
+                serde_yaml::from_slice(body).map_err(|e| WebDomainError::SpecParseFailed {
                     details: format!("yaml parse: {e}"),
-                }
-            })?;
+                })?;
             serde_json::to_value(y).map_err(|e| WebDomainError::SpecParseFailed {
                 details: format!("yaml→json: {e}"),
             })?
@@ -257,9 +258,7 @@ pub(crate) fn parse_body_to_spec(
         }
         SpecFormat::Swagger20 => {
             let converted =
-                crate::web::application::swagger2_to_oas3::convert_swagger2_to_openapi3(
-                    &as_value,
-                )?;
+                crate::web::application::swagger2_to_oas3::convert_swagger2_to_openapi3(&as_value)?;
             parse_oas3_value(converted, SpecFormat::Swagger20, input_url, resolved_url)
         }
     }
@@ -355,7 +354,11 @@ fn extract_endpoints(root: &serde_json::Value) -> Result<Vec<Endpoint>, WebDomai
             let tags = op
                 .get("tags")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|t| t.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
 
             // Merge path-level + op-level parameters; op-level wins on name conflict.
@@ -363,8 +366,7 @@ fn extract_endpoints(root: &serde_json::Value) -> Result<Vec<Endpoint>, WebDomai
             if let Some(Some(arr)) = op.get("parameters").map(|v| v.as_array()) {
                 for p in arr {
                     combined.retain(|existing| {
-                        existing.get("name") != p.get("name")
-                            || existing.get("in") != p.get("in")
+                        existing.get("name") != p.get("name") || existing.get("in") != p.get("in")
                     });
                     combined.push(p.clone());
                 }
@@ -399,7 +401,11 @@ fn extract_endpoints(root: &serde_json::Value) -> Result<Vec<Endpoint>, WebDomai
             let security = op
                 .get("security")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().flat_map(security_requirements_from_array).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .flat_map(security_requirements_from_array)
+                        .collect()
+                })
                 .unwrap_or_default();
 
             out.push(Endpoint {
@@ -427,7 +433,13 @@ fn generate_operation_id(method: HttpMethod, path: &str) -> String {
     // e.g. (POST, /pet/{petId}/uploadImage) → Post_pet_petId_uploadImage
     let cleaned: String = path
         .chars()
-        .map(|c| if c == '/' || c == '{' || c == '}' || c == '-' { '_' } else { c })
+        .map(|c| {
+            if c == '/' || c == '{' || c == '}' || c == '-' {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let cleaned = cleaned.trim_matches('_');
     format!(
@@ -452,12 +464,12 @@ fn parameter_from_json(p: &serde_json::Map<String, serde_json::Value>) -> Parame
         .and_then(|v| v.as_str())
         .map(String::from)
         .unwrap_or_default();
-    let description = p.get("description").and_then(|v| v.as_str()).map(String::from);
+    let description = p
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let required = p.get("required").and_then(|v| v.as_bool()).unwrap_or(false);
-    let schema = p
-        .get("schema")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
+    let schema = p.get("schema").cloned().unwrap_or(serde_json::Value::Null);
     let param_type = classify_schema(&schema);
     let style = p.get("style").and_then(|v| v.as_str()).map(String::from);
     let explode = p.get("explode").and_then(|v| v.as_bool());
@@ -481,7 +493,10 @@ fn classify_schema(schema: &serde_json::Value) -> ParamType {
         Some("number") => ParamType::Number,
         Some("boolean") => ParamType::Boolean,
         Some("array") => {
-            let items = schema.get("items").cloned().unwrap_or(serde_json::Value::Null);
+            let items = schema
+                .get("items")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             ParamType::Array(Box::new(classify_schema(&items)))
         }
         Some("object") => ParamType::Object,
@@ -497,17 +512,27 @@ fn classify_schema(schema: &serde_json::Value) -> ParamType {
 
 fn request_body_from_json(rb: &serde_json::Value) -> Option<RequestBodySpec> {
     let rb_obj = rb.as_object()?;
-    let required = rb_obj.get("required").and_then(|v| v.as_bool()).unwrap_or(false);
+    let required = rb_obj
+        .get("required")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let content = rb_obj.get("content").and_then(|v| v.as_object())?;
     // Prefer JSON, fall back to form-urlencoded, multipart, then first key.
-    let preferred = ["application/json", "application/x-www-form-urlencoded", "multipart/form-data"];
+    let preferred = [
+        "application/json",
+        "application/x-www-form-urlencoded",
+        "multipart/form-data",
+    ];
     let content_type = preferred
         .iter()
         .find(|k| content.contains_key(**k))
         .map(|s| s.to_string())
         .or_else(|| content.keys().next().cloned())?;
     let media = content.get(&content_type)?.as_object()?;
-    let schema = media.get("schema").cloned().unwrap_or(serde_json::Value::Null);
+    let schema = media
+        .get("schema")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     Some(RequestBodySpec {
         content_type,
         required,
@@ -530,7 +555,10 @@ fn response_spec_from_json(resp: &serde_json::Value) -> ResponseSpec {
             }
         }
     }
-    ResponseSpec { description, content }
+    ResponseSpec {
+        description,
+        content,
+    }
 }
 
 fn security_requirements_from_array(v: &serde_json::Value) -> Vec<SecurityRequirement> {
@@ -542,7 +570,11 @@ fn security_requirements_from_array(v: &serde_json::Value) -> Vec<SecurityRequir
             scheme: scheme.clone(),
             scopes: scopes
                 .as_array()
-                .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default(),
         })
         .collect()
@@ -557,8 +589,13 @@ fn extract_security_schemes(root: &serde_json::Value) -> HashMap<String, Securit
         return out;
     };
     for (name, raw) in ss {
-        let Some(scheme_obj) = raw.as_object() else { continue };
-        let ty = scheme_obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let Some(scheme_obj) = raw.as_object() else {
+            continue;
+        };
+        let ty = scheme_obj
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let scheme = match ty {
             "http" => SecurityScheme::Http {
                 scheme: scheme_obj
@@ -572,7 +609,11 @@ fn extract_security_schemes(root: &serde_json::Value) -> HashMap<String, Securit
                     .map(String::from),
             },
             "apiKey" => {
-                let location = match scheme_obj.get("in").and_then(|v| v.as_str()).unwrap_or("header") {
+                let location = match scheme_obj
+                    .get("in")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("header")
+                {
                     "query" => ApiKeyLocation::Query,
                     "cookie" => ApiKeyLocation::Cookie,
                     _ => ApiKeyLocation::Header,
@@ -664,13 +705,19 @@ mod tests_parse_openapi3 {
     #[test]
     fn detect_spec_kind_openapi_3x() {
         let v: serde_json::Value = serde_json::from_str(r#"{"openapi": "3.0.3"}"#).unwrap();
-        assert_eq!(super::super::openapi_adapter::detect_spec_kind(&v).unwrap(), SpecFormat::OpenApi3x);
+        assert_eq!(
+            super::super::openapi_adapter::detect_spec_kind(&v).unwrap(),
+            SpecFormat::OpenApi3x
+        );
     }
 
     #[test]
     fn detect_spec_kind_swagger_2() {
         let v: serde_json::Value = serde_json::from_str(r#"{"swagger": "2.0"}"#).unwrap();
-        assert_eq!(super::super::openapi_adapter::detect_spec_kind(&v).unwrap(), SpecFormat::Swagger20);
+        assert_eq!(
+            super::super::openapi_adapter::detect_spec_kind(&v).unwrap(),
+            SpecFormat::Swagger20
+        );
     }
 
     #[test]
@@ -736,8 +783,15 @@ mod tests_fetch {
         let adapter = adapter_at(OpenApiAdapterConfig::default());
         let res = adapter.fetch_raw(&url, None, None).await.unwrap();
         match res {
-            FetchRawResult::Fresh { body, content_type, etag, .. } => {
-                assert!(std::str::from_utf8(&body).unwrap().contains("openapi: 3.0.3"));
+            FetchRawResult::Fresh {
+                body,
+                content_type,
+                etag,
+                ..
+            } => {
+                assert!(std::str::from_utf8(&body)
+                    .unwrap()
+                    .contains("openapi: 3.0.3"));
                 assert_eq!(content_type.as_deref(), Some("application/yaml"));
                 assert_eq!(etag.as_deref(), Some("\"abc\""));
             }
@@ -773,7 +827,9 @@ mod tests_fetch {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"   <!DOCTYPE html>...".as_ref()))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(b"   <!DOCTYPE html>...".as_ref()),
+            )
             .mount(&server)
             .await;
 
@@ -789,10 +845,7 @@ mod tests_fetch {
         let big = "x".repeat(10_000);
         Mock::given(method("GET"))
             .and(path("/big.yaml"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_raw(big, "application/yaml"),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_raw(big, "application/yaml"))
             .mount(&server)
             .await;
 
@@ -887,7 +940,10 @@ mod tests_parse_swagger2 {
         assert_eq!(rb.content_type, "application/json");
 
         // ApiKeyAuth security scheme survived the conversion.
-        let sec = parsed.security_schemes.get("ApiKeyAuth").expect("ApiKeyAuth");
+        let sec = parsed
+            .security_schemes
+            .get("ApiKeyAuth")
+            .expect("ApiKeyAuth");
         match sec {
             SecurityScheme::ApiKey { name, location } => {
                 assert_eq!(name, "X-API-Key");

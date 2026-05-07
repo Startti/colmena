@@ -92,7 +92,9 @@ impl FilesystemSkillRepository {
                     // Children that fail to canonicalize, escape the allowed set, or lack a
                     // SKILL.md are silently skipped — only present, in-tree skill directories
                     // count toward `found`.
-                    let Ok(sub_canonical) = sub.canonicalize() else { continue };
+                    let Ok(sub_canonical) = sub.canonicalize() else {
+                        continue;
+                    };
                     if !allowed.iter().any(|root| sub_canonical.starts_with(root)) {
                         continue;
                     }

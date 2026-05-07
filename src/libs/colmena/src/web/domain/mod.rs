@@ -8,7 +8,8 @@ pub mod session;
 
 pub use api_spec_port::{
     ApiKeyLocation, ApiSpecPort, Endpoint, HttpMethod, ParamType, ParameterSpec, ParsedSpec,
-    RequestBodySpec, ResponseSpec, SecurityRequirement, SecurityScheme, SpecFetchResult, SpecFormat,
+    RequestBodySpec, ResponseSpec, SecurityRequirement, SecurityScheme, SpecFetchResult,
+    SpecFormat,
 };
 pub use errors::WebDomainError;
 pub use lifecycle::{ConversationLifecycleBus, ConversationLifecycleSubscriber};

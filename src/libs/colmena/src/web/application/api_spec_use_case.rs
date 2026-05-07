@@ -40,9 +40,7 @@ pub struct SpecCache {
 impl SpecCache {
     pub fn new(max: usize) -> Self {
         Self {
-            specs: Mutex::new(LruCache::new(
-                NonZeroUsize::new(max.max(1)).unwrap(),
-            )),
+            specs: Mutex::new(LruCache::new(NonZeroUsize::new(max.max(1)).unwrap())),
         }
     }
 }
@@ -67,7 +65,11 @@ impl ApiSpecUseCase {
         registry: Arc<SessionRegistry<Arc<SpecCache>>>,
         config: ApiSpecUseCaseConfig,
     ) -> Self {
-        Self { port, registry, config }
+        Self {
+            port,
+            registry,
+            config,
+        }
     }
 
     /// Fetch-or-reuse a spec for a given conversation.
@@ -95,13 +97,7 @@ impl ApiSpecUseCase {
         self.registry.insert(key.clone(), cache.clone()).await;
 
         if self.config.enable_cache && !force_reload {
-            if let Some(hit) = cache
-                .specs
-                .lock()
-                .await
-                .get(input_url)
-                .cloned()
-            {
+            if let Some(hit) = cache.specs.lock().await.get(input_url).cloned() {
                 if hit.cached_at.elapsed() < self.config.cache_ttl {
                     // Fresh enough — skip revalidation to avoid network.
                     return Ok((hit, true));
@@ -140,9 +136,9 @@ impl ApiSpecUseCase {
                 Ok((entry, false))
             }
             SpecFetchResult::NotModified => {
-                let mut prev = previous.ok_or_else(|| WebDomainError::AdapterInit(
-                    "got 304 Not Modified without a cached spec".into(),
-                ))?;
+                let mut prev = previous.ok_or_else(|| {
+                    WebDomainError::AdapterInit("got 304 Not Modified without a cached spec".into())
+                })?;
                 prev.cached_at = Instant::now();
                 cache
                     .specs
@@ -417,7 +413,11 @@ pub fn get_endpoint_details(
     spec: &ParsedSpec,
     operation_id: &str,
 ) -> Result<Value, WebDomainError> {
-    let ep = match spec.endpoints.iter().find(|e| e.operation_id == operation_id) {
+    let ep = match spec
+        .endpoints
+        .iter()
+        .find(|e| e.operation_id == operation_id)
+    {
         Some(e) => e,
         None => {
             // Return top-3 fuzzy suggestions.
@@ -494,9 +494,7 @@ pub fn get_endpoint_details(
     let security = Value::Array(
         ep.security
             .iter()
-            .map(|s| {
-                json!({ "scheme": s.scheme, "scopes": s.scopes })
-            })
+            .map(|s| json!({ "scheme": s.scheme, "scopes": s.scopes }))
             .collect(),
     );
 
@@ -569,7 +567,9 @@ pub(crate) fn resolve_refs(
             Value::Object(new_obj)
         }
         Value::Array(arr) => Value::Array(
-            arr.iter().map(|v| resolve_refs(v, components, path)).collect(),
+            arr.iter()
+                .map(|v| resolve_refs(v, components, path))
+                .collect(),
         ),
         other => other.clone(),
     }
@@ -681,7 +681,10 @@ pub fn build_http_request(
             }
         }
         body_value = body;
-        headers.insert("Content-Type".into(), Value::String(rb.content_type.clone()));
+        headers.insert(
+            "Content-Type".into(),
+            Value::String(rb.content_type.clone()),
+        );
     }
 
     if !missing.is_empty() {
@@ -717,9 +720,11 @@ pub fn build_http_request(
     let base = base_url_override
         .map(str::to_string)
         .or_else(|| spec.servers.first().cloned())
-        .ok_or_else(|| WebDomainError::InvalidConfig(
-            "spec has no servers[]; set default_base_url_override in the node config".into(),
-        ))?;
+        .ok_or_else(|| {
+            WebDomainError::InvalidConfig(
+                "spec has no servers[]; set default_base_url_override in the node config".into(),
+            )
+        })?;
     let url = format!("{}{}", base.trim_end_matches('/'), url_path);
 
     Ok(json!({
@@ -751,7 +756,8 @@ fn coerce_scalar(v: &Value, ty: &ParamType, name: &str) -> Result<String, WebDom
                     got: format!("\"{s}\""),
                 })
         }
-        (Value::Number(n), ParamType::Integer) => Ok(n.as_i64()
+        (Value::Number(n), ParamType::Integer) => Ok(n
+            .as_i64()
             .map(|i| i.to_string())
             .unwrap_or_else(|| n.to_string())),
         (Value::Number(n), ParamType::Number) => Ok(n.to_string()),
@@ -782,11 +788,13 @@ fn coerce_scalar(v: &Value, ty: &ParamType, name: &str) -> Result<String, WebDom
 
 fn encode_param(v: &Value, p: &ParameterSpec) -> Result<Value, WebDomainError> {
     if let ParamType::Array(inner) = &p.param_type {
-        let arr = v.as_array().ok_or_else(|| WebDomainError::InvalidParamType {
-            param: p.name.clone(),
-            expected_type: "array".into(),
-            got: format!("{v:?}"),
-        })?;
+        let arr = v
+            .as_array()
+            .ok_or_else(|| WebDomainError::InvalidParamType {
+                param: p.name.clone(),
+                expected_type: "array".into(),
+                got: format!("{v:?}"),
+            })?;
         let strs: Result<Vec<String>, WebDomainError> = arr
             .iter()
             .map(|e| coerce_scalar(e, inner, &p.name))
@@ -826,7 +834,11 @@ fn required_fields_from_schema(schema: &Value) -> Vec<String> {
     schema
         .get("required")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -931,7 +943,11 @@ fn apply_security_scheme(
     let placeholder = format!("${{SECURE:{secret_ref}}}");
     match scheme {
         SecurityScheme::Http { scheme: s, .. } => {
-            let prefix = if s.eq_ignore_ascii_case("basic") { "Basic" } else { "Bearer" };
+            let prefix = if s.eq_ignore_ascii_case("basic") {
+                "Basic"
+            } else {
+                "Bearer"
+            };
             headers.insert(
                 "Authorization".into(),
                 Value::String(format!("{prefix} {placeholder}")),
@@ -1161,14 +1177,8 @@ mod tests_build_http_request {
     #[test]
     fn path_parameter_is_substituted() {
         let spec = spec_pet_by_id();
-        let req = build_http_request(
-            &spec,
-            "getPetById",
-            &json!({ "petId": 42 }),
-            None,
-            None,
-        )
-        .unwrap();
+        let req =
+            build_http_request(&spec, "getPetById", &json!({ "petId": 42 }), None, None).unwrap();
         assert_eq!(req["url"], "https://api.example.com/pet/42");
         assert_eq!(req["method"], "GET");
     }
@@ -1176,28 +1186,15 @@ mod tests_build_http_request {
     #[test]
     fn missing_required_path_parameter_returns_error() {
         let spec = spec_pet_by_id();
-        let err = build_http_request(
-            &spec,
-            "getPetById",
-            &json!({}),
-            None,
-            None,
-        )
-        .unwrap_err();
+        let err = build_http_request(&spec, "getPetById", &json!({}), None, None).unwrap_err();
         assert!(matches!(err, WebDomainError::MissingRequiredParams { .. }));
     }
 
     #[test]
     fn integer_param_accepts_string_coercion() {
         let spec = spec_pet_by_id();
-        let req = build_http_request(
-            &spec,
-            "getPetById",
-            &json!({ "petId": "42" }),
-            None,
-            None,
-        )
-        .unwrap();
+        let req =
+            build_http_request(&spec, "getPetById", &json!({ "petId": "42" }), None, None).unwrap();
         assert_eq!(req["url"], "https://api.example.com/pet/42");
     }
 
@@ -1299,15 +1296,12 @@ mod tests_build_http_request {
         .unwrap();
         assert_eq!(req["query_params"]["api_key"], "${SECURE:my_key}");
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::web::domain::{
-        Endpoint, HttpMethod, ParsedSpec, SpecFormat, TtlConfig,
-    };
+    use crate::web::domain::{Endpoint, HttpMethod, ParsedSpec, SpecFormat, TtlConfig};
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -1417,7 +1411,9 @@ mod tests {
             respond_with: Mutex::new(None),
         });
         let uc = use_case_with(port.clone());
-        uc.fetch_spec("conv-1", "https://ex/s.yaml", false).await.unwrap();
+        uc.fetch_spec("conv-1", "https://ex/s.yaml", false)
+            .await
+            .unwrap();
         let (_entry, was_cached) = uc
             .fetch_spec("conv-1", "https://ex/s.yaml", true)
             .await
@@ -1433,8 +1429,12 @@ mod tests {
             respond_with: Mutex::new(None),
         });
         let uc = use_case_with(port.clone());
-        uc.fetch_spec("conv-a", "https://ex/s.yaml", false).await.unwrap();
-        uc.fetch_spec("conv-b", "https://ex/s.yaml", false).await.unwrap();
+        uc.fetch_spec("conv-a", "https://ex/s.yaml", false)
+            .await
+            .unwrap();
+        uc.fetch_spec("conv-b", "https://ex/s.yaml", false)
+            .await
+            .unwrap();
         assert_eq!(port.calls.load(Ordering::SeqCst), 2);
     }
 
@@ -1445,7 +1445,9 @@ mod tests {
             respond_with: Mutex::new(None),
         });
         let uc = use_case_with(port.clone());
-        uc.fetch_spec("conv-1", "https://ex/s.yaml", false).await.unwrap();
+        uc.fetch_spec("conv-1", "https://ex/s.yaml", false)
+            .await
+            .unwrap();
         *port.respond_with.lock().await = Some(SpecFetchResult::NotModified);
         let (entry, was_cached) = uc
             .fetch_spec("conv-1", "https://ex/s.yaml", true)
@@ -1483,7 +1485,9 @@ mod tests {
             respond_with: Mutex::new(None),
         });
         let uc = use_case_with(port.clone());
-        uc.fetch_spec("conv-1", "https://ex/s.yaml", false).await.unwrap();
+        uc.fetch_spec("conv-1", "https://ex/s.yaml", false)
+            .await
+            .unwrap();
         let spec = uc
             .lookup_cached("conv-1", "https://ex/s.yaml")
             .await
@@ -1515,13 +1519,7 @@ mod tests_list_and_search {
         }
     }
 
-    fn ep(
-        op: &str,
-        method: HttpMethod,
-        path: &str,
-        summary: &str,
-        tag: &str,
-    ) -> Endpoint {
+    fn ep(op: &str, method: HttpMethod, path: &str, summary: &str, tag: &str) -> Endpoint {
         Endpoint {
             operation_id: op.into(),
             method,
@@ -1542,9 +1540,27 @@ mod tests_list_and_search {
         spec_with(vec![
             ep("listPets", HttpMethod::Get, "/pet", "List pets", "pet"),
             ep("addPet", HttpMethod::Post, "/pet", "Add a new pet", "pet"),
-            ep("getPet", HttpMethod::Get, "/pet/{id}", "Get pet by ID", "pet"),
-            ep("listStores", HttpMethod::Get, "/store", "List stores", "store"),
-            ep("createSubscription", HttpMethod::Post, "/subscription", "Create a subscription", "billing"),
+            ep(
+                "getPet",
+                HttpMethod::Get,
+                "/pet/{id}",
+                "Get pet by ID",
+                "pet",
+            ),
+            ep(
+                "listStores",
+                HttpMethod::Get,
+                "/store",
+                "List stores",
+                "store",
+            ),
+            ep(
+                "createSubscription",
+                HttpMethod::Post,
+                "/subscription",
+                "Create a subscription",
+                "billing",
+            ),
         ])
     }
 
@@ -1591,13 +1607,8 @@ mod tests_list_and_search {
     #[test]
     fn search_filters_by_method() {
         let spec = sample();
-        let results = super::super::api_spec_use_case::search_endpoint(
-            &spec,
-            "pet",
-            Some("GET"),
-            10,
-            0.1,
-        );
+        let results =
+            super::super::api_spec_use_case::search_endpoint(&spec, "pet", Some("GET"), 10, 0.1);
         for r in &results {
             assert_eq!(r.method, "GET");
         }
@@ -1619,13 +1630,7 @@ mod tests_list_and_search {
     #[test]
     fn search_returns_top_n() {
         let spec = sample();
-        let results = super::super::api_spec_use_case::search_endpoint(
-            &spec,
-            "pet",
-            None,
-            2,
-            0.1,
-        );
+        let results = super::super::api_spec_use_case::search_endpoint(&spec, "pet", None, 2, 0.1);
         assert!(results.len() <= 2);
     }
 }
@@ -1634,8 +1639,8 @@ mod tests_list_and_search {
 mod tests_details {
     use super::*;
     use crate::web::domain::{
-        Endpoint, HttpMethod, ParamType, ParameterSpec, ParsedSpec, RequestBodySpec,
-        ResponseSpec, SpecFormat,
+        Endpoint, HttpMethod, ParamType, ParameterSpec, ParsedSpec, RequestBodySpec, ResponseSpec,
+        SpecFormat,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -1708,11 +1713,9 @@ mod tests_details {
     #[test]
     fn happy_path_returns_expected_shape() {
         let spec = sample();
-        let details = super::super::api_spec_use_case::get_endpoint_details(
-            &spec,
-            "createSubscription",
-        )
-        .unwrap();
+        let details =
+            super::super::api_spec_use_case::get_endpoint_details(&spec, "createSubscription")
+                .unwrap();
         assert_eq!(details["operation_id"], "createSubscription");
         assert_eq!(details["method"], "POST");
         assert_eq!(details["path"], "/v1/subscriptions");
@@ -1822,7 +1825,10 @@ mod tests_resolve_refs {
         });
         let out = resolve_refs(&input, &comps, &mut Vec::new());
         assert_eq!(out["properties"]["primary"]["type"], "object");
-        assert_eq!(out["properties"]["history"]["items"]["properties"]["city"]["type"], "string");
+        assert_eq!(
+            out["properties"]["history"]["items"]["properties"]["city"]["type"],
+            "string"
+        );
         assert!(!out.to_string().contains("$ref"));
     }
 }
