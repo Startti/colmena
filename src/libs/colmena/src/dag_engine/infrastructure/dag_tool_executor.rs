@@ -324,6 +324,7 @@ impl DagToolExecutor {
                         description,
                         enum_values: None,
                         pattern: None,
+            items: None,
                     },
                 );
                 required.push(param_name.clone());
@@ -390,6 +391,7 @@ impl DagToolExecutor {
                     description: desc.to_string(),
                     enum_values: None,
                     pattern: None,
+            items: None,
                 },
             );
 
@@ -835,6 +837,7 @@ impl ToolExecutor for DagToolExecutor {
                             description: desc.to_string(),
                             enum_values: None, // TODO: Parse enum values if available
                             pattern: None,
+            items: None,
                         },
                     );
 

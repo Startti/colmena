@@ -327,6 +327,7 @@ fn search_sub_tool() -> SubToolDefinition {
             description: "Natural-language search query.".into(),
             enum_values: None,
             pattern: None,
+            items: None,
         },
     );
     props.insert(
@@ -336,6 +337,7 @@ fn search_sub_tool() -> SubToolDefinition {
             description: "Number of results (1-10). Default 5.".into(),
             enum_values: None,
             pattern: None,
+            items: None,
         },
     );
     props.insert(
@@ -347,6 +349,7 @@ fn search_sub_tool() -> SubToolDefinition {
                     .into(),
             enum_values: None,
             pattern: None,
+            items: None,
         },
     );
     props.insert(
@@ -356,6 +359,7 @@ fn search_sub_tool() -> SubToolDefinition {
             description: "\"basic\" (1 credit) or \"advanced\" (2 credits). Default basic.".into(),
             enum_values: Some(vec!["basic".into(), "advanced".into()]),
             pattern: None,
+            items: None,
         },
     );
     props.insert(
@@ -365,6 +369,10 @@ fn search_sub_tool() -> SubToolDefinition {
             description: "Restrict results to these domains.".into(),
             enum_values: None,
             pattern: None,
+            items: Some(Box::new(ParameterProperty::new(
+                "string".into(),
+                "Domain name (e.g. \"docs.aws.amazon.com\").".into(),
+            ))),
         },
     );
     props.insert(
@@ -374,6 +382,10 @@ fn search_sub_tool() -> SubToolDefinition {
             description: "Exclude these domains.".into(),
             enum_values: None,
             pattern: None,
+            items: Some(Box::new(ParameterProperty::new(
+                "string".into(),
+                "Domain name to exclude from results.".into(),
+            ))),
         },
     );
     props.insert(
@@ -388,6 +400,7 @@ fn search_sub_tool() -> SubToolDefinition {
                 "year".into(),
             ]),
             pattern: None,
+            items: None,
         },
     );
 
@@ -476,6 +489,7 @@ fn fetch_sub_tool() -> SubToolDefinition {
             description: "Absolute URL to fetch.".into(),
             enum_values: None,
             pattern: None,
+            items: None,
         },
     );
     props.insert(
@@ -485,6 +499,7 @@ fn fetch_sub_tool() -> SubToolDefinition {
             description: "Output format (default markdown).".into(),
             enum_values: Some(vec!["markdown".into(), "text".into()]),
             pattern: None,
+            items: None,
         },
     );
     SubToolDefinition {

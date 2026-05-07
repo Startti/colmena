@@ -68,6 +68,7 @@ impl ToolkitNode for EchoToolkitNode {
                 description: "Text to echo back".to_string(),
                 enum_values: None,
                 pattern: None,
+            items: None,
             },
         );
 
@@ -79,6 +80,7 @@ impl ToolkitNode for EchoToolkitNode {
                 description: "Number to double".to_string(),
                 enum_values: None,
                 pattern: None,
+            items: None,
             },
         );
 

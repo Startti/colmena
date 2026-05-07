@@ -149,6 +149,12 @@ pub struct ParameterProperty {
     /// Optional regex pattern constraint for string validation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
+
+    /// Item type for array properties. Required by Gemini's strict JSON Schema
+    /// validation when `property_type == "array"`; OpenAI and Anthropic accept
+    /// arrays without `items` but it's good practice everywhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub items: Option<Box<ParameterProperty>>,
 }
 
 impl ParameterProperty {
@@ -159,6 +165,7 @@ impl ParameterProperty {
             description,
             enum_values: None,
             pattern: None,
+            items: None,
         }
     }
 

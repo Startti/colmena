@@ -46,6 +46,7 @@ again with the `reference` parameter to load that additional material.",
             description: "The name of the skill to load".to_string(),
             enum_values: Some(names),
             pattern: None,
+            items: None,
         },
     );
     properties.insert(
@@ -58,6 +59,7 @@ skill and seeing it declares this reference."
                     .to_string(),
             enum_values: None,
             pattern: None,
+            items: None,
         },
     );
 

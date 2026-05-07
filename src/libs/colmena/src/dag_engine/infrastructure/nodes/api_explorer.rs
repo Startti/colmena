@@ -557,6 +557,7 @@ fn load_spec_sub_tool() -> SubToolDefinition {
                 .into(),
             enum_values: None,
             pattern: None,
+            items: None,
         },
     );
     props.insert(
@@ -566,6 +567,7 @@ fn load_spec_sub_tool() -> SubToolDefinition {
             description: "If true, bypass cache and re-download. Default false.".into(),
             enum_values: None,
             pattern: None,
+            items: None,
         },
     );
     SubToolDefinition {
@@ -595,6 +597,7 @@ fn list_endpoints_sub_tool() -> SubToolDefinition {
                 .into(),
             enum_values: None,
             pattern: None,
+            items: None,
         },
     );
     props.insert(
@@ -604,6 +607,7 @@ fn list_endpoints_sub_tool() -> SubToolDefinition {
             description: "Filter by tag (e.g., \"Subscriptions\").".into(),
             enum_values: None,
             pattern: None,
+            items: None,
         },
     );
     props.insert(
@@ -613,6 +617,7 @@ fn list_endpoints_sub_tool() -> SubToolDefinition {
             description: "Page size. Default 50, max 200.".into(),
             enum_values: None,
             pattern: None,
+            items: None,
         },
     );
     props.insert(
@@ -622,6 +627,7 @@ fn list_endpoints_sub_tool() -> SubToolDefinition {
             description: "Pagination offset. Default 0.".into(),
             enum_values: None,
             pattern: None,
+            items: None,
         },
     );
     SubToolDefinition {
@@ -644,6 +650,7 @@ fn search_endpoint_sub_tool() -> SubToolDefinition {
             description: "The URL of the previously-loaded spec.".into(),
             enum_values: None,
             pattern: None,
+            items: None,
         },
     );
     props.insert(
@@ -653,6 +660,7 @@ fn search_endpoint_sub_tool() -> SubToolDefinition {
             description: "Free-text query, e.g. \"create subscription\", \"list customers\".".into(),
             enum_values: None,
             pattern: None,
+            items: None,
         },
     );
     props.insert(
@@ -668,6 +676,7 @@ fn search_endpoint_sub_tool() -> SubToolDefinition {
                 "DELETE".into(),
             ]),
             pattern: None,
+            items: None,
         },
     );
     props.insert(
@@ -677,6 +686,7 @@ fn search_endpoint_sub_tool() -> SubToolDefinition {
             description: "Default 10, max 50.".into(),
             enum_values: None,
             pattern: None,
+            items: None,
         },
     );
     SubToolDefinition {
@@ -700,6 +710,7 @@ fn get_endpoint_details_sub_tool() -> SubToolDefinition {
             description: "The URL of the previously-loaded spec.".into(),
             enum_values: None,
             pattern: None,
+            items: None,
         },
     );
     props.insert(
@@ -709,6 +720,7 @@ fn get_endpoint_details_sub_tool() -> SubToolDefinition {
             description: "The operation id from `search_endpoint` or `list_endpoints`.".into(),
             enum_values: None,
             pattern: None,
+            items: None,
         },
     );
     SubToolDefinition {
@@ -733,6 +745,7 @@ fn build_http_request_sub_tool() -> SubToolDefinition {
             description: "The URL of the previously-loaded spec.".into(),
             enum_values: None,
             pattern: None,
+            items: None,
         },
     );
     props.insert(
@@ -742,6 +755,7 @@ fn build_http_request_sub_tool() -> SubToolDefinition {
             description: "The operation id from `search_endpoint` or `list_endpoints`.".into(),
             enum_values: None,
             pattern: None,
+            items: None,
         },
     );
     props.insert(
@@ -758,6 +772,7 @@ fn build_http_request_sub_tool() -> SubToolDefinition {
                 .into(),
             enum_values: None,
             pattern: None,
+            items: None,
         },
     );
     props.insert(
@@ -770,6 +785,7 @@ fn build_http_request_sub_tool() -> SubToolDefinition {
                 .into(),
             enum_values: None,
             pattern: None,
+            items: None,
         },
     );
     SubToolDefinition {
