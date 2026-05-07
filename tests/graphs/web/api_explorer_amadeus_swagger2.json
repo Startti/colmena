@@ -1,0 +1,36 @@
+{
+  "nodes": {
+    "ask": {
+      "type": "input",
+      "config": {
+        "default": "Load the Amadeus Airline Code Lookup spec from https://github.com/amadeus4dev/amadeus-open-api-specification/blob/main/spec/yaml/AirlineCodeLookUp_v1_swagger_specification.yaml, then build a request to look up the airline with IATA code 'BA'. Return only the final http_request JSON config you would execute."
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "api_key": "${OPENAI_API_KEY}",
+        "system_message": "You are an integration agent. Use apis__load_spec to load an OpenAPI or Swagger URL — Git-forge blob URLs are auto-rewritten for you; read the `resolved_url` and `original_format` in the result to confirm. Use apis__search_endpoint → apis__get_endpoint_details → apis__build_http_request (which takes a `params` object mapping each parameter name to its value, and merges request-body fields into that same object) to construct the call. The Amadeus API uses Bearer auth (scheme: Bearer); pass auth_secret_ref=\"amadeus_token\" in build_http_request.",
+        "tool_configurations": {
+          "apis": {
+            "name": "apis",
+            "description": "OpenAPI + Swagger 2.0 discovery",
+            "node_type": "api_explorer",
+            "node_config": {},
+            "expose_sub_tools": "all"
+          }
+        }
+      }
+    },
+    "sink": {
+      "type": "output",
+      "config": {}
+    }
+  },
+  "edges": [
+    { "from": "ask", "to": "agent", "field": "prompt" },
+    { "from": "agent", "to": "sink" }
+  ]
+}

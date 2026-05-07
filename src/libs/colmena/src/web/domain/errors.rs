@@ -36,8 +36,11 @@ pub enum WebDomainError {
     #[error("timeout after {ms}ms")]
     Timeout { ms: u64 },
 
-    #[error("spec parse failed: {0}")]
-    SpecParseError(String),
+    #[error("spec parse failed: {details}")]
+    SpecParseFailed { details: String },
+
+    #[error("unsupported spec format: {detected}")]
+    UnsupportedSpecFormat { detected: String },
 
     #[error("endpoint not found: {searched_for}")]
     EndpointNotFound {
@@ -53,6 +56,38 @@ pub enum WebDomainError {
 
     #[error("unexpected HTML response from {url}")]
     UnexpectedHtmlResponse { url: String, resolved_url: String },
+
+    #[error("spec too large: {size_bytes} bytes > {limit_bytes}")]
+    SpecTooLarge { size_bytes: u64, limit_bytes: u64 },
+
+    /// A Swagger 2.0 document could not be converted to OpenAPI 3.0.3.
+    /// The `unsupported_feature` field pinpoints the bit that tripped us up.
+    #[error("swagger 2.0 conversion failed: {reason}")]
+    Swagger2ConversionFailed {
+        reason: String,
+        unsupported_feature: Option<String>,
+    },
+
+    #[error("missing required parameters: {missing:?}")]
+    MissingRequiredParams {
+        missing: Vec<String>,
+        hints: Option<String>,
+    },
+
+    #[error("invalid param type: {param} — expected {expected_type}, got {got}")]
+    InvalidParamType {
+        param: String,
+        expected_type: String,
+        got: String,
+    },
+
+    #[error("missing auth for scheme {scheme}")]
+    MissingAuth { scheme: String, message: String },
+
+    /// A handler that needs a previously-loaded spec was called with a
+    /// `spec_url` that has no entry in the per-conversation cache.
+    #[error("spec not loaded: {spec_url}")]
+    SpecNotLoaded { spec_url: String },
 }
 
 impl WebDomainError {
@@ -60,7 +95,10 @@ impl WebDomainError {
     /// tool result. Returns `false` for configuration / adapter init failures that
     /// should bubble up and crash the DAG.
     pub fn is_llm_recoverable(&self) -> bool {
-        !matches!(self, Self::InvalidConfig(_) | Self::AdapterInit(_))
+        !matches!(
+            self,
+            Self::InvalidConfig(_) | Self::AdapterInit(_) | Self::SpecTooLarge { .. }
+        )
     }
 }
 
@@ -110,11 +148,81 @@ mod tests {
     }
 
     #[test]
+    fn swagger2_conversion_failed_is_recoverable() {
+        assert!(WebDomainError::Swagger2ConversionFailed {
+            reason: "bad flow".into(),
+            unsupported_feature: Some("oauth2.flow".into())
+        }
+        .is_llm_recoverable());
+    }
+
+    #[test]
     fn display_uses_thiserror_message() {
         let e = WebDomainError::RateLimit {
             calls_used: 51,
             cap: 50,
         };
         assert_eq!(e.to_string(), "rate limit exceeded (51/50)");
+    }
+
+    #[test]
+    fn spec_too_large_is_not_recoverable() {
+        assert!(!WebDomainError::SpecTooLarge {
+            size_bytes: 11_000_000,
+            limit_bytes: 10_485_760,
+        }
+        .is_llm_recoverable());
+    }
+
+    #[test]
+    fn spec_parse_failed_is_recoverable() {
+        assert!(WebDomainError::SpecParseFailed {
+            details: "json parse: unexpected token".into()
+        }
+        .is_llm_recoverable());
+    }
+
+    #[test]
+    fn unsupported_spec_format_is_recoverable() {
+        assert!(WebDomainError::UnsupportedSpecFormat {
+            detected: "asyncapi 2.4.0".into()
+        }
+        .is_llm_recoverable());
+    }
+
+    #[test]
+    fn missing_required_params_is_recoverable() {
+        assert!(WebDomainError::MissingRequiredParams {
+            missing: vec!["customer".into()],
+            hints: None,
+        }
+        .is_llm_recoverable());
+    }
+
+    #[test]
+    fn invalid_param_type_is_recoverable() {
+        assert!(WebDomainError::InvalidParamType {
+            param: "petId".into(),
+            expected_type: "integer".into(),
+            got: "\"not-a-number\"".into(),
+        }
+        .is_llm_recoverable());
+    }
+
+    #[test]
+    fn missing_auth_is_recoverable() {
+        assert!(WebDomainError::MissingAuth {
+            scheme: "BearerAuth".into(),
+            message: "no secret ref".into(),
+        }
+        .is_llm_recoverable());
+    }
+
+    #[test]
+    fn spec_not_loaded_is_recoverable() {
+        assert!(WebDomainError::SpecNotLoaded {
+            spec_url: "https://ex/s.yaml".into(),
+        }
+        .is_llm_recoverable());
     }
 }

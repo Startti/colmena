@@ -167,7 +167,10 @@ pub struct ParameterProperty {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
 
-    /// Item schema for array types — required by OpenAI when property_type is "array"
+    /// Item type for array properties. Required by both OpenAI and Gemini's
+    /// strict JSON Schema validators when `property_type == "array"`;
+    /// Anthropic accepts arrays without `items` but it's good practice
+    /// everywhere.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub items: Option<Box<ParameterProperty>>,
 }

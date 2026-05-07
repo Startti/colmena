@@ -37,3 +37,4 @@ dist/
 
 # Git worktrees (local dev)
 .worktrees/
+colmena_memory.db

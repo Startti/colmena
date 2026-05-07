@@ -1,4 +1,5 @@
 // Hacemos públicos los módulos de nodos
+pub mod api_explorer;
 pub mod critic;
 pub mod current_time;
 pub mod debug;

@@ -999,3 +999,34 @@ Nodo de herramientas expuesto a un `llm_call`. Dos sub-herramientas: `search` y 
 **Outputs — `fetch`:** `{ url, title?, content, content_length, credits_used }`.
 
 Errores recuperables por el LLM: `rate_limit`, `timeout`, `upstream_error`. `AdapterInit` e `InvalidConfig` causan fallo de ejecución de DAG.
+
+## `api_explorer` (Toolkit)
+
+Nodo de herramientas expuesto a un `llm_call`. Cinco sub-herramientas que permiten al LLM descubrir endpoints de una especificación OpenAPI 3.x / Swagger 2.0 y construir un `http_request` válido.
+
+**Node type:** `api_explorer`
+
+**Inputs comunes (inyectados por el ejecutor de toolkits, no los rellena el LLM):**
+
+| Key | Type | Required | Source | Description |
+|---|---|---|---|---|
+| `__sub_tool` | string | yes | toolkit executor | Uno de: `load_spec`, `list_endpoints`, `search_endpoint`, `get_endpoint_details`, `build_http_request`. |
+| `conversation_id` | string | no | toolkit executor | Llave usada para cachear specs por conversación. Default `"default"`. |
+
+**Inputs por sub-tool (los rellena el LLM):**
+
+| Sub-tool | Parámetros |
+|---|---|
+| `load_spec` | `url` (req), `force_reload` (bool, default false) |
+| `list_endpoints` | `spec_url` (req), `tag` (str), `limit` (1-200, default 50), `offset` (default 0) |
+| `search_endpoint` | `spec_url` (req), `query` (req), `method` (str), `max_results` (1-50, default 10) |
+| `get_endpoint_details` | `spec_url` (req), `operation_id` (req) |
+| `build_http_request` | `spec_url` (req), `operation_id` (req), `params` (object opt, default `{}`), `auth_secret_ref` (opt) |
+
+**Outputs (`output`):** envelope JSON específico por sub-tool. `load_spec` devuelve `{ spec_url_input, resolved_url, original_format, internal_format, title, version, description, server_url, endpoints_count, tags, security_schemes, cached }`. Los demás devuelven la representación documental directa (`{ endpoints, total }`, `{ query, results }`, detalles del endpoint, o el objeto `http_request`-shaped). Ver el spec C para el contrato exacto.
+
+**Resolución de `$ref`:** los schemas de `request_body` y `responses[].content[]` que devuelve `get_endpoint_details` tienen los `{"$ref": "#/components/schemas/X"}` **inlinados** desde `components.schemas` (con detección de ciclos via path tracking; cycles dejan `{"x-cycle-to": "X"}`, refs desconocidas dejan `{"x-unresolved-ref": "X"}`). Esto es crítico para Gemini — su validador estricto rechaza strings que empiezan con `#/` —, y de paso el LLM ve la forma real del schema sin tener que seguir referencias.
+
+**Errores recuperables (entregados al LLM como JSON):** `rate_limit`, `timeout`, `upstream`, `spec_parse_failed`, `unsupported_spec_format`, `endpoint_not_found` (con `did_you_mean`), `missing_required_params`, `invalid_param_type`, `missing_auth`, `spec_not_loaded`, `unexpected_html_response`, `swagger2_conversion_failed`. Errores de configuración (`InvalidConfig`, `AdapterInit`, `SpecTooLarge`) crashean el DAG.
+
+**Lifecycle:** El nodo mantiene un `SessionRegistry<Arc<SpecCache>>` indexado por `conversation_id`. El orquestador del DAG suscribe el nodo al `ConversationLifecycleBus`, así que las specs cacheadas para una conversación cerrada se evictan inmediatamente sin esperar al TTL.

@@ -128,3 +128,133 @@ Ver `tests/graphs/web/tavily_direct_search.json`. El output del nodo es el mismo
 ### Ejemplo completo
 
 Ver `tests/graphs/web/tavily_search_basic.json` y `tests/graphs/web/tavily_fetch_article.json`.
+
+## api_explorer
+
+Nodo toolkit que permite a un LLM descubrir endpoints en una especificación **OpenAPI 3.x** o **Swagger 2.0** y construir deterministicamente una configuración válida del nodo `http_request`. Los documentos Swagger 2.0 se convierten transparentemente a OpenAPI 3.0.3 dentro del adaptador, así que el código río abajo ve un único modelo.
+
+### Cinco sub-herramientas
+
+| Sub-tool | Propósito |
+|---|---|
+| `load_spec` | Descarga + parsea + cachea una spec. Debe llamarse antes que las otras. |
+| `list_endpoints` | Browse paginado por tag. |
+| `search_endpoint` | Búsqueda fuzzy (path + summary + op_id + tags + description). |
+| `get_endpoint_details` | Parámetros, request body, responses y security por endpoint. |
+| `build_http_request` | Emite un objeto JSON con la forma exacta del input del nodo `http_request`, con placeholders `${SECURE:<ref>}` para auth. |
+
+### Referencia de configuración
+
+Ver el schema canónico en `docs/node_configurations.json` (clave `api_explorer`). Knobs principales:
+
+- **`cache_ttl_seconds`** — vida útil de una spec parseada (default 24 h); las hits aún frescas se revalidan vía ETag/If-None-Match (304 ≈ HEAD).
+- **`max_spec_size_bytes`** — protege contra specs gigantescas (default 10 MiB). El adaptador aborta a mitad de stream si se cruza el límite.
+- **`fuzzy_match_threshold`** — sube para ser más estricto con `search_endpoint`; baja para mejor recall. Default `0.1` porque la normalización divide el score crudo de nucleo por la longitud del haystack y para queries cortos (p. ej. `"add pet"`) sobre summaries largos los normalizados quedan bajos. Subir por encima de `0.5` solo si se ve ruido.
+
+### Uso desde un `llm_call`
+
+```json
+"tool_configurations": {
+  "apis": {
+    "name": "apis",
+    "description": "OpenAPI spec discovery + request builder",
+    "node_type": "api_explorer",
+    "node_config": {},
+    "expose_sub_tools": "all"
+  }
+}
+```
+
+El LLM verá las cinco herramientas con prefijo del alias: `apis__load_spec`, `apis__list_endpoints`, `apis__search_endpoint`, `apis__get_endpoint_details`, `apis__build_http_request`.
+
+### Normalización de URL
+
+El adaptador reescribe estos patrones de Git-forge antes de hacer la petición HTTP:
+
+| Patrón de entrada | Reescrito a |
+|---|---|
+| `github.com/{o}/{r}/blob/{ref}/{p}` | `raw.githubusercontent.com/{o}/{r}/{ref}/{p}` |
+| `github.com/{o}/{r}/tree/{ref}/{p}` | mismo que arriba |
+| `gitlab.com/{o}/{r}/-/blob/{ref}/{p}` | `gitlab.com/{o}/{r}/-/raw/{ref}/{p}` |
+| `bitbucket.org/{o}/{r}/src/{ref}/{p}` | `bitbucket.org/{o}/{r}/raw/{ref}/{p}` |
+
+Hosts desconocidos pasan sin cambio. El LLM ve tanto `spec_url_input` (lo que pasó) como `resolved_url` (lo que efectivamente se descargó) en el resultado de `load_spec`. Si una URL devuelve HTML (forge sin reescribir), el nodo retorna `unexpected_html_response` con sugerencia de usar la URL raw.
+
+### Conversión Swagger 2.0 → OpenAPI 3.0
+
+Toda la conversión es Rust puro (`swagger2_to_oas3.rs`). Reglas principales:
+
+| Swagger 2.0 | OpenAPI 3.0.3 |
+|---|---|
+| `swagger: "2.0"` | `openapi: "3.0.3"` |
+| `host` + `basePath` + `schemes[]` | `servers: [{ url: "{scheme}://{host}{basePath}" }]` (uno por scheme) |
+| `definitions` | `components.schemas` |
+| `securityDefinitions` | `components.securitySchemes` |
+| body param + `consumes` | `requestBody.content` |
+| formData params | `multipart/form-data` o `x-www-form-urlencoded` |
+| `collectionFormat: csv` | `style: form, explode: false` |
+| `collectionFormat: multi` | `style: form, explode: true` |
+| `collectionFormat: ssv` | `style: spaceDelimited` |
+| `collectionFormat: pipes` | `style: pipeDelimited` |
+| `collectionFormat: tsv` | **error** — no hay equivalente 3.0. |
+
+### `build_http_request` — contrato de salida
+
+El JSON devuelto coincide exactamente con el input del nodo `http_request`:
+
+```json
+{
+  "url": "...",
+  "method": "GET|POST|...",
+  "headers": { ... },
+  "query_params": { ... },
+  "body": "...raw string..." | { ... } | { "__multipart": true, "fields": { ... } }
+}
+```
+
+Los headers de auth usan el placeholder `${SECURE:<ref>}` que el nodo `http_request` resuelve más adelante. Los secretos en plano nunca entran en el contexto visible del LLM.
+
+### Caché por conversación + lifecycle
+
+Las specs cacheadas viven en un `SessionRegistry<Arc<SpecCache>>` indexado por `conversation_id`. El orquestador del DAG suscribe cada instancia de `api_explorer` al `ConversationLifecycleBus`, así que las specs de una conversación cerrada se evictan inmediatamente sin esperar al TTL.
+
+Cada `load_spec` indexa la spec **bajo dos llaves**: el `input_url` que pasó el LLM y el `resolved_url` post-normalización (cuando difieren, p. ej. tras un rewrite de Git-forge). Esto evita que un sub-tool subsecuente que use cualquiera de las dos formas tenga que reabrir la red.
+
+**Múltiples specs en paralelo:** el cache por conversación es un LRU (default 100 entradas). El LLM puede llamar `load_spec` con N URLs distintas y luego pasar `spec_url` distinto a cada `list_endpoints`/`search_endpoint`/`get_endpoint_details` — las specs no se mezclan; cada query consulta exactamente la spec indicada. Útil para flujos como "navegar el catálogo de specs de HubSpot, luego cargar Contacts y Deals juntas".
+
+### Resolución inline de `$ref`
+
+`get_endpoint_details` **resuelve inline** las referencias `{"$ref": "#/components/schemas/X"}` dentro de `request_body.schema` y `responses[].content[]`, reemplazándolas con el schema concreto de `components.schemas`.
+
+| Caso | Resultado |
+|---|---|
+| Ref válida y no cíclica | Schema completo inlinado |
+| Ciclo detectado (vía path-tracking) | `{"type": "object", "x-cycle-to": "X"}` |
+| Ref desconocida | `{"type": "object", "x-unresolved-ref": "X"}` |
+
+Por qué importa: (1) Gemini rechaza con 400 cualquier `function_response` que contenga strings empezando por `#/` — es su validador estricto interpretándolas como referencias a `display_name`s. (2) El LLM ve directamente la forma del schema sin tener que seguir referencias por separado.
+
+### Manejo de errores
+
+Recuperables (devueltos al LLM como JSON estructurado): `rate_limit`, `timeout`, `upstream`, `spec_parse_failed`, `unsupported_spec_format`, `endpoint_not_found` (con `did_you_mean`), `missing_required_params`, `invalid_param_type`, `missing_auth`, `spec_not_loaded`, `unexpected_html_response`, `swagger2_conversion_failed`.
+
+Crashean el DAG: `InvalidConfig`, `AdapterInit`, `SpecTooLarge`.
+
+### Ejemplos completos
+
+- `tests/graphs/web/api_explorer_petstore.json` — flow completo OpenAPI 3.0 (Petstore).
+- `tests/graphs/web/api_explorer_amadeus_swagger2.json` — ejercita el rewrite GitHub → raw + conversión Swagger 2.0 → OpenAPI 3.0.
+- `tests/graphs/web/api_explorer_hubspot_conversation.json` — demo conversacional multi-turn contra el catálogo de specs de HubSpot (`web__fetch` para el índice + `apis__*` para cada sub-spec). Memoria persistente vía `${DATABASE_URL}` y `--session-id`.
+
+### Uso conversacional (memoria multi-turn)
+
+Para un agente que mantiene contexto entre invocaciones del grafo:
+
+1. **Una sola** instancia del nodo `llm_call` con `session_id` + `connection_url` (Postgres recomendado).
+2. Re-ejecutar el grafo cambiando el campo `nodes.<input>.config.default` en el JSON entre turnos. El flag `--session-id` debe matchear el del config para que la memoria persista.
+3. La cache de specs en `SessionRegistry` vive en proceso, así que **se reinicia entre `cargo run`s**. El LLM, recordando del turno previo qué URLs cargó, simplemente vuelve a llamar `load_spec` (la red puede aprovechar ETags si el server los soporta).
+
+### Referencia
+
+Spec: [2026-04-23-web-nodes-c-api-explorer-design.md](../superpowers/specs/2026-04-23-web-nodes-c-api-explorer-design.md).
+Implementación: `src/libs/colmena/src/dag_engine/infrastructure/nodes/api_explorer.rs`, `src/libs/colmena/src/web/application/api_spec_use_case.rs`, `src/libs/colmena/src/web/infrastructure/openapi_adapter.rs`, `src/libs/colmena/src/web/application/swagger2_to_oas3.rs`, `src/libs/colmena/src/web/application/url_normalizer.rs`.
