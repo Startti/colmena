@@ -366,6 +366,127 @@ cargo run --bin dag_engine -- run tests/graphs/agents/amadeus_llm_http_auth_expe
 
 ---
 
+### Strategy 6: Interactive Collection via `secure_suspend` (CONVERSATION-DRIVEN)
+
+**When to use it:**  
+When the user is in the loop and must provide credentials interactively — e.g. the canvas-builder pattern where a meta-agent needs to collect API keys from the user before building and launching a new agent. Use this when credentials are not known upfront and cannot be injected via environment or webhook.
+
+**How it works:**
+
+The `secure_suspend` node pauses the DAG and presents the user with one or more questions (e.g., "Enter your API key"). Answers are encrypted with AES-256-GCM and stored in `secure_value_mappings`. The node returns only opaque handles (`<sv_name>`) — the LLM and all other nodes **never see the real value**. On DAG resume the handles flow through the graph and are auto-injected by `inject_secrets` at execution time.
+
+The node can be used in two ways:
+
+**Mode A — Top-level DAG node:**
+```json
+{
+  "collect_creds": {
+    "type": "secure_suspend",
+    "config": {
+      "secrets": [
+        { "name": "api_key",   "question": "Please enter your API key" },
+        { "name": "api_secret","question": "Please enter your API secret" }
+      ]
+    }
+  }
+}
+```
+The DAG suspends until the user provides both values, then resumes. Downstream nodes receive `{ "api_key": "<sv_api_key>", "api_secret": "<sv_api_secret>" }`.
+
+**Mode B — LLM tool via `tool_configurations`:**
+```json
+{
+  "tool_configurations": {
+    "collect_creds": {
+      "name": "collect_creds",
+      "node_type": "secure_suspend",
+      "description": "Ask the user for API credentials. Call this before making authenticated requests.",
+      "node_schema": {
+        "secrets": {
+          "fixed": [
+            { "name": "api_key",    "question": "Please enter your API key" },
+            { "name": "api_secret", "question": "Please enter your API secret" }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+When the LLM calls this tool, `llm_call` detects `__colmena_status: SUSPENDED` in the tool result and propagates SUSPENDED upward, pausing the DAG. On resume the pending tool call is re-dispatched with the user's answer and the LLM loop continues. See the note on **LLM tool suspend propagation** below.
+
+**End-to-end flow:**
+```
+User starts DAG (or LLM calls collect_creds tool)
+  ↓
+secure_suspend node: DAG pauses, user sees question(s)
+  ↓
+User provides answers (--answer "api_key\nVALUE\napi_secret\nVALUE2")
+  ↓
+Values encrypted with AES-256 → secure_value_mappings
+  ↓
+Node outputs: { api_key: "<sv_api_key>", api_secret: "<sv_api_secret>" }
+  ↓
+inject_secrets (runs on both inputs AND config)
+  replaces handles with real values before node execution
+  ↓
+HTTP / downstream node calls API with real credentials ✅
+LLM nodes see only "<sv_api_key>" ✅
+```
+
+**Pros:**
+- ✅ No credentials need to be known at deploy time
+- ✅ LLM never sees real credential values
+- ✅ Works as top-level node or LLM tool
+- ✅ Multi-secret batch collection in a single suspend round-trip
+- ✅ Compatible with `agent_session_id`-first lookup (cross-session use case)
+
+**Cons:**
+- ❌ Requires a human in the loop (not suitable for fully automated pipelines)
+- ❌ Requires PostgreSQL + `secure_value_mappings` table
+
+**When to Use:**
+- Canvas-builder / agent-spawning flows where the meta-agent must collect user secrets before configuring a new agent
+- Any conversational DAG where credentials are not available in the environment
+- Multi-tenant scenarios where each user provides their own credentials
+
+**Spec:** [`docs/superpowers/specs/2026-05-07-secure-suspend-node-design.md`](../superpowers/specs/2026-05-07-secure-suspend-node-design.md)
+
+---
+
+### Note: `inject_secrets` Covers Both `inputs` and `config`
+
+The engine runs `inject_secrets` on a node's **inputs AND config** before execution. This means `<sv_*>` handles placed directly in `node.config` fields (e.g., when a canvas-builder pre-populates a child node's config with a handle) are resolved to real values at execution time, without needing an edge to carry the value through inputs.
+
+**Spec:** [`docs/superpowers/specs/2026-05-07-inject-secrets-in-config-design.md`](../superpowers/specs/2026-05-07-inject-secrets-in-config-design.md)
+
+---
+
+### Note: LLM Tool Suspend Propagation
+
+When `secure_suspend` (or any suspendable node) is used as an LLM tool via `tool_configurations`, the `llm_call` node propagates suspension correctly:
+
+1. Tool returns `{ "__colmena_status": "SUSPENDED", ... }`.
+2. `agent_service` detects SUSPENDED and short-circuits the tool loop.
+3. `llm_call` emits `__colmena_status: SUSPENDED` to the DAG.
+4. On resume (user provides `--answer`), the conversation is replayed from memory, the pending tool call is re-dispatched with the answer routed in, and the agent loop continues normally.
+
+This enables the full `secure_suspend`-as-tool pattern without any special handling in the graph.
+
+**Spec:** [`docs/superpowers/specs/2026-05-08-llm-call-tool-suspend-design.md`](../superpowers/specs/2026-05-08-llm-call-tool-suspend-design.md)
+
+---
+
+### Note: `agent_session_id`-First Lookup in `secure_value_mappings`
+
+The `secure_value_mappings` table has an `agent_session_id TEXT` column. When an `agent_session_id` is set (via `--agent-session-id` CLI flag or the `ColmenaEngine` API), secret lookup uses it first and falls back to `session_id`. This mirrors the pattern already used by `llm_node_history` and `dag_runs`.
+
+**Use case:** A meta-agent (session A) collects and persists credentials under `agent_session_id = "agent_X"`. A later invocation with a new ephemeral `session_id` but the same `--agent-session-id agent_X` can retrieve those credentials, enabling cross-session secret sharing without exposing values.
+
+**Spec:** [`docs/superpowers/specs/2026-05-08-secure-values-agent-session-id-design.md`](../superpowers/specs/2026-05-08-secure-values-agent-session-id-design.md)
+
+---
+
 ## Comparison Matrix
 
 | Strategy | Setup | Credentials in Code? | LLM Sees Real Values? | DB Required? | Encryption? | Audit Trail? | Production Ready? |
@@ -375,6 +496,7 @@ cargo run --bin dag_engine -- run tests/graphs/agents/amadeus_llm_http_auth_expe
 | Test Payload | Hardcode in JSON | **YES** ⚠️ | **YES** ⚠️ | No | No | No | **No** |
 | DB Query (Future) | `store-secret` CLI | No | No | **Yes** | AES-256 | **Yes** ✓ | Future |
 | LLM-Driven Auth | tool + secure:true | No | **NO** ✓ | **Yes** | AES-256 | Basic | **Yes** ✓ |
+| `secure_suspend` | Human in loop | No | **NO** ✓ | **Yes** | AES-256 | Basic | **Yes** ✓ |
 
 ---
 
@@ -685,6 +807,10 @@ SELECT * FROM secure_value_mappings;
 - Environment variables (Strategy 1)
 - Webhook + Secure (Strategy 2)
 - Test payloads (Strategy 3)
+- LLM-Driven Auth via secure tools (Strategy 5)
+- Interactive collection via `secure_suspend` — top-level node or LLM tool (Strategy 6)
+- `inject_secrets` covers node `config` in addition to `inputs`
+- `secure_value_mappings` `agent_session_id`-first lookup for cross-session flows
 
 ### Phase 2: SOON
 - [ ] DB Query node (Strategy 4)
@@ -788,6 +914,6 @@ Si se necesita CA privada o mTLS en HTTP/Socket.IO hay que extender la config de
 ---
 
 **Status:** Documentation Updated  
-**Date:** 2026-04-05  
-**Version:** 1.1  
-**Changes:** Added Strategy 5 (LLM-Driven Auth via secure tools). Fixed `secure=true` leaking as query param. HttpNode body/query param distinction documented. Debug log security hardening noted.
+**Date:** 2026-05-08  
+**Version:** 1.2  
+**Changes:** Added Strategy 6 (`secure_suspend` — interactive credential collection as top-level DAG node or LLM tool). Documented `inject_secrets` now covers node `config` in addition to `inputs`. Added note on `llm_call` propagating `SUSPENDED` from tool results with replay-on-resume. Added note on `agent_session_id`-first lookup in `secure_value_mappings` for cross-session flows. Updated Comparison Matrix and Roadmap Phase 1. Previous: Strategy 5 (LLM-Driven Auth via secure tools), `secure=true` query-param fix, HttpNode body/query param docs.

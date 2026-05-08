@@ -762,3 +762,19 @@ async fn test_cleanup_on_dag_end() {
 - [PostgreSQL pgcrypto](https://www.postgresql.org/docs/current/pgcrypto.html)
 - [sqlx async query execution](https://github.com/launchbadge/sqlx)
 - Related: `FINAL_DELIVERY.md` (field_mapping system)
+
+---
+
+## Updates — 2026-05
+
+The original design above (HTTP node hashes outputs, LLM nodes see handles, non-LLM nodes get real values injected) remains the foundation. Subsequent specs extended it:
+
+- **Interactive secret collection — `secure_suspend` node** ([spec](../superpowers/specs/2026-05-07-secure-suspend-node-design.md)). Pauses the DAG to ask the user for one or more secrets in a single batch; persists encrypted; returns only handles. Usable as top-level DAG node or LLM tool. Adds the missing "ask the user" path that complements "hash an HTTP response".
+
+- **Inject covers `config`, not just `inputs`** ([spec](../superpowers/specs/2026-05-07-inject-secrets-in-config-design.md)). Original design assumed handles flow through edges into inputs. The canvas-builder pattern places handles directly in node `config`, so the engine now runs `inject_secrets` on both. ~5 LoC change in `run_use_case.rs`.
+
+- **`llm_call` propagates `SUSPENDED` from tools** ([spec](../superpowers/specs/2026-05-08-llm-call-tool-suspend-design.md)). When a tool returns `__colmena_status: SUSPENDED`, the agent loop short-circuits, the DAG pauses, and on resume the pending tool is re-dispatched with the user's answer routed in. Enables `secure_suspend` as an LLM tool.
+
+- **`agent_session_id`-first lookup** ([spec](../superpowers/specs/2026-05-08-secure-values-agent-session-id-design.md)). Added `agent_session_id TEXT` column to `secure_value_mappings`. Lookup uses agent_session_id when set, falls back to session_id. Same pattern as `llm_node_history` and `dag_runs`. Closes the cross-session use case where a meta-agent persists in one session and the built agent consumes in a later session with the same stable agent identifier.
+
+End-to-end validated 2026-05-08 against live Postgres + httpbin: meta-agent suspend/resume flow works using only `--agent-session-id`, ephemeral `session_id` rotates per CLI run.

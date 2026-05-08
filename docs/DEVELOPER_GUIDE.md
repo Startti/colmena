@@ -20,7 +20,7 @@ Esta guía se ha dividido en varias secciones para facilitar su consulta.
 12. [**CI/CD Guide**](./developer_guide/10_cicd_guide.md): Detalles del pipeline de integración y despliegue continuo.
 13. [**Branch Protection Rules**](./developer_guide/11_branch_protection_rules.md): Reglas de protección de ramas y flujo de trabajo de Git.
 14. [**Guía del Motor DAG**](./developer_guide/12_dag_engine_guide.md): Detalles técnicos sobre el funcionamiento del motor de grafos.
-15. [**Secure Values y Estrategia de Seguridad**](./developer_guide/13_security_strategy.md): Diseño y manejo de secretos aes-256-gcm.
+15. [**Secure Values y Estrategia de Seguridad**](./developer_guide/13_security_strategy.md): Diseño y manejo de secretos AES-256-GCM. Incluye estrategias por env var, hashing automático de respuestas HTTP, recolección interactiva vía `secure_suspend` (LLM tool o nodo top-level), inyección automática en `inputs` y `config`, y lookup por `agent_session_id` para flujos cross-session (canvas-builder).
 16. [**Deep Dive: Nodo LLM**](./developer_guide/14_llm_deep_dive.md): Parámetros avanzados y capacidades de los modelos de lenguaje.
 17. [**Guía de Memoria y Persistencia**](./developer_guide/15_memory_guide.md): Configuración de SQLite y PostgreSQL para agentes con memoria.
 18. [**Flujo de Datos y Conexiones**](./developer_guide/16_data_flow_guide.md): Detalles sobre cómo se pasan y transforman los datos entre nodos.
