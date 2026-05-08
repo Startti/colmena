@@ -75,6 +75,7 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 | `log` | `input` | `output` | Debug logger — pass-through |
 | `input` | — | `output` | Static input — reads from config |
 | `suspend` | `question` | `answer_received` | Suspend/resume — question→answer flow |
+| `secure_suspend` | `secrets` | `handles` | Secret collection — pauses, persists encrypted, returns handles only |
 | `loop_controller` | `loop_status` | `output` | Loop control — manages loop state |
 | **add** | — | `output` | **Requires explicit `a`, `b` fields** |
 | **subtract** | — | `output` | **Requires explicit `a`, `b` fields** |
@@ -390,6 +391,64 @@ cargo run --bin dag_engine -- run graph.json --session-id abc123 --answer '{"app
 **Cause:** Session ID from first suspension used for all subsequent ones.
 
 **Solution:** Each `suspend` node generates a **new** `session_id` on resume. Use the latest `session_id` from the latest `finish` event, not the first one.
+
+---
+
+---
+
+## The `secure_suspend` Node (In-Depth)
+
+El nodo `secure_suspend` pausa el DAG para recolectar uno o más secretos del usuario. El valor real **nunca** aparece en outputs, logs, ni en el contexto del LLM — solo se exponen handles opacos del tipo `sv_<name>`.
+
+- **Type**: `"secure_suspend"`
+- **Location**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/secure_suspend.rs`
+- **Requires**: `DATABASE_URL` — los secretos se persisten cifrados (AES-256-GCM) en PostgreSQL vía `SecureValueService`.
+- **Spec completa**: `docs/superpowers/specs/2026-05-07-secure-suspend-node-design.md`
+
+### Inputs (engine-injected)
+
+- `__node_id` — usado como base ID si `config.id` no está presente.
+- `__colmena_session_id` — scope de los handles persistidos.
+- `__colmena_resume_answer` — string formato `pregunta\nvalor\npregunta\nvalor` al reanudar.
+
+### Outputs (suspend-path)
+
+- `__colmena_status: "SUSPENDED"` — señaliza al engine que pause la ejecución.
+- `questions: [{ id, question, type: "secret", options: null }, ...]` — una entrada por ítem en `config.secrets`, IDs `<base>__1`, `<base>__2`, ...
+
+### Outputs (resume-path)
+
+- `status: "resumed"`
+- `handles: { <name>: "<sv_<name>>", ... }` — mapa con un handle por secreto, indexado por el `name` del config.
+
+**Default input:** `secrets`. **Default output:** `handles`.
+
+### Configuration
+
+| Campo | Tipo | Requerido | Descripción |
+|---|---|---|---|
+| `secrets` | array | **sí** | Lista de `{ question, name }`. Mínimo 1, máximo 8. `name` debe ser único y matchear `^[a-z][a-z0-9_]{2,63}$`. |
+| `id` | string | no | Base ID del bloque. Default: `__node_id`. |
+
+### Uso como LLM tool
+
+Registrar bajo `tool_configurations` con `node_type: "secure_suspend"`. Los argumentos del LLM (campo `secrets`) llegan como inputs del nodo. El LLM ve solo los handles, nunca el valor real.
+
+```json
+"tool_configurations": {
+  "collect_credentials": {
+    "node_type": "secure_suspend",
+    "description": "Asks the user for one or more API credentials and returns opaque handles.",
+    "node_schema": {
+      "secrets": {
+        "type": "array",
+        "required": true,
+        "description": "List of { question, name } objects describing each credential to collect."
+      }
+    }
+  }
+}
+```
 
 ---
 

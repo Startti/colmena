@@ -679,6 +679,79 @@
       "reserved_input_keys": ["base_url", "endpoint", "method", "headers", "body", "query_params", "query_parameters", "bearer_token", "authorization", "secure", "__colmena_session_id", "__node_id", "__colmena_resume_answer"]
     },
 
+    "secure_suspend": {
+      "name": "Secure Suspend (Secret Collection)",
+      "description": "Pausa el DAG y pide al usuario uno o más secretos en una sola pausa. Persiste cada valor cifrado en la tabla de secure_value_mappings y devuelve solo handles `<sv_<name>>`. El valor real nunca aparece en outputs ni en logs ni en el contexto del LLM. Soporta uso como nodo top-level del DAG o como LLM tool en `tool_configurations`.",
+      "category": "control_flow",
+      "config_fields": {
+        "secrets": {
+          "type": "array",
+          "required": true,
+          "description": "Lista de objetos { question, name }. Mínimo 1, máximo 8. Cada `name` debe matchear ^[a-z][a-z0-9_]{2,63}$ y ser único dentro de la lista; cada `question` debe ser único dentro de la lista (anclas del parser de respuesta).",
+          "example": [
+            { "question": "Cuál es tu Amadeus client_id?", "name": "amadeus_client_id" },
+            { "question": "Cuál es tu Amadeus client_secret?", "name": "amadeus_client_secret" }
+          ]
+        },
+        "id": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "ID estable del bloque de preguntas. Default: el __node_id del nodo. Las questions emitidas tienen IDs de la forma `<id>__1`, `<id>__2`, ...",
+          "example": "ask_amadeus_creds"
+        }
+      },
+      "input_ports": {
+        "secrets": {
+          "type": "array",
+          "description": "Array dinámico de { question, name } provisto por un nodo upstream. Útil cuando el LLM decide en runtime qué secretos pedir."
+        },
+        "__colmena_session_id": {
+          "type": "string",
+          "description": "Inyectado automáticamente por el engine. Scope de los handles persistidos."
+        },
+        "__node_id": {
+          "type": "string",
+          "description": "Inyectado automáticamente por el engine. Usado como base ID si config.id no está presente."
+        },
+        "__colmena_resume_answer": {
+          "type": "string",
+          "description": "Inyectado automáticamente al reanudar. Formato: `pregunta\\nvalor\\npregunta\\nvalor`. Nunca se configura manualmente."
+        }
+      },
+      "output_ports": {
+        "handles": {
+          "type": "object",
+          "description": "Mapa { <name>: '<sv_<name>>' } con un handle por secreto. Solo disponible en el resume-path. El valor real nunca es expuesto."
+        },
+        "status": {
+          "type": "string",
+          "description": "Valor fijo 'resumed'. Solo disponible en el resume-path."
+        },
+        "__colmena_status": {
+          "type": "string",
+          "description": "Valor 'SUSPENDED' en el suspend-path. Señaliza al engine que pause la ejecución."
+        },
+        "questions": {
+          "type": "array",
+          "description": "Array [{ id, question, type: 'secret', options: null }, ...] en el suspend-path. Una entrada por ítem en config.secrets, con IDs <base>__1, <base>__2, ..."
+        }
+      },
+      "default_input": "secrets",
+      "default_output": "handles",
+      "requires": ["postgres"],
+      "supports_env_vars": false,
+      "example": {
+        "type": "secure_suspend",
+        "config": {
+          "secrets": [
+            { "question": "Cuál es tu Amadeus client_id?", "name": "amadeus_client_id" },
+            { "question": "Cuál es tu Amadeus client_secret?", "name": "amadeus_client_secret" }
+          ]
+        }
+      }
+    },
+
     "socketio_request": {
       "name": "Socket.IO Request",
       "description": "Connects to a Socket.IO server, emits an event with a JSON payload, and receives the response via acknowledgment callback or a separate server event. Supports two response patterns: ack mode (default — server responds via Socket.IO acknowledgment callback) and wait-event mode (set 'wait_event' to listen for a named server event instead). Supports namespaces, cookie-based authentication, custom headers, and configurable transport (WebSocket, polling, or auto). All string values in config support '${VAR_NAME}' environment variable resolution — essential for injecting API URLs and tokens securely. Input values override config values (inputs take priority). Each execution creates a fresh connection, emits the event, collects the response, and disconnects.",
