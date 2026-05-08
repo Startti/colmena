@@ -26,7 +26,7 @@ pub use llm_provider::{LlmProvider, ProviderKind};
 pub use llm_repository::MockLlmRepository;
 pub use llm_repository::{LlmRepository, LlmStream};
 pub use llm_request::LlmRequest;
-pub use llm_response::{LlmResponse, LlmStreamChunk, LlmStreamPart, ToolCallChunk};
+pub use llm_response::{LlmResponse, LlmStreamChunk, LlmStreamPart, SuspendInfo, ToolCallChunk};
 pub use memory::{
     AgentSessionId, Conversation, ConversationKey, ConversationRepository, NodeIdPath, SessionId,
 };

@@ -1,8 +1,22 @@
 use crate::llm::domain::{
-    LlmMessage, LlmProvider, LlmRequestId, LlmResponseId, LlmUsage, ToolCall, ToolResult,
+    LlmMessage, LlmProvider, LlmRequestId, LlmResponseId, LlmUsage, ProviderKind, ToolCall,
+    ToolResult,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+/// Carries suspend information when a tool execution returns `__colmena_status: SUSPENDED`.
+/// Used by `agent_service` to short-circuit out of the tool loop and propagate the suspend
+/// signal back to the DAG engine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuspendInfo {
+    /// The tool call ID that triggered the suspend.
+    pub tool_call_id: String,
+    /// The questions array from the suspend output (`pending_questions` field).
+    pub questions: serde_json::Value,
+    /// The raw JSON string output from the tool that triggered the suspend.
+    pub raw_output: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmResponse {
@@ -21,6 +35,11 @@ pub struct LlmResponse {
     /// Reasoning/thinking content produced by the model before responding.
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking_content: Option<String>,
+
+    /// Present when a tool returned `__colmena_status: SUSPENDED` during the tool loop.
+    /// When `Some`, the agent service must stop iterating and propagate the suspend signal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suspend: Option<SuspendInfo>,
 }
 
 impl LlmResponse {
@@ -40,6 +59,7 @@ impl LlmResponse {
             finish_reason: None,
             tool_calls: None,
             thinking_content: None,
+            suspend: None,
         })
     }
 
@@ -58,6 +78,7 @@ impl LlmResponse {
             finish_reason: None,
             tool_calls: None,
             thinking_content: None,
+            suspend: None,
         }
     }
 
@@ -163,6 +184,48 @@ impl LlmResponse {
 
     pub fn thinking_content(&self) -> Option<&str> {
         self.thinking_content.as_deref()
+    }
+
+    /// Construct a minimal `LlmResponse` that signals a suspend event from a tool call.
+    ///
+    /// All non-suspend fields are left at placeholder values. The caller should
+    /// inspect `suspend()` before treating any other field as meaningful.
+    pub fn suspended(
+        tool_call_id: String,
+        questions: serde_json::Value,
+        raw_output: String,
+    ) -> Self {
+        // Use a sentinel message; LlmMessage::assistant never fails for non-empty strings.
+        let message = LlmMessage::assistant("__suspended__".to_string())
+            .expect("non-empty sentinel string is always valid");
+        // Use the Mock provider kind so no real API key is required.
+        let provider = LlmProvider::new(
+            ProviderKind::Mock,
+            "__suspended__".to_string(),
+            None,
+        )
+        .expect("non-empty api_key is always valid");
+        Self {
+            id: LlmResponseId::new(),
+            request_id: LlmRequestId::new(),
+            message,
+            usage: None,
+            provider,
+            timestamp: Utc::now(),
+            finish_reason: None,
+            tool_calls: None,
+            thinking_content: None,
+            suspend: Some(SuspendInfo {
+                tool_call_id,
+                questions,
+                raw_output,
+            }),
+        }
+    }
+
+    /// Returns the [`SuspendInfo`] if this response carries a suspend signal, or `None`.
+    pub fn suspend(&self) -> Option<&SuspendInfo> {
+        self.suspend.as_ref()
     }
 }
 
@@ -270,7 +333,7 @@ impl LlmStreamChunk {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::domain::{LlmProvider, ProviderKind};
+    use crate::llm::domain::ProviderKind;
 
     // Helper para crear un LlmProvider de prueba
     fn create_test_provider() -> LlmProvider {
@@ -339,5 +402,27 @@ mod tests {
         assert_eq!(chunk.provider().kind(), provider.kind());
         assert!(chunk.is_final());
         assert_eq!(chunk.finish_reason(), Some("stop"));
+    }
+
+    #[test]
+    fn suspend_info_set_and_retrieved() {
+        let questions = serde_json::json!([{"id": "q1", "question": "x?", "type": "secret"}]);
+        let resp = LlmResponse::suspended(
+            "call_abc".to_string(),
+            questions.clone(),
+            r#"{"__colmena_status":"SUSPENDED"}"#.to_string(),
+        );
+        let got = resp.suspend().expect("must be Some");
+        assert_eq!(got.tool_call_id, "call_abc");
+        assert_eq!(got.questions[0]["id"], "q1");
+        assert_eq!(got.raw_output, r#"{"__colmena_status":"SUSPENDED"}"#);
+    }
+
+    #[test]
+    fn non_suspended_response_returns_none_for_suspend() {
+        let request_id = LlmRequestId::new();
+        let provider = create_test_provider();
+        let resp = LlmResponse::new(request_id, "hello".to_string(), provider).unwrap();
+        assert!(resp.suspend().is_none());
     }
 }
