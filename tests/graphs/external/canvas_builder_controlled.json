@@ -190,6 +190,31 @@
               }
             }
           },
+          "delete_canvas_node": {
+            "name": "delete_canvas_node",
+            "node_type": "socketio_request",
+            "description": "Delete a node from the canvas by its ID. Also removes any edges connected to this node and resolves groups automatically. In controlled mode: ALWAYS confirm with the user before calling this — destructive.",
+            "node_schema": {
+              "url": { "type": "string", "fixed": "${ADP_API_URL}" },
+              "namespace": { "type": "string", "fixed": "/canvas" },
+              "event": { "type": "string", "fixed": "delete_node" },
+              "pre_events": {
+                "type": "array",
+                "fixed": [
+                  { "event": "join_environment_room", "payload": { "environmentId": "${ADP_ENVIRONMENT_ID}" } }
+                ]
+              },
+              "cookies": { "type": "string", "fixed": "__Secure-better-auth.session_token=${ADP_SESSION_TOKEN}" },
+              "timeout_ms": { "type": "integer", "fixed": 15000 },
+              "payload": {
+                "type": "object",
+                "properties": {
+                  "environmentId": { "type": "string", "fixed": "${ADP_ENVIRONMENT_ID}" },
+                  "nodeId": { "type": "string", "required": true, "description": "The ID of the node to delete" }
+                }
+              }
+            }
+          },
           "create_edge": {
             "name": "create_edge",
             "node_type": "socketio_request",
@@ -328,6 +353,31 @@
                     "required": true,
                     "description": "Fields to update on the edge (e.g., source, target, type)"
                   }
+                }
+              }
+            }
+          },
+          "delete_edge": {
+            "name": "delete_edge",
+            "node_type": "socketio_request",
+            "description": "Delete an edge from the canvas by its ID. This may cause group splits if the removed edge disconnects nodes within a group. In controlled mode: ALWAYS confirm with the user before calling this — destructive.",
+            "node_schema": {
+              "url": { "type": "string", "fixed": "${ADP_API_URL}" },
+              "namespace": { "type": "string", "fixed": "/canvas" },
+              "event": { "type": "string", "fixed": "delete_edge" },
+              "pre_events": {
+                "type": "array",
+                "fixed": [
+                  { "event": "join_environment_room", "payload": { "environmentId": "${ADP_ENVIRONMENT_ID}" } }
+                ]
+              },
+              "cookies": { "type": "string", "fixed": "__Secure-better-auth.session_token=${ADP_SESSION_TOKEN}" },
+              "timeout_ms": { "type": "integer", "fixed": 15000 },
+              "payload": {
+                "type": "object",
+                "properties": {
+                  "environmentId": { "type": "string", "fixed": "${ADP_ENVIRONMENT_ID}" },
+                  "edgeId": { "type": "string", "required": true, "description": "The ID of the edge to delete" }
                 }
               }
             }

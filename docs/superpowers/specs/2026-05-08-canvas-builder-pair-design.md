@@ -41,7 +41,8 @@ Producir dos grafos en `tests/graphs/external/`:
 | `temperature` | 0.0 | 0.3 |
 | `reasoning_effort` (Gemini) | `low` | `high` |
 | `system_message` | "Confirma cada mutación con el usuario antes de ejecutarla. Trabaja sobre un group existente — pídelo si no lo conoces." | "Construye el agente solicitado de un tirón, prueba con `test_agent`, ajusta y vuelve a probar. Pregunta solo cuando necesites credenciales." |
-| Tools de mutación destructiva | NO incluye `delete_canvas_node`, `delete_edge`, `delete_group`, `update_group` | Incluye TODOS: `delete_canvas_node`, `delete_edge`, `create_group`, `update_group`, `delete_group` |
+| Tools de mutación de grupo | NO incluye `create_group`, `update_group`, `delete_group` | Incluye los 3: `create_group`, `update_group`, `delete_group` |
+| Tools de borrado de nodos/aristas | Incluye `delete_canvas_node` y `delete_edge` (con regla "confirmar antes" en system_message) | Incluye `delete_canvas_node` y `delete_edge` |
 | Loop test | Después de cada `create_canvas_node`/`create_edge`, llamar `test_agent` para verificar | Test al menos 1 vez después de armar el grupo mínimo (chatInput + llmCall + chatOutput) |
 
 ## Configuración por tool nuevo
@@ -132,7 +133,9 @@ Pattern existente — copy-paste from `api_explorer_hubspot_conversation.json`:
 }
 ```
 
-### Solo en autónomo: `create_group`, `update_group`, `delete_group` (Socket.IO), `delete_canvas_node`, `delete_edge` (ya en seed pero mantenidos)
+### Solo en autónomo: `create_group`, `update_group`, `delete_group` (Socket.IO)
+
+`delete_canvas_node` y `delete_edge` se incluyen en AMBOS sabores. La diferencia está en el workflow del system_message del controlado: "ALWAYS confirm with the user before calling this — destructive". El meta-agente puede borrar para corregir errores, pero solo después de confirmación explícita.
 
 `create_group` ejemplo:
 
