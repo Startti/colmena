@@ -34,6 +34,14 @@ references:
     description: PUT /crm/v4/.../associations/default/... — primary association, empty body, when NOT to use labeled associations.
   - name: associate_deal
     description: PUT /crm/v4/objects/deal/{dealId}/associations/default/{contact|company}/{id} — link a deal to a contact OR company; one call per direction.
+  - name: add_note
+    description: POST /crm/v3/objects/notes — log a note on the timeline of a contact, company, deal, or ticket. Use this to leave a footprint of what the agent did or what the user said.
+  - name: create_task
+    description: POST /crm/v3/objects/tasks — create a to-do (CALL/EMAIL/TODO) with a due date, owner, and inline associations to contacts/companies/deals.
+  - name: create_ticket
+    description: POST /crm/v3/objects/tickets — log a customer support issue or message; sets pipeline/stage/priority and associates to the relevant contact/company.
+  - name: list_ticket_pipelines
+    description: GET /crm/v3/pipelines/tickets — list ticket pipelines and their stage IDs. Call BEFORE create_ticket so you do not invent stage values.
 ---
 
 # HubSpot CRM
@@ -106,6 +114,32 @@ A deal is HubSpot's object for a sales opportunity (one potential transaction). 
 5. **`update_deal`** when the stage advances, the amount changes, or the owner is reassigned.
 
 Common deal property internal names: `dealname`, `pipeline`, `dealstage`, `amount`, `closedate`, `hubspot_owner_id`, `description`, `dealtype`.
+
+## Engagements (notes, tasks, tickets)
+
+Notes, tasks, and tickets are HubSpot's "engagement" objects — things that capture activity on the timeline of a contact / company / deal. Three rules:
+
+1. **`hs_timestamp` is required** on notes and tasks. Use the current ISO 8601 timestamp (e.g. the value the orchestrator passes you, or build one yourself).
+2. **Associations are inline.** Unlike contacts/companies/deals where you create first and associate after, notes/tasks/tickets accept an `associations` array at the TOP LEVEL of the request body (sibling of `properties`). The reference for each tool shows the exact shape. You can omit `associations` to create an orphan engagement, but that is rarely useful.
+3. **Tickets need their own pipeline.** Call `list_ticket_pipelines` before `create_ticket` — ticket pipelines are separate from deal pipelines, with different stage IDs.
+
+Inline associations require HubSpot's predefined `associationTypeId` per object pair. The most common ones, from the [HubSpot docs](https://developers.hubspot.com/docs/api/crm/associations):
+
+| From → To | associationTypeId |
+|---|---|
+| Note → Contact | 202 |
+| Note → Company | 190 |
+| Note → Deal | 214 |
+| Note → Ticket | 228 |
+| Task → Contact | 204 |
+| Task → Company | 192 |
+| Task → Deal | 216 |
+| Task → Ticket | 230 |
+| Ticket → Contact | 16 |
+| Ticket → Company | 26 |
+| Ticket → Deal | 28 |
+
+These IDs are stable and HubSpot-defined, so it is safe to use them directly. The reference for each tool repeats the relevant subset.
 
 ## Tool naming and reference loading
 

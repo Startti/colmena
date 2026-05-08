@@ -3,7 +3,7 @@
     "input": {
       "type": "input",
       "config": {
-        "prompt": "Creá un deal para Dummy Corp QA y Juan Perez (los que creamos antes): nombre 'Dummy Corp QA — POC inicial', amount 5000, closedate 2026-08-31, en la etapa de 'qualified to buy'. Asocialo tanto a la empresa como al contacto."
+        "prompt": "Asigná todas las acciones siguientes a margarita@startti.ai (buscá su owner id una vez y reusalo). En el deal 'Dummy Corp QA — POC inicial' (que creamos antes): (1) agregá una nota como Margarita: 'Cliente pidió 10% de descuento; ofrecí 5%, pendiente respuesta del comité'. Asociala al deal y al contacto Juan Perez. (2) Creá una tarea de llamada con due date 2026-05-09T15:00:00Z, prioridad alta, subject 'Llamar a Juan para cerrar tema descuento', asociada al deal y al contacto, asignada a Margarita. (3) Juan reportó un bug crítico: 'No puedo subir archivos al portal — recibo error 500 al confirmar'. Creá un ticket en alta prioridad asignado a Margarita, asociado al contacto y a la empresa Dummy Corp QA. Recordá llamar list_ticket_pipelines primero para obtener pipeline/stage válidos."
       }
     },
     "agent_llm": {
@@ -333,6 +333,65 @@
                 "description": "Full path of the form /crm/v4/objects/deal/{dealId}/associations/default/{contact|company}/{toId}. Pick `contact` or `company` for the second-to-last segment based on what you are linking. Body is empty."
               },
               "body": { "type": "object", "fixed": {} }
+            }
+          },
+          "add_note": {
+            "name": "add_note",
+            "node_type": "http_request",
+            "description": "Log a note on the timeline of a contact, company, deal, or ticket. Use to leave a footprint of what happened. See `hubspot-crm/add_note` for the body shape (properties + inline associations).",
+            "node_schema": {
+              "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
+              "endpoint":     { "type": "string", "fixed": "/crm/v3/objects/notes" },
+              "method":       { "type": "string", "fixed": "POST" },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json", "Authorization": "Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}" } },
+              "body": {
+                "type": "object",
+                "required": true,
+                "description": "Full JSON body. Required: properties.hs_note_body (string) and properties.hs_timestamp (ISO 8601). Recommended: associations array with entries { to: { id }, types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: <int> }] }. AssociationTypeIds: 202=contact, 190=company, 214=deal, 228=ticket. See hubspot-crm/add_note."
+              }
+            }
+          },
+          "create_task": {
+            "name": "create_task",
+            "node_type": "http_request",
+            "description": "Create a HubSpot to-do (CALL/EMAIL/TODO) with a due date and assignee. Look up `hubspot_owner_id` via `list_owners` first. See `hubspot-crm/create_task` for the body shape.",
+            "node_schema": {
+              "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
+              "endpoint":     { "type": "string", "fixed": "/crm/v3/objects/tasks" },
+              "method":       { "type": "string", "fixed": "POST" },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json", "Authorization": "Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}" } },
+              "body": {
+                "type": "object",
+                "required": true,
+                "description": "Full JSON body. Required properties: hs_task_subject (string), hs_timestamp (ISO 8601 due date). Optional: hs_task_body, hs_task_status (NOT_STARTED|IN_PROGRESS|WAITING|COMPLETED|DEFERRED), hs_task_priority (LOW|MEDIUM|HIGH), hs_task_type (TODO|CALL|EMAIL), hubspot_owner_id. Recommended: associations with associationTypeIds 204=contact, 192=company, 216=deal, 230=ticket. See hubspot-crm/create_task."
+              }
+            }
+          },
+          "list_ticket_pipelines": {
+            "name": "list_ticket_pipelines",
+            "node_type": "http_request",
+            "description": "List HubSpot ticket pipelines and their stage IDs. Call this BEFORE create_ticket so you do not invent hs_pipeline or hs_pipeline_stage values. Ticket pipelines are separate from deal pipelines. See `hubspot-crm/list_ticket_pipelines`.",
+            "node_schema": {
+              "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
+              "endpoint":     { "type": "string", "fixed": "/crm/v3/pipelines/tickets" },
+              "method":       { "type": "string", "fixed": "GET" },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json", "Authorization": "Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}" } }
+            }
+          },
+          "create_ticket": {
+            "name": "create_ticket",
+            "node_type": "http_request",
+            "description": "Log a customer support issue or message as a HubSpot ticket. Call list_ticket_pipelines first to get valid pipeline/stage ids. See `hubspot-crm/create_ticket` for the body shape.",
+            "node_schema": {
+              "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
+              "endpoint":     { "type": "string", "fixed": "/crm/v3/objects/tickets" },
+              "method":       { "type": "string", "fixed": "POST" },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json", "Authorization": "Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}" } },
+              "body": {
+                "type": "object",
+                "required": true,
+                "description": "Full JSON body. Required by HubSpot: properties.subject (string) AND properties.hs_pipeline_stage (stage id from list_ticket_pipelines — call it first). Recommended: properties.content, hs_pipeline (default '0'), hs_ticket_priority (LOW|MEDIUM|HIGH), hs_ticket_category, source_type (CHAT|EMAIL|FORM|PHONE), hubspot_owner_id. Recommended: associations with associationTypeIds 16=contact, 26=company, 28=deal. See hubspot-crm/create_ticket."
+              }
             }
           }
         }
