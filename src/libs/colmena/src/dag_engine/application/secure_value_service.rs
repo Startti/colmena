@@ -157,6 +157,33 @@ impl SecureValueService {
         }
     }
 
+    /// Store a single named secret as `<sv_<name>>` and persist its real value.
+    /// The handle returned to callers is `format!("<sv_{}>", name)`.
+    /// Used by the `secure_suspend` node to record user-supplied secrets.
+    pub async fn persist_secret(
+        &self,
+        session_id: &str,
+        source_node_id: &str,
+        name: &str,
+        real_value: &str,
+    ) -> Result<String, DagError> {
+        let handle = format!("<sv_{}>", name);
+        self.repo
+            .persist(session_id, source_node_id, &handle, real_value, "secret")
+            .await?;
+        Ok(handle)
+    }
+
+    /// Check whether a handle is already registered in this session.
+    /// Used by `secure_suspend` to detect collisions before persisting.
+    pub async fn handle_exists(
+        &self,
+        session_id: &str,
+        handle: &str,
+    ) -> Result<bool, DagError> {
+        self.repo.exists(session_id, handle).await
+    }
+
     /// Cleanup all secure values for a session
     pub async fn cleanup(&self, session_id: &str) -> Result<(), DagError> {
         self.repo.cleanup(session_id).await
@@ -286,6 +313,45 @@ mod tests {
             .unwrap();
         assert!(repo.exists("s1", "<sv_token>").await.unwrap());
         assert!(!repo.exists("s1", "<sv_other>").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_handle_exists_after_persist_secret() {
+        let repo = Arc::new(MockSecureValueRepository {
+            storage: std::sync::Mutex::new(HashMap::new()),
+        });
+        let service = SecureValueService::new(repo);
+        service
+            .persist_secret("session_a", "node1", "amadeus_client_id", "real_id_value")
+            .await
+            .unwrap();
+        assert!(
+            service
+                .handle_exists("session_a", "<sv_amadeus_client_id>")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !service
+                .handle_exists("session_a", "<sv_unknown>")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_persist_secret_can_be_decrypted_via_inject() {
+        let repo = Arc::new(MockSecureValueRepository {
+            storage: std::sync::Mutex::new(HashMap::new()),
+        });
+        let service = SecureValueService::new(repo);
+        service
+            .persist_secret("s2", "node1", "tok", "real_token_xyz")
+            .await
+            .unwrap();
+        let mut inputs = json!({"bearer": "<sv_tok>"});
+        service.inject_secrets(&mut inputs, "s2").await.unwrap();
+        assert_eq!(inputs["bearer"].as_str(), Some("real_token_xyz"));
     }
 
     #[tokio::test]
