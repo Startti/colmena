@@ -200,6 +200,14 @@ mod tests {
             Ok(self.storage.lock().unwrap().get(hash_key).cloned())
         }
 
+        async fn exists(
+            &self,
+            _session_id: &str,
+            hash_key: &str,
+        ) -> Result<bool, DagError> {
+            Ok(self.storage.lock().unwrap().contains_key(hash_key))
+        }
+
         async fn cleanup(&self, _session_id: &str) -> Result<(), DagError> {
             self.storage.lock().unwrap().clear();
             Ok(())
@@ -266,6 +274,18 @@ mod tests {
 
         // Should be unchanged
         assert_eq!(result["body"]["token"].as_str(), Some("sk_live_abc123"));
+    }
+
+    #[tokio::test]
+    async fn test_repo_exists_true_after_persist() {
+        let repo = Arc::new(MockSecureValueRepository {
+            storage: std::sync::Mutex::new(HashMap::new()),
+        });
+        repo.persist("s1", "n1", "<sv_token>", "real", "secret")
+            .await
+            .unwrap();
+        assert!(repo.exists("s1", "<sv_token>").await.unwrap());
+        assert!(!repo.exists("s1", "<sv_other>").await.unwrap());
     }
 
     #[tokio::test]

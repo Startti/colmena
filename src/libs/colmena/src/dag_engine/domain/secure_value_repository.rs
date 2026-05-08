@@ -26,6 +26,16 @@ pub trait SecureValueRepository: Send + Sync {
     /// Returns None if the hash key doesn't exist
     async fn decrypt(&self, session_id: &str, hash_key: &str) -> Result<Option<String>, DagError>;
 
+    /// Check whether a hash_key already exists in this session.
+    /// Cheaper than `decrypt` when only existence matters and avoids loading
+    /// the secret value into memory unnecessarily.
+    ///
+    /// Default implementation delegates to `decrypt`; production impls should
+    /// override with a SQL `EXISTS` query for efficiency.
+    async fn exists(&self, session_id: &str, hash_key: &str) -> Result<bool, DagError> {
+        Ok(self.decrypt(session_id, hash_key).await?.is_some())
+    }
+
     /// Delete all secure values for a session (cleanup after DAG)
     async fn cleanup(&self, session_id: &str) -> Result<(), DagError>;
 
