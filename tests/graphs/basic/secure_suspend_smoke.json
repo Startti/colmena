@@ -1,0 +1,25 @@
+{
+  "comment": "Smoke test: secure_suspend collects two secrets, log node downstream sees only handles.",
+  "metadata": {
+    "category": "basic",
+    "features": ["secure_suspend", "secure_values"],
+    "requires_env": ["DATABASE_URL"]
+  },
+  "nodes": {
+    "ask_creds": {
+      "type": "secure_suspend",
+      "config": {
+        "secrets": [
+          { "question": "Q1?", "name": "smoke_secret_a" },
+          { "question": "Q2?", "name": "smoke_secret_b" }
+        ]
+      }
+    },
+    "log_handles": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "ask_creds.handles", "to": "log_handles" }
+  ]
+}
