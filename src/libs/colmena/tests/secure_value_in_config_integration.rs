@@ -39,7 +39,7 @@ async fn cleanup(session_id: &str) {
     dotenvy::dotenv().ok();
     let url = std::env::var("DATABASE_URL").unwrap();
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
-    sqlx::query("DELETE FROM dag_runs WHERE agent_session_id = $1")
+    sqlx::query("DELETE FROM dag_runs WHERE session_id = $1")
         .bind(session_id)
         .execute(&pool)
         .await
@@ -87,7 +87,7 @@ async fn config_handle_is_not_injected_exposes_bug() {
     let svc = SecureValueService::new(repo);
 
     let handle = svc
-        .persist_secret(&session_id, "test_setup", "smoke", "smoke-value-xyz")
+        .persist_secret(&session_id, None, "test_setup", "smoke", "smoke-value-xyz")
         .await
         .expect("persist_secret must succeed");
 
@@ -97,15 +97,19 @@ async fn config_handle_is_not_injected_exposes_bug() {
     );
 
     // --- Step 2: run the graph ---
+    // Pass `session_id` as `resume_session_id` so the engine uses that exact string
+    // as its internal `session_id` (no state row → fresh run with the known id).
+    // This keeps the lookup key consistent: both `persist_secret` above and the
+    // engine's `inject_secrets` call now use the same identifier.
     let eng = engine().await;
 
     let mut stream = Box::pin(eng.execute_stream(
         smoke_graph(),
-        None,
+        Some(session_id.clone()),
         None,
         false,
         None,
-        Some(session_id.clone()),
+        None,
     ));
 
     // --- Step 3: collect the NodeStart event for the "show" node ---

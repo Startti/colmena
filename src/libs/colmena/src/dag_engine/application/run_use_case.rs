@@ -377,15 +377,22 @@ impl DagRunUseCase {
                 let mut node_config_value = node_config.config.clone();
                 if node_config.node_type != "llm" {
                     if let Some(svc) = &self.secure_value_service {
+                        let agent_for_inject = active_agent_session_id.as_deref();
                         let mut inputs_value = serde_json::to_value(&inputs)
                             .unwrap_or(Value::Object(Default::default()));
-                        if let Err(e) = svc.inject_secrets(&mut inputs_value, &session_id).await {
+                        if let Err(e) = svc
+                            .inject_secrets(&mut inputs_value, &session_id, agent_for_inject)
+                            .await
+                        {
                             eprintln!("⚠️ Failed to inject secrets: {}", e);
                         }
                         if let Ok(injected_inputs) = serde_json::from_value::<NodeInputs>(inputs_value) {
                             inputs = injected_inputs;
                         }
-                        if let Err(e) = svc.inject_secrets(&mut node_config_value, &session_id).await {
+                        if let Err(e) = svc
+                            .inject_secrets(&mut node_config_value, &session_id, agent_for_inject)
+                            .await
+                        {
                             eprintln!("⚠️ Failed to inject secrets in config: {}", e);
                         }
                     }
@@ -405,13 +412,12 @@ impl DagRunUseCase {
                     "__colmena_node_id_path".to_string(),
                     Value::String(node_id_path.clone()),
                 );
-                inputs.insert(
-                    "__colmena_agent_session_id".to_string(),
-                    match &active_agent_session_id {
-                        Some(a) => Value::String(a.clone()),
-                        None => Value::Null,
-                    },
-                );
+                if let Some(a) = active_agent_session_id.as_deref() {
+                    inputs.insert(
+                        "__colmena_agent_session_id".to_string(),
+                        Value::String(a.to_string()),
+                    );
+                }
 
                 // INJECT GLOBAL SHARED STATE (so nodes can use {{key}} out of the box).
                 // We override None, Null, AND empty objects — the latter arise when an
@@ -535,7 +541,13 @@ impl DagRunUseCase {
                 let mut processed_output = output.clone();
                 if let Some(svc) = &self.secure_value_service {
                     match svc
-                        .hash_output(&processed_output, &node_config.config, &session_id, &node_id)
+                        .hash_output(
+                            &processed_output,
+                            &node_config.config,
+                            &session_id,
+                            active_agent_session_id.as_deref(),
+                            &node_id,
+                        )
                         .await
                     {
                         Ok(hashed) => {

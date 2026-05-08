@@ -72,7 +72,10 @@ impl TavilyClientNode {
         // config is untouched. Env-var placeholders (${VAR}) are resolved below.
         let mut cfg_copy = config.clone();
         if let Some(svc) = &self.secure_values {
-            svc.inject_secrets(&mut cfg_copy, session_id).await?;
+            // Tavily currently has no chat-handle plumbing; pass None to keep
+            // legacy session-scoped lookup. If/when needed, thread agent_session_id
+            // through `build_use_case` from the node's inputs.
+            svc.inject_secrets(&mut cfg_copy, session_id, None).await?;
         }
 
         let api_key_raw = cfg_copy

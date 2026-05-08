@@ -62,6 +62,10 @@ pub struct DagToolExecutor {
     secure_value_service: Option<Arc<SecureValueService>>,
     /// Session ID used to scope secret lookup.
     session_id: Option<String>,
+    /// Agent session id (chat handle). When Some, secret lookup is agent-first
+    /// with session fallback — letting tool calls in a fresh ephemeral session
+    /// resolve secrets persisted under the same chat in a previous run.
+    agent_session_id: Option<String>,
     /// Optional skill repository. When present, the executor intercepts `load_skill`
     /// tool calls and dispatches them to this repository instead of the normal
     /// tool-configuration path. An optional observer callback receives SkillLoaded
@@ -140,6 +144,7 @@ impl DagToolExecutor {
             tool_configurations,
             secure_value_service: None,
             session_id: None,
+            agent_session_id: None,
             skill_repository: None,
             skill_observer: None,
             documents_context: None,
@@ -167,6 +172,14 @@ impl DagToolExecutor {
     /// find it on the resume path.
     pub fn with_session_id(mut self, session_id: String) -> Self {
         self.session_id = Some(session_id);
+        self
+    }
+
+    /// Builder: attach the agent_session_id (chat handle). When set, every
+    /// tool dispatch will inject `__colmena_agent_session_id` into the node's
+    /// inputs and secret lookups become agent-first with session fallback.
+    pub fn with_agent_session_id(mut self, agent_session_id: Option<String>) -> Self {
+        self.agent_session_id = agent_session_id;
         self
     }
 
@@ -841,6 +854,12 @@ impl DagToolExecutor {
                 Value::String(sid.clone()),
             );
         }
+        if let Some(asid) = &self.agent_session_id {
+            inputs.insert(
+                "__colmena_agent_session_id".to_string(),
+                Value::String(asid.clone()),
+            );
+        }
 
         // Convert HashMap to NodeInputs (which is just HashMap<String, Value>)
         // SECURE VALUES: decrypt <value_N> placeholders before sending to the node.
@@ -848,7 +867,10 @@ impl DagToolExecutor {
         {
             let mut inputs_val =
                 serde_json::to_value(&inputs).unwrap_or(Value::Object(Default::default()));
-            if let Err(e) = svc.inject_secrets(&mut inputs_val, sid).await {
+            if let Err(e) = svc
+                .inject_secrets(&mut inputs_val, sid, self.agent_session_id.as_deref())
+                .await
+            {
                 eprintln!("⚠️ [DagToolExecutor] Failed to inject secrets: {}", e);
             }
             serde_json::from_value::<HashMap<String, Value>>(inputs_val).unwrap_or(inputs)
@@ -883,7 +905,13 @@ impl DagToolExecutor {
                     if let (Some(svc), Some(sid)) = (&self.secure_value_service, &self.session_id) {
                         let secure_config = serde_json::json!({ "secure": true });
                         match svc
-                            .hash_output(&value, &secure_config, sid, node_type)
+                            .hash_output(
+                                &value,
+                                &secure_config,
+                                sid,
+                                self.agent_session_id.as_deref(),
+                                node_type,
+                            )
                             .await
                         {
                             Ok(hashed) => {

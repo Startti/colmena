@@ -16,11 +16,16 @@ impl SecureValueService {
     ///
     /// Returns the output with placeholders instead of real values,
     /// and stores encrypted mappings in the database.
+    ///
+    /// `agent_session_id` is forwarded to the repository so cross-session lookup
+    /// (resume under a different ephemeral session) works. `None` preserves
+    /// legacy session-only semantics.
     pub async fn hash_output(
         &self,
         output: &Value,
         config: &Value,
         session_id: &str,
+        agent_session_id: Option<&str>,
         source_node_id: &str,
     ) -> Result<Value, DagError> {
         // If secure flag not set, return output unchanged
@@ -38,7 +43,14 @@ impl SecureValueService {
         // Persist all mappings to database
         for (hash_key, real_value) in to_persist {
             self.repo
-                .persist(session_id, None, source_node_id, &hash_key, &real_value, "value")
+                .persist(
+                    session_id,
+                    agent_session_id,
+                    source_node_id,
+                    &hash_key,
+                    &real_value,
+                    "value",
+                )
                 .await?;
         }
 
@@ -96,12 +108,17 @@ impl SecureValueService {
         }
     }
 
-    /// Inject real values back into inputs before non-LLM node execution
-    /// Automatically detects placeholders (<value_N>) and replaces them
+    /// Inject real values back into inputs before non-LLM node execution.
+    /// Automatically detects placeholders (`<value_N>`, `<sv_*>`) and replaces them.
+    ///
+    /// `agent_session_id` is forwarded to the repository: when present, lookup is
+    /// agent-first with session fallback (so resume under a fresh ephemeral
+    /// session_id can still find secrets persisted under the same agent).
     pub async fn inject_secrets(
         &self,
         inputs: &mut Value,
         session_id: &str,
+        agent_session_id: Option<&str>,
     ) -> Result<(), DagError> {
         // First pass: collect all placeholders
         let mut placeholders = Vec::new();
@@ -109,7 +126,11 @@ impl SecureValueService {
 
         // Second pass: decrypt and replace
         for placeholder in placeholders {
-            if let Some(real) = self.repo.decrypt(session_id, None, &placeholder).await? {
+            if let Some(real) = self
+                .repo
+                .decrypt(session_id, agent_session_id, &placeholder)
+                .await?
+            {
                 self.replace_placeholder(inputs, &placeholder, real);
             }
         }
@@ -163,25 +184,35 @@ impl SecureValueService {
     pub async fn persist_secret(
         &self,
         session_id: &str,
+        agent_session_id: Option<&str>,
         source_node_id: &str,
         name: &str,
         real_value: &str,
     ) -> Result<String, DagError> {
         let handle = format!("<sv_{}>", name);
         self.repo
-            .persist(session_id, None, source_node_id, &handle, real_value, "secret")
+            .persist(
+                session_id,
+                agent_session_id,
+                source_node_id,
+                &handle,
+                real_value,
+                "secret",
+            )
             .await?;
         Ok(handle)
     }
 
-    /// Check whether a handle is already registered in this session.
-    /// Used by `secure_suspend` to detect collisions before persisting.
+    /// Check whether a handle is already registered (agent-first when provided,
+    /// else session-scoped). Used by `secure_suspend` to detect collisions
+    /// before persisting.
     pub async fn handle_exists(
         &self,
         session_id: &str,
+        agent_session_id: Option<&str>,
         handle: &str,
     ) -> Result<bool, DagError> {
-        self.repo.exists(session_id, None, handle).await
+        self.repo.exists(session_id, agent_session_id, handle).await
     }
 
     /// Cleanup all secure values for a session
@@ -195,51 +226,97 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use serde_json::json;
-    use std::collections::HashMap;
+    use std::sync::Mutex;
 
-    /// Mock repository for testing
+    /// Per-write entry the mock repo records. Lets tests assert agent-first
+    /// vs session-only lookup semantics meaningfully.
+    #[derive(Clone, Debug)]
+    struct MockEntry {
+        session: String,
+        agent: Option<String>,
+        hash: String,
+        value: String,
+    }
+
+    /// Mock repository for testing. Stores every persist as a row.
+    /// `decrypt`/`exists` mirror the production agent-first / session-fallback rule.
     struct MockSecureValueRepository {
-        storage: std::sync::Mutex<HashMap<String, String>>,
+        rows: Mutex<Vec<MockEntry>>,
+    }
+
+    impl MockSecureValueRepository {
+        fn new() -> Self {
+            Self {
+                rows: Mutex::new(Vec::new()),
+            }
+        }
     }
 
     #[async_trait]
     impl SecureValueRepository for MockSecureValueRepository {
         async fn persist(
             &self,
-            _session_id: &str,
-            _agent_session_id: Option<&str>,
+            session_id: &str,
+            agent_session_id: Option<&str>,
             _source_node_id: &str,
             hash_key: &str,
             real_value: &str,
             _field_name: &str,
         ) -> Result<(), DagError> {
-            self.storage
-                .lock()
-                .unwrap()
-                .insert(hash_key.to_string(), real_value.to_string());
+            self.rows.lock().unwrap().push(MockEntry {
+                session: session_id.to_string(),
+                agent: agent_session_id.map(|s| s.to_string()),
+                hash: hash_key.to_string(),
+                value: real_value.to_string(),
+            });
             Ok(())
         }
 
         async fn decrypt(
             &self,
-            _session_id: &str,
-            _agent_session_id: Option<&str>,
+            session_id: &str,
+            agent_session_id: Option<&str>,
             hash_key: &str,
         ) -> Result<Option<String>, DagError> {
-            Ok(self.storage.lock().unwrap().get(hash_key).cloned())
+            let rows = self.rows.lock().unwrap();
+            // Agent-first: if an agent is provided, look up by agent + hash.
+            if let Some(agent) = agent_session_id {
+                if let Some(row) = rows
+                    .iter()
+                    .find(|r| r.agent.as_deref() == Some(agent) && r.hash == hash_key)
+                {
+                    return Ok(Some(row.value.clone()));
+                }
+            }
+            // Fallback: session-scoped lookup.
+            Ok(rows
+                .iter()
+                .find(|r| r.session == session_id && r.hash == hash_key)
+                .map(|r| r.value.clone()))
         }
 
         async fn exists(
             &self,
-            _session_id: &str,
-            _agent_session_id: Option<&str>,
+            session_id: &str,
+            agent_session_id: Option<&str>,
             hash_key: &str,
         ) -> Result<bool, DagError> {
-            Ok(self.storage.lock().unwrap().contains_key(hash_key))
+            let rows = self.rows.lock().unwrap();
+            if let Some(agent) = agent_session_id {
+                if rows
+                    .iter()
+                    .any(|r| r.agent.as_deref() == Some(agent) && r.hash == hash_key)
+                {
+                    return Ok(true);
+                }
+            }
+            Ok(rows
+                .iter()
+                .any(|r| r.session == session_id && r.hash == hash_key))
         }
 
-        async fn cleanup(&self, _session_id: &str) -> Result<(), DagError> {
-            self.storage.lock().unwrap().clear();
+        async fn cleanup(&self, session_id: &str) -> Result<(), DagError> {
+            self.rows.lock().unwrap().retain(|r| r.session != session_id);
             Ok(())
         }
 
@@ -248,12 +325,15 @@ mod tests {
         }
     }
 
+    fn build_service() -> (Arc<MockSecureValueRepository>, SecureValueService) {
+        let repo = Arc::new(MockSecureValueRepository::new());
+        let svc = SecureValueService::new(repo.clone());
+        (repo, svc)
+    }
+
     #[tokio::test]
     async fn test_hash_output_with_secure_flag() {
-        let repo = Arc::new(MockSecureValueRepository {
-            storage: std::sync::Mutex::new(HashMap::new()),
-        });
-        let service = SecureValueService::new(repo);
+        let (_repo, service) = build_service();
 
         let output = json!({
             "status": 200,
@@ -266,7 +346,7 @@ mod tests {
         let config = json!({ "secure": true });
 
         let hashed = service
-            .hash_output(&output, &config, "session_1", "http_node_1")
+            .hash_output(&output, &config, "session_1", None, "http_node_1")
             .await
             .unwrap();
 
@@ -283,10 +363,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_hash_output_without_secure_flag() {
-        let repo = Arc::new(MockSecureValueRepository {
-            storage: std::sync::Mutex::new(HashMap::new()),
-        });
-        let service = SecureValueService::new(repo);
+        let (_repo, service) = build_service();
 
         let output = json!({
             "status": 200,
@@ -298,7 +375,7 @@ mod tests {
         let config = json!({ "secure": false });
 
         let result = service
-            .hash_output(&output, &config, "session_1", "http_node_1")
+            .hash_output(&output, &config, "session_1", None, "http_node_1")
             .await
             .unwrap();
 
@@ -308,9 +385,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_repo_exists_true_after_persist() {
-        let repo = Arc::new(MockSecureValueRepository {
-            storage: std::sync::Mutex::new(HashMap::new()),
-        });
+        let repo = Arc::new(MockSecureValueRepository::new());
         repo.persist("s1", None, "n1", "<sv_token>", "real", "secret")
             .await
             .unwrap();
@@ -320,23 +395,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_exists_after_persist_secret() {
-        let repo = Arc::new(MockSecureValueRepository {
-            storage: std::sync::Mutex::new(HashMap::new()),
-        });
-        let service = SecureValueService::new(repo);
+        let (_repo, service) = build_service();
         service
-            .persist_secret("session_a", "node1", "amadeus_client_id", "real_id_value")
+            .persist_secret("session_a", None, "node1", "amadeus_client_id", "real_id_value")
             .await
             .unwrap();
         assert!(
             service
-                .handle_exists("session_a", "<sv_amadeus_client_id>")
+                .handle_exists("session_a", None, "<sv_amadeus_client_id>")
                 .await
                 .unwrap()
         );
         assert!(
             !service
-                .handle_exists("session_a", "<sv_unknown>")
+                .handle_exists("session_a", None, "<sv_unknown>")
                 .await
                 .unwrap()
         );
@@ -344,25 +416,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_persist_secret_can_be_decrypted_via_inject() {
-        let repo = Arc::new(MockSecureValueRepository {
-            storage: std::sync::Mutex::new(HashMap::new()),
-        });
-        let service = SecureValueService::new(repo);
+        let (_repo, service) = build_service();
         service
-            .persist_secret("s2", "node1", "tok", "real_token_xyz")
+            .persist_secret("s2", None, "node1", "tok", "real_token_xyz")
             .await
             .unwrap();
         let mut inputs = json!({"bearer": "<sv_tok>"});
-        service.inject_secrets(&mut inputs, "s2").await.unwrap();
+        service.inject_secrets(&mut inputs, "s2", None).await.unwrap();
         assert_eq!(inputs["bearer"].as_str(), Some("real_token_xyz"));
     }
 
     #[tokio::test]
     async fn test_inject_secrets_restores_values() {
-        let repo = Arc::new(MockSecureValueRepository {
-            storage: std::sync::Mutex::new(HashMap::new()),
-        });
-        let service = SecureValueService::new(repo);
+        let (_repo, service) = build_service();
 
         // First: hash
         let output = json!({
@@ -372,7 +438,7 @@ mod tests {
 
         let config = json!({ "secure": true });
         let hashed = service
-            .hash_output(&output, &config, "session_1", "http_node_1")
+            .hash_output(&output, &config, "session_1", None, "http_node_1")
             .await
             .unwrap();
 
@@ -382,11 +448,90 @@ mod tests {
         });
 
         service
-            .inject_secrets(&mut inputs, "session_1")
+            .inject_secrets(&mut inputs, "session_1", None)
             .await
             .unwrap();
 
         // Should be restored
         assert_eq!(inputs["bearer_token"].as_str(), Some("sk_live_abc123"));
+    }
+
+    /// Persist under (session_A, agent_X), then resolve from a *different*
+    /// ephemeral session (session_B) but the same agent_X. Agent-first lookup
+    /// must succeed.
+    #[tokio::test]
+    async fn test_inject_secrets_agent_first_cross_session() {
+        let (_repo, service) = build_service();
+
+        service
+            .persist_secret(
+                "ephemeral_A",
+                Some("agent_demo_001"),
+                "ask",
+                "tok",
+                "real_token_xyz",
+            )
+            .await
+            .unwrap();
+
+        let mut inputs = json!({"bearer": "<sv_tok>"});
+        service
+            .inject_secrets(&mut inputs, "ephemeral_B", Some("agent_demo_001"))
+            .await
+            .unwrap();
+        assert_eq!(
+            inputs["bearer"].as_str(),
+            Some("real_token_xyz"),
+            "agent_first lookup must find the secret under a different ephemeral session"
+        );
+    }
+
+    /// Without an agent, lookup is session-scoped: a different session_id
+    /// must NOT see another session's secret.
+    #[tokio::test]
+    async fn test_inject_secrets_no_agent_session_isolated() {
+        let (_repo, service) = build_service();
+
+        service
+            .persist_secret("ephemeral_A", None, "ask", "tok", "real_token_xyz")
+            .await
+            .unwrap();
+
+        let mut inputs = json!({"bearer": "<sv_tok>"});
+        service
+            .inject_secrets(&mut inputs, "ephemeral_B", None)
+            .await
+            .unwrap();
+        // Placeholder must remain — different session, no agent → isolated.
+        assert_eq!(inputs["bearer"].as_str(), Some("<sv_tok>"));
+    }
+
+    /// `handle_exists` must follow the same agent-first rule.
+    #[tokio::test]
+    async fn test_handle_exists_agent_first_cross_session() {
+        let (_repo, service) = build_service();
+
+        service
+            .persist_secret(
+                "ephemeral_A",
+                Some("agent_demo_001"),
+                "ask",
+                "amadeus_client_id",
+                "real",
+            )
+            .await
+            .unwrap();
+
+        // Same agent, different ephemeral session — must report exists=true.
+        assert!(
+            service
+                .handle_exists(
+                    "ephemeral_B",
+                    Some("agent_demo_001"),
+                    "<sv_amadeus_client_id>"
+                )
+                .await
+                .unwrap()
+        );
     }
 }

@@ -827,6 +827,10 @@ impl ExecutableNode for LlmNode {
             if let Some(svc) = self.secure_value_service.clone() {
                 executor = executor.with_secure_values(svc, session_id_str.clone());
             }
+            // Propagate the agent_session_id (chat handle) so tool dispatch can
+            // resolve secrets persisted under the same chat across ephemeral
+            // session_id boundaries. Always pass — None preserves legacy behavior.
+            executor = executor.with_agent_session_id(agent_session_id_str.clone());
             if let Some(ctx) = documents_context.clone() {
                 executor = executor.with_documents(ctx);
             }

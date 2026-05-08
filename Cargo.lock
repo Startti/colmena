@@ -446,6 +446,7 @@ dependencies = [
  "napi-derive",
  "nucleo-matcher",
  "oas3",
+ "once_cell",
  "pyo3",
  "pyo3-asyncio-0-21",
  "pythonize",
