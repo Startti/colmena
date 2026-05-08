@@ -1,5 +1,6 @@
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
+use crate::dag_engine::infrastructure::nodes::qa_response_parser::parse_qa_response;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::error::Error;
@@ -9,11 +10,13 @@ use std::sync::Arc;
 ///
 /// Config fields:
 /// - `question` (required, string): the question to display to the user.
-/// - `id` (optional, string): stable identifier for the question. Defaults to the local node_id
-///   (engine-injected as `__node_id`). Used by external clients (UIs) to map the suspend
-///   to a specific UI widget.
+/// - `id` (required, string): stable identifier for the question. Must match
+///   `[A-Za-z0-9_-]{1,64}`. Used by external clients (UIs) to map the suspend
+///   to a specific UI widget, and used on resume to parse the ID-keyed Q/A
+///   answer format produced by the user.
 /// - `question_type` (optional, "open" | "choice"): defaults to "open" (free-text answer).
 /// - `options` (optional, array of strings): only meaningful when `question_type == "choice"`.
+///   Note: `options` is a UX suggestion list — answers on resume are NOT validated against it.
 pub struct SuspendNode;
 
 #[async_trait]
@@ -26,7 +29,24 @@ impl ExecutableNode for SuspendNode {
         _observer: Option<Arc<dyn ExecutionObserver>>,
     ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         // Resume path: user provided an answer.
-        if let Some(answer) = inputs.get("__colmena_resume_answer") {
+        if let Some(answer_val) = inputs.get("__colmena_resume_answer") {
+            let raw = answer_val.as_str().ok_or_else(|| {
+                Box::<dyn Error + Send + Sync>::from(
+                    "suspend: __colmena_resume_answer must be a string",
+                )
+            })?;
+            let id = config
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    Box::<dyn Error + Send + Sync>::from(
+                        "suspend: config.id is required on resume",
+                    )
+                })?;
+            let mut parsed = parse_qa_response(raw, &[id])
+                .map_err(|e| Box::<dyn Error + Send + Sync>::from(format!("suspend: {e}")))?;
+            let answer = parsed.remove(id).expect("parser guarantees the id is present");
+
             return Ok(json!({
                 "status": "resumed",
                 "answer_received": answer
@@ -44,14 +64,23 @@ impl ExecutableNode for SuspendNode {
         let id = config
             .get("id")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .or_else(|| {
-                inputs
-                    .get("__node_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_else(|| "suspend".to_string());
+            .ok_or_else(|| {
+                Box::<dyn Error + Send + Sync>::from(
+                    "suspend: config.id is required (must be [A-Za-z0-9_-]{1,64})",
+                )
+            })?
+            .to_string();
+
+        if id.is_empty()
+            || id.len() > 64
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(Box::<dyn Error + Send + Sync>::from(format!(
+                "suspend: invalid config.id '{id}' (must match [A-Za-z0-9_-]{{1,64}})"
+            )));
+        }
 
         let question_type = config
             .get("question_type")
@@ -114,7 +143,7 @@ mod tests {
     async fn suspend_emits_open_when_no_config() {
         let node = SuspendNode;
         let inputs = inputs_with_node_id("ask_user");
-        let cfg = json!({ "question": "Confirm?" });
+        let cfg = json!({ "id": "ask_user", "question": "Confirm?" });
         let mut state = Value::Null;
         let out = node
             .execute(&inputs, &cfg, &mut state, empty_observer())
@@ -132,6 +161,7 @@ mod tests {
         let node = SuspendNode;
         let inputs = inputs_with_node_id("ask_user");
         let cfg = json!({
+            "id": "ask_user",
             "question": "Pick one",
             "question_type": "choice",
             "options": ["a", "b", "c"]
@@ -147,17 +177,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn suspend_uses_local_node_id_as_default_id() {
+    async fn suspend_uses_explicit_id() {
         let node = SuspendNode;
         let inputs = inputs_with_node_id("ask_user");
-        let cfg = json!({ "question": "Confirm?" });
+        let cfg = json!({ "id": "confirm_transfer", "question": "Confirm?" });
         let mut state = Value::Null;
         let out = node
             .execute(&inputs, &cfg, &mut state, empty_observer())
             .await
             .unwrap();
 
-        assert_eq!(out["questions"][0]["id"], "ask_user");
+        // Explicit config.id is used (NOT the local __node_id fallback).
+        assert_eq!(out["questions"][0]["id"], "confirm_transfer");
     }
 
     #[tokio::test]
@@ -178,8 +209,12 @@ mod tests {
     async fn suspend_preserves_legacy_question_field() {
         let node = SuspendNode;
         let inputs = inputs_with_node_id("ask_user");
-        let cfg =
-            json!({ "question": "Confirm?", "question_type": "choice", "options": ["a","b"] });
+        let cfg = json!({
+            "id": "ask_user",
+            "question": "Confirm?",
+            "question_type": "choice",
+            "options": ["a","b"]
+        });
         let mut state = Value::Null;
         let out = node
             .execute(&inputs, &cfg, &mut state, empty_observer())
@@ -192,21 +227,95 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_path_unchanged() {
+    async fn config_without_id_is_rejected_at_execute() {
+        let node = SuspendNode;
+        let inputs: NodeInputs = HashMap::new();
+        let cfg = json!({ "question": "Confirm?" }); // no id
+        let mut state = Value::Null;
+        let err = node
+            .execute(&inputs, &cfg, &mut state, empty_observer())
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("config.id is required"));
+    }
+
+    #[tokio::test]
+    async fn resume_with_qa_open_yields_answer() {
         let node = SuspendNode;
         let mut inputs: NodeInputs = HashMap::new();
         inputs.insert(
             "__colmena_resume_answer".to_string(),
-            Value::String("yes".to_string()),
+            Value::String("Q[confirm]: Confirm?\nA[confirm]: yes".to_string()),
         );
-        let cfg = json!({ "question": "Confirm?" });
+        let cfg = json!({ "id": "confirm", "question": "Confirm?" });
         let mut state = Value::Null;
         let out = node
             .execute(&inputs, &cfg, &mut state, empty_observer())
             .await
             .unwrap();
-
         assert_eq!(out["status"], "resumed");
         assert_eq!(out["answer_received"], "yes");
+    }
+
+    #[tokio::test]
+    async fn resume_with_qa_choice_accepts_option_value() {
+        let node = SuspendNode;
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(
+            "__colmena_resume_answer".to_string(),
+            Value::String("Q[env]: Pick env\nA[env]: production".to_string()),
+        );
+        let cfg = json!({
+            "id": "env",
+            "question": "Pick env",
+            "question_type": "choice",
+            "options": ["production", "staging"]
+        });
+        let mut state = Value::Null;
+        let out = node
+            .execute(&inputs, &cfg, &mut state, empty_observer())
+            .await
+            .unwrap();
+        assert_eq!(out["answer_received"], "production");
+    }
+
+    #[tokio::test]
+    async fn resume_with_qa_choice_accepts_free_text() {
+        // Options are suggestions, not a whitelist — free-text is accepted.
+        let node = SuspendNode;
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(
+            "__colmena_resume_answer".to_string(),
+            Value::String("Q[env]: Pick env\nA[env]: review-app-123".to_string()),
+        );
+        let cfg = json!({
+            "id": "env",
+            "question": "Pick env",
+            "question_type": "choice",
+            "options": ["production", "staging"]
+        });
+        let mut state = Value::Null;
+        let out = node
+            .execute(&inputs, &cfg, &mut state, empty_observer())
+            .await
+            .unwrap();
+        assert_eq!(out["answer_received"], "review-app-123");
+    }
+
+    #[tokio::test]
+    async fn resume_path_propagates_parser_errors() {
+        let node = SuspendNode;
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(
+            "__colmena_resume_answer".to_string(),
+            Value::String("just a raw string".to_string()),
+        );
+        let cfg = json!({ "id": "x", "question": "Confirm?" });
+        let mut state = Value::Null;
+        let err = node
+            .execute(&inputs, &cfg, &mut state, empty_observer())
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("missing answer"));
     }
 }
