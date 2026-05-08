@@ -75,6 +75,61 @@ fn parse_and_validate_secrets(config: &Value) -> Result<Vec<Secret>, String> {
     Ok(out)
 }
 
+/// Anchored parser: each `secret.question` must appear in `answer` in the same
+/// order as in `secrets`. The value associated with `secrets[i]` is everything
+/// between the `\n` after question i and the start of question i+1 (or end of
+/// string for the last one). Trailing `\n` is stripped from the value but
+/// internal newlines are preserved. Empty values are rejected.
+///
+/// Not yet called from `execute` — Task 8 wires this into the resume path.
+#[allow(dead_code)]
+fn parse_answers(answer: &str, secrets: &[Secret]) -> Result<Vec<String>, String> {
+    let mut positions: Vec<usize> = Vec::with_capacity(secrets.len());
+    let mut search_from = 0usize;
+    for s in secrets {
+        match answer[search_from..].find(s.question.as_str()) {
+            Some(rel) => {
+                let abs = search_from + rel;
+                positions.push(abs);
+                search_from = abs + s.question.len();
+            }
+            None => {
+                return Err(format!(
+                    "secure_suspend: missing answer for secret '{}' (question not found in response)",
+                    s.name
+                ));
+            }
+        }
+    }
+
+    let mut values: Vec<String> = Vec::with_capacity(secrets.len());
+    for i in 0..secrets.len() {
+        let q_end = positions[i] + secrets[i].question.len();
+        // Skip the single newline immediately after the question, if present.
+        let value_start = if answer[q_end..].starts_with('\n') {
+            q_end + 1
+        } else {
+            q_end
+        };
+        let value_end = if i + 1 < secrets.len() {
+            positions[i + 1]
+        } else {
+            answer.len()
+        };
+        let raw = &answer[value_start..value_end];
+        // Strip trailing newlines but keep internal ones.
+        let trimmed = raw.trim_end_matches('\n');
+        if trimmed.is_empty() {
+            return Err(format!(
+                "secure_suspend: empty value for secret '{}'",
+                secrets[i].name
+            ));
+        }
+        values.push(trimmed.to_string());
+    }
+    Ok(values)
+}
+
 /// Node that batches user-secret collection through the suspend mechanism
 /// and stores the answers in the encrypted secure-values table.
 pub struct SecureSuspendNode {
@@ -370,5 +425,68 @@ mod tests {
             msg.contains("duplicate question text"),
             "got: {msg}"
         );
+    }
+
+    #[test]
+    fn parser_extracts_two_values_in_order() {
+        let secrets = vec![
+            Secret { question: "Q1?".into(), name: "n1".into() },
+            Secret { question: "Q2?".into(), name: "n2".into() },
+        ];
+        let answer = "Q1?\nval-one\nQ2?\nval-two";
+        let values = parse_answers(answer, &secrets).unwrap();
+        assert_eq!(values, vec!["val-one".to_string(), "val-two".to_string()]);
+    }
+
+    #[test]
+    fn parser_preserves_internal_newlines_in_value() {
+        let secrets = vec![
+            Secret { question: "Paste private key:".into(), name: "pk".into() },
+            Secret { question: "Paste public key:".into(), name: "pubk".into() },
+        ];
+        let multiline = "-----BEGIN-----\nline1\nline2\n-----END-----";
+        let answer = format!(
+            "Paste private key:\n{multiline}\nPaste public key:\nABCDEF"
+        );
+        let values = parse_answers(&answer, &secrets).unwrap();
+        assert_eq!(values[0], multiline);
+        assert_eq!(values[1], "ABCDEF");
+    }
+
+    #[test]
+    fn parser_errors_on_missing_question() {
+        let secrets = vec![
+            Secret { question: "Q1?".into(), name: "n1".into() },
+            Secret { question: "Q2?".into(), name: "n2".into() },
+        ];
+        let answer = "Q1?\nval-one";
+        let err = parse_answers(answer, &secrets).unwrap_err();
+        assert!(err.contains("missing answer for secret 'n2'"), "got: {err}");
+    }
+
+    #[test]
+    fn parser_errors_on_empty_value() {
+        let secrets = vec![
+            Secret { question: "Q1?".into(), name: "n1".into() },
+            Secret { question: "Q2?".into(), name: "n2".into() },
+        ];
+        // No newline-value between Q1? and Q2? → empty value for n1.
+        let answer = "Q1?\nQ2?\nv2";
+        let err = parse_answers(answer, &secrets).unwrap_err();
+        assert!(err.contains("empty value for secret 'n1'"), "got: {err}");
+    }
+
+    #[test]
+    fn parser_errors_when_questions_out_of_order() {
+        let secrets = vec![
+            Secret { question: "FIRST?".into(), name: "n1".into() },
+            Secret { question: "SECOND?".into(), name: "n2".into() },
+        ];
+        // FIRST? appears at offset 12 in the string, after SECOND?.
+        // Parser anchors: finds FIRST? at pos 12, then searches for SECOND?
+        // starting from pos 18 → not found → errors on n2.
+        let answer = "SECOND?\nv2\nFIRST?\nv1";
+        let err = parse_answers(answer, &secrets).unwrap_err();
+        assert!(err.contains("missing answer for secret 'n2'"), "got: {err}");
     }
 }
