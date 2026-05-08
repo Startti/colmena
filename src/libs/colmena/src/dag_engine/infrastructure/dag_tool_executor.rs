@@ -482,10 +482,30 @@ impl DagToolExecutor {
     }
 }
 
-#[async_trait]
-impl ToolExecutor for DagToolExecutor {
+impl DagToolExecutor {
+    /// Execute a tool call and inject `__colmena_resume_answer` into the node's
+    /// inputs so a previously-suspended tool receives the user's answer.
+    ///
+    /// Behaves identically to [`ToolExecutor::execute`] in every other respect.
+    pub async fn execute_with_resume_answer(
+        &self,
+        tool_call: &ToolCall,
+        resume_answer: &str,
+    ) -> Result<ToolResult, LlmError> {
+        self.execute_inner(tool_call, Some(resume_answer)).await
+    }
+
+    /// Shared body for [`ToolExecutor::execute`] and [`execute_with_resume_answer`].
+    ///
+    /// `resume_answer` is inserted into the final `inputs` map under the key
+    /// `__colmena_resume_answer` **after** all fixed/dynamic merging and **before**
+    /// `inject_secrets` runs, so secrets resolution still applies uniformly.
     #[allow(deprecated)]
-    async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, LlmError> {
+    async fn execute_inner(
+        &self,
+        tool_call: &ToolCall,
+        resume_answer: Option<&str>,
+    ) -> Result<ToolResult, LlmError> {
         use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
             describe_tool_into_tool_result, dispatch_describe_tool, dispatch_load_skill,
             into_tool_result, DESCRIBE_TOOL_NAME, LOAD_SKILL_TOOL_NAME,
@@ -789,6 +809,17 @@ impl ToolExecutor for DagToolExecutor {
             args
         };
 
+        // Inject the resume answer AFTER all merging but BEFORE inject_secrets so that
+        // secret resolution still applies uniformly and the key cannot be overridden by
+        // anything in fixed_config or the LLM arguments.
+        let mut inputs = inputs;
+        if let Some(ans) = resume_answer {
+            inputs.insert(
+                "__colmena_resume_answer".to_string(),
+                Value::String(ans.to_string()),
+            );
+        }
+
         // Convert HashMap to NodeInputs (which is just HashMap<String, Value>)
         // SECURE VALUES: decrypt <value_N> placeholders before sending to the node.
         let inputs = if let (Some(svc), Some(sid)) = (&self.secure_value_service, &self.session_id)
@@ -867,6 +898,13 @@ impl ToolExecutor for DagToolExecutor {
                 error: Some(e.to_string()),
             }),
         }
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for DagToolExecutor {
+    async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, LlmError> {
+        self.execute_inner(tool_call, None).await
     }
 
     async fn available_tools(&self) -> Vec<crate::llm::domain::ToolDefinition> {
@@ -1910,6 +1948,52 @@ mod tests {
         // title should be in body (from $DYNAMIC), not in headers (from field_mapping)
         assert_eq!(output["body"]["title"], "Test");
         assert!(output.get("headers").is_none() || output["headers"].is_null());
+    }
+
+    #[tokio::test]
+    async fn execute_with_resume_answer_threads_value_into_node_inputs() {
+        // MockNode echoes inputs back as JSON — we can assert the resume key was injected.
+        let registry = Arc::new(MockRegistry::new());
+        let executor = DagToolExecutor::new(registry, HashMap::new());
+
+        let tool_call = ToolCall::new(
+            "call_resume".to_string(),
+            FunctionCall::new("mock_tool".to_string(), r#"{"a": "original"}"#.to_string()),
+        );
+
+        let result = executor
+            .execute_with_resume_answer(&tool_call, "USER_ANSWER_42")
+            .await
+            .unwrap();
+
+        assert!(result.success);
+
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+        // The original LLM arg must still be present.
+        assert_eq!(output["a"], "original");
+        // The resume answer must have been injected under the reserved key.
+        assert_eq!(output["__colmena_resume_answer"], "USER_ANSWER_42");
+    }
+
+    #[tokio::test]
+    async fn execute_without_resume_answer_does_not_inject_key() {
+        // Calling the plain execute path must NOT inject __colmena_resume_answer.
+        let registry = Arc::new(MockRegistry::new());
+        let executor = DagToolExecutor::new(registry, HashMap::new());
+
+        let tool_call = ToolCall::new(
+            "call_plain".to_string(),
+            FunctionCall::new("mock_tool".to_string(), r#"{"a": "plain"}"#.to_string()),
+        );
+
+        let result = executor.execute(&tool_call).await.unwrap();
+        assert!(result.success);
+
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+        assert!(
+            output.get("__colmena_resume_answer").is_none(),
+            "plain execute must not inject __colmena_resume_answer"
+        );
     }
 }
 
