@@ -121,6 +121,18 @@ impl HashMapNodeRegistry {
                 Arc::new(crate::dag_engine::infrastructure::nodes::suspend::SuspendNode),
             );
 
+            // --- Registrar secure_suspend (solo si hay SecureValueService) ---
+            if let Some(svc) = secure_value_service.clone() {
+                nodes.insert(
+                    "secure_suspend".to_string(),
+                    Arc::new(
+                        crate::dag_engine::infrastructure::nodes::secure_suspend::SecureSuspendNode::new(
+                            svc,
+                        ),
+                    ),
+                );
+            }
+
             // --- Registrar Loop Controller ---
             nodes.insert("loop_controller".to_string(), Arc::new(crate::dag_engine::infrastructure::nodes::loop_controller::LoopControllerNode::new()));
 
@@ -323,7 +335,7 @@ mod registry_tavily_tests {
     use async_trait::async_trait;
     use serde_json::Value;
 
-    struct StubTaskMemory;
+    pub(super) struct StubTaskMemory;
 
     #[async_trait]
     impl DagTaskMemoryRepository for StubTaskMemory {
@@ -436,5 +448,86 @@ mod registry_api_explorer_tests {
         reg.subscribe_lifecycle(&bus).await;
         // Notification should reach api_explorer's lifecycle hook without panic.
         bus.notify_conversation_closed("conv-x").await;
+    }
+}
+
+#[cfg(test)]
+mod registry_secure_suspend_tests {
+    use super::*;
+    use crate::dag_engine::application::secure_value_service::SecureValueService;
+    use crate::dag_engine::domain::error::DagError;
+    use crate::dag_engine::domain::secure_value_repository::SecureValueRepository;
+    use async_trait::async_trait;
+
+    pub(super) struct NoopRepo;
+
+    #[async_trait]
+    impl SecureValueRepository for NoopRepo {
+        async fn persist(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<(), DagError> {
+            Ok(())
+        }
+        async fn decrypt(&self, _: &str, _: &str) -> Result<Option<String>, DagError> {
+            Ok(None)
+        }
+        async fn exists(&self, _: &str, _: &str) -> Result<bool, DagError> {
+            Ok(false)
+        }
+        async fn cleanup(&self, _: &str) -> Result<(), DagError> {
+            Ok(())
+        }
+        async fn cleanup_expired(&self) -> Result<u64, DagError> {
+            Ok(0)
+        }
+    }
+
+    fn build_registry_with_secure_values() -> Arc<HashMapNodeRegistry> {
+        let pool_registry = Arc::new(
+            crate::dag_engine::infrastructure::pool_registry::PgPoolRegistry::new(
+                crate::dag_engine::infrastructure::pool_registry::PoolConfig::defaults(),
+            ),
+        );
+        let repo_factory =
+            Arc::new(crate::llm::infrastructure::ConversationRepositoryFactory::new(
+                pool_registry.clone(),
+            ));
+        let sql_factory = Arc::new(
+            crate::dag_engine::infrastructure::sql_port_factory::SqlPortFactory::new(
+                pool_registry,
+            ),
+        );
+        let task_memory: Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository> =
+            Arc::new(super::registry_tavily_tests::StubTaskMemory);
+        let svc = Arc::new(SecureValueService::new(Arc::new(NoopRepo) as Arc<_>));
+        HashMapNodeRegistry::new_with_secure_values(
+            repo_factory,
+            sql_factory,
+            Some(task_memory),
+            Some(svc),
+        )
+    }
+
+    #[test]
+    fn secure_suspend_registered_when_secure_value_service_present() {
+        let reg = build_registry_with_secure_values();
+        assert!(
+            reg.get_node("secure_suspend").is_some(),
+            "secure_suspend must be registered when SecureValueService is wired"
+        );
+    }
+
+    #[test]
+    fn secure_suspend_not_registered_when_secure_value_service_absent() {
+        let reg = super::registry_tavily_tests::build_registry();
+        assert!(
+            reg.get_node("secure_suspend").is_none(),
+            "secure_suspend must NOT be registered without SecureValueService"
+        );
     }
 }
