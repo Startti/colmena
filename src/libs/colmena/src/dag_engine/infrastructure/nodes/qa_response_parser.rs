@@ -76,7 +76,7 @@ fn parse_prefix_at(answer: &str, offset: usize) -> Option<(char, String, usize)>
     // Find the next ']' or '\n' after the '['. We accept up to the first ']'
     // to support the `bad space` error case (validate_id will reject it).
     let search_start = offset + 2;
-    let rel_end = answer[search_start..].find(|c: char| c == ']' || c == '\n')?;
+    let rel_end = answer[search_start..].find([']', '\n'])?;
     let close_byte = answer.as_bytes()[search_start + rel_end];
     if close_byte != b']' {
         return None;
@@ -147,7 +147,7 @@ pub fn parse_qa_response(
                 return Err(QaParseError::EmptyAnswer { id });
             }
 
-            if !expected_ids.iter().any(|e| *e == id) {
+            if !expected_ids.contains(&id.as_str()) {
                 return Err(QaParseError::UnknownId { id });
             }
             if answers.contains_key(&id) {
@@ -167,7 +167,7 @@ pub fn parse_qa_response(
     }
 
     for id in &q_seen {
-        if !answers.contains_key(id) && expected_ids.iter().any(|e| *e == id.as_str()) {
+        if !answers.contains_key(id) && expected_ids.contains(&id.as_str()) {
             return Err(QaParseError::OrphanQuestion { id: id.clone() });
         }
     }

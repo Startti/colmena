@@ -154,6 +154,9 @@ impl ExecutableNode for SecureSuspendNode {
             let answer_map = parse_qa_response(answer, &id_refs).map_err(|e| {
                 Box::<dyn Error + Send + Sync>::from(format!("secure_suspend: {e}"))
             })?;
+            // Parser contract: Ok(map) ⇒ every id in `id_refs` is a key in `map`.
+            // Walking `secrets` here (not `answer_map`) preserves declaration order
+            // for the indexed collision/persist loops below.
             let values: Vec<String> = secrets
                 .iter()
                 .map(|s| {
