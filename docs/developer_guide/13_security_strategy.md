@@ -421,7 +421,11 @@ User starts DAG (or LLM calls collect_creds tool)
   ↓
 secure_suspend node: DAG pauses, user sees question(s)
   ↓
-User provides answers (--answer "api_key\nVALUE\napi_secret\nVALUE2")
+User provides answers (ID-keyed Q/A — keyed by each secret's `name`):
+  --answer "Q[api_key]: Please enter your API key
+            A[api_key]: VALUE
+            Q[api_secret]: Please enter your API secret
+            A[api_secret]: VALUE2"
   ↓
 Values encrypted with AES-256 → secure_value_mappings
   ↓
@@ -433,6 +437,26 @@ inject_secrets (runs on both inputs AND config)
 HTTP / downstream node calls API with real credentials ✅
 LLM nodes see only "<sv_api_key>" ✅
 ```
+
+#### Resume answer format
+
+The `--answer` payload uses the canonical **ID-keyed Q/A format** shared with the `suspend` node:
+
+```
+Q[<name>]: <question echo>
+A[<name>]: <answer body>
+```
+
+- `Q[<name>]:` and `A[<name>]:` are line-anchored literal prefixes. `<name>` is the secret's `name` from `config.secrets[i].name`.
+- Order-independent: the parser binds by id, so the operator may answer secrets in any order.
+- The text after `Q[<name>]:` is echoed for human readability only — the parser does not validate it. The LLM is free to rephrase or translate the question without breaking parsing.
+- Multi-line answer bodies (PEM blocks, multi-line JSON) are preserved between `A[<name>]:` and the next prefix or end of input.
+- ID character set: `[A-Za-z0-9_-]{1,64}` (already what `name` accepts).
+- Each expected `name` must appear exactly once as `A[<name>]:`. Duplicates, missing names, unknown ids, or empty answers → parser error and resume fails loudly.
+- `secure_suspend` only supports open questions in this iteration (no choice).
+- For the classic `suspend` node, `config.id` is now **required** (no fallback to `__node_id`) — the same Q/A format applies, keyed by `config.id`.
+
+Schema reference: [`docs/node_configurations.json`](../node_configurations.json) → `secure_suspend.resume_answer_format` and `suspend.resume_answer_format`.
 
 **Pros:**
 - ✅ No credentials need to be known at deploy time

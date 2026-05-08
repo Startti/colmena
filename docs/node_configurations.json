@@ -239,12 +239,33 @@
       "description": "Pauses DAG execution and waits for human input before continuing. On first execution, the node returns a SUSPENDED status with a question for the user. The DAG engine persists the entire execution state to the database (PostgreSQL required). When the user provides an answer (via the resume API), the engine restores state and re-executes this node with the answer injected as '__colmena_resume_answer', at which point the node outputs the user's answer and execution continues downstream. This is the core mechanism for building interactive, human-in-the-loop workflows.",
       "category": "control_flow",
       "config_fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "description": "Stable per-question identifier used to key the resume answer payload. Required (no fallback to __node_id). Character set: [A-Za-z0-9_-]{1,64}. The operator's --answer must reference this id with `Q[<id>]:` / `A[<id>]:` line-anchored prefixes. Renaming the surrounding node does NOT change this id, so the resume contract stays stable across graph refactors.",
+          "example": "confirm_transfer"
+        },
         "question": {
           "type": "string",
           "required": false,
           "default": "What is your input?",
           "description": "The question displayed to the user when execution is suspended. Should be clear and specific about what information is needed to continue. This question is included in the SUSPENDED response so the frontend or API consumer can display it to the user. Can also be provided dynamically via an input edge to the 'question' port.",
           "example": "Do you approve this flight booking for $450?"
+        },
+        "question_type": {
+          "type": "string",
+          "required": false,
+          "default": "open",
+          "valid_values": ["open", "choice"],
+          "description": "Question kind. `open` accepts free-form text. `choice` exposes an `options` array as a UX hint — the parser does NOT whitelist against options, so the operator may answer with any of the suggested options OR free text.",
+          "example": "choice"
+        },
+        "options": {
+          "type": "array",
+          "required": false,
+          "default": null,
+          "description": "Suggested answer values for `question_type: \"choice\"`. UX suggestion list, NOT a whitelist — the resume parser accepts any free-text answer regardless of whether it appears in `options`. Use this to give the frontend / LLM quick-pick hints without forcing the operator into a closed set.",
+          "example": ["staging", "production", "rollback"]
         }
       },
       "input_ports": {
@@ -266,7 +287,11 @@
       "default_input": "question",
       "default_output": "answer_received",
       "requires": ["postgres"],
-      "supports_env_vars": false
+      "supports_env_vars": false,
+      "resume_answer_format": {
+        "format": "Q[<id>]: <question echo>\nA[<id>]: <answer>",
+        "description": "Operators (or LLMs) write the answer using Q[<id>]:/A[<id>]: prefixes anchored at line start. The <id> is the config.id of this suspend node. Multi-line answers are preserved between A[<id>]: and the next prefix or end of input. The question echo is for human readability; the parser does not validate it. For choice questions, options are UX suggestions — any free-text answer is accepted. Format is canonical and shared with `secure_suspend`."
+      }
     },
 
     "loop_controller": {
@@ -687,7 +712,7 @@
         "secrets": {
           "type": "array",
           "required": true,
-          "description": "Lista de objetos { question, name }. Mínimo 1, máximo 8. Cada `name` debe matchear ^[a-z][a-z0-9_]{2,63}$ y ser único dentro de la lista; cada `question` debe ser único dentro de la lista (anclas del parser de respuesta).",
+          "description": "Lista de objetos { question, name }. Mínimo 1, máximo 8. Cada `name` debe matchear ^[a-z][a-z0-9_]{2,63}$ y ser único dentro de la lista. El `name` cumple doble rol: identifica el handle persistido (`<sv_<name>>`) y es el id usado por el operador en la respuesta de resume (formato `Q[<name>]:` / `A[<name>]:`). El `question` es human-readable y NO se valida contra el echo en el resume — el parser binda por id, así que el LLM puede reformular o traducir libremente.",
           "example": [
             { "question": "Cuál es tu Amadeus client_id?", "name": "amadeus_client_id" },
             { "question": "Cuál es tu Amadeus client_secret?", "name": "amadeus_client_secret" }
@@ -741,6 +766,10 @@
       "default_output": "handles",
       "requires": ["postgres"],
       "supports_env_vars": false,
+      "resume_answer_format": {
+        "format": "Q[<name1>]: <q1>\nA[<name1>]: <a1>\nQ[<name2>]: <q2>\nA[<name2>]: <a2>...",
+        "description": "Resume answers are keyed by the secret's `name`. Order does not matter — the parser binds by id. Multi-line answers preserved between A[<name>]: and the next prefix or end of input. Format is canonical and shared with the `suspend` node. Only open questions are supported (no choice in this iteration)."
+      },
       "example": {
         "type": "secure_suspend",
         "config": {

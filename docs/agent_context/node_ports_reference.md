@@ -176,14 +176,19 @@ The DAG engine automatically saves the execution state (active queue, all node o
 }
 ```
 
-**3. Resume Phase:** Pass the `session_id` and user's answer to continue:
+**3. Resume Phase:** Pass the `session_id` and user's answer to continue. The `--answer` payload uses the canonical **ID-keyed Q/A format** — `Q[<id>]:` and `A[<id>]:` line-anchored prefixes, where `<id>` is `config.id` (now **required** on `suspend`):
 ```bash
 cargo run --bin dag_engine -- run graph.json \
   --session-id 6d8928e5-e38c-49c3-a40b-16a1202055f3 \
-  --answer "Approved"
+  --answer "Q[confirm_transfer]: Approve transfer?
+A[confirm_transfer]: Approved"
 ```
 
-**4. Internal: Answer Injection:** The DAG engine automatically injects the user's answer into the node's inputs as `__colmena_resume_answer`. This happens before the node executes on resume.
+The format is **order-independent** when multiple suspends are answered in one payload — the parser binds by id, not position. The text after `Q[<id>]:` is echoed for human readability and is not validated. ID character set: `[A-Za-z0-9_-]{1,64}`. Multi-line answers between `A[<id>]:` and the next prefix (or EOF) are preserved verbatim. Schema reference: `docs/node_configurations.json` → `suspend.resume_answer_format`.
+
+For `question_type: "choice"`, the configured `options` array is a UX suggestion list — the parser does **not** whitelist against it. Any free-text answer is accepted.
+
+**4. Internal: Answer Injection:** The DAG engine automatically injects the user's answer into the node's inputs as `__colmena_resume_answer`. This happens before the node executes on resume. The shared Q/A parser then extracts the answer body keyed by `config.id`.
 
 **5. Resume Execution:** The `suspend` node executes with `__colmena_resume_answer` present and produces:
 ```json
@@ -193,7 +198,7 @@ cargo run --bin dag_engine -- run graph.json \
 }
 ```
 
-**Important:** The `answer_received` field contains the **exact value** passed via `--answer`, not a modified version. If you passed `--answer "Approved"`, then `answer_received = "Approved"`. If you passed `--answer '{"status": "ok"}'`, then `answer_received = {"status": "ok"}` (JSON parsing).
+**Important:** The `answer_received` field contains the parsed answer body — the text between `A[<id>]:` and the next prefix (or EOF), with surrounding whitespace and trailing newlines trimmed. Multi-line bodies (e.g. PEM blocks) are preserved internally.
 
 This output is passed downstream via the `answer_received` default output port.
 
@@ -281,7 +286,7 @@ These allow implicit edge definitions: `{ "from": "upstream", "to": "suspend" }`
 {
   "nodes": {
     "process_node": { "type": "log", "config": { "message": "Processing..." } },
-    "approval": { "type": "suspend", "config": { "question": "Approve?" } },
+    "approval": { "type": "suspend", "config": { "id": "approval", "question": "Approve?" } },
     "final_output": { "type": "log" }
   },
   "edges": [
@@ -290,7 +295,7 @@ These allow implicit edge definitions: `{ "from": "upstream", "to": "suspend" }`
   ]
 }
 ```
-After user approves with `--answer "yes"`, execution continues to `final_output`.
+After user approves with `--answer "Q[approval]: Approve?\nA[approval]: yes"`, execution continues to `final_output`.
 
 **Pattern 2: Conditional Resume (Route on Answer)**
 ```json
@@ -312,7 +317,7 @@ The downstream `router` node receives the exact answer and can decide what to do
   ]
 }
 ```
-Chain multiple `suspend` nodes for cascading approvals. Resume each one with `--session-id <id> --answer <response>`.
+Chain multiple `suspend` nodes for cascading approvals. Each node has its own `config.id`, so resume payloads use that id in the Q/A prefix. Multiple ids can be answered in a single payload (order-independent).
 
 **Pattern 4: Dynamic Question from Upstream**
 ```json
@@ -359,23 +364,27 @@ The `question` input overrides the config default. (Note: this example passes `o
 # ❌ Wrong: no --answer
 cargo run --bin dag_engine -- run graph.json --session-id abc123
 
-# ✅ Correct: with --answer
-cargo run --bin dag_engine -- run graph.json --session-id abc123 --answer "yes"
+# ✅ Correct: ID-keyed Q/A payload (id must match config.id)
+cargo run --bin dag_engine -- run graph.json --session-id abc123 \
+  --answer "Q[approval]: Approve?
+A[approval]: yes"
 ```
 
-### Issue: Answer received as JSON string instead of object
+### Issue: Resume rejects payload with parser error
 
-**Cause:** CLI argument is quoted but not parsed.
+**Cause:** The `--answer` payload doesn't match the canonical Q/A format, references an unknown id, or omits an expected id.
 
-**Solutions:**
+**Checklist:**
+- The id in `Q[<id>]:` / `A[<id>]:` matches the `config.id` of the suspend node (or `secret.name` for `secure_suspend`).
+- Each expected id appears exactly once as `A[<id>]:` (duplicates → error).
+- No empty answers (`A[<id>]:` followed only by whitespace before the next prefix or EOF).
+- For multi-id payloads, all expected ids are present; order is irrelevant.
+
+The answer body — the text between `A[<id>]:` and the next prefix — is taken verbatim. To pass a JSON object, place it in the body:
 ```bash
-# If you want a string "yes"
-cargo run --bin dag_engine -- run graph.json --session-id abc123 --answer "yes"
-# answer_received = "yes"
-
-# If you want JSON object {"approved": true}
-cargo run --bin dag_engine -- run graph.json --session-id abc123 --answer '{"approved": true}'
-# answer_received = {approved: true} (JSON parsed)
+--answer "Q[approval]: Decision?
+A[approval]: {\"approved\": true}"
+# answer_received = "{\"approved\": true}" (string body, not auto-parsed)
 ```
 
 ### Issue: No question is displayed to user
@@ -409,12 +418,12 @@ El nodo `secure_suspend` pausa el DAG para recolectar uno o más secretos del us
 
 - `__node_id` — usado como base ID si `config.id` no está presente.
 - `__colmena_session_id` — scope de los handles persistidos.
-- `__colmena_resume_answer` — string formato `pregunta\nvalor\npregunta\nvalor` al reanudar.
+- `__colmena_resume_answer` — string en formato canónico ID-keyed Q/A (ver §"Reanudación"). Inyectado automáticamente por el engine.
 
 ### Outputs (suspend-path)
 
 - `__colmena_status: "SUSPENDED"` — señaliza al engine que pause la ejecución.
-- `questions: [{ id, question, type: "secret", options: null }, ...]` — una entrada por ítem en `config.secrets`, IDs `<base>__1`, `<base>__2`, ...
+- `questions: [{ id, question, type: "secret", options: null }, ...]` — una entrada por ítem en `config.secrets`. **El `id` de cada question es el `name` del secret** — el operador lo usa directamente en `Q[<name>]:` / `A[<name>]:` al reanudar.
 
 ### Outputs (resume-path)
 
@@ -427,8 +436,29 @@ El nodo `secure_suspend` pausa el DAG para recolectar uno o más secretos del us
 
 | Campo | Tipo | Requerido | Descripción |
 |---|---|---|---|
-| `secrets` | array | **sí** | Lista de `{ question, name }`. Mínimo 1, máximo 8. `name` debe ser único y matchear `^[a-z][a-z0-9_]{2,63}$`. |
+| `secrets` | array | **sí** | Lista de `{ question, name }`. Mínimo 1, máximo 8. `name` debe ser único y matchear `^[a-z][a-z0-9_]{2,63}$`. El `name` cumple doble rol: identifica el handle (`<sv_<name>>`) y es el id usado en la respuesta de resume. |
 | `id` | string | no | Base ID del bloque. Default: `__node_id`. |
+
+### Reanudación
+
+El payload `--answer` usa el formato canónico **ID-keyed Q/A** compartido con el nodo `suspend`, keyed por el `name` de cada secret:
+
+```bash
+cargo run --bin dag_engine -- run graph.json \
+  --agent-session-id agent_x \
+  --answer "Q[username]: API key
+A[username]: sk-abc123
+Q[password]: API secret
+A[password]: shh-def456"
+```
+
+- Orden-independiente: el operador puede contestar `password` antes que `username` y el parser sigue bindeando por id.
+- Multi-line answers (PEM blocks, JSON pegado) se preservan entre `A[<name>]:` y el siguiente prefix o EOF.
+- El echo después de `Q[<name>]:` es human-readable y NO se valida — el LLM puede reformular o traducir libremente.
+- Cada `name` esperado debe aparecer exactamente una vez como `A[<name>]:`. Duplicados, ids desconocidos, ids faltantes o respuestas vacías → error.
+- `secure_suspend` solo soporta open questions (no choice).
+
+Schema canónico: `docs/node_configurations.json` → `secure_suspend.resume_answer_format`.
 
 ### Uso como LLM tool
 

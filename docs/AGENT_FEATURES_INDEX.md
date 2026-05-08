@@ -83,7 +83,7 @@ Pausa el DAG para recolectar uno o más secretos del usuario en una sola pausa, 
 
 ### Reanudación
 
-CLI: `--answer "<pregunta_1>\n<valor_1>\n<pregunta_2>\n<valor_2>"`. Parser ancla en el texto literal de cada pregunta (preserva multilinea internos).
+CLI: `--answer "Q[<name1>]: <pregunta>\nA[<name1>]: <valor>\nQ[<name2>]: <pregunta>\nA[<name2>]: <valor>"`. Formato canónico compartido con el nodo `suspend` clásico — keyed por el `name` de cada secret (o `config.id` en suspend), orden-independiente, multilinea preservada. Para suspend clásico, `config.id` es **obligatorio**.
 
 ---
 
