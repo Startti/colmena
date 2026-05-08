@@ -166,11 +166,12 @@ async fn orchestrator_resumes_agent_suspend_end_to_end() {
     while s1.next().await.is_some() {}
     drop(s1);
 
-    // Run 2: resume by agent_session_id only with an answer.
+    // Run 2: resume by agent_session_id only with an answer in the canonical
+    // ID-keyed Q/A format. The id ("confirm") matches the suspend node's config.id.
     let mut s2 = Box::pin(eng.execute_stream(
         single_agent_suspend_graph(),
         None,
-        Some("yes".into()),
+        Some("Q[confirm]: Do you confirm?\nA[confirm]: yes".into()),
         false,
         None,
         Some(chat.into()),
@@ -249,11 +250,15 @@ async fn nested_orchestrators_suspend_cascades_3_levels() {
         "expected 3 SUSPENDED rows after run 1 (root + 2 subgraphs)"
     );
 
-    // Run 2: resume.
+    // Run 2: resume — the deepest suspend node (id="confirm_meeting") in the
+    // fixture expects a canonical ID-keyed Q/A answer.
     let mut s2 = Box::pin(eng.execute_stream(
         graph,
         None,
-        Some("Yes, Tuesday at 10am works for me.".into()),
+        Some(
+            "Q[confirm_meeting]: Please confirm: shall we schedule the meeting for Tuesday at 10am?\nA[confirm_meeting]: Yes, Tuesday at 10am works for me."
+                .into(),
+        ),
         false,
         None,
         Some(chat.into()),

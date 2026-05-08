@@ -2,7 +2,9 @@
 //!
 //! The test validates the round-trip lifecycle:
 //!   1. Executes the graph once — `secure_suspend` pauses and emits SUSPENDED with questions.
-//!   2. Resumes with answers in the canonical `question\nvalue` format.
+//!   2. Resumes with answers in the canonical ID-keyed Q/A format
+//!      (`Q[<id>]: <question>\nA[<id>]: <value>` repeated, where `<id>` is each
+//!      `secrets[].name`).
 //!   3. Asserts the `ask_creds` node output contains only opaque handles
 //!      (`<sv_smoke_secret_a>`, `<sv_smoke_secret_b>`) — never the real values.
 //!
@@ -119,9 +121,10 @@ async fn secure_suspend_smoke_round_trip() {
         "first run: expected SUSPENDED GraphFinish event"
     );
 
-    // --- Run 2: resume — answer covers both questions in the canonical format. ---
-    // Format: <question-text>\n<value>\n<question-text>\n<value>
-    let answer = "Q1?\nsmoke-val-a\nQ2?\nsmoke-val-b";
+    // --- Run 2: resume — answer covers both secrets in the canonical ID-keyed format. ---
+    // Format: Q[<name>]: <question>\nA[<name>]: <value> repeated, where <name>
+    // matches each entry of `secrets[].name` in the graph.
+    let answer = "Q[smoke_secret_a]: Q1?\nA[smoke_secret_a]: smoke-val-a\nQ[smoke_secret_b]: Q2?\nA[smoke_secret_b]: smoke-val-b";
 
     let mut s2 = Box::pin(eng.execute_stream(
         smoke_graph_inline(),
