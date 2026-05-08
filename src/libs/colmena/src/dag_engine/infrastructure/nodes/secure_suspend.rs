@@ -151,7 +151,28 @@ impl ExecutableNode for SecureSuspendNode {
         _global_state: &mut Value,
         _observer: Option<Arc<dyn ExecutionObserver>>,
     ) -> Result<Value, Box<dyn Error + Send + Sync>> {
-        let secrets = parse_and_validate_secrets(config)
+        // When invoked as an LLM tool, the dispatcher places the LLM-supplied
+        // arguments in `inputs` (with config = {}). When invoked as a
+        // top-level DAG node, they live in `config`. Accept both.
+        let effective_config = if inputs.get("secrets").is_some() || inputs.get("id").is_some() {
+            let mut merged = serde_json::Map::new();
+            if let Some(v) = inputs.get("secrets") {
+                merged.insert("secrets".to_string(), v.clone());
+            }
+            if let Some(v) = inputs.get("id") {
+                merged.insert("id".to_string(), v.clone());
+            }
+            // Fall back to config for any field not in inputs.
+            if let Some(obj) = config.as_object() {
+                for (k, v) in obj {
+                    merged.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
+            Value::Object(merged)
+        } else {
+            config.clone()
+        };
+        let secrets = parse_and_validate_secrets(&effective_config)
             .map_err(Box::<dyn Error + Send + Sync>::from)?;
 
         if let Some(answer_val) = inputs.get("__colmena_resume_answer") {
@@ -211,7 +232,7 @@ impl ExecutableNode for SecureSuspendNode {
         }
 
         // Suspend-path emission.
-        let base_id = config
+        let base_id = effective_config
             .get("id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
