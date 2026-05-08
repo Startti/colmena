@@ -3,7 +3,7 @@
     "input": {
       "type": "input",
       "config": {
-        "prompt": "Hello — just reply 'ready' so we can confirm the graph loads. Do not call any tool."
+        "prompt": "Investigá online qué hace la empresa Claro Colombia (su sitio es claro.com.co), y luego enriquecé su registro en HubSpot con un `description` corto (1-2 frases) y un `industry` apropiado."
       }
     },
     "agent_llm": {
@@ -12,7 +12,7 @@
         "provider": "gemini",
         "api_key": "${GEMINI_API_KEY}",
         "model": "gemini-2.5-flash",
-        "system_message": "You manage HubSpot CRM contacts and companies. When you need details about a specific operation, load the matching reference from the hubspot-crm skill.",
+        "system_message": "You manage HubSpot CRM contacts and companies. Before creating or enriching a record, you may use the `web` tool to research the company online (industry, domain, headquarters, description) to avoid guessing or asking the user for things you can find. When you need details about a specific HubSpot operation, load the matching reference from the hubspot-crm skill.",
         "temperature": 0.2,
         "connection_url": "${DATABASE_URL}",
         "skills": {
@@ -27,8 +27,7 @@
               "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
               "endpoint":     { "type": "string", "fixed": "/crm/v3/objects/contacts" },
               "method":       { "type": "string", "fixed": "GET" },
-              "bearer_token": { "type": "string", "fixed": "${HUBSPOT_PRIVATE_APP_TOKEN}" },
-              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json" } },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json", "Authorization": "Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}" } },
               "query_params": {
                 "type": "object",
                 "properties": {
@@ -48,8 +47,7 @@
               "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
               "endpoint":     { "type": "string", "fixed": "/crm/v3/objects/contacts" },
               "method":       { "type": "string", "fixed": "POST" },
-              "bearer_token": { "type": "string", "fixed": "${HUBSPOT_PRIVATE_APP_TOKEN}" },
-              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json" } },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json", "Authorization": "Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}" } },
               "body": {
                 "type": "object",
                 "properties": {
@@ -69,8 +67,7 @@
             "node_schema": {
               "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
               "method":       { "type": "string", "fixed": "PATCH" },
-              "bearer_token": { "type": "string", "fixed": "${HUBSPOT_PRIVATE_APP_TOKEN}" },
-              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json" } },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json", "Authorization": "Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}" } },
               "endpoint": {
                 "type": "string",
                 "required": true,
@@ -96,8 +93,7 @@
               "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
               "endpoint":     { "type": "string", "fixed": "/crm/v3/objects/contacts/search" },
               "method":       { "type": "string", "fixed": "POST" },
-              "bearer_token": { "type": "string", "fixed": "${HUBSPOT_PRIVATE_APP_TOKEN}" },
-              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json" } },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json", "Authorization": "Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}" } },
               "body": {
                 "type": "object",
                 "required": true,
@@ -113,8 +109,7 @@
               "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
               "endpoint":     { "type": "string", "fixed": "/crm/v3/objects/companies" },
               "method":       { "type": "string", "fixed": "GET" },
-              "bearer_token": { "type": "string", "fixed": "${HUBSPOT_PRIVATE_APP_TOKEN}" },
-              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json" } },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json", "Authorization": "Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}" } },
               "query_params": {
                 "type": "object",
                 "properties": {
@@ -134,8 +129,7 @@
               "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
               "endpoint":     { "type": "string", "fixed": "/crm/v3/objects/companies" },
               "method":       { "type": "string", "fixed": "POST" },
-              "bearer_token": { "type": "string", "fixed": "${HUBSPOT_PRIVATE_APP_TOKEN}" },
-              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json" } },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json", "Authorization": "Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}" } },
               "body": {
                 "type": "object",
                 "properties": {
@@ -155,8 +149,7 @@
             "node_schema": {
               "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
               "method":       { "type": "string", "fixed": "PATCH" },
-              "bearer_token": { "type": "string", "fixed": "${HUBSPOT_PRIVATE_APP_TOKEN}" },
-              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json" } },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json", "Authorization": "Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}" } },
               "endpoint": {
                 "type": "string",
                 "required": true,
@@ -182,14 +175,20 @@
               "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
               "endpoint":     { "type": "string", "fixed": "/crm/v3/objects/companies/search" },
               "method":       { "type": "string", "fixed": "POST" },
-              "bearer_token": { "type": "string", "fixed": "${HUBSPOT_PRIVATE_APP_TOKEN}" },
-              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json" } },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json", "Authorization": "Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}" } },
               "body": {
                 "type": "object",
                 "required": true,
                 "description": "Full JSON body. Required: filterGroups (array of { filters: [ { propertyName, operator, value } ] }). Optional: properties (array of strings — names to return), limit (number, default 10, max 100). Operators: EQ, NEQ, CONTAINS_TOKEN, HAS_PROPERTY, NOT_HAS_PROPERTY, GT, LT, BETWEEN, IN. See hubspot-crm/search_companies."
               }
             }
+          },
+          "web": {
+            "name": "web",
+            "description": "Web search and fetch via Tavily. Use to discover a company's industry, domain, headquarters, description, or any public info before creating/enriching its HubSpot record. Sub-tools: `search` (general queries) and `fetch` (extract content from a specific URL).",
+            "node_type": "tavily_client",
+            "node_config": { "api_key": "${TAVILY_API_KEY}" },
+            "expose_sub_tools": "all"
           },
           "associate_contact_company": {
             "name": "associate_contact_company",
@@ -198,8 +197,7 @@
             "node_schema": {
               "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
               "method":       { "type": "string", "fixed": "PUT" },
-              "bearer_token": { "type": "string", "fixed": "${HUBSPOT_PRIVATE_APP_TOKEN}" },
-              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json" } },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json", "Authorization": "Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}" } },
               "endpoint": {
                 "type": "string",
                 "required": true,
