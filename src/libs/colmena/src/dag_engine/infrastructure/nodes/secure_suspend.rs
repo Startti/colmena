@@ -6,6 +6,7 @@
 use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
+use crate::dag_engine::infrastructure::nodes::qa_response_parser::parse_qa_response;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -73,59 +74,6 @@ fn parse_and_validate_secrets(config: &Value) -> Result<Vec<Secret>, String> {
     }
 
     Ok(out)
-}
-
-/// Anchored parser: each `secret.question` must appear in `answer` in the same
-/// order as in `secrets`. The value associated with `secrets[i]` is everything
-/// between the `\n` after question i and the start of question i+1 (or end of
-/// string for the last one). Trailing `\n` is stripped from the value but
-/// internal newlines are preserved. Empty values are rejected.
-///
-fn parse_answers(answer: &str, secrets: &[Secret]) -> Result<Vec<String>, String> {
-    let mut positions: Vec<usize> = Vec::with_capacity(secrets.len());
-    let mut search_from = 0usize;
-    for s in secrets {
-        match answer[search_from..].find(s.question.as_str()) {
-            Some(rel) => {
-                let abs = search_from + rel;
-                positions.push(abs);
-                search_from = abs + s.question.len();
-            }
-            None => {
-                return Err(format!(
-                    "secure_suspend: missing answer for secret '{}' (question not found in response)",
-                    s.name
-                ));
-            }
-        }
-    }
-
-    let mut values: Vec<String> = Vec::with_capacity(secrets.len());
-    for i in 0..secrets.len() {
-        let q_end = positions[i] + secrets[i].question.len();
-        // Skip the single newline immediately after the question, if present.
-        let value_start = if answer[q_end..].starts_with('\n') {
-            q_end + 1
-        } else {
-            q_end
-        };
-        let value_end = if i + 1 < secrets.len() {
-            positions[i + 1]
-        } else {
-            answer.len()
-        };
-        let raw = &answer[value_start..value_end];
-        // Strip trailing newlines but keep internal ones.
-        let trimmed = raw.trim_end_matches('\n');
-        if trimmed.is_empty() {
-            return Err(format!(
-                "secure_suspend: empty value for secret '{}'",
-                secrets[i].name
-            ));
-        }
-        values.push(trimmed.to_string());
-    }
-    Ok(values)
 }
 
 /// Node that batches user-secret collection through the suspend mechanism
@@ -202,8 +150,19 @@ impl ExecutableNode for SecureSuspendNode {
                 .and_then(|v| v.as_str())
                 .unwrap_or("secure_suspend");
 
-            let values = parse_answers(answer, &secrets)
-                .map_err(Box::<dyn Error + Send + Sync>::from)?;
+            let id_refs: Vec<&str> = secrets.iter().map(|s| s.name.as_str()).collect();
+            let answer_map = parse_qa_response(answer, &id_refs).map_err(|e| {
+                Box::<dyn Error + Send + Sync>::from(format!("secure_suspend: {e}"))
+            })?;
+            let values: Vec<String> = secrets
+                .iter()
+                .map(|s| {
+                    answer_map
+                        .get(&s.name)
+                        .cloned()
+                        .expect("parser guarantees all expected ids are present")
+                })
+                .collect();
 
             // Collision pre-check (all secrets) before any write.
             for s in &secrets {
@@ -527,40 +486,50 @@ mod tests {
     }
 
     #[test]
-    fn parser_extracts_two_values_in_order() {
+    fn parser_extracts_two_values_by_id() {
         let secrets = vec![
             Secret { question: "Q1?".into(), name: "n1".into() },
             Secret { question: "Q2?".into(), name: "n2".into() },
         ];
-        let answer = "Q1?\nval-one\nQ2?\nval-two";
-        let values = parse_answers(answer, &secrets).unwrap();
-        assert_eq!(values, vec!["val-one".to_string(), "val-two".to_string()]);
+        let answer = "Q[n1]: Q1?\nA[n1]: val-one\nQ[n2]: Q2?\nA[n2]: val-two";
+        let values = call_parser(answer, &secrets).unwrap();
+        assert_eq!(values.get("n1").unwrap(), "val-one");
+        assert_eq!(values.get("n2").unwrap(), "val-two");
+    }
+
+    #[test]
+    fn parser_order_independent() {
+        let secrets = vec![
+            Secret { question: "Q1?".into(), name: "n1".into() },
+            Secret { question: "Q2?".into(), name: "n2".into() },
+        ];
+        let answer = "Q[n2]: Q2?\nA[n2]: val-two\nQ[n1]: Q1?\nA[n1]: val-one";
+        let values = call_parser(answer, &secrets).unwrap();
+        assert_eq!(values.get("n1").unwrap(), "val-one");
+        assert_eq!(values.get("n2").unwrap(), "val-two");
     }
 
     #[test]
     fn parser_preserves_internal_newlines_in_value() {
         let secrets = vec![
-            Secret { question: "Paste private key:".into(), name: "pk".into() },
-            Secret { question: "Paste public key:".into(), name: "pubk".into() },
+            Secret { question: "PEM?".into(), name: "key".into() },
+            Secret { question: "FP?".into(), name: "fp".into() },
         ];
-        let multiline = "-----BEGIN-----\nline1\nline2\n-----END-----";
-        let answer = format!(
-            "Paste private key:\n{multiline}\nPaste public key:\nABCDEF"
-        );
-        let values = parse_answers(&answer, &secrets).unwrap();
-        assert_eq!(values[0], multiline);
-        assert_eq!(values[1], "ABCDEF");
+        let answer = "Q[key]: PEM?\nA[key]: line-1\nline-2\nline-3\nQ[fp]: FP?\nA[fp]: ab:cd";
+        let values = call_parser(answer, &secrets).unwrap();
+        assert_eq!(values.get("key").unwrap(), "line-1\nline-2\nline-3");
+        assert_eq!(values.get("fp").unwrap(), "ab:cd");
     }
 
     #[test]
-    fn parser_errors_on_missing_question() {
+    fn parser_errors_on_missing_id() {
         let secrets = vec![
             Secret { question: "Q1?".into(), name: "n1".into() },
             Secret { question: "Q2?".into(), name: "n2".into() },
         ];
-        let answer = "Q1?\nval-one";
-        let err = parse_answers(answer, &secrets).unwrap_err();
-        assert!(err.contains("missing answer for secret 'n2'"), "got: {err}");
+        let answer = "Q[n1]: Q1?\nA[n1]: only";
+        let err = call_parser(answer, &secrets).unwrap_err();
+        assert!(err.contains("missing answer for id 'n2'"), "got: {err}");
     }
 
     #[test]
@@ -569,24 +538,20 @@ mod tests {
             Secret { question: "Q1?".into(), name: "n1".into() },
             Secret { question: "Q2?".into(), name: "n2".into() },
         ];
-        // No newline-value between Q1? and Q2? → empty value for n1.
-        let answer = "Q1?\nQ2?\nv2";
-        let err = parse_answers(answer, &secrets).unwrap_err();
-        assert!(err.contains("empty value for secret 'n1'"), "got: {err}");
+        let answer = "Q[n1]: Q1?\nA[n1]: \nQ[n2]: Q2?\nA[n2]: v2";
+        let err = call_parser(answer, &secrets).unwrap_err();
+        assert!(err.contains("empty answer for A[n1]"), "got: {err}");
     }
 
-    #[test]
-    fn parser_errors_when_questions_out_of_order() {
-        let secrets = vec![
-            Secret { question: "FIRST?".into(), name: "n1".into() },
-            Secret { question: "SECOND?".into(), name: "n2".into() },
-        ];
-        // FIRST? appears at offset 12 in the string, after SECOND?.
-        // Parser anchors: finds FIRST? at pos 12, then searches for SECOND?
-        // starting from pos 18 → not found → errors on n2.
-        let answer = "SECOND?\nv2\nFIRST?\nv1";
-        let err = parse_answers(answer, &secrets).unwrap_err();
-        assert!(err.contains("missing answer for secret 'n2'"), "got: {err}");
+    // Adapter that calls the shared parser with the secrets' names as the
+    // expected id set.
+    fn call_parser(
+        answer: &str,
+        secrets: &[Secret],
+    ) -> Result<std::collections::HashMap<String, String>, String> {
+        use crate::dag_engine::infrastructure::nodes::qa_response_parser::parse_qa_response;
+        let ids: Vec<&str> = secrets.iter().map(|s| s.name.as_str()).collect();
+        parse_qa_response(answer, &ids).map_err(|e| e.to_string())
     }
 
     #[tokio::test]
@@ -603,7 +568,7 @@ mod tests {
         inputs.insert(
             "__colmena_resume_answer".into(),
             Value::String(
-                "Cliente ID?\nABC-CLI-ID\nCliente secret?\nXYZ-CLI-SEC".into(),
+                "Q[amadeus_client_id]: Cliente ID?\nA[amadeus_client_id]: ABC-CLI-ID\nQ[amadeus_client_secret]: Cliente secret?\nA[amadeus_client_secret]: XYZ-CLI-SEC".into(),
             ),
         );
 
@@ -655,7 +620,7 @@ mod tests {
         let mut inputs = inputs_with("ask", "sx");
         inputs.insert(
             "__colmena_resume_answer".into(),
-            Value::String("Token?\nnew-value".into()),
+            Value::String("Q[dup_token]: Token?\nA[dup_token]: new-value".into()),
         );
 
         let err = node
@@ -690,7 +655,7 @@ mod tests {
         let mut inputs = inputs_with_agent("ask", "ephemeral_session_a", "agent_demo_001");
         inputs.insert(
             "__colmena_resume_answer".into(),
-            Value::String("Token?\nreal-tok".into()),
+            Value::String("Q[tok]: Token?\nA[tok]: real-tok".into()),
         );
 
         let _out = node
@@ -724,7 +689,7 @@ mod tests {
         let mut inputs = inputs_with("ask", "session_only");
         inputs.insert(
             "__colmena_resume_answer".into(),
-            Value::String("Token?\nreal-tok".into()),
+            Value::String("Q[tok2]: Token?\nA[tok2]: real-tok".into()),
         );
 
         let _out = node
@@ -761,7 +726,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            format!("{err}").contains("missing answer for secret 'nxt'"),
+            format!("{err}").contains("missing answer for id 'nxt'"),
             "got: {err}"
         );
     }
@@ -809,7 +774,7 @@ mod tests {
         let mut inputs = inputs_with("ask", "sx");
         inputs.insert(
             "__colmena_resume_answer".into(),
-            Value::String(format!("Marker?\n{secret_marker}")),
+            Value::String(format!("Q[marker_secret]: Marker?\nA[marker_secret]: {secret_marker}")),
         );
         let mut state = Value::Null;
 
