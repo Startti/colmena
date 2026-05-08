@@ -191,6 +191,12 @@ impl ExecutableNode for SecureSuspendNode {
                         "secure_suspend: missing __colmena_session_id in inputs",
                     )
                 })?;
+            // Optional chat handle: when present, secrets are persisted *and*
+            // looked up agent-first so a fresh ephemeral session can still
+            // resolve them on resume.
+            let agent_session_id = inputs
+                .get("__colmena_agent_session_id")
+                .and_then(|v| v.as_str());
             let node_id = inputs
                 .get("__node_id")
                 .and_then(|v| v.as_str())
@@ -204,7 +210,7 @@ impl ExecutableNode for SecureSuspendNode {
                 let handle = format!("<sv_{}>", s.name);
                 if self
                     .secure_value_service
-                    .handle_exists(session_id, &handle)
+                    .handle_exists(session_id, agent_session_id, &handle)
                     .await
                     .map_err(|e| Box::<dyn Error + Send + Sync>::from(format!("{e}")))?
                 {
@@ -219,7 +225,7 @@ impl ExecutableNode for SecureSuspendNode {
             for (s, v) in secrets.iter().zip(values.iter()) {
                 let handle = self
                     .secure_value_service
-                    .persist_secret(session_id, node_id, &s.name, v)
+                    .persist_secret(session_id, agent_session_id, node_id, &s.name, v)
                     .await
                     .map_err(|e| Box::<dyn Error + Send + Sync>::from(format!("{e}")))?;
                 handles.insert(s.name.clone(), Value::String(handle));
@@ -286,14 +292,20 @@ mod tests {
     use std::sync::Mutex;
 
     /// Test double that records persist calls and supports exists.
+    /// Also captures the `agent_session_id` of the most recent persist so
+    /// propagation tests can assert it.
     pub(super) struct StubRepo {
         pub(super) storage: Mutex<HashMap<String, String>>,
+        pub(super) last_persist_agent: Mutex<Option<Option<String>>>,
+        pub(super) last_exists_agent: Mutex<Option<Option<String>>>,
     }
 
     impl StubRepo {
         pub(super) fn new() -> Arc<Self> {
             Arc::new(Self {
                 storage: Mutex::new(HashMap::new()),
+                last_persist_agent: Mutex::new(None),
+                last_exists_agent: Mutex::new(None),
             })
         }
     }
@@ -303,12 +315,14 @@ mod tests {
         async fn persist(
             &self,
             _session_id: &str,
-            _agent_session_id: Option<&str>,
+            agent_session_id: Option<&str>,
             _source_node_id: &str,
             hash_key: &str,
             real_value: &str,
             _field_name: &str,
         ) -> Result<(), DagError> {
+            *self.last_persist_agent.lock().unwrap() =
+                Some(agent_session_id.map(|s| s.to_string()));
             self.storage
                 .lock()
                 .unwrap()
@@ -326,9 +340,11 @@ mod tests {
         async fn exists(
             &self,
             _session_id: &str,
-            _agent_session_id: Option<&str>,
+            agent_session_id: Option<&str>,
             hash_key: &str,
         ) -> Result<bool, DagError> {
+            *self.last_exists_agent.lock().unwrap() =
+                Some(agent_session_id.map(|s| s.to_string()));
             Ok(self.storage.lock().unwrap().contains_key(hash_key))
         }
         async fn cleanup(&self, _session_id: &str) -> Result<(), DagError> {
@@ -352,6 +368,19 @@ mod tests {
         m.insert(
             "__colmena_session_id".into(),
             Value::String(session_id.into()),
+        );
+        m
+    }
+
+    pub(super) fn inputs_with_agent(
+        node_id: &str,
+        session_id: &str,
+        agent_session_id: &str,
+    ) -> NodeInputs {
+        let mut m = inputs_with(node_id, session_id);
+        m.insert(
+            "__colmena_agent_session_id".into(),
+            Value::String(agent_session_id.into()),
         );
         m
     }
@@ -646,6 +675,72 @@ mod tests {
                 .get("<sv_dup_token>")
                 .map(String::as_str),
             Some("preexisting")
+        );
+    }
+
+    /// Resume must forward `__colmena_agent_session_id` (when present in inputs)
+    /// to both `handle_exists` and `persist_secret` so cross-session lookup works.
+    #[tokio::test]
+    async fn resume_forwards_agent_session_id_to_repo() {
+        let (node, repo) = build_node();
+        let mut state = Value::Null;
+        let cfg = json!({
+            "secrets": [{ "question": "Token?", "name": "tok" }]
+        });
+        let mut inputs = inputs_with_agent("ask", "ephemeral_session_a", "agent_demo_001");
+        inputs.insert(
+            "__colmena_resume_answer".into(),
+            Value::String("Token?\nreal-tok".into()),
+        );
+
+        let _out = node
+            .execute(&inputs, &cfg, &mut state, None)
+            .await
+            .unwrap();
+
+        // exists() must have been called with the agent_session_id.
+        assert_eq!(
+            repo.last_exists_agent.lock().unwrap().as_ref().unwrap(),
+            &Some("agent_demo_001".to_string()),
+            "handle_exists must receive agent_session_id from inputs"
+        );
+        // persist() must have been called with the same agent_session_id.
+        assert_eq!(
+            repo.last_persist_agent.lock().unwrap().as_ref().unwrap(),
+            &Some("agent_demo_001".to_string()),
+            "persist_secret must receive agent_session_id from inputs"
+        );
+    }
+
+    /// When `__colmena_agent_session_id` is absent, resume must pass `None`
+    /// to the repo (legacy session-only behavior).
+    #[tokio::test]
+    async fn resume_without_agent_session_id_passes_none() {
+        let (node, repo) = build_node();
+        let mut state = Value::Null;
+        let cfg = json!({
+            "secrets": [{ "question": "Token?", "name": "tok2" }]
+        });
+        let mut inputs = inputs_with("ask", "session_only");
+        inputs.insert(
+            "__colmena_resume_answer".into(),
+            Value::String("Token?\nreal-tok".into()),
+        );
+
+        let _out = node
+            .execute(&inputs, &cfg, &mut state, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repo.last_exists_agent.lock().unwrap().as_ref().unwrap(),
+            &None,
+            "handle_exists must receive None when agent_session_id is absent"
+        );
+        assert_eq!(
+            repo.last_persist_agent.lock().unwrap().as_ref().unwrap(),
+            &None,
+            "persist_secret must receive None when agent_session_id is absent"
         );
     }
 

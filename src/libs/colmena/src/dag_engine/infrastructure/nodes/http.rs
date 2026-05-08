@@ -238,7 +238,9 @@ impl ExecutableNode for HttpNode {
             "authorization",
             "secure", // internal Colmena flag — NEVER send to external APIs
             "__colmena_session_id",
+            "__colmena_agent_session_id",
             "__node_id",
+            "__colmena_node_id_path",
             "__colmena_resume_answer",
         ];
         let mut extra_params = std::collections::HashMap::new();
