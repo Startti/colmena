@@ -159,6 +159,17 @@ impl DagToolExecutor {
         self
     }
 
+    /// Builder: set the session_id without attaching a SecureValueService.
+    ///
+    /// This is useful when the engine has a session context but no secrets
+    /// store configured. `__colmena_session_id` will still be injected into
+    /// every tool's `inputs` map so that nodes like `secure_suspend` can
+    /// find it on the resume path.
+    pub fn with_session_id(mut self, session_id: String) -> Self {
+        self.session_id = Some(session_id);
+        self
+    }
+
     /// Attach a SkillRepository so `load_skill` tool calls are handled.
     pub fn with_skills(
         mut self,
@@ -817,6 +828,17 @@ impl DagToolExecutor {
             inputs.insert(
                 "__colmena_resume_answer".to_string(),
                 Value::String(ans.to_string()),
+            );
+        }
+
+        // Always inject __colmena_session_id so every tool dispatch — including
+        // secure_suspend on its resume path — can find the session without relying
+        // on the caller to pass it through fixed_config or LLM arguments.
+        // The engine's value is authoritative and overwrites any caller-supplied one.
+        if let Some(sid) = &self.session_id {
+            inputs.insert(
+                "__colmena_session_id".to_string(),
+                Value::String(sid.clone()),
             );
         }
 
@@ -1993,6 +2015,57 @@ mod tests {
         assert!(
             output.get("__colmena_resume_answer").is_none(),
             "plain execute must not inject __colmena_resume_answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_inner_injects_session_id_into_node_inputs() {
+        // Build an executor with a known session_id and verify that every tool
+        // dispatch — including plain `execute` — receives __colmena_session_id
+        // in its inputs map.  This is the uniform-contract guarantee that allows
+        // secure_suspend (and similar nodes) to find the session on the resume path.
+        let registry = Arc::new(MockRegistry::new());
+        let executor = DagToolExecutor::new(registry, HashMap::new())
+            .with_session_id("session_xyz".to_string());
+
+        let tool_call = ToolCall::new(
+            "call_sid".to_string(),
+            FunctionCall::new("mock_tool".to_string(), r#"{"a": "value"}"#.to_string()),
+        );
+
+        let result = executor.execute(&tool_call).await.unwrap();
+        assert!(result.success);
+
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+        // The original arg must still be present.
+        assert_eq!(output["a"], "value");
+        // The session_id must have been injected under the reserved key.
+        assert_eq!(
+            output["__colmena_session_id"],
+            "session_xyz",
+            "execute_inner must inject __colmena_session_id from self.session_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_inner_does_not_inject_session_id_when_none() {
+        // When no session_id is configured (executor built without with_session_id or
+        // with_secure_values), __colmena_session_id must NOT appear in the inputs.
+        let registry = Arc::new(MockRegistry::new());
+        let executor = DagToolExecutor::new(registry, HashMap::new());
+
+        let tool_call = ToolCall::new(
+            "call_no_sid".to_string(),
+            FunctionCall::new("mock_tool".to_string(), r#"{"b": "no_session"}"#.to_string()),
+        );
+
+        let result = executor.execute(&tool_call).await.unwrap();
+        assert!(result.success);
+
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+        assert!(
+            output.get("__colmena_session_id").is_none(),
+            "execute_inner must not inject __colmena_session_id when session_id is None"
         );
     }
 }
