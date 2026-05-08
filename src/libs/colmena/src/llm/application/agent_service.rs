@@ -267,6 +267,30 @@ impl AgentService {
                         },
                     };
 
+                    // Detect SUSPENDED before persisting the tool message.
+                    // The assistant message (with tool_calls) was already persisted above
+                    // (step B), so the resume path can walk the history to find the pending
+                    // tool call. We must NOT persist the tool result — we don't have one yet.
+                    if let Ok(parsed) =
+                        serde_json::from_str::<serde_json::Value>(&result.output)
+                    {
+                        if parsed
+                            .get("__colmena_status")
+                            .and_then(|v| v.as_str())
+                            == Some("SUSPENDED")
+                        {
+                            let questions = parsed
+                                .get("questions")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
+                            return Ok(LlmResponse::suspended(
+                                result.tool_call_id.clone(),
+                                questions,
+                                result.output.clone(),
+                            ));
+                        }
+                    }
+
                     // Populate tool call output tracker
                     let parsed_output = serde_json::from_str::<serde_json::Value>(&result.output)
                         .unwrap_or_else(|_| serde_json::Value::String(result.output.clone()));
@@ -656,5 +680,101 @@ mod tests {
             result,
             Err(LlmError::MaxIterationsReached { max: 3 })
         ));
+    }
+
+    /// When a tool returns `__colmena_status: "SUSPENDED"` the agent service must
+    /// stop iterating, persist only the assistant message (not a tool message), and
+    /// return an `LlmResponse` whose `suspend()` is `Some`.
+    #[tokio::test]
+    async fn detects_suspended_tool_result_and_short_circuits() {
+        let mut mock_llm = MockLlmRepo::new();
+        let mut mock_conv = MockConversationRepo::new();
+        let mut mock_tool_exec = MockToolExec::new();
+
+        let key = test_key();
+        let prompt = "hello".to_string();
+
+        // Conversation starts empty
+        mock_conv
+            .expect_get_by_id()
+            .times(1)
+            .returning(|k| {
+                Ok(Conversation {
+                    key: k.clone(),
+                    messages: vec![],
+                })
+            });
+
+        // Exactly 2 add_message calls:
+        //   1. user message
+        //   2. assistant message (with tool_calls) — already persisted before the tool loop
+        // The tool result must NOT be persisted (we short-circuit before that).
+        mock_conv
+            .expect_add_message()
+            .times(2)
+            .returning(|_, _| Ok(()));
+
+        // LLM returns a response with one tool call
+        mock_llm.expect_call().times(1).returning(|_| {
+            let tool_call = ToolCall {
+                id: "call_xyz".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "suspend_tool".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                response: None,
+            };
+            Ok(LlmResponse::new(
+                LlmRequestId::from_string("req-susp".to_string()).unwrap(),
+                "".to_string(),
+                LlmProvider::new(
+                    ProviderKind::OpenAi,
+                    "key".to_string(),
+                    Some("gpt-4".to_string()),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .with_tool_calls(vec![tool_call]))
+        });
+
+        // Tool executor returns a SUSPENDED payload
+        mock_tool_exec.expect_execute().times(1).returning(|call| {
+            Ok(ToolResult {
+                tool_call_id: call.id.clone(),
+                success: true,
+                output: r#"{"__colmena_status":"SUSPENDED","questions":[{"id":"q1","question":"x?","type":"secret"}]}"#
+                    .to_string(),
+                error: None,
+            })
+        });
+
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+
+        let result = service
+            .run(AgentRunParams {
+                session_id: &key,
+                prompt: Some(prompt),
+                messages: None,
+                config: create_config(),
+                tools: vec![],
+                tool_executor: &mock_tool_exec,
+                max_iterations: None,
+                on_token: None,
+                tools_provider: None,
+            })
+            .await;
+
+        assert!(result.is_ok(), "run must succeed: {:?}", result.err());
+        let response = result.unwrap();
+
+        // Must carry suspend info
+        let suspend = response.suspend().expect("response must have suspend info");
+        assert_eq!(suspend.tool_call_id, "call_xyz");
+
+        let questions = suspend.questions.as_array().expect("questions must be an array");
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0]["id"], "q1");
     }
 }
