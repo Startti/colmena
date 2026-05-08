@@ -374,6 +374,7 @@ impl DagRunUseCase {
                 let mut inputs = self.build_inputs_for(&node_id, &graph.edges, &all_outputs, &graph)?;
 
                 // STEP 1: Inject secrets for non-LLM nodes (before executing)
+                let mut node_config_value = node_config.config.clone();
                 if node_config.node_type != "llm" {
                     if let Some(svc) = &self.secure_value_service {
                         let mut inputs_value = serde_json::to_value(&inputs)
@@ -383,6 +384,16 @@ impl DagRunUseCase {
                         }
                         if let Ok(injected_inputs) = serde_json::from_value::<NodeInputs>(inputs_value) {
                             inputs = injected_inputs;
+                        }
+                        // Config secrets are stored at the agent/workspace level
+                        // (identified by active_agent_session_id when available),
+                        // so look them up using that identifier rather than the
+                        // ephemeral per-run session_id.
+                        let config_secret_session = active_agent_session_id
+                            .as_deref()
+                            .unwrap_or(&session_id);
+                        if let Err(e) = svc.inject_secrets(&mut node_config_value, config_secret_session).await {
+                            eprintln!("⚠️ Failed to inject secrets in config: {}", e);
                         }
                     }
                 }
@@ -439,14 +450,14 @@ impl DagRunUseCase {
                     node_id: node_id.clone(),
                     node_type: node_config.node_type.clone(),
                     inputs: serde_json::to_value(&inputs).unwrap_or(Value::Null),
-                    config: node_config.config.clone(),
+                    config: node_config_value.clone(),
                 };
 
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
                 let observer = Arc::new(ChannelObserver { tx });
 
                 let output = {
-                    let execution_future = node_impl.execute(&inputs, &node_config.config, &mut global_shared_state, Some(observer));
+                    let execution_future = node_impl.execute(&inputs, &node_config_value, &mut global_shared_state, Some(observer));
                     tokio::pin!(execution_future);
 
                     let mut output_opt = None;
