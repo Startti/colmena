@@ -46,6 +46,7 @@
                             "ask_user": {
                               "type": "suspend",
                               "config": {
+                                "id": "confirm_meeting",
                                 "question": "Please confirm: shall we schedule the meeting for Tuesday at 10am?"
                               }
                             },

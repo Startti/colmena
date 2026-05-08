@@ -17,6 +17,7 @@
             "ask_user": {
               "type": "suspend",
               "config": {
+                "id": "confirm_transfer",
                 "question": "¿Confirmás la transferencia de $100?"
               }
             },

@@ -9,6 +9,7 @@
     "controller": {
       "type": "suspend",
       "config": {
+        "id": "approve_continue",
         "question": "¿Apruebas continuar con el proceso?"
       }
     },

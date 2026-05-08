@@ -9,6 +9,7 @@
     "ask": {
       "type": "suspend",
       "config": {
+        "id": "manual_input",
         "question": "Provide some manual input"
       }
     },
