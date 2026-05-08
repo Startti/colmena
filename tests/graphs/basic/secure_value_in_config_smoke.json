@@ -1,0 +1,17 @@
+{
+  "comment": "Smoke test for inject_secrets on config. The log node's config contains a handle <sv_smoke>; if the engine's inject_secrets covers config, the log node will see the real value 'smoke-value-xyz' (pre-populated by the test setup). If not, it sees the handle literal.",
+  "metadata": {
+    "category": "basic",
+    "features": ["secure_values", "inject_in_config"],
+    "requires_env": ["DATABASE_URL"]
+  },
+  "nodes": {
+    "show": {
+      "type": "log",
+      "config": {
+        "marker_field": "<sv_smoke>"
+      }
+    }
+  },
+  "edges": []
+}
