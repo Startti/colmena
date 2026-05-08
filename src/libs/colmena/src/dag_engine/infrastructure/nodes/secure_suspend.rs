@@ -646,4 +646,65 @@ mod tests {
             "got: {err}"
         );
     }
+
+    /// Regression guard: the resume path must never emit the real secret value
+    /// through `tracing`, regardless of log level.  If a future maintainer adds
+    /// a `tracing::info!("answer = {answer}")` style line this test will catch it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn resume_does_not_log_real_values() {
+        use std::io::Write;
+        use std::sync::Mutex as StdMutex;
+        use tracing_subscriber::fmt;
+
+        /// Writer that buffers everything emitted by tracing.
+        #[derive(Clone, Default)]
+        struct BufWriter(std::sync::Arc<StdMutex<Vec<u8>>>);
+        impl<'a> fmt::MakeWriter<'a> for BufWriter {
+            type Writer = BufWriterHandle;
+            fn make_writer(&'a self) -> Self::Writer {
+                BufWriterHandle(self.0.clone())
+            }
+        }
+        struct BufWriterHandle(std::sync::Arc<StdMutex<Vec<u8>>>);
+        impl Write for BufWriterHandle {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buf = BufWriter::default();
+        let subscriber = fmt::Subscriber::builder()
+            .with_writer(buf.clone())
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+
+        let secret_marker = "SUPER_SECRET_MARKER_qwerty12345";
+        let cfg = json!({
+            "secrets": [{ "question": "Marker?", "name": "marker_secret" }]
+        });
+        let (node, _repo) = build_node();
+        let mut inputs = inputs_with("ask", "sx");
+        inputs.insert(
+            "__colmena_resume_answer".into(),
+            Value::String(format!("Marker?\n{secret_marker}")),
+        );
+        let mut state = Value::Null;
+
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let _out = node
+            .execute(&inputs, &cfg, &mut state, None)
+            .await
+            .unwrap();
+        drop(_guard);
+
+        let captured = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            !captured.contains(secret_marker),
+            "secret leaked into tracing: {captured}"
+        );
+    }
 }
