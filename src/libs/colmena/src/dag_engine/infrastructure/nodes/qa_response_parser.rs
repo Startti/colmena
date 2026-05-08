@@ -278,9 +278,70 @@ mod tests {
     fn errors_on_orphan_q_without_a() {
         let input = "Q[x]: hi";
         let err = parse_qa_response(input, &["x"]).unwrap_err();
+        match err {
+            QaParseError::OrphanQuestion { id } => assert_eq!(id, "x"),
+            other => panic!("expected OrphanQuestion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_id_accepts_valid_chars() {
+        assert!(validate_id("abc").is_ok());
+        assert!(validate_id("ABC123_x-y").is_ok());
+        assert!(validate_id("a").is_ok());
+        assert!(validate_id(&"x".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn validate_id_rejects_invalid() {
         assert!(matches!(
-            err,
-            QaParseError::OrphanQuestion { .. } | QaParseError::MissingId { .. }
+            validate_id(""),
+            Err(QaParseError::InvalidIdSyntax { .. })
         ));
+        assert!(matches!(
+            validate_id(&"x".repeat(65)),
+            Err(QaParseError::InvalidIdSyntax { .. })
+        ));
+        assert!(matches!(
+            validate_id("bad space"),
+            Err(QaParseError::InvalidIdSyntax { .. })
+        ));
+        assert!(matches!(
+            validate_id("with.dot"),
+            Err(QaParseError::InvalidIdSyntax { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_prefix_at_finds_q_prefix() {
+        let input = "Q[abc]: rest";
+        let (kind, id, after) = parse_prefix_at(input, 0).unwrap();
+        assert_eq!(kind, 'Q');
+        assert_eq!(id, "abc");
+        assert_eq!(after, 7); // byte just past the colon
+    }
+
+    #[test]
+    fn parse_prefix_at_finds_a_prefix() {
+        let input = "A[xyz]: body";
+        let (kind, id, _) = parse_prefix_at(input, 0).unwrap();
+        assert_eq!(kind, 'A');
+        assert_eq!(id, "xyz");
+    }
+
+    #[test]
+    fn parse_prefix_at_returns_none_for_non_prefix() {
+        assert!(parse_prefix_at("hello", 0).is_none());
+        assert!(parse_prefix_at("Q without bracket", 0).is_none());
+        assert!(parse_prefix_at("Q[unclosed", 0).is_none());
+        assert!(parse_prefix_at("Q[id] no colon", 0).is_none());
+    }
+
+    #[test]
+    fn parse_prefix_at_aborts_on_newline_in_brackets() {
+        // The closing `]` lookup must abort if a `\n` appears first, so a
+        // line like "Q[" doesn't gobble the next line's text as the id.
+        let input = "Q[\nA[x]: body";
+        assert!(parse_prefix_at(input, 0).is_none());
     }
 }
