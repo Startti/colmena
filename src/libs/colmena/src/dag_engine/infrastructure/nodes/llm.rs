@@ -1127,7 +1127,7 @@ impl ExecutableNode for LlmNode {
         // Create AgentService parameters
         let params = crate::llm::application::AgentRunParams {
             session_id: &conversation_key,
-            prompt: prompt.to_string(),
+            prompt: Some(prompt.to_string()),
             messages: Some(messages.clone()),
             config: llm_config,
             tools,

@@ -13,7 +13,7 @@ pub type ToolsProvider = Box<dyn Fn(&[LlmMessage]) -> Vec<ToolDefinition> + Send
 /// Parameters for running the agent
 pub struct AgentRunParams<'a> {
     pub session_id: &'a ConversationKey,
-    pub prompt: String,
+    pub prompt: Option<String>,
     pub messages: Option<Vec<LlmMessage>>,
     pub config: LlmConfig,
     pub tools: Vec<ToolDefinition>,
@@ -71,6 +71,8 @@ impl AgentService {
         let mut messages = conversation.messages;
 
         // 2. Add user prompt (or pre-built messages)
+        //    When `prompt` is `None` and `messages` is `None`, we continue from
+        //    whatever is already in the conversation (resume path).
         if let Some(custom_messages) = params.messages {
             for custom_msg in custom_messages {
                 messages.push(custom_msg.clone());
@@ -78,13 +80,14 @@ impl AgentService {
                     .add_message(session_id, custom_msg)
                     .await?;
             }
-        } else {
-            let user_message = LlmMessage::user(prompt)?;
+        } else if let Some(p) = prompt {
+            let user_message = LlmMessage::user(p)?;
             messages.push(user_message.clone());
             self.conversation_repository
                 .add_message(session_id, user_message)
                 .await?;
         }
+        // else: prompt is None — continue from existing history (resume path)
 
         let mut cumulative_usage = LlmUsage::default();
         let mut all_tool_calls_executed = Vec::new();
@@ -406,7 +409,7 @@ mod tests {
         let result = service
             .run(AgentRunParams {
                 session_id: &key,
-                prompt,
+                prompt: Some(prompt),
                 messages: None,
                 config: create_config(),
                 tools: vec![],
@@ -507,7 +510,7 @@ mod tests {
         let result = service
             .run(AgentRunParams {
                 session_id: &key,
-                prompt,
+                prompt: Some(prompt),
                 messages: None,
                 config: create_config(),
                 tools: vec![], // Tools list doesn't matter for mock
@@ -520,6 +523,66 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap().content(), "The answer is 4");
+    }
+
+    /// When `prompt` is `None` and existing messages are already in the
+    /// conversation, the agent must continue from those messages WITHOUT
+    /// pushing a new user message into the conversation.
+    #[tokio::test]
+    async fn run_with_no_prompt_continues_from_existing_messages() {
+        let mut mock_llm = MockLlmRepo::new();
+        let mut mock_conv = MockConversationRepo::new();
+        let mock_tool_exec = MockToolExec::new();
+
+        let key = test_key();
+
+        // Conversation already has a prior user message (simulating resume)
+        mock_conv.expect_get_by_id().times(1).returning(|k| {
+            Ok(Conversation {
+                key: k.clone(),
+                messages: vec![LlmMessage::user("original question".to_string()).unwrap()],
+            })
+        });
+
+        // Only the assistant reply must be persisted — no new user message
+        mock_conv
+            .expect_add_message()
+            .times(1) // exactly 1: the assistant response
+            .returning(|_, _| Ok(()));
+
+        // LLM returns a simple final answer
+        mock_llm.expect_call().times(1).returning(|_| {
+            Ok(LlmResponse::new(
+                LlmRequestId::from_string("req-resume".to_string()).unwrap(),
+                "Resumed answer".to_string(),
+                LlmProvider::new(
+                    ProviderKind::OpenAi,
+                    "key".to_string(),
+                    Some("gpt-4".to_string()),
+                )
+                .unwrap(),
+            )
+            .unwrap())
+        });
+
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+
+        let result = service
+            .run(AgentRunParams {
+                session_id: &key,
+                prompt: None,
+                messages: None,
+                config: create_config(),
+                tools: vec![],
+                tool_executor: &mock_tool_exec,
+                max_iterations: None,
+                on_token: None,
+                tools_provider: None,
+            })
+            .await;
+
+        assert!(result.is_ok(), "run with None prompt must succeed");
+        assert_eq!(result.unwrap().content(), "Resumed answer");
     }
 
     #[tokio::test]
@@ -578,7 +641,7 @@ mod tests {
         let result = service
             .run(AgentRunParams {
                 session_id: &key,
-                prompt: "Loop me".to_string(),
+                prompt: Some("Loop me".to_string()),
                 messages: None,
                 config: create_config(),
                 tools: vec![],

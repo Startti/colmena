@@ -194,7 +194,7 @@ impl ExecutableNode for ExtractionNode {
 
         let params = crate::llm::application::AgentRunParams {
             session_id: &tid,
-            prompt: String::new(), // We already prepopulated messages
+            prompt: None, // messages already pre-populated
             messages: Some(messages),
             config: llm_config,
             tools: vec![],

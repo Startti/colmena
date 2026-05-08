@@ -377,7 +377,7 @@ impl ExecutableNode for PlannerNode {
 
         let params = crate::llm::application::AgentRunParams {
             session_id: &tid,
-            prompt: String::new(),
+            prompt: None, // messages already pre-populated
             messages: Some(messages),
             config: llm_config,
             tools: vec![],
