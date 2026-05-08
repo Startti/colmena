@@ -6,12 +6,19 @@
 
 ## Contexto
 
-El meta-agente "canvas builder" (ver `tests/graphs/external/socketio_canvas_builder.json`) construye grafos de ADP para el usuario. Cuando un grafo nuevo necesita autenticarse contra una API externa (HubSpot, Stripe, etc.), el meta-agente debe poner un token en el campo `bearerToken` del nodo `apiCall` que está creando.
+El meta-agente "canvas builder" (ver `tests/graphs/external/socketio_canvas_builder.json`) construye grafos de ADP para el usuario. Cuando un grafo nuevo necesita autenticarse contra una API externa, el meta-agente debe colocar credenciales del usuario en algún campo de los nodos que crea. Las formas de auth varían:
+
+- **Token estático en header.** El más simple — un bearer token o `X-API-Key` en `headers` o `bearerToken` del `apiCall` (caso típico HubSpot Private App, Stripe).
+- **Par de credenciales en body para intercambio OAuth.** El usuario provee `client_id` + `client_secret`, el grafo los manda en el body form-urlencoded de un POST `/oauth2/token` (`secure: true`), recibe un access token de corta vida, y lo enchufa a las tools downstream vía `${context.X}` — patrón implementado en `tests/graphs/advanced/trip_assistant.json` para Amadeus.
+- **Credenciales en query string.** Algunas APIs viejas piden `?api_key=...`.
+- **Connection string en `databaseQuery`.** Password embebido en una URL Postgres.
+
+En todos los casos el flujo de **recolección** del valor desde el usuario es el mismo, y en todos el flujo de **inyección** al ejecutar el nodo no-LLM ya está resuelto por `SecureValueService::inject_secrets`. Lo que falta es el puente entre ambos: un nodo que el meta-agente pueda invocar como tool LLM para preguntar al usuario y obtener un handle.
 
 Hoy las dos únicas opciones son:
 
 1. Que el meta-agente use `${ENV_VAR}` y delegar al usuario definir esa variable fuera de banda. No es operable: el meta-agente no puede recolectar el secreto en la conversación.
-2. Que el meta-agente le pida el token al usuario por chat. El valor pasa por el contexto del LLM y por logs. Inaceptable.
+2. Que el meta-agente le pida el secreto al usuario por chat. El valor pasa por el contexto del LLM y por logs. Inaceptable.
 
 Lo que sí tenemos en Colmena: `SecureValueService` (`src/libs/colmena/src/dag_engine/application/secure_value_service.rs`) ya guarda valores cifrados y los inyecta automáticamente cuando un nodo no-LLM recibe un input con un placeholder de la forma `<...>`. Ese mecanismo lo usa hoy `http_request` con `secure: true` para hashear respuestas.
 
@@ -113,7 +120,7 @@ El nodo se expone en `tool_configurations` así:
   "ask_secret": {
     "name": "ask_secret",
     "node_type": "secure_suspend",
-    "description": "Ask the user for a SECRET (API token, password, private key) needed to authenticate against an external service. The user's answer is stored encrypted; you only get back a HANDLE of the form `<sv_<name>>` that you can paste into the bearerToken / Authorization header / any auth field of an apiCall node. NEVER ask the user for secrets via plain text — always use this tool. Compose the question as a short, specific request: name the service and what kind of credential. Examples of good questions: 'Pega el HubSpot private app token (empieza con \"pat-\").', 'Cuál es la API key de Stripe en modo live?'. Bad questions: 'dame tu token', 'qué credencial uso?'.",
+    "description": "Ask the user for ONE secret (API token, password, client_id, client_secret, etc.) needed to authenticate against an external service. The answer is stored encrypted; you receive only a HANDLE of the form `<sv_<name>>` which you paste into ANY field of any non-LLM node — `bearerToken`, an entry inside `headers`, a value inside an object-form `body`, a `query_params` value, a Postgres connection string, etc. The handle is replaced by the real value at execution time, never by you. NEVER ask the user for secrets via plain chat messages — always use this tool. Multi-secret flows (e.g. OAuth client_id + client_secret for Amadeus, AWS access_key + secret_key) require ONE call PER secret in sequence. Compose each question as a short, specific request: name the service and what kind of credential. Good: 'Pega el HubSpot private app token (empieza con \"pat-\").', 'Cuál es tu Amadeus client_id?'. Bad: 'dame tu token', 'qué credencial uso?'. IMPORTANT placement rule: the handle must appear as a complete string value, never embedded inside a longer string. So for OAuth bodies use object form `{ \"client_id\": \"<sv_xxx>\", \"client_secret\": \"<sv_yyy>\" }` — NOT urlencoded `\"client_id=<sv_xxx>&client_secret=<sv_yyy>\"`, which the runtime cannot inject into.",
     "node_schema": {
       "question": {
         "type": "string",
@@ -135,6 +142,47 @@ Notas importantes:
 - La `description` arriba es **prescriptiva**: dice cuándo llamar el tool y cómo redactar la pregunta. Esto es lo que el usuario explícitamente pidió: "cuando se agregue como una tool debe tener una descripción específica de cuándo llamarlo y cómo debe componer las preguntas".
 - `node_schema` solo expone `question` y `name`. No hay forma de que el LLM pase un valor de secreto.
 - Esta plantilla se incluye en el spec del par de grafos canvas-builder (Spec 2) y en la skill `adp-node-catalog` (Spec 3).
+
+## Patrones de uso comunes
+
+### Patrón 1 — Token estático en header (HubSpot, Stripe simple)
+
+Una sola llamada a `ask_secret`. El handle va a `bearerToken` o a una entrada de `headers`.
+
+```jsonc
+"bearerToken": "<sv_hubspot_private_token>"
+// o
+"headers": { "X-API-Key": "<sv_stripe_secret>" }
+```
+
+### Patrón 2 — Intercambio OAuth con par de credenciales (Amadeus)
+
+El meta-agente hace **dos llamadas consecutivas** a `ask_secret` (una para `client_id`, otra para `client_secret`). Luego construye dos nodos:
+
+1. Un `apiCall` que POSTea a `/oauth2/token` con el par de credenciales en body **forma objeto** (no string urlencoded), `secure: true`. El output `access_token` se hashea automáticamente como `<value_N>` por la lógica existente de `SecureValueService::hash_output`.
+2. Un segundo `apiCall` para la API de negocio (`/v2/shopping/flight-offers`, etc.) cuyo `bearerToken` recibe el `access_token` por edge desde el primer nodo, ya con la inyección automática.
+
+```jsonc
+// Nodo OAuth — recolectado por dos ask_secret previos
+{
+  "url": "https://api.amadeus.com",
+  "endpoint": "/v1/security/oauth2/token",
+  "method": "POST",
+  "secure": true,
+  "headers": { "Content-Type": "application/x-www-form-urlencoded" },
+  "body": {
+    "grant_type": "client_credentials",
+    "client_id": "<sv_amadeus_client_id>",
+    "client_secret": "<sv_amadeus_client_secret>"
+  }
+}
+```
+
+Pre-condición: el nodo `http_request` debe serializar un body de forma `application/x-www-form-urlencoded` cuando el `Content-Type` lo indica y el body es objeto. Esto se valida en el plan de implementación; si no lo hace hoy es un bug separado del nodo HTTP, no de `secure_suspend`.
+
+### Patrón 3 — Connection string de DB
+
+Una llamada a `ask_secret` con `name: "main_db_url"`, el handle va al campo `connection_url` de un `databaseQuery`. Mismo mecanismo.
 
 ## Flujo end-to-end
 
@@ -255,6 +303,8 @@ Esto se confirma en el plan de implementación, no aquí.
 - Promoción de secretos a un scope mayor que `session_id` (workspace, environment). Si las pruebas confirman que se necesita, se aborda en un spec separado.
 - Cambios al UX de ADP para detectar `questions[].type == "secret"` y renderizar input enmascarado. Esto es una mejora pero no bloquea el funcionamiento (el valor sigue siendo seguro porque jamás vuelve al LLM).
 - Limpieza/expiración explícita de handles. Ya existe `SecureValueRepository::cleanup_expired`; este spec asume que la política actual es suficiente.
+- **Variante batch multi-pregunta** (`ask_secret` que toma una lista `[{question, name}, ...]` y emite N preguntas en una sola pausa). Mejora UX para flujos OAuth pero requiere extender el protocolo de resume (`__colmena_resume_answer` hoy es string único) y el flag `--answer` del CLI. Para este spec el LLM hace N llamadas consecutivas.
+- **Inyección por substring dentro de strings más largas.** El `inject_secrets` actual solo reemplaza valores que son exactamente un placeholder (`<sv_…>`), no busca dentro de cadenas. Esto fuerza al meta-agente a usar bodies/headers en forma objeto. Si en uso real esta restricción molesta, se aborda en un spec aparte sobre `SecureValueService`. La descripción del tool LLM lo enseña explícitamente.
 
 ## Cambios concretos al repo
 
