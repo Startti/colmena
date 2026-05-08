@@ -9,7 +9,7 @@ Punteros a la documentación específica de las capacidades más usadas al const
 Carga progresiva del schema de tools en `llm_call` vía el tool sintético `describe_tool` — el modelo recibe un catálogo ligero `name + summary` y revela schemas completos on-demand.
 
 - **Guía:** [`docs/developer_guide/29_lazy_tool_loading.md`](developer_guide/29_lazy_tool_loading.md)
-- **Spec:** [`docs/superpowers/specs/2026-04-25-lazy-tool-loading-design.md`](superpowers/specs/2026-04-25-lazy-tool-loading-design.md) (si existe; si no, el código es la fuente)
+- **Spec:** [`docs/superpowers/specs/2026-05-03-lazy-tool-loading-design.md`](superpowers/specs/2026-05-03-lazy-tool-loading-design.md)
 - **Configuración por tool**: `summary` y `eager` en `tool_configurations`. SSE: `tool-described` events; final summary: `tools_discovered`.
 
 ---
