@@ -34,6 +34,44 @@ use std::sync::Weak;
 /// specific facts that are not present in the conversation.
 const LLM_DEFAULT_SYSTEM: &str = include_str!("prompts/llm_default_system.md");
 
+/// Walk a message history and return the first `ToolCall` from the latest
+/// `Assistant` message-with-tool_calls that has NO matching `Tool` message
+/// (by `tool_call_id`) appearing later in the list.
+///
+/// Used by the resume path: when the LLM node is re-entered with
+/// `__colmena_resume_answer`, the previous run persisted an assistant message
+/// containing the SUSPENDED tool call but did not persist a tool result for it.
+/// This function returns that pending call so the executor can dispatch it
+/// with the resume answer.
+fn find_pending_tool_call(messages: &[crate::llm::domain::LlmMessage]) -> Option<crate::llm::domain::ToolCall> {
+    use crate::llm::domain::MessageRole;
+
+    // Collect every tool_call_id that already has a Tool message somewhere in
+    // the history. Order does not matter — a tool result can only follow its
+    // assistant call by construction, so any matching Tool message means the
+    // call is resolved.
+    let resolved: std::collections::HashSet<&str> = messages
+        .iter()
+        .filter(|m| m.role() == &MessageRole::Tool)
+        .filter_map(|m| m.tool_call_id())
+        .collect();
+
+    // Scan from the END so we get the LATEST pending call.
+    for msg in messages.iter().rev() {
+        if msg.role() != &MessageRole::Assistant {
+            continue;
+        }
+        if let Some(calls) = msg.tool_calls() {
+            for call in calls {
+                if !resolved.contains(call.id.as_str()) {
+                    return Some(call.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone)]
 struct SkillLoadedLogEntry {
     skill_name: String,
@@ -305,8 +343,19 @@ impl ExecutableNode for LlmNode {
             .or_else(|| config.get("model").and_then(|v| v.as_str()))
             .map(|s| s.to_string());
 
+        // Resume detection — when the run_use_case re-enters this node after a
+        // SUSPENDED tool call, it injects `__colmena_resume_answer`. In that case
+        // a fresh `prompt` is not required: the conversation is continued from the
+        // persisted history and the user's answer is threaded into the pending
+        // tool call instead of starting a new turn.
+        let resume_answer: Option<String> = inputs
+            .get("__colmena_resume_answer")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         // Prompt — accepts string OR any JSON value (arrays, objects are serialized).
         // This allows the synthesizer to receive `final_result` (a JSON array) directly.
+        // On resume, the prompt may be missing/empty — that is allowed.
         let prompt_raw_str: String;
         let prompt: &str = {
             let val = inputs
@@ -318,28 +367,37 @@ impl ExecutableNode for LlmNode {
                 Some(Value::String(s)) => {
                     prompt_raw_str = Self::resolve_template_vars(s, inputs);
                     if prompt_raw_str.is_empty() {
+                        if resume_answer.is_some() {
+                            ""
+                        } else {
+                            let node_name = inputs
+                                .get("__node_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("(unknown)");
+                            colmena_log!(
+                                "⚠️ [LlmNode] Skipped (prompt resolved to empty) — node: \"{}\"",
+                                node_name
+                            );
+                            return Ok(Value::Null);
+                        }
+                    } else {
+                        &prompt_raw_str
+                    }
+                }
+                Some(Value::Null) | None => {
+                    if resume_answer.is_some() {
+                        ""
+                    } else {
                         let node_name = inputs
                             .get("__node_id")
                             .and_then(|v| v.as_str())
                             .unwrap_or("(unknown)");
                         colmena_log!(
-                            "⚠️ [LlmNode] Skipped (prompt resolved to empty) — node: \"{}\"",
+                            "⚠️ [LlmNode] Skipped (not active this turn) — node: \"{}\"",
                             node_name
                         );
                         return Ok(Value::Null);
                     }
-                    &prompt_raw_str
-                }
-                Some(Value::Null) | None => {
-                    let node_name = inputs
-                        .get("__node_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("(unknown)");
-                    colmena_log!(
-                        "⚠️ [LlmNode] Skipped (not active this turn) — node: \"{}\"",
-                        node_name
-                    );
-                    return Ok(Value::Null);
                 }
                 Some(other) => {
                     // JSON array / object — serialize to pretty string so the LLM can read it
@@ -610,13 +668,19 @@ impl ExecutableNode for LlmNode {
             }
         }
 
-        let user_message = if resolved_files.is_empty() {
-            LlmMessage::user(prompt.to_string())?
-        } else {
-            LlmMessage::user_with_files(prompt.to_string(), resolved_files)?
-        };
+        // On resume, do NOT push a fresh user message — the conversation is
+        // continued from the persisted history. The pending tool call (whose
+        // result was never persisted) is dispatched below with the resume
+        // answer threaded in.
+        if resume_answer.is_none() {
+            let user_message = if resolved_files.is_empty() {
+                LlmMessage::user(prompt.to_string())?
+            } else {
+                LlmMessage::user_with_files(prompt.to_string(), resolved_files)?
+            };
 
-        messages.push(user_message.clone());
+            messages.push(user_message.clone());
+        }
 
         // --- 3. Execute LLM Call (via AgentService) ---
         let llm_repo = LlmProviderFactory::create(provider_kind);
@@ -870,7 +934,54 @@ impl ExecutableNode for LlmNode {
                 }
             };
 
-        let agent_service = AgentService::new(llm_repo_arc, conversation_repo);
+        let agent_service = AgentService::new(llm_repo_arc, conversation_repo.clone());
+
+        // Resume path — when re-entered with `__colmena_resume_answer`, the
+        // assistant message that requested the SUSPENDED tool was already
+        // persisted in a prior run (by agent_service.run before short-circuit),
+        // but the tool result was not. Find that pending tool call, dispatch it
+        // with the resume answer, persist the tool message, then fall through
+        // to agent_service.run with `prompt: None, messages: None` so the LLM
+        // receives the resolved tool result and continues.
+        if let Some(answer) = resume_answer.as_deref() {
+            let conversation = conversation_repo.get_by_id(&conversation_key).await?;
+            let pending = find_pending_tool_call(&conversation.messages).ok_or(
+                "llm_call resume: no pending tool call found in conversation history",
+            )?;
+
+            let result = tool_executor
+                .execute_with_resume_answer(&pending, answer)
+                .await?;
+
+            // Multi-suspend — the resumed tool itself returned SUSPENDED again.
+            // Propagate without persisting a tool message; the next resume will
+            // walk the same pending call.
+            if let Ok(parsed) = serde_json::from_str::<Value>(&result.output) {
+                if parsed
+                    .get("__colmena_status")
+                    .and_then(|v| v.as_str())
+                    == Some("SUSPENDED")
+                {
+                    return Ok(json!({
+                        "__colmena_status": "SUSPENDED",
+                        "questions": parsed.get("questions").cloned().unwrap_or(Value::Null),
+                        "_pending_tool_call_id": pending.id.clone(),
+                        "_conversation_key": {
+                            "session_id": session_id_str.clone(),
+                            "agent_session_id": agent_session_id_str.clone(),
+                            "node_id": node_id_path_str.clone(),
+                        },
+                    }));
+                }
+            }
+
+            // Persist the resolved tool message so agent_service.run will see it
+            // when it loads the conversation history below.
+            let tool_msg = LlmMessage::tool(pending.id.clone(), result.output.clone())?;
+            conversation_repo
+                .add_message(&conversation_key, tool_msg)
+                .await?;
+        }
 
         // Decide which tools are exposed to the LLM.
         //
@@ -1124,17 +1235,34 @@ impl ExecutableNode for LlmNode {
                 None
             };
 
-        // Create AgentService parameters
-        let params = crate::llm::application::AgentRunParams {
-            session_id: &conversation_key,
-            prompt: Some(prompt.to_string()),
-            messages: Some(messages.clone()),
-            config: llm_config,
-            tools,
-            tool_executor: &tool_executor,
-            max_iterations: Some(50), // Max iterations
-            on_token,
-            tools_provider,
+        // Create AgentService parameters. On resume, the user prompt is `None`
+        // and `messages` is `None`: agent_service will load the just-persisted
+        // tool message (added in the resume block above) from history and
+        // continue the ReAct loop from there.
+        let params = if resume_answer.is_some() {
+            crate::llm::application::AgentRunParams {
+                session_id: &conversation_key,
+                prompt: None,
+                messages: None,
+                config: llm_config,
+                tools,
+                tool_executor: &tool_executor,
+                max_iterations: Some(50),
+                on_token,
+                tools_provider,
+            }
+        } else {
+            crate::llm::application::AgentRunParams {
+                session_id: &conversation_key,
+                prompt: Some(prompt.to_string()),
+                messages: Some(messages.clone()),
+                config: llm_config,
+                tools,
+                tool_executor: &tool_executor,
+                max_iterations: Some(50), // Max iterations
+                on_token,
+                tools_provider,
+            }
         };
 
         if verbose {
@@ -1150,6 +1278,23 @@ impl ExecutableNode for LlmNode {
         }
 
         let response = agent_service.run(params).await?;
+
+        // 3.0a SUSPENDED propagation — when the agent loop short-circuited because a tool
+        // returned `__colmena_status: SUSPENDED`, surface that signal upward to the DAG
+        // engine. The assistant message that requested the tool was already persisted by
+        // `agent_service.run` (step B of the ReAct loop); the resume path will replay it.
+        if let Some(suspend) = response.suspend() {
+            return Ok(json!({
+                "__colmena_status": "SUSPENDED",
+                "questions": suspend.questions.clone(),
+                "_pending_tool_call_id": suspend.tool_call_id.clone(),
+                "_conversation_key": {
+                    "session_id": session_id_str.clone(),
+                    "agent_session_id": agent_session_id_str.clone(),
+                    "node_id": node_id_path_str.clone(),
+                },
+            }));
+        }
 
         // 3.1 Notify observer of usage (even if not streaming)
         if let Some(obs) = _observer.clone() {
@@ -1580,5 +1725,79 @@ mod files_parser_tests {
         ]);
         let parsed = parse(files).unwrap();
         assert_eq!(parsed.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod find_pending_tool_call_tests {
+    use super::*;
+    use crate::llm::domain::{FunctionCall, LlmMessage, ToolCall};
+
+    fn tc(id: &str, name: &str) -> ToolCall {
+        ToolCall::new(
+            id.to_string(),
+            FunctionCall::new(name.to_string(), "{}".to_string()),
+        )
+    }
+
+    #[test]
+    fn returns_unmatched_tool_call() {
+        // Assistant requested `call_xyz`; no matching Tool message follows.
+        let messages = vec![
+            LlmMessage::user("hi".to_string()).unwrap(),
+            LlmMessage::assistant_with_tool_calls("".to_string(), vec![tc("call_xyz", "ask")])
+                .unwrap(),
+        ];
+        let pending = find_pending_tool_call(&messages).expect("must find one");
+        assert_eq!(pending.id, "call_xyz");
+        assert_eq!(pending.function.name, "ask");
+    }
+
+    #[test]
+    fn returns_none_when_all_tools_resolved() {
+        let messages = vec![
+            LlmMessage::user("hi".to_string()).unwrap(),
+            LlmMessage::assistant_with_tool_calls("".to_string(), vec![tc("call_xyz", "ask")])
+                .unwrap(),
+            LlmMessage::tool("call_xyz".to_string(), "result".to_string()).unwrap(),
+        ];
+        assert!(find_pending_tool_call(&messages).is_none());
+    }
+
+    #[test]
+    fn returns_latest_pending_when_multiple_assistant_messages() {
+        // First assistant call is resolved; second is pending → must return the second.
+        let messages = vec![
+            LlmMessage::user("first".to_string()).unwrap(),
+            LlmMessage::assistant_with_tool_calls("".to_string(), vec![tc("call_a", "ask_a")])
+                .unwrap(),
+            LlmMessage::tool("call_a".to_string(), "result_a".to_string()).unwrap(),
+            LlmMessage::user("second".to_string()).unwrap(),
+            LlmMessage::assistant_with_tool_calls("".to_string(), vec![tc("call_b", "ask_b")])
+                .unwrap(),
+        ];
+        let pending = find_pending_tool_call(&messages).expect("must find one");
+        assert_eq!(pending.id, "call_b");
+    }
+
+    #[test]
+    fn returns_none_for_empty_history() {
+        let messages: Vec<LlmMessage> = vec![];
+        assert!(find_pending_tool_call(&messages).is_none());
+    }
+
+    #[test]
+    fn returns_first_unresolved_among_multiple_tool_calls_in_one_message() {
+        // Single assistant message with two tool_calls; only the second has a result.
+        let messages = vec![
+            LlmMessage::assistant_with_tool_calls(
+                "".to_string(),
+                vec![tc("call_a", "ask_a"), tc("call_b", "ask_b")],
+            )
+            .unwrap(),
+            LlmMessage::tool("call_b".to_string(), "result_b".to_string()).unwrap(),
+        ];
+        let pending = find_pending_tool_call(&messages).expect("must find one");
+        assert_eq!(pending.id, "call_a");
     }
 }
