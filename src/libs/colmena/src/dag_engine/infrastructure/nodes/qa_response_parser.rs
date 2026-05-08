@@ -59,6 +59,14 @@ fn validate_id(id: &str) -> Result<(), QaParseError> {
     Ok(())
 }
 
+/// Returns true iff `id` matches the canonical Q/A id charset
+/// `[A-Za-z0-9_-]{1,64}`. Use this from outside the parser when you want
+/// a simple boolean check (e.g. validating config-supplied ids before
+/// you have an answer to parse).
+pub fn is_valid_qa_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= ID_MAX_LEN && id.chars().all(is_valid_id_char)
+}
+
 /// Attempt to parse a `Q[id]:` or `A[id]:` prefix at `offset`.
 /// Returns `(kind, id, position_after_colon)` on success.
 fn parse_prefix_at(answer: &str, offset: usize) -> Option<(char, String, usize)> {
@@ -310,6 +318,20 @@ mod tests {
             validate_id("with.dot"),
             Err(QaParseError::InvalidIdSyntax { .. })
         ));
+    }
+
+    #[test]
+    fn is_valid_qa_id_accepts_valid() {
+        assert!(is_valid_qa_id("abc"));
+        assert!(is_valid_qa_id("ABC_123-x"));
+    }
+
+    #[test]
+    fn is_valid_qa_id_rejects_invalid() {
+        assert!(!is_valid_qa_id(""));
+        assert!(!is_valid_qa_id(&"x".repeat(65)));
+        assert!(!is_valid_qa_id("with space"));
+        assert!(!is_valid_qa_id("dot.notation"));
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
-use crate::dag_engine::infrastructure::nodes::qa_response_parser::parse_qa_response;
+use crate::dag_engine::infrastructure::nodes::qa_response_parser::{
+    is_valid_qa_id, parse_qa_response,
+};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::error::Error;
@@ -65,18 +67,11 @@ impl ExecutableNode for SuspendNode {
             .get("id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                Box::<dyn Error + Send + Sync>::from(
-                    "suspend: config.id is required (must be [A-Za-z0-9_-]{1,64})",
-                )
+                Box::<dyn Error + Send + Sync>::from("suspend: config.id is required")
             })?
             .to_string();
 
-        if id.is_empty()
-            || id.len() > 64
-            || !id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        {
+        if !is_valid_qa_id(&id) {
             return Err(Box::<dyn Error + Send + Sync>::from(format!(
                 "suspend: invalid config.id '{id}' (must match [A-Za-z0-9_-]{{1,64}})"
             )));
@@ -133,16 +128,14 @@ mod tests {
         None
     }
 
-    fn inputs_with_node_id(id: &str) -> NodeInputs {
-        let mut m: HashMap<String, Value> = HashMap::new();
-        m.insert("__node_id".to_string(), Value::String(id.to_string()));
-        m
+    fn empty_inputs() -> NodeInputs {
+        HashMap::new()
     }
 
     #[tokio::test]
-    async fn suspend_emits_open_when_no_config() {
+    async fn suspend_emits_open_by_default() {
         let node = SuspendNode;
-        let inputs = inputs_with_node_id("ask_user");
+        let inputs = empty_inputs();
         let cfg = json!({ "id": "ask_user", "question": "Confirm?" });
         let mut state = Value::Null;
         let out = node
@@ -159,7 +152,7 @@ mod tests {
     #[tokio::test]
     async fn suspend_emits_choice_with_options() {
         let node = SuspendNode;
-        let inputs = inputs_with_node_id("ask_user");
+        let inputs = empty_inputs();
         let cfg = json!({
             "id": "ask_user",
             "question": "Pick one",
@@ -179,7 +172,7 @@ mod tests {
     #[tokio::test]
     async fn suspend_uses_explicit_id() {
         let node = SuspendNode;
-        let inputs = inputs_with_node_id("ask_user");
+        let inputs = empty_inputs();
         let cfg = json!({ "id": "confirm_transfer", "question": "Confirm?" });
         let mut state = Value::Null;
         let out = node
@@ -192,23 +185,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn suspend_uses_explicit_id_when_set() {
-        let node = SuspendNode;
-        let inputs = inputs_with_node_id("ask_user");
-        let cfg = json!({ "id": "confirm_transfer", "question": "Confirm?" });
-        let mut state = Value::Null;
-        let out = node
-            .execute(&inputs, &cfg, &mut state, empty_observer())
-            .await
-            .unwrap();
-
-        assert_eq!(out["questions"][0]["id"], "confirm_transfer");
-    }
-
-    #[tokio::test]
     async fn suspend_preserves_legacy_question_field() {
         let node = SuspendNode;
-        let inputs = inputs_with_node_id("ask_user");
+        let inputs = empty_inputs();
         let cfg = json!({
             "id": "ask_user",
             "question": "Confirm?",
