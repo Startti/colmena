@@ -78,6 +78,7 @@ base64 = "0.22.1"
 
 # Template resolution
 regex = "1.10"
+once_cell = "1"
 
 # Shared connection-pool registry (see docs/superpowers/specs/2026-04-20-connection-pool-management-design.md)
 dashmap = "6"
