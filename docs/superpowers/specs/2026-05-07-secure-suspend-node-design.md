@@ -57,22 +57,26 @@ El service container (`src/libs/colmena/src/shared/service_container.rs`) ya iny
 
 ## API del nodo
 
+El nodo recolecta **uno o más secretos en una sola pausa**. El meta-agente le pasa una lista de pares `{question, name}`, el usuario teclea todos los valores en un único turno, y el nodo retorna un mapa de handles.
+
 ### Config schema
 
 ```jsonc
 {
-  "question": "string, required",  // visible al usuario
-  "name": "string, required",      // slug del secreto, e.g. \"hubspot_private_token\"
-  "id": "string, optional"         // ID estable de la pregunta para mapeo en UIs (default: __node_id)
+  "secrets": [
+    { "question": "string, required", "name": "string, required" },
+    ...
+  ],
+  "id": "string, optional"  // ID estable del bloque de preguntas (default: __node_id)
 }
 ```
 
 Decisiones:
 
-- **`name` es obligatorio** y se usa como sufijo del handle: el output es exactamente `<sv_<name>>`. El meta-agente puede predecirlo y usarlo varias veces si quiere.
-- **El `name` debe matchear `^[a-z][a-z0-9_]{2,63}$`**. Si no, el nodo retorna error en suspend-path (antes de pausar). Esto evita handles raros y reduce ambigüedad de inyección.
+- **`secrets` es una lista**, mínimo 1 ítem, máximo razonable 8. El nodo acepta también una sola entrada — un secreto suelto es solo un `secrets: [{...}]` de longitud 1.
+- **`name` por ítem es obligatorio** y se usa como sufijo del handle: cada ítem genera un handle `<sv_<name>>`. Los names dentro de una misma llamada deben ser únicos (validado en suspend-path antes de pausar).
+- **Cada `name` debe matchear `^[a-z][a-z0-9_]{2,63}$`**. Reduce ambigüedad de inyección y evita handles raros.
 - **No hay `question_type`** ni `options`. Un secreto siempre es texto libre.
-- **No hay `secure: bool`**. Este nodo siempre es seguro; el booleano sería un foot-gun (cf. opción B descartada en brainstorm).
 
 ### Salida del nodo
 
@@ -81,35 +85,76 @@ Decisiones:
 ```json
 {
   "__colmena_status": "SUSPENDED",
-  "question": "<la pregunta>",
   "questions": [
-    { "id": "<id>", "question": "<la pregunta>", "type": "secret", "options": null }
+    { "id": "<id>__1", "question": "<pregunta_1>", "type": "secret", "options": null },
+    { "id": "<id>__2", "question": "<pregunta_2>", "type": "secret", "options": null }
   ]
 }
 ```
 
-Notar `"type": "secret"`. Las UIs (ADP frontend) pueden detectar este tipo y renderizar un input enmascarado / sin autocompletar. Si la UI no lo distingue, fallback a `text` es seguro porque el valor nunca se logea.
+- `type: "secret"` permite a las UIs (ADP frontend) renderizar un input enmascarado / sin autocompletar. Si la UI no lo distingue, fallback a `text` es seguro porque el valor nunca se logea.
+- A diferencia del `SuspendNode` actual, **no se emite el campo `question` legacy** (top-level) — con múltiples preguntas dejaría de tener sentido. La canónica `questions[]` ya está soportada por las UIs.
 
 **Resume-path** (con `__colmena_resume_answer`):
 
 ```json
 {
   "status": "resumed",
-  "handle": "<sv_<name>>"
+  "handles": {
+    "amadeus_client_id":     "<sv_amadeus_client_id>",
+    "amadeus_client_secret": "<sv_amadeus_client_secret>"
+  }
 }
 ```
 
-**Crítico**: el campo `answer_received` de `SuspendNode` NO existe aquí. El valor real jamás aparece en el output. Esto rompe deliberadamente la simetría con `suspend` para forzar que el llamador no pueda accidentalmente leer el secreto.
+**Crítico**: el output **nunca** contiene los valores reales — solo los handles, indexados por el `name` del meta-agente. Si la lista era de un solo ítem, `handles` igual es un mapa con una clave (consistencia, así el meta-agente siempre lee `tool_result.handles.<name>`).
+
+### Protocolo de respuesta del UI / cliente
+
+`__colmena_resume_answer` es **un único string** con el siguiente formato canónico:
+
+```
+<pregunta_1>
+<valor_1>
+<pregunta_2>
+<valor_2>
+```
+
+Es decir: cada pregunta literal del array `questions[]` aparece tal cual emitida, seguida de un newline, seguida del valor que el usuario tecleó, seguida de un newline, y luego la siguiente pregunta. El UI debe reproducir el texto exacto de cada pregunta como anclas de parsing.
+
+**Algoritmo de parsing en el nodo:**
+
+1. Tomar `secrets` del config en orden. Para cada `secrets[i].question`, buscarlo en el string de respuesta. Las preguntas deben aparecer en el mismo orden.
+2. Para cada pregunta encontrada en posición `p_i`, el valor asociado es la subcadena entre el `\n` que sigue a la pregunta `i` y el inicio de la pregunta `i+1` (o el final del string para la última).
+3. Trimmear solo trailing newlines del valor — espacios internos y newlines internos se preservan tal cual (importante para RSA private keys multilínea).
+
+Esto significa que el UI puede simplemente concatenar `pregunta\nvalor\n` por cada par sin preocuparse de escape, porque el ancla es el texto exacto de la pregunta.
+
+**Casos límite:**
+
+- Una pregunta del config no aparece en el answer string → error `missing answer for secret '<name>' (question not found)`.
+- El valor entre dos preguntas es vacío → error `empty value for secret '<name>'`.
+- Dos preguntas del config tienen el mismo texto → error en suspend-path validation antes de pausar (`duplicate question text — make each question unique`).
+- El answer string contiene una pregunta más de las pedidas → ignorada (el meta-agente solo pidió N).
 
 ### Errores
 
-El motor envuelve cualquier error retornado por `execute` en `DagError::NodeExecution(String)`. El nodo retorna mensajes específicos para que sean fácilmente identificables en logs y respuestas:
+El motor envuelve cualquier error retornado por `execute` en `DagError::NodeExecution(String)`. El nodo retorna mensajes específicos:
 
-- `name` ausente o no matchea regex `^[a-z][a-z0-9_]{2,63}$` → `Err("secure_suspend: name missing or invalid format (expected lowercase slug, 3-64 chars)")` en suspend-path, **antes** de emitir SUSPENDED. Esto evita pausar el grafo solo para fallar al reanudarlo.
-- Colisión de handle (ya existe `<sv_<name>>` en la misma `session_id`) → `Err("secure_suspend: handle <sv_<name>> already exists in session — use a different name")` en resume-path. Decisión consciente: nunca sobrescribir silenciosamente. Si el meta-agente quiere actualizar, debe usar un `name` distinto o limpiar la sesión.
-- Falla al persistir (DB caída) → propaga el error del repo como string. La sesión queda en estado fallido; el motor no resume.
+| Caso | Path | Mensaje |
+|---|---|---|
+| `secrets` ausente o vacío | suspend | `secure_suspend: secrets list missing or empty` |
+| Algún `name` inválido | suspend | `secure_suspend: name '<x>' invalid (expected lowercase slug, 3-64 chars)` |
+| Names duplicados dentro del call | suspend | `secure_suspend: duplicate name '<x>' in secrets list` |
+| Preguntas duplicadas dentro del call | suspend | `secure_suspend: duplicate question text — make each question unique` |
+| Colisión de handle (ya existe en sesión) | resume | `secure_suspend: handle <sv_<name>> already exists in session — use a different name` |
+| Pregunta no encontrada en answer | resume | `secure_suspend: missing answer for secret '<name>' (question not found in response)` |
+| Valor vacío | resume | `secure_suspend: empty value for secret '<name>'` |
+| Persist falla | resume | propagado del repo |
 
-La detección de colisión requiere una operación adicional en `SecureValueRepository`: o bien un `exists(session_id, hash_key) -> bool`, o cambiar `persist` a fallar cuando ya existe (Postgres `INSERT ... ON CONFLICT DO NOTHING` + chequeo de filas afectadas). El plan de implementación elige el camino menos invasivo.
+Validaciones de suspend-path corren **antes** de emitir SUSPENDED: si fallan, el grafo no se pausa, lo cual evita ciclos suspend-fail-suspend que confunden al usuario.
+
+La detección de colisión requiere una operación adicional en `SecureValueRepository`: un `exists(session_id, hash_key) -> bool`, o cambiar `persist` a fallar al ya existir. El plan de implementación elige el camino menos invasivo.
 
 ## Uso como tool LLM
 
@@ -120,17 +165,27 @@ El nodo se expone en `tool_configurations` así:
   "ask_secret": {
     "name": "ask_secret",
     "node_type": "secure_suspend",
-    "description": "Ask the user for ONE secret (API token, password, client_id, client_secret, etc.) needed to authenticate against an external service. The answer is stored encrypted; you receive only a HANDLE of the form `<sv_<name>>` which you paste into ANY field of any non-LLM node — `bearerToken`, an entry inside `headers`, a value inside an object-form `body`, a `query_params` value, a Postgres connection string, etc. The handle is replaced by the real value at execution time, never by you. NEVER ask the user for secrets via plain chat messages — always use this tool. Multi-secret flows (e.g. OAuth client_id + client_secret for Amadeus, AWS access_key + secret_key) require ONE call PER secret in sequence. Compose each question as a short, specific request: name the service and what kind of credential. Good: 'Pega el HubSpot private app token (empieza con \"pat-\").', 'Cuál es tu Amadeus client_id?'. Bad: 'dame tu token', 'qué credencial uso?'. IMPORTANT placement rule: the handle must appear as a complete string value, never embedded inside a longer string. So for OAuth bodies use object form `{ \"client_id\": \"<sv_xxx>\", \"client_secret\": \"<sv_yyy>\" }` — NOT urlencoded `\"client_id=<sv_xxx>&client_secret=<sv_yyy>\"`, which the runtime cannot inject into.",
+    "description": "Ask the user for ONE OR MORE secrets in a SINGLE prompt cycle. Use this whenever a workflow you are building needs credentials (API token, OAuth client_id+secret pair, AWS access keys, DB password, etc.). Pass an array of {question, name} pairs — ALL the secrets needed for the same external service in one call. The user's answers are stored encrypted; you receive a HANDLES MAP `{ <name>: <sv_<name>> }`. Paste each handle into ANY field of any non-LLM node — `bearerToken`, an entry inside `headers`, a value inside an OBJECT-form `body`, a `query_params` value, a Postgres connection string, etc. The handle is replaced by the real value at execution time, never by you. NEVER ask for secrets via plain chat messages. Compose each question as a short, specific request: name the service and the credential type. Good: 'Pega el HubSpot private app token (empieza con \"pat-\").', 'Cuál es tu Amadeus client_id?'. Bad: 'dame tu token'. IMPORTANT placement rule: the handle must appear as a COMPLETE string value, never embedded inside a longer string. Object body form works: `{ \"client_id\": \"<sv_xxx>\", \"client_secret\": \"<sv_yyy>\" }`. Concatenated string form does NOT: `\"client_id=<sv_xxx>&client_secret=<sv_yyy>\"`. Each question must be UNIQUE within a call (the response anchors on question text).",
     "node_schema": {
-      "question": {
-        "type": "string",
+      "secrets": {
+        "type": "array",
         "required": true,
-        "description": "The exact text shown to the user. Mention the service and the credential type. Do NOT include any example value."
-      },
-      "name": {
-        "type": "string",
-        "required": true,
-        "description": "Slug identifying this secret in the session. Lowercase letters, digits, underscore. 3–64 chars. Examples: 'hubspot_private_token', 'stripe_live_key'. Use the same slug if you want to reference the same secret again later (collision is an error)."
+        "description": "List of secrets to ask for in this single prompt cycle. Min 1, max 8. Each item has a question and a name slug.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "question": {
+              "type": "string",
+              "required": true,
+              "description": "The exact text shown to the user. Mention the service and credential type. Do NOT include example values. Must be unique within this call."
+            },
+            "name": {
+              "type": "string",
+              "required": true,
+              "description": "Slug identifying this secret. Lowercase letters/digits/underscore, 3-64 chars. Examples: 'hubspot_private_token', 'amadeus_client_id', 'amadeus_client_secret'. Used as the suffix of the returned handle <sv_<name>>."
+            }
+          }
+        }
       }
     }
   }
@@ -147,23 +202,41 @@ Notas importantes:
 
 ### Patrón 1 — Token estático en header (HubSpot, Stripe simple)
 
-Una sola llamada a `ask_secret`. El handle va a `bearerToken` o a una entrada de `headers`.
+Una sola llamada a `ask_secret` con un solo ítem en `secrets`. El handle va a `bearerToken` o a una entrada de `headers`.
 
 ```jsonc
+ask_secret({
+  secrets: [{ question: "Pega tu HubSpot private app token", name: "hubspot_private_token" }]
+})
+// → { handles: { hubspot_private_token: "<sv_hubspot_private_token>" } }
+
+// El meta-agente luego usa:
 "bearerToken": "<sv_hubspot_private_token>"
 // o
-"headers": { "X-API-Key": "<sv_stripe_secret>" }
+"headers": { "X-API-Key": "<sv_hubspot_private_token>" }
 ```
 
 ### Patrón 2 — Intercambio OAuth con par de credenciales (Amadeus)
 
-El meta-agente hace **dos llamadas consecutivas** a `ask_secret` (una para `client_id`, otra para `client_secret`). Luego construye dos nodos:
+**Una sola llamada** a `ask_secret` con DOS ítems. El usuario teclea ambos valores en un solo turno. Luego el meta-agente construye dos nodos:
 
 1. Un `apiCall` que POSTea a `/oauth2/token` con el par de credenciales en body **forma objeto** (no string urlencoded), `secure: true`. El output `access_token` se hashea automáticamente como `<value_N>` por la lógica existente de `SecureValueService::hash_output`.
-2. Un segundo `apiCall` para la API de negocio (`/v2/shopping/flight-offers`, etc.) cuyo `bearerToken` recibe el `access_token` por edge desde el primer nodo, ya con la inyección automática.
+2. Un segundo `apiCall` para la API de negocio (`/v2/shopping/flight-offers`, etc.) cuyo `bearerToken` recibe el `access_token` por edge desde el primer nodo, con inyección automática.
 
 ```jsonc
-// Nodo OAuth — recolectado por dos ask_secret previos
+// Llamada del meta-agente al tool:
+ask_secret({
+  secrets: [
+    { question: "Cuál es tu Amadeus client_id?",     name: "amadeus_client_id" },
+    { question: "Cuál es tu Amadeus client_secret?", name: "amadeus_client_secret" }
+  ]
+})
+// → { handles: {
+//       amadeus_client_id:     "<sv_amadeus_client_id>",
+//       amadeus_client_secret: "<sv_amadeus_client_secret>"
+//   } }
+
+// Nodo OAuth construido por el meta-agente:
 {
   "url": "https://api.amadeus.com",
   "endpoint": "/v1/security/oauth2/token",
@@ -182,47 +255,71 @@ Pre-condición: el nodo `http_request` debe serializar un body de forma `applica
 
 ### Patrón 3 — Connection string de DB
 
-Una llamada a `ask_secret` con `name: "main_db_url"`, el handle va al campo `connection_url` de un `databaseQuery`. Mismo mecanismo.
+Una llamada a `ask_secret` con un ítem `name: "main_db_url"`, el handle va al campo `connection_url` de un `databaseQuery`. Mismo mecanismo.
 
 ## Flujo end-to-end
 
+Ejemplo con el caso Amadeus (dos secretos en una pausa):
+
 ```
 [meta-agente, llm_call]
-   │ piensa: "necesito el HubSpot token para crear el apiCall"
-   │ tool_call: ask_secret(question="Pega el HubSpot private app token...", name="hubspot_token")
+   │ piensa: "necesito client_id + client_secret de Amadeus"
+   │ tool_call: ask_secret({ secrets: [
+   │     { question: "Cuál es tu Amadeus client_id?",     name: "amadeus_client_id" },
+   │     { question: "Cuál es tu Amadeus client_secret?", name: "amadeus_client_secret" }
+   │ ]})
    ▼
 [secure_suspend node, suspend-path]
-   │ valida name regex → OK
-   │ emite __colmena_status: SUSPENDED + questions:[{type:"secret",...}]
+   │ valida names (regex, únicos) y preguntas (únicas) → OK
+   │ emite __colmena_status: SUSPENDED + questions:[
+   │   {id:"...__1", question:"Cuál es tu Amadeus client_id?",     type:"secret"},
+   │   {id:"...__2", question:"Cuál es tu Amadeus client_secret?", type:"secret"}
+   │ ]
    ▼
 [engine] congela DAG, persiste session, retorna a cliente
    ▼
-[ADP frontend] renderiza pregunta con input enmascarado
+[ADP frontend] renderiza dos inputs enmascarados (uno por pregunta)
    ▼
-[usuario] teclea "pat-na1-abcdef..."
+[usuario] teclea ambos valores
    ▼
-[ADP] POST /chat/run con sessionId + prompt = "pat-na1-abcdef..."
+[ADP] POST /chat/run con sessionId + prompt =
+   "Cuál es tu Amadeus client_id?
+   AMG-CLI-ID-abc
+   Cuál es tu Amadeus client_secret?
+   AMG-CLI-SEC-xyz"
    ▼
-[engine] reanuda DAG con __colmena_resume_answer = "pat-na1-abcdef..."
+[engine] reanuda DAG con __colmena_resume_answer = el string anterior
    ▼
 [secure_suspend node, resume-path]
-   │ valida no-colisión de "<sv_hubspot_token>" en session
-   │ repo.persist(session_id, node_id, "<sv_hubspot_token>", "pat-na1-abcdef...", "secret")
-   │ retorna { status: "resumed", handle: "<sv_hubspot_token>" }
+   │ parsea el string: ancla en cada question del config para extraer su valor
+   │ valida no-colisión de "<sv_amadeus_client_id>" y "<sv_amadeus_client_secret>"
+   │ repo.persist por cada uno
+   │ retorna { status: "resumed", handles: {
+   │     amadeus_client_id:     "<sv_amadeus_client_id>",
+   │     amadeus_client_secret: "<sv_amadeus_client_secret>"
+   │ }}
    ▼
 [meta-agente, llm_call] continúa
-   │ tool_result visible al LLM = { status:"resumed", handle:"<sv_hubspot_token>" }
-   │ tool_call: create_canvas_node(node={
-   │   type: "apiCall",
-   │   data: { config: { bearerToken: "<sv_hubspot_token>", secure: true, ... } }
-   │ })
+   │ tool_result visible al LLM = solo handles, los valores reales nunca aparecen
+   │ tool_call: create_canvas_node(node={ type: "apiCall", data: { config: {
+   │     url: "https://api.amadeus.com",
+   │     endpoint: "/v1/security/oauth2/token",
+   │     method: "POST",
+   │     secure: true,
+   │     headers: { "Content-Type": "application/x-www-form-urlencoded" },
+   │     body: {
+   │       grant_type: "client_credentials",
+   │       client_id:     "<sv_amadeus_client_id>",
+   │       client_secret: "<sv_amadeus_client_secret>"
+   │     }
+   │ }}})
    ▼
 [ADP runtime, en una ejecución posterior del agente creado]
    │ engine va a ejecutar el apiCall (un http_request)
-   │ inject_secrets recorre inputs, encuentra "<sv_hubspot_token>", llama repo.decrypt
-   │ reemplaza el placeholder por "pat-na1-abcdef..." JUSTO antes del request HTTP
+   │ inject_secrets recorre inputs, encuentra los dos handles, repo.decrypt cada uno
+   │ reemplaza por los valores reales JUSTO antes del request HTTP
    ▼
-[http_request] dispara el call con el bearer real, el LLM nunca lo vio
+[http_request] dispara el POST con el body real, el LLM nunca vio los valores
 ```
 
 Pre-condición de la última fase: ADP y Colmena comparten la misma `DATABASE_URL` y por tanto la misma tabla de secure values. Confirmado en el brainstorm. La inyección funciona siempre que la `session_id` con la que el agente creado ejecute coincida con la que persistió el secreto. **Ojo**: si el secreto se persiste con `session_id = X` y el agente creado se ejecuta más tarde con `session_id = Y`, el handle no resuelve. Ver "Modos de falla" abajo.
@@ -265,22 +362,27 @@ Si en uso real esto resulta molesto, se relaja en una iteración futura. Easier 
 
 ### Unit tests (en el archivo del nodo)
 
-1. `suspend_path_emits_secret_question_type` — verifica que el output incluye `questions[0].type == "secret"` y `__colmena_status == "SUSPENDED"`.
-2. `suspend_path_validates_name_format` — un `name` con espacios o mayúsculas falla con `InvalidConfig`.
-3. `suspend_path_requires_name` — `name` ausente falla.
-4. `resume_path_persists_value_and_returns_handle` — con un mock repo, verifica que `persist` se invoca con `(session_id, node_id, "<sv_foo>", "real_value", "secret")` y el output es `{status:"resumed", handle:"<sv_foo>"}`. **Crítico**: assert que el output NO contiene la string del valor real.
-5. `resume_path_errors_on_collision` — el mock retorna que el handle ya existe y el nodo emite `Conflict`.
-6. `resume_path_does_not_log_real_value` — captura `tracing` durante la ejecución y verifica que el valor real no aparece.
+1. `suspend_path_emits_n_questions_with_secret_type` — secrets de longitud 2 produce dos entradas en `questions[]`, ambas con `type:"secret"`, status SUSPENDED.
+2. `suspend_path_validates_name_format` — `name` con espacios/mayúsculas falla antes de pausar.
+3. `suspend_path_rejects_duplicate_names` — dos ítems con el mismo `name` fallan.
+4. `suspend_path_rejects_duplicate_questions` — dos ítems con el mismo `question` fallan (rompería el parser).
+5. `suspend_path_rejects_empty_secrets_list` — `secrets: []` falla.
+6. `resume_parses_two_secrets_correctly` — con un mock repo y answer `"q1\nval1\nq2\nval2"`, verifica que `persist` se invoca dos veces con los pares correctos y output es `{status:"resumed", handles:{n1:"<sv_n1>", n2:"<sv_n2>"}}`. **Crítico**: assert que el output NO contiene `val1` ni `val2` como strings.
+7. `resume_preserves_internal_newlines_in_value` — con un valor multilínea (RSA private key), el parser preserva los newlines internos porque ancla en el texto literal de la siguiente pregunta.
+8. `resume_errors_on_missing_question_in_answer` — answer string que no contiene una de las preguntas del config emite el error específico.
+9. `resume_errors_on_empty_value` — pregunta seguida inmediatamente por la siguiente pregunta (sin valor) emite el error específico.
+10. `resume_errors_on_collision` — mock retorna que un handle ya existe y el nodo emite el error de colisión.
+11. `resume_does_not_log_real_values` — captura `tracing` durante la ejecución y verifica que los valores reales no aparecen.
 
 ### Integration test (en `tests/`)
 
-Un grafo mínimo que:
+Un grafo mínimo con dos secretos en un solo `secure_suspend`:
 
-1. Ejecuta `secure_suspend` con `--answer "test_secret_xyz"` (la sesión va a estar en estado SUSPENDED, se reanuda con la flag estándar del CLI).
-2. Encadena un nodo dummy downstream que recibe el handle y lo devuelve. Verifica que el handle es `<sv_test>`.
-3. Ejecuta `inject_secrets` (a través de un `http_request` apuntando a un mock server local) y verifica que el header recibido en el mock server contiene `test_secret_xyz`. Esto valida el ciclo completo.
+1. Ejecuta el nodo. La sesión queda SUSPENDED.
+2. Reanuda con `--answer "<q1>\n<val1>\n<q2>\n<val2>"`. Verifica que el output downstream tiene los dos handles esperados.
+3. Encadena un `http_request` apuntando a un mock server local cuyo body usa los dos handles. Verifica que el body que llegó al mock server contiene `<val1>` y `<val2>` reales (la inyección funcionó).
 
-Marcado `#[ignore = "requires DATABASE_URL — run with \`cargo test -- --ignored\`"]` por la convención del proyecto.
+Marcado `#[ignore = "requires DATABASE_URL — run with \`cargo test -- --ignored\`"]`.
 
 ### Test de tool-call → suspend (verificación, no implementación)
 
@@ -303,8 +405,7 @@ Esto se confirma en el plan de implementación, no aquí.
 - Promoción de secretos a un scope mayor que `session_id` (workspace, environment). Si las pruebas confirman que se necesita, se aborda en un spec separado.
 - Cambios al UX de ADP para detectar `questions[].type == "secret"` y renderizar input enmascarado. Esto es una mejora pero no bloquea el funcionamiento (el valor sigue siendo seguro porque jamás vuelve al LLM).
 - Limpieza/expiración explícita de handles. Ya existe `SecureValueRepository::cleanup_expired`; este spec asume que la política actual es suficiente.
-- **Variante batch multi-pregunta** (`ask_secret` que toma una lista `[{question, name}, ...]` y emite N preguntas en una sola pausa). Mejora UX para flujos OAuth pero requiere extender el protocolo de resume (`__colmena_resume_answer` hoy es string único) y el flag `--answer` del CLI. Para este spec el LLM hace N llamadas consecutivas.
-- **Inyección por substring dentro de strings más largas.** El `inject_secrets` actual solo reemplaza valores que son exactamente un placeholder (`<sv_…>`), no busca dentro de cadenas. Esto fuerza al meta-agente a usar bodies/headers en forma objeto. Si en uso real esta restricción molesta, se aborda en un spec aparte sobre `SecureValueService`. La descripción del tool LLM lo enseña explícitamente.
+- **Inyección por substring dentro de strings más largas.** El `inject_secrets` actual solo reemplaza valores que son exactamente un placeholder (`<sv_…>`), no busca dentro de cadenas. **No es una limitación real en este flujo**: el meta-agente usa `api_explorer` para leer el OpenAPI/Swagger del endpoint antes de construir el `apiCall`, así que conoce la forma exacta del request (qué campos espera el body, qué headers, qué query params) y coloca los handles directamente en los campos correspondientes como valores completos. La descripción del tool LLM refuerza esta convención. Si más adelante aparece un caso donde el campo legítimo es un string concatenado (raro), se aborda en un spec aparte sobre `SecureValueService`.
 
 ## Cambios concretos al repo
 
