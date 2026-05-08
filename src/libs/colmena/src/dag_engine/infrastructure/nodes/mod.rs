@@ -17,6 +17,7 @@ pub mod output;
 pub mod planner;
 pub mod python_node;
 pub mod reactor;
+pub mod secure_suspend;
 pub mod socketio;
 pub mod sql;
 pub mod subgraph;
