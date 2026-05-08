@@ -118,8 +118,29 @@ cargo run --bin dag_engine -- run tests/graphs/memory/memory_sqlite_example.json
 
 ### Opciones adicionales del subcomando `run`
 ```bash
-cargo run --bin dag_engine -- run <file> [--session-id <id>] [--answer <text>] [--include-extra-info]
+cargo run --bin dag_engine -- run <file> [--session-id <id>] [--agent-session-id <id>] [--answer <text>] [--include-extra-info]
 ```
+
+### Regla — Usar `--agent-session-id` en todas las pruebas de grafos
+Para cualquier flujo con estado entre runs (suspend/resume, multi-turn conversacional, secure_values, agentes con memoria), **siempre pasar `--agent-session-id <id_estable>`** en lugar de depender de `--session-id`.
+
+**Por qué:** los tres subsistemas que persisten estado entre runs keyan primero por `agent_session_id` (estable) con fallback a `session_id` (ephemeral, rotates per CLI invocation):
+- Memoria conversacional (`llm_node_history`)
+- DAG state para resume chains (`dag_runs.find_resume_entry`)
+- Secure values (`secure_value_mappings`)
+
+Cada `cargo run` genera un `session_id` ephemeral nuevo. Sin `--agent-session-id` el resume/memoria no funciona entre invocaciones distintas, y la prueba no representa cómo ADP ejecuta agentes en producción.
+
+**Patrón canónico:**
+```bash
+# Run 1 — suspend
+cargo run --bin dag_engine -- run graph.json --agent-session-id agent_demo_001
+
+# Run 2 — resume (mismo agent, session_id ephemeral nuevo automático)
+cargo run --bin dag_engine -- run graph.json --agent-session-id agent_demo_001 --answer "..."
+```
+
+`--session-id` sigue siendo válido para tests one-shot sin estado.
 
 ### Levantar como servidor HTTP (serve)
 ```bash
