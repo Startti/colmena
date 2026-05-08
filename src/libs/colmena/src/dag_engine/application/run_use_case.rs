@@ -385,14 +385,7 @@ impl DagRunUseCase {
                         if let Ok(injected_inputs) = serde_json::from_value::<NodeInputs>(inputs_value) {
                             inputs = injected_inputs;
                         }
-                        // Config secrets are stored at the agent/workspace level
-                        // (identified by active_agent_session_id when available),
-                        // so look them up using that identifier rather than the
-                        // ephemeral per-run session_id.
-                        let config_secret_session = active_agent_session_id
-                            .as_deref()
-                            .unwrap_or(&session_id);
-                        if let Err(e) = svc.inject_secrets(&mut node_config_value, config_secret_session).await {
+                        if let Err(e) = svc.inject_secrets(&mut node_config_value, &session_id).await {
                             eprintln!("⚠️ Failed to inject secrets in config: {}", e);
                         }
                     }
