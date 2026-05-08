@@ -38,7 +38,7 @@ impl SecureValueService {
         // Persist all mappings to database
         for (hash_key, real_value) in to_persist {
             self.repo
-                .persist(session_id, source_node_id, &hash_key, &real_value, "value")
+                .persist(session_id, None, source_node_id, &hash_key, &real_value, "value")
                 .await?;
         }
 
@@ -109,7 +109,7 @@ impl SecureValueService {
 
         // Second pass: decrypt and replace
         for placeholder in placeholders {
-            if let Some(real) = self.repo.decrypt(session_id, &placeholder).await? {
+            if let Some(real) = self.repo.decrypt(session_id, None, &placeholder).await? {
                 self.replace_placeholder(inputs, &placeholder, real);
             }
         }
@@ -169,7 +169,7 @@ impl SecureValueService {
     ) -> Result<String, DagError> {
         let handle = format!("<sv_{}>", name);
         self.repo
-            .persist(session_id, source_node_id, &handle, real_value, "secret")
+            .persist(session_id, None, source_node_id, &handle, real_value, "secret")
             .await?;
         Ok(handle)
     }
@@ -181,7 +181,7 @@ impl SecureValueService {
         session_id: &str,
         handle: &str,
     ) -> Result<bool, DagError> {
-        self.repo.exists(session_id, handle).await
+        self.repo.exists(session_id, None, handle).await
     }
 
     /// Cleanup all secure values for a session
@@ -207,6 +207,7 @@ mod tests {
         async fn persist(
             &self,
             _session_id: &str,
+            _agent_session_id: Option<&str>,
             _source_node_id: &str,
             hash_key: &str,
             real_value: &str,
@@ -222,6 +223,7 @@ mod tests {
         async fn decrypt(
             &self,
             _session_id: &str,
+            _agent_session_id: Option<&str>,
             hash_key: &str,
         ) -> Result<Option<String>, DagError> {
             Ok(self.storage.lock().unwrap().get(hash_key).cloned())
@@ -230,6 +232,7 @@ mod tests {
         async fn exists(
             &self,
             _session_id: &str,
+            _agent_session_id: Option<&str>,
             hash_key: &str,
         ) -> Result<bool, DagError> {
             Ok(self.storage.lock().unwrap().contains_key(hash_key))
@@ -308,11 +311,11 @@ mod tests {
         let repo = Arc::new(MockSecureValueRepository {
             storage: std::sync::Mutex::new(HashMap::new()),
         });
-        repo.persist("s1", "n1", "<sv_token>", "real", "secret")
+        repo.persist("s1", None, "n1", "<sv_token>", "real", "secret")
             .await
             .unwrap();
-        assert!(repo.exists("s1", "<sv_token>").await.unwrap());
-        assert!(!repo.exists("s1", "<sv_other>").await.unwrap());
+        assert!(repo.exists("s1", None, "<sv_token>").await.unwrap());
+        assert!(!repo.exists("s1", None, "<sv_other>").await.unwrap());
     }
 
     #[tokio::test]

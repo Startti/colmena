@@ -9,6 +9,7 @@ pub trait SecureValueRepository: Send + Sync {
     ///
     /// # Arguments
     /// * `session_id` - DAG execution session ID
+    /// * `agent_session_id` - Optional agent session ID for cross-session lookup
     /// * `source_node_id` - ID of the HTTP node that generated this value
     /// * `hash_key` - Placeholder identifier (e.g., "<token_1>")
     /// * `real_value` - The actual sensitive value to encrypt
@@ -16,25 +17,43 @@ pub trait SecureValueRepository: Send + Sync {
     async fn persist(
         &self,
         session_id: &str,
+        agent_session_id: Option<&str>,
         source_node_id: &str,
         hash_key: &str,
         real_value: &str,
         field_name: &str,
     ) -> Result<(), DagError>;
 
-    /// Retrieve and decrypt a value by its hash key
+    /// Retrieve and decrypt a value by its hash key.
+    /// If `agent_session_id` is Some, looks up by agent_session_id + hash_key (cross-session).
+    /// Otherwise falls back to session_id + hash_key.
     /// Returns None if the hash key doesn't exist
-    async fn decrypt(&self, session_id: &str, hash_key: &str) -> Result<Option<String>, DagError>;
+    async fn decrypt(
+        &self,
+        session_id: &str,
+        agent_session_id: Option<&str>,
+        hash_key: &str,
+    ) -> Result<Option<String>, DagError>;
 
-    /// Check whether a hash_key already exists in this session.
+    /// Check whether a hash_key already exists.
+    /// If `agent_session_id` is Some, checks by agent_session_id + hash_key (cross-session).
+    /// Otherwise falls back to session_id + hash_key.
     ///
     /// Production impls should override with a direct existence check (e.g. SQL
     /// `EXISTS`) so that callers checking only for presence do not pay
     /// decryption cost or transiently materialize the secret in memory. The
     /// default implementation calls `decrypt` and discards the value — correct
     /// but suboptimal for that goal.
-    async fn exists(&self, session_id: &str, hash_key: &str) -> Result<bool, DagError> {
-        Ok(self.decrypt(session_id, hash_key).await?.is_some())
+    async fn exists(
+        &self,
+        session_id: &str,
+        agent_session_id: Option<&str>,
+        hash_key: &str,
+    ) -> Result<bool, DagError> {
+        Ok(self
+            .decrypt(session_id, agent_session_id, hash_key)
+            .await?
+            .is_some())
     }
 
     /// Delete all secure values for a session (cleanup after DAG)

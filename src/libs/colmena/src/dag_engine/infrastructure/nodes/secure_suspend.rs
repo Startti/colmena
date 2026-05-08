@@ -303,6 +303,7 @@ mod tests {
         async fn persist(
             &self,
             _session_id: &str,
+            _agent_session_id: Option<&str>,
             _source_node_id: &str,
             hash_key: &str,
             real_value: &str,
@@ -317,6 +318,7 @@ mod tests {
         async fn decrypt(
             &self,
             _session_id: &str,
+            _agent_session_id: Option<&str>,
             hash_key: &str,
         ) -> Result<Option<String>, DagError> {
             Ok(self.storage.lock().unwrap().get(hash_key).cloned())
@@ -324,6 +326,7 @@ mod tests {
         async fn exists(
             &self,
             _session_id: &str,
+            _agent_session_id: Option<&str>,
             hash_key: &str,
         ) -> Result<bool, DagError> {
             Ok(self.storage.lock().unwrap().contains_key(hash_key))

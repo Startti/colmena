@@ -466,6 +466,7 @@ mod registry_secure_suspend_tests {
         async fn persist(
             &self,
             _: &str,
+            _: Option<&str>,
             _: &str,
             _: &str,
             _: &str,
@@ -473,10 +474,20 @@ mod registry_secure_suspend_tests {
         ) -> Result<(), DagError> {
             Ok(())
         }
-        async fn decrypt(&self, _: &str, _: &str) -> Result<Option<String>, DagError> {
+        async fn decrypt(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: &str,
+        ) -> Result<Option<String>, DagError> {
             Ok(None)
         }
-        async fn exists(&self, _: &str, _: &str) -> Result<bool, DagError> {
+        async fn exists(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: &str,
+        ) -> Result<bool, DagError> {
             Ok(false)
         }
         async fn cleanup(&self, _: &str) -> Result<(), DagError> {
