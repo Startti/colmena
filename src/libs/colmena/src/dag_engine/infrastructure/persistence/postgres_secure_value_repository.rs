@@ -100,4 +100,54 @@ impl SecureValueRepository for PostgresSecureValueRepository {
 
         Ok(result.rows_affected())
     }
+
+    async fn exists(&self, session_id: &str, hash_key: &str) -> Result<bool, DagError> {
+        let row: Option<(bool,)> = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM secure_value_mappings WHERE session_id = $1 AND hash_key = $2)"
+        )
+        .bind(session_id)
+        .bind(hash_key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DagError::StateError(format!("secure_value_mappings exists query failed: {e}")))?;
+        Ok(row.map(|(b,)| b).unwrap_or(false))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn test_postgres_exists_returns_false_for_unknown_key() {
+        use sqlx::postgres::PgPoolOptions;
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+        let repo = PostgresSecureValueRepository::new(pool);
+        let exists = repo
+            .exists("nonexistent_session_xyz", "<sv_nope>")
+            .await
+            .unwrap();
+        assert!(!exists);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn test_postgres_exists_returns_true_after_persist() {
+        use sqlx::postgres::PgPoolOptions;
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+        let repo = PostgresSecureValueRepository::new(pool);
+        let unique_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let session = format!("test_session_{unique_id}");
+        repo.persist(&session, "node1", "<sv_x>", "secret_value", "test")
+            .await
+            .unwrap();
+        assert!(repo.exists(&session, "<sv_x>").await.unwrap());
+        repo.cleanup(&session).await.unwrap();
+    }
 }
