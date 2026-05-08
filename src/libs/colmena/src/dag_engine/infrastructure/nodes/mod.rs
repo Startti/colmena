@@ -16,6 +16,7 @@ pub mod orchestrator;
 pub mod output;
 pub mod planner;
 pub mod python_node;
+pub mod qa_response_parser;
 pub mod reactor;
 pub mod secure_suspend;
 pub mod socketio;
