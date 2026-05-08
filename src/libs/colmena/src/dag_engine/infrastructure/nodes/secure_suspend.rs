@@ -81,8 +81,6 @@ fn parse_and_validate_secrets(config: &Value) -> Result<Vec<Secret>, String> {
 /// string for the last one). Trailing `\n` is stripped from the value but
 /// internal newlines are preserved. Empty values are rejected.
 ///
-/// Not yet called from `execute` — Task 8 wires this into the resume path.
-#[allow(dead_code)]
 fn parse_answers(answer: &str, secrets: &[Secret]) -> Result<Vec<String>, String> {
     let mut positions: Vec<usize> = Vec::with_capacity(secrets.len());
     let mut search_from = 0usize;
@@ -153,15 +151,63 @@ impl ExecutableNode for SecureSuspendNode {
         _global_state: &mut Value,
         _observer: Option<Arc<dyn ExecutionObserver>>,
     ) -> Result<Value, Box<dyn Error + Send + Sync>> {
-        // Keep the _svc workaround until Task 8 introduces a real read of the field.
-        let _svc = Arc::clone(&self.secure_value_service);
-
         let secrets = parse_and_validate_secrets(config)
             .map_err(Box::<dyn Error + Send + Sync>::from)?;
 
-        // Resume-path: handled in Task 8. For now, fall through to suspend.
-        if inputs.get("__colmena_resume_answer").is_some() {
-            return Err("secure_suspend: resume not implemented".into());
+        if let Some(answer_val) = inputs.get("__colmena_resume_answer") {
+            let answer = answer_val
+                .as_str()
+                .ok_or_else(|| {
+                    Box::<dyn Error + Send + Sync>::from(
+                        "secure_suspend: __colmena_resume_answer must be a string",
+                    )
+                })?;
+            let session_id = inputs
+                .get("__colmena_session_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    Box::<dyn Error + Send + Sync>::from(
+                        "secure_suspend: missing __colmena_session_id in inputs",
+                    )
+                })?;
+            let node_id = inputs
+                .get("__node_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("secure_suspend");
+
+            let values = parse_answers(answer, &secrets)
+                .map_err(Box::<dyn Error + Send + Sync>::from)?;
+
+            // Collision pre-check (all secrets) before any write.
+            for s in &secrets {
+                let handle = format!("<sv_{}>", s.name);
+                if self
+                    .secure_value_service
+                    .handle_exists(session_id, &handle)
+                    .await
+                    .map_err(|e| Box::<dyn Error + Send + Sync>::from(format!("{e}")))?
+                {
+                    return Err(Box::<dyn Error + Send + Sync>::from(format!(
+                        "secure_suspend: handle {handle} already exists in session — use a different name"
+                    )));
+                }
+            }
+
+            // Persist + collect handles.
+            let mut handles = serde_json::Map::new();
+            for (s, v) in secrets.iter().zip(values.iter()) {
+                let handle = self
+                    .secure_value_service
+                    .persist_secret(session_id, node_id, &s.name, v)
+                    .await
+                    .map_err(|e| Box::<dyn Error + Send + Sync>::from(format!("{e}")))?;
+                handles.insert(s.name.clone(), Value::String(handle));
+            }
+
+            return Ok(json!({
+                "status": "resumed",
+                "handles": Value::Object(handles)
+            }));
         }
 
         // Suspend-path emission.
@@ -488,5 +534,116 @@ mod tests {
         let answer = "SECOND?\nv2\nFIRST?\nv1";
         let err = parse_answers(answer, &secrets).unwrap_err();
         assert!(err.contains("missing answer for secret 'n2'"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn resume_persists_two_secrets_and_returns_handles_map() {
+        let (node, repo) = build_node();
+        let mut state = Value::Null;
+        let cfg = json!({
+            "secrets": [
+                { "question": "Cliente ID?",     "name": "amadeus_client_id" },
+                { "question": "Cliente secret?", "name": "amadeus_client_secret" }
+            ]
+        });
+        let mut inputs = inputs_with("ask_creds", "sx");
+        inputs.insert(
+            "__colmena_resume_answer".into(),
+            Value::String(
+                "Cliente ID?\nABC-CLI-ID\nCliente secret?\nXYZ-CLI-SEC".into(),
+            ),
+        );
+
+        let out = node
+            .execute(&inputs, &cfg, &mut state, None)
+            .await
+            .unwrap();
+
+        assert_eq!(out["status"], "resumed");
+        assert_eq!(
+            out["handles"]["amadeus_client_id"],
+            "<sv_amadeus_client_id>"
+        );
+        assert_eq!(
+            out["handles"]["amadeus_client_secret"],
+            "<sv_amadeus_client_secret>"
+        );
+
+        // Real values must NEVER appear in the output.
+        let serialized = out.to_string();
+        assert!(!serialized.contains("ABC-CLI-ID"), "real value leaked: {serialized}");
+        assert!(!serialized.contains("XYZ-CLI-SEC"), "real value leaked: {serialized}");
+
+        // But they ARE persisted in the repo.
+        let stored = repo.storage.lock().unwrap();
+        assert_eq!(
+            stored.get("<sv_amadeus_client_id>").map(String::as_str),
+            Some("ABC-CLI-ID")
+        );
+        assert_eq!(
+            stored.get("<sv_amadeus_client_secret>").map(String::as_str),
+            Some("XYZ-CLI-SEC")
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_errors_on_handle_collision() {
+        let (node, repo) = build_node();
+        // Pre-populate a colliding handle.
+        repo.storage
+            .lock()
+            .unwrap()
+            .insert("<sv_dup_token>".into(), "preexisting".into());
+
+        let mut state = Value::Null;
+        let cfg = json!({
+            "secrets": [{ "question": "Token?", "name": "dup_token" }]
+        });
+        let mut inputs = inputs_with("ask", "sx");
+        inputs.insert(
+            "__colmena_resume_answer".into(),
+            Value::String("Token?\nnew-value".into()),
+        );
+
+        let err = node
+            .execute(&inputs, &cfg, &mut state, None)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("handle <sv_dup_token> already exists"),
+            "got: {err}"
+        );
+
+        // Repo must NOT have been mutated.
+        assert_eq!(
+            repo.storage
+                .lock()
+                .unwrap()
+                .get("<sv_dup_token>")
+                .map(String::as_str),
+            Some("preexisting")
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_propagates_parser_errors() {
+        let (node, _) = build_node();
+        let mut state = Value::Null;
+        let cfg = json!({
+            "secrets": [{ "question": "Q?", "name": "nxt" }]
+        });
+        let mut inputs = inputs_with("ask", "sx");
+        inputs.insert(
+            "__colmena_resume_answer".into(),
+            Value::String("UnrelatedText\nval".into()),
+        );
+        let err = node
+            .execute(&inputs, &cfg, &mut state, None)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("missing answer for secret 'nxt'"),
+            "got: {err}"
+        );
     }
 }
