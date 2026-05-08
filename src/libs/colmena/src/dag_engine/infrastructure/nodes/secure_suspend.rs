@@ -93,18 +93,52 @@ impl SecureSuspendNode {
 impl ExecutableNode for SecureSuspendNode {
     async fn execute(
         &self,
-        _inputs: &NodeInputs,
+        inputs: &NodeInputs,
         config: &Value,
         _global_state: &mut Value,
         _observer: Option<Arc<dyn ExecutionObserver>>,
     ) -> Result<Value, Box<dyn Error + Send + Sync>> {
-        // Temporary read to suppress dead_code on the field until Task 8 uses it.
+        // Keep the _svc workaround until Task 8 introduces a real read of the field.
         let _svc = Arc::clone(&self.secure_value_service);
-        let _secrets = parse_and_validate_secrets(config).map_err(|e| {
-            Box::<dyn Error + Send + Sync>::from(e)
-        })?;
-        // Emission of SUSPENDED comes in Task 6.
-        Err("secure_suspend: emission not implemented".into())
+
+        let secrets = parse_and_validate_secrets(config)
+            .map_err(Box::<dyn Error + Send + Sync>::from)?;
+
+        // Resume-path: handled in Task 8. For now, fall through to suspend.
+        if inputs.get("__colmena_resume_answer").is_some() {
+            return Err("secure_suspend: resume not implemented".into());
+        }
+
+        // Suspend-path emission.
+        let base_id = config
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                inputs
+                    .get("__node_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| "secure_suspend".to_string());
+
+        let questions: Vec<Value> = secrets
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                json!({
+                    "id": format!("{base_id}__{}", i + 1),
+                    "question": s.question,
+                    "type": "secret",
+                    "options": Value::Null
+                })
+            })
+            .collect();
+
+        Ok(json!({
+            "__colmena_status": "SUSPENDED",
+            "questions": questions
+        }))
     }
 
     fn default_input(&self) -> Option<&str> {
@@ -198,17 +232,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_with_valid_config_reaches_emission_phase() {
+    async fn execute_with_valid_config_emits_suspended() {
         let (node, _) = build_node();
         let mut state = Value::Null;
         let cfg = json!({
             "secrets": [{"question": "Q?", "name": "valid_name"}]
         });
-        let err = node
+        let out = node
             .execute(&inputs_with("ask", "s1"), &cfg, &mut state, None)
             .await
-            .unwrap_err();
-        assert!(format!("{err}").contains("emission not implemented"));
+            .unwrap();
+        assert_eq!(out["__colmena_status"], "SUSPENDED");
     }
 
     #[tokio::test]
@@ -275,6 +309,47 @@ mod tests {
             .await;
         let msg = format!("{}", result.unwrap_err());
         assert!(msg.contains("duplicate name 'dup_name'"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn suspend_path_emits_n_questions_with_secret_type() {
+        let (node, _) = build_node();
+        let mut state = Value::Null;
+        let cfg = json!({
+            "secrets": [
+                { "question": "Cliente ID?",     "name": "amadeus_client_id" },
+                { "question": "Cliente secret?", "name": "amadeus_client_secret" }
+            ]
+        });
+        let out = node
+            .execute(&inputs_with("ask_creds", "sx"), &cfg, &mut state, None)
+            .await
+            .unwrap();
+
+        assert_eq!(out["__colmena_status"], "SUSPENDED");
+        let qs = out["questions"].as_array().expect("questions array");
+        assert_eq!(qs.len(), 2);
+        assert_eq!(qs[0]["question"], "Cliente ID?");
+        assert_eq!(qs[0]["type"], "secret");
+        assert_eq!(qs[0]["id"], "ask_creds__1");
+        assert_eq!(qs[0]["options"], Value::Null);
+        assert_eq!(qs[1]["question"], "Cliente secret?");
+        assert_eq!(qs[1]["id"], "ask_creds__2");
+    }
+
+    #[tokio::test]
+    async fn suspend_path_uses_explicit_id_from_config() {
+        let (node, _) = build_node();
+        let mut state = Value::Null;
+        let cfg = json!({
+            "id": "custom_block",
+            "secrets": [{"question": "Q?", "name": "n_a"}]
+        });
+        let out = node
+            .execute(&inputs_with("ignored_node_id", "sx"), &cfg, &mut state, None)
+            .await
+            .unwrap();
+        assert_eq!(out["questions"][0]["id"], "custom_block__1");
     }
 
     #[tokio::test]
