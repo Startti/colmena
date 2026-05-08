@@ -2,12 +2,16 @@
 name: hubspot-crm
 description: Use when calling HubSpot CRM tools — create/update/search contacts and companies, or associate a contact with a company. Load the reference for the specific operation you are about to call to get its property table, request/response shape, and error remedies.
 references:
+  - name: list_contacts
+    description: GET /crm/v3/objects/contacts — paginated list of all contacts, no filters. Use for "show me what I have".
   - name: create_contact
     description: POST /crm/v3/objects/contacts — required/optional properties, dedup behavior on email.
   - name: update_contact
     description: PATCH /crm/v3/objects/contacts/{id} — partial updates, requires id from search/create.
   - name: search_contacts
     description: POST /crm/v3/objects/contacts/search — filterGroups, common operators, pagination.
+  - name: list_companies
+    description: GET /crm/v3/objects/companies — paginated list of all companies, no filters. Use for "show me what I have".
   - name: create_company
     description: POST /crm/v3/objects/companies — required/optional properties, dedup notes.
   - name: update_company
@@ -64,8 +68,14 @@ The `body` field returned by the `http_request` tool contains this exact JSON.
 
 ## When to search before acting
 
-- **Update / associate** require an `id`. **Never invent an id.** If you do not have one from a prior `create_*` or `search_*` in this conversation, call the matching `search_*` first.
+- **Update / associate** require an `id`. **Never invent an id.** If you do not have one from a prior `create_*`, `search_*`, or `list_*` in this conversation, call the matching `search_*` (when you have a filter) or `list_*` (when you want a browse) first.
 - For associate, you need both ids — search the contact and the company independently if you do not have them.
+
+## List vs search
+
+- Use `list_*` when the user wants to **browse** ("show me my contacts", "what companies do I have?"). No filter logic needed; results are paginated.
+- Use `search_*` when the user gives **filtering criteria** ("find Jane by email", "companies in the financial sector"). Search supports `filterGroups` with operators.
+- Both return the same per-record shape (`{ id, properties, ... }`), so once you have results, follow-up `update_*` and `associate_*` work the same way.
 
 ## Association type IDs
 

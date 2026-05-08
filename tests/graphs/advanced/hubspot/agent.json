@@ -1,0 +1,222 @@
+{
+  "nodes": {
+    "input": {
+      "type": "input",
+      "config": {
+        "prompt": "Hello — just reply 'ready' so we can confirm the graph loads. Do not call any tool."
+      }
+    },
+    "agent_llm": {
+      "type": "llm_call",
+      "config": {
+        "provider": "gemini",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "system_message": "You manage HubSpot CRM contacts and companies. When you need details about a specific operation, load the matching reference from the hubspot-crm skill.",
+        "temperature": 0.2,
+        "connection_url": "${DATABASE_URL}",
+        "skills": {
+          "paths": ["tests/graphs/advanced/hubspot/skills/hubspot-crm"]
+        },
+        "tool_configurations": {
+          "list_contacts": {
+            "name": "list_contacts",
+            "node_type": "http_request",
+            "description": "List HubSpot contacts (paginated, no filters). Use this to browse what's there. For filtered queries use `search_contacts`. See `hubspot-crm/list_contacts`.",
+            "node_schema": {
+              "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
+              "endpoint":     { "type": "string", "fixed": "/crm/v3/objects/contacts" },
+              "method":       { "type": "string", "fixed": "GET" },
+              "bearer_token": { "type": "string", "fixed": "${HUBSPOT_PRIVATE_APP_TOKEN}" },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json" } },
+              "query_params": {
+                "type": "object",
+                "properties": {
+                  "limit":      { "type": "number", "description": "Page size 1-100, default 10." },
+                  "after":      { "type": "string", "description": "Pagination cursor from a prior response's paging.next.after. Omit on first page." },
+                  "properties": { "type": "string", "description": "Comma-separated property names to return, e.g. 'email,firstname,lastname'." },
+                  "archived":   { "type": "boolean", "description": "If true, list archived (soft-deleted) records. Default false." }
+                }
+              }
+            }
+          },
+          "create_contact": {
+            "name": "create_contact",
+            "node_type": "http_request",
+            "description": "Create a HubSpot contact. Provide a `properties` object with at least `email`. See `hubspot-crm/create_contact` for valid property names and dedup behavior.",
+            "node_schema": {
+              "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
+              "endpoint":     { "type": "string", "fixed": "/crm/v3/objects/contacts" },
+              "method":       { "type": "string", "fixed": "POST" },
+              "bearer_token": { "type": "string", "fixed": "${HUBSPOT_PRIVATE_APP_TOKEN}" },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json" } },
+              "body": {
+                "type": "object",
+                "properties": {
+                  "properties": {
+                    "type": "object",
+                    "required": true,
+                    "description": "Contact fields. Required: email. Common: firstname, lastname, phone, company, lifecyclestage. See hubspot-crm/create_contact for the full property list."
+                  }
+                }
+              }
+            }
+          },
+          "update_contact": {
+            "name": "update_contact",
+            "node_type": "http_request",
+            "description": "Update a HubSpot contact's properties. Requires the contact id in the endpoint path. See `hubspot-crm/update_contact`.",
+            "node_schema": {
+              "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
+              "method":       { "type": "string", "fixed": "PATCH" },
+              "bearer_token": { "type": "string", "fixed": "${HUBSPOT_PRIVATE_APP_TOKEN}" },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json" } },
+              "endpoint": {
+                "type": "string",
+                "required": true,
+                "description": "Full path of the form /crm/v3/objects/contacts/{contactId} where {contactId} is the real id from a prior search_contacts or create_contact response. Never invent an id."
+              },
+              "body": {
+                "type": "object",
+                "properties": {
+                  "properties": {
+                    "type": "object",
+                    "required": true,
+                    "description": "Properties to update (partial). Same names as create_contact. See hubspot-crm/update_contact."
+                  }
+                }
+              }
+            }
+          },
+          "search_contacts": {
+            "name": "search_contacts",
+            "node_type": "http_request",
+            "description": "Search HubSpot contacts using filterGroups. Use this before update or associate when you only have an email/name. See `hubspot-crm/search_contacts` for the body shape and operators.",
+            "node_schema": {
+              "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
+              "endpoint":     { "type": "string", "fixed": "/crm/v3/objects/contacts/search" },
+              "method":       { "type": "string", "fixed": "POST" },
+              "bearer_token": { "type": "string", "fixed": "${HUBSPOT_PRIVATE_APP_TOKEN}" },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json" } },
+              "body": {
+                "type": "object",
+                "required": true,
+                "description": "Full JSON body. Required: filterGroups (array of { filters: [ { propertyName, operator, value } ] }). Optional: properties (array of strings — names to return), limit (number, default 10, max 100). Operators: EQ, NEQ, CONTAINS_TOKEN, HAS_PROPERTY, NOT_HAS_PROPERTY, GT, LT, BETWEEN, IN. See hubspot-crm/search_contacts."
+              }
+            }
+          },
+          "list_companies": {
+            "name": "list_companies",
+            "node_type": "http_request",
+            "description": "List HubSpot companies (paginated, no filters). Use this to browse what's there. For filtered queries use `search_companies`. See `hubspot-crm/list_companies`.",
+            "node_schema": {
+              "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
+              "endpoint":     { "type": "string", "fixed": "/crm/v3/objects/companies" },
+              "method":       { "type": "string", "fixed": "GET" },
+              "bearer_token": { "type": "string", "fixed": "${HUBSPOT_PRIVATE_APP_TOKEN}" },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json" } },
+              "query_params": {
+                "type": "object",
+                "properties": {
+                  "limit":      { "type": "number", "description": "Page size 1-100, default 10." },
+                  "after":      { "type": "string", "description": "Pagination cursor from a prior response's paging.next.after. Omit on first page." },
+                  "properties": { "type": "string", "description": "Comma-separated property names to return, e.g. 'name,domain,industry'." },
+                  "archived":   { "type": "boolean", "description": "If true, list archived (soft-deleted) records. Default false." }
+                }
+              }
+            }
+          },
+          "create_company": {
+            "name": "create_company",
+            "node_type": "http_request",
+            "description": "Create a HubSpot company. Provide a `properties` object with at least `name`. See `hubspot-crm/create_company` for valid property names and dedup notes.",
+            "node_schema": {
+              "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
+              "endpoint":     { "type": "string", "fixed": "/crm/v3/objects/companies" },
+              "method":       { "type": "string", "fixed": "POST" },
+              "bearer_token": { "type": "string", "fixed": "${HUBSPOT_PRIVATE_APP_TOKEN}" },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json" } },
+              "body": {
+                "type": "object",
+                "properties": {
+                  "properties": {
+                    "type": "object",
+                    "required": true,
+                    "description": "Company fields. Required: name. Common: domain, industry, phone, city, country, numberofemployees. See hubspot-crm/create_company."
+                  }
+                }
+              }
+            }
+          },
+          "update_company": {
+            "name": "update_company",
+            "node_type": "http_request",
+            "description": "Update a HubSpot company's properties. Requires the company id in the endpoint path. See `hubspot-crm/update_company`.",
+            "node_schema": {
+              "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
+              "method":       { "type": "string", "fixed": "PATCH" },
+              "bearer_token": { "type": "string", "fixed": "${HUBSPOT_PRIVATE_APP_TOKEN}" },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json" } },
+              "endpoint": {
+                "type": "string",
+                "required": true,
+                "description": "Full path of the form /crm/v3/objects/companies/{companyId} where {companyId} is the real id from a prior search_companies or create_company response. Never invent an id."
+              },
+              "body": {
+                "type": "object",
+                "properties": {
+                  "properties": {
+                    "type": "object",
+                    "required": true,
+                    "description": "Properties to update (partial). Same names as create_company. See hubspot-crm/update_company."
+                  }
+                }
+              }
+            }
+          },
+          "search_companies": {
+            "name": "search_companies",
+            "node_type": "http_request",
+            "description": "Search HubSpot companies using filterGroups. Use this before update or associate when you only have a domain/name. See `hubspot-crm/search_companies` for the body shape and operators.",
+            "node_schema": {
+              "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
+              "endpoint":     { "type": "string", "fixed": "/crm/v3/objects/companies/search" },
+              "method":       { "type": "string", "fixed": "POST" },
+              "bearer_token": { "type": "string", "fixed": "${HUBSPOT_PRIVATE_APP_TOKEN}" },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json" } },
+              "body": {
+                "type": "object",
+                "required": true,
+                "description": "Full JSON body. Required: filterGroups (array of { filters: [ { propertyName, operator, value } ] }). Optional: properties (array of strings — names to return), limit (number, default 10, max 100). Operators: EQ, NEQ, CONTAINS_TOKEN, HAS_PROPERTY, NOT_HAS_PROPERTY, GT, LT, BETWEEN, IN. See hubspot-crm/search_companies."
+              }
+            }
+          },
+          "associate_contact_company": {
+            "name": "associate_contact_company",
+            "node_type": "http_request",
+            "description": "Associate a HubSpot contact with a HubSpot company using the default (primary) association type. Both ids must come from prior search/create — never invent. See `hubspot-crm/associate_contact_company`.",
+            "node_schema": {
+              "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
+              "method":       { "type": "string", "fixed": "PUT" },
+              "bearer_token": { "type": "string", "fixed": "${HUBSPOT_PRIVATE_APP_TOKEN}" },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json" } },
+              "endpoint": {
+                "type": "string",
+                "required": true,
+                "description": "Full path of the form /crm/v4/objects/contact/{contactId}/associations/default/company/{companyId}. Both ids required. The 'default' segment means HubSpot's primary association type; body is empty."
+              },
+              "body": { "type": "object", "fixed": {} }
+            }
+          }
+        }
+      }
+    },
+    "log": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "input", "to": "agent_llm" },
+    { "from": "agent_llm", "to": "log" }
+  ]
+}

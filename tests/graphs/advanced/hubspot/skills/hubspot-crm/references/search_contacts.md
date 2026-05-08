@@ -5,9 +5,10 @@
 
 ## What you provide (LLM-visible parameters)
 
-- `filterGroups` (array, required) — see structure and operators below.
-- `properties` (array, optional) — names of the properties you want returned, e.g. `["email","firstname","lastname","phone"]`. Default minimal set if omitted.
-- `limit` (number, optional) — max results. Default 10, max 100.
+- `body` (object, required) — the full JSON body for the search. The tool sends it verbatim. Shape:
+  - `filterGroups` (array, required) — see structure and operators below.
+  - `properties` (array, optional) — names of the properties you want returned, e.g. `["email","firstname","lastname","phone"]`. Default minimal set if omitted.
+  - `limit` (number, optional) — max results. Default 10, max 100.
 
 ## filterGroups structure
 

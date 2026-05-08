@@ -5,9 +5,10 @@
 
 ## What you provide (LLM-visible parameters)
 
-- `filterGroups` (array, required) — same structure as `search_contacts`.
-- `properties` (array, optional) — property names to return, e.g. `["name","domain","industry"]`.
-- `limit` (number, optional) — default 10, max 100.
+- `body` (object, required) — the full JSON body. Shape:
+  - `filterGroups` (array, required) — same structure as `search_contacts`.
+  - `properties` (array, optional) — property names to return, e.g. `["name","domain","industry"]`.
+  - `limit` (number, optional) — default 10, max 100.
 
 ## filterGroups structure
 
