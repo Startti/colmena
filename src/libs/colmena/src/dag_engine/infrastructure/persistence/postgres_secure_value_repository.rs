@@ -101,16 +101,20 @@ impl SecureValueRepository for PostgresSecureValueRepository {
         Ok(result.rows_affected())
     }
 
-    async fn exists(&self, session_id: &str, hash_key: &str) -> Result<bool, DagError> {
-        let row: Option<(bool,)> = sqlx::query_as(
+    async fn exists(
+        &self,
+        session_id: &str,
+        hash_key: &str,
+    ) -> Result<bool, DagError> {
+        let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM secure_value_mappings WHERE session_id = $1 AND hash_key = $2)"
         )
         .bind(session_id)
         .bind(hash_key)
-        .fetch_optional(&self.pool)
+        .fetch_one(&self.pool)
         .await
         .map_err(|e| DagError::StateError(format!("secure_value_mappings exists query failed: {e}")))?;
-        Ok(row.map(|(b,)| b).unwrap_or(false))
+        Ok(exists)
     }
 }
 
