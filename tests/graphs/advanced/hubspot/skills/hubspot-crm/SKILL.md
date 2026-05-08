@@ -18,8 +18,22 @@ references:
     description: PATCH /crm/v3/objects/companies/{id} — partial updates, requires id from search/create.
   - name: search_companies
     description: POST /crm/v3/objects/companies/search — filterGroups, operators, pagination.
+  - name: list_deals
+    description: GET /crm/v3/objects/deals — paginated list of all deals, no filters.
+  - name: create_deal
+    description: POST /crm/v3/objects/deals — required dealname; pipeline/dealstage IDs come from list_pipelines.
+  - name: update_deal
+    description: PATCH /crm/v3/objects/deals/{id} — partial updates (move stage, change amount, reassign owner).
+  - name: search_deals
+    description: POST /crm/v3/objects/deals/search — filterGroups, operators, pagination.
+  - name: list_pipelines
+    description: GET /crm/v3/pipelines/deals — list deal pipelines and their stage IDs. Call BEFORE create_deal/update_deal so you do not invent stage values.
+  - name: list_owners
+    description: GET /crm/v3/owners — list workspace users (HubSpot owners). Call before assigning hubspot_owner_id.
   - name: associate_contact_company
     description: PUT /crm/v4/.../associations/default/... — primary association, empty body, when NOT to use labeled associations.
+  - name: associate_deal
+    description: PUT /crm/v4/objects/deal/{dealId}/associations/default/{contact|company}/{id} — link a deal to a contact OR company; one call per direction.
 ---
 
 # HubSpot CRM
@@ -79,7 +93,19 @@ The `body` field returned by the `http_request` tool contains this exact JSON.
 
 ## Association type IDs
 
-The `associate_contact_company` tool uses the URL segment `/associations/default/`, which means HubSpot's primary association type. The body is empty. There is no need to pass a type id. Labeled associations (custom association types) are out of scope.
+The `associate_contact_company` and `associate_deal` tools use the URL segment `/associations/default/`, which means HubSpot's primary association type. The body is empty. There is no need to pass a type id. Labeled associations (custom association types) are out of scope.
+
+## Working with deals
+
+A deal is HubSpot's object for a sales opportunity (one potential transaction). The typical flow:
+
+1. **`list_pipelines`** first — returns the deal pipelines and the stage IDs for each. Without this you would have to guess `dealstage` values, and HubSpot rejects unknown stage IDs.
+2. **`list_owners`** if you intend to assign a `hubspot_owner_id` (a real user in the workspace). Without this you would invent owner ids.
+3. **`create_deal`** with at minimum `dealname`, plus `pipeline` and `dealstage` from step 1, optionally `amount`, `closedate`, `hubspot_owner_id`, `description`.
+4. **`associate_deal`** — call once per related object: one call to link the deal to a contact, another to link it to a company. Both directions get auto-created by HubSpot.
+5. **`update_deal`** when the stage advances, the amount changes, or the owner is reassigned.
+
+Common deal property internal names: `dealname`, `pipeline`, `dealstage`, `amount`, `closedate`, `hubspot_owner_id`, `description`, `dealtype`.
 
 ## Tool naming and reference loading
 

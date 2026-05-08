@@ -3,7 +3,7 @@
     "input": {
       "type": "input",
       "config": {
-        "prompt": "Investigá online qué hace la empresa Claro Colombia (su sitio es claro.com.co), y luego enriquecé su registro en HubSpot con un `description` corto (1-2 frases) y un `industry` apropiado."
+        "prompt": "Creá un deal para Dummy Corp QA y Juan Perez (los que creamos antes): nombre 'Dummy Corp QA — POC inicial', amount 5000, closedate 2026-08-31, en la etapa de 'qualified to buy'. Asocialo tanto a la empresa como al contacto."
       }
     },
     "agent_llm": {
@@ -183,6 +183,119 @@
               }
             }
           },
+          "list_deals": {
+            "name": "list_deals",
+            "node_type": "http_request",
+            "description": "List HubSpot deals (paginated, no filters). Use to browse what's there. For filtered queries use `search_deals`. See `hubspot-crm/list_deals`.",
+            "node_schema": {
+              "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
+              "endpoint":     { "type": "string", "fixed": "/crm/v3/objects/deals" },
+              "method":       { "type": "string", "fixed": "GET" },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json", "Authorization": "Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}" } },
+              "query_params": {
+                "type": "object",
+                "properties": {
+                  "limit":      { "type": "number", "description": "Page size 1-100, default 10." },
+                  "after":      { "type": "string", "description": "Pagination cursor from a prior response's paging.next.after. Omit on first page." },
+                  "properties": { "type": "string", "description": "Comma-separated property names to return, e.g. 'dealname,amount,dealstage,closedate'." },
+                  "archived":   { "type": "boolean", "description": "If true, list archived (soft-deleted) records. Default false." }
+                }
+              }
+            }
+          },
+          "create_deal": {
+            "name": "create_deal",
+            "node_type": "http_request",
+            "description": "Create a HubSpot deal. Provide a `properties` object with at least `dealname`. Look up valid `pipeline`/`dealstage` ids via `list_pipelines` first, and `hubspot_owner_id` via `list_owners` if you set it. See `hubspot-crm/create_deal`.",
+            "node_schema": {
+              "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
+              "endpoint":     { "type": "string", "fixed": "/crm/v3/objects/deals" },
+              "method":       { "type": "string", "fixed": "POST" },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json", "Authorization": "Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}" } },
+              "body": {
+                "type": "object",
+                "properties": {
+                  "properties": {
+                    "type": "object",
+                    "required": true,
+                    "description": "Deal fields. Required: dealname. Common: pipeline, dealstage (must belong to the chosen pipeline), amount, closedate (ISO 8601), hubspot_owner_id, description, dealtype. See hubspot-crm/create_deal."
+                  }
+                }
+              }
+            }
+          },
+          "update_deal": {
+            "name": "update_deal",
+            "node_type": "http_request",
+            "description": "Update a HubSpot deal's properties (move stage, change amount, reassign owner). Requires the deal id in the endpoint path. See `hubspot-crm/update_deal`.",
+            "node_schema": {
+              "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
+              "method":       { "type": "string", "fixed": "PATCH" },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json", "Authorization": "Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}" } },
+              "endpoint": {
+                "type": "string",
+                "required": true,
+                "description": "Full path of the form /crm/v3/objects/deals/{dealId} where {dealId} is the real id from a prior search_deals, list_deals, or create_deal response. Never invent an id."
+              },
+              "body": {
+                "type": "object",
+                "properties": {
+                  "properties": {
+                    "type": "object",
+                    "required": true,
+                    "description": "Properties to update (partial). Same names as create_deal. See hubspot-crm/update_deal."
+                  }
+                }
+              }
+            }
+          },
+          "search_deals": {
+            "name": "search_deals",
+            "node_type": "http_request",
+            "description": "Search HubSpot deals using filterGroups. Use this before update or associate when you only have a name/criteria. See `hubspot-crm/search_deals` for the body shape and operators.",
+            "node_schema": {
+              "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
+              "endpoint":     { "type": "string", "fixed": "/crm/v3/objects/deals/search" },
+              "method":       { "type": "string", "fixed": "POST" },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json", "Authorization": "Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}" } },
+              "body": {
+                "type": "object",
+                "required": true,
+                "description": "Full JSON body. Required: filterGroups (array of { filters: [ { propertyName, operator, value } ] }). Optional: properties (array of strings — names to return), limit (number, default 10, max 100). Operators: EQ, NEQ, CONTAINS_TOKEN, HAS_PROPERTY, NOT_HAS_PROPERTY, GT, LT, BETWEEN, IN. See hubspot-crm/search_deals."
+              }
+            }
+          },
+          "list_pipelines": {
+            "name": "list_pipelines",
+            "node_type": "http_request",
+            "description": "List HubSpot deal pipelines and their stage IDs. Call this BEFORE create_deal/update_deal so you do not invent pipeline or dealstage values. See `hubspot-crm/list_pipelines`.",
+            "node_schema": {
+              "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
+              "endpoint":     { "type": "string", "fixed": "/crm/v3/pipelines/deals" },
+              "method":       { "type": "string", "fixed": "GET" },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json", "Authorization": "Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}" } }
+            }
+          },
+          "list_owners": {
+            "name": "list_owners",
+            "node_type": "http_request",
+            "description": "List HubSpot owners (workspace users). Call before assigning hubspot_owner_id on contacts/companies/deals. Filter by email to find a specific user. See `hubspot-crm/list_owners`.",
+            "node_schema": {
+              "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
+              "endpoint":     { "type": "string", "fixed": "/crm/v3/owners" },
+              "method":       { "type": "string", "fixed": "GET" },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json", "Authorization": "Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}" } },
+              "query_params": {
+                "type": "object",
+                "properties": {
+                  "limit":    { "type": "number", "description": "Page size 1-100, default 10." },
+                  "after":    { "type": "string", "description": "Pagination cursor from paging.next.after. Omit on first page." },
+                  "email":    { "type": "string", "description": "Exact-match filter on user email — useful to find one specific person's owner id." },
+                  "archived": { "type": "boolean", "description": "If true, include deactivated users. Default false." }
+                }
+              }
+            }
+          },
           "web": {
             "name": "web",
             "description": "Web search and fetch via Tavily. Use to discover a company's industry, domain, headquarters, description, or any public info before creating/enriching its HubSpot record. Sub-tools: `search` (general queries) and `fetch` (extract content from a specific URL).",
@@ -202,6 +315,22 @@
                 "type": "string",
                 "required": true,
                 "description": "Full path of the form /crm/v4/objects/contact/{contactId}/associations/default/company/{companyId}. Both ids required. The 'default' segment means HubSpot's primary association type; body is empty."
+              },
+              "body": { "type": "object", "fixed": {} }
+            }
+          },
+          "associate_deal": {
+            "name": "associate_deal",
+            "node_type": "http_request",
+            "description": "Link a HubSpot deal to a contact OR a company using the default (primary) association type. Call once per direction (one call to link the deal to a contact, another to link it to a company). Both ids must come from prior search/create — never invent. See `hubspot-crm/associate_deal`.",
+            "node_schema": {
+              "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
+              "method":       { "type": "string", "fixed": "PUT" },
+              "headers":      { "type": "object", "fixed": { "Content-Type": "application/json", "Authorization": "Bearer ${HUBSPOT_PRIVATE_APP_TOKEN}" } },
+              "endpoint": {
+                "type": "string",
+                "required": true,
+                "description": "Full path of the form /crm/v4/objects/deal/{dealId}/associations/default/{contact|company}/{toId}. Pick `contact` or `company` for the second-to-last segment based on what you are linking. Body is empty."
               },
               "body": { "type": "object", "fixed": {} }
             }
