@@ -204,7 +204,7 @@ async fn resume_replays_and_completes() {
             id: "call_1".into(),
             tool_name: "ask_secret".into(),
             arguments: serde_json::json!({
-                "secrets": [{"question": "User?", "name": "u"}]
+                "secrets": [{"question": "User?", "name": "user"}]
             }),
         }]));
         let _g = OverrideGuard::install(adapter);
@@ -225,11 +225,11 @@ async fn resume_replays_and_completes() {
             "Saved username.".into(),
         )]));
         let _g = OverrideGuard::install(adapter);
-        tracing::info!("--- run 2: resume with Q[u]: User?\\nA[u]: alice ---");
+        tracing::info!("--- run 2: resume with Q[user]: User?\\nA[user]: alice ---");
         let output = run_until_finish(
             &eng,
             smoke_graph(),
-            Some("Q[u]: User?\nA[u]: alice".into()),
+            Some("Q[user]: User?\nA[user]: alice".into()),
             &chat,
         )
         .await;
@@ -261,8 +261,8 @@ async fn multiple_secrets_resolved_via_qa_format() {
             tool_name: "ask_secret".into(),
             arguments: serde_json::json!({
                 "secrets": [
-                    {"question": "User?", "name": "u"},
-                    {"question": "Pass?", "name": "p"}
+                    {"question": "User?", "name": "user"},
+                    {"question": "Pass?", "name": "pass"}
                 ]
             }),
         }]));
@@ -285,7 +285,7 @@ async fn multiple_secrets_resolved_via_qa_format() {
         let _output = run_until_finish(
             &eng,
             smoke_graph(),
-            Some("Q[u]: User?\nA[u]: alice\nQ[p]: Pass?\nA[p]: hunter2".into()),
+            Some("Q[user]: User?\nA[user]: alice\nQ[pass]: Pass?\nA[pass]: hunter2".into()),
             &chat,
         )
         .await;
@@ -305,12 +305,12 @@ async fn multiple_secrets_resolved_via_qa_format() {
     let handles: Vec<String> = rows.into_iter().map(|r| r.0).collect();
     tracing::info!(?handles, "test: handles stored in DB");
     assert!(
-        handles.iter().any(|h| h.contains("<sv_u>")),
-        "expected <sv_u> handle, got: {handles:?}"
+        handles.iter().any(|h| h.contains("<sv_user>")),
+        "expected <sv_user> handle, got: {handles:?}"
     );
     assert!(
-        handles.iter().any(|h| h.contains("<sv_p>")),
-        "expected <sv_p> handle, got: {handles:?}"
+        handles.iter().any(|h| h.contains("<sv_pass>")),
+        "expected <sv_pass> handle, got: {handles:?}"
     );
 
     eng.shutdown().await;
