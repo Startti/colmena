@@ -1,0 +1,49 @@
+{
+  "comment": "Minimal smoke graph: input → llm_call with secure_suspend registered as the `ask_secret` tool. Used by Plan 2 Test B integration tests (deterministic via ScriptedAdapter; real via Gemini Flash). The `provider`/`model` fields here are placeholders the test driver overrides.",
+  "metadata": {
+    "category": "advanced",
+    "features": [
+      "llm_call",
+      "secure_suspend",
+      "tool_configurations"
+    ],
+    "requires_env": [
+      "DATABASE_URL"
+    ]
+  },
+  "nodes": {
+    "user_input": {
+      "type": "input",
+      "config": {
+        "default": "Set up a connection — I need username and password to log in."
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "session_id": "llm_tool_suspend_smoke",
+        "connection_url": "${DATABASE_URL}",
+        "temperature": 0.0,
+        "stream": false,
+        "system_message": "You collect credentials from the user. When the user asks you to set up any login or connection that needs secrets, call `ask_secret` exactly once with a list of `{question, name}` pairs covering ALL credentials you need. Do not chat about the secrets — just call the tool.",
+        "tool_configurations": {
+          "ask_secret": {
+            "name": "ask_secret",
+            "node_type": "secure_suspend",
+            "description": "Ask the user for ONE OR MORE secrets in a SINGLE prompt cycle. Pass `secrets: [{question, name}, ...]` — batch all credentials needed for the same external service in one call. Returns `{handles: {<name>: <sv_<name>>}}`. NEVER ask for secrets via plain chat."
+          }
+        }
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "user_input", "to": "agent" },
+    { "from": "agent.result", "to": "log_result" }
+  ]
+}
