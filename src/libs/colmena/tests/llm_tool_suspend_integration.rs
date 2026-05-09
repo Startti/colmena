@@ -33,45 +33,73 @@ async fn engine() -> ColmenaEngine {
     ColmenaEngine::new(cfg).await.unwrap()
 }
 
-/// Reset DB state for a test agent_session_id and seed the `agent_session`
-/// row that other tables reference via FK.
+/// Reset DB state for a test agent_session_id and (when applicable) seed
+/// the `agent_session` parent row that other tables may reference via FK.
 ///
-/// `llm_node_history.agent_session_id` and `dag_runs.agent_session_id` are
-/// foreign keys into `agent_session(id)` (a table owned by ADP, layered
-/// on top of the same Postgres). To run integration tests with fresh
-/// per-run ids, we must seed that row first; on completion (or next run)
-/// the `ON DELETE CASCADE` clause cleans up dependent rows automatically.
+/// Two deployment shapes:
+///   1. Standalone colmena DB (`colmena_llm_memory` or similar) — only
+///      colmena's own tables. No FK to `agent_session`. We just clean up.
+///   2. Shared ADP DB — `llm_node_history.agent_session_id` and
+///      `dag_runs.agent_session_id` are FKs into `agent_session(id)`. We
+///      seed that row so inserts pass the FK; ON DELETE CASCADE cleans up
+///      dependents on next run.
+///
+/// We auto-detect by checking `information_schema.tables`.
 async fn cleanup(chat: &str) {
     dotenvy::dotenv().ok();
     let url = std::env::var("DATABASE_URL").unwrap();
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
 
-    // Cascade-delete any prior state for this agent_session_id. The CASCADE
-    // on agent_session takes care of dag_runs and llm_node_history.
-    sqlx::query("DELETE FROM agent_session WHERE id = $1")
-        .bind(chat)
-        .execute(&pool)
-        .await
-        .ok();
-    // secure_value_mappings has no FK on agent_session — clean it explicitly.
+    let has_agent_session: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS (
+             SELECT 1 FROM information_schema.tables
+             WHERE table_schema = 'public' AND table_name = 'agent_session'
+           )"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("probe agent_session existence");
+
+    if has_agent_session {
+        // CASCADE on agent_session covers dag_runs + llm_node_history.
+        sqlx::query("DELETE FROM agent_session WHERE id = $1")
+            .bind(chat)
+            .execute(&pool)
+            .await
+            .ok();
+    } else {
+        // No FK — clean the engine tables directly.
+        sqlx::query("DELETE FROM dag_runs WHERE agent_session_id = $1")
+            .bind(chat)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM llm_node_history WHERE agent_session_id = $1")
+            .bind(chat)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    // secure_value_mappings has no FK on agent_session — clean explicitly
+    // either way.
     sqlx::query("DELETE FROM secure_value_mappings WHERE agent_session_id = $1")
         .bind(chat)
         .execute(&pool)
         .await
         .ok();
 
-    // Seed the agent_session row so subsequent inserts into llm_node_history
-    // and dag_runs satisfy the FK. Minimal columns: id (PK) and updatedAt
-    // (NOT NULL, no default). Other FKs are nullable.
-    sqlx::query(
-        r#"INSERT INTO agent_session (id, "updatedAt")
-           VALUES ($1, NOW())
-           ON CONFLICT (id) DO NOTHING"#,
-    )
-    .bind(chat)
-    .execute(&pool)
-    .await
-    .expect("seed agent_session row");
+    if has_agent_session {
+        sqlx::query(
+            r#"INSERT INTO agent_session (id, "updatedAt")
+               VALUES ($1, NOW())
+               ON CONFLICT (id) DO NOTHING"#,
+        )
+        .bind(chat)
+        .execute(&pool)
+        .await
+        .expect("seed agent_session row");
+    }
 }
 
 fn smoke_graph() -> Graph {
