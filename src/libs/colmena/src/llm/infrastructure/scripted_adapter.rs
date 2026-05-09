@@ -5,7 +5,10 @@
 //! or tolerating model nondeterminism.
 
 use crate::llm::domain::tools::{FunctionCall, ToolCall};
-use crate::llm::domain::{LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream};
+use crate::llm::domain::{
+    LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk, LlmStreamPart,
+    ToolCallChunk,
+};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Mutex;
@@ -63,6 +66,23 @@ impl LlmRepository for ScriptedAdapter {
                 message: "scripted_adapter: script exhausted".to_string(),
             })?;
 
+        match &next {
+            ScriptedResponse::Text(t) => tracing::info!(
+                target: "colmena::scripted_adapter",
+                kind = "text",
+                preview = %t.chars().take(40).collect::<String>(),
+                remaining = self.remaining(),
+                "scripted_adapter: yielding"
+            ),
+            ScriptedResponse::ToolCall { tool_name, .. } => tracing::info!(
+                target: "colmena::scripted_adapter",
+                kind = "tool_call",
+                tool = %tool_name,
+                remaining = self.remaining(),
+                "scripted_adapter: yielding"
+            ),
+        }
+
         match next {
             ScriptedResponse::Text(t) => LlmResponse::new(
                 request.id().clone(),
@@ -87,10 +107,51 @@ impl LlmRepository for ScriptedAdapter {
         }
     }
 
-    async fn stream(&self, _request: LlmRequest) -> Result<LlmStream, LlmError> {
-        Err(LlmError::RequestFailed {
-            message: "scripted_adapter: streaming is not supported".to_string(),
-        })
+    async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
+        let next = self
+            .queue
+            .lock()
+            .expect("scripted_adapter mutex poisoned")
+            .pop()
+            .ok_or_else(|| LlmError::RequestFailed {
+                message: "scripted_adapter: script exhausted".to_string(),
+            })?;
+
+        let provider = request.config().provider().clone();
+        let req_id = request.id().clone();
+
+        // Build the stream chunks for this scripted entry. We emit a single
+        // representative chunk per entry — enough to drive the agent_service
+        // accumulator in `application/agent_service.rs`.
+        let chunks: Vec<Result<LlmStreamChunk, LlmError>> = match next {
+            ScriptedResponse::Text(t) => vec![Ok(LlmStreamChunk::new(
+                req_id,
+                LlmStreamPart::Content(t),
+                provider,
+                true,
+            ))],
+            ScriptedResponse::ToolCall {
+                id,
+                tool_name,
+                arguments,
+            } => {
+                let args_str = serde_json::to_string(&arguments).unwrap_or_default();
+                vec![Ok(LlmStreamChunk::new(
+                    req_id,
+                    LlmStreamPart::ToolCallChunk(ToolCallChunk {
+                        index: 0,
+                        id,
+                        name: tool_name,
+                        args_chunk: args_str,
+                    }),
+                    provider,
+                    true,
+                ))]
+            }
+        };
+
+        let s = futures::stream::iter(chunks);
+        Ok(Box::pin(s))
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {
@@ -189,12 +250,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_returns_error() {
-        let adapter = ScriptedAdapter::new(vec![]);
-        let result = adapter.stream(make_request("a")).await;
-        match result {
-            Err(e) => assert!(format!("{e}").contains("not supported")),
-            Ok(_) => panic!("expected stream() to return an error"),
+    async fn stream_emits_text_chunk() {
+        use futures::StreamExt;
+        let adapter = ScriptedAdapter::new(vec![ScriptedResponse::Text("hi".into())]);
+        let mut s = adapter.stream(make_request("q")).await.expect("stream ok");
+        let first = s.next().await.expect("one chunk").expect("ok");
+        match first.part() {
+            LlmStreamPart::Content(c) => assert_eq!(c, "hi"),
+            other => panic!("expected Content, got {other:?}"),
         }
+        assert!(s.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_emits_tool_call_chunk() {
+        use futures::StreamExt;
+        let adapter = ScriptedAdapter::new(vec![ScriptedResponse::ToolCall {
+            id: "t1".into(),
+            tool_name: "echo".into(),
+            arguments: serde_json::json!({"x": 1}),
+        }]);
+        let mut s = adapter.stream(make_request("q")).await.expect("stream ok");
+        let first = s.next().await.expect("one chunk").expect("ok");
+        match first.part() {
+            LlmStreamPart::ToolCallChunk(tc) => {
+                assert_eq!(tc.id, "t1");
+                assert_eq!(tc.name, "echo");
+                let parsed: serde_json::Value = serde_json::from_str(&tc.args_chunk).unwrap();
+                assert_eq!(parsed["x"], 1);
+            }
+            other => panic!("expected ToolCallChunk, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_errors_when_exhausted() {
+        let adapter = ScriptedAdapter::new(vec![]);
+        let err = match adapter.stream(make_request("a")).await {
+            Ok(_) => panic!("expected error when script is exhausted"),
+            Err(e) => e,
+        };
+        assert!(format!("{err}").contains("exhausted"));
     }
 }
