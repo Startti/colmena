@@ -1182,6 +1182,14 @@
           "validation": { "min": 1 },
           "example": 2048
         },
+        "max_iterations": {
+          "type": "integer",
+          "required": false,
+          "default": 10,
+          "description": "Hard ceiling on the number of LLM call iterations within a single agent invocation (the ReAct loop). Each iteration is one LLM call plus any tool executions. The agent terminates with `LlmError::MaxIterationsReached` if exceeded. Increase if your agent legitimately needs more reasoning steps.",
+          "validation": { "min": 1 },
+          "example": 10
+        },
         "stream": {
           "type": "boolean",
           "required": false,

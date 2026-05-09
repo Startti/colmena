@@ -519,6 +519,22 @@ impl ExecutableNode for LlmNode {
             llm_config = llm_config.with_thinking_budget(thinking_budget as u32);
         }
 
+        // Maximum iterations of the ReAct agent loop. Each iteration is one LLM
+        // call. Hitting this limit returns MaxIterationsReached. Reads from
+        // inputs first (dynamic from upstream), then config, defaulting to 10.
+        let max_iterations: usize = inputs
+            .get("max_iterations")
+            .and_then(|v| v.as_u64())
+            .or_else(|| config.get("max_iterations").and_then(|v| v.as_u64()))
+            .map(|n| n as usize)
+            .unwrap_or(10);
+
+        tracing::info!(
+            target: "colmena::llm",
+            max_iterations,
+            "llm_call_max_iterations_resolved"
+        );
+
         let mut messages = Vec::new();
         let mut history_exists = false;
 
@@ -953,6 +969,10 @@ impl ExecutableNode for LlmNode {
                 "llm_call resume: no pending tool call found in conversation history",
             )?;
 
+            tracing::info!(
+                target: "colmena::llm_node",
+                "llm_call: resume — replaying pending tool with user answer"
+            );
             let result = tool_executor
                 .execute_with_resume_answer(&pending, answer)
                 .await?;
@@ -985,6 +1005,11 @@ impl ExecutableNode for LlmNode {
             conversation_repo
                 .add_message(&conversation_key, tool_msg)
                 .await?;
+
+            tracing::info!(
+                target: "colmena::llm",
+                "resume_tool_re_executed_continuing_loop"
+            );
         }
 
         // Decide which tools are exposed to the LLM.
@@ -1251,7 +1276,7 @@ impl ExecutableNode for LlmNode {
                 config: llm_config,
                 tools,
                 tool_executor: &tool_executor,
-                max_iterations: Some(50),
+                max_iterations: Some(max_iterations),
                 on_token,
                 tools_provider,
             }
@@ -1263,7 +1288,7 @@ impl ExecutableNode for LlmNode {
                 config: llm_config,
                 tools,
                 tool_executor: &tool_executor,
-                max_iterations: Some(50), // Max iterations
+                max_iterations: Some(max_iterations),
                 on_token,
                 tools_provider,
             }
@@ -1288,6 +1313,10 @@ impl ExecutableNode for LlmNode {
         // engine. The assistant message that requested the tool was already persisted by
         // `agent_service.run` (step B of the ReAct loop); the resume path will replay it.
         if let Some(suspend) = response.suspend() {
+            tracing::info!(
+                target: "colmena::llm_node",
+                "llm_call: propagating SUSPENDED to DAG"
+            );
             return Ok(json!({
                 "__colmena_status": "SUSPENDED",
                 "questions": suspend.questions.clone(),
