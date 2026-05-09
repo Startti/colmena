@@ -137,10 +137,28 @@ Cada `cargo run` genera un `session_id` ephemeral nuevo. Sin `--agent-session-id
 cargo run --bin dag_engine -- run graph.json --agent-session-id agent_demo_001
 
 # Run 2 — resume (mismo agent, session_id ephemeral nuevo automático)
-cargo run --bin dag_engine -- run graph.json --agent-session-id agent_demo_001 --answer "..."
+cargo run --bin dag_engine -- run graph.json --agent-session-id agent_demo_001 \
+  --answer "Q[<id>]: <pregunta>\nA[<id>]: <respuesta>"
 ```
 
 `--session-id` sigue siendo válido para tests one-shot sin estado.
+
+### Regla — Formato canónico Q/A para `--answer`
+
+Todos los nodos de pausa (`suspend`, `secure_suspend`) consumen `--answer` en formato ID-keyed:
+
+```
+Q[<id>]: <pregunta echo>
+A[<id>]: <respuesta>
+Q[<id2>]: <pregunta echo>
+A[<id2>]: <respuesta>
+```
+
+- `<id>` proviene de `config.id` (suspend, **obligatorio**) o `secrets[i].name` (secure_suspend).
+- Orden-independiente — el parser hace bind por id.
+- Multilínea preservada entre `A[<id>]:` y el siguiente prefijo o EOF.
+- `options` en choice questions es solo sugerencia UX — cualquier texto es válido.
+- Spec completo: [docs/superpowers/specs/2026-05-08-suspend-qa-response-format-design.md](docs/superpowers/specs/2026-05-08-suspend-qa-response-format-design.md).
 
 ### Levantar como servidor HTTP (serve)
 ```bash
