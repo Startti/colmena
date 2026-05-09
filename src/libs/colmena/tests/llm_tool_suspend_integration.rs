@@ -1,61 +1,289 @@
-//! Integration test for the LLM tool-call suspend → resume cycle (Gap 2).
+//! Deterministic coverage of llm_call's SUSPENDED-propagation path
+//! (Spec 5) using ScriptedAdapter — no real LLM provider needed.
 //!
-//! ## Goal
-//! Run a graph with an `llm_call` node whose only tool is a suspendable stub.
-//! On run 1 the LLM should call the tool, the tool returns
-//! `__colmena_status: "SUSPENDED"`, and `agent_service` short-circuits propagating
-//! SUSPENDED to the DAG. On run 2 with an answer the conversation is replayed and
-//! the pending tool is re-dispatched with the user's answer.
+//! These tests install a process-global ScriptedAdapter override via
+//! `OverrideGuard`, which holds a serialization mutex against other
+//! override tests.
 //!
-//! ## Why this test is DEFERRED
-//!
-//! Exercising the suspend path requires the LLM adapter to produce a `ToolCall` in
-//! its streaming response (not plain text). The existing `MockAdapter` only returns
-//! text strings — it has no mechanism for configurable tool-call responses:
-//!
-//! ```
-//! // mock_adapter.rs — current behaviour
-//! async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
-//!     let full_text = format!("Mock stream response to: {}", last_message.content());
-//!     // ... emits only LlmStreamPart::Content chunks, never LlmStreamPart::ToolCall
-//! }
-//! ```
-//!
-//! Wiring a real LLM (OpenAI / Gemini / Anthropic) would make this test CI-hostile
-//! (requires API keys, network, non-deterministic model output).
-//!
-//! To unblock Test B we need one of:
-//!   1. Extend `MockAdapter` to accept a `Vec<MockResponse>` script (text OR tool_call)
-//!      and replay them in sequence — then it can simulate turn 1 → tool_call → SUSPEND,
-//!      turn 2 → text → COMPLETED.
-//!   2. Add a new `ScriptedAdapter` implementing `LlmRepository` with pre-recorded
-//!      responses, wired into the engine via a dedicated `"scripted"` provider kind.
-//!
-//! Both approaches are self-contained and do not require API keys, but they are their
-//! own non-trivial implementation tasks. The suspend/resume path is already covered by
-//! the manual end-to-end validation with `tests/graphs/advanced/secure_suspend_login_e2e.json`
-//! (see commit bd47860 and the design doc `2026-05-08-llm-call-tool-suspend-design.md`).
-//!
-//! TODO: implement a scripted/mock LLM provider that can emit tool-call chunks, then
-//! activate this test.
-//!
-//! Run with (once implemented):
-//!   source .env && cargo test --test llm_tool_suspend_integration -- --ignored
+//! Run with:
+//!   source .env && RUST_LOG=info,colmena=info,colmena_dag_engine=info \
+//!     cargo test --test llm_tool_suspend_integration -- --ignored --nocapture
 
-/// Placeholder so the test binary compiles even though the test body is not yet written.
+use colmena::dag_engine::domain::events::DagExecutionEvent;
+use colmena::dag_engine::domain::graph::Graph;
+use colmena::dag_engine::engine::{ColmenaEngine, EngineConfig};
+use colmena::llm::infrastructure::{OverrideGuard, ScriptedAdapter, ScriptedResponse};
+use futures::StreamExt;
+use std::sync::Arc;
+
+fn init_logs() {
+    // Idempotent — can be called multiple times across tests safely.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_test_writer()
+        .try_init();
+}
+
+async fn engine() -> ColmenaEngine {
+    dotenvy::dotenv().ok();
+    let cfg = EngineConfig::from_env().unwrap();
+    ColmenaEngine::new(cfg).await.unwrap()
+}
+
+/// Reset DB state for a test agent_session_id and seed the `agent_session`
+/// row that other tables reference via FK.
+///
+/// `llm_node_history.agent_session_id` and `dag_runs.agent_session_id` are
+/// foreign keys into `agent_session(id)` (a table owned by ADP, layered
+/// on top of the same Postgres). To run integration tests with fresh
+/// per-run ids, we must seed that row first; on completion (or next run)
+/// the `ON DELETE CASCADE` clause cleans up dependent rows automatically.
+async fn cleanup(chat: &str) {
+    dotenvy::dotenv().ok();
+    let url = std::env::var("DATABASE_URL").unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+
+    // Cascade-delete any prior state for this agent_session_id. The CASCADE
+    // on agent_session takes care of dag_runs and llm_node_history.
+    sqlx::query("DELETE FROM agent_session WHERE id = $1")
+        .bind(chat)
+        .execute(&pool)
+        .await
+        .ok();
+    // secure_value_mappings has no FK on agent_session — clean it explicitly.
+    sqlx::query("DELETE FROM secure_value_mappings WHERE agent_session_id = $1")
+        .bind(chat)
+        .execute(&pool)
+        .await
+        .ok();
+
+    // Seed the agent_session row so subsequent inserts into llm_node_history
+    // and dag_runs satisfy the FK. Minimal columns: id (PK) and updatedAt
+    // (NOT NULL, no default). Other FKs are nullable.
+    sqlx::query(
+        r#"INSERT INTO agent_session (id, "updatedAt")
+           VALUES ($1, NOW())
+           ON CONFLICT (id) DO NOTHING"#,
+    )
+    .bind(chat)
+    .execute(&pool)
+    .await
+    .expect("seed agent_session row");
+}
+
+fn smoke_graph() -> Graph {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../tests/graphs/advanced/llm_tool_suspend_smoke.json"
+    );
+    let raw = std::fs::read_to_string(path).expect("smoke graph must exist");
+    serde_json::from_str(&raw).expect("valid graph JSON")
+}
+
+fn unique_chat(prefix: &str) -> String {
+    format!(
+        "{}_{}",
+        prefix,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    )
+}
+
+async fn run_until_finish(
+    eng: &ColmenaEngine,
+    graph: Graph,
+    resume_answer: Option<String>,
+    chat: &str,
+) -> serde_json::Value {
+    let mut stream = Box::pin(eng.execute_stream(
+        graph,
+        None,
+        resume_answer,
+        false,
+        None,
+        Some(chat.to_string()),
+    ));
+    let mut last_output = serde_json::Value::Null;
+    while let Some(item) = stream.next().await {
+        let ev = item.expect("stream event must not error");
+        if let DagExecutionEvent::GraphFinish { ref output } = ev {
+            last_output = output.clone();
+        }
+    }
+    last_output
+}
+
 #[tokio::test]
-#[ignore = "DEFERRED — MockAdapter cannot emit tool-call responses; see module-level doc for unblock plan"]
-async fn llm_tool_suspend_and_resume_via_mock_provider() {
-    // TODO: implement once a scripted LLM adapter is available.
-    // Outline:
-    //   1. Build a ScriptedAdapter with two scripted responses:
-    //      - Turn 1: ToolCall { name: "ask_credential", arguments: "{}" }
-    //      - Turn 2: Content("Login complete")
-    //   2. Run a graph: input → llm_call (provider="scripted", tool=ask_credential) → log
-    //      where ask_credential is backed by a secure_suspend node.
-    //   3. Assert run 1 stream contains GraphFinish { __colmena_status: "SUSPENDED" }.
-    //   4. Resume with --answer "mypassword".
-    //   5. Assert run 2 stream contains GraphFinish without SUSPENDED, and the
-    //      log node received the resolved secure-value handle or real value.
-    todo!("implement ScriptedAdapter first — see module-level TODO");
+#[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+async fn suspend_propagates_when_tool_returns_suspended() {
+    init_logs();
+    let chat = unique_chat("agent_test_suspend_propagate");
+    cleanup(&chat).await;
+
+    tracing::info!("=== TEST: suspend_propagates_when_tool_returns_suspended (chat={chat}) ===");
+
+    let adapter = Arc::new(ScriptedAdapter::new(vec![ScriptedResponse::ToolCall {
+        id: "call_1".into(),
+        tool_name: "ask_secret".into(),
+        arguments: serde_json::json!({
+            "secrets": [{"question": "What is your username?", "name": "username"}]
+        }),
+    }]));
+    let _guard = OverrideGuard::install(adapter);
+
+    let eng = engine().await;
+    let output = run_until_finish(&eng, smoke_graph(), None, &chat).await;
+
+    tracing::info!(?output, "test: graph finished");
+
+    assert_eq!(
+        output.get("__colmena_status").and_then(|v| v.as_str()),
+        Some("SUSPENDED"),
+        "expected SUSPENDED, got: {output}"
+    );
+    let questions = output
+        .get("questions")
+        .and_then(|v| v.as_array())
+        .expect("questions array");
+    assert_eq!(questions.len(), 1);
+    assert_eq!(
+        questions[0].get("question").and_then(|v| v.as_str()),
+        Some("What is your username?")
+    );
+
+    eng.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+async fn resume_replays_and_completes() {
+    init_logs();
+    let chat = unique_chat("agent_test_resume_replay");
+    cleanup(&chat).await;
+
+    tracing::info!("=== TEST: resume_replays_and_completes (chat={chat}) ===");
+
+    let eng = engine().await;
+
+    // Run 1: tool_call → SUSPEND.
+    {
+        let adapter = Arc::new(ScriptedAdapter::new(vec![ScriptedResponse::ToolCall {
+            id: "call_1".into(),
+            tool_name: "ask_secret".into(),
+            arguments: serde_json::json!({
+                "secrets": [{"question": "User?", "name": "u"}]
+            }),
+        }]));
+        let _g = OverrideGuard::install(adapter);
+        tracing::info!("--- run 1: expecting SUSPENDED ---");
+        let output = run_until_finish(&eng, smoke_graph(), None, &chat).await;
+        assert_eq!(
+            output.get("__colmena_status").and_then(|v| v.as_str()),
+            Some("SUSPENDED"),
+            "run 1 expected SUSPENDED, got: {output}"
+        );
+    }
+
+    // Run 2: resume. Script provides ONE Text entry — the agent loop calls
+    // the LLM once after replaying the tool, and that text response closes
+    // the loop.
+    {
+        let adapter = Arc::new(ScriptedAdapter::new(vec![ScriptedResponse::Text(
+            "Saved username.".into(),
+        )]));
+        let _g = OverrideGuard::install(adapter);
+        tracing::info!("--- run 2: resume with Q[u]: User?\\nA[u]: alice ---");
+        let output = run_until_finish(
+            &eng,
+            smoke_graph(),
+            Some("Q[u]: User?\nA[u]: alice".into()),
+            &chat,
+        )
+        .await;
+        tracing::info!(?output, "test: run 2 graph finished");
+        assert!(
+            output.get("__colmena_status").and_then(|v| v.as_str())
+                != Some("SUSPENDED"),
+            "run 2 expected COMPLETED (not SUSPENDED), got: {output}"
+        );
+    }
+
+    eng.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+async fn multiple_secrets_resolved_via_qa_format() {
+    init_logs();
+    let chat = unique_chat("agent_test_multi_secret");
+    cleanup(&chat).await;
+
+    tracing::info!("=== TEST: multiple_secrets_resolved_via_qa_format (chat={chat}) ===");
+
+    let eng = engine().await;
+
+    {
+        let adapter = Arc::new(ScriptedAdapter::new(vec![ScriptedResponse::ToolCall {
+            id: "call_1".into(),
+            tool_name: "ask_secret".into(),
+            arguments: serde_json::json!({
+                "secrets": [
+                    {"question": "User?", "name": "u"},
+                    {"question": "Pass?", "name": "p"}
+                ]
+            }),
+        }]));
+        let _g = OverrideGuard::install(adapter);
+        tracing::info!("--- run 1: expecting SUSPENDED with 2 questions ---");
+        let output = run_until_finish(&eng, smoke_graph(), None, &chat).await;
+        let qs = output
+            .get("questions")
+            .and_then(|v| v.as_array())
+            .expect("questions");
+        assert_eq!(qs.len(), 2, "expected 2 questions, got: {output}");
+    }
+
+    {
+        let adapter = Arc::new(ScriptedAdapter::new(vec![ScriptedResponse::Text(
+            "Saved both credentials.".into(),
+        )]));
+        let _g = OverrideGuard::install(adapter);
+        tracing::info!("--- run 2: resume with two Q/A pairs ---");
+        let _output = run_until_finish(
+            &eng,
+            smoke_graph(),
+            Some("Q[u]: User?\nA[u]: alice\nQ[p]: Pass?\nA[p]: hunter2".into()),
+            &chat,
+        )
+        .await;
+    }
+
+    // Verify both secure values landed in DB keyed by agent_session_id.
+    dotenvy::dotenv().ok();
+    let url = std::env::var("DATABASE_URL").unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT handle FROM secure_value_mappings WHERE agent_session_id = $1 ORDER BY handle",
+    )
+    .bind(&chat)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let handles: Vec<String> = rows.into_iter().map(|r| r.0).collect();
+    tracing::info!(?handles, "test: handles stored in DB");
+    assert!(
+        handles.iter().any(|h| h.contains("<sv_u>")),
+        "expected <sv_u> handle, got: {handles:?}"
+    );
+    assert!(
+        handles.iter().any(|h| h.contains("<sv_p>")),
+        "expected <sv_p> handle, got: {handles:?}"
+    );
+
+    eng.shutdown().await;
 }
