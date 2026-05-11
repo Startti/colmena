@@ -1,6 +1,7 @@
 use crate::dag_engine::domain::{error::DagError, secure_value_repository::SecureValueRepository};
 use serde_json::Value;
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// Business logic for hashing outputs and injecting secrets
 pub struct SecureValueService {
@@ -178,9 +179,10 @@ impl SecureValueService {
         }
     }
 
-    /// Store a single named secret as `<sv_<name>>` and persist its real value.
-    /// The handle returned to callers is `format!("<sv_{}>", name)`.
-    /// Used by the `secure_suspend` node to record user-supplied secrets.
+    /// Store a single named secret as `<sv_<name>_<8hex>>` and persist its real
+    /// value. The handle returned to callers is unique per persist (a random
+    /// 8-hex suffix taken from a fresh UUID v4). Used by the `secure_suspend`
+    /// node to record user-supplied secrets.
     pub async fn persist_secret(
         &self,
         session_id: &str,
@@ -189,7 +191,7 @@ impl SecureValueService {
         name: &str,
         real_value: &str,
     ) -> Result<String, DagError> {
-        let handle = format!("<sv_{}>", name);
+        let handle = Self::new_handle(name);
         self.repo
             .persist(
                 session_id,
@@ -201,6 +203,15 @@ impl SecureValueService {
             )
             .await?;
         Ok(handle)
+    }
+
+    /// Build a handle `<sv_<name>_<8-hex>>` using random bytes from a v4
+    /// UUID. The suffix prevents an LLM from guessing/forging handle names
+    /// (e.g. `<sv_admin>`) — every persist yields a unique label.
+    fn new_handle(name: &str) -> String {
+        let id = Uuid::new_v4().simple().to_string(); // 32 hex chars
+        let suffix: String = id.chars().take(8).collect();
+        format!("<sv_{name}_{suffix}>")
     }
 
     /// Check whether a handle is already registered (agent-first when provided,
@@ -421,7 +432,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_exists_after_persist_secret() {
         let (_repo, service) = build_service();
-        service
+        let handle = service
             .persist_secret(
                 "session_a",
                 None,
@@ -431,8 +442,12 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(
+            handle.starts_with("<sv_amadeus_client_id_"),
+            "got: {handle}"
+        );
         assert!(service
-            .handle_exists("session_a", None, "<sv_amadeus_client_id>")
+            .handle_exists("session_a", None, &handle)
             .await
             .unwrap());
         assert!(!service
@@ -444,16 +459,41 @@ mod tests {
     #[tokio::test]
     async fn test_persist_secret_can_be_decrypted_via_inject() {
         let (_repo, service) = build_service();
-        service
+        let handle = service
             .persist_secret("s2", None, "node1", "tok", "real_token_xyz")
             .await
             .unwrap();
-        let mut inputs = json!({"bearer": "<sv_tok>"});
+        assert!(handle.starts_with("<sv_tok_"), "got: {handle}");
+        let mut inputs = json!({ "bearer": handle.clone() });
         service
             .inject_secrets(&mut inputs, "s2", None)
             .await
             .unwrap();
         assert_eq!(inputs["bearer"].as_str(), Some("real_token_xyz"));
+    }
+
+    #[tokio::test]
+    async fn persist_secret_handle_includes_random_suffix() {
+        let (_repo, svc) = build_service();
+        let h1 = svc
+            .persist_secret("s1", None, "n", "user", "alice123")
+            .await
+            .unwrap();
+        let h2 = svc
+            .persist_secret("s2", None, "n", "user", "alice123")
+            .await
+            .unwrap();
+
+        assert!(h1.starts_with("<sv_user_"), "got: {h1}");
+        assert!(h2.starts_with("<sv_user_"), "got: {h2}");
+        assert!(h1.ends_with('>'));
+        assert!(h2.ends_with('>'));
+        assert_ne!(h1, h2, "two persists must yield distinct handles");
+
+        let prefix = "<sv_user_";
+        let suffix1 = &h1[prefix.len()..h1.len() - 1];
+        assert_eq!(suffix1.len(), 8);
+        assert!(suffix1.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[tokio::test]
@@ -493,7 +533,7 @@ mod tests {
     async fn test_inject_secrets_agent_first_cross_session() {
         let (_repo, service) = build_service();
 
-        service
+        let handle = service
             .persist_secret(
                 "ephemeral_A",
                 Some("agent_demo_001"),
@@ -504,7 +544,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut inputs = json!({"bearer": "<sv_tok>"});
+        let mut inputs = json!({ "bearer": handle });
         service
             .inject_secrets(&mut inputs, "ephemeral_B", Some("agent_demo_001"))
             .await
@@ -522,18 +562,18 @@ mod tests {
     async fn test_inject_secrets_no_agent_session_isolated() {
         let (_repo, service) = build_service();
 
-        service
+        let handle = service
             .persist_secret("ephemeral_A", None, "ask", "tok", "real_token_xyz")
             .await
             .unwrap();
 
-        let mut inputs = json!({"bearer": "<sv_tok>"});
+        let mut inputs = json!({ "bearer": handle.clone() });
         service
             .inject_secrets(&mut inputs, "ephemeral_B", None)
             .await
             .unwrap();
         // Placeholder must remain — different session, no agent → isolated.
-        assert_eq!(inputs["bearer"].as_str(), Some("<sv_tok>"));
+        assert_eq!(inputs["bearer"].as_str(), Some(handle.as_str()));
     }
 
     /// `handle_exists` must follow the same agent-first rule.
@@ -541,7 +581,7 @@ mod tests {
     async fn test_handle_exists_agent_first_cross_session() {
         let (_repo, service) = build_service();
 
-        service
+        let handle = service
             .persist_secret(
                 "ephemeral_A",
                 Some("agent_demo_001"),
@@ -554,11 +594,7 @@ mod tests {
 
         // Same agent, different ephemeral session — must report exists=true.
         assert!(service
-            .handle_exists(
-                "ephemeral_B",
-                Some("agent_demo_001"),
-                "<sv_amadeus_client_id>"
-            )
+            .handle_exists("ephemeral_B", Some("agent_demo_001"), &handle)
             .await
             .unwrap());
     }

@@ -50,13 +50,13 @@ async fn cleanup(session_id: &str) {
     let _ = svc.cleanup(session_id).await;
 }
 
-fn smoke_graph() -> Graph {
+fn smoke_graph(handle: &str) -> Graph {
     let raw = json!({
         "nodes": {
             "show": {
                 "type": "log",
                 "config": {
-                    "marker_field": "<sv_smoke>"
+                    "marker_field": handle
                 }
             }
         },
@@ -91,9 +91,9 @@ async fn config_handle_is_not_injected_exposes_bug() {
         .await
         .expect("persist_secret must succeed");
 
-    assert_eq!(
-        handle, "<sv_smoke>",
-        "persist_secret must return the expected handle"
+    assert!(
+        handle.starts_with("<sv_smoke_") && handle.ends_with('>'),
+        "persist_secret must return a handle of the form <sv_smoke_<8hex>>, got: {handle}"
     );
 
     // --- Step 2: run the graph ---
@@ -104,7 +104,7 @@ async fn config_handle_is_not_injected_exposes_bug() {
     let eng = engine().await;
 
     let mut stream = Box::pin(eng.execute_stream(
-        smoke_graph(),
+        smoke_graph(&handle),
         Some(session_id.clone()),
         None,
         false,

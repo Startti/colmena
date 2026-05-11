@@ -29,16 +29,20 @@ async fn engine() -> ColmenaEngine {
     ColmenaEngine::new(cfg).await.unwrap()
 }
 
-/// Load the smoke graph from the repo's `tests/graphs/basic/` directory.
+/// Load the smoke graph from the repo's `tests/graphs/basic/` directory,
+/// substituting the literal `<sv_smoke>` placeholder in `show.config.marker_field`
+/// with the real handle returned by `persist_secret` (handles now carry a
+/// random 8-hex suffix).
 /// `CARGO_MANIFEST_DIR` points to `src/libs/colmena`; walk three levels up to reach the repo root.
-fn smoke_config_graph() -> Graph {
+fn smoke_config_graph(handle: &str) -> Graph {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../../tests/graphs/basic/secure_value_in_config_smoke.json"
     );
-    let raw = std::fs::read_to_string(path)
-        .expect("secure_value_in_config_smoke.json must exist");
-    serde_json::from_str(&raw).expect("valid graph JSON")
+    let raw = std::fs::read_to_string(path).expect("secure_value_in_config_smoke.json must exist");
+    let mut v: serde_json::Value = serde_json::from_str(&raw).expect("valid graph JSON");
+    v["nodes"]["show"]["config"]["marker_field"] = serde_json::Value::String(handle.to_string());
+    serde_json::from_value(v).expect("valid graph JSON after handle substitution")
 }
 
 /// Delete all secure-value rows associated with a session and all dag_runs rows for the agent.
@@ -96,9 +100,9 @@ async fn agent_session_id_resolves_handle_persisted_in_another_session() {
         .await
         .expect("persist_secret must succeed");
 
-    assert_eq!(
-        handle, "<sv_smoke>",
-        "persist_secret must return <sv_smoke>"
+    assert!(
+        handle.starts_with("<sv_smoke_") && handle.ends_with('>'),
+        "persist_secret must return a handle of the form <sv_smoke_<8hex>>, got: {handle}"
     );
 
     // --- Step 2: run the engine under session_b with the SAME agent_id ---
@@ -108,7 +112,7 @@ async fn agent_session_id_resolves_handle_persisted_in_another_session() {
     let eng = engine().await;
 
     let mut stream = Box::pin(eng.execute_stream(
-        smoke_config_graph(),
+        smoke_config_graph(&handle),
         Some(session_b.clone()),
         None,
         false,

@@ -640,13 +640,21 @@ mod tests {
         let out = node.execute(&inputs, &cfg, &mut state, None).await.unwrap();
 
         assert_eq!(out["status"], "resumed");
-        assert_eq!(
-            out["handles"]["amadeus_client_id"],
-            "<sv_amadeus_client_id>"
+        let handle_id = out["handles"]["amadeus_client_id"]
+            .as_str()
+            .expect("handle for amadeus_client_id must be a string")
+            .to_string();
+        let handle_secret = out["handles"]["amadeus_client_secret"]
+            .as_str()
+            .expect("handle for amadeus_client_secret must be a string")
+            .to_string();
+        assert!(
+            handle_id.starts_with("<sv_amadeus_client_id_") && handle_id.ends_with('>'),
+            "got: {handle_id}"
         );
-        assert_eq!(
-            out["handles"]["amadeus_client_secret"],
-            "<sv_amadeus_client_secret>"
+        assert!(
+            handle_secret.starts_with("<sv_amadeus_client_secret_") && handle_secret.ends_with('>'),
+            "got: {handle_secret}"
         );
 
         // Real values must NEVER appear in the output.
@@ -660,14 +668,14 @@ mod tests {
             "real value leaked: {serialized}"
         );
 
-        // But they ARE persisted in the repo.
+        // But they ARE persisted in the repo under the returned handles.
         let stored = repo.storage.lock().unwrap();
         assert_eq!(
-            stored.get("<sv_amadeus_client_id>").map(String::as_str),
+            stored.get(handle_id.as_str()).map(String::as_str),
             Some("ABC-CLI-ID")
         );
         assert_eq!(
-            stored.get("<sv_amadeus_client_secret>").map(String::as_str),
+            stored.get(handle_secret.as_str()).map(String::as_str),
             Some("XYZ-CLI-SEC")
         );
     }
@@ -777,7 +785,10 @@ mod tests {
         let node = SecureSuspendNode::new(service);
 
         let mut inputs: NodeInputs = HashMap::new();
-        inputs.insert("__colmena_session_id".to_string(), Value::String("s".into()));
+        inputs.insert(
+            "__colmena_session_id".to_string(),
+            Value::String("s".into()),
+        );
         inputs.insert(
             "__colmena_resume_answer".to_string(),
             Value::String("Q[shortie]: ?\nA[shortie]: abc".into()), // 3 chars
@@ -806,7 +817,10 @@ mod tests {
         let node = SecureSuspendNode::new(service);
 
         let mut inputs: NodeInputs = HashMap::new();
-        inputs.insert("__colmena_session_id".to_string(), Value::String("s".into()));
+        inputs.insert(
+            "__colmena_session_id".to_string(),
+            Value::String("s".into()),
+        );
         inputs.insert(
             "__colmena_resume_answer".to_string(),
             Value::String("Q[four]: ?\nA[four]: abcd".into()), // 4 chars
@@ -818,10 +832,7 @@ mod tests {
 
         let cfg = json!({});
         let mut state = Value::Null;
-        let out = node
-            .execute(&inputs, &cfg, &mut state, None)
-            .await
-            .unwrap();
+        let out = node.execute(&inputs, &cfg, &mut state, None).await.unwrap();
         assert_eq!(out["status"], "resumed");
     }
 

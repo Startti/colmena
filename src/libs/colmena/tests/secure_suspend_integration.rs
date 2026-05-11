@@ -92,24 +92,14 @@ async fn secure_suspend_smoke_round_trip() {
     let eng = engine().await;
 
     // --- Run 1: graph should pause at secure_suspend, emit SUSPENDED. ---
-    let mut s1 = Box::pin(eng.execute_stream(
-        smoke_graph(),
-        None,
-        None,
-        false,
-        None,
-        Some(chat.clone()),
-    ));
+    let mut s1 =
+        Box::pin(eng.execute_stream(smoke_graph(), None, None, false, None, Some(chat.clone())));
 
     let mut saw_suspended = false;
     while let Some(item) = s1.next().await {
         let ev = item.expect("stream event must not error on first run");
         if let DagExecutionEvent::GraphFinish { ref output } = ev {
-            if output
-                .get("__colmena_status")
-                .and_then(|v| v.as_str())
-                == Some("SUSPENDED")
-            {
+            if output.get("__colmena_status").and_then(|v| v.as_str()) == Some("SUSPENDED") {
                 saw_suspended = true;
             }
         }
@@ -143,7 +133,11 @@ async fn secure_suspend_smoke_round_trip() {
     while let Some(item) = s2.next().await {
         let ev = item.expect("stream event must not error on resume");
 
-        if let DagExecutionEvent::NodeFinish { ref node_id, ref output } = ev {
+        if let DagExecutionEvent::NodeFinish {
+            ref node_id,
+            ref output,
+        } = ev
+        {
             if node_id == "ask_creds" {
                 ask_creds_output = Some(output.clone());
             }
@@ -173,13 +167,15 @@ async fn secure_suspend_smoke_round_trip() {
     let creds_out = ask_creds_output.expect("ask_creds NodeFinish event must have fired");
     let creds_str = creds_out.to_string();
 
+    // Handles now carry a random 8-hex suffix (`<sv_<name>_<8hex>>`), so match
+    // by prefix only.
     assert!(
-        creds_str.contains("<sv_smoke_secret_a>"),
-        "ask_creds output must contain handle <sv_smoke_secret_a>, got: {creds_str}"
+        creds_str.contains("<sv_smoke_secret_a_"),
+        "ask_creds output must contain a handle starting with <sv_smoke_secret_a_, got: {creds_str}"
     );
     assert!(
-        creds_str.contains("<sv_smoke_secret_b>"),
-        "ask_creds output must contain handle <sv_smoke_secret_b>, got: {creds_str}"
+        creds_str.contains("<sv_smoke_secret_b_"),
+        "ask_creds output must contain a handle starting with <sv_smoke_secret_b_, got: {creds_str}"
     );
     assert!(
         !creds_str.contains("smoke-val-a"),
