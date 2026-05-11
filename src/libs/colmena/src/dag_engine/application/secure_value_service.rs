@@ -219,6 +219,20 @@ impl SecureValueService {
     pub async fn cleanup(&self, session_id: &str) -> Result<(), DagError> {
         self.repo.cleanup(session_id).await
     }
+
+    /// Per-run sweep: delete only rows whose `expires_at < NOW()` and whose
+    /// `session_id` matches this run, OR whose `agent_session_id` matches
+    /// this conversation. Live rows survive — they are reused on the next
+    /// turn. Returns the count of deleted rows.
+    pub async fn cleanup_expired_for_run(
+        &self,
+        session_id: &str,
+        agent_session_id: Option<&str>,
+    ) -> Result<u64, DagError> {
+        self.repo
+            .cleanup_expired_for_run(session_id, agent_session_id)
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -316,7 +330,10 @@ mod tests {
         }
 
         async fn cleanup(&self, session_id: &str) -> Result<(), DagError> {
-            self.rows.lock().unwrap().retain(|r| r.session != session_id);
+            self.rows
+                .lock()
+                .unwrap()
+                .retain(|r| r.session != session_id);
             Ok(())
         }
 
@@ -405,21 +422,23 @@ mod tests {
     async fn test_handle_exists_after_persist_secret() {
         let (_repo, service) = build_service();
         service
-            .persist_secret("session_a", None, "node1", "amadeus_client_id", "real_id_value")
+            .persist_secret(
+                "session_a",
+                None,
+                "node1",
+                "amadeus_client_id",
+                "real_id_value",
+            )
             .await
             .unwrap();
-        assert!(
-            service
-                .handle_exists("session_a", None, "<sv_amadeus_client_id>")
-                .await
-                .unwrap()
-        );
-        assert!(
-            !service
-                .handle_exists("session_a", None, "<sv_unknown>")
-                .await
-                .unwrap()
-        );
+        assert!(service
+            .handle_exists("session_a", None, "<sv_amadeus_client_id>")
+            .await
+            .unwrap());
+        assert!(!service
+            .handle_exists("session_a", None, "<sv_unknown>")
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -430,7 +449,10 @@ mod tests {
             .await
             .unwrap();
         let mut inputs = json!({"bearer": "<sv_tok>"});
-        service.inject_secrets(&mut inputs, "s2", None).await.unwrap();
+        service
+            .inject_secrets(&mut inputs, "s2", None)
+            .await
+            .unwrap();
         assert_eq!(inputs["bearer"].as_str(), Some("real_token_xyz"));
     }
 
@@ -531,15 +553,13 @@ mod tests {
             .unwrap();
 
         // Same agent, different ephemeral session — must report exists=true.
-        assert!(
-            service
-                .handle_exists(
-                    "ephemeral_B",
-                    Some("agent_demo_001"),
-                    "<sv_amadeus_client_id>"
-                )
-                .await
-                .unwrap()
-        );
+        assert!(service
+            .handle_exists(
+                "ephemeral_B",
+                Some("agent_demo_001"),
+                "<sv_amadeus_client_id>"
+            )
+            .await
+            .unwrap());
     }
 }
