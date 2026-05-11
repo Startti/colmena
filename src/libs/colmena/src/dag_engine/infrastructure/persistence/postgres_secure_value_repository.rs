@@ -94,9 +94,12 @@ impl SecureValueRepository for PostgresSecureValueRepository {
         let row = if let Some(agent) = agent_session_id {
             sqlx::query(
                 r#"
-                SELECT pgp_sym_decrypt(encrypted_value, $1) as decrypted
-                FROM secure_value_mappings
-                WHERE agent_session_id = $2 AND hash_key = $3
+                UPDATE secure_value_mappings
+                SET expires_at = NOW() + INTERVAL '24 hours'
+                WHERE agent_session_id = $2
+                  AND hash_key = $3
+                  AND expires_at > NOW()
+                RETURNING pgp_sym_decrypt(encrypted_value, $1)::text AS decrypted
                 "#,
             )
             .bind(&encryption_key)
@@ -107,9 +110,12 @@ impl SecureValueRepository for PostgresSecureValueRepository {
         } else {
             sqlx::query(
                 r#"
-                SELECT pgp_sym_decrypt(encrypted_value, $1) as decrypted
-                FROM secure_value_mappings
-                WHERE session_id = $2 AND hash_key = $3
+                UPDATE secure_value_mappings
+                SET expires_at = NOW() + INTERVAL '24 hours'
+                WHERE session_id = $2
+                  AND hash_key = $3
+                  AND expires_at > NOW()
+                RETURNING pgp_sym_decrypt(encrypted_value, $1)::text AS decrypted
                 "#,
             )
             .bind(&encryption_key)
@@ -258,21 +264,40 @@ mod tests {
         let agent_b = "agent_A2";
 
         // Persist with session1 + agent_a.
-        repo.persist(&session1, Some(agent_a), "setup_node", "<sv_xs>", "the-real-value", "secret")
-            .await
-            .unwrap();
+        repo.persist(
+            &session1,
+            Some(agent_a),
+            "setup_node",
+            "<sv_xs>",
+            "the-real-value",
+            "secret",
+        )
+        .await
+        .unwrap();
 
         // Decrypt from session2 (DIFFERENT) but same agent_a → must find.
-        let v = repo.decrypt(&session2, Some(agent_a), "<sv_xs>").await.unwrap();
+        let v = repo
+            .decrypt(&session2, Some(agent_a), "<sv_xs>")
+            .await
+            .unwrap();
         assert_eq!(v.as_deref(), Some("the-real-value"));
 
         // Decrypt with same session2 but different agent_b → None.
-        let v = repo.decrypt(&session2, Some(agent_b), "<sv_xs>").await.unwrap();
+        let v = repo
+            .decrypt(&session2, Some(agent_b), "<sv_xs>")
+            .await
+            .unwrap();
         assert!(v.is_none());
 
         // exists also works
-        assert!(repo.exists(&session2, Some(agent_a), "<sv_xs>").await.unwrap());
-        assert!(!repo.exists(&session2, Some(agent_b), "<sv_xs>").await.unwrap());
+        assert!(repo
+            .exists(&session2, Some(agent_a), "<sv_xs>")
+            .await
+            .unwrap());
+        assert!(!repo
+            .exists(&session2, Some(agent_b), "<sv_xs>")
+            .await
+            .unwrap());
 
         repo.cleanup(&session1).await.unwrap();
     }
@@ -294,9 +319,16 @@ mod tests {
         );
 
         // Persist WITHOUT agent_session_id.
-        repo.persist(&session1, None, "setup_node", "<sv_legacy>", "ephem-only", "secret")
-            .await
-            .unwrap();
+        repo.persist(
+            &session1,
+            None,
+            "setup_node",
+            "<sv_legacy>",
+            "ephem-only",
+            "secret",
+        )
+        .await
+        .unwrap();
 
         // Decrypt with same session1, no agent → finds.
         let v = repo.decrypt(&session1, None, "<sv_legacy>").await.unwrap();
@@ -314,5 +346,99 @@ mod tests {
         assert!(v.is_none());
 
         repo.cleanup(&session1).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn decrypt_extends_expires_at() {
+        dotenvy::dotenv().ok();
+        let url = std::env::var("DATABASE_URL").unwrap();
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        let repo = PostgresSecureValueRepository::new(pool.clone());
+
+        let session = format!("ttl_test_{}", uuid::Uuid::new_v4());
+        repo.persist(
+            &session,
+            None,
+            "test_node",
+            "<sv_short>",
+            "alice123",
+            "secret",
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE secure_value_mappings SET expires_at = NOW() + INTERVAL '10 seconds' WHERE session_id = $1",
+        )
+        .bind(&session)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let pre: (chrono::DateTime<chrono::Utc>,) =
+            sqlx::query_as("SELECT expires_at FROM secure_value_mappings WHERE session_id = $1")
+                .bind(&session)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(pre.0 < chrono::Utc::now() + chrono::Duration::minutes(1));
+
+        let value = repo.decrypt(&session, None, "<sv_short>").await.unwrap();
+        assert_eq!(value, Some("alice123".to_string()));
+
+        let post: (chrono::DateTime<chrono::Utc>,) =
+            sqlx::query_as("SELECT expires_at FROM secure_value_mappings WHERE session_id = $1")
+                .bind(&session)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            post.0 > chrono::Utc::now() + chrono::Duration::hours(23),
+            "expires_at should be > now+23h, got {}",
+            post.0
+        );
+
+        sqlx::query("DELETE FROM secure_value_mappings WHERE session_id = $1")
+            .bind(&session)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn decrypt_returns_none_for_expired_row() {
+        dotenvy::dotenv().ok();
+        let url = std::env::var("DATABASE_URL").unwrap();
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        let repo = PostgresSecureValueRepository::new(pool.clone());
+
+        let session = format!("ttl_expired_{}", uuid::Uuid::new_v4());
+        repo.persist(
+            &session,
+            None,
+            "test_node",
+            "<sv_expired>",
+            "alice123",
+            "secret",
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE secure_value_mappings SET expires_at = NOW() - INTERVAL '1 second' WHERE session_id = $1",
+        )
+        .bind(&session)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let value = repo.decrypt(&session, None, "<sv_expired>").await.unwrap();
+        assert!(value.is_none(), "expired row should not decrypt");
+
+        sqlx::query("DELETE FROM secure_value_mappings WHERE session_id = $1")
+            .bind(&session)
+            .execute(&pool)
+            .await
+            .ok();
     }
 }
