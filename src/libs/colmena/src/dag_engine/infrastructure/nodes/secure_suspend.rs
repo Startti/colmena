@@ -316,6 +316,13 @@ mod tests {
         async fn cleanup_expired(&self) -> Result<u64, DagError> {
             Ok(0)
         }
+        async fn cleanup_expired_for_run(
+            &self,
+            _session_id: &str,
+            _agent_session_id: Option<&str>,
+        ) -> Result<u64, DagError> {
+            Ok(0)
+        }
     }
 
     pub(super) fn build_node() -> (SecureSuspendNode, Arc<StubRepo>) {

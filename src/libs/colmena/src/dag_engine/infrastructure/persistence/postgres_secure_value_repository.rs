@@ -61,6 +61,24 @@ impl SecureValueRepository for PostgresSecureValueRepository {
         .await
         .map_err(|e| DagError::StateError(format!("Failed to persist secure value: {}", e)))?;
 
+        // Diagnostic: confirm the row is visible from the SAME pool right after insert.
+        let visible: Option<(String,)> = sqlx::query_as(
+            "SELECT hash_key FROM secure_value_mappings WHERE session_id = $1 AND hash_key = $2",
+        )
+        .bind(session_id)
+        .bind(hash_key)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten();
+        tracing::info!(
+            target: "colmena::secure_value_repo",
+            session_id,
+            hash_key,
+            visible_after_insert = visible.is_some(),
+            "postgres_persist: post-insert visibility probe"
+        );
+
         Ok(())
     }
 
@@ -150,6 +168,29 @@ impl SecureValueRepository for PostgresSecureValueRepository {
             .await
             .map_err(|e| DagError::StateError(format!("Cleanup expired failed: {}", e)))?;
 
+        Ok(result.rows_affected())
+    }
+
+    async fn cleanup_expired_for_run(
+        &self,
+        session_id: &str,
+        agent_session_id: Option<&str>,
+    ) -> Result<u64, DagError> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM secure_value_mappings
+            WHERE expires_at < NOW()
+              AND (
+                    session_id = $1
+                    OR ($2::text IS NOT NULL AND agent_session_id = $2)
+                  )
+            "#,
+        )
+        .bind(session_id)
+        .bind(agent_session_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DagError::StateError(format!("cleanup_expired_for_run failed: {}", e)))?;
         Ok(result.rows_affected())
     }
 }

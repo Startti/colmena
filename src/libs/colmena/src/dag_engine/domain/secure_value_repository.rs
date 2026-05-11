@@ -61,4 +61,17 @@ pub trait SecureValueRepository: Send + Sync {
 
     /// Delete expired values (safety net, called periodically)
     async fn cleanup_expired(&self) -> Result<u64, DagError>;
+
+    /// Delete rows that have already expired AND belong to this run's scope.
+    /// Scope is `session_id = $1 OR (agent_session_id IS NOT NULL AND
+    /// agent_session_id = $2)`. Returns the count of deleted rows. Called by
+    /// `run_use_case` at the end of every Completed DAG run.
+    ///
+    /// Does NOT delete unexpired rows — those survive the run end and are
+    /// available for the next turn of the conversation.
+    async fn cleanup_expired_for_run(
+        &self,
+        session_id: &str,
+        agent_session_id: Option<&str>,
+    ) -> Result<u64, DagError>;
 }

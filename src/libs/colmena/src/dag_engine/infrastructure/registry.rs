@@ -496,6 +496,13 @@ mod registry_secure_suspend_tests {
         async fn cleanup_expired(&self) -> Result<u64, DagError> {
             Ok(0)
         }
+        async fn cleanup_expired_for_run(
+            &self,
+            _session_id: &str,
+            _agent_session_id: Option<&str>,
+        ) -> Result<u64, DagError> {
+            Ok(0)
+        }
     }
 
     fn build_registry_with_secure_values() -> Arc<HashMapNodeRegistry> {
