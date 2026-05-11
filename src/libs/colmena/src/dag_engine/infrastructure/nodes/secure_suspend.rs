@@ -41,9 +41,7 @@ fn parse_and_validate_secrets(config: &Value) -> Result<Vec<Secret>, String> {
         let name = item
             .get("name")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                "secure_suspend: each secret must have a 'name' string".to_string()
-            })?;
+            .ok_or_else(|| "secure_suspend: each secret must have a 'name' string".to_string())?;
         if !NAME_RE.is_match(name) {
             return Err(format!(
                 "secure_suspend: name '{name}' invalid (expected lowercase slug, 3-64 chars)"
@@ -123,14 +121,21 @@ impl ExecutableNode for SecureSuspendNode {
         let secrets = parse_and_validate_secrets(&effective_config)
             .map_err(Box::<dyn Error + Send + Sync>::from)?;
 
+        tracing::info!(
+            target: "colmena::secure_suspend",
+            secret_count = secrets.len(),
+            has_resume_answer = inputs.get("__colmena_resume_answer").is_some(),
+            has_session_id = inputs.get("__colmena_session_id").is_some(),
+            has_agent_session_id = inputs.get("__colmena_agent_session_id").is_some(),
+            "secure_suspend: execute entry"
+        );
+
         if let Some(answer_val) = inputs.get("__colmena_resume_answer") {
-            let answer = answer_val
-                .as_str()
-                .ok_or_else(|| {
-                    Box::<dyn Error + Send + Sync>::from(
-                        "secure_suspend: __colmena_resume_answer must be a string",
-                    )
-                })?;
+            let answer = answer_val.as_str().ok_or_else(|| {
+                Box::<dyn Error + Send + Sync>::from(
+                    "secure_suspend: __colmena_resume_answer must be a string",
+                )
+            })?;
             let session_id = inputs
                 .get("__colmena_session_id")
                 .and_then(|v| v.as_str())
@@ -167,6 +172,21 @@ impl ExecutableNode for SecureSuspendNode {
                 })
                 .collect();
 
+            // Minimum-length check: outbound masking does substring matching on
+            // decrypted values, so very short values cause pathological over-masking.
+            // Reject values < 4 chars with a clear error before any write.
+            const MIN_SECRET_VALUE_LEN: usize = 4;
+            for (s, v) in secrets.iter().zip(values.iter()) {
+                if v.chars().count() < MIN_SECRET_VALUE_LEN {
+                    return Err(Box::<dyn Error + Send + Sync>::from(format!(
+                        "secure_suspend: value for secret '{}' is too short \
+                         (min {MIN_SECRET_VALUE_LEN} chars). Short values cause \
+                         unsafe outbound masking — please supply ≥{MIN_SECRET_VALUE_LEN} chars.",
+                        s.name
+                    )));
+                }
+            }
+
             // Collision pre-check (all secrets) before any write.
             for s in &secrets {
                 let handle = format!("<sv_{}>", s.name);
@@ -185,11 +205,23 @@ impl ExecutableNode for SecureSuspendNode {
             // Persist + collect handles.
             let mut handles = serde_json::Map::new();
             for (s, v) in secrets.iter().zip(values.iter()) {
+                tracing::info!(
+                    target: "colmena::secure_suspend",
+                    name = %s.name,
+                    session_id = %session_id,
+                    agent_session_id = ?agent_session_id,
+                    "secure_suspend: persisting secret"
+                );
                 let handle = self
                     .secure_value_service
                     .persist_secret(session_id, agent_session_id, node_id, &s.name, v)
                     .await
                     .map_err(|e| Box::<dyn Error + Send + Sync>::from(format!("{e}")))?;
+                tracing::info!(
+                    target: "colmena::secure_suspend",
+                    handle = %handle,
+                    "secure_suspend: persist OK"
+                );
                 handles.insert(s.name.clone(), Value::String(handle));
             }
 
@@ -305,8 +337,7 @@ mod tests {
             agent_session_id: Option<&str>,
             hash_key: &str,
         ) -> Result<bool, DagError> {
-            *self.last_exists_agent.lock().unwrap() =
-                Some(agent_session_id.map(|s| s.to_string()));
+            *self.last_exists_agent.lock().unwrap() = Some(agent_session_id.map(|s| s.to_string()));
             Ok(self.storage.lock().unwrap().contains_key(hash_key))
         }
         async fn cleanup(&self, _session_id: &str) -> Result<(), DagError> {
@@ -373,18 +404,10 @@ mod tests {
         let (node, _) = build_node();
         let mut state = Value::Null;
         let result = node
-            .execute(
-                &inputs_with("ask", "s1"),
-                &json!({}),
-                &mut state,
-                None,
-            )
+            .execute(&inputs_with("ask", "s1"), &json!({}), &mut state, None)
             .await;
         let msg = format!("{}", result.unwrap_err());
-        assert!(
-            msg.contains("secrets list missing or empty"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("secrets list missing or empty"), "got: {msg}");
     }
 
     #[tokio::test]
@@ -469,7 +492,12 @@ mod tests {
             "secrets": [{"question": "Q?", "name": "n_a"}]
         });
         let out = node
-            .execute(&inputs_with("ignored_node_id", "sx"), &cfg, &mut state, None)
+            .execute(
+                &inputs_with("ignored_node_id", "sx"),
+                &cfg,
+                &mut state,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(out["questions"][0]["id"], "custom_block__1");
@@ -489,17 +517,20 @@ mod tests {
             .execute(&inputs_with("ask", "s1"), &cfg, &mut state, None)
             .await;
         let msg = format!("{}", result.unwrap_err());
-        assert!(
-            msg.contains("duplicate question text"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("duplicate question text"), "got: {msg}");
     }
 
     #[test]
     fn parser_extracts_two_values_by_id() {
         let secrets = vec![
-            Secret { question: "Q1?".into(), name: "n1".into() },
-            Secret { question: "Q2?".into(), name: "n2".into() },
+            Secret {
+                question: "Q1?".into(),
+                name: "n1".into(),
+            },
+            Secret {
+                question: "Q2?".into(),
+                name: "n2".into(),
+            },
         ];
         let answer = "Q[n1]: Q1?\nA[n1]: val-one\nQ[n2]: Q2?\nA[n2]: val-two";
         let values = call_parser(answer, &secrets).unwrap();
@@ -510,8 +541,14 @@ mod tests {
     #[test]
     fn parser_order_independent() {
         let secrets = vec![
-            Secret { question: "Q1?".into(), name: "n1".into() },
-            Secret { question: "Q2?".into(), name: "n2".into() },
+            Secret {
+                question: "Q1?".into(),
+                name: "n1".into(),
+            },
+            Secret {
+                question: "Q2?".into(),
+                name: "n2".into(),
+            },
         ];
         let answer = "Q[n2]: Q2?\nA[n2]: val-two\nQ[n1]: Q1?\nA[n1]: val-one";
         let values = call_parser(answer, &secrets).unwrap();
@@ -522,8 +559,14 @@ mod tests {
     #[test]
     fn parser_preserves_internal_newlines_in_value() {
         let secrets = vec![
-            Secret { question: "PEM?".into(), name: "key".into() },
-            Secret { question: "FP?".into(), name: "fp".into() },
+            Secret {
+                question: "PEM?".into(),
+                name: "key".into(),
+            },
+            Secret {
+                question: "FP?".into(),
+                name: "fp".into(),
+            },
         ];
         let answer = "Q[key]: PEM?\nA[key]: line-1\nline-2\nline-3\nQ[fp]: FP?\nA[fp]: ab:cd";
         let values = call_parser(answer, &secrets).unwrap();
@@ -534,8 +577,14 @@ mod tests {
     #[test]
     fn parser_errors_on_missing_id() {
         let secrets = vec![
-            Secret { question: "Q1?".into(), name: "n1".into() },
-            Secret { question: "Q2?".into(), name: "n2".into() },
+            Secret {
+                question: "Q1?".into(),
+                name: "n1".into(),
+            },
+            Secret {
+                question: "Q2?".into(),
+                name: "n2".into(),
+            },
         ];
         let answer = "Q[n1]: Q1?\nA[n1]: only";
         let err = call_parser(answer, &secrets).unwrap_err();
@@ -545,8 +594,14 @@ mod tests {
     #[test]
     fn parser_errors_on_empty_value() {
         let secrets = vec![
-            Secret { question: "Q1?".into(), name: "n1".into() },
-            Secret { question: "Q2?".into(), name: "n2".into() },
+            Secret {
+                question: "Q1?".into(),
+                name: "n1".into(),
+            },
+            Secret {
+                question: "Q2?".into(),
+                name: "n2".into(),
+            },
         ];
         let answer = "Q[n1]: Q1?\nA[n1]: \nQ[n2]: Q2?\nA[n2]: v2";
         let err = call_parser(answer, &secrets).unwrap_err();
@@ -582,10 +637,7 @@ mod tests {
             ),
         );
 
-        let out = node
-            .execute(&inputs, &cfg, &mut state, None)
-            .await
-            .unwrap();
+        let out = node.execute(&inputs, &cfg, &mut state, None).await.unwrap();
 
         assert_eq!(out["status"], "resumed");
         assert_eq!(
@@ -599,8 +651,14 @@ mod tests {
 
         // Real values must NEVER appear in the output.
         let serialized = out.to_string();
-        assert!(!serialized.contains("ABC-CLI-ID"), "real value leaked: {serialized}");
-        assert!(!serialized.contains("XYZ-CLI-SEC"), "real value leaked: {serialized}");
+        assert!(
+            !serialized.contains("ABC-CLI-ID"),
+            "real value leaked: {serialized}"
+        );
+        assert!(
+            !serialized.contains("XYZ-CLI-SEC"),
+            "real value leaked: {serialized}"
+        );
 
         // But they ARE persisted in the repo.
         let stored = repo.storage.lock().unwrap();
@@ -668,10 +726,7 @@ mod tests {
             Value::String("Q[tok]: Token?\nA[tok]: real-tok".into()),
         );
 
-        let _out = node
-            .execute(&inputs, &cfg, &mut state, None)
-            .await
-            .unwrap();
+        let _out = node.execute(&inputs, &cfg, &mut state, None).await.unwrap();
 
         // exists() must have been called with the agent_session_id.
         assert_eq!(
@@ -702,10 +757,7 @@ mod tests {
             Value::String("Q[tok2]: Token?\nA[tok2]: real-tok".into()),
         );
 
-        let _out = node
-            .execute(&inputs, &cfg, &mut state, None)
-            .await
-            .unwrap();
+        let _out = node.execute(&inputs, &cfg, &mut state, None).await.unwrap();
 
         assert_eq!(
             repo.last_exists_agent.lock().unwrap().as_ref().unwrap(),
@@ -717,6 +769,60 @@ mod tests {
             &None,
             "persist_secret must receive None when agent_session_id is absent"
         );
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_value_shorter_than_4_chars() {
+        let service = Arc::new(SecureValueService::new(StubRepo::new()));
+        let node = SecureSuspendNode::new(service);
+
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert("__colmena_session_id".to_string(), Value::String("s".into()));
+        inputs.insert(
+            "__colmena_resume_answer".to_string(),
+            Value::String("Q[shortie]: ?\nA[shortie]: abc".into()), // 3 chars
+        );
+        inputs.insert(
+            "secrets".to_string(),
+            json!([{"question": "?", "name": "shortie"}]),
+        );
+
+        let cfg = json!({});
+        let mut state = Value::Null;
+        let err = node
+            .execute(&inputs, &cfg, &mut state, None)
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("too short") && msg.contains("shortie"),
+            "got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_accepts_value_of_exactly_4_chars() {
+        let service = Arc::new(SecureValueService::new(StubRepo::new()));
+        let node = SecureSuspendNode::new(service);
+
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert("__colmena_session_id".to_string(), Value::String("s".into()));
+        inputs.insert(
+            "__colmena_resume_answer".to_string(),
+            Value::String("Q[four]: ?\nA[four]: abcd".into()), // 4 chars
+        );
+        inputs.insert(
+            "secrets".to_string(),
+            json!([{"question": "?", "name": "four"}]),
+        );
+
+        let cfg = json!({});
+        let mut state = Value::Null;
+        let out = node
+            .execute(&inputs, &cfg, &mut state, None)
+            .await
+            .unwrap();
+        assert_eq!(out["status"], "resumed");
     }
 
     #[tokio::test]
@@ -784,15 +890,14 @@ mod tests {
         let mut inputs = inputs_with("ask", "sx");
         inputs.insert(
             "__colmena_resume_answer".into(),
-            Value::String(format!("Q[marker_secret]: Marker?\nA[marker_secret]: {secret_marker}")),
+            Value::String(format!(
+                "Q[marker_secret]: Marker?\nA[marker_secret]: {secret_marker}"
+            )),
         );
         let mut state = Value::Null;
 
         let _guard = tracing::subscriber::set_default(subscriber);
-        let _out = node
-            .execute(&inputs, &cfg, &mut state, None)
-            .await
-            .unwrap();
+        let _out = node.execute(&inputs, &cfg, &mut state, None).await.unwrap();
         drop(_guard);
 
         let captured = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
