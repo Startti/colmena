@@ -251,7 +251,7 @@ impl SecureValueService {
             .iter()
             .filter(|(k, _)| k.chars().count() >= 4)
             .collect();
-        ordered.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        ordered.sort_by_key(|(k, _)| std::cmp::Reverse(k.len()));
 
         Self::mask_walk(value, &ordered);
     }
