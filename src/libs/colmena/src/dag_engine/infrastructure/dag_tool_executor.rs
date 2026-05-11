@@ -863,16 +863,22 @@ impl DagToolExecutor {
 
         // Convert HashMap to NodeInputs (which is just HashMap<String, Value>)
         // SECURE VALUES: decrypt <value_N> placeholders before sending to the node.
+        // The applied map `(decrypted_value → handle)` will be used by the outbound
+        // masker (Task 11) to rewrite real values back to handles in tool responses.
         let inputs = if let (Some(svc), Some(sid)) = (&self.secure_value_service, &self.session_id)
         {
             let mut inputs_val =
                 serde_json::to_value(&inputs).unwrap_or(Value::Object(Default::default()));
-            if let Err(e) = svc
+            let _applied = match svc
                 .inject_secrets(&mut inputs_val, sid, self.agent_session_id.as_deref())
                 .await
             {
-                eprintln!("⚠️ [DagToolExecutor] Failed to inject secrets: {}", e);
-            }
+                Ok(map) => map,
+                Err(e) => {
+                    eprintln!("⚠️ [DagToolExecutor] Failed to inject secrets: {}", e);
+                    Default::default()
+                }
+            };
             serde_json::from_value::<HashMap<String, Value>>(inputs_val).unwrap_or(inputs)
         } else {
             inputs
@@ -2069,8 +2075,7 @@ mod tests {
         assert_eq!(output["a"], "value");
         // The session_id must have been injected under the reserved key.
         assert_eq!(
-            output["__colmena_session_id"],
-            "session_xyz",
+            output["__colmena_session_id"], "session_xyz",
             "execute_inner must inject __colmena_session_id from self.session_id"
         );
     }
@@ -2084,7 +2089,10 @@ mod tests {
 
         let tool_call = ToolCall::new(
             "call_no_sid".to_string(),
-            FunctionCall::new("mock_tool".to_string(), r#"{"b": "no_session"}"#.to_string()),
+            FunctionCall::new(
+                "mock_tool".to_string(),
+                r#"{"b": "no_session"}"#.to_string(),
+            ),
         );
 
         let result = executor.execute(&tool_call).await.unwrap();

@@ -75,7 +75,7 @@ impl TavilyClientNode {
             // Tavily currently has no chat-handle plumbing; pass None to keep
             // legacy session-scoped lookup. If/when needed, thread agent_session_id
             // through `build_use_case` from the node's inputs.
-            svc.inject_secrets(&mut cfg_copy, session_id, None).await?;
+            let _ = svc.inject_secrets(&mut cfg_copy, session_id, None).await?;
         }
 
         let api_key_raw = cfg_copy

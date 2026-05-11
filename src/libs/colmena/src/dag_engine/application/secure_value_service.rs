@@ -1,5 +1,6 @@
 use crate::dag_engine::domain::{error::DagError, secure_value_repository::SecureValueRepository};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -115,28 +116,37 @@ impl SecureValueService {
     /// `agent_session_id` is forwarded to the repository: when present, lookup is
     /// agent-first with session fallback (so resume under a fresh ephemeral
     /// session_id can still find secrets persisted under the same agent).
+    ///
+    /// Returns the map of `(decrypted_value → handle)` for every placeholder that
+    /// was successfully resolved and substituted. Outbound-masking callers (e.g.
+    /// the DAG tool executor) use this to rewrite the real value back to its
+    /// handle in any response that echoes it. Callers that don't need masking
+    /// can discard the returned map.
     pub async fn inject_secrets(
         &self,
         inputs: &mut Value,
         session_id: &str,
         agent_session_id: Option<&str>,
-    ) -> Result<(), DagError> {
+    ) -> Result<HashMap<String, String>, DagError> {
         // First pass: collect all placeholders
         let mut placeholders = Vec::new();
         self.collect_placeholders(inputs, &mut placeholders);
 
-        // Second pass: decrypt and replace
+        // Second pass: decrypt and replace; record (decrypted → handle) pairs
+        // so callers can mask outbound responses.
+        let mut applied: HashMap<String, String> = HashMap::new();
         for placeholder in placeholders {
             if let Some(real) = self
                 .repo
                 .decrypt(session_id, agent_session_id, &placeholder)
                 .await?
             {
+                applied.insert(real.clone(), placeholder.clone());
                 self.replace_placeholder(inputs, &placeholder, real);
             }
         }
 
-        Ok(())
+        Ok(applied)
     }
 
     /// Collect all placeholder strings in the value tree
