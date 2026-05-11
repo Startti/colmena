@@ -137,7 +137,7 @@ impl SecureValueRepository for PostgresSecureValueRepository {
     ) -> Result<bool, DagError> {
         let exists: bool = if let Some(agent) = agent_session_id {
             sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM secure_value_mappings WHERE agent_session_id = $1 AND hash_key = $2)"
+                "SELECT EXISTS(SELECT 1 FROM secure_value_mappings WHERE agent_session_id = $1 AND hash_key = $2 AND expires_at > NOW())"
             )
             .bind(agent)
             .bind(hash_key)
@@ -145,7 +145,7 @@ impl SecureValueRepository for PostgresSecureValueRepository {
             .await
         } else {
             sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM secure_value_mappings WHERE session_id = $1 AND hash_key = $2)"
+                "SELECT EXISTS(SELECT 1 FROM secure_value_mappings WHERE session_id = $1 AND hash_key = $2 AND expires_at > NOW())"
             )
             .bind(session_id)
             .bind(hash_key)
@@ -397,6 +397,36 @@ mod tests {
             "expires_at should be > now+23h, got {}",
             post.0
         );
+
+        sqlx::query("DELETE FROM secure_value_mappings WHERE session_id = $1")
+            .bind(&session)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn exists_returns_false_for_expired_row() {
+        dotenvy::dotenv().ok();
+        let url = std::env::var("DATABASE_URL").unwrap();
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        let repo = PostgresSecureValueRepository::new(pool.clone());
+
+        let session = format!("exists_expired_{}", uuid::Uuid::new_v4());
+        repo.persist(&session, None, "test_node", "<sv_expired>", "alice123", "secret")
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE secure_value_mappings SET expires_at = NOW() - INTERVAL '1 second' WHERE session_id = $1",
+        )
+        .bind(&session)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let exists = repo.exists(&session, None, "<sv_expired>").await.unwrap();
+        assert!(!exists, "expired row should not be reported as existing");
 
         sqlx::query("DELETE FROM secure_value_mappings WHERE session_id = $1")
             .bind(&session)
