@@ -235,8 +235,7 @@ async fn resume_replays_and_completes() {
         .await;
         tracing::info!(?output, "test: run 2 graph finished");
         assert!(
-            output.get("__colmena_status").and_then(|v| v.as_str())
-                != Some("SUSPENDED"),
+            output.get("__colmena_status").and_then(|v| v.as_str()) != Some("SUSPENDED"),
             "run 2 expected COMPLETED (not SUSPENDED), got: {output}"
         );
     }
@@ -291,25 +290,30 @@ async fn multiple_secrets_resolved_via_qa_format() {
         .await;
     }
 
-    // Verify both secure values landed in DB keyed by agent_session_id.
-    // The on-disk column is `hash_key` (sha256 of `<sv_<name>>`); the literal
-    // handle string is never stored. We assert presence by counting rows for
-    // this agent_session_id — exactly two should exist (one per secret).
+    // With the sliding TTL change (spec 2026-05-11), live rows survive
+    // the end-of-run sweep. Assert both <sv_user_*> and <sv_pass_*> handles
+    // are present for this agent_session_id.
     dotenvy::dotenv().ok();
     let url = std::env::var("DATABASE_URL").unwrap();
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
-    let row_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM secure_value_mappings WHERE agent_session_id = $1",
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT hash_key FROM secure_value_mappings \
+         WHERE agent_session_id = $1 ORDER BY hash_key",
     )
     .bind(&chat)
-    .fetch_one(&pool)
+    .fetch_all(&pool)
     .await
     .unwrap();
-    tracing::info!(count = row_count.0, "test: secure_value_mappings rows for chat");
-    assert_eq!(
-        row_count.0, 2,
-        "expected 2 secure_value_mappings rows for agent_session_id={chat}, got {}",
-        row_count.0
+    let handles: Vec<String> = rows.into_iter().map(|r| r.0).collect();
+    tracing::info!(?handles, "test: handles persisted for chat");
+
+    assert!(
+        handles.iter().any(|h| h.starts_with("<sv_user_")),
+        "expected <sv_user_*> handle, got: {handles:?}"
+    );
+    assert!(
+        handles.iter().any(|h| h.starts_with("<sv_pass_")),
+        "expected <sv_pass_*> handle, got: {handles:?}"
     );
 
     eng.shutdown().await;
