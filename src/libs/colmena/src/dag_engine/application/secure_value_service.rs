@@ -236,6 +236,49 @@ impl SecureValueService {
         self.repo.exists(session_id, agent_session_id, handle).await
     }
 
+    /// Recursively walk `value`. For each JSON string, replace every
+    /// substring equal to any key in `mapping` with the corresponding value.
+    /// Replacements are applied longest-key-first so two secrets sharing a
+    /// prefix do not leak partial content. Keys shorter than 4 chars are
+    /// skipped as a defense-in-depth check (secure_suspend already rejects
+    /// short values at persist time).
+    pub fn mask_outbound(&self, value: &mut Value, mapping: &HashMap<String, String>) {
+        if mapping.is_empty() {
+            return;
+        }
+        // Sort keys longest-first.
+        let mut ordered: Vec<(&String, &String)> = mapping
+            .iter()
+            .filter(|(k, _)| k.chars().count() >= 4)
+            .collect();
+        ordered.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+        Self::mask_walk(value, &ordered);
+    }
+
+    fn mask_walk(value: &mut Value, ordered: &[(&String, &String)]) {
+        match value {
+            Value::String(s) => {
+                for (k, handle) in ordered {
+                    if s.contains(k.as_str()) {
+                        *s = s.replace(k.as_str(), handle.as_str());
+                    }
+                }
+            }
+            Value::Array(arr) => {
+                for item in arr {
+                    Self::mask_walk(item, ordered);
+                }
+            }
+            Value::Object(map) => {
+                for (_, v) in map.iter_mut() {
+                    Self::mask_walk(v, ordered);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Cleanup all secure values for a session
     pub async fn cleanup(&self, session_id: &str) -> Result<(), DagError> {
         self.repo.cleanup(session_id).await
@@ -584,6 +627,86 @@ mod tests {
             .unwrap();
         // Placeholder must remain — different session, no agent → isolated.
         assert_eq!(inputs["bearer"].as_str(), Some(handle.as_str()));
+    }
+
+    #[test]
+    fn mask_outbound_replaces_string_literal() {
+        let svc = SecureValueService::new(Arc::new(MockSecureValueRepository::new()));
+        let mut value = json!("token=alice123");
+        let map: HashMap<String, String> = [("alice123".to_string(), "<sv_user_X>".to_string())]
+            .into_iter()
+            .collect();
+        svc.mask_outbound(&mut value, &map);
+        assert_eq!(value, json!("token=<sv_user_X>"));
+    }
+
+    #[test]
+    fn mask_outbound_walks_nested_objects() {
+        let svc = SecureValueService::new(Arc::new(MockSecureValueRepository::new()));
+        let mut value = json!({"user": {"name": "alice123"}});
+        let map: HashMap<String, String> = [("alice123".to_string(), "<sv_user_X>".to_string())]
+            .into_iter()
+            .collect();
+        svc.mask_outbound(&mut value, &map);
+        assert_eq!(value, json!({"user": {"name": "<sv_user_X>"}}));
+    }
+
+    #[test]
+    fn mask_outbound_walks_arrays() {
+        let svc = SecureValueService::new(Arc::new(MockSecureValueRepository::new()));
+        let mut value = json!(["alice123", "bob"]);
+        let map: HashMap<String, String> = [("alice123".to_string(), "<sv_user_X>".to_string())]
+            .into_iter()
+            .collect();
+        svc.mask_outbound(&mut value, &map);
+        assert_eq!(value, json!(["<sv_user_X>", "bob"]));
+    }
+
+    #[test]
+    fn mask_outbound_orders_longest_first() {
+        let svc = SecureValueService::new(Arc::new(MockSecureValueRepository::new()));
+        let mut value = json!("alicezhang123");
+        let map: HashMap<String, String> = [
+            ("alice123".to_string(), "<sv_short_X>".to_string()),
+            ("alicezhang123".to_string(), "<sv_long_X>".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        svc.mask_outbound(&mut value, &map);
+        assert_eq!(value, json!("<sv_long_X>"));
+    }
+
+    #[test]
+    fn mask_outbound_skips_short_values() {
+        let svc = SecureValueService::new(Arc::new(MockSecureValueRepository::new()));
+        let mut value = json!("okok");
+        let map: HashMap<String, String> = [("ok".to_string(), "<sv_flag_X>".to_string())]
+            .into_iter()
+            .collect();
+        svc.mask_outbound(&mut value, &map);
+        assert_eq!(value, json!("okok"), "should not replace keys < 4 chars");
+    }
+
+    #[test]
+    fn mask_outbound_is_noop_on_empty_map() {
+        let svc = SecureValueService::new(Arc::new(MockSecureValueRepository::new()));
+        let mut value = json!({"a": "alice123"});
+        svc.mask_outbound(&mut value, &HashMap::new());
+        assert_eq!(value, json!({"a": "alice123"}));
+    }
+
+    #[test]
+    fn mask_outbound_does_not_modify_numbers_or_booleans() {
+        let svc = SecureValueService::new(Arc::new(MockSecureValueRepository::new()));
+        let mut value = json!({"count": 42, "active": true, "name": "alice123"});
+        let map: HashMap<String, String> = [("alice123".to_string(), "<sv_user_X>".to_string())]
+            .into_iter()
+            .collect();
+        svc.mask_outbound(&mut value, &map);
+        assert_eq!(
+            value,
+            json!({"count": 42, "active": true, "name": "<sv_user_X>"})
+        );
     }
 
     /// `handle_exists` must follow the same agent-first rule.
