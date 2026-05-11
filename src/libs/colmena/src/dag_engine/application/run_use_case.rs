@@ -682,10 +682,31 @@ impl DagRunUseCase {
                 obj.insert("__colmena_session_id".to_string(), Value::String(session_id.clone()));
             }
 
-            // CLEANUP: Delete all secure values for this session
+            // SWEEP: Delete only EXPIRED secure values for this run's scope
+            // (session_id OR agent_session_id when set). Live rows survive so the
+            // next turn of a multi-turn conversation can still read them. See
+            // docs/superpowers/specs/2026-05-11-secure-values-sliding-ttl-design.md.
             if let Some(svc) = &self.secure_value_service {
-                if let Err(e) = svc.cleanup(&session_id).await {
-                    eprintln!("⚠️ Failed to cleanup secure values: {}", e);
+                match svc
+                    .cleanup_expired_for_run(&session_id, active_agent_session_id.as_deref())
+                    .await
+                {
+                    Ok(rows) if rows > 0 => {
+                        tracing::info!(
+                            target: "colmena::run_use_case",
+                            rows_deleted = rows,
+                            session_id = %session_id,
+                            "secure_values: expired rows swept at run end"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "colmena::run_use_case",
+                            error = %e,
+                            "secure_values: cleanup_expired_for_run failed (non-fatal)"
+                        );
+                    }
                 }
             }
 
