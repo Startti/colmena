@@ -865,11 +865,12 @@ impl DagToolExecutor {
         // SECURE VALUES: decrypt <value_N> placeholders before sending to the node.
         // The applied map `(decrypted_value → handle)` will be used by the outbound
         // masker (Task 11) to rewrite real values back to handles in tool responses.
+        let mut applied_secrets: HashMap<String, String> = HashMap::new();
         let inputs = if let (Some(svc), Some(sid)) = (&self.secure_value_service, &self.session_id)
         {
             let mut inputs_val =
                 serde_json::to_value(&inputs).unwrap_or(Value::Object(Default::default()));
-            let _applied = match svc
+            applied_secrets = match svc
                 .inject_secrets(&mut inputs_val, sid, self.agent_session_id.as_deref())
                 .await
             {
@@ -900,6 +901,27 @@ impl DagToolExecutor {
         let result = node
             .execute(&inputs, &node_exec_config, &mut state, None)
             .await;
+
+        // SECURE VALUES (Task 11): mask decrypted secrets back to their handles
+        // before any downstream handling. This runs unconditionally (independent of
+        // `is_secure`) and on BOTH Ok and Err paths so error messages cannot leak
+        // a secret either. Must precede `hash_output` so the masker sees raw values.
+        let result = if let Some(svc) = &self.secure_value_service {
+            match result {
+                Ok(mut value) => {
+                    svc.mask_outbound(&mut value, &applied_secrets);
+                    Ok(value)
+                }
+                Err(e) => {
+                    let mut err_value = Value::String(e.to_string());
+                    svc.mask_outbound(&mut err_value, &applied_secrets);
+                    let masked_msg = err_value.as_str().unwrap_or("").to_string();
+                    Err(Box::<dyn std::error::Error + Send + Sync>::from(masked_msg))
+                }
+            }
+        } else {
+            result
+        };
 
         // 4. Apply Secure Value hashing BEFORE returning to LLM
         // This is the critical step: if the tool has `secure: true`, all sensitive
