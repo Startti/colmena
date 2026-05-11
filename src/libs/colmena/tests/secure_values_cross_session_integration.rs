@@ -155,3 +155,84 @@ async fn agent_session_id_resolves_handle_persisted_in_another_session() {
     cleanup(&session_a, &agent_id).await;
     eng.shutdown().await;
 }
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+async fn secret_survives_end_of_run_cleanup_when_agent_session_id_set() {
+    let chat = format!(
+        "agent_survive_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    // Reuse the existing cleanup helper: session_id arg deletes by session_id,
+    // agent_id arg deletes dag_runs. Pass `chat` for both so any prior rows
+    // (under either column) for this id are cleared.
+    cleanup(&chat, &chat).await;
+
+    let eng = engine().await;
+
+    // Use a minimal graph that persists a secret via secure_suspend (top-level
+    // node — no LLM needed). We test the persistence lifecycle here, not the
+    // agent loop.
+    let raw = serde_json::json!({
+        "nodes": {
+            "ask": {
+                "type": "secure_suspend",
+                "config": {
+                    "secrets": [{"question": "Token?", "name": "tok"}]
+                }
+            },
+            "log_handles": { "type": "log" }
+        },
+        "edges": [{ "from": "ask.handles", "to": "log_handles" }]
+    });
+    let graph: Graph = serde_json::from_value(raw).unwrap();
+
+    // Run 1: suspend (secure_suspend emits SUSPENDED with question, no persist yet).
+    {
+        let mut s = Box::pin(eng.execute_stream(
+            graph.clone(),
+            None,
+            None,
+            false,
+            None,
+            Some(chat.clone()),
+        ));
+        while s.next().await.is_some() {}
+    }
+
+    // Run 2: resume with a valid (≥4 char) value. secure_suspend persists,
+    // run completes (status Completed), cleanup_expired_for_run fires but
+    // the row is NOT expired → it survives.
+    {
+        let mut s = Box::pin(eng.execute_stream(
+            graph.clone(),
+            None,
+            Some("Q[tok]: Token?\nA[tok]: tokenvalue123".into()),
+            false,
+            None,
+            Some(chat.clone()),
+        ));
+        while s.next().await.is_some() {}
+    }
+
+    // Assert: row exists in DB after Completed run.
+    dotenvy::dotenv().ok();
+    let url = std::env::var("DATABASE_URL").unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    let count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM secure_value_mappings WHERE agent_session_id = $1",
+    )
+    .bind(&chat)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        count.0, 1,
+        "exactly one row should survive end-of-run sweep for agent_session_id={chat}"
+    );
+
+    eng.shutdown().await;
+}
