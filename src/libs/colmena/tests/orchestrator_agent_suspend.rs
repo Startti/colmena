@@ -44,7 +44,7 @@ fn single_agent_suspend_graph() -> Graph {
                     "verbose": false,
                     "include_extra_info": false,
                     "planner": {
-                        "provider": "gemini",
+                        "provider": "google",
                         "model": "gemini-2.5-flash",
                         "api_key": "${GEMINI_API_KEY}",
                         "system_message": "Break the request into exactly ONE task assigned to 'asker'."
@@ -74,13 +74,13 @@ fn single_agent_suspend_graph() -> Graph {
                         }
                     },
                     "phase_reactor": {
-                        "provider": "gemini",
+                        "provider": "google",
                         "model": "gemini-2.5-flash",
                         "api_key": "${GEMINI_API_KEY}",
                         "system_message": "Summarize phase. Set task_ok=true."
                     },
                     "final_reactor": {
-                        "provider": "gemini",
+                        "provider": "google",
                         "model": "gemini-2.5-flash",
                         "api_key": "${GEMINI_API_KEY}",
                         "system_message": "Reply with what the user confirmed."

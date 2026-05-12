@@ -76,7 +76,7 @@ fn graph_inline() -> Graph {
             "agent": {
                 "type": "llm_call",
                 "config": {
-                    "provider": "gemini",
+                    "provider": "google",
                     "model": "gemini-2.5-flash",
                     "api_key": "${GEMINI_API_KEY}",
                     "session_id": "outbound_masking_smoke",

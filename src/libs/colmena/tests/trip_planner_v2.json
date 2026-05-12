@@ -11,7 +11,7 @@
         "planner": {
             "type": "planner",
             "config": {
-                "provider": "gemini",
+                "provider": "google",
                 "model": "gemini-2.5-flash",
                 "api_key": "${GEMINI_API_KEY}",
                 "verbose": false,
@@ -33,7 +33,7 @@
         "clothing_expert": {
             "type": "llm_call",
             "config": {
-                "provider": "gemini",
+                "provider": "google",
                 "model": "gemini-2.5-flash",
                 "api_key": "${GEMINI_API_KEY}",
                 "verbose": false,
@@ -48,7 +48,7 @@
         "gear_expert": {
             "type": "llm_call",
             "config": {
-                "provider": "gemini",
+                "provider": "google",
                 "model": "gemini-2.5-flash",
                 "api_key": "${GEMINI_API_KEY}",
                 "verbose": false,
@@ -63,7 +63,7 @@
         "budget_expert": {
             "type": "llm_call",
             "config": {
-                "provider": "gemini",
+                "provider": "google",
                 "model": "gemini-2.5-flash",
                 "api_key": "${GEMINI_API_KEY}",
                 "verbose": false,
@@ -78,7 +78,7 @@
         "critic": {
             "type": "critic",
             "config": {
-                "provider": "gemini",
+                "provider": "google",
                 "model": "gemini-2.5-flash",
                 "api_key": "${GEMINI_API_KEY}",
                 "verbose": false,
@@ -95,7 +95,7 @@
             "type": "reactor",
             "trigger_on": "FINISHED_PHASE",
             "config": {
-                "provider": "gemini",
+                "provider": "google",
                 "model": "gemini-2.5-flash",
                 "api_key": "${GEMINI_API_KEY}",
                 "verbose": false,
@@ -106,7 +106,7 @@
             "type": "reactor",
             "trigger_on": "FINISHED",
             "config": {
-                "provider": "gemini",
+                "provider": "google",
                 "model": "gemini-2.5-flash",
                 "api_key": "${GEMINI_API_KEY}",
                 "verbose": false,
