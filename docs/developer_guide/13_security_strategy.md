@@ -375,7 +375,7 @@ When the user is in the loop and must provide credentials interactively — e.g.
 
 The `secure_suspend` node pauses the DAG and presents the user with one or more questions (e.g., "Enter your API key"). Answers are encrypted with AES-256-GCM and stored in `secure_value_mappings`. The node returns only opaque handles (`<sv_name>`) — the LLM and all other nodes **never see the real value**. On DAG resume the handles flow through the graph and are auto-injected by `inject_secrets` at execution time.
 
-The node can be used in two ways:
+The node can be used in three ways:
 
 **Mode A — Top-level DAG node:**
 ```json
@@ -393,31 +393,54 @@ The node can be used in two ways:
 ```
 The DAG suspends until the user provides both values, then resumes. Downstream nodes receive `{ "api_key": "<sv_api_key>", "api_secret": "<sv_api_secret>" }`.
 
-**Mode B — LLM tool via `tool_configurations`:**
+**Mode B — `secure_suspend_allowed: true` (recomendado):**
+
+La forma más concisa de exponer `secure_suspend` como tool es el flag `secure_suspend_allowed` en la config del nodo `llm_call`. Al activarlo, el engine registra automáticamente una tool `ask_secret` con descripción canónica y `node_schema` listos para usar — no se necesita ninguna entrada en `tool_configurations`.
+
 ```json
 {
-  "tool_configurations": {
-    "collect_creds": {
-      "name": "collect_creds",
-      "node_type": "secure_suspend",
-      "description": "Ask the user for API credentials. Call this before making authenticated requests.",
-      "node_schema": {
-        "secrets": {
-          "fixed": [
-            { "name": "api_key",    "question": "Please enter your API key" },
-            { "name": "api_secret", "question": "Please enter your API secret" }
-          ]
-        }
-      }
+  "agent": {
+    "type": "llm_call",
+    "config": {
+      "provider": "google",
+      "model": "gemini-2.5-flash",
+      "api_key": "${GEMINI_API_KEY}",
+      "connection_url": "${DATABASE_URL}",
+      "secure_suspend_allowed": true,
+      "system_message": "Eres un agente que recopila credenciales del usuario antes de hacer llamadas a APIs externas."
     }
   }
 }
 ```
-When the LLM calls this tool, `llm_call` detects `__colmena_status: SUSPENDED` in the tool result and propagates SUSPENDED upward, pausing the DAG. On resume the pending tool call is re-dispatched with the user's answer and the LLM loop continues. See the note on **LLM tool suspend propagation** below.
+
+El LLM verá la tool `ask_secret` en su lista de herramientas disponibles. Al llamarla, el engine detecta `__colmena_status: SUSPENDED` en el resultado y propaga la suspensión hacia arriba, pausando el DAG. Al reanudar, la llamada pendiente se re-despacha con la respuesta del usuario y el loop del agente continúa normalmente.
+
+> **Precedencia:** si `tool_configurations` ya contiene una entrada con `"node_type": "secure_suspend"`, el flag `secure_suspend_allowed` es un no-op — esa entrada tiene prioridad.
+
+> **Convergencia:** ambos modos (B y C) convergen en el mismo mecanismo interno `apply_secure_suspend_tool_defaults`. El LLM ve un contrato idéntico en ambos casos.
+
+**Mode C — `tool_configurations` explícito (para renombrar o co-ubicar overrides):**
+
+Usa esta forma cuando necesites cambiar el nombre de la tool (p.ej. `ask_credentials`) o co-ubicar otras sobreescrituras de tool junto a `secure_suspend`:
+
+```json
+{
+  "tool_configurations": {
+    "ask_credentials": {
+      "name": "ask_credentials",
+      "node_type": "secure_suspend"
+    }
+  }
+}
+```
+
+Los campos opcionales (`description`, `node_schema`, etc.) se rellenan con los defaults canónicos si se omiten, igual que en el Mode B. Ver [`docs/node_configurations.json`](../node_configurations.json) → `secure_suspend` para el schema completo.
+
+Cuando el LLM llama a esta tool, `llm_call` detecta `__colmena_status: SUSPENDED` en el resultado y propaga la suspensión hacia arriba, pausando el DAG. Al reanudar, la llamada pendiente se re-despacha con la respuesta del usuario y el loop del agente continúa. Ver la nota **LLM tool suspend propagation** abajo.
 
 **End-to-end flow:**
 ```
-User starts DAG (or LLM calls collect_creds tool)
+User starts DAG (or LLM calls ask_secret tool)
   ↓
 secure_suspend node: DAG pauses, user sees question(s)
   ↓
