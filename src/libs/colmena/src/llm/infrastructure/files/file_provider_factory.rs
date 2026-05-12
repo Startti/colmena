@@ -32,7 +32,7 @@ impl FileProviderFactory {
         match kind {
             ProviderKind::Anthropic => Ok(Arc::new(AnthropicFilesApiAdapter::new(api_key))),
             ProviderKind::OpenAi => Ok(Arc::new(OpenAiFilesApiAdapter::new(api_key))),
-            ProviderKind::Gemini => Ok(Arc::new(GeminiFilesApiAdapter::new(api_key))),
+            ProviderKind::Google => Ok(Arc::new(GeminiFilesApiAdapter::new(api_key))),
             ProviderKind::Mock => Err(LlmError::ProviderLimitation {
                 provider: "mock".into(),
                 feature: "Files API".into(),
@@ -74,9 +74,9 @@ mod tests {
     }
 
     #[test]
-    fn creates_gemini() {
-        let r = FileProviderFactory::create(ProviderKind::Gemini, "k".into()).unwrap();
-        assert_eq!(r.provider(), ProviderKind::Gemini);
+    fn creates_google() {
+        let r = FileProviderFactory::create(ProviderKind::Google, "k".into()).unwrap();
+        assert_eq!(r.provider(), ProviderKind::Google);
     }
 
     #[test]

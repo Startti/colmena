@@ -22,7 +22,7 @@ impl LlmProviderFactory {
         }
         match kind {
             ProviderKind::OpenAi => Arc::new(OpenAiAdapter::new()),
-            ProviderKind::Gemini => Arc::new(GeminiAdapter::new()),
+            ProviderKind::Google => Arc::new(GeminiAdapter::new()),
             ProviderKind::Anthropic => Arc::new(AnthropicAdapter::new()),
             ProviderKind::Mock => Arc::new(MockAdapter::new()),
         }
@@ -31,7 +31,7 @@ impl LlmProviderFactory {
     pub fn create_all() -> Vec<(ProviderKind, Arc<dyn LlmRepository>)> {
         vec![
             (ProviderKind::OpenAi, Self::create(ProviderKind::OpenAi)),
-            (ProviderKind::Gemini, Self::create(ProviderKind::Gemini)),
+            (ProviderKind::Google, Self::create(ProviderKind::Google)),
             (
                 ProviderKind::Anthropic,
                 Self::create(ProviderKind::Anthropic),
