@@ -3,7 +3,7 @@
     "input": {
       "type": "input",
       "config": {
-        "prompt": "Asigná todas las acciones siguientes a margarita@startti.ai (buscá su owner id una vez y reusalo). En el deal 'Dummy Corp QA — POC inicial' (que creamos antes): (1) agregá una nota como Margarita: 'Cliente pidió 10% de descuento; ofrecí 5%, pendiente respuesta del comité'. Asociala al deal y al contacto Juan Perez. (2) Creá una tarea de llamada con due date 2026-05-09T15:00:00Z, prioridad alta, subject 'Llamar a Juan para cerrar tema descuento', asociada al deal y al contacto, asignada a Margarita. (3) Juan reportó un bug crítico: 'No puedo subir archivos al portal — recibo error 500 al confirmar'. Creá un ticket en alta prioridad asignado a Margarita, asociado al contacto y a la empresa Dummy Corp QA. Recordá llamar list_ticket_pipelines primero para obtener pipeline/stage válidos."
+        "prompt": "Buscá el contacto Juan Perez (firstname Juan, lastname Perez) en HubSpot y devolveme su email y empresa. Usá search_contacts."
       }
     },
     "agent_llm": {
@@ -97,7 +97,7 @@
               "body": {
                 "type": "object",
                 "required": true,
-                "description": "Full JSON body. Required: filterGroups (array of { filters: [ { propertyName, operator, value } ] }). Optional: properties (array of strings — names to return), limit (number, default 10, max 100). Operators: EQ, NEQ, CONTAINS_TOKEN, HAS_PROPERTY, NOT_HAS_PROPERTY, GT, LT, BETWEEN, IN. See hubspot-crm/search_contacts."
+                "description": "Full JSON body. Required: filterGroups. **AND vs OR rule (CRITICAL): filters INSIDE one group are AND'd; groups in the top-level array are OR'd.** For 'Juan Perez' (firstname AND lastname), put BOTH filters inside ONE group: filterGroups=[{filters:[{firstname=Juan},{lastname=Perez}]}] — NOT two separate groups. Optional: properties (array of strings to return), limit (default 10, max 100). Operators: EQ, NEQ, CONTAINS_TOKEN, HAS_PROPERTY, NOT_HAS_PROPERTY, GT, LT, BETWEEN, IN. See hubspot-crm/search_contacts."
               }
             }
           },
@@ -179,7 +179,7 @@
               "body": {
                 "type": "object",
                 "required": true,
-                "description": "Full JSON body. Required: filterGroups (array of { filters: [ { propertyName, operator, value } ] }). Optional: properties (array of strings — names to return), limit (number, default 10, max 100). Operators: EQ, NEQ, CONTAINS_TOKEN, HAS_PROPERTY, NOT_HAS_PROPERTY, GT, LT, BETWEEN, IN. See hubspot-crm/search_companies."
+                "description": "Full JSON body. Required: filterGroups. **AND vs OR rule (CRITICAL): filters INSIDE one group are AND'd; groups in the top-level array are OR'd.** For combined criteria (e.g. name AND industry), put BOTH filters inside ONE group — NOT two separate groups. Optional: properties (array of strings to return), limit (default 10, max 100). Operators: EQ, NEQ, CONTAINS_TOKEN, HAS_PROPERTY, NOT_HAS_PROPERTY, GT, LT, BETWEEN, IN. See hubspot-crm/search_companies."
               }
             }
           },
@@ -347,7 +347,7 @@
               "body": {
                 "type": "object",
                 "required": true,
-                "description": "Full JSON body. Required: properties.hs_note_body (string) and properties.hs_timestamp (ISO 8601). Recommended: associations array with entries { to: { id }, types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: <int> }] }. AssociationTypeIds: 202=contact, 190=company, 214=deal, 228=ticket. See hubspot-crm/add_note."
+                "description": "Pass the parameter `body` as an object with EXACTLY this shape: {\"properties\": {hs_note_body, hs_timestamp, ...}, \"associations\": [...]}. The outer wrapper with keys `properties` and `associations` is REQUIRED — do not flatten. Required inside properties: hs_note_body (string), hs_timestamp (ISO 8601). Associations entries: {to:{id}, types:[{associationCategory:'HUBSPOT_DEFINED', associationTypeId:<int>}]}. associationTypeIds: 202=contact, 190=company, 214=deal, 228=ticket. See hubspot-crm/add_note."
               }
             }
           },
@@ -363,7 +363,7 @@
               "body": {
                 "type": "object",
                 "required": true,
-                "description": "Full JSON body. Required properties: hs_task_subject (string), hs_timestamp (ISO 8601 due date). Optional: hs_task_body, hs_task_status (NOT_STARTED|IN_PROGRESS|WAITING|COMPLETED|DEFERRED), hs_task_priority (LOW|MEDIUM|HIGH), hs_task_type (TODO|CALL|EMAIL), hubspot_owner_id. Recommended: associations with associationTypeIds 204=contact, 192=company, 216=deal, 230=ticket. See hubspot-crm/create_task."
+                "description": "Pass the parameter `body` as an object with EXACTLY this shape: {\"properties\": {hs_task_subject, hs_timestamp, ...}, \"associations\": [...]}. The outer wrapper with keys `properties` and `associations` is REQUIRED — do not flatten. Required inside properties: hs_task_subject (string), hs_timestamp (ISO 8601 due date). Optional: hs_task_body, hs_task_status (NOT_STARTED|IN_PROGRESS|WAITING|COMPLETED|DEFERRED), hs_task_priority (LOW|MEDIUM|HIGH), hs_task_type (TODO|CALL|EMAIL), hubspot_owner_id. associationTypeIds: 204=contact, 192=company, 216=deal, 230=ticket. See hubspot-crm/create_task."
               }
             }
           },
@@ -381,7 +381,7 @@
           "create_ticket": {
             "name": "create_ticket",
             "node_type": "http_request",
-            "description": "Log a customer support issue or message as a HubSpot ticket. Call list_ticket_pipelines first to get valid pipeline/stage ids. See `hubspot-crm/create_ticket` for the body shape.",
+            "description": "Log a customer support issue or message as a HubSpot ticket. **MANDATORY workflow**: (1) call `list_ticket_pipelines` first to obtain a valid `hs_pipeline_stage`, (2) only then call `create_ticket`. HubSpot rejects the create with VALIDATION_ERROR if `hs_pipeline_stage` is missing. See `hubspot-crm/create_ticket` for the body shape.",
             "node_schema": {
               "base_url":     { "type": "string", "fixed": "https://api.hubapi.com" },
               "endpoint":     { "type": "string", "fixed": "/crm/v3/objects/tickets" },
@@ -390,7 +390,7 @@
               "body": {
                 "type": "object",
                 "required": true,
-                "description": "Full JSON body. Required by HubSpot: properties.subject (string) AND properties.hs_pipeline_stage (stage id from list_ticket_pipelines — call it first). Recommended: properties.content, hs_pipeline (default '0'), hs_ticket_priority (LOW|MEDIUM|HIGH), hs_ticket_category, source_type (CHAT|EMAIL|FORM|PHONE), hubspot_owner_id. Recommended: associations with associationTypeIds 16=contact, 26=company, 28=deal. See hubspot-crm/create_ticket."
+                "description": "Pass the parameter `body` as an object with EXACTLY this shape: {\"properties\": {subject, hs_pipeline_stage, hs_pipeline, ...}, \"associations\": [...]}. The outer wrapper with keys `properties` and `associations` is REQUIRED — do not flatten. **REQUIRED inside properties (HubSpot rejects the call if missing): `subject` (string) AND `hs_pipeline_stage` (stage id obtained from list_ticket_pipelines). NEVER omit `hs_pipeline_stage` — call list_ticket_pipelines first if you do not have a valid stage id.** Recommended: hs_pipeline (default '0'), content, hs_ticket_priority (LOW|MEDIUM|HIGH), hs_ticket_category, source_type (CHAT|EMAIL|FORM|PHONE), hubspot_owner_id. associationTypeIds: 16=contact, 26=company, 28=deal. See hubspot-crm/create_ticket."
               }
             }
           }

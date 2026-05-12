@@ -22,8 +22,32 @@
 ]
 ```
 
-- Filters within a single group are AND'd.
-- Filter groups (top-level array) are OR'd.
+- Filters **within a single group are AND'd**.
+- Filter **groups (top-level array) are OR'd**.
+
+### ⚠️ Common mistake — multi-criteria search
+
+When the user asks for "Juan Perez" (firstname AND lastname), put BOTH filters inside ONE group, not two groups. Two groups would mean OR.
+
+**✅ Correct — firstname=Juan AND lastname=Perez (1 result):**
+```json
+"filterGroups": [
+  { "filters": [
+      { "propertyName": "firstname", "operator": "EQ", "value": "Juan" },
+      { "propertyName": "lastname",  "operator": "EQ", "value": "Perez" }
+  ]}
+]
+```
+
+**❌ Wrong — firstname=Juan OR lastname=Perez (hundreds of results):**
+```json
+"filterGroups": [
+  { "filters": [{ "propertyName": "firstname", "operator": "EQ", "value": "Juan" }] },
+  { "filters": [{ "propertyName": "lastname",  "operator": "EQ", "value": "Perez" }] }
+]
+```
+
+Use multiple groups ONLY when you genuinely want OR semantics (e.g. "contacts in marketing OR in sales").
 
 ## Operators
 

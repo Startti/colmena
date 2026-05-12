@@ -18,7 +18,31 @@
 ]
 ```
 
-Filters within a group are AND'd; groups are OR'd.
+Filters **within a group are AND'd**; **groups (top-level array) are OR'd**.
+
+### ⚠️ Common mistake — multi-criteria search
+
+When the user asks for "Acme Corp in software" (name AND industry), put BOTH filters inside ONE group, not two groups. Two groups would mean OR.
+
+**✅ Correct — name CONTAINS Acme AND industry=COMPUTER_SOFTWARE:**
+```json
+"filterGroups": [
+  { "filters": [
+      { "propertyName": "name",     "operator": "CONTAINS_TOKEN", "value": "Acme" },
+      { "propertyName": "industry", "operator": "EQ",             "value": "COMPUTER_SOFTWARE" }
+  ]}
+]
+```
+
+**❌ Wrong — name CONTAINS Acme OR industry=COMPUTER_SOFTWARE (way too many results):**
+```json
+"filterGroups": [
+  { "filters": [{ "propertyName": "name",     "operator": "CONTAINS_TOKEN", "value": "Acme" }] },
+  { "filters": [{ "propertyName": "industry", "operator": "EQ",             "value": "COMPUTER_SOFTWARE" }] }
+]
+```
+
+Use multiple groups ONLY for genuine OR semantics.
 
 ## Operators
 
