@@ -20,12 +20,12 @@ Paquetes de conocimiento en markdown cargados bajo demanda por `llm_call` vía e
 
 ### Modos de definir skills
 
-| Modo | Cómo se declara | Doc |
-|---|---|---|
-| **Built-in** (compiladas con `include_dir!`) | Nada en el grafo — siempre disponibles | [`24_skills.md`](developer_guide/24_skills.md) §"Skills integradas" |
-| **Filesystem path** (declared) | `skills.paths: ["/abs/path/to/skill_dir"]` | [`24_skills.md`](developer_guide/24_skills.md) §"Skills del usuario (paths)" |
-| **Signed URL** (preprocesado por ADP worker) | `skills.declared` con `url` apuntando a un signed URL → ADP descarga, escribe en cache local, reescribe a `paths` antes de invocar Colmena | [`docs/superpowers/plans/2026-05-03-user-skills-via-signed-urls.md`](superpowers/plans/2026-05-03-user-skills-via-signed-urls.md) |
-| **Inline content** (preprocesado por ADP worker) | `skills.declared` con `content` literal → ADP escribe a archivos, reescribe a `paths` | mismo plan ↑ |
+| Modo                                             | Cómo se declara                                                                                                                            | Doc                                                                                                                               |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| **Built-in** (compiladas con `include_dir!`)     | Nada en el grafo — siempre disponibles                                                                                                     | [`24_skills.md`](developer_guide/24_skills.md) §"Skills integradas"                                                               |
+| **Filesystem path** (declared)                   | `skills.paths: ["/abs/path/to/skill_dir"]`                                                                                                 | [`24_skills.md`](developer_guide/24_skills.md) §"Skills del usuario (paths)"                                                      |
+| **Signed URL** (preprocesado por ADP worker)     | `skills.declared` con `url` apuntando a un signed URL → ADP descarga, escribe en cache local, reescribe a `paths` antes de invocar Colmena | [`docs/superpowers/plans/2026-05-03-user-skills-via-signed-urls.md`](superpowers/plans/2026-05-03-user-skills-via-signed-urls.md) |
+| **Inline content** (preprocesado por ADP worker) | `skills.declared` con `content` literal → ADP escribe a archivos, reescribe a `paths`                                                      | mismo plan ↑                                                                                                                      |
 
 **Seguridad:** `paths` se validan con `canonicalize()` y el allowed-dirs whitelist; sin escape via `../` o symlinks. Catálogo + observabilidad en `24_skills.md` §"Observabilidad".
 
@@ -39,10 +39,10 @@ Ejecuta código Python arbitrario vía PyO3 dentro del DAG.
 
 ### Dos modos de uso
 
-| Modo | Cómo | Cuándo |
-|---|---|---|
-| **Como nodo DAG top-level** | `node_type: "python_script"`, `code` literal en config | Transformaciones determinísticas, glue entre nodos |
-| **Como LLM tool** | `tool_configurations.<name>` con `node_type: "python_script"`. El `code` puede ser fijo o que el LLM lo genere. Activar `sandbox_mode: "restricted"` cuando el LLM escribe código | Cálculos sobre datos que el LLM ya tiene |
+| Modo                        | Cómo                                                                                                                                                                              | Cuándo                                             |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| **Como nodo DAG top-level** | `node_type: "python_script"`, `code` literal en config                                                                                                                            | Transformaciones determinísticas, glue entre nodos |
+| **Como LLM tool**           | `tool_configurations.<name>` con `node_type: "python_script"`. El `code` puede ser fijo o que el LLM lo genere. Activar `sandbox_mode: "restricted"` cuando el LLM escribe código | Cálculos sobre datos que el LLM ya tiene           |
 
 ### Sandbox
 
@@ -91,16 +91,12 @@ CLI: `--answer "Q[<name1>]: <pregunta>\nA[<name1>]: <valor>\nQ[<name2>]: <pregun
 
 Los siguientes specs cierran el ciclo end-to-end de `secure_suspend` desde el meta-agente hasta el agente generado, validado contra Postgres + httpbin reales:
 
-| Cambio | Spec | Plan | Resumen |
-|---|---|---|---|
-| `secure_suspend` node | [spec](superpowers/specs/2026-05-07-secure-suspend-node-design.md) | [plan](superpowers/plans/2026-05-07-secure-suspend-node.md) | Recolección interactiva en batch, persistencia cifrada, handles de salida. |
-| Inject covers `config` | [spec](superpowers/specs/2026-05-07-inject-secrets-in-config-design.md) | [plan](superpowers/plans/2026-05-07-inject-secrets-in-config.md) | `inject_secrets` corre sobre inputs **y** config antes de cada nodo. |
-| `llm_call` propaga SUSPENDED | [spec](superpowers/specs/2026-05-08-llm-call-tool-suspend-design.md) | [plan](superpowers/plans/2026-05-08-llm-call-tool-suspend.md) | Cuando un tool retorna SUSPENDED, el agente corta el loop, pausa el DAG, y al resume replaya la conversación + re-ejecuta el tool con la respuesta. |
+| Cambio                          | Spec                                                                          | Plan                                                                   | Resumen                                                                                                                                                                 |
+| ------------------------------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `secure_suspend` node           | [spec](superpowers/specs/2026-05-07-secure-suspend-node-design.md)            | [plan](superpowers/plans/2026-05-07-secure-suspend-node.md)            | Recolección interactiva en batch, persistencia cifrada, handles de salida.                                                                                              |
+| Inject covers `config`          | [spec](superpowers/specs/2026-05-07-inject-secrets-in-config-design.md)       | [plan](superpowers/plans/2026-05-07-inject-secrets-in-config.md)       | `inject_secrets` corre sobre inputs **y** config antes de cada nodo.                                                                                                    |
+| `llm_call` propaga SUSPENDED    | [spec](superpowers/specs/2026-05-08-llm-call-tool-suspend-design.md)          | [plan](superpowers/plans/2026-05-08-llm-call-tool-suspend.md)          | Cuando un tool retorna SUSPENDED, el agente corta el loop, pausa el DAG, y al resume replaya la conversación + re-ejecuta el tool con la respuesta.                     |
 | `agent_session_id`-first lookup | [spec](superpowers/specs/2026-05-08-secure-values-agent-session-id-design.md) | [plan](superpowers/plans/2026-05-08-secure-values-agent-session-id.md) | `secure_value_mappings` keya por `agent_session_id` cuando está set; fallback a `session_id`. Mismo patrón que `llm_node_history` y `dag_runs`. Habilita cross-session. |
-
-### Convención de testing
-
-Todas las pruebas con estado entre runs (suspend/resume, multi-turn, secure_values) **deben usar `--agent-session-id <id_estable>`** — el `--session-id` ephemeral rota por invocación CLI. Detalle en [CLAUDE.md](../CLAUDE.md) §"Regla — Usar `--agent-session-id` en todas las pruebas de grafos".
 
 ### Schema BD (3 tablas afectadas)
 

@@ -414,9 +414,16 @@ mod tests {
         let repo = PostgresSecureValueRepository::new(pool.clone());
 
         let session = format!("exists_expired_{}", uuid::Uuid::new_v4());
-        repo.persist(&session, None, "test_node", "<sv_expired>", "alice123", "secret")
-            .await
-            .unwrap();
+        repo.persist(
+            &session,
+            None,
+            "test_node",
+            "<sv_expired>",
+            "alice123",
+            "secret",
+        )
+        .await
+        .unwrap();
         sqlx::query(
             "UPDATE secure_value_mappings SET expires_at = NOW() - INTERVAL '1 second' WHERE session_id = $1",
         )
@@ -484,17 +491,26 @@ mod tests {
         let other_session = format!("sweep_b_{}", uuid::Uuid::new_v4());
 
         // (a) expired, this session
-        repo.persist(&my_session, None, "n", "<sv_a>", "alice123", "secret").await.unwrap();
+        repo.persist(&my_session, None, "n", "<sv_a>", "alice123", "secret")
+            .await
+            .unwrap();
         sqlx::query("UPDATE secure_value_mappings SET expires_at = NOW() - INTERVAL '1 second' WHERE session_id = $1 AND hash_key = '<sv_a>'")
             .bind(&my_session).execute(&pool).await.unwrap();
         // (b) expired, OTHER session
-        repo.persist(&other_session, None, "n", "<sv_b>", "alice123", "secret").await.unwrap();
+        repo.persist(&other_session, None, "n", "<sv_b>", "alice123", "secret")
+            .await
+            .unwrap();
         sqlx::query("UPDATE secure_value_mappings SET expires_at = NOW() - INTERVAL '1 second' WHERE session_id = $1 AND hash_key = '<sv_b>'")
             .bind(&other_session).execute(&pool).await.unwrap();
         // (c) not expired, this session
-        repo.persist(&my_session, None, "n", "<sv_c>", "alice123", "secret").await.unwrap();
+        repo.persist(&my_session, None, "n", "<sv_c>", "alice123", "secret")
+            .await
+            .unwrap();
 
-        let deleted = repo.cleanup_expired_for_run(&my_session, None).await.unwrap();
+        let deleted = repo
+            .cleanup_expired_for_run(&my_session, None)
+            .await
+            .unwrap();
         assert_eq!(deleted, 1, "should delete exactly the (a) row");
 
         let a_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM secure_value_mappings WHERE session_id=$1 AND hash_key='<sv_a>')")
@@ -508,7 +524,11 @@ mod tests {
         assert!(c_exists, "non-expired row in same session must survive");
 
         sqlx::query("DELETE FROM secure_value_mappings WHERE session_id IN ($1, $2)")
-            .bind(&my_session).bind(&other_session).execute(&pool).await.ok();
+            .bind(&my_session)
+            .bind(&other_session)
+            .execute(&pool)
+            .await
+            .ok();
     }
 
     #[tokio::test]
@@ -524,24 +544,57 @@ mod tests {
         let session_a = format!("s_a_{}", uuid::Uuid::new_v4());
         let session_b = format!("s_b_{}", uuid::Uuid::new_v4());
 
-        repo.persist(&session_a, Some(&my_agent), "n", "<sv_mine>", "alice123", "secret").await.unwrap();
-        repo.persist(&session_b, Some(&other_agent), "n", "<sv_other>", "alice123", "secret").await.unwrap();
+        repo.persist(
+            &session_a,
+            Some(&my_agent),
+            "n",
+            "<sv_mine>",
+            "alice123",
+            "secret",
+        )
+        .await
+        .unwrap();
+        repo.persist(
+            &session_b,
+            Some(&other_agent),
+            "n",
+            "<sv_other>",
+            "alice123",
+            "secret",
+        )
+        .await
+        .unwrap();
         sqlx::query("UPDATE secure_value_mappings SET expires_at = NOW() - INTERVAL '1 second' WHERE hash_key IN ('<sv_mine>','<sv_other>')")
             .execute(&pool).await.unwrap();
 
         // Pass an unrelated session_id to prove agent_session_id is the key.
         let unrelated_session = format!("unrelated_{}", uuid::Uuid::new_v4());
-        let deleted = repo.cleanup_expired_for_run(&unrelated_session, Some(&my_agent)).await.unwrap();
+        let deleted = repo
+            .cleanup_expired_for_run(&unrelated_session, Some(&my_agent))
+            .await
+            .unwrap();
         assert_eq!(deleted, 1);
 
-        let mine_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM secure_value_mappings WHERE hash_key='<sv_mine>')")
-            .fetch_one(&pool).await.unwrap();
-        let other_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM secure_value_mappings WHERE hash_key='<sv_other>')")
-            .fetch_one(&pool).await.unwrap();
+        let mine_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM secure_value_mappings WHERE hash_key='<sv_mine>')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let other_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM secure_value_mappings WHERE hash_key='<sv_other>')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert!(!mine_exists);
         assert!(other_exists);
 
         sqlx::query("DELETE FROM secure_value_mappings WHERE agent_session_id IN ($1, $2)")
-            .bind(&my_agent).bind(&other_agent).execute(&pool).await.ok();
+            .bind(&my_agent)
+            .bind(&other_agent)
+            .execute(&pool)
+            .await
+            .ok();
     }
 }

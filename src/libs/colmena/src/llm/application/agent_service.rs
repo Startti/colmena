@@ -95,6 +95,12 @@ impl AgentService {
 
         // 3. ReAct Loop
         for _iteration in 0..max_iter {
+            tracing::info!(
+                target: "colmena::agent",
+                iteration = _iteration,
+                max = max_iter,
+                "agent_service: iteration start"
+            );
             // Signal start of a new message/iteration
             if let Some(callback) = &on_token {
                 (callback)(LlmStreamPart::LlmMessageStart);
@@ -271,14 +277,15 @@ impl AgentService {
                     // The assistant message (with tool_calls) was already persisted above
                     // (step B), so the resume path can walk the history to find the pending
                     // tool call. We must NOT persist the tool result — we don't have one yet.
-                    if let Ok(parsed) =
-                        serde_json::from_str::<serde_json::Value>(&result.output)
-                    {
-                        if parsed
-                            .get("__colmena_status")
-                            .and_then(|v| v.as_str())
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&result.output) {
+                        if parsed.get("__colmena_status").and_then(|v| v.as_str())
                             == Some("SUSPENDED")
                         {
+                            tracing::info!(
+                                target: "colmena::agent",
+                                tool_call_id = %result.tool_call_id,
+                                "agent_service: SUSPENDED detected in tool result, short-circuiting agent loop"
+                            );
                             let questions = parsed
                                 .get("questions")
                                 .cloned()
@@ -695,15 +702,12 @@ mod tests {
         let prompt = "hello".to_string();
 
         // Conversation starts empty
-        mock_conv
-            .expect_get_by_id()
-            .times(1)
-            .returning(|k| {
-                Ok(Conversation {
-                    key: k.clone(),
-                    messages: vec![],
-                })
-            });
+        mock_conv.expect_get_by_id().times(1).returning(|k| {
+            Ok(Conversation {
+                key: k.clone(),
+                messages: vec![],
+            })
+        });
 
         // Exactly 2 add_message calls:
         //   1. user message
@@ -773,7 +777,10 @@ mod tests {
         let suspend = response.suspend().expect("response must have suspend info");
         assert_eq!(suspend.tool_call_id, "call_xyz");
 
-        let questions = suspend.questions.as_array().expect("questions must be an array");
+        let questions = suspend
+            .questions
+            .as_array()
+            .expect("questions must be an array");
         assert_eq!(questions.len(), 1);
         assert_eq!(questions[0]["id"], "q1");
     }

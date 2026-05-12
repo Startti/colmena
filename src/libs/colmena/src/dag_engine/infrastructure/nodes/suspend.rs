@@ -37,17 +37,14 @@ impl ExecutableNode for SuspendNode {
                     "suspend: __colmena_resume_answer must be a string",
                 )
             })?;
-            let id = config
-                .get("id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    Box::<dyn Error + Send + Sync>::from(
-                        "suspend: config.id is required on resume",
-                    )
-                })?;
+            let id = config.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
+                Box::<dyn Error + Send + Sync>::from("suspend: config.id is required on resume")
+            })?;
             let mut parsed = parse_qa_response(raw, &[id])
                 .map_err(|e| Box::<dyn Error + Send + Sync>::from(format!("suspend: {e}")))?;
-            let answer = parsed.remove(id).expect("parser guarantees the id is present");
+            let answer = parsed
+                .remove(id)
+                .expect("parser guarantees the id is present");
 
             return Ok(json!({
                 "status": "resumed",
@@ -66,9 +63,7 @@ impl ExecutableNode for SuspendNode {
         let id = config
             .get("id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                Box::<dyn Error + Send + Sync>::from("suspend: config.id is required")
-            })?
+            .ok_or_else(|| Box::<dyn Error + Send + Sync>::from("suspend: config.id is required"))?
             .to_string();
 
         if !is_valid_qa_id(&id) {

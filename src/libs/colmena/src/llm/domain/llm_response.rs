@@ -199,12 +199,8 @@ impl LlmResponse {
         let message = LlmMessage::assistant("__suspended__".to_string())
             .expect("non-empty sentinel string is always valid");
         // Use the Mock provider kind so no real API key is required.
-        let provider = LlmProvider::new(
-            ProviderKind::Mock,
-            "__suspended__".to_string(),
-            None,
-        )
-        .expect("non-empty api_key is always valid");
+        let provider = LlmProvider::new(ProviderKind::Mock, "__suspended__".to_string(), None)
+            .expect("non-empty api_key is always valid");
         Self {
             id: LlmResponseId::new(),
             request_id: LlmRequestId::new(),

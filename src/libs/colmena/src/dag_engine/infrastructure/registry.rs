@@ -482,12 +482,7 @@ mod registry_secure_suspend_tests {
         ) -> Result<Option<String>, DagError> {
             Ok(None)
         }
-        async fn exists(
-            &self,
-            _: &str,
-            _: Option<&str>,
-            _: &str,
-        ) -> Result<bool, DagError> {
+        async fn exists(&self, _: &str, _: Option<&str>, _: &str) -> Result<bool, DagError> {
             Ok(false)
         }
         async fn cleanup(&self, _: &str) -> Result<(), DagError> {
@@ -511,14 +506,11 @@ mod registry_secure_suspend_tests {
                 crate::dag_engine::infrastructure::pool_registry::PoolConfig::defaults(),
             ),
         );
-        let repo_factory =
-            Arc::new(crate::llm::infrastructure::ConversationRepositoryFactory::new(
-                pool_registry.clone(),
-            ));
+        let repo_factory = Arc::new(
+            crate::llm::infrastructure::ConversationRepositoryFactory::new(pool_registry.clone()),
+        );
         let sql_factory = Arc::new(
-            crate::dag_engine::infrastructure::sql_port_factory::SqlPortFactory::new(
-                pool_registry,
-            ),
+            crate::dag_engine::infrastructure::sql_port_factory::SqlPortFactory::new(pool_registry),
         );
         let task_memory: Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository> =
             Arc::new(super::registry_tavily_tests::StubTaskMemory);
