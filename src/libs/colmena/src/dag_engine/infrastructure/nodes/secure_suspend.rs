@@ -6,7 +6,9 @@
 use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
-use crate::dag_engine::domain::tool_configuration::{NodeSchema, NodeSchemaField, ToolConfiguration};
+use crate::dag_engine::domain::tool_configuration::{
+    NodeSchema, NodeSchemaField, ToolConfiguration,
+};
 use crate::dag_engine::infrastructure::nodes::qa_response_parser::parse_qa_response;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -66,6 +68,57 @@ pub fn secure_suspend_tool_node_schema() -> NodeSchema {
         },
     );
     schema
+}
+
+/// Build a minimal synthetic `ToolConfiguration` for `secure_suspend`. The
+/// `description` and `node_schema` fields are intentionally left empty —
+/// callers are expected to run [`apply_secure_suspend_tool_defaults`] on the
+/// resulting entry (the LLM node already does this for every entry in
+/// `tool_configurations`, so injecting then deferring is the cheapest path).
+pub fn synthetic_secure_suspend_tool(name: &str) -> ToolConfiguration {
+    #[allow(deprecated)]
+    ToolConfiguration {
+        name: name.to_string(),
+        description: String::new(),
+        node_type: "secure_suspend".to_string(),
+        fixed_config: std::collections::HashMap::new(),
+        exposed_inputs: None,
+        parameters: None,
+        mergeable_fields: None,
+        field_mapping: None,
+        node_schema: None,
+        node_config: None,
+        expose_sub_tools: None,
+        summary: None,
+        eager: false,
+    }
+}
+
+/// Inject a synthetic `ask_secret` tool into the given `tool_configurations`
+/// map iff `flag` is true AND no existing entry already wires `secure_suspend`
+/// AND the target key is free. Idempotent and conflict-safe — explicit user
+/// declarations always win.
+pub fn maybe_inject_secure_suspend_tool(
+    flag: bool,
+    tool_configurations: &mut std::collections::HashMap<String, ToolConfiguration>,
+) {
+    if !flag {
+        return;
+    }
+    let already_declared = tool_configurations
+        .values()
+        .any(|tc| tc.node_type == "secure_suspend");
+    if already_declared {
+        return;
+    }
+    const INJECTED_KEY: &str = "ask_secret";
+    if tool_configurations.contains_key(INJECTED_KEY) {
+        return;
+    }
+    tool_configurations.insert(
+        INJECTED_KEY.to_string(),
+        synthetic_secure_suspend_tool(INJECTED_KEY),
+    );
 }
 
 static NAME_RE: Lazy<Regex> =
@@ -330,8 +383,10 @@ mod tool_defaults_tests {
             "name": "alias",
             "node_type": node_type
         }))
-        .expect("ToolConfiguration with only name+node_type must deserialize \
-                 — description should be #[serde(default)]")
+        .expect(
+            "ToolConfiguration with only name+node_type must deserialize \
+                 — description should be #[serde(default)]",
+        )
     }
 
     #[test]
@@ -388,8 +443,14 @@ mod tool_defaults_tests {
     fn no_op_for_other_node_types() {
         let mut cfg = empty_tool_cfg("http_request");
         apply_secure_suspend_tool_defaults(&mut cfg);
-        assert!(cfg.description.is_empty(), "http_request must NOT inherit secure_suspend defaults");
-        assert!(cfg.node_schema.is_none(), "http_request must NOT receive a schema");
+        assert!(
+            cfg.description.is_empty(),
+            "http_request must NOT inherit secure_suspend defaults"
+        );
+        assert!(
+            cfg.node_schema.is_none(),
+            "http_request must NOT receive a schema"
+        );
     }
 
     #[test]
@@ -398,7 +459,10 @@ mod tool_defaults_tests {
         apply_secure_suspend_tool_defaults(&mut cfg);
         let desc_first = cfg.description.clone();
         apply_secure_suspend_tool_defaults(&mut cfg);
-        assert_eq!(cfg.description, desc_first, "second call must not duplicate or alter the description");
+        assert_eq!(
+            cfg.description, desc_first,
+            "second call must not duplicate or alter the description"
+        );
     }
 }
 
@@ -621,12 +685,7 @@ mod tests {
             "secrets": [{"question": "Q?", "name": "the_name"}]
         });
         let out = node
-            .execute(
-                &inputs_with("some_node_id", "sx"),
-                &cfg,
-                &mut state,
-                None,
-            )
+            .execute(&inputs_with("some_node_id", "sx"), &cfg, &mut state, None)
             .await
             .unwrap();
         assert_eq!(out["questions"][0]["id"], "the_name");
@@ -1029,9 +1088,69 @@ mod tests {
         );
     }
 
+    // ── injection-helper tests ────────────────────────────────────────────────
+
+    #[test]
+    fn maybe_inject_secure_suspend_tool_noop_when_flag_false() {
+        let mut map: std::collections::HashMap<String, ToolConfiguration> =
+            std::collections::HashMap::new();
+        maybe_inject_secure_suspend_tool(false, &mut map);
+        assert!(map.is_empty(), "flag=false must not inject anything");
+    }
+
+    #[test]
+    fn maybe_inject_secure_suspend_tool_inserts_when_flag_true_and_no_conflict() {
+        let mut map: std::collections::HashMap<String, ToolConfiguration> =
+            std::collections::HashMap::new();
+        maybe_inject_secure_suspend_tool(true, &mut map);
+        let entry = map
+            .get("ask_secret")
+            .expect("ask_secret entry must be inserted");
+        assert_eq!(entry.name, "ask_secret");
+        assert_eq!(entry.node_type, "secure_suspend");
+        assert!(entry.description.is_empty());
+        assert!(entry.node_schema.is_none());
+    }
+
+    #[test]
+    fn maybe_inject_secure_suspend_tool_noop_when_user_already_declared_secure_suspend() {
+        let mut map: std::collections::HashMap<String, ToolConfiguration> =
+            std::collections::HashMap::new();
+        map.insert(
+            "ask_credentials".to_string(),
+            synthetic_secure_suspend_tool("ask_credentials"),
+        );
+        maybe_inject_secure_suspend_tool(true, &mut map);
+        assert_eq!(
+            map.len(),
+            1,
+            "must not inject when user already declared secure_suspend"
+        );
+        assert!(map.contains_key("ask_credentials"));
+        assert!(!map.contains_key("ask_secret"));
+    }
+
+    #[test]
+    fn maybe_inject_secure_suspend_tool_noop_when_ask_secret_key_taken_by_other_tool() {
+        let mut map: std::collections::HashMap<String, ToolConfiguration> =
+            std::collections::HashMap::new();
+        let mut other = synthetic_secure_suspend_tool("ask_secret");
+        other.node_type = "log".to_string();
+        map.insert("ask_secret".to_string(), other);
+        maybe_inject_secure_suspend_tool(true, &mut map);
+        assert_eq!(map.len(), 1);
+        assert_eq!(
+            map.get("ask_secret").unwrap().node_type,
+            "log",
+            "must not clobber existing key"
+        );
+    }
+
     /// Regression guard: the resume path must never emit the real secret value
     /// through `tracing`, regardless of log level.  If a future maintainer adds
     /// a `tracing::info!("answer = {answer}")` style line this test will catch it.
+    // ── logging-leak regression ───────────────────────────────────────────────
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn resume_does_not_log_real_values() {
         use std::io::Write;
