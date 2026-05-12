@@ -1,0 +1,44 @@
+{
+  "comment": "Twin of llm_tool_suspend_smoke.json that uses the `secure_suspend_allowed: true` shorthand instead of an explicit tool_configurations entry. The LLM should call `ask_secret` with the credentials needed for the requested login.",
+  "metadata": {
+    "category": "advanced",
+    "features": [
+      "llm_call",
+      "secure_suspend",
+      "secure_suspend_allowed"
+    ],
+    "requires_env": [
+      "DATABASE_URL",
+      "GEMINI_API_KEY"
+    ]
+  },
+  "nodes": {
+    "user_input": {
+      "type": "input",
+      "config": {
+        "default": "Set up a connection — I need username and password to log in."
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "session_id": "llm_tool_suspend_flag_smoke",
+        "connection_url": "${DATABASE_URL}",
+        "temperature": 0.0,
+        "stream": false,
+        "secure_suspend_allowed": true,
+        "system_message": "You collect credentials from the user. When the user asks you to set up any login or connection that needs secrets, call `ask_secret` exactly once with a list of `{question, name}` pairs covering ALL credentials you need. Do not chat about the secrets — just call the tool."
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "user_input", "to": "agent" },
+    { "from": "agent.result", "to": "log_result" }
+  ]
+}
