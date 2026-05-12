@@ -490,7 +490,7 @@ def benchmark_call():
     start = time.time()
     response = llm.call(
         messages=["Hi"],
-        provider="gemini",
+        provider="google",
         api_key="tu-api-key"
     )
     total_time = time.time() - start
@@ -514,7 +514,7 @@ benchmark_call()
    # Reducir max_tokens para respuestas más rápidas
    response = llm.call(
        messages=["Respuesta corta por favor"],
-       provider="gemini",
+       provider="google",
        max_tokens=100,  # Límite bajo
        api_key="tu-api-key"
    )
@@ -525,7 +525,7 @@ benchmark_call()
    # Modelos más rápidos por proveedor
    fast_models = {
        "openai": "gpt-3.5-turbo",      # Más rápido que gpt-4
-       "gemini": "gemini-1.5-flash",   # Más rápido que gemini-pro
+       "google": "gemini-1.5-flash",   # Más rápido que gemini-pro
        "anthropic": "claude-3-haiku-20240307"  # Más rápido que sonnet
    }
    ```
@@ -636,7 +636,7 @@ logging.getLogger("urllib3").setLevel(logging.DEBUG)
 
 # Ahora las llamadas mostrarán información detallada
 llm = colmena.ColmenaLlm()
-response = llm.call(["Debug test"], "gemini", api_key="tu-api-key")
+response = llm.call(["Debug test"], "google", api_key="tu-api-key")
 ```
 
 ### Verificar Bindings Nativos
@@ -691,7 +691,7 @@ def stress_test():
         try:
             response = llm.call(
                 messages=[f"Thread {thread_id} test"],
-                provider="gemini",
+                provider="google",
                 api_key="tu-api-key"
             )
             responses.append(f"Thread {thread_id}: OK")

@@ -51,7 +51,7 @@ def primera_llamada():
 
     response = llm.call(
         messages=["Hola, ¿cómo estás?"],
-        provider="gemini",
+        provider="google",
         api_key="tu-gemini-api-key"
     )
 
@@ -93,7 +93,7 @@ def comparar_proveedores():
 
     proveedores = [
         ("openai", "gpt-4", "tu-openai-key"),
-        ("gemini", "gemini-1.5-flash", "tu-gemini-key"),
+        ("google", "gemini-1.5-flash", "tu-gemini-key"),
         ("anthropic", "claude-3-sonnet-20240229", "tu-anthropic-key")
     ]
 
@@ -126,7 +126,7 @@ def streaming_basico():
 
     chunks = llm.stream(
         messages=["Cuenta una historia corta sobre un robot que aprende a programar"],
-        provider="gemini",
+        provider="google",
         api_key="tu-gemini-key"
     )
 
@@ -224,7 +224,7 @@ def conversacion_interactiva():
             # Generar respuesta
             response = llm.call(
                 messages=historial,
-                provider="gemini",
+                provider="google",
                 api_key="tu-gemini-key",
                 temperature=0.7
             )
@@ -256,7 +256,7 @@ def analizar_archivos():
     # Ejemplo 1: Imagen por ruta local
     response_img = llm.call(
         messages=["¿Qué hay en esta imagen?"],
-        provider="gemini",
+        provider="google",
         api_key="tu-gemini-key",
         files=[
             {
@@ -468,7 +468,7 @@ Requisitos:
 
     response = llm.call(
         messages=[prompt],
-        provider="gemini",
+        provider="google",
         api_key="tu-gemini-key",
         temperature=0.3
     )
@@ -551,7 +551,7 @@ def usar_wrapper():
 
     result = wrapper.call_safe(
         messages=["Explica qué es PyO3"],
-        provider="gemini",
+        provider="google",
         api_key="tu-gemini-key"
     )
 
@@ -657,14 +657,14 @@ def usar_cache():
     # Primera llamada (se guarda en cache)
     response1 = cache.call_cached(
         messages=["¿Qué es Rust?"],
-        provider="gemini",
+        provider="google",
         api_key="tu-gemini-key"
     )
 
     # Segunda llamada (se obtiene del cache)
     response2 = cache.call_cached(
         messages=["¿Qué es Rust?"],
-        provider="gemini",
+        provider="google",
         api_key="tu-gemini-key"
     )
 
@@ -689,7 +689,7 @@ def procesar_lote():
         {
             "id": "rust_basics",
             "messages": ["¿Cuáles son los conceptos básicos de Rust?"],
-            "provider": "gemini"
+            "provider": "google"
         },
         {
             "id": "python_vs_rust",
@@ -776,7 +776,7 @@ class ColmenaConfig:
     openai_key: Optional[str] = None
     gemini_key: Optional[str] = None
     anthropic_key: Optional[str] = None
-    default_provider: str = "gemini"
+    default_provider: str = "google"
     default_temperature: float = 0.7
     default_max_tokens: int = 1000
     enable_logging: bool = True
@@ -816,7 +816,7 @@ class ColmenaProduction:
         if not api_key:
             key_map = {
                 'openai': self.config.openai_key,
-                'gemini': self.config.gemini_key,
+                'google': self.config.gemini_key,
                 'anthropic': self.config.anthropic_key
             }
             api_key = key_map.get(provider)
@@ -853,7 +853,7 @@ def ejemplo_produccion():
     config = ColmenaConfig(
         gemini_key="tu-gemini-key",
         openai_key="tu-openai-key",
-        default_provider="gemini",
+        default_provider="google",
         enable_logging=True
     )
 
@@ -876,13 +876,13 @@ ejemplo_produccion()
 
 ```python
 # Respuesta rápida
-respuesta = colmena.ColmenaLlm().call(["Tu pregunta"], "gemini", api_key="key")
+respuesta = colmena.ColmenaLlm().call(["Tu pregunta"], "google", api_key="key")
 
 # Streaming en una línea
-list(colmena.ColmenaLlm().stream(["Cuenta algo"], "gemini", api_key="key"))
+list(colmena.ColmenaLlm().stream(["Cuenta algo"], "google", api_key="key"))
 
 # Comparar proveedores rápidamente
-[colmena.ColmenaLlm().call(["¿Qué es Rust?"], p, api_key="key") for p in ["openai", "gemini"]]
+[colmena.ColmenaLlm().call(["¿Qué es Rust?"], p, api_key="key") for p in ["openai", "google"]]
 ```
 
 ### Scripts de Utilidad
@@ -892,7 +892,7 @@ list(colmena.ColmenaLlm().stream(["Cuenta algo"], "gemini", api_key="key"))
 def test_all_providers():
     providers = {
         "openai": "tu-openai-key",
-        "gemini": "tu-gemini-key",
+        "google": "tu-gemini-key",
         "anthropic": "tu-anthropic-key"
     }
 

@@ -144,7 +144,7 @@ impl ColmenaLlm {
     /// Args:
     ///     messages (list[dict]): Lista de mensajes. Cada mensaje es un diccionario
     ///         con claves "role" (str) y "content" (str).
-    ///     provider (str): Proveedor a usar ('openai', 'gemini', 'anthropic').
+    ///     provider (str): Proveedor a usar ('openai', 'google', 'anthropic').
     ///     api_key (str, optional): API key del proveedor.
     ///     model (str, optional): Modelo específico a usar.
     ///     temperature (float, optional): Creatividad de la respuesta [0.0-2.0].

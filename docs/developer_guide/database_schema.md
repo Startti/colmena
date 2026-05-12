@@ -245,7 +245,7 @@ full flow.
 | Column | Type | Nullable | Default | Description |
 |--------|------|----------|---------|-------------|
 | `document_id` | `TEXT` | NO | — | Caller-provided identifier (the `id` field in the `files` array of the `llm_call` node config). Stable across runs |
-| `provider` | `TEXT` | NO | — | Lowercase provider name (`anthropic`, `openai`, `gemini`, `mock`). Validated by `parse_provider_from_row` — fail-fast on corrupted strings |
+| `provider` | `TEXT` | NO | — | Lowercase provider name (`anthropic`, `openai`, `google`, `mock`). Validated by `parse_provider_from_row` — fail-fast on corrupted strings |
 | `provider_file_id` | `TEXT` | NO | — | Opaque identifier returned by the provider's Files API after a successful upload (e.g., Anthropic `file_01abc`, OpenAI `file-...`, Gemini `files/...`) |
 | `mime_type` | `TEXT` | NO | — | MIME type the file was uploaded with |
 | `filename` | `TEXT` | NO | — | Filename submitted to the provider (used by some adapters for display) |

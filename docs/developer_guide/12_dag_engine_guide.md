@@ -934,33 +934,33 @@ PROMPT DEL USUARIO
   "config": {
     "max_phases": 5,
     "planner": {
-      "provider": "gemini",
+      "provider": "google",
       "model": "gemini-2.5-flash",
       "api_key": "${GEMINI_API_KEY}",
       "system_message": "Descompón la petición del usuario en tareas específicas."
     },
     "agents": {
       "clothing_expert": {
-        "provider": "gemini",
+        "provider": "google",
         "model": "gemini-2.5-flash",
         "api_key": "${GEMINI_API_KEY}",
         "system_message": "Eres un experto en ropa para viajes de invierno."
       },
       "budget_expert": {
-        "provider": "gemini",
+        "provider": "google",
         "model": "gemini-2.5-flash",
         "api_key": "${GEMINI_API_KEY}",
         "system_message": "Eres un estimador de presupuesto para viajes."
       }
     },
     "phase_reactor": {
-      "provider": "gemini",
+      "provider": "google",
       "model": "gemini-2.5-flash",
       "api_key": "${GEMINI_API_KEY}",
       "system_message": "Resume los resultados de esta fase e identifica si falta información."
     },
     "final_reactor": {
-      "provider": "gemini",
+      "provider": "google",
       "model": "gemini-2.5-flash",
       "api_key": "${GEMINI_API_KEY}",
       "system_message": "Combina todos los resúmenes de fases en una respuesta final clara."

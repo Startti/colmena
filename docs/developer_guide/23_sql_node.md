@@ -123,7 +123,7 @@ Valid deny values: `select`, `insert`, `update`, `delete`, `create_function`, `c
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | boolean | `false` | Activate the LLM critic |
-| `provider` | string | `"openai"` | LLM provider (`openai`, `gemini`, `anthropic`) |
+| `provider` | string | `"openai"` | LLM provider (`openai`, `google`, `anthropic`) |
 | `model` | string | `"gpt-4o-mini"` | Model for security analysis |
 | `api_key` | string | — | API key for the critic LLM. Supports `${ENV_VAR}` |
 

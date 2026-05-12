@@ -255,7 +255,7 @@ Look at Colmena logs or add `verbose: true` to the LLM node:
 {
   "type": "llm_call",
   "config": {
-    "provider": "gemini",
+    "provider": "google",
     "verbose": true
   }
 }

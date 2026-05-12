@@ -42,7 +42,7 @@ Fase 1: <resumen>
         "verbose": true,
         "max_phases": 3,
         "planner": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,
@@ -50,14 +50,14 @@ Fase 1: <resumen>
         },
         "agents": {
           "<agent_id>": {
-            "provider": "gemini",
+            "provider": "google",
             "model": "gemini-2.5-flash",
             "api_key": "${GEMINI_API_KEY}",
             "system_message": "<system message del agente>"
           }
         },
         "critic": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": true,
@@ -65,13 +65,13 @@ Fase 1: <resumen>
           "system_message": "<instrucciones del critic>"
         },
         "phase_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false
         },
         "final_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false
@@ -312,7 +312,7 @@ cargo run --bin dag_engine -- run tests/graphs/advanced/critic_feedback_cleanup_
 
 ## Notas para el agente que cree los grafos
 
-- Todos los grafos usan `"provider": "gemini"` y `"model": "gemini-2.5-flash"` con `"api_key": "${GEMINI_API_KEY}"`.
+- Todos los grafos usan `"provider": "google"` y `"model": "gemini-2.5-flash"` con `"api_key": "${GEMINI_API_KEY}"`.
 - `"verbose": true` es obligatorio para ver los prompts en los logs.
 - El `_comment` y `_test_instructions` deben incluirse como arrays de strings en el JSON (igual que los grafos existentes en `tests/graphs/advanced/`).
 - Guardar en `tests/graphs/advanced/` con los nombres indicados arriba.

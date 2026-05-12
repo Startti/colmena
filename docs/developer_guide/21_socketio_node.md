@@ -342,7 +342,7 @@ A graph where an LLM agent uses `socketio_request` as a tool via `tool_configura
     "agent": {
       "type": "llm_call",
       "config": {
-        "provider": "gemini",
+        "provider": "google",
         "model": "gemini-2.5-flash",
         "api_key": "${GEMINI_API_KEY}",
         "system_message": "You are a canvas automation agent. Use the available tools to interact with the canvas.",

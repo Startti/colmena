@@ -40,7 +40,7 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 
 | Node | Purpose | Key Behavior |
 |---|---|---|
-| **llm_call** | Language model inference | Calls OpenAI/Gemini/Anthropic; streams tokens; supports tool calling |
+| **llm_call** | Language model inference | Calls OpenAI/Google/Anthropic; streams tokens; supports tool calling |
 | **planner** | Multi-step planning | LLM generates structured plan from inputs |
 | **critic** | Quality review | LLM reviews outputs; returns pass/fail assessment |
 | **information_extraction** | Schema-based extraction | LLM extracts structured data per schema |
@@ -532,14 +532,14 @@ OUTPUT: final_response
     "verbose": true,
     "max_phases": 5,
     "planner": {
-      "provider": "gemini",
+      "provider": "google",
       "model": "gemini-2.5-flash",
       "api_key": "${GEMINI_API_KEY}",
       "system_message": "You are a planner. Decompose the user's request into tasks."
     },
     "agents": {
       "agent_id_1": {
-        "provider": "gemini",
+        "provider": "google",
         "model": "gemini-2.5-flash",
         "api_key": "${GEMINI_API_KEY}",
         "system_message": "You are a specialist. Do your task concisely."
@@ -547,19 +547,19 @@ OUTPUT: final_response
       "agent_id_2": { "..." : "..." }
     },
     "critic": {
-      "provider": "gemini",
+      "provider": "google",
       "model": "gemini-2.5-flash",
       "api_key": "${GEMINI_API_KEY}",
       "system_message": "Review the agent result for quality."
     },
     "phase_reactor": {
-      "provider": "gemini",
+      "provider": "google",
       "model": "gemini-2.5-flash",
       "api_key": "${GEMINI_API_KEY}",
       "system_message": "Summarize this phase and identify any gaps."
     },
     "final_reactor": {
-      "provider": "gemini",
+      "provider": "google",
       "model": "gemini-2.5-flash",
       "api_key": "${GEMINI_API_KEY}",
       "system_message": "Combine all phase summaries into a final answer."
@@ -765,28 +765,28 @@ The orchestrator uses `global_shared_state` (persisted in DB as part of `DagRunS
       "config": {
         "max_phases": 4,
         "planner": {
-          "provider": "gemini", "model": "gemini-2.5-flash",
+          "provider": "google", "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}"
         },
         "agents": {
           "clothing_expert": {
-            "provider": "gemini", "model": "gemini-2.5-flash",
+            "provider": "google", "model": "gemini-2.5-flash",
             "api_key": "${GEMINI_API_KEY}",
             "system_message": "You are a clothing expert for cold weather trips."
           },
           "budget_expert": {
-            "provider": "gemini", "model": "gemini-2.5-flash",
+            "provider": "google", "model": "gemini-2.5-flash",
             "api_key": "${GEMINI_API_KEY}",
             "system_message": "You are a travel budget estimator."
           }
         },
         "phase_reactor": {
-          "provider": "gemini", "model": "gemini-2.5-flash",
+          "provider": "google", "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "Summarize this phase and identify any missing coverage."
         },
         "final_reactor": {
-          "provider": "gemini", "model": "gemini-2.5-flash",
+          "provider": "google", "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "Combine all phases into a final 3-4 line trip summary."
         }

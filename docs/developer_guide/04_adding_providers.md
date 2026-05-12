@@ -16,7 +16,7 @@ impl ProviderKind {
     pub fn from_str(s: &str) -> Result<Self, LlmError> {
         match s.to_lowercase().as_str() {
             "openai" => Ok(Self::OpenAi),
-            "gemini" => Ok(Self::Gemini),
+            "google" => Ok(Self::Gemini),
             "anthropic" => Ok(Self::Anthropic),
             "mistral" => Ok(Self::Mistral),        // ← Añadir aquí
             _ => Err(LlmError::UnsupportedProvider { provider: s.to_string() }),
@@ -24,6 +24,8 @@ impl ProviderKind {
     }
 }
 ```
+
+**Provider naming:** The provider identifier for Google's LLM is `"google"` (not `"gemini"`) — Google is the company; Gemini is the product family Google ships. However, the env var name `GEMINI_API_KEY` and model identifiers like `gemini-2.5-flash` remain unchanged because those are the official names Google uses in its Gemini SDK and docs. Internally, the Rust adapter struct is still named `GeminiAdapter` for the same reason.
 
 ### 2. Crear Adapter
 

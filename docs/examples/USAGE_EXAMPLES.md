@@ -99,7 +99,7 @@ conversation = [
 
 response = llm.call_conversation(
     conversation=conversation,
-    provider="gemini",
+    provider="google",
     model="gemini-2.5-flash",
     temperature=0.5
 )
@@ -163,7 +163,7 @@ import colmena
 llm = colmena.ColmenaLlm()
 
 prompt = "Explica las ventajas de usar Rust para desarrollo de sistemas"
-providers = ["openai", "gemini", "anthropic"]
+providers = ["openai", "google", "anthropic"]
 
 print("Comparando respuestas de diferentes proveedores:\n")
 
@@ -260,7 +260,7 @@ def analyze_sentiment_consensus(text: str) -> dict:
     Sentimiento:\"\"\"
 
     results = {}
-    providers = ["openai", "gemini", "anthropic"]
+    providers = ["openai", "google", "anthropic"]
 
     for provider in providers:
         try:
@@ -447,7 +447,7 @@ code_response = llm.call(
 # Para respuestas factuales
 factual_response = llm.call(
     messages=["¿Cuántos planetas hay en el sistema solar?"],
-    provider="gemini",
+    provider="google",
     **LlmConfigFactory.factual_qa()
 )
 ```
@@ -896,7 +896,7 @@ Fetch data from API, analyze with LLM, and log results:
         "path": "/multi-llm",
         "method": "POST",
         "test_payload": {
-          "provider": "gemini",
+          "provider": "google",
           "question": "What is hexagonal architecture?",
           "model": "gemini-2.0-flash-001"
         }

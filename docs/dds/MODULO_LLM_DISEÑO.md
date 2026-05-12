@@ -558,7 +558,7 @@ impl ExecutableNode for LlmNode {
         json!({
             "type": "llm_call",
             "config": {
-                "provider": "string (openai, gemini, anthropic)",
+                "provider": "string (openai, google, anthropic)",
                 "api_key": "string",
                 "model": "string (optional)",
                 "system_message": "string (optional)",

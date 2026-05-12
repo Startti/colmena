@@ -711,7 +711,7 @@ When using HTTP nodes as LLM tools, the **modern approach** is to use `node_sche
 {
   "type": "llm_call",
   "config": {
-    "provider": "gemini",
+    "provider": "google",
     "model": "gemini-2.5-flash",
     "api_key": "${GEMINI_API_KEY}",
     "enabled_tools": ["search_flights"],

@@ -20,7 +20,7 @@ Level 3 (Default): Environment variables o valores por defecto
 
 #### `provider`
 - **Tipo:** `string`
-- **Valores válidos:** `"openai"`, `"gemini"`, `"anthropic"`, `"mock"` (testing)
+- **Valores válidos:** `"openai"`, `"google"`, `"anthropic"`, `"mock"` (testing)
 - **Fuente:** `inputs.provider` → `config.provider`
 - **Descripción:** El proveedor de LLM a usar
 - **Ejemplos:**
