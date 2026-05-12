@@ -1,0 +1,76 @@
+{
+  "comment": "End-to-end demo for secure_suspend. An LLM agent (Gemini) gets two tools: (1) ask_secret = secure_suspend, used to collect demo_user + demo_password from the human in a single pause; (2) dummy_login = http_request POSTing to httpbin.org/post (which echoes the body). Goal: confirm that the LLM sees ONLY handles in tool args/results, while the actual HTTP request body sent on the wire contains the real values (and httpbin proves it by echoing the body back). The httpbin response is run through 'secure: true' so even the echo gets re-hashed before re-entering the LLM context.",
+  "metadata": {
+    "category": "advanced",
+    "features": ["secure_suspend", "secure_values", "llm_call", "tool_calling"],
+    "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "default": "Necesito autenticarme contra el servicio interno y luego hacer una prueba ping. Recoge mis credenciales."
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "session_id": "secure_suspend_login_e2e",
+        "connection_url": "${DATABASE_URL}",
+        "temperature": 0.0,
+        "stream": false,
+        "system_message": "Eres un agente de autenticación. Para completar la tarea: (1) Llama UNA SOLA VEZ a ask_secret con un array de DOS items: uno preguntando por el usuario (name: demo_user) y otro preguntando por la contraseña (name: demo_password). (2) Cuando ask_secret te devuelva los handles, llama a dummy_login pasando esos handles literales en el body como user y password. NUNCA inventes valores reales — siempre usa los handles tal como te los devolvió ask_secret. (3) Después de recibir la respuesta de dummy_login, resume en una frase qué pasó.",
+        "tool_configurations": {
+          "ask_secret": {
+            "name": "ask_secret",
+            "node_type": "secure_suspend",
+            "description": "Pregunta al usuario por uno o más secretos en una SOLA llamada. Pasa un array secrets con items {question, name}. Devuelve un mapa de handles {<name>: <sv_<name>>} que debes pegar tal cual en cualquier campo de cualquier tool no-LLM (por ejemplo el body de dummy_login). Los valores reales NUNCA llegan a ti — solo los handles."
+          },
+          "dummy_login": {
+            "name": "dummy_login",
+            "node_type": "http_request",
+            "description": "POST de credenciales a un endpoint de autenticación de demo. El body debe contener user y password. El endpoint devuelve el body que recibió (eco), lo cual nos permite verificar qué llegó al servidor.",
+            "node_schema": {
+              "base_url": { "type": "string", "fixed": "https://httpbin.org" },
+              "endpoint": { "type": "string", "fixed": "/post" },
+              "method": { "type": "string", "fixed": "POST" },
+              "secure": { "type": "boolean", "fixed": true },
+              "headers": {
+                "type": "object",
+                "fixed": { "Content-Type": "application/json" }
+              },
+              "body": {
+                "type": "object",
+                "required": true,
+                "description": "JSON body con user y password. Pegar los handles devueltos por ask_secret tal cual.",
+                "properties": {
+                  "user": {
+                    "type": "string",
+                    "required": true,
+                    "description": "El handle <sv_demo_user> que devolvió ask_secret."
+                  },
+                  "password": {
+                    "type": "string",
+                    "required": true,
+                    "description": "El handle <sv_demo_password> que devolvió ask_secret."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "sink": {
+      "type": "output",
+      "config": {}
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent", "field": "prompt" },
+    { "from": "agent", "to": "sink" }
+  ]
+}

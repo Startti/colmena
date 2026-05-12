@@ -1,0 +1,40 @@
+{
+  "comment": "Validates the COMPLETE secure_suspend → http_request chain end-to-end. The handles `<sv_demo_user>` and `<sv_demo_password>` are placed directly in the http_request config (this is exactly the pattern the canvas-builder meta-agent will produce: it gets handles from ask_secret and pastes them into the body field of the apiCall config it creates). At execution time, inject_secrets replaces the handles with real values just before the wire call. httpbin.org/post echoes the body, proving the real values reached the wire. `secure: true` re-hashes the response so the echoed values appear as <value_N> in the node output.",
+  "metadata": {
+    "category": "advanced",
+    "features": ["secure_suspend", "secure_values", "http_request"],
+    "requires_env": ["DATABASE_URL"]
+  },
+  "nodes": {
+    "ask_creds": {
+      "type": "secure_suspend",
+      "config": {
+        "secrets": [
+          { "question": "Pega tu usuario:",     "name": "demo_user" },
+          { "question": "Pega tu contraseña:", "name": "demo_password" }
+        ]
+      }
+    },
+    "login": {
+      "type": "http_request",
+      "config": {
+        "base_url": "https://httpbin.org",
+        "endpoint": "/post",
+        "method": "POST",
+        "secure": true,
+        "headers": { "Content-Type": "application/json" },
+        "body": {
+          "user": "<sv_demo_user>",
+          "password": "<sv_demo_password>"
+        }
+      }
+    },
+    "show": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "ask_creds", "to": "login" },
+    { "from": "login",     "to": "show" }
+  ]
+}
