@@ -126,6 +126,7 @@ derivative = "2.2"
 tempfile = "3.10"
 serial_test = "3"
 calamine = "0.24"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Treat all warnings as errors for this crate so local builds match CI strictness.
 # Scoped to our crate only (does not affect dependencies).

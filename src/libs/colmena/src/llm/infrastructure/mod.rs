@@ -9,7 +9,7 @@ pub mod scripted_adapter;
 
 pub use anthropic_adapter::AnthropicAdapter;
 pub use gemini_adapter::GeminiAdapter;
-pub use llm_provider_factory::LlmProviderFactory;
+pub use llm_provider_factory::{LlmProviderFactory, OverrideGuard};
 pub use mock_adapter::MockAdapter;
 pub use openai_adapter::OpenAiAdapter;
 pub use persistence::{

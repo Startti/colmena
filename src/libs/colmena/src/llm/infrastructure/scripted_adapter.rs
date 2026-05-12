@@ -84,11 +84,9 @@ impl LlmRepository for ScriptedAdapter {
         }
 
         match next {
-            ScriptedResponse::Text(t) => LlmResponse::new(
-                request.id().clone(),
-                t,
-                request.config().provider().clone(),
-            ),
+            ScriptedResponse::Text(t) => {
+                LlmResponse::new(request.id().clone(), t, request.config().provider().clone())
+            }
             ScriptedResponse::ToolCall {
                 id,
                 tool_name,
@@ -201,8 +199,7 @@ mod tests {
         assert_eq!(tcs[0].id, "call_1");
         assert_eq!(tcs[0].function.name, "ask_secret");
         // arguments must be a JSON string, not a Value.
-        let parsed: serde_json::Value =
-            serde_json::from_str(&tcs[0].function.arguments).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&tcs[0].function.arguments).unwrap();
         assert_eq!(parsed["secrets"][0]["name"], "u");
     }
 
