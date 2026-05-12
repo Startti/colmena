@@ -38,7 +38,7 @@
                   "type": "llm_call",
                   "config": {
                     "model": "gemini-2.5-flash",
-                    "provider": "gemini",
+                    "provider": "google",
                     "api_key": "${GEMINI_API_KEY}",
                     "enabled_tools": [
                       "get_amadeus_token",
@@ -162,7 +162,7 @@
                   "type": "llm_call",
                   "config": {
                     "model": "gemini-2.5-flash",
-                    "provider": "gemini",
+                    "provider": "google",
                     "api_key": "${GEMINI_API_KEY}",
                     "system_message": "Eres un experto en hoteles. Recibirás el destino, fechas, y número de huéspedes (adultos/niños/movilidad reducida) ya resueltos en el contexto de la tarea. NO pidas clarificación al usuario. Recomienda 3 hoteles concretos en el destino adecuados al perfil de los viajeros: nombre del hotel, zona/barrio, categoría (estrellas), razón por la que encaja. Sé breve (máx. 10 líneas) y responde en español."
                   }
@@ -196,7 +196,7 @@
                   "type": "llm_call",
                   "config": {
                     "model": "gemini-2.5-flash",
-                    "provider": "gemini",
+                    "provider": "google",
                     "api_key": "${GEMINI_API_KEY}",
                     "system_message": "Eres un experto en planificación de actividades turísticas. Recibirás destino, fechas, y número de viajeros (adultos/niños/movilidad reducida) ya resueltos en el contexto de la tarea. NO pidas clarificación al usuario. Entrega un itinerario compacto día por día con actividades concretas ajustadas al perfil del grupo. Sé conciso (máx. 15 líneas en total) y responde en español."
                   }
@@ -215,13 +215,13 @@
         },
         "planner": {
           "model": "gemini-2.5-flash",
-          "provider": "gemini",
+          "provider": "google",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "eres un experto en creacion de viajes.\nEl usuario envia un origen y destino y tienes que armar un plan de viaje con vuelos hoteles y actividades."
         },
         "final_reactor": {
           "model": "gemini-2.5-flash",
-          "provider": "gemini",
+          "provider": "google",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,
           "system_message": "Eres el paso final del orquestador de viajes. Combina los resultados de vuelos, hoteles y actividades en un resumen claro y bien estructurado del plan de viaje (máx. 10 líneas). Responde en español."

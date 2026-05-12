@@ -9,7 +9,7 @@
       "real API endpoint",
       "agent pattern"
     ],
-    "provider": "gemini",
+    "provider": "google",
     "requires_env": [
       "AMADEUS_CLIENT_ID",
       "AMADEUS_CLIENT_SECRET",

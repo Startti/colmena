@@ -24,7 +24,7 @@
         "include_extra_info": false,
         "max_phases": 1,
         "planner": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,
@@ -40,7 +40,7 @@
                 "llm": {
                   "type": "llm_call",
                   "config": {
-                    "provider": "gemini",
+                    "provider": "google",
                     "model": "gemini-2.5-flash",
                     "api_key": "${GEMINI_API_KEY}",
                     "system_message": "Recommend exactly ONE tourist activity for a 1-day visit to Madrid. One sentence only."
@@ -56,7 +56,7 @@
           }
         },
         "phase_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,
@@ -64,7 +64,7 @@
           "system_message": "The task is complete. Set requires_replanning=false."
         },
         "final_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,

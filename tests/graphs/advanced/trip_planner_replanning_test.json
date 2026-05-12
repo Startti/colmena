@@ -13,7 +13,7 @@
         "include_extra_info": false,
         "max_phases": 5,
         "planner": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "You are a trip planning orchestrator. Read the user's request and decompose it into parallel and sequential tasks across phases. Assign tasks to the available agents based on their expertise."
@@ -25,7 +25,7 @@
               "nodes": {
                 "in":  { "type": "input",    "config": {} },
                 "llm": { "type": "llm_call", "config": {
-                  "provider": "gemini",
+                  "provider": "google",
                   "model": "gemini-2.5-flash",
                   "api_key": "${GEMINI_API_KEY}",
                   "system_message": "You are a professional clothing stylist. Recommend exactly 1 to 2 essential clothing items for the given trip details. Output a very short bulleted list (max 2 items) with estimated prices. Be brief."
@@ -44,7 +44,7 @@
               "nodes": {
                 "in":  { "type": "input",    "config": {} },
                 "llm": { "type": "llm_call", "config": {
-                  "provider": "gemini",
+                  "provider": "google",
                   "model": "gemini-2.5-flash",
                   "api_key": "${GEMINI_API_KEY}",
                   "system_message": "You are a professional ski equipment outfitter. Recommend exactly 1 to 2 essential gear items for the given trip details. Output a very short bulleted list (max 2 items) with estimated prices. Be brief."
@@ -63,7 +63,7 @@
               "nodes": {
                 "in":  { "type": "input",    "config": {} },
                 "llm": { "type": "llm_call", "config": {
-                  "provider": "gemini",
+                  "provider": "google",
                   "model": "gemini-2.5-flash",
                   "api_key": "${GEMINI_API_KEY}",
                   "system_message": "You are a travel budget estimator. Analyze the given lists of clothing and gear from previous phases, and provide a very brief budget estimate with a final total. Keep it to 2-3 lines maximum."
@@ -82,7 +82,7 @@
               "nodes": {
                 "in":  { "type": "input",    "config": {} },
                 "llm": { "type": "llm_call", "config": {
-                  "provider": "gemini",
+                  "provider": "google",
                   "model": "gemini-2.5-flash",
                   "api_key": "${GEMINI_API_KEY}",
                   "system_message": "You are a travel insurance specialist. Given the budget from previous phases, recommend a suitable travel insurance plan for a ski trip with an estimated cost. Keep it to 2 lines."
@@ -97,13 +97,13 @@
           }
         },
         "phase_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "You are reviewing the completed phase results for a ski trip planning assistant. After reviewing the results, you MUST always set requires_replanning=true and add one recovery task: assign 'Recommend a travel insurance plan based on the total budget' to insurance_expert. This simulates detecting a gap (no insurance coverage was planned)."
         },
         "final_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "You are the final step in a ski trip planning assistant. Combine everything into a 3-4 line summary covering clothing, gear, budget, and insurance."

@@ -46,7 +46,7 @@
         "include_extra_info": false,
         "max_phases": 2,
         "planner": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,
@@ -59,7 +59,7 @@
               "nodes": {
                 "in":  { "type": "input",    "config": {} },
                 "llm": { "type": "llm_call", "config": {
-                  "provider": "gemini",
+                  "provider": "google",
                   "model": "gemini-2.5-flash",
                   "api_key": "${GEMINI_API_KEY}",
                   "system_message": "You are an AI research analyst. List the top 5 AI breakthroughs of 2024. For each: name, brief description, and impact. Keep it to 8-10 lines total."
@@ -74,7 +74,7 @@
           }
         },
         "critic": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": true,
@@ -82,14 +82,14 @@
           "system_message": "You are an extremely strict research critic. You MUST ALWAYS set task_ok=false and suspend=false (do NOT suspend from critic directly — the orchestrator handles max_retries). Your rejection reason should always be: 'The research lacks verified sources and specific citations. Every claim must have a source URL or publication reference.' This simulates a critic that always rejects to test the max_retries mechanism."
         },
         "phase_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,
           "system_message": "Review completed phase results. If all tasks are done (including SKIPPED/CANCELLED ones), set requires_replanning=false."
         },
         "final_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,

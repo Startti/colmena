@@ -29,7 +29,7 @@
         "include_extra_info": false,
         "max_phases": 3,
         "planner": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,
@@ -42,7 +42,7 @@
               "nodes": {
                 "in":  { "type": "input",    "config": {} },
                 "llm": { "type": "llm_call", "config": {
-                  "provider": "gemini",
+                  "provider": "google",
                   "model": "gemini-2.5-flash",
                   "api_key": "${GEMINI_API_KEY}",
                   "system_message": "You are a weather assistant. Write a brief weather report for Madrid. Keep it to 2-3 sentences. Do not include specific numbers unless explicitly asked."
@@ -57,7 +57,7 @@
           }
         },
         "critic": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,
@@ -65,14 +65,14 @@
           "system_message": "You are a strict weather data critic. A weather report is ONLY acceptable if it contains ALL of the following as explicit numbers:\n1. Temperature in degrees Celsius (e.g. \"15°C\" or \"15 degrees Celsius\")\n2. Wind speed in km/h (e.g. \"20 km/h\")\n3. Humidity as a percentage (e.g. \"65%\")\n\nIf ANY of these three values is missing or not expressed as a number:\n- Set task_ok=false\n- Set suspend=false\n- Write feedback listing exactly which values are missing and instructing: \"On your next attempt you MUST include: [list missing items] as explicit numbers in your report.\"\n\nIf ALL three values are present as numbers: set task_ok=true, feedback=\"\".\nNever suspend."
         },
         "phase_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,
           "system_message": "Review the phase results. If the weather report task is complete, set requires_replanning=false."
         },
         "final_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,

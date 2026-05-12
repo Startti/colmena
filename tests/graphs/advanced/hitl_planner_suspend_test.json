@@ -28,7 +28,7 @@
         "include_extra_info": false,
         "max_phases": 3,
         "planner": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": true,
@@ -41,7 +41,7 @@
               "nodes": {
                 "in":  { "type": "input",    "config": {} },
                 "llm": { "type": "llm_call", "config": {
-                  "provider": "gemini",
+                  "provider": "google",
                   "model": "gemini-2.5-flash",
                   "api_key": "${GEMINI_API_KEY}",
                   "system_message": "You are a flights expert. Based on the travel details, suggest 2 flight options with estimated prices. Keep it brief (3-4 lines)."
@@ -60,7 +60,7 @@
               "nodes": {
                 "in":  { "type": "input",    "config": {} },
                 "llm": { "type": "llm_call", "config": {
-                  "provider": "gemini",
+                  "provider": "google",
                   "model": "gemini-2.5-flash",
                   "api_key": "${GEMINI_API_KEY}",
                   "system_message": "You are a hotel booking expert. Based on the travel details and budget, suggest 2 hotel options with estimated prices per night. Keep it brief (3-4 lines)."
@@ -79,7 +79,7 @@
               "nodes": {
                 "in":  { "type": "input",    "config": {} },
                 "llm": { "type": "llm_call", "config": {
-                  "provider": "gemini",
+                  "provider": "google",
                   "model": "gemini-2.5-flash",
                   "api_key": "${GEMINI_API_KEY}",
                   "system_message": "You are a travel activities expert. Based on the destination and dates, suggest 3 must-do activities with estimated costs. Keep it brief."
@@ -94,14 +94,14 @@
           }
         },
         "phase_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,
           "system_message": "You are reviewing phase results for a travel plan. If all tasks are complete and reasonable, set requires_replanning=false. If critical info is missing, set requires_replanning=true and add recovery tasks."
         },
         "final_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,

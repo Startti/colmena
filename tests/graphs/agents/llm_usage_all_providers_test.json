@@ -25,7 +25,7 @@
     "gemini_step": {
       "type": "llm_call",
       "config": {
-        "provider": "gemini",
+        "provider": "google",
         "api_key": "${GEMINI_API_KEY}",
         "model": "gemini-2.5-flash",
         "system_message": "You are a concise reasoning assistant. Answer in 2-3 sentences.",

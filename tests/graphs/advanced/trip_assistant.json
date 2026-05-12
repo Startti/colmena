@@ -12,7 +12,7 @@
       "multi-agent",
       "parallel-phases"
     ],
-    "provider": "gemini",
+    "provider": "google",
     "difficulty": "advanced",
     "requires_env": [
       "GEMINI_API_KEY",
@@ -33,7 +33,7 @@
         "verbose": true,
         "include_extra_info": false,
         "planner": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "You are a trip planning coordinator. The user wants to plan a complete trip. Break the request into parallel research tasks for Phase 1, then a budget consolidation in Phase 2.\n\nPhase 1 (all parallel=true, phase=1): Assign one task each to flights_agent, weather_clothing_agent, hotels_agent, activities_agent. Pass the FULL user context (origin, destination, dates, budget, passenger count) in every task instruction.\n\nPhase 2 (parallel=false, phase=2): Assign one task to budget_agent with ALL Phase 1 results included so it can consolidate costs.\n\nAlways pass IATA codes: BOG for Bogotá, BCN for Barcelona."
@@ -62,7 +62,7 @@
                 "flight_llm": {
                   "type": "llm_call",
                   "config": {
-                    "provider": "gemini",
+                    "provider": "google",
                     "model": "gemini-2.5-flash",
                     "api_key": "${GEMINI_API_KEY}",
                     "system_message": "You are a flight search specialist. Use the search_flights tool to find available flights matching the user's request. Extract origin IATA code, destination IATA code, departure date (YYYY-MM-DD), and number of adults from the task. Return a clear summary of the top 3 flight options found, including airline, departure time, duration, number of stops, and price per person in USD. If no flights are found, say so clearly.",
@@ -176,7 +176,7 @@
                 "weather_llm": {
                   "type": "llm_call",
                   "config": {
-                    "provider": "gemini",
+                    "provider": "google",
                     "model": "gemini-2.5-flash",
                     "api_key": "${GEMINI_API_KEY}",
                     "system_message": "You are a travel packing and weather expert. Based on the destination city and travel dates provided, give a concise weather forecast (temperature range, typical conditions) for that time of year. Then provide a practical packing list organized by category: clothing essentials, footwear, accessories, and any destination-specific items. Keep the list focused — 10 to 15 items total. Be specific about layers, rain gear, or formal attire if relevant.",
@@ -222,7 +222,7 @@
                 "hotels_llm": {
                   "type": "llm_call",
                   "config": {
-                    "provider": "gemini",
+                    "provider": "google",
                     "model": "gemini-2.5-flash",
                     "api_key": "${GEMINI_API_KEY}",
                     "system_message": "You are a hotel search specialist. Use the search_hotels tool to find hotels in the destination city. Extract the destination city IATA code from the task. After getting the hotel list, select the top 5 most relevant options and present them clearly with hotel name and any available details. Also estimate a typical nightly price range for mid-range hotels in that city based on your knowledge, and calculate the estimated total hotel cost for the stay duration.",
@@ -329,7 +329,7 @@
                 "activities_llm": {
                   "type": "llm_call",
                   "config": {
-                    "provider": "gemini",
+                    "provider": "google",
                     "model": "gemini-2.5-flash",
                     "api_key": "${GEMINI_API_KEY}",
                     "system_message": "You are a travel activities specialist. Use the search_activities tool to find tours and activities at the destination. For Barcelona, use latitude=41.3851 and longitude=2.1734. After getting the results, curate a list of the top 5 most interesting activities, including name, description if available, and estimated price. Also add 2-3 free or very cheap activities you know about in that city that complement the paid ones.",
@@ -420,7 +420,7 @@
                 "budget_llm": {
                   "type": "llm_call",
                   "config": {
-                    "provider": "gemini",
+                    "provider": "google",
                     "model": "gemini-2.5-flash",
                     "api_key": "${GEMINI_API_KEY}",
                     "system_message": "You are a travel budget analyst. You will receive a task containing the results from flights, hotels, and activities research. Create a detailed budget breakdown with the following sections:\n\n1. FLIGHTS: cheapest option found + price\n2. HOTELS: estimated total cost for the stay (nightly rate × number of nights)\n3. ACTIVITIES: total for selected activities\n4. DAILY EXPENSES: estimated food, transport, and incidentals per day × number of days\n5. TOTAL vs BUDGET: sum everything and compare to the user's stated budget\n\nIf the total exceeds the budget, suggest 2-3 specific ways to reduce costs (cheaper flight class, hostel vs hotel, free activities, etc.). If it fits, highlight how much buffer remains. Be precise with numbers in USD.",
@@ -446,13 +446,13 @@
           }
         },
         "phase_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "You are reviewing the results of a completed planning phase. Write a concise 2-3 sentence summary of what was accomplished and the key findings. Set task_ok=true unless a critical agent failed to return useful data, in which case you may add one retry task."
         },
         "final_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "You are the final step of a comprehensive trip planning assistant. Combine all agent results into a beautiful, well-organized trip summary. Structure it with these sections:\n\n✈️ FLIGHTS — top 3 options with prices\n🏨 HOTELS — recommended options and estimated nightly cost\n🌤️ WEATHER & PACKING — forecast and what to bring\n🎯 ACTIVITIES — top experiences with prices\n💰 BUDGET SUMMARY — full breakdown and whether it fits the $2,000 budget\n\nBe practical, specific, and helpful. End with 1-2 personalized travel tips for first-time visitors to Barcelona. Set task_ok=true."

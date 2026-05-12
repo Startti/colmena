@@ -29,7 +29,7 @@
         "include_extra_info": false,
         "max_phases": 2,
         "planner": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,
@@ -42,7 +42,7 @@
               "nodes": {
                 "in":  { "type": "input",    "config": {} },
                 "llm": { "type": "llm_call", "config": {
-                  "provider": "gemini",
+                  "provider": "google",
                   "model": "gemini-2.5-flash",
                   "api_key": "${GEMINI_API_KEY}",
                   "system_message": "You are a Rome travel expert. Create a 2-day itinerary for Rome. Include 3-4 attractions per day. Keep it to 6-8 lines total."
@@ -57,7 +57,7 @@
           }
         },
         "critic": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": true,
@@ -65,14 +65,14 @@
           "system_message": "You are a strict travel itinerary critic. You need two specific pieces of information before approving any itinerary:\n1. How many people are traveling (number of travelers)\n2. What currency to use for budget/prices\n\nRULES:\n- If the itinerary does NOT specify the number of travelers AND the currency for prices: output task_ok=false, suspend=true, question='Para personalizar el itinerario necesito saber: ¿Cuántas personas viajan? ¿En qué moneda quieres los precios (EUR, USD, etc.)?'\n- If the USER CLARIFICATION section contains both the number of travelers AND the currency: output task_ok=true (approve the itinerary as-is)\n- Never suspend more than once — if USER CLARIFICATION is present, always approve"
         },
         "phase_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,
           "system_message": "Review the phase results. If the itinerary task is complete, set requires_replanning=false."
         },
         "final_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,

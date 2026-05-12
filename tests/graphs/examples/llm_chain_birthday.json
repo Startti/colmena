@@ -4,7 +4,7 @@
     "name_generator": {
       "type": "llm_call",
       "config": {
-        "provider": "gemini",
+        "provider": "google",
         "api_key": "${GEMINI_API_KEY}",
         "model": "gemini-2.5-flash",
         "prompt": "Generate a random person's name (first name and last name only). Respond with ONLY the name, nothing else.",
@@ -14,7 +14,7 @@
     "birthday_message_creator": {
       "type": "llm_call",
       "config": {
-        "provider": "gemini",
+        "provider": "google",
         "api_key": "${GEMINI_API_KEY}",
         "model": "gemini-2.5-flash",
         "system_message": "You are a friendly birthday greeting writer. Keep the message short (2-3 sentences) and cheerful.",

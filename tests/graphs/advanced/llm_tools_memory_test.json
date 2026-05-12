@@ -3,7 +3,7 @@
     "step_1": {
       "type": "llm_call",
       "config": {
-        "provider": "gemini",
+        "provider": "google",
         "api_key": "${GEMINI_API_KEY}",
         "model": "gemini-2.5-flash",
         "system_message": "You are a helpful assistant that can perform math. Use tools when necessary.",
@@ -15,7 +15,7 @@
     "step_2": {
       "type": "llm_call",
       "config": {
-        "provider": "gemini",
+        "provider": "google",
         "api_key": "${GEMINI_API_KEY}",
         "model": "gemini-2.5-flash",
         "connection_url": "${DATABASE_URL}",

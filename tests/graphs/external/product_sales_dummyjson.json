@@ -3,7 +3,7 @@
   "metadata": {
     "category": "external",
     "features": ["llm_call", "tool_calling", "http_request", "node_schema", "DummyJSON"],
-    "provider": "gemini",
+    "provider": "google",
     "requires_env": ["GEMINI_API_KEY"]
   },
   "nodes": {
@@ -18,7 +18,7 @@
     "sales_agent": {
       "type": "llm_call",
       "config": {
-        "provider": "gemini",
+        "provider": "google",
         "model": "gemini-2.5-flash",
         "api_key": "${GEMINI_API_KEY}",
         "stream": true,

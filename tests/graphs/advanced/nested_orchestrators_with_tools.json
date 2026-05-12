@@ -14,7 +14,7 @@
         "verbose": false,
         "include_extra_info": false,
         "planner": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "Assign exactly ONE task to 'cost_team'. The task should ask cost_team to compute the trip cost based on the user's prompt and report the final breakdown plus grand total."
@@ -32,7 +32,7 @@
                     "verbose": false,
                     "include_extra_info": false,
                     "planner": {
-                      "provider": "gemini",
+                      "provider": "google",
                       "model": "gemini-2.5-flash",
                       "api_key": "${GEMINI_API_KEY}",
                       "system_message": "Break the task into exactly TWO parallel subtasks: one for 'lodging_calc' (compute total lodging cost using nightly rate * nights) and one for 'gear_calc' (compute total gear rental cost using daily rate * days). Both tasks should run in parallel. Set parallel=true on each."
@@ -46,7 +46,7 @@
                             "lodging_llm": {
                               "type": "llm_call",
                               "config": {
-                                "provider": "gemini",
+                                "provider": "google",
                                 "model": "gemini-2.5-flash",
                                 "api_key": "${GEMINI_API_KEY}",
                                 "system_message": "You compute lodging costs. Always use the multiply tool to perform the calculation. Show your work concisely and end with the dollar total.",
@@ -69,7 +69,7 @@
                             "gear_llm": {
                               "type": "llm_call",
                               "config": {
-                                "provider": "gemini",
+                                "provider": "google",
                                 "model": "gemini-2.5-flash",
                                 "api_key": "${GEMINI_API_KEY}",
                                 "system_message": "You compute gear rental costs. Always use the multiply tool to perform the calculation. Show your work concisely and end with the dollar total.",
@@ -86,20 +86,20 @@
                       }
                     },
                     "critic": {
-                      "provider": "gemini",
+                      "provider": "google",
                       "model": "gemini-2.5-flash",
                       "api_key": "${GEMINI_API_KEY}",
                       "system_message": "Review the agent's calculation. Set task_ok=true if it shows the multiplication explicitly and arrives at a correct dollar total. Set task_ok=false only if the math is wrong or the total is missing.",
                       "max_retries": 2
                     },
                     "phase_reactor": {
-                      "provider": "gemini",
+                      "provider": "google",
                       "model": "gemini-2.5-flash",
                       "api_key": "${GEMINI_API_KEY}",
                       "system_message": "Summarize the phase results in ONE sentence. Always set task_ok=true."
                     },
                     "final_reactor": {
-                      "provider": "gemini",
+                      "provider": "google",
                       "model": "gemini-2.5-flash",
                       "api_key": "${GEMINI_API_KEY}",
                       "system_message": "Combine the lodging and gear cost calculations into a concise breakdown. Compute the grand total by adding both. Output should be: 'Lodging: $X. Gear: $Y. Grand total: $X+Y'."
@@ -116,20 +116,20 @@
           }
         },
         "critic": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "Review the cost team's output. Set task_ok=true if the response includes a clear breakdown (lodging + gear) and a grand total dollar amount. Set task_ok=false only if those are missing.",
           "max_retries": 2
         },
         "phase_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "Summarize the phase results in ONE sentence. Always set task_ok=true."
         },
         "final_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "Provide the user with the final trip cost estimate. Cite the breakdown from the cost team and the grand total."

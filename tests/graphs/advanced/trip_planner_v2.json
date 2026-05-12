@@ -13,7 +13,7 @@
         "include_extra_info": false,
         "max_phases": 10,
         "planner": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "Read the user's trip request and break it down into tasks. using the agent you have"
@@ -30,7 +30,7 @@
                 "lq20gdgzoddrvje8x0hhop8n": {
                   "type": "llm_call",
                   "config": {
-                    "provider": "gemini",
+                    "provider": "google",
                     "model": "gemini-2.5-flash",
                     "api_key": "${GEMINI_API_KEY}",
                     "system_message": "You are a travel budget estimator. Analyze the given lists of clothing and gear, and provide a very brief budget estimate with a final total."
@@ -64,7 +64,7 @@
                 "qja9kes5o4j3m9bdqw8efkoq": {
                   "type": "llm_call",
                   "config": {
-                    "provider": "gemini",
+                    "provider": "google",
                     "stream": true,
                     "model": "gemini-2.5-flash",
                     "api_key": "${GEMINI_API_KEY}",
@@ -99,7 +99,7 @@
                 "twh0v7v43ngzolws9w9naq4s": {
                   "type": "llm_call",
                   "config": {
-                    "provider": "gemini",
+                    "provider": "google",
                     "model": "gemini-2.5-flash",
                     "stream": true,
                     "api_key": "${GEMINI_API_KEY}",
@@ -125,20 +125,20 @@
           }
         },
         "critic": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "You are reviewing results for a ski trip packing assistant. Be very brief. If the results look reasonable, set task_ok=true and add_tasks=[].",
           "max_retries": 3
         },
         "phase_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "You are summarizing the results of a completed phase. Write a single sentence summary. Set task_ok=true."
         },
         "final_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "You are the final step in a ski trip planning assistant. Combine everything into a summary covering clothing, gear, and budget"

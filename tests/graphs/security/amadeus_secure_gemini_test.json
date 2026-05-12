@@ -3,7 +3,7 @@
   "metadata": {
     "category": "security",
     "features": ["secure: true", "LLM isolation", "auto-injection", "real API endpoint", "explicit query_params"],
-    "provider": "gemini",
+    "provider": "google",
     "requires_env": ["AMADEUS_CLIENT_ID", "AMADEUS_CLIENT_SECRET", "GEMINI_API_KEY", "DATABASE_URL", "SECURE_VALUES_KEY"]
   },
   "nodes": {
@@ -41,7 +41,7 @@
     "analyze_with_gemini": {
       "type": "llm_call",
       "config": {
-        "provider": "gemini",
+        "provider": "google",
         "model": "gemini-2.5-flash",
         "api_key": "${GEMINI_API_KEY}",
         "system_message": "You are a travel advisor. Analyze flight data and recommend the best option based on price and duration. Note: fields like <value_1> are secure hashes for credentials.",

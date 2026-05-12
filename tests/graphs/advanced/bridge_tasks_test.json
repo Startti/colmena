@@ -32,7 +32,7 @@
         "include_extra_info": false,
         "max_phases": 3,
         "planner": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,
@@ -45,7 +45,7 @@
               "nodes": {
                 "in":  { "type": "input",    "config": {} },
                 "llm": { "type": "llm_call", "config": {
-                  "provider": "gemini",
+                  "provider": "google",
                   "model": "gemini-2.5-flash",
                   "api_key": "${GEMINI_API_KEY}",
                   "system_message": "You are an energy research analyst. Provide factual, concise information. Keep your response to 6-8 lines."
@@ -64,7 +64,7 @@
               "nodes": {
                 "in":  { "type": "input",    "config": {} },
                 "llm": { "type": "llm_call", "config": {
-                  "provider": "gemini",
+                  "provider": "google",
                   "model": "gemini-2.5-flash",
                   "api_key": "${GEMINI_API_KEY}",
                   "system_message": "You are a cost analyst. Given the researched energy sources, provide a brief cost comparison (installation cost per kW and levelized cost of energy). Keep it to 4-6 lines."
@@ -83,7 +83,7 @@
               "nodes": {
                 "in":  { "type": "input",    "config": {} },
                 "llm": { "type": "llm_call", "config": {
-                  "provider": "gemini",
+                  "provider": "google",
                   "model": "gemini-2.5-flash",
                   "api_key": "${GEMINI_API_KEY}",
                   "system_message": "You are a technical writer. Write a clear, structured report using ALL the provided context (research findings AND cost data). Organize it with brief sections: Overview, Energy Sources, Cost Comparison, Conclusion. Keep it to 12-15 lines total."
@@ -98,14 +98,14 @@
           }
         },
         "phase_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,
           "system_message": "You are a research quality reviewer. After reviewing the phase 1 research results, the research lacks specific installation cost per kW data. You MUST respond with task_ok=false and add EXACTLY ONE task to add_tasks. The task MUST be: {\"task\": \"Estimate cost comparison for the researched energy sources (installation cost per kW and levelized cost of energy for solar, wind, and hydro)\", \"assigned_to\": \"bridge_agent\", \"context\": \"The writer needs cost per kW data before writing the report\", \"parallel\": false, \"bridge\": true}. The 'bridge' field MUST be true — this causes the task to run in the current phase before the next phase starts. Set suspend=false."
         },
         "final_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,

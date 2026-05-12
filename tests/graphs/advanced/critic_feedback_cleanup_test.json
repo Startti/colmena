@@ -46,7 +46,7 @@
         "include_extra_info": false,
         "max_phases": 3,
         "planner": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,
@@ -59,7 +59,7 @@
               "nodes": {
                 "in":  { "type": "input",    "config": {} },
                 "llm": { "type": "llm_call", "config": {
-                  "provider": "gemini",
+                  "provider": "google",
                   "model": "gemini-2.5-flash",
                   "api_key": "${GEMINI_API_KEY}",
                   "system_message": "You are a financial analyst. Analyze Tesla stock in 2024. Write 3-4 sentences. Focus on qualitative trends, not specific numbers."
@@ -74,7 +74,7 @@
           }
         },
         "critic": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": true,
@@ -82,14 +82,14 @@
           "system_message": "You are a strict financial data critic. Accept a stock analysis ONLY if it contains ALL of:\n1. At least one specific price figure (e.g. \"$200\", \"$180.50\")\n2. At least one percentage change (e.g. \"+15%\", \"-8.3%\")\n3. The word \"Q1\", \"Q2\", \"Q3\", or \"Q4\" referencing a specific quarter\n\nFor each missing element, list it explicitly in feedback. For example:\n- \"Missing: specific price figure. Include the stock price at start or end of 2024.\"\n- \"Missing: percentage change. Include the annual gain or loss as a percentage.\"\n- \"Missing: quarterly reference. Mention at least one specific quarter.\"\n\nSet task_ok=false, suspend=false when anything is missing.\nSet task_ok=true, feedback=\"\" only when ALL three are present."
         },
         "phase_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,
           "system_message": "Review completed phase results. If all tasks are done (including SKIPPED/CANCELLED ones), set requires_replanning=false."
         },
         "final_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,

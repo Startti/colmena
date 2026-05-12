@@ -3,7 +3,7 @@
     "step_3": {
       "type": "llm_call",
       "config": {
-        "provider": "gemini",
+        "provider": "google",
         "api_key": "${GEMINI_API_KEY}",
         "model": "gemini-2.5-flash",
         "connection_url": "${DATABASE_URL}",

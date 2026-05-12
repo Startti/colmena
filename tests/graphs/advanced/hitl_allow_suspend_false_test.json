@@ -29,7 +29,7 @@
         "include_extra_info": false,
         "max_phases": 2,
         "planner": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,
@@ -42,7 +42,7 @@
               "nodes": {
                 "in":  { "type": "input",    "config": {} },
                 "llm": { "type": "llm_call", "config": {
-                  "provider": "gemini",
+                  "provider": "google",
                   "model": "gemini-2.5-flash",
                   "api_key": "${GEMINI_API_KEY}",
                   "system_message": "You are a technical writer. Write a 4-5 line summary covering 3 key benefits of renewable energy: environmental, economic, and energy independence."
@@ -57,7 +57,7 @@
           }
         },
         "critic": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,
@@ -65,14 +65,14 @@
           "system_message": "You are a content critic. On first evaluation, you WANT to suspend with the question '¿Quieres reformular esta respuesta?' but since allow_suspend=false, this will be blocked.\n\nFor any task result you receive, output:\n  task_ok: true\n  suspend: true\n  question: '¿Quieres reformular esta respuesta?'\n\nNote: The 'suspend: true' will be blocked by allow_suspend=false in the orchestrator config. The orchestrator should log the blocked questions and approve the task anyway."
         },
         "phase_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,
           "system_message": "Review the phase results. If the writing task is complete, set requires_replanning=false."
         },
         "final_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "allow_suspend": false,

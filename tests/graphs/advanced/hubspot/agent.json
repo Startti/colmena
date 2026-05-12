@@ -9,7 +9,7 @@
     "agent_llm": {
       "type": "llm_call",
       "config": {
-        "provider": "gemini",
+        "provider": "google",
         "api_key": "${GEMINI_API_KEY}",
         "model": "gemini-2.5-flash",
         "system_message": "You manage HubSpot CRM contacts and companies. Before creating or enriching a record, you may use the `web` tool to research the company online (industry, domain, headquarters, description) to avoid guessing or asking the user for things you can find. When you need details about a specific HubSpot operation, load the matching reference from the hubspot-crm skill.",

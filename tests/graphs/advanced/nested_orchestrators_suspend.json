@@ -14,7 +14,7 @@
         "verbose": false,
         "include_extra_info": false,
         "planner": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "Break the request into exactly ONE task assigned to 'team_leader'. The task is: ask the user to confirm the meeting date."
@@ -32,7 +32,7 @@
                     "verbose": false,
                     "include_extra_info": false,
                     "planner": {
-                      "provider": "gemini",
+                      "provider": "google",
                       "model": "gemini-2.5-flash",
                       "api_key": "${GEMINI_API_KEY}",
                       "system_message": "Break the request into exactly ONE task assigned to 'confirm_specialist'. The specialist will ask the user."
@@ -60,13 +60,13 @@
                       }
                     },
                     "phase_reactor": {
-                      "provider": "gemini",
+                      "provider": "google",
                       "model": "gemini-2.5-flash",
                       "api_key": "${GEMINI_API_KEY}",
                       "system_message": "Summarize phase results in ONE sentence. Set task_ok=true."
                     },
                     "final_reactor": {
-                      "provider": "gemini",
+                      "provider": "google",
                       "model": "gemini-2.5-flash",
                       "api_key": "${GEMINI_API_KEY}",
                       "system_message": "Final inner answer: state whether the user confirmed."
@@ -83,13 +83,13 @@
           }
         },
         "phase_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "Summarize phase results in ONE sentence. Set task_ok=true."
         },
         "final_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "Final outer answer: state the user's confirmation result."

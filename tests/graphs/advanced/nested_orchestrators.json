@@ -14,7 +14,7 @@
         "verbose": false,
         "include_extra_info": false,
         "planner": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "Break the user's request into exactly ONE task assigned to 'team_leader'."
@@ -32,7 +32,7 @@
                     "verbose": false,
                     "include_extra_info": false,
                     "planner": {
-                      "provider": "gemini",
+                      "provider": "google",
                       "model": "gemini-2.5-flash",
                       "api_key": "${GEMINI_API_KEY}",
                       "system_message": "Break the request into exactly ONE task assigned to 'specialist'."
@@ -46,7 +46,7 @@
                             "spec_call": {
                               "type": "llm_call",
                               "config": {
-                                "provider": "gemini",
+                                "provider": "google",
                                 "model": "gemini-2.5-flash",
                                 "api_key": "${GEMINI_API_KEY}",
                                 "system_message": "Write exactly 2 lines: agenda for the meeting."
@@ -62,13 +62,13 @@
                       }
                     },
                     "phase_reactor": {
-                      "provider": "gemini",
+                      "provider": "google",
                       "model": "gemini-2.5-flash",
                       "api_key": "${GEMINI_API_KEY}",
                       "system_message": "Summarize phase results in ONE sentence. Set task_ok=true."
                     },
                     "final_reactor": {
-                      "provider": "gemini",
+                      "provider": "google",
                       "model": "gemini-2.5-flash",
                       "api_key": "${GEMINI_API_KEY}",
                       "system_message": "Final inner answer: brief summary."
@@ -85,13 +85,13 @@
           }
         },
         "phase_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "Summarize phase results in ONE sentence. Set task_ok=true."
         },
         "final_reactor": {
-          "provider": "gemini",
+          "provider": "google",
           "model": "gemini-2.5-flash",
           "api_key": "${GEMINI_API_KEY}",
           "system_message": "Final outer answer: combine into a brief, concrete recommendation."

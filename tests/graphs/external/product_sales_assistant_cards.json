@@ -11,7 +11,7 @@
             "sqlite_memory",
             "multi_turn"
         ],
-        "provider": "gemini",
+        "provider": "google",
         "difficulty": "intermediate",
         "requires_env": [
             "GEMINI_API_KEY"
@@ -29,7 +29,7 @@
         "sales_agent": {
             "type": "llm_call",
             "config": {
-                "provider": "gemini",
+                "provider": "google",
                 "model": "gemini-2.5-flash",
                 "api_key": "${GEMINI_API_KEY}",
                 "verbose": true,
@@ -176,7 +176,7 @@
         "parse_cards": {
             "type": "information_extraction",
             "config": {
-                "provider": "gemini",
+                "provider": "google",
                 "model": "gemini-2.5-flash",
                 "api_key": "${GEMINI_API_KEY}",
                 "verbose": true,
