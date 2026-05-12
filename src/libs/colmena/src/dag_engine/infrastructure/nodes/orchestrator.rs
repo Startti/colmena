@@ -584,7 +584,7 @@ impl OrchestratorNode {
             .ok_or("final_reactor: missing 'provider' in config")?;
         let provider_kind = match provider_str.to_lowercase().as_str() {
             "openai" => crate::llm::domain::ProviderKind::OpenAi,
-            "gemini" => crate::llm::domain::ProviderKind::Gemini,
+            "google" => crate::llm::domain::ProviderKind::Google,
             "anthropic" => crate::llm::domain::ProviderKind::Anthropic,
             _ => return Err(format!("final_reactor: invalid provider '{}'", provider_str).into()),
         };

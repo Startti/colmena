@@ -317,12 +317,12 @@ impl ExecutableNode for LlmNode {
 
         let provider_kind = match provider_str.to_lowercase().as_str() {
             "openai" => ProviderKind::OpenAi,
-            "gemini" => ProviderKind::Gemini,
+            "google" => ProviderKind::Google,
             "anthropic" => ProviderKind::Anthropic,
             "mock" => ProviderKind::Mock,
             _ => {
                 return Err(format!(
-                    "Invalid provider '{}'. Supported: openai, gemini, anthropic, mock",
+                    "Invalid provider '{}'. Supported: openai, google, anthropic, mock",
                     provider_str
                 )
                 .into())
@@ -1490,7 +1490,7 @@ impl ExecutableNode for LlmNode {
         json!({
             "type": "llm_call",
             "config": {
-                "provider": "string (openai, gemini, anthropic)",
+                "provider": "string (openai, google, anthropic)",
                 "api_key": "string",
                 "model": "string (optional)",
                 "system_message": "string (optional)",

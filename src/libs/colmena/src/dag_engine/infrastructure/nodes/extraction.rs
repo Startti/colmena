@@ -57,7 +57,7 @@ impl ExecutableNode for ExtractionNode {
 
         let provider_kind = match provider_str.to_lowercase().as_str() {
             "openai" => ProviderKind::OpenAi,
-            "gemini" => ProviderKind::Gemini,
+            "google" => ProviderKind::Google,
             "anthropic" => ProviderKind::Anthropic,
             _ => return Err(format!("Invalid provider '{}'.", provider_str).into()),
         };
