@@ -162,7 +162,7 @@ mod tests {
     // Helper para crear un LlmProvider de prueba.
     fn create_test_provider() -> LlmProvider {
         LlmProvider::new(
-            ProviderKind::Gemini,
+            ProviderKind::Google,
             "test_api_key".to_string(),
             Some("gemini-pro".to_string()),
         )
@@ -174,7 +174,7 @@ mod tests {
         let provider = create_test_provider();
         let config = LlmConfig::new(provider);
 
-        assert_eq!(config.provider().kind(), &ProviderKind::Gemini);
+        assert_eq!(config.provider().kind(), &ProviderKind::Google);
         assert!(config.temperature().is_none());
         assert!(config.max_tokens().is_none());
         assert!(config.top_p().is_none());

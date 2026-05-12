@@ -45,8 +45,8 @@ impl ServiceContainerFactory {
                 ServiceContainer::new(ProviderKind::OpenAi),
             ),
             (
-                ProviderKind::Gemini,
-                ServiceContainer::new(ProviderKind::Gemini),
+                ProviderKind::Google,
+                ServiceContainer::new(ProviderKind::Google),
             ),
             (
                 ProviderKind::Anthropic,

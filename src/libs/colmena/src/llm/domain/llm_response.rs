@@ -334,7 +334,7 @@ mod tests {
     // Helper para crear un LlmProvider de prueba
     fn create_test_provider() -> LlmProvider {
         LlmProvider::new(
-            ProviderKind::Gemini,
+            ProviderKind::Google,
             "test_api_key".to_string(),
             Some("gemini-pro".to_string()),
         )

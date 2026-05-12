@@ -65,7 +65,7 @@ mod tests {
         let now = Utc::now();
         CachedFileEntry {
             document_id: "doc-1".into(),
-            provider: ProviderKind::Gemini,
+            provider: ProviderKind::Google,
             provider_file_id: "files/abc".into(),
             mime_type: "application/pdf".into(),
             filename: "x.pdf".into(),
@@ -154,20 +154,20 @@ mod tests {
         };
         let entry = entry_with_expiry(None);
         assert!(cache
-            .lookup("doc-1", ProviderKind::Gemini)
+            .lookup("doc-1", ProviderKind::Google)
             .await
             .unwrap()
             .is_none());
         cache.upsert(&entry).await.unwrap();
-        let got = cache.lookup("doc-1", ProviderKind::Gemini).await.unwrap();
+        let got = cache.lookup("doc-1", ProviderKind::Google).await.unwrap();
         assert!(got.is_some());
         assert_eq!(got.unwrap().provider_file_id, "files/abc");
         cache
-            .invalidate("doc-1", ProviderKind::Gemini)
+            .invalidate("doc-1", ProviderKind::Google)
             .await
             .unwrap();
         assert!(cache
-            .lookup("doc-1", ProviderKind::Gemini)
+            .lookup("doc-1", ProviderKind::Google)
             .await
             .unwrap()
             .is_none());

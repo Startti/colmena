@@ -682,7 +682,7 @@ impl LlmRepository for GeminiAdapter {
     }
 
     fn provider_name(&self) -> &'static str {
-        "gemini"
+        "google"
     }
 }
 
@@ -860,7 +860,7 @@ mod tests {
             filename: "x.pdf".into(),
             size_hint: None,
             source: FileSource::Uploaded(ProviderFileRef {
-                provider: ProviderKind::Gemini,
+                provider: ProviderKind::Google,
                 provider_file_id: "https://generativelanguage.googleapis.com/v1beta/files/abc"
                     .into(),
                 mime_type: "application/pdf".into(),
@@ -870,7 +870,7 @@ mod tests {
         };
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
         let provider = LlmProvider::new(
-            ProviderKind::Gemini,
+            ProviderKind::Google,
             "k".into(),
             Some("gemini-1.5-pro".into()),
         )
@@ -903,7 +903,7 @@ mod tests {
         };
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
         let provider = LlmProvider::new(
-            ProviderKind::Gemini,
+            ProviderKind::Google,
             "k".into(),
             Some("gemini-1.5-pro".into()),
         )
@@ -927,7 +927,7 @@ mod tests {
         let file = FileData::inline("application/pdf".into(), "x.pdf".into(), b"PDF".to_vec());
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
         let provider = LlmProvider::new(
-            ProviderKind::Gemini,
+            ProviderKind::Google,
             "k".into(),
             Some("gemini-1.5-pro".into()),
         )

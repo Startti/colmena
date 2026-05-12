@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn parse_provider_from_row_accepts_known_kinds() {
-        for s in ["anthropic", "openai", "gemini", "mock"] {
+        for s in ["anthropic", "openai", "google", "mock"] {
             let parsed = parse_provider_from_row(s, "doc-1").unwrap();
             assert_eq!(parsed.to_string(), s);
         }

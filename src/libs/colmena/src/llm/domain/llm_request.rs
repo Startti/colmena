@@ -131,7 +131,7 @@ mod tests {
     // Helper para crear una configuración de prueba
     fn create_test_config() -> LlmConfig {
         let provider = LlmProvider::new(
-            ProviderKind::Gemini,
+            ProviderKind::Google,
             "test_api_key".to_string(),
             Some("gemini-pro".to_string()),
         )
@@ -152,7 +152,7 @@ mod tests {
 
         assert!(!request.id().value().to_string().is_empty());
         assert_eq!(request.message_count(), 1);
-        assert_eq!(request.config().provider().kind(), &ProviderKind::Gemini);
+        assert_eq!(request.config().provider().kind(), &ProviderKind::Google);
         assert!(request.is_streaming());
     }
 

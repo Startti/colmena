@@ -77,7 +77,7 @@ impl GeminiFilesApiAdapter {
             .send()
             .await
             .map_err(|e| LlmError::FileApiUploadFailed {
-                provider: "gemini".into(),
+                provider: "google".into(),
                 message: format!("session start failed: {}", e),
             })?;
 
@@ -85,7 +85,7 @@ impl GeminiFilesApiAdapter {
             let s = resp.status();
             let b = resp.text().await.unwrap_or_default();
             return Err(LlmError::FileApiUploadFailed {
-                provider: "gemini".into(),
+                provider: "google".into(),
                 message: format!("session start HTTP {}: {}", s, b),
             });
         }
@@ -95,7 +95,7 @@ impl GeminiFilesApiAdapter {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string())
             .ok_or_else(|| LlmError::FileApiUploadFailed {
-                provider: "gemini".into(),
+                provider: "google".into(),
                 message: "missing X-Goog-Upload-URL header in start response".into(),
             })
     }
@@ -122,7 +122,7 @@ impl GeminiFilesApiAdapter {
             .send()
             .await
             .map_err(|e| LlmError::FileApiUploadFailed {
-                provider: "gemini".into(),
+                provider: "google".into(),
                 message: format!("PUT chunk failed at offset {}: {}", offset, e),
             })?;
 
@@ -130,7 +130,7 @@ impl GeminiFilesApiAdapter {
             let s = resp.status();
             let b = resp.text().await.unwrap_or_default();
             return Err(LlmError::FileApiUploadFailed {
-                provider: "gemini".into(),
+                provider: "google".into(),
                 message: format!("PUT chunk HTTP {}: {}", s, b),
             });
         }
@@ -140,7 +140,7 @@ impl GeminiFilesApiAdapter {
                 resp.json()
                     .await
                     .map_err(|e| LlmError::FileApiUploadFailed {
-                        provider: "gemini".into(),
+                        provider: "google".into(),
                         message: format!("invalid finalize JSON: {}", e),
                     })?;
             Ok(Some(parsed))
@@ -185,7 +185,7 @@ impl FileProviderRepository for GeminiFilesApiAdapter {
                     Some(Ok(b)) => buffer.extend_from_slice(&b),
                     Some(Err(e)) => {
                         return Err(LlmError::FileApiUploadFailed {
-                            provider: "gemini".into(),
+                            provider: "google".into(),
                             message: format!("stream read error: {}", e),
                         });
                     }
@@ -220,7 +220,7 @@ impl FileProviderRepository for GeminiFilesApiAdapter {
         }
 
         let resp = finalize_response.ok_or_else(|| LlmError::FileApiUploadFailed {
-            provider: "gemini".into(),
+            provider: "google".into(),
             message: "finalize response missing".into(),
         })?;
 
@@ -228,7 +228,7 @@ impl FileProviderRepository for GeminiFilesApiAdapter {
         let file_uri = format!("{}/v1beta/{}", self.base_url, resp.file.name);
 
         Ok(ProviderFileRef {
-            provider: ProviderKind::Gemini,
+            provider: ProviderKind::Google,
             provider_file_id: file_uri,
             mime_type: mime_type.to_string(),
             filename: filename.to_string(),
@@ -241,7 +241,7 @@ impl FileProviderRepository for GeminiFilesApiAdapter {
     }
 
     fn provider(&self) -> ProviderKind {
-        ProviderKind::Gemini
+        ProviderKind::Google
     }
 }
 
@@ -292,7 +292,7 @@ mod tests {
             .await
             .unwrap();
         assert!(r.provider_file_id.contains("files/abcd1234"));
-        assert_eq!(r.provider, ProviderKind::Gemini);
+        assert_eq!(r.provider, ProviderKind::Google);
         assert!(r.expires_at.is_some());
     }
 
