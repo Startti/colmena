@@ -734,10 +734,24 @@ impl ExecutableNode for LlmNode {
             None => HashMap::new(),
         };
 
+        // Opt-in shorthand: `config.secure_suspend_allowed: true` auto-registers
+        // a tool named `ask_secret` backed by `secure_suspend`. No-op when the
+        // flag is absent/false or when the user already wired `secure_suspend`
+        // through `tool_configurations` (explicit always wins).
+        let secure_suspend_allowed = inputs
+            .get("secure_suspend_allowed")
+            .or_else(|| config.get("secure_suspend_allowed"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        crate::dag_engine::infrastructure::nodes::secure_suspend::maybe_inject_secure_suspend_tool(
+            secure_suspend_allowed,
+            &mut tool_configurations,
+        );
+
         // Auto-fill canonical tool defaults for node types that ship them.
         // Currently only `secure_suspend` opts in — keeps `tool_configurations`
-        // minimal (just `name` + `node_type`) and avoids forcing users to
-        // duplicate the contract in their system_message.
+        // minimal (just `name` + `node_type`) and fills defaults for any entry
+        // injected by the `secure_suspend_allowed` shorthand above.
         for tool_cfg in tool_configurations.values_mut() {
             crate::dag_engine::infrastructure::nodes::secure_suspend::apply_secure_suspend_tool_defaults(tool_cfg);
         }
