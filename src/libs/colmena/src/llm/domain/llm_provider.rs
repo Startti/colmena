@@ -6,7 +6,7 @@ use std::str::FromStr;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderKind {
     OpenAi,
-    Gemini,
+    Google,
     Anthropic,
     Mock,
 }
@@ -15,7 +15,7 @@ impl Display for ProviderKind {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             ProviderKind::OpenAi => write!(f, "openai"),
-            ProviderKind::Gemini => write!(f, "gemini"),
+            ProviderKind::Google => write!(f, "google"),
             ProviderKind::Anthropic => write!(f, "anthropic"),
             ProviderKind::Mock => write!(f, "mock"),
         }
@@ -28,7 +28,7 @@ impl FromStr for ProviderKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "openai" => Ok(ProviderKind::OpenAi),
-            "gemini" => Ok(ProviderKind::Gemini),
+            "google" => Ok(ProviderKind::Google),
             "anthropic" => Ok(ProviderKind::Anthropic),
             "mock" => Ok(ProviderKind::Mock),
             _ => Err(LlmError::UnsupportedProvider {
@@ -42,7 +42,8 @@ impl ProviderKind {
     pub fn default_model(&self) -> &'static str {
         match self {
             ProviderKind::OpenAi => "gpt-4o",
-            ProviderKind::Gemini => "gemini-pro",
+            // Model identifier stays as "gemini-*" — Gemini is Google's product name.
+            ProviderKind::Google => "gemini-pro",
             ProviderKind::Anthropic => "claude-3-sonnet",
             ProviderKind::Mock => "mock-model",
         }
@@ -51,7 +52,8 @@ impl ProviderKind {
     pub fn env_var_name(&self) -> &'static str {
         match self {
             ProviderKind::OpenAi => "OPENAI_API_KEY",
-            ProviderKind::Gemini => "GEMINI_API_KEY",
+            // Env var stays as GEMINI_API_KEY — that is Google's official name for the key.
+            ProviderKind::Google => "GEMINI_API_KEY",
             ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
             ProviderKind::Mock => "MOCK_API_KEY",
         }
@@ -119,10 +121,10 @@ mod tests {
     #[test]
     fn test_provider_creation_uses_default_model() {
         let provider =
-            LlmProvider::new(ProviderKind::Gemini, "test_key".to_string(), None).unwrap();
+            LlmProvider::new(ProviderKind::Google, "test_key".to_string(), None).unwrap();
 
-        assert_eq!(*provider.kind(), ProviderKind::Gemini);
-        assert_eq!(provider.model(), ProviderKind::Gemini.default_model());
+        assert_eq!(*provider.kind(), ProviderKind::Google);
+        assert_eq!(provider.model(), ProviderKind::Google.default_model());
     }
 
     #[test]
@@ -143,21 +145,19 @@ mod tests {
 
     #[test]
     fn test_provider_kind_from_str() {
-        // Casos exitosos (case-insensitive)
         assert_eq!(
             ProviderKind::from_str("openai").unwrap(),
             ProviderKind::OpenAi
         );
         assert_eq!(
-            ProviderKind::from_str("Gemini").unwrap(),
-            ProviderKind::Gemini
+            ProviderKind::from_str("Google").unwrap(),
+            ProviderKind::Google
         );
         assert_eq!(
             ProviderKind::from_str("ANTHROPIC").unwrap(),
             ProviderKind::Anthropic
         );
 
-        // Caso de error
         let result = ProviderKind::from_str("unknown_provider");
         assert!(result.is_err());
         if let Err(LlmError::UnsupportedProvider { provider }) = result {
@@ -168,5 +168,28 @@ mod tests {
                 result
             );
         }
+    }
+
+    #[test]
+    fn test_provider_kind_from_str_rejects_gemini() {
+        // Clean-cut rename: "gemini" was renamed to "google" with no backward-compat alias.
+        let result = ProviderKind::from_str("gemini");
+        assert!(matches!(result, Err(LlmError::UnsupportedProvider { .. })));
+    }
+
+    #[test]
+    fn test_provider_kind_display() {
+        assert_eq!(ProviderKind::OpenAi.to_string(), "openai");
+        assert_eq!(ProviderKind::Google.to_string(), "google");
+        assert_eq!(ProviderKind::Anthropic.to_string(), "anthropic");
+        assert_eq!(ProviderKind::Mock.to_string(), "mock");
+    }
+
+    #[test]
+    fn test_provider_kind_env_var_name_preserves_gemini() {
+        // The env var name intentionally stays as GEMINI_API_KEY — that is
+        // the official name Google uses in its Gemini SDK / docs. Renaming
+        // it would confuse users who already have it set.
+        assert_eq!(ProviderKind::Google.env_var_name(), "GEMINI_API_KEY");
     }
 }
