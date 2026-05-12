@@ -1211,6 +1211,13 @@
           "description": "When true, tools in tool_configurations are exposed via a lightweight catalog inside the synthetic describe_tool; full schemas are revealed on demand. Tools with `eager: true` in their ToolConfiguration remain always-on. See developer_guide/29_lazy_tool_loading.md.",
           "example": true
         },
+        "secure_suspend_allowed": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "When true, auto-registers a tool named `ask_secret` backed by the `secure_suspend` node. The LLM sees the canonical description and node_schema (a `secrets: [{question, name}]` array) without any entry in `tool_configurations`. Use this as the simplest way to let an agent ask the user for credentials. Explicit `tool_configurations` entries with `node_type: \"secure_suspend\"` take precedence — the flag is a no-op if the user already declared the tool. See developer_guide/13_security_strategy.md.",
+          "example": true
+        },
         "tool_configurations": {
           "type": "object",
           "required": false,
