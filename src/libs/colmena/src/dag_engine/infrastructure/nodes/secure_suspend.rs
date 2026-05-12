@@ -6,6 +6,7 @@
 use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
+use crate::dag_engine::domain::tool_configuration::{NodeSchema, NodeSchemaField, ToolConfiguration};
 use crate::dag_engine::infrastructure::nodes::qa_response_parser::parse_qa_response;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -13,6 +14,59 @@ use regex::Regex;
 use serde_json::{json, Value};
 use std::error::Error;
 use std::sync::Arc;
+
+/// Canonical tool description for `secure_suspend` when exposed via
+/// `tool_configurations`. Auto-injected by the LLM node when the user does not
+/// provide one — lets `tool_configurations` for secure_suspend stay as terse as
+/// `{ "name": "ask_secret", "node_type": "secure_suspend" }` without needing
+/// any custom system_message instructions.
+pub const SECURE_SUSPEND_TOOL_DESCRIPTION: &str = "Pregunta al usuario por uno o más secretos en una SOLA llamada y los almacena cifrados, devolviendo handles opacos. Llamada: pasa un argumento `secrets` que es un ARRAY de objetos, cada uno con AMBOS campos `question` (string — la pregunta que verá el usuario) y `name` (string — slug en minúsculas [a-z][a-z0-9_]{2,63} que identifica al secreto; debe ser único dentro de esta llamada). Retorna: un mapa `{<name>: \"<sv_<name>_<random>>\"}` con un handle opaco por cada secreto. NUNCA verás los valores reales — solo los handles. Pega los handles tal cual en argumentos de tools subsiguientes que requieran ese secreto; el motor los sustituirá por los valores reales antes de ejecutar la tool y los volverá a enmascarar antes de devolverte la respuesta.";
+
+/// Auto-fill canonical `description` and `node_schema` on a tool entry whose
+/// `node_type` is `secure_suspend`. Idempotent: only fills fields the user did
+/// NOT provide. A no-op for any other node_type.
+pub fn apply_secure_suspend_tool_defaults(tool_cfg: &mut ToolConfiguration) {
+    if tool_cfg.node_type != "secure_suspend" {
+        return;
+    }
+    if tool_cfg.description.is_empty() {
+        tool_cfg.description = SECURE_SUSPEND_TOOL_DESCRIPTION.to_string();
+    }
+    if tool_cfg.node_schema.is_none() {
+        tool_cfg.node_schema = Some(secure_suspend_tool_node_schema());
+    }
+}
+
+/// Canonical `node_schema` for `secure_suspend` when used as a tool. Captures
+/// the `secrets: [{question, name}]` shape so the LLM-facing tool definition
+/// is self-describing without manual `node_schema` setup.
+pub fn secure_suspend_tool_node_schema() -> NodeSchema {
+    let mut schema: NodeSchema = std::collections::HashMap::new();
+    schema.insert(
+        "secrets".to_string(),
+        NodeSchemaField {
+            field_type: "array".to_string(),
+            fixed: None,
+            required: Some(true),
+            description: Some(
+                "Array OBLIGATORIO de objetos {question, name}. Cada item DEBE tener ambos campos: `question` (string — pregunta visible al usuario) y `name` (string — slug en minúsculas [a-z][a-z0-9_]{2,63}, único dentro del array). El `name` también es la clave bajo la cual recibirás el handle en la respuesta."
+                    .to_string(),
+            ),
+            pattern: None,
+            properties: None,
+            items: Some(Box::new(NodeSchemaField {
+                field_type: "object".to_string(),
+                fixed: None,
+                required: None,
+                description: Some("Objeto con campos `question` y `name`.".to_string()),
+                pattern: None,
+                properties: None,
+                items: None,
+            })),
+        },
+    );
+    schema
+}
 
 static NAME_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-z][a-z0-9_]{2,63}$").expect("name regex"));
@@ -231,25 +285,15 @@ impl ExecutableNode for SecureSuspendNode {
             }));
         }
 
-        // Suspend-path emission.
-        let base_id = effective_config
-            .get("id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .or_else(|| {
-                inputs
-                    .get("__node_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_else(|| "secure_suspend".to_string());
-
+        // Suspend-path emission. The id of each question is the secret's `name`
+        // — this is the contract the resume path expects (see `id_refs` above).
+        // `config.id` and `__node_id` are intentionally ignored here: in
+        // `secure_suspend`, names ARE the ids.
         let questions: Vec<Value> = secrets
             .iter()
-            .enumerate()
-            .map(|(i, s)| {
+            .map(|s| {
                 json!({
-                    "id": format!("{base_id}__{}", i + 1),
+                    "id": s.name,
                     "question": s.question,
                     "type": "secret",
                     "options": Value::Null
@@ -273,6 +317,88 @@ impl ExecutableNode for SecureSuspendNode {
 
     fn schema(&self) -> Value {
         json!({})
+    }
+}
+
+#[cfg(test)]
+mod tool_defaults_tests {
+    use super::*;
+    use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
+
+    fn empty_tool_cfg(node_type: &str) -> ToolConfiguration {
+        serde_json::from_value(serde_json::json!({
+            "name": "alias",
+            "node_type": node_type
+        }))
+        .expect("ToolConfiguration with only name+node_type must deserialize \
+                 — description should be #[serde(default)]")
+    }
+
+    #[test]
+    fn defaults_injected_when_description_and_schema_missing() {
+        let mut cfg = empty_tool_cfg("secure_suspend");
+        assert!(cfg.description.is_empty());
+        assert!(cfg.node_schema.is_none());
+
+        apply_secure_suspend_tool_defaults(&mut cfg);
+
+        assert_eq!(cfg.description, SECURE_SUSPEND_TOOL_DESCRIPTION);
+        let schema = cfg.node_schema.expect("schema injected");
+        let secrets = schema.get("secrets").expect("secrets field");
+        assert_eq!(secrets.field_type, "array");
+        assert_eq!(secrets.required, Some(true));
+        let items = secrets.items.as_ref().expect("items declared");
+        assert_eq!(items.field_type, "object");
+    }
+
+    #[test]
+    fn defaults_preserve_user_provided_description() {
+        let mut cfg = serde_json::from_value::<ToolConfiguration>(serde_json::json!({
+            "name": "alias",
+            "node_type": "secure_suspend",
+            "description": "MI descripción custom"
+        }))
+        .unwrap();
+        apply_secure_suspend_tool_defaults(&mut cfg);
+        assert_eq!(cfg.description, "MI descripción custom");
+        // schema still auto-injected since user didn't provide one
+        assert!(cfg.node_schema.is_some());
+    }
+
+    #[test]
+    fn defaults_preserve_user_provided_schema() {
+        let mut cfg = serde_json::from_value::<ToolConfiguration>(serde_json::json!({
+            "name": "alias",
+            "node_type": "secure_suspend",
+            "node_schema": {
+                "secrets": { "type": "array", "required": true, "items": { "type": "string" } }
+            }
+        }))
+        .unwrap();
+        apply_secure_suspend_tool_defaults(&mut cfg);
+        // description auto-injected since user didn't provide one
+        assert!(!cfg.description.is_empty());
+        // schema preserved as-is — items must still be string, not object
+        let schema = cfg.node_schema.expect("schema preserved");
+        let secrets = schema.get("secrets").unwrap();
+        assert_eq!(secrets.items.as_ref().unwrap().field_type, "string");
+    }
+
+    #[test]
+    fn no_op_for_other_node_types() {
+        let mut cfg = empty_tool_cfg("http_request");
+        apply_secure_suspend_tool_defaults(&mut cfg);
+        assert!(cfg.description.is_empty(), "http_request must NOT inherit secure_suspend defaults");
+        assert!(cfg.node_schema.is_none(), "http_request must NOT receive a schema");
+    }
+
+    #[test]
+    fn idempotent_when_called_twice() {
+        let mut cfg = empty_tool_cfg("secure_suspend");
+        apply_secure_suspend_tool_defaults(&mut cfg);
+        let desc_first = cfg.description.clone();
+        apply_secure_suspend_tool_defaults(&mut cfg);
+        assert_eq!(cfg.description, desc_first, "second call must not duplicate or alter the description");
     }
 }
 
@@ -477,30 +603,33 @@ mod tests {
         assert_eq!(qs.len(), 2);
         assert_eq!(qs[0]["question"], "Cliente ID?");
         assert_eq!(qs[0]["type"], "secret");
-        assert_eq!(qs[0]["id"], "ask_creds__1");
+        assert_eq!(qs[0]["id"], "amadeus_client_id");
         assert_eq!(qs[0]["options"], Value::Null);
         assert_eq!(qs[1]["question"], "Cliente secret?");
-        assert_eq!(qs[1]["id"], "ask_creds__2");
+        assert_eq!(qs[1]["id"], "amadeus_client_secret");
     }
 
+    /// Regression: in secure_suspend the question `id` is ALWAYS the secret's
+    /// `name`. `config.id` and `__node_id` must NOT influence it — the resume
+    /// branch keys answers by `name`, so any other id would break the contract.
     #[tokio::test]
-    async fn suspend_path_uses_explicit_id_from_config() {
+    async fn suspend_ids_ignore_config_id_and_node_id() {
         let (node, _) = build_node();
         let mut state = Value::Null;
         let cfg = json!({
             "id": "custom_block",
-            "secrets": [{"question": "Q?", "name": "n_a"}]
+            "secrets": [{"question": "Q?", "name": "the_name"}]
         });
         let out = node
             .execute(
-                &inputs_with("ignored_node_id", "sx"),
+                &inputs_with("some_node_id", "sx"),
                 &cfg,
                 &mut state,
                 None,
             )
             .await
             .unwrap();
-        assert_eq!(out["questions"][0]["id"], "custom_block__1");
+        assert_eq!(out["questions"][0]["id"], "the_name");
     }
 
     #[tokio::test]
@@ -617,6 +746,48 @@ mod tests {
         use crate::dag_engine::infrastructure::nodes::qa_response_parser::parse_qa_response;
         let ids: Vec<&str> = secrets.iter().map(|s| s.name.as_str()).collect();
         parse_qa_response(answer, &ids).map_err(|e| e.to_string())
+    }
+
+    /// End-to-end contract test: the ids emitted by the SUSPEND branch must be
+    /// EXACTLY the ids the RESUME branch accepts. Builds a Q/A response using
+    /// only the ids that came back from the SUSPENDED output and asserts the
+    /// resume succeeds.
+    #[tokio::test]
+    async fn suspend_ids_match_resume_expected_ids() {
+        let (node, _) = build_node();
+        let cfg = json!({
+            "secrets": [
+                { "question": "User?", "name": "uname" },
+                { "question": "Pass?", "name": "pword" }
+            ]
+        });
+
+        // (1) Suspend branch — capture emitted ids.
+        let mut state = Value::Null;
+        let out = node
+            .execute(&inputs_with("any_node", "sx"), &cfg, &mut state, None)
+            .await
+            .unwrap();
+        let qs = out["questions"].as_array().expect("questions");
+        let emitted_ids: Vec<String> = qs
+            .iter()
+            .map(|q| q["id"].as_str().unwrap().to_string())
+            .collect();
+
+        // (2) Build a Q/A response using ONLY the emitted ids.
+        let answer = format!(
+            "Q[{0}]: User?\nA[{0}]: alice123\nQ[{1}]: Pass?\nA[{1}]: hunter22",
+            emitted_ids[0], emitted_ids[1]
+        );
+
+        // (3) Resume branch — must accept the answer without error.
+        let mut resume_inputs = inputs_with("any_node", "sx");
+        resume_inputs.insert("__colmena_resume_answer".into(), Value::String(answer));
+        let resumed = node
+            .execute(&resume_inputs, &cfg, &mut state, None)
+            .await
+            .expect("resume must accept ids the suspend branch emitted");
+        assert_eq!(resumed["status"], "resumed");
     }
 
     #[tokio::test]

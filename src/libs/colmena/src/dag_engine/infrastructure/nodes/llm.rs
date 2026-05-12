@@ -43,7 +43,9 @@ const LLM_DEFAULT_SYSTEM: &str = include_str!("prompts/llm_default_system.md");
 /// containing the SUSPENDED tool call but did not persist a tool result for it.
 /// This function returns that pending call so the executor can dispatch it
 /// with the resume answer.
-fn find_pending_tool_call(messages: &[crate::llm::domain::LlmMessage]) -> Option<crate::llm::domain::ToolCall> {
+fn find_pending_tool_call(
+    messages: &[crate::llm::domain::LlmMessage],
+) -> Option<crate::llm::domain::ToolCall> {
     use crate::llm::domain::MessageRole;
 
     // Collect every tool_call_id that already has a Tool message somewhere in
@@ -732,6 +734,14 @@ impl ExecutableNode for LlmNode {
             None => HashMap::new(),
         };
 
+        // Auto-fill canonical tool defaults for node types that ship them.
+        // Currently only `secure_suspend` opts in — keeps `tool_configurations`
+        // minimal (just `name` + `node_type`) and avoids forcing users to
+        // duplicate the contract in their system_message.
+        for tool_cfg in tool_configurations.values_mut() {
+            crate::dag_engine::infrastructure::nodes::secure_suspend::apply_secure_suspend_tool_defaults(tool_cfg);
+        }
+
         // Resolve context variables in both fixed_config and node_schema
         for tool_cfg in tool_configurations.values_mut() {
             // Legacy: Resolve context variables in fixed_config (deprecated)
@@ -965,9 +975,8 @@ impl ExecutableNode for LlmNode {
         // receives the resolved tool result and continues.
         if let Some(answer) = resume_answer.as_deref() {
             let conversation = conversation_repo.get_by_id(&conversation_key).await?;
-            let pending = find_pending_tool_call(&conversation.messages).ok_or(
-                "llm_call resume: no pending tool call found in conversation history",
-            )?;
+            let pending = find_pending_tool_call(&conversation.messages)
+                .ok_or("llm_call resume: no pending tool call found in conversation history")?;
 
             tracing::info!(
                 target: "colmena::llm_node",
@@ -981,11 +990,7 @@ impl ExecutableNode for LlmNode {
             // Propagate without persisting a tool message; the next resume will
             // walk the same pending call.
             if let Ok(parsed) = serde_json::from_str::<Value>(&result.output) {
-                if parsed
-                    .get("__colmena_status")
-                    .and_then(|v| v.as_str())
-                    == Some("SUSPENDED")
-                {
+                if parsed.get("__colmena_status").and_then(|v| v.as_str()) == Some("SUSPENDED") {
                     return Ok(json!({
                         "__colmena_status": "SUSPENDED",
                         "questions": parsed.get("questions").cloned().unwrap_or(Value::Null),

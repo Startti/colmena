@@ -101,7 +101,10 @@ pub struct ToolConfiguration {
     /// Name of the tool (shown to LLM)
     pub name: String,
 
-    /// Human-readable description for the LLM
+    /// Human-readable description for the LLM. Optional in the JSON config: when
+    /// absent or empty, the engine auto-fills a canonical description for nodes
+    /// that ship one (e.g. `secure_suspend`). Otherwise it stays empty.
+    #[serde(default)]
     pub description: String,
 
     /// Node type to execute

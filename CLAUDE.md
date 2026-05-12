@@ -154,7 +154,7 @@ Q[<id2>]: <pregunta echo>
 A[<id2>]: <respuesta>
 ```
 
-- `<id>` proviene de `config.id` (suspend, **obligatorio**) o `secrets[i].name` (secure_suspend).
+- `<id>` proviene de `config.id` (suspend clásico, **obligatorio**) o **`secrets[i].name`** (secure_suspend — `name` ES el id; `config.id` y `__node_id` no influyen).
 - Orden-independiente — el parser hace bind por id.
 - Multilínea preservada entre `A[<id>]:` y el siguiente prefijo o EOF.
 - `options` en choice questions es solo sugerencia UX — cualquier texto es válido.

@@ -1,0 +1,63 @@
+{
+  "comment": "End-to-end demo del flujo completo de secure_values + outbound masking. Mismo objetivo que antes pero con tool_configurations minimal: `ask_secret` es solo {name, node_type} y el engine auto-inyecta la description + node_schema canónicos del secure_suspend. El system_message NO describe cómo se usa la tool — el LLM lo aprende del schema y la description auto-inyectados. Invariantes a verificar: (1) el LLM nunca ve los valores reales (solo handles), (2) el engine inyecta valores reales al ejecutar echo_creds, (3) el script devuelve los valores reales, (4) el DagToolExecutor enmascara la respuesta antes de devolverla al agent.",
+  "metadata": {
+    "category": "advanced",
+    "features": ["secure_suspend", "secure_values", "outbound_masking", "llm_call", "tool_calling", "python_script"],
+    "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "default": "Necesito guardar mis credenciales (usuario y contraseña) y luego verificar que las recibiste correctamente. Recoge los secretos y después llama a echo_creds para confirmarlo."
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "temperature": 0.0,
+        "stream": false,
+        "system_message": "Eres un agente de prueba. Cuando necesites credenciales del usuario, usa la tool ask_secret. Después llama a echo_creds con los handles que ask_secret te devolvió. Termina con UNA frase resumiendo qué valores te devolvió echo_creds (si son handles <sv_*>, dilo; si son valores reales en texto plano, también dilo).",
+        "tool_configurations": {
+          "ask_secret": {
+            "name": "ask_secret",
+            "node_type": "secure_suspend"
+          },
+          "echo_creds": {
+            "name": "echo_creds",
+            "node_type": "python_script",
+            "description": "Script de verificación que devuelve los valores user y password tal como los recibe. Útil para probar que el sistema enmascara correctamente las credenciales antes de devolverlas al agente. Pega los handles devueltos por ask_secret como user y password.",
+            "node_schema": {
+              "sandbox_mode": { "type": "string", "fixed": "none" },
+              "code": {
+                "type": "string",
+                "fixed": "output = {\"echo_user\": user, \"echo_password\": password}"
+              },
+              "user": {
+                "type": "string",
+                "required": true,
+                "description": "El handle <sv_user_*> que devolvió ask_secret. Pega el handle exacto, no inventes valores."
+              },
+              "password": {
+                "type": "string",
+                "required": true,
+                "description": "El handle <sv_pass_*> que devolvió ask_secret. Pega el handle exacto, no inventes valores."
+              }
+            }
+          }
+        }
+      }
+    },
+    "show": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent", "field": "prompt" },
+    { "from": "agent", "to": "show" }
+  ]
+}
