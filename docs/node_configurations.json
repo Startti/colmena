@@ -81,10 +81,10 @@
         "required": true,
         "default": null,
         "description": "The LLM provider to use for this node. Determines which API endpoint and protocol will be used to communicate with the language model. Each provider has different model offerings, pricing, and capabilities. The value is case-insensitive.",
-        "valid_values": ["openai", "gemini", "anthropic", "mock"],
+        "valid_values": ["openai", "google", "anthropic", "mock"],
         "provider_details": {
           "openai": { "default_model": "gpt-4o", "env_var": "OPENAI_API_KEY" },
-          "gemini": { "default_model": "gemini-pro", "env_var": "GEMINI_API_KEY" },
+          "google": { "default_model": "gemini-pro", "env_var": "GEMINI_API_KEY" },
           "anthropic": { "default_model": "claude-3-sonnet", "env_var": "ANTHROPIC_API_KEY" },
           "mock": { "default_model": "mock-model", "env_var": "MOCK_API_KEY", "note": "For testing only. Returns predefined responses without making real API calls." }
         },
@@ -101,7 +101,7 @@
       "model": {
         "type": "string",
         "required": false,
-        "default": "Provider-dependent (openai: 'gpt-4o', gemini: 'gemini-pro', anthropic: 'claude-3-sonnet')",
+        "default": "Provider-dependent (openai: 'gpt-4o', google: 'gemini-pro', anthropic: 'claude-3-sonnet')",
         "description": "The specific model identifier to use. If omitted, the engine uses the provider's default model. Different models within the same provider offer trade-offs between quality, speed, and cost. For example, 'gpt-4o-mini' is faster and cheaper than 'gpt-4o', while 'gemini-2.5-flash' offers fast inference for Gemini. Check each provider's documentation for available model IDs.",
         "example": "gpt-4o-mini"
       },
@@ -1019,7 +1019,7 @@
             "provider": {
               "type": "string",
               "description": "LLM provider for the critic.",
-              "valid_values": ["openai", "gemini", "anthropic"],
+              "valid_values": ["openai", "google", "anthropic"],
               "example": "openai"
             },
             "model": {
@@ -1127,7 +1127,7 @@
           "required": true,
           "default": null,
           "description": "The LLM provider to use. Determines which API endpoint and protocol is used. See 'llm_shared_fields.provider' for details on each provider.",
-          "valid_values": ["openai", "gemini", "anthropic", "mock"],
+          "valid_values": ["openai", "google", "anthropic", "mock"],
           "example": "openai"
         },
         "api_key": {
@@ -1380,7 +1380,7 @@
           "required": true,
           "default": null,
           "description": "The LLM provider to use for extraction. See 'llm_shared_fields.provider'.",
-          "valid_values": ["openai", "gemini", "anthropic"],
+          "valid_values": ["openai", "google", "anthropic"],
           "example": "openai"
         },
         "api_key": {
@@ -1469,8 +1469,8 @@
           "required": true,
           "default": null,
           "description": "The LLM provider. See 'llm_shared_fields.provider'.",
-          "valid_values": ["openai", "gemini", "anthropic"],
-          "example": "gemini"
+          "valid_values": ["openai", "google", "anthropic"],
+          "example": "google"
         },
         "api_key": {
           "type": "string",
@@ -1548,7 +1548,7 @@
           "required": true,
           "default": null,
           "description": "The LLM provider. See 'llm_shared_fields.provider'.",
-          "valid_values": ["openai", "gemini", "anthropic"],
+          "valid_values": ["openai", "google", "anthropic"],
           "example": "openai"
         },
         "api_key": {
@@ -1624,8 +1624,8 @@
           "required": true,
           "default": null,
           "description": "The LLM provider. See 'llm_shared_fields.provider'.",
-          "valid_values": ["openai", "gemini", "anthropic"],
-          "example": "gemini"
+          "valid_values": ["openai", "google", "anthropic"],
+          "example": "google"
         },
         "api_key": {
           "type": "string",
@@ -1723,7 +1723,7 @@
             "allow_suspend": { "type": "boolean", "required": false, "default": true, "description": "When true, allows the planner to suspend execution and ask the user clarification questions before generating the task plan. When false, any clarification questions from the planner are logged but execution continues with the LLM's best guess." }
           },
           "example": {
-            "provider": "gemini",
+            "provider": "google",
             "model": "gemini-2.5-flash",
             "api_key": "${GEMINI_API_KEY}",
             "allow_suspend": true,
@@ -1771,7 +1771,7 @@
             "allow_suspend": { "type": "boolean", "required": false, "default": true, "description": "When true, if max_retries is exceeded, the orchestrator suspends and asks the user for help. When false, exceeded retries are logged but execution continues." }
           },
           "example": {
-            "provider": "gemini",
+            "provider": "google",
             "model": "gemini-2.5-flash",
             "api_key": "${GEMINI_API_KEY}",
             "max_retries": 3,
@@ -1791,7 +1791,7 @@
             "allow_suspend": { "type": "boolean", "required": false, "default": true, "description": "When true, allows the phase reactor to suspend for user clarification after a phase completes." }
           },
           "example": {
-            "provider": "gemini",
+            "provider": "google",
             "model": "gemini-2.5-flash",
             "api_key": "${GEMINI_API_KEY}",
             "system_message": "Summarize the results and check for completeness."
@@ -1810,7 +1810,7 @@
             "allow_suspend": { "type": "boolean", "required": false, "default": true, "description": "When true, allows the final reactor to suspend and ask the user a question before producing the final response." }
           },
           "example": {
-            "provider": "gemini",
+            "provider": "google",
             "model": "gemini-2.5-flash",
             "api_key": "${GEMINI_API_KEY}",
             "system_message": "Create a comprehensive travel itinerary based on all the research."
