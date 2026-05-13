@@ -16,7 +16,10 @@ pub mod tools;
 
 pub mod value_objects;
 
-pub use attachments::{AttachmentError, AttachmentSource, ConversationAttachment};
+pub use attachments::{
+    AttachmentError, AttachmentRegistry, AttachmentSource, ConversationAttachment,
+    UpsertAttachmentInput,
+};
 pub use file_cache_repository::{CachedFileEntry, FileCacheRepository};
 pub use file_provider_factory_port::FileProviderFactoryPort;
 pub use file_provider_repository::{BoxedByteStream, FileProviderRepository};
