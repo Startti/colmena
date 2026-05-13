@@ -3,6 +3,7 @@
 pub mod describe_tool;
 pub mod document_tools;
 pub mod lazy_tools_catalog;
+pub mod load_attachment_tool;
 pub mod load_skill_tool;
 
 pub use describe_tool::{
@@ -24,6 +25,10 @@ pub use document_tools::{
 
 pub use lazy_tools_catalog::{
     build_describe_tool_definition, reconstruct_discovered_set, summary_for_catalog, CatalogEntry,
+};
+
+pub use load_attachment_tool::{
+    build_load_attachment_tool_definition, dispatch_load_attachment, LOAD_ATTACHMENT_TOOL_NAME,
 };
 
 pub use load_skill_tool::{
