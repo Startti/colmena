@@ -1,3 +1,4 @@
+pub mod attachments;
 pub mod file_cache_repository;
 pub mod file_provider_factory_port;
 pub mod file_provider_repository;
@@ -15,6 +16,7 @@ pub mod tools;
 
 pub mod value_objects;
 
+pub use attachments::AttachmentError;
 pub use file_cache_repository::{CachedFileEntry, FileCacheRepository};
 pub use file_provider_factory_port::FileProviderFactoryPort;
 pub use file_provider_repository::{BoxedByteStream, FileProviderRepository};
