@@ -85,6 +85,12 @@ pub struct DagToolExecutor {
     /// through and is treated as an unknown tool by the rest of the executor.
     describe_tool_lookup: Option<Vec<ToolConfiguration>>,
     describe_tool_observer: Option<ToolDescribeObserver>,
+    /// Catalog snapshot for `load_attachment` interception. When present
+    /// (`Some(...)`), the executor handles `load_attachment` calls by validating
+    /// against this slice and returning a LOAD_ATTACHMENT sentinel. The actual
+    /// registry handle stays in the llm_call node; we only need the catalog
+    /// here so dispatch can succeed without an extra dependency.
+    attachment_catalog: Option<Vec<crate::llm::domain::ConversationAttachment>>,
 }
 
 impl DagToolExecutor {
@@ -150,6 +156,7 @@ impl DagToolExecutor {
             documents_context: None,
             describe_tool_lookup: None,
             describe_tool_observer: None,
+            attachment_catalog: None,
         }
     }
 
@@ -221,6 +228,17 @@ impl DagToolExecutor {
     /// `describe_tool` dispatch.
     pub fn with_describe_tool_observer(mut self, cb: ToolDescribeObserver) -> Self {
         self.describe_tool_observer = Some(cb);
+        self
+    }
+
+    /// Attach a snapshot of available attachments for `load_attachment`
+    /// interception. Passing an empty slice has the same effect as not
+    /// calling this method (the tool dispatch will report no rows).
+    pub fn with_attachments(
+        mut self,
+        catalog: Vec<crate::llm::domain::ConversationAttachment>,
+    ) -> Self {
+        self.attachment_catalog = Some(catalog);
         self
     }
 
@@ -561,6 +579,18 @@ impl DagToolExecutor {
                 obs(&result);
             }
             return Ok(describe_tool_into_tool_result(&tool_call.id, &result));
+        }
+
+        // --- Synthetic load_attachment ---
+        {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
+                dispatch_load_attachment, LOAD_ATTACHMENT_TOOL_NAME,
+            };
+            if tool_call.function.name == LOAD_ATTACHMENT_TOOL_NAME {
+                let empty: Vec<crate::llm::domain::ConversationAttachment> = Vec::new();
+                let catalog = self.attachment_catalog.as_ref().unwrap_or(&empty);
+                return dispatch_load_attachment(tool_call, catalog);
+            }
         }
 
         // --- Synthetic document tools (document_create, document_edit, etc.) ---
@@ -2284,5 +2314,58 @@ mod toolkit_runtime_tests {
         let names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
         assert!(names.contains(&"web__echo".to_string()));
         assert!(!names.contains(&"web__double".to_string()));
+    }
+
+    #[tokio::test]
+    async fn intercepts_load_attachment_when_catalog_attached() {
+        use crate::llm::domain::attachments::AttachmentSource;
+        use crate::llm::domain::tools::FunctionCall;
+        use crate::llm::domain::ProviderKind;
+        use crate::llm::domain::{ConversationAttachment, ToolCall};
+        use chrono::Utc;
+
+        struct DummyRegistry;
+        impl NodeRegistryPort for DummyRegistry {
+            fn get_node(&self, _: &str) -> Option<Arc<dyn ExecutableNode>> {
+                None
+            }
+
+            fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+                HashMap::new()
+            }
+        }
+
+        let attach = ConversationAttachment {
+            agent_session_id: "s1".to_string(),
+            document_id: "doc-x".to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "x.pdf".to_string(),
+            size_bytes: Some(1024),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+            registered_at: Utc::now(),
+            refreshed_at: Utc::now(),
+        };
+
+        let executor = DagToolExecutor::new(Arc::new(DummyRegistry), Default::default())
+            .with_attachments(vec![attach]);
+
+        let call = ToolCall {
+            id: "c1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall::new(
+                "load_attachment".to_string(),
+                r#"{"document_id":"doc-x"}"#.to_string(),
+            ),
+            response: None,
+        };
+
+        let res = executor.execute(&call).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&res.output).unwrap();
+        assert_eq!(parsed["__colmena_status"], "LOAD_ATTACHMENT");
+        assert_eq!(parsed["document_id"], "doc-x");
     }
 }
