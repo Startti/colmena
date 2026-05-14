@@ -97,6 +97,7 @@ nucleo-matcher = "0.3"
 include_dir = "0.7"
 
 # Documents feature
+pdf-extract = "0.7"
 rust_xlsxwriter = "0.77"
 docx-rs = "0.4"
 schemars = { version = "0.8", features = ["chrono", "uuid1", "preserve_order"] }
