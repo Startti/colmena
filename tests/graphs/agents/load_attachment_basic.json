@@ -1,0 +1,31 @@
+{
+  "nodes": {
+    "ask": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "session_id": "load_attachment_basic",
+        "attachments_enabled": true,
+        "system_message": "You are a financial analyst. Acknowledge briefly when the user uploads a document, and answer subsequent questions about it.",
+        "files": [
+          {
+            "id": "q3-report",
+            "mime_type": "application/pdf",
+            "filename": "Q3_Financial.pdf",
+            "label": "Q3 Financial Report",
+            "description": "Revenue and expense breakdown, Q3 2026",
+            "url": "$REPLACE_WITH_SIGNED_URL"
+          }
+        ],
+        "prompt": "I uploaded a financial report. Just acknowledge for now; I'll ask about it later."
+      }
+    },
+    "out": { "type": "log" }
+  },
+  "edges": [
+    { "from": "ask", "to": "out" }
+  ]
+}

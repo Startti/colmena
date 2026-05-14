@@ -1,0 +1,52 @@
+{
+  "nodes": {
+    "outer": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "session_id": "load_attachment_subgraph_outer",
+        "attachments_enabled": true,
+        "system_message": "You acknowledge uploads briefly.",
+        "files": [
+          {
+            "id": "shared-doc",
+            "mime_type": "application/pdf",
+            "filename": "shared.pdf",
+            "label": "Shared Doc",
+            "url": "$REPLACE_WITH_SIGNED_URL"
+          }
+        ],
+        "prompt": "Acknowledge the upload."
+      }
+    },
+    "child_graph": {
+      "type": "subgraph",
+      "config": {
+        "graph": {
+          "nodes": {
+            "child": {
+              "type": "llm_call",
+              "config": {
+                "provider": "google",
+                "model": "gemini-2.5-flash",
+                "api_key": "${GEMINI_API_KEY}",
+                "connection_url": "${DATABASE_URL}",
+                "session_id": "load_attachment_subgraph_child",
+                "attachments_enabled": true,
+                "system_message": "You are a document analyst. Produce a one-line summary of any document the user asks about.",
+                "prompt": "Summarise the shared document in one line."
+              }
+            }
+          },
+          "edges": []
+        }
+      }
+    }
+  },
+  "edges": [
+    { "from": "outer", "to": "child_graph" }
+  ]
+}
