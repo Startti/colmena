@@ -85,14 +85,12 @@ The upload pipeline (`upload_streaming`) consumes the bytes stream and does not 
 | Source | Strategy |
 |---|---|
 | `Inline(bytes)` | Already have the bytes in memory. Pass directly to extraction. No I/O. |
-| `SignedUrl(url)` | Re-issue a `downloader.stream(url)` call **in parallel with the answer call**, collect into a `Vec<u8>` bounded by `summary_max_bytes`, then extract. |
-| `Path(path)` | Read the file from disk (`tokio::fs::read`), bounded by `summary_max_bytes`. |
+| `SignedUrl(url)` | Re-issue a `downloader.stream(url)` call **in parallel with the answer call**, collect into a `Vec<u8>`, then extract. |
+| `Path(path)` | Read the file from disk (`tokio::fs::read`). |
 
 The re-download for `SignedUrl` is the v1 simplification. A future optimisation can tee the original upload stream so we only download once, but v1 prioritises code simplicity — the re-download happens concurrently with the answer call, so user-facing latency is unaffected. Network cost for signed URLs is negligible (typically same-region object storage).
 
-### Size cap
-
-`summary_max_bytes` (default 25 MB) guards against memory bombs. If the file exceeds the cap, we skip extraction entirely and persist `description=null`. The cap is applied at the byte-acquisition layer (before allocating the full `Vec<u8>`), so streaming downloads stop early. For typical document workflows 25 MB ≫ 200 pp of PDF, so this rarely triggers.
+No size cap is enforced at this layer. The frontend caps uploads at 100 MB, so memory pressure is naturally bounded by that ceiling; adding a redundant backend check would be dead code.
 
 ### Data flow — turn N, file already in registry
 
@@ -133,7 +131,8 @@ New fields on the `llm_call` node config (all optional, all top-level):
 | `summary_model` | `string` | provider cheap-tier | Override the model used for summarisation. Empty/missing → use the cheap-tier default for the main provider. |
 | `summary_timeout_secs` | `int` | `15` | Hard timeout on the summary call. On exceed, the summary task is cancelled and `description` stays null. |
 | `summary_max_output_chars` | `int` | `200` | The summary prompt instructs the model to keep output under this many chars. Soft cap; we also truncate post-hoc. |
-| `summary_max_bytes` | `int` | `26214400` (25 MB) | Hard ceiling on file size for which extraction is attempted. Above this, summary is skipped and `description=null`. |
+
+> **No backend file-size cap.** The frontend already enforces a hard 100 MB upload limit, so adding a redundant backend cap would be dead code. `acquire_bytes` reads whatever was uploaded.
 
 `docs/node_configurations.json` will be updated with these fields.
 
@@ -278,7 +277,6 @@ If the parent `execute()` future is dropped (user aborts the request), both `ans
 |---|---|---|
 | `summary_enabled = false` | Skip extraction and LLM call entirely. | `description = caller-supplied or null` |
 | Caller passed non-empty `description` | Skip generation. Use the supplied value. | `description = caller value` |
-| File size exceeds `summary_max_bytes` | Skip extraction entirely. Log info. | `description = null` |
 | MIME unsupported (e.g. `application/zip`) | Skip generation. Log info. | `description = null` |
 | `pdf-extract` returns empty (image-only PDF) | Skip LLM call. Log info. | `description = null` |
 | `pdf-extract` returns `Err` (corrupt PDF) | Skip LLM call. Log warn. | `description = null` |
