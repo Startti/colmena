@@ -28,7 +28,8 @@ pub use lazy_tools_catalog::{
 };
 
 pub use load_attachment_tool::{
-    build_load_attachment_tool_definition, dispatch_load_attachment, LOAD_ATTACHMENT_TOOL_NAME,
+    build_load_attachment_tool_definition, dispatch_load_attachment, ATTACHMENTS_SYSTEM_PRELUDE,
+    LOAD_ATTACHMENT_TOOL_NAME,
 };
 
 pub use load_skill_tool::{

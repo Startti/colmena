@@ -10,6 +10,23 @@ use std::collections::HashMap;
 
 pub const LOAD_ATTACHMENT_TOOL_NAME: &str = "load_attachment";
 
+/// Auto-injected system prelude when at least one attachment is registered and
+/// `attachments_enabled` is true on the node. Tells the model that attachments
+/// exist in this conversation and that it should use `load_attachment` proactively
+/// when the user references uploaded content. Graph authors should NOT have to
+/// duplicate these instructions in their own `system_message`.
+pub const ATTACHMENTS_SYSTEM_PRELUDE: &str = "## Conversation Attachments\n\
+This conversation has one or more documents attached to it. They are listed in \
+the description of the `load_attachment` tool, each with a `document_id`, label, \
+mime type, and size.\n\n\
+Rules:\n\
+- If the user asks about any uploaded document, call `load_attachment` with the \
+matching `document_id` before answering — never guess at the contents.\n\
+- Do not list, paraphrase, or summarise the attachments unless the user asks.\n\
+- One `document_id` per call. Call the tool again if you need a second document.\n\
+- If the user's question does not depend on any attachment, answer normally — \
+do NOT call `load_attachment` preemptively.";
+
 /// Build the `ToolDefinition` for `load_attachment`. The catalog is a snapshot
 /// taken at the start of `llm_call.execute`. The caller is responsible for
 /// passing only the entries that belong to the current provider.

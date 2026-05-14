@@ -17,7 +17,7 @@ use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
     build_all_document_tools, build_describe_tool_definition, build_load_skill_tool_definition,
     reconstruct_discovered_set, summary_for_catalog, CatalogEntry, DescribeToolDispatchResult,
-    DocumentToolsContext, DOCUMENTS_SYSTEM_PRELUDE,
+    DocumentToolsContext, ATTACHMENTS_SYSTEM_PRELUDE, DOCUMENTS_SYSTEM_PRELUDE,
 };
 use crate::documents::application::DocumentRuntime;
 use crate::documents::domain::ids::SessionId as DocSessionId;
@@ -1370,6 +1370,9 @@ impl ExecutableNode for LlmNode {
             }
             if documents_context.is_some() {
                 sections.push(DOCUMENTS_SYSTEM_PRELUDE.to_string());
+            }
+            if !attachment_catalog.is_empty() {
+                sections.push(ATTACHMENTS_SYSTEM_PRELUDE.to_string());
             }
             if !tools.is_empty() {
                 // In lazy mode, hide cataloged tool names from the system prompt —
