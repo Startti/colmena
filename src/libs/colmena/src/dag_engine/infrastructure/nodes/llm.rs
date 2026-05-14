@@ -358,49 +358,38 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
                 .map_err(|e| e.to_string())?;
                 let downloader = crate::llm::infrastructure::files::SignedUrlDownloader::new();
 
-                let mut bag = vec![FileData {
+                let source_url = match &att.source {
+                    crate::llm::domain::AttachmentSource::SignedUrl(u) => u.clone(),
+                    crate::llm::domain::AttachmentSource::Path(p) => p.clone(),
+                    crate::llm::domain::AttachmentSource::Inline => unreachable!(),
+                };
+
+                let stream = downloader
+                    .stream(&source_url)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let provider_ref = file_provider
+                    .upload_streaming(stream, &att.mime_type, &att.filename)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                self.registry
+                    .refresh_provider_file_id(
+                        agent_session_id,
+                        document_id,
+                        self.provider.clone(),
+                        &provider_ref.provider_file_id,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                return Ok(Some(FileData {
                     document_id: Some(att.document_id.clone()),
                     mime_type: att.mime_type.clone(),
                     filename: att.filename.clone(),
                     size_hint: att.size_bytes,
-                    source: match &att.source {
-                        crate::llm::domain::AttachmentSource::SignedUrl(u) => {
-                            FileSource::SignedUrl(u.clone())
-                        }
-                        crate::llm::domain::AttachmentSource::Path(p) => {
-                            FileSource::SignedUrl(p.clone())
-                        }
-                        crate::llm::domain::AttachmentSource::Inline => unreachable!(),
-                    },
-                }];
-
-                let null_cache: Option<
-                    std::sync::Arc<dyn crate::llm::domain::FileCacheRepository>,
-                > = None;
-                if let Some(cache) = null_cache {
-                    crate::llm::application::LlmCallUseCase::resolve_files(
-                        &mut bag,
-                        self.provider.clone(),
-                        file_provider,
-                        cache,
-                        &downloader,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())?;
-                }
-                if let FileSource::Uploaded(r) = &bag[0].source {
-                    let _ = self
-                        .registry
-                        .refresh_provider_file_id(
-                            agent_session_id,
-                            document_id,
-                            self.provider.clone(),
-                            &r.provider_file_id,
-                        )
-                        .await;
-                }
-
-                return Ok(Some(bag.into_iter().next().unwrap()));
+                    source: FileSource::Uploaded(provider_ref),
+                }));
             }
         }
 
@@ -1829,12 +1818,15 @@ impl ExecutableNode for LlmNode {
     }
 }
 
-/// Returns the SQLite `connection_url` if the node config declares one;
-/// otherwise `None`. Used for the AttachmentRegistry fallback.
+/// Returns the SQLite `connection_url` if the node config declares one
+/// (e.g. `"connection_url": "sqlite:./mem.db"`); otherwise `None`. Used for
+/// the AttachmentRegistry fallback when `DATABASE_URL` is unset. The same
+/// `connection_url` may also be a `postgres://` URL — in that case we return
+/// `None` because the Postgres branch is selected ahead of this fallback via
+/// the `DATABASE_URL` env var.
 fn sqlite_url_for_node(config: &serde_json::Value) -> Option<String> {
     config
-        .get("memory")
-        .and_then(|m| m.get("connection_url"))
+        .get("connection_url")
         .and_then(|v| v.as_str())
         .filter(|s| s.starts_with("sqlite:"))
         .map(|s| s.to_string())
