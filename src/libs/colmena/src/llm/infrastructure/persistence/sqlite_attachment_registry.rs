@@ -217,6 +217,35 @@ impl AttachmentRegistry for SqliteAttachmentRegistry {
 
         rows.iter().map(row_to_attachment).collect()
     }
+
+    async fn update_description(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+        provider: ProviderKind,
+        description: &str,
+    ) -> Result<(), AttachmentError> {
+        let provider_str = provider.to_string();
+        let res = sqlx::query(
+            "UPDATE conversation_attachments
+                SET description = ?
+              WHERE agent_session_id = ? AND document_id = ? AND provider = ?",
+        )
+        .bind(description)
+        .bind(agent_session_id)
+        .bind(document_id)
+        .bind(&provider_str)
+        .execute(&*self.pool)
+        .await
+        .map_err(|e| AttachmentError::RepositoryFailed(format!("update_description: {}", e)))?;
+
+        if res.rows_affected() == 0 {
+            return Err(AttachmentError::NotFound {
+                document_id: document_id.to_string(),
+            });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -316,5 +345,49 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, AttachmentError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn update_description_persists_value() {
+        let reg = SqliteAttachmentRegistry::new("sqlite::memory:")
+            .await
+            .unwrap();
+        // Upsert a row with description=None
+        reg.upsert(UpsertAttachmentInput {
+            agent_session_id: "s1".into(),
+            document_id: "doc-1".into(),
+            provider: ProviderKind::Mock,
+            provider_file_id: "pf-1".into(),
+            mime_type: "application/pdf".into(),
+            filename: "a.pdf".into(),
+            size_bytes: Some(100),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+        })
+        .await
+        .unwrap();
+
+        reg.update_description("s1", "doc-1", ProviderKind::Mock, "Q3 financials")
+            .await
+            .unwrap();
+
+        let row = reg
+            .lookup("s1", "doc-1", ProviderKind::Mock)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.description.as_deref(), Some("Q3 financials"));
+    }
+
+    #[tokio::test]
+    async fn update_description_missing_row_returns_not_found() {
+        let reg = SqliteAttachmentRegistry::new("sqlite::memory:")
+            .await
+            .unwrap();
+        let r = reg
+            .update_description("s1", "missing", ProviderKind::Mock, "x")
+            .await;
+        assert!(matches!(r, Err(AttachmentError::NotFound { .. })));
     }
 }

@@ -204,6 +204,35 @@ impl AttachmentRegistry for PostgresAttachmentRegistry {
 
         rows.iter().map(row_to_attachment).collect()
     }
+
+    async fn update_description(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+        provider: ProviderKind,
+        description: &str,
+    ) -> Result<(), AttachmentError> {
+        let provider_str = provider.to_string();
+        let res = sqlx::query(
+            "UPDATE conversation_attachments
+                SET description = $4
+              WHERE agent_session_id = $1 AND document_id = $2 AND provider = $3",
+        )
+        .bind(agent_session_id)
+        .bind(document_id)
+        .bind(&provider_str)
+        .bind(description)
+        .execute(&*self.pool)
+        .await
+        .map_err(|e| AttachmentError::RepositoryFailed(format!("update_description: {}", e)))?;
+
+        if res.rows_affected() == 0 {
+            return Err(AttachmentError::NotFound {
+                document_id: document_id.to_string(),
+            });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -288,6 +317,49 @@ mod tests {
         let reg = make_registry().await;
         let err = reg
             .refresh_provider_file_id("missing_sess", "missing_doc", ProviderKind::OpenAi, "pf-x")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AttachmentError::NotFound { .. }));
+    }
+
+    #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+    #[tokio::test]
+    async fn update_description_persists_value_pg() {
+        let reg = make_registry().await;
+        let sid = format!("test_sess_{}", uuid::Uuid::new_v4());
+        reg.upsert(UpsertAttachmentInput {
+            agent_session_id: sid.clone(),
+            document_id: "doc-1".to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf-1".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "a.pdf".to_string(),
+            size_bytes: Some(100),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+        })
+        .await
+        .unwrap();
+
+        reg.update_description(&sid, "doc-1", ProviderKind::OpenAi, "Q3 financials")
+            .await
+            .unwrap();
+
+        let row = reg
+            .lookup(&sid, "doc-1", ProviderKind::OpenAi)
+            .await
+            .unwrap()
+            .expect("row present");
+        assert_eq!(row.description.as_deref(), Some("Q3 financials"));
+    }
+
+    #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+    #[tokio::test]
+    async fn update_description_missing_row_returns_not_found_pg() {
+        let reg = make_registry().await;
+        let err = reg
+            .update_description("missing_sess", "missing_doc", ProviderKind::OpenAi, "x")
             .await
             .unwrap_err();
         assert!(matches!(err, AttachmentError::NotFound { .. }));

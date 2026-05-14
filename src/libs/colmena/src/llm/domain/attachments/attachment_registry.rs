@@ -43,6 +43,17 @@ pub trait AttachmentRegistry: Send + Sync {
         new_provider_file_id: &str,
     ) -> Result<(), AttachmentError>;
 
+    /// Replace the `description` for an existing row. Used by the auto-summary
+    /// generator to persist the produced summary after the upsert. Returns
+    /// `Err(NotFound)` when the row does not exist.
+    async fn update_description(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+        provider: ProviderKind,
+        description: &str,
+    ) -> Result<(), AttachmentError>;
+
     /// List every entry registered for the given session. Used to build the
     /// `load_attachment` catalog at the start of an llm_call execute. Filtering
     /// by provider happens in the caller (one provider per llm_call execution).
