@@ -297,6 +297,56 @@ impl LlmNode {
     }
 }
 
+// ---- Step 6: LoadAttachmentResolver implementation -------------------------
+struct AttachmentResolverImpl {
+    registry: std::sync::Arc<dyn crate::llm::domain::AttachmentRegistry>,
+    provider: crate::llm::domain::ProviderKind,
+    api_key: String,
+}
+
+#[async_trait::async_trait]
+impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl {
+    async fn resolve(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+    ) -> Result<Option<crate::llm::domain::FileData>, String> {
+        use crate::llm::domain::{FileData, FileSource, ProviderFileRef};
+
+        let row = self
+            .registry
+            .lookup(agent_session_id, document_id, self.provider.clone())
+            .await
+            .map_err(|e| e.to_string())?;
+        let Some(att) = row else {
+            return Ok(None);
+        };
+
+        // Attempt to use the cached provider_file_id as-is. The provider call
+        // itself will surface expiry on use; we treat lookup failure on the
+        // provider as a recoverable case ONLY when the source is recoverable.
+        let file_data = FileData {
+            document_id: Some(att.document_id.clone()),
+            mime_type: att.mime_type.clone(),
+            filename: att.filename.clone(),
+            size_hint: att.size_bytes,
+            source: FileSource::Uploaded(ProviderFileRef {
+                provider: att.provider.clone(),
+                provider_file_id: att.provider_file_id.clone(),
+                mime_type: att.mime_type.clone(),
+                filename: att.filename.clone(),
+                expires_at: None,
+            }),
+        };
+
+        // Marker block: in Task 12 this is replaced with real re-upload logic
+        // when att.source.is_recoverable() and refreshed_at is stale.
+        let _ = (&self.api_key, &att);
+
+        Ok(Some(file_data))
+    }
+}
+
 #[async_trait]
 impl ExecutableNode for LlmNode {
     async fn execute(
@@ -483,6 +533,37 @@ impl ExecutableNode for LlmNode {
                 .as_ref()
                 .map(|a| AgentSessionId(a.clone())),
             node_id: NodeIdPath(node_id_path_str.clone()),
+        };
+
+        // ---- AttachmentRegistry adapter (Step 2) -------------------------------------
+        use crate::llm::domain::AttachmentRegistry;
+        use crate::llm::infrastructure::persistence::{
+            PostgresAttachmentRegistry, SqliteAttachmentRegistry,
+        };
+
+        let attachment_registry: Option<std::sync::Arc<dyn AttachmentRegistry>> = if agent_session_id_str.is_some() {
+            match std::env::var("DATABASE_URL").ok() {
+                Some(url) => {
+                    use crate::dag_engine::infrastructure::pool_registry::{PgPoolRegistry, PoolConfig};
+                    let registry = std::sync::Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+                    let reg = PostgresAttachmentRegistry::new(registry, &url)
+                        .await
+                        .map_err(|e| format!("attachment registry init: {}", e))?;
+                    Some(std::sync::Arc::new(reg))
+                }
+                None => {
+                    if let Some(sqlite_url) = sqlite_url_for_node(config) {
+                        let reg = SqliteAttachmentRegistry::new(&sqlite_url)
+                            .await
+                            .map_err(|e| format!("attachment sqlite registry init: {}", e))?;
+                        Some(std::sync::Arc::new(reg))
+                    } else {
+                        None
+                    }
+                }
+            }
+        } else {
+            None
         };
 
         // Connection URL (Optional - for Memory Backend)
@@ -686,6 +767,79 @@ impl ExecutableNode for LlmNode {
             }
         }
 
+        // ---- Step 3: Auto-register resolved uploads in AttachmentRegistry -----------
+        if let (Some(reg), Some(sid)) = (attachment_registry.as_ref(), agent_session_id_str.as_ref()) {
+            use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
+            use crate::llm::domain::attachments::generate_attachment_id;
+            use crate::llm::domain::FileSource;
+
+            let raw_entries: Vec<serde_json::Value> = inputs
+                .get("files")
+                .or_else(|| config.get("files"))
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            for (idx, file) in resolved_files.iter().enumerate() {
+                let raw = raw_entries.get(idx);
+                let label = raw.and_then(|v| v.get("label")).and_then(|v| v.as_str()).map(String::from);
+                let description = raw.and_then(|v| v.get("description")).and_then(|v| v.as_str()).map(String::from);
+                let supplied_id = raw.and_then(|v| v.get("id")).and_then(|v| v.as_str()).map(String::from);
+
+                let source = match &file.source {
+                    FileSource::SignedUrl(u) => AttachmentSource::SignedUrl(u.clone()),
+                    FileSource::Uploaded(_) => {
+                        raw.and_then(|v| v.get("url"))
+                            .and_then(|v| v.as_str())
+                            .map(|u| AttachmentSource::SignedUrl(u.to_string()))
+                            .or_else(|| {
+                                raw.and_then(|v| v.get("path"))
+                                    .and_then(|v| v.as_str())
+                                    .map(|p| AttachmentSource::Path(p.to_string()))
+                            })
+                            .unwrap_or(AttachmentSource::Inline)
+                    }
+                    FileSource::InlineBytes { .. } => AttachmentSource::Inline,
+                };
+
+                let document_id = supplied_id.unwrap_or_else(|| {
+                    generate_attachment_id(
+                        &file.filename,
+                        &file.mime_type,
+                        file.size_hint,
+                        &source,
+                        None,
+                    )
+                });
+
+                let provider_file_id = match &file.source {
+                    FileSource::Uploaded(r) => r.provider_file_id.clone(),
+                    _ => continue, // Not uploaded yet — skip registration this pass.
+                };
+
+                let input = UpsertAttachmentInput {
+                    agent_session_id: sid.clone(),
+                    document_id: document_id.clone(),
+                    provider: provider_kind.clone(),
+                    provider_file_id,
+                    mime_type: file.mime_type.clone(),
+                    filename: file.filename.clone(),
+                    size_bytes: file.size_hint,
+                    label: label.clone(),
+                    description: description.clone(),
+                    source,
+                };
+                reg.upsert(input).await.map_err(|e| format!("attachment upsert: {}", e))?;
+                tracing::info!(
+                    target: "colmena::attachment",
+                    event = "attachment.registered",
+                    agent_session_id = %sid,
+                    document_id = %document_id,
+                    "registered attachment"
+                );
+            }
+        }
+
         // On resume, do NOT push a fresh user message — the conversation is
         // continued from the persisted history. The pending tool call (whose
         // result was never persisted) is dispatched below with the resume
@@ -701,7 +855,7 @@ impl ExecutableNode for LlmNode {
         }
 
         // --- 3. Execute LLM Call (via AgentService) ---
-        let llm_repo = LlmProviderFactory::create(provider_kind);
+        let llm_repo = LlmProviderFactory::create(provider_kind.clone());
         let llm_repo_arc: Arc<dyn crate::llm::domain::LlmRepository> = llm_repo; // Already Arc
 
         // Create Tool Executor
@@ -793,6 +947,13 @@ impl ExecutableNode for LlmNode {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        // ---- Attachments enabled flag -------------------------------------------------
+        let attachments_enabled: bool = inputs
+            .get("attachments_enabled")
+            .and_then(|v| v.as_bool())
+            .or_else(|| config.get("attachments_enabled").and_then(|v| v.as_bool()))
+            .unwrap_or(true);
+
         // Build the catalog (CatalogEntry list) and the lookup snapshot for
         // describe_tool. Both are populated only when lazy mode is on AND the
         // tool is not eager: true. Eager tools always carry their own full schema
@@ -861,6 +1022,24 @@ impl ExecutableNode for LlmNode {
             None => None,
         };
 
+        // ---- Step 4 (catalog building) — must precede executor block ----------------
+        let attachment_catalog: Vec<crate::llm::domain::ConversationAttachment> =
+            if attachments_enabled {
+                if let (Some(reg), Some(sid)) = (attachment_registry.as_ref(), agent_session_id_str.as_ref()) {
+                    let all = reg
+                        .list_for_session(sid)
+                        .await
+                        .map_err(|e| format!("attachment list: {}", e))?;
+                    all.into_iter()
+                        .filter(|a| a.provider == provider_kind)
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+
         let tool_executor = {
             let mut executor = DagToolExecutor::new(registry, tool_configurations);
             // Propagate SecureValueService + session_id so tool calls decrypt secrets.
@@ -873,6 +1052,10 @@ impl ExecutableNode for LlmNode {
             executor = executor.with_agent_session_id(agent_session_id_str.clone());
             if let Some(ctx) = documents_context.clone() {
                 executor = executor.with_documents(ctx);
+            }
+            // ---- Step 5: Wire attachment catalog into executor ----------------------
+            if !attachment_catalog.is_empty() {
+                executor = executor.with_attachments(attachment_catalog.clone());
             }
             if let Some(repo) = skill_repo.clone() {
                 executor = executor.with_skills(repo.clone());
@@ -1095,6 +1278,12 @@ impl ExecutableNode for LlmNode {
             tools.push(build_load_skill_tool_definition(repo));
         }
 
+        // ---- Step 4 (tool expose) — catalog already built above executor block ------
+        if !attachment_catalog.is_empty() {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::build_load_attachment_tool_definition;
+            tools.push(build_load_attachment_tool_definition(&attachment_catalog));
+        }
+
         // When the LLM node has a `documents` config, expose the seven synthetic
         // document_* tools regardless of `enabled_tools` — same pattern as
         // load_skill. The DagToolExecutor was already wired with the matching
@@ -1298,8 +1487,14 @@ impl ExecutableNode for LlmNode {
                 max_iterations: Some(max_iterations),
                 on_token,
                 tools_provider,
-                attachment_resolver: None,
-                agent_session_id: None,
+                attachment_resolver: attachment_registry.as_ref().map(|reg| {
+                    std::sync::Arc::new(AttachmentResolverImpl {
+                        registry: reg.clone(),
+                        provider: provider_kind.clone(),
+                        api_key: api_key.clone(),
+                    }) as std::sync::Arc<dyn crate::llm::application::LoadAttachmentResolver>
+                }),
+                agent_session_id: agent_session_id_str.clone(),
             }
         } else {
             crate::llm::application::AgentRunParams {
@@ -1312,8 +1507,14 @@ impl ExecutableNode for LlmNode {
                 max_iterations: Some(max_iterations),
                 on_token,
                 tools_provider,
-                attachment_resolver: None,
-                agent_session_id: None,
+                attachment_resolver: attachment_registry.as_ref().map(|reg| {
+                    std::sync::Arc::new(AttachmentResolverImpl {
+                        registry: reg.clone(),
+                        provider: provider_kind.clone(),
+                        api_key: api_key.clone(),
+                    }) as std::sync::Arc<dyn crate::llm::application::LoadAttachmentResolver>
+                }),
+                agent_session_id: agent_session_id_str.clone(),
             }
         };
 
@@ -1542,6 +1743,17 @@ impl ExecutableNode for LlmNode {
             }
         })
     }
+}
+
+/// Returns the SQLite `connection_url` if the node config declares one;
+/// otherwise `None`. Used for the AttachmentRegistry fallback.
+fn sqlite_url_for_node(config: &serde_json::Value) -> Option<String> {
+    config
+        .get("memory")
+        .and_then(|m| m.get("connection_url"))
+        .and_then(|v| v.as_str())
+        .filter(|s| s.starts_with("sqlite:"))
+        .map(|s| s.to_string())
 }
 
 const FILE_DATA_LIMIT_BYTES: u64 = 30 * 1024 * 1024;
