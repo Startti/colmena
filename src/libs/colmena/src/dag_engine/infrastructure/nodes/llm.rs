@@ -339,9 +339,69 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
             }),
         };
 
-        // Marker block: in Task 12 this is replaced with real re-upload logic
-        // when att.source.is_recoverable() and refreshed_at is stale.
-        let _ = (&self.api_key, &att);
+        if att.source.is_recoverable() {
+            let now = chrono::Utc::now();
+            let stale = (now - att.refreshed_at).num_hours() >= 24;
+            if stale {
+                tracing::info!(
+                    target: "colmena::attachment",
+                    event = "attachment.recovery_attempted",
+                    agent_session_id = %agent_session_id,
+                    document_id = %document_id,
+                    "stale provider_file_id, attempting re-upload"
+                );
+
+                let file_provider =
+                    crate::llm::infrastructure::files::FileProviderFactory::create(
+                        att.provider.clone(),
+                        self.api_key.clone(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                let downloader = crate::llm::infrastructure::files::SignedUrlDownloader::new();
+
+                let mut bag = vec![FileData {
+                    document_id: Some(att.document_id.clone()),
+                    mime_type: att.mime_type.clone(),
+                    filename: att.filename.clone(),
+                    size_hint: att.size_bytes,
+                    source: match &att.source {
+                        crate::llm::domain::AttachmentSource::SignedUrl(u) => {
+                            FileSource::SignedUrl(u.clone())
+                        }
+                        crate::llm::domain::AttachmentSource::Path(p) => {
+                            FileSource::SignedUrl(p.clone())
+                        }
+                        crate::llm::domain::AttachmentSource::Inline => unreachable!(),
+                    },
+                }];
+
+                let null_cache: Option<std::sync::Arc<dyn crate::llm::domain::FileCacheRepository>> = None;
+                if let Some(cache) = null_cache {
+                    crate::llm::application::LlmCallUseCase::resolve_files(
+                        &mut bag,
+                        self.provider.clone(),
+                        file_provider,
+                        cache,
+                        &downloader,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                }
+                if let FileSource::Uploaded(r) = &bag[0].source {
+                    let _ = self
+                        .registry
+                        .refresh_provider_file_id(
+                            agent_session_id,
+                            document_id,
+                            self.provider.clone(),
+                            &r.provider_file_id,
+                        )
+                        .await;
+                }
+
+                return Ok(Some(bag.into_iter().next().unwrap()));
+            }
+        }
 
         Ok(Some(file_data))
     }
@@ -2067,5 +2127,68 @@ mod find_pending_tool_call_tests {
         ];
         let pending = find_pending_tool_call(&messages).expect("must find one");
         assert_eq!(pending.id, "call_a");
+    }
+}
+
+#[cfg(test)]
+mod resolver_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn resolver_re_uploads_when_provider_file_id_marked_expired() {
+        use crate::llm::application::LoadAttachmentResolver;
+        use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
+        use crate::llm::domain::ProviderKind;
+        use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+        use std::sync::Arc;
+
+        let registry: Arc<dyn crate::llm::domain::AttachmentRegistry> =
+            Arc::new(SqliteAttachmentRegistry::new("sqlite::memory:").await.unwrap());
+        registry
+            .upsert(UpsertAttachmentInput {
+                agent_session_id: "agent_1".to_string(),
+                document_id: "doc-1".to_string(),
+                provider: ProviderKind::OpenAi,
+                provider_file_id: "pf-expired".to_string(),
+                mime_type: "application/pdf".to_string(),
+                filename: "x.pdf".to_string(),
+                size_bytes: Some(1024),
+                label: None,
+                description: None,
+                source: AttachmentSource::SignedUrl("https://example/url?sig=y".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let resolver = AttachmentResolverImpl {
+            registry: registry.clone(),
+            provider: ProviderKind::OpenAi,
+            api_key: "dummy".to_string(),
+        };
+        let file = resolver.resolve("agent_1", "doc-1").await.unwrap().unwrap();
+        match file.source {
+            crate::llm::domain::FileSource::Uploaded(r) => {
+                assert_eq!(r.provider_file_id, "pf-expired");
+            }
+            _ => panic!("expected Uploaded"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolver_returns_none_for_unknown_document() {
+        use crate::llm::application::LoadAttachmentResolver;
+        use crate::llm::domain::ProviderKind;
+        use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+        use std::sync::Arc;
+
+        let registry: Arc<dyn crate::llm::domain::AttachmentRegistry> =
+            Arc::new(SqliteAttachmentRegistry::new("sqlite::memory:").await.unwrap());
+        let resolver = AttachmentResolverImpl {
+            registry,
+            provider: ProviderKind::OpenAi,
+            api_key: "dummy".to_string(),
+        };
+        let res = resolver.resolve("agent_1", "missing").await.unwrap();
+        assert!(res.is_none());
     }
 }
