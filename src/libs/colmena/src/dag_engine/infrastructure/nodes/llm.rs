@@ -351,12 +351,11 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
                     "stale provider_file_id, attempting re-upload"
                 );
 
-                let file_provider =
-                    crate::llm::infrastructure::files::FileProviderFactory::create(
-                        att.provider.clone(),
-                        self.api_key.clone(),
-                    )
-                    .map_err(|e| e.to_string())?;
+                let file_provider = crate::llm::infrastructure::files::FileProviderFactory::create(
+                    att.provider.clone(),
+                    self.api_key.clone(),
+                )
+                .map_err(|e| e.to_string())?;
                 let downloader = crate::llm::infrastructure::files::SignedUrlDownloader::new();
 
                 let mut bag = vec![FileData {
@@ -375,7 +374,9 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
                     },
                 }];
 
-                let null_cache: Option<std::sync::Arc<dyn crate::llm::domain::FileCacheRepository>> = None;
+                let null_cache: Option<
+                    std::sync::Arc<dyn crate::llm::domain::FileCacheRepository>,
+                > = None;
                 if let Some(cache) = null_cache {
                     crate::llm::application::LlmCallUseCase::resolve_files(
                         &mut bag,
@@ -601,30 +602,34 @@ impl ExecutableNode for LlmNode {
             PostgresAttachmentRegistry, SqliteAttachmentRegistry,
         };
 
-        let attachment_registry: Option<std::sync::Arc<dyn AttachmentRegistry>> = if agent_session_id_str.is_some() {
-            match std::env::var("DATABASE_URL").ok() {
-                Some(url) => {
-                    use crate::dag_engine::infrastructure::pool_registry::{PgPoolRegistry, PoolConfig};
-                    let registry = std::sync::Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
-                    let reg = PostgresAttachmentRegistry::new(registry, &url)
-                        .await
-                        .map_err(|e| format!("attachment registry init: {}", e))?;
-                    Some(std::sync::Arc::new(reg))
-                }
-                None => {
-                    if let Some(sqlite_url) = sqlite_url_for_node(config) {
-                        let reg = SqliteAttachmentRegistry::new(&sqlite_url)
+        let attachment_registry: Option<std::sync::Arc<dyn AttachmentRegistry>> =
+            if agent_session_id_str.is_some() {
+                match std::env::var("DATABASE_URL").ok() {
+                    Some(url) => {
+                        use crate::dag_engine::infrastructure::pool_registry::{
+                            PgPoolRegistry, PoolConfig,
+                        };
+                        let registry =
+                            std::sync::Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+                        let reg = PostgresAttachmentRegistry::new(registry, &url)
                             .await
-                            .map_err(|e| format!("attachment sqlite registry init: {}", e))?;
+                            .map_err(|e| format!("attachment registry init: {}", e))?;
                         Some(std::sync::Arc::new(reg))
-                    } else {
-                        None
+                    }
+                    None => {
+                        if let Some(sqlite_url) = sqlite_url_for_node(config) {
+                            let reg = SqliteAttachmentRegistry::new(&sqlite_url)
+                                .await
+                                .map_err(|e| format!("attachment sqlite registry init: {}", e))?;
+                            Some(std::sync::Arc::new(reg))
+                        } else {
+                            None
+                        }
                     }
                 }
-            }
-        } else {
-            None
-        };
+            } else {
+                None
+            };
 
         // Connection URL (Optional - for Memory Backend)
         let connection_url_raw = inputs
@@ -828,9 +833,11 @@ impl ExecutableNode for LlmNode {
         }
 
         // ---- Step 3: Auto-register resolved uploads in AttachmentRegistry -----------
-        if let (Some(reg), Some(sid)) = (attachment_registry.as_ref(), agent_session_id_str.as_ref()) {
-            use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
+        if let (Some(reg), Some(sid)) =
+            (attachment_registry.as_ref(), agent_session_id_str.as_ref())
+        {
             use crate::llm::domain::attachments::generate_attachment_id;
+            use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
             use crate::llm::domain::FileSource;
 
             let raw_entries: Vec<serde_json::Value> = inputs
@@ -842,23 +849,31 @@ impl ExecutableNode for LlmNode {
 
             for (idx, file) in resolved_files.iter().enumerate() {
                 let raw = raw_entries.get(idx);
-                let label = raw.and_then(|v| v.get("label")).and_then(|v| v.as_str()).map(String::from);
-                let description = raw.and_then(|v| v.get("description")).and_then(|v| v.as_str()).map(String::from);
-                let supplied_id = raw.and_then(|v| v.get("id")).and_then(|v| v.as_str()).map(String::from);
+                let label = raw
+                    .and_then(|v| v.get("label"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let description = raw
+                    .and_then(|v| v.get("description"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let supplied_id = raw
+                    .and_then(|v| v.get("id"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
 
                 let source = match &file.source {
                     FileSource::SignedUrl(u) => AttachmentSource::SignedUrl(u.clone()),
-                    FileSource::Uploaded(_) => {
-                        raw.and_then(|v| v.get("url"))
-                            .and_then(|v| v.as_str())
-                            .map(|u| AttachmentSource::SignedUrl(u.to_string()))
-                            .or_else(|| {
-                                raw.and_then(|v| v.get("path"))
-                                    .and_then(|v| v.as_str())
-                                    .map(|p| AttachmentSource::Path(p.to_string()))
-                            })
-                            .unwrap_or(AttachmentSource::Inline)
-                    }
+                    FileSource::Uploaded(_) => raw
+                        .and_then(|v| v.get("url"))
+                        .and_then(|v| v.as_str())
+                        .map(|u| AttachmentSource::SignedUrl(u.to_string()))
+                        .or_else(|| {
+                            raw.and_then(|v| v.get("path"))
+                                .and_then(|v| v.as_str())
+                                .map(|p| AttachmentSource::Path(p.to_string()))
+                        })
+                        .unwrap_or(AttachmentSource::Inline),
                     FileSource::InlineBytes { .. } => AttachmentSource::Inline,
                 };
 
@@ -889,7 +904,9 @@ impl ExecutableNode for LlmNode {
                     description: description.clone(),
                     source,
                 };
-                reg.upsert(input).await.map_err(|e| format!("attachment upsert: {}", e))?;
+                reg.upsert(input)
+                    .await
+                    .map_err(|e| format!("attachment upsert: {}", e))?;
                 tracing::info!(
                     target: "colmena::attachment",
                     event = "attachment.registered",
@@ -1085,7 +1102,9 @@ impl ExecutableNode for LlmNode {
         // ---- Step 4 (catalog building) — must precede executor block ----------------
         let attachment_catalog: Vec<crate::llm::domain::ConversationAttachment> =
             if attachments_enabled {
-                if let (Some(reg), Some(sid)) = (attachment_registry.as_ref(), agent_session_id_str.as_ref()) {
+                if let (Some(reg), Some(sid)) =
+                    (attachment_registry.as_ref(), agent_session_id_str.as_ref())
+                {
                     let all = reg
                         .list_for_session(sid)
                         .await
@@ -1555,7 +1574,8 @@ impl ExecutableNode for LlmNode {
                         registry: reg.clone(),
                         provider: provider_kind.clone(),
                         api_key: api_key.clone(),
-                    }) as std::sync::Arc<dyn crate::llm::application::LoadAttachmentResolver>
+                    })
+                        as std::sync::Arc<dyn crate::llm::application::LoadAttachmentResolver>
                 }),
                 agent_session_id: agent_session_id_str.clone(),
             }
@@ -1575,7 +1595,8 @@ impl ExecutableNode for LlmNode {
                         registry: reg.clone(),
                         provider: provider_kind.clone(),
                         api_key: api_key.clone(),
-                    }) as std::sync::Arc<dyn crate::llm::application::LoadAttachmentResolver>
+                    })
+                        as std::sync::Arc<dyn crate::llm::application::LoadAttachmentResolver>
                 }),
                 agent_session_id: agent_session_id_str.clone(),
             }
@@ -2145,8 +2166,11 @@ mod resolver_tests {
         use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
         use std::sync::Arc;
 
-        let registry: Arc<dyn crate::llm::domain::AttachmentRegistry> =
-            Arc::new(SqliteAttachmentRegistry::new("sqlite::memory:").await.unwrap());
+        let registry: Arc<dyn crate::llm::domain::AttachmentRegistry> = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
         registry
             .upsert(UpsertAttachmentInput {
                 agent_session_id: "agent_1".to_string(),
@@ -2184,8 +2208,11 @@ mod resolver_tests {
         use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
         use std::sync::Arc;
 
-        let registry: Arc<dyn crate::llm::domain::AttachmentRegistry> =
-            Arc::new(SqliteAttachmentRegistry::new("sqlite::memory:").await.unwrap());
+        let registry: Arc<dyn crate::llm::domain::AttachmentRegistry> = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
         let resolver = AttachmentResolverImpl {
             registry,
             provider: ProviderKind::OpenAi,

@@ -5,14 +5,14 @@
 //!   2. A synthetic `user` message with `files[]` is appended and persisted.
 //!   3. The next ReAct iteration receives the file in its message slice.
 
+use async_trait::async_trait;
 use colmena::llm::application::{AgentRunParams, AgentService, LoadAttachmentResolver};
 use colmena::llm::domain::{
     AgentSessionId, Conversation, ConversationKey, ConversationRepository, FileData, FileSource,
     FunctionCall, LlmConfig, LlmError, LlmMessage, LlmProvider, LlmRepository, LlmRequest,
-    LlmRequestId, LlmResponse, LlmStream, NodeIdPath, ProviderFileRef, ProviderKind,
-    SessionId, ToolCall, ToolDefinition, ToolExecutor, ToolResult,
+    LlmRequestId, LlmResponse, LlmStream, NodeIdPath, ProviderFileRef, ProviderKind, SessionId,
+    ToolCall, ToolDefinition, ToolExecutor, ToolResult,
 };
-use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 
 struct ScriptedLlm {
@@ -20,7 +20,12 @@ struct ScriptedLlm {
 }
 
 fn scripted_provider() -> LlmProvider {
-    LlmProvider::new(ProviderKind::OpenAi, "key".to_string(), Some("gpt-4".to_string())).unwrap()
+    LlmProvider::new(
+        ProviderKind::OpenAi,
+        "key".to_string(),
+        Some("gpt-4".to_string()),
+    )
+    .unwrap()
 }
 
 #[async_trait]
@@ -46,8 +51,10 @@ impl LlmRepository for ScriptedLlm {
                     .with_tool_calls(vec![tc]),
             )
         } else {
-            Ok(LlmResponse::new(LlmRequestId::new(), "done".to_string(), scripted_provider())
-                .unwrap())
+            Ok(
+                LlmResponse::new(LlmRequestId::new(), "done".to_string(), scripted_provider())
+                    .unwrap(),
+            )
         }
     }
 

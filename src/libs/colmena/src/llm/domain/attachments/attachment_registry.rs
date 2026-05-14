@@ -1,6 +1,4 @@
-use crate::llm::domain::attachments::{
-    AttachmentError, AttachmentSource, ConversationAttachment,
-};
+use crate::llm::domain::attachments::{AttachmentError, AttachmentSource, ConversationAttachment};
 use crate::llm::domain::ProviderKind;
 use async_trait::async_trait;
 

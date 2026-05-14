@@ -14,9 +14,9 @@ pub struct SqliteAttachmentRegistry {
 
 impl SqliteAttachmentRegistry {
     pub async fn new(database_url: &str) -> Result<Self, AttachmentError> {
-        let pool = SqlitePool::connect(database_url).await.map_err(|e| {
-            AttachmentError::RepositoryFailed(format!("sqlite connect: {}", e))
-        })?;
+        let pool = SqlitePool::connect(database_url)
+            .await
+            .map_err(|e| AttachmentError::RepositoryFailed(format!("sqlite connect: {}", e)))?;
         sqlx::migrate!("migrations/sqlite")
             .set_ignore_missing(true)
             .run(&pool)
@@ -39,7 +39,9 @@ fn parse_ts(s: &str) -> Result<DateTime<Utc>, AttachmentError> {
         .map_err(|e| AttachmentError::RepositoryFailed(format!("bad ts '{}': {}", s, e)))
 }
 
-fn row_to_attachment(row: &sqlx::sqlite::SqliteRow) -> Result<ConversationAttachment, AttachmentError> {
+fn row_to_attachment(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<ConversationAttachment, AttachmentError> {
     let provider_db: String = row
         .try_get("provider")
         .map_err(|e| AttachmentError::RepositoryFailed(format!("provider: {}", e)))?;
@@ -298,7 +300,11 @@ mod tests {
         reg.refresh_provider_file_id("s1", "d", ProviderKind::OpenAi, "pf-new")
             .await
             .unwrap();
-        let r = reg.lookup("s1", "d", ProviderKind::OpenAi).await.unwrap().unwrap();
+        let r = reg
+            .lookup("s1", "d", ProviderKind::OpenAi)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(r.provider_file_id, "pf-new");
     }
 

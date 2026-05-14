@@ -303,7 +303,8 @@ impl AgentService {
                     // The assistant message (with tool_calls) was already persisted above
                     // (step B), so the resume path can walk the history to find the pending
                     // tool call. We must NOT persist the tool result — we don't have one yet.
-                    let parsed_sentinel = serde_json::from_str::<serde_json::Value>(&result.output).ok();
+                    let parsed_sentinel =
+                        serde_json::from_str::<serde_json::Value>(&result.output).ok();
                     if let Some(parsed) = parsed_sentinel.as_ref() {
                         if parsed.get("__colmena_status").and_then(|v| v.as_str())
                             == Some("SUSPENDED")
@@ -355,7 +356,8 @@ impl AgentService {
                                 None => {
                                     let tool_message = LlmMessage::tool(
                                         result.tool_call_id.clone(),
-                                        r#"{"error":"load_attachment_session_missing"}"#.to_string(),
+                                        r#"{"error":"load_attachment_session_missing"}"#
+                                            .to_string(),
                                     )?;
                                     messages.push(tool_message.clone());
                                     self.conversation_repository
@@ -393,7 +395,8 @@ impl AgentService {
                                     None,
                                 ),
                             };
-                            let tool_message = LlmMessage::tool(result.tool_call_id.clone(), ack_text)?;
+                            let tool_message =
+                                LlmMessage::tool(result.tool_call_id.clone(), ack_text)?;
                             messages.push(tool_message.clone());
                             self.conversation_repository
                                 .add_message(session_id, tool_message)
@@ -908,8 +911,7 @@ mod tests {
     #[tokio::test]
     async fn load_attachment_sentinel_injects_synthetic_user_message_and_continues() {
         use crate::llm::domain::{
-            FileData, FileSource, ProviderFileRef, ProviderKind as PK,
-            tools::FunctionCall as FC,
+            tools::FunctionCall as FC, FileData, FileSource, ProviderFileRef, ProviderKind as PK,
         };
         use std::sync::Mutex;
 
@@ -921,43 +923,36 @@ mod tests {
         // Turn 1: LLM emits a load_attachment tool call.
         {
             let llm_call_id = call_id.clone();
-            mock_llm
-                .expect_call()
-                .times(1)
-                .returning(move |_req| {
-                    let tc = ToolCall {
-                        id: llm_call_id.clone(),
-                        call_type: "function".to_string(),
-                        function: FC::new(
-                            "load_attachment".to_string(),
-                            r#"{"document_id":"doc-1"}"#.to_string(),
-                        ),
-                        response: None,
-                    };
-                    Ok(LlmResponse::new(
-                        LlmRequestId::from_string("req-la-1".to_string()).unwrap(),
-                        "".to_string(),
-                        LlmProvider::new(PK::OpenAi, "key".to_string(), Some("gpt-4".to_string()))
-                            .unwrap(),
-                    )
-                    .unwrap()
-                    .with_tool_calls(vec![tc]))
-                });
-        }
-
-        // Turn 2: LLM emits a final text response.
-        mock_llm
-            .expect_call()
-            .times(1)
-            .returning(|_req| {
+            mock_llm.expect_call().times(1).returning(move |_req| {
+                let tc = ToolCall {
+                    id: llm_call_id.clone(),
+                    call_type: "function".to_string(),
+                    function: FC::new(
+                        "load_attachment".to_string(),
+                        r#"{"document_id":"doc-1"}"#.to_string(),
+                    ),
+                    response: None,
+                };
                 Ok(LlmResponse::new(
-                    LlmRequestId::from_string("req-la-2".to_string()).unwrap(),
-                    "Final answer".to_string(),
+                    LlmRequestId::from_string("req-la-1".to_string()).unwrap(),
+                    "".to_string(),
                     LlmProvider::new(PK::OpenAi, "key".to_string(), Some("gpt-4".to_string()))
                         .unwrap(),
                 )
-                .unwrap())
+                .unwrap()
+                .with_tool_calls(vec![tc]))
             });
+        }
+
+        // Turn 2: LLM emits a final text response.
+        mock_llm.expect_call().times(1).returning(|_req| {
+            Ok(LlmResponse::new(
+                LlmRequestId::from_string("req-la-2".to_string()).unwrap(),
+                "Final answer".to_string(),
+                LlmProvider::new(PK::OpenAi, "key".to_string(), Some("gpt-4".to_string())).unwrap(),
+            )
+            .unwrap())
+        });
 
         // In-memory conversation repo.
         mock_conv.expect_get_by_id().returning(|key| {
@@ -968,12 +963,10 @@ mod tests {
         });
         let persisted: Arc<Mutex<Vec<LlmMessage>>> = Arc::new(Mutex::new(Vec::new()));
         let persisted_for_mock = persisted.clone();
-        mock_conv
-            .expect_add_message()
-            .returning(move |_k, m| {
-                persisted_for_mock.lock().unwrap().push(m);
-                Ok(())
-            });
+        mock_conv.expect_add_message().returning(move |_k, m| {
+            persisted_for_mock.lock().unwrap().push(m);
+            Ok(())
+        });
 
         // Tool executor: returns the LOAD_ATTACHMENT sentinel.
         struct SentinelExec;
@@ -997,11 +990,7 @@ mod tests {
         struct FakeResolver;
         #[async_trait::async_trait]
         impl LoadAttachmentResolver for FakeResolver {
-            async fn resolve(
-                &self,
-                _sid: &str,
-                doc_id: &str,
-            ) -> Result<Option<FileData>, String> {
+            async fn resolve(&self, _sid: &str, doc_id: &str) -> Result<Option<FileData>, String> {
                 if doc_id == "doc-1" {
                     Ok(Some(FileData {
                         document_id: Some(doc_id.to_string()),
@@ -1047,8 +1036,7 @@ mod tests {
         // The persisted message stream must contain a user message with files attached.
         let msgs = persisted.lock().unwrap().clone();
         let has_user_with_files = msgs.iter().any(|m| {
-            m.role().as_str() == "user"
-                && m.files().map(|f| !f.is_empty()).unwrap_or(false)
+            m.role().as_str() == "user" && m.files().map(|f| !f.is_empty()).unwrap_or(false)
         });
         assert!(
             has_user_with_files,

@@ -36,7 +36,10 @@ do NOT call `load_attachment` preemptively.";
 /// defensive use, producing a description that says no attachments are
 /// available — but the recommended path is to skip the call.
 pub fn build_load_attachment_tool_definition(catalog: &[ConversationAttachment]) -> ToolDefinition {
-    let lines: Vec<String> = catalog.iter().map(|a| format!("- {}", a.catalog_line())).collect();
+    let lines: Vec<String> = catalog
+        .iter()
+        .map(|a| format!("- {}", a.catalog_line()))
+        .collect();
     let body = if lines.is_empty() {
         "No attachments are currently available in this conversation.".to_string()
     } else {
@@ -177,7 +180,14 @@ mod tests {
     fn tool_definition_enum_contains_every_id() {
         let cat = vec![mk_attachment("a", "A"), mk_attachment("b", "B")];
         let td = build_load_attachment_tool_definition(&cat);
-        let enum_values = td.parameters.properties.get("document_id").unwrap().enum_values.clone().unwrap();
+        let enum_values = td
+            .parameters
+            .properties
+            .get("document_id")
+            .unwrap()
+            .enum_values
+            .clone()
+            .unwrap();
         assert!(enum_values.contains(&"a".to_string()));
         assert!(enum_values.contains(&"b".to_string()));
     }
@@ -185,7 +195,9 @@ mod tests {
     #[test]
     fn tool_definition_empty_catalog_renders_no_attachments_message() {
         let td = build_load_attachment_tool_definition(&[]);
-        assert!(td.description.contains("No attachments are currently available"));
+        assert!(td
+            .description
+            .contains("No attachments are currently available"));
     }
 
     #[test]

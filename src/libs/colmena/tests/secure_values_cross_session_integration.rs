@@ -222,13 +222,12 @@ async fn secret_survives_end_of_run_cleanup_when_agent_session_id_set() {
     dotenvy::dotenv().ok();
     let url = std::env::var("DATABASE_URL").unwrap();
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
-    let count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM secure_value_mappings WHERE agent_session_id = $1",
-    )
-    .bind(&chat)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM secure_value_mappings WHERE agent_session_id = $1")
+            .bind(&chat)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(
         count.0, 1,
         "exactly one row should survive end-of-run sweep for agent_session_id={chat}"

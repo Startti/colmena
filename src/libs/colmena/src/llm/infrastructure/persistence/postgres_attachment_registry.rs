@@ -18,17 +18,20 @@ impl PostgresAttachmentRegistry {
         registry: Arc<PgPoolRegistry>,
         database_url: &str,
     ) -> Result<Self, AttachmentError> {
-        let pool = registry.get_or_create(database_url).await.map_err(|e| {
-            AttachmentError::RepositoryFailed(format!("pool init failed: {}", e))
-        })?;
+        let pool = registry
+            .get_or_create(database_url)
+            .await
+            .map_err(|e| AttachmentError::RepositoryFailed(format!("pool init failed: {}", e)))?;
         Ok(Self { pool })
     }
 }
 
-fn row_to_attachment(row: &sqlx::postgres::PgRow) -> Result<ConversationAttachment, AttachmentError> {
-    let provider_db: String = row.try_get("provider").map_err(|e| {
-        AttachmentError::RepositoryFailed(format!("provider column read: {}", e))
-    })?;
+fn row_to_attachment(
+    row: &sqlx::postgres::PgRow,
+) -> Result<ConversationAttachment, AttachmentError> {
+    let provider_db: String = row
+        .try_get("provider")
+        .map_err(|e| AttachmentError::RepositoryFailed(format!("provider column read: {}", e)))?;
     let provider = ProviderKind::from_str(&provider_db).map_err(|e| {
         AttachmentError::RepositoryFailed(format!("corrupted provider '{}': {}", provider_db, e))
     })?;
@@ -217,7 +220,9 @@ mod tests {
             .run(&*pool)
             .await
             .unwrap();
-        PostgresAttachmentRegistry::new(registry, &url).await.unwrap()
+        PostgresAttachmentRegistry::new(registry, &url)
+            .await
+            .unwrap()
     }
 
     #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
@@ -244,7 +249,10 @@ mod tests {
             .unwrap()
             .expect("row present");
         assert_eq!(got.provider_file_id, "pf-1");
-        assert_eq!(got.source, AttachmentSource::SignedUrl("https://u".to_string()));
+        assert_eq!(
+            got.source,
+            AttachmentSource::SignedUrl("https://u".to_string())
+        );
     }
 
     #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]

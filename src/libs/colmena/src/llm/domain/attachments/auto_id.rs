@@ -39,7 +39,11 @@ pub fn generate_attachment_id(
         }
     }
     let digest = hasher.finalize();
-    let hex: String = digest.iter().take(8).map(|b| format!("{:02x}", b)).collect();
+    let hex: String = digest
+        .iter()
+        .take(8)
+        .map(|b| format!("{:02x}", b))
+        .collect();
     format!("att_{}", hex)
 }
 
