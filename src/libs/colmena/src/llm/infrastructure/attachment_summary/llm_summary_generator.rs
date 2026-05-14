@@ -98,11 +98,20 @@ impl AttachmentSummaryGenerator for LlmAttachmentSummaryGenerator {
         let request = LlmRequest::new(vec![system_msg, user_msg], llm_config, false)
             .map_err(|e| SummaryError::LlmCallFailed(format!("build request: {}", e)))?;
 
-        let response = self
-            .repo
-            .call(request)
-            .await
-            .map_err(|e| SummaryError::LlmCallFailed(e.to_string()))?;
+        // Per-call timeout: enforced inside the adapter so each target gets
+        // its own budget. The caller (`llm.rs`) keeps an outer batch timeout
+        // as a hard ceiling, but a single slow target must not starve the
+        // others — that is what this timeout prevents.
+        let response = match tokio::time::timeout(config.timeout, self.repo.call(request)).await {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => return Err(SummaryError::LlmCallFailed(e.to_string())),
+            Err(_) => {
+                return Err(SummaryError::LlmCallFailed(format!(
+                    "timeout after {:?}",
+                    config.timeout
+                )));
+            }
+        };
 
         // Normalise the output: trim, strip surrounding quotes, collapse newlines.
         let raw = response.content().trim().trim_matches('"').to_string();
@@ -245,6 +254,72 @@ mod tests {
         match outcome {
             SummaryOutcome::Generated(s) => assert_eq!(s.chars().count(), 200),
             o => panic!("expected Generated, got {:?}", o),
+        }
+    }
+
+    /// Test-only `LlmRepository` whose `call` sleeps asynchronously for
+    /// `delay` before returning. Used to exercise the per-call timeout path —
+    /// mockall's sync `returning` closure cannot await, so we hand-roll a
+    /// minimal impl here.
+    struct SlowLlmRepository {
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl LlmRepository for SlowLlmRepository {
+        async fn call(
+            &self,
+            _request: LlmRequest,
+        ) -> Result<crate::llm::domain::LlmResponse, crate::llm::domain::LlmError> {
+            tokio::time::sleep(self.delay).await;
+            Ok(mock_response("late response"))
+        }
+
+        async fn stream(
+            &self,
+            _request: LlmRequest,
+        ) -> Result<crate::llm::domain::llm_repository::LlmStream, crate::llm::domain::LlmError>
+        {
+            unimplemented!("not used in timeout test")
+        }
+
+        async fn health_check(&self) -> Result<(), crate::llm::domain::LlmError> {
+            Ok(())
+        }
+
+        fn provider_name(&self) -> &'static str {
+            "slow-test"
+        }
+    }
+
+    #[tokio::test]
+    async fn per_call_timeout_returns_llm_call_failed() {
+        let slow = Arc::new(SlowLlmRepository {
+            delay: Duration::from_secs(2),
+        });
+        let generator = LlmAttachmentSummaryGenerator::new(slow);
+
+        let mut config = cfg();
+        config.timeout = Duration::from_millis(50);
+
+        let err = generator
+            .generate(
+                SummaryInput {
+                    filename: "x.pdf".into(),
+                    mime_type: "application/pdf".into(),
+                    source: SummarySource::ExtractedText("content".into()),
+                },
+                &config,
+            )
+            .await
+            .unwrap_err();
+        match err {
+            SummaryError::LlmCallFailed(msg) => assert!(
+                msg.contains("timeout"),
+                "expected timeout message, got {}",
+                msg
+            ),
+            other => panic!("expected LlmCallFailed, got {:?}", other),
         }
     }
 

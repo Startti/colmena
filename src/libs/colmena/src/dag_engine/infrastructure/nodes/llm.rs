@@ -87,9 +87,6 @@ struct SummaryTarget {
     source: crate::llm::domain::attachments::AttachmentSource,
     mime_type: String,
     filename: String,
-    /// Carries bytes from `FileSource::InlineBytes` because they are not
-    /// retained anywhere else.
-    inline_bytes: Option<Vec<u8>>,
 }
 
 async fn generate_one_summary(
@@ -105,7 +102,9 @@ async fn generate_one_summary(
     };
 
     // 1. Acquire bytes (no size bound — frontend enforces 100 MB).
-    let bytes = match acquire_bytes(&target.source, target.inline_bytes.as_deref(), fetcher).await {
+    // v1: inline-bytes attachments are skipped before reaching here (see
+    // auto-registration loop), so we always pass `None`.
+    let bytes = match acquire_bytes(&target.source, None, fetcher).await {
         Ok(b) => b,
         Err(e) => {
             return SummaryOutcome::Skipped {
@@ -1014,17 +1013,22 @@ impl ExecutableNode for LlmNode {
                 );
 
                 if summary_enabled && description.is_none() {
-                    let inline_bytes = match &file.source {
-                        FileSource::InlineBytes { bytes } => Some(bytes.clone()),
-                        _ => None,
-                    };
-                    summary_targets.push(SummaryTarget {
-                        document_id: document_id.clone(),
-                        source,
-                        mime_type: file.mime_type.clone(),
-                        filename: file.filename.clone(),
-                        inline_bytes,
-                    });
+                    // v1 limitation: inline-bytes attachments lost their original
+                    // bytes before reaching this point (they were uploaded to the
+                    // provider, and the registry source resolves to `Inline`
+                    // with no fetchable URL/path). Skip summary for them — the
+                    // caller can pass `description` explicitly if a catalog
+                    // entry is required. TODO(v2): retain the original bytes
+                    // through the upload pipeline so they can be summarised
+                    // here as well.
+                    if !matches!(source, AttachmentSource::Inline) {
+                        summary_targets.push(SummaryTarget {
+                            document_id: document_id.clone(),
+                            source,
+                            mime_type: file.mime_type.clone(),
+                            filename: file.filename.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -1768,8 +1772,12 @@ impl ExecutableNode for LlmNode {
                 let (Some(gen), Some(reg), Some(sid)) = (gen_opt, reg_opt, sid_opt) else {
                     return;
                 };
-                // Each target runs concurrently with the others.
-                let mut handles = Vec::new();
+                // Use a `JoinSet` so that if the outer future is dropped
+                // (timeout, caller cancellation, etc.) all spawned tasks are
+                // aborted automatically. Dropping `tokio::task::JoinHandle`
+                // does NOT abort the task — it would otherwise survive and
+                // race-write stale summaries into the registry.
+                let mut set = tokio::task::JoinSet::new();
                 for t in targets {
                     let gen = gen.clone();
                     let reg = reg.clone();
@@ -1777,7 +1785,7 @@ impl ExecutableNode for LlmNode {
                     let provider_kind = provider_kind_cap.clone();
                     let cfg = cfg.clone();
                     let fetcher = fetcher_for_summary.clone();
-                    handles.push(tokio::spawn(async move {
+                    set.spawn(async move {
                         let outcome = generate_one_summary(
                             &*gen,
                             &cfg,
@@ -1819,11 +1827,9 @@ impl ExecutableNode for LlmNode {
                                 );
                             }
                         }
-                    }));
+                    });
                 }
-                for h in handles {
-                    let _ = h.await;
-                }
+                while set.join_next().await.is_some() {}
             }
         };
 
