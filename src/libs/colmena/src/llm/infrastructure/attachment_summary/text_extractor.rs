@@ -25,7 +25,12 @@ pub enum ExtractError {
 /// Caller is responsible for char-truncating the returned text via
 /// [`truncate_chars`]. This function returns the full extracted string.
 pub fn extract_text(mime: &str, bytes: &[u8]) -> Result<Option<String>, ExtractError> {
-    let mime_norm = mime.to_ascii_lowercase();
+    let mime_norm = mime
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     match mime_norm.as_str() {
         "application/pdf" => extract_pdf(bytes).map(Some),
         "text/plain" | "text/markdown" | "text/csv" | "text/html" | "text/x-markdown" => {
@@ -148,6 +153,26 @@ mod tests {
     #[test]
     fn extract_mime_is_case_insensitive() {
         let r = extract_text("TEXT/PLAIN", b"x").unwrap();
+        assert_eq!(r.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn extract_plaintext_with_charset_param_decodes_utf8() {
+        let r = extract_text("text/plain; charset=utf-8", b"hello").unwrap();
+        assert_eq!(r.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn extract_pdf_with_params_extracts() {
+        let pdf = include_bytes!("../../../../tests/fixtures/hello.pdf");
+        let r = extract_text("application/pdf; qs=0.001", pdf).unwrap();
+        let text = r.expect("expected Some for application/pdf with params");
+        assert!(text.to_lowercase().contains("hello"));
+    }
+
+    #[test]
+    fn extract_text_handles_leading_whitespace_in_mime() {
+        let r = extract_text("  text/plain  ; charset=utf-8", b"x").unwrap();
         assert_eq!(r.as_deref(), Some("x"));
     }
 }
