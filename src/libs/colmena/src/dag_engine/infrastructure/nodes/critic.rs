@@ -265,6 +265,8 @@ impl ExecutableNode for CriticNode {
             max_iterations: Some(1),
             on_token,
             tools_provider: None,
+            attachment_resolver: None,
+            agent_session_id: None,
         };
 
         let response = agent_service.run(params).await?;

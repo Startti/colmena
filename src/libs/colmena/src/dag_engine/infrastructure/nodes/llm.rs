@@ -1298,6 +1298,8 @@ impl ExecutableNode for LlmNode {
                 max_iterations: Some(max_iterations),
                 on_token,
                 tools_provider,
+                attachment_resolver: None,
+                agent_session_id: None,
             }
         } else {
             crate::llm::application::AgentRunParams {
@@ -1310,6 +1312,8 @@ impl ExecutableNode for LlmNode {
                 max_iterations: Some(max_iterations),
                 on_token,
                 tools_provider,
+                attachment_resolver: None,
+                agent_session_id: None,
             }
         };
 

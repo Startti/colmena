@@ -1,7 +1,7 @@
 use crate::llm::domain::{
-    ConversationKey, ConversationRepository, LlmConfig, LlmError, LlmMessage, LlmRepository,
-    LlmRequest, LlmResponse, LlmStreamPart, LlmUsage, ToolCall, ToolDefinition, ToolExecutor,
-    ToolResult,
+    ConversationKey, ConversationRepository, FileData, LlmConfig, LlmError, LlmMessage,
+    LlmRepository, LlmRequest, LlmResponse, LlmStreamPart, LlmUsage, ToolCall, ToolDefinition,
+    ToolExecutor, ToolResult,
 };
 use std::sync::Arc;
 
@@ -9,6 +9,23 @@ use std::sync::Arc;
 /// the current message history. Used to implement lazy tool loading without
 /// teaching `AgentService` about lazy mode itself.
 pub type ToolsProvider = Box<dyn Fn(&[LlmMessage]) -> Vec<ToolDefinition> + Send + Sync>;
+
+/// Resolves a `document_id` into a ready-to-use `FileData` for the agent loop.
+/// Implementations are responsible for:
+///   1. Looking up the entry in AttachmentRegistry.
+///   2. Verifying / refreshing the provider_file_id when expired (silent re-upload).
+///   3. Returning a recoverable error string when re-upload is impossible.
+///
+/// Returning `Ok(None)` means the document_id is not in this session — the
+/// agent loop will close the tool call with a `not_found` tool result.
+#[async_trait::async_trait]
+pub trait LoadAttachmentResolver: Send + Sync {
+    async fn resolve(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+    ) -> Result<Option<FileData>, String>;
+}
 
 /// Parameters for running the agent
 pub struct AgentRunParams<'a> {
@@ -24,6 +41,13 @@ pub struct AgentRunParams<'a> {
     /// When `Some`, its return value REPLACES `tools` for that iteration.
     /// When `None`, `tools` is used unchanged each iteration (default).
     pub tools_provider: Option<ToolsProvider>,
+    /// Optional resolver invoked when a tool returns the LOAD_ATTACHMENT sentinel.
+    /// When `None`, sentinels surface as ordinary tool results (no special handling).
+    pub attachment_resolver: Option<Arc<dyn LoadAttachmentResolver>>,
+    /// Agent session id used by the resolver. Required when `attachment_resolver`
+    /// is `Some`; if missing while a sentinel is detected, the loop returns an
+    /// `AttachmentError::SessionMissing` mapped to a tool result string.
+    pub agent_session_id: Option<String>,
 }
 
 /// Agent service implementing the ReAct (Reasoning + Acting) pattern
@@ -65,6 +89,8 @@ impl AgentService {
         let tool_executor = params.tool_executor;
         let on_token = params.on_token;
         let tools_provider = params.tools_provider;
+        let params_resolver = params.attachment_resolver;
+        let params_agent_session_id = params.agent_session_id;
 
         // 1. Load conversation history
         let conversation = self.conversation_repository.get_by_id(session_id).await?;
@@ -277,7 +303,8 @@ impl AgentService {
                     // The assistant message (with tool_calls) was already persisted above
                     // (step B), so the resume path can walk the history to find the pending
                     // tool call. We must NOT persist the tool result — we don't have one yet.
-                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&result.output) {
+                    let parsed_sentinel = serde_json::from_str::<serde_json::Value>(&result.output).ok();
+                    if let Some(parsed) = parsed_sentinel.as_ref() {
                         if parsed.get("__colmena_status").and_then(|v| v.as_str())
                             == Some("SUSPENDED")
                         {
@@ -295,6 +322,89 @@ impl AgentService {
                                 questions,
                                 result.output.clone(),
                             ));
+                        }
+                        if parsed.get("__colmena_status").and_then(|v| v.as_str())
+                            == Some("LOAD_ATTACHMENT")
+                        {
+                            let document_id = parsed
+                                .get("document_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            tracing::info!(
+                                target: "colmena::attachment",
+                                event = "attachment.loaded",
+                                document_id = %document_id,
+                                "LOAD_ATTACHMENT sentinel received"
+                            );
+                            let resolver = match &params_resolver {
+                                Some(r) => r.clone(),
+                                None => {
+                                    let tool_message = LlmMessage::tool(
+                                        result.tool_call_id.clone(),
+                                        r#"{"error":"load_attachment_unsupported","reason":"no AttachmentResolver wired"}"#.to_string(),
+                                    )?;
+                                    messages.push(tool_message.clone());
+                                    self.conversation_repository
+                                        .add_message(session_id, tool_message)
+                                        .await?;
+                                    continue;
+                                }
+                            };
+                            let sid = match params_agent_session_id.as_ref() {
+                                Some(s) => s.clone(),
+                                None => {
+                                    let tool_message = LlmMessage::tool(
+                                        result.tool_call_id.clone(),
+                                        r#"{"error":"load_attachment_session_missing"}"#.to_string(),
+                                    )?;
+                                    messages.push(tool_message.clone());
+                                    self.conversation_repository
+                                        .add_message(session_id, tool_message)
+                                        .await?;
+                                    continue;
+                                }
+                            };
+                            let resolved = resolver.resolve(&sid, document_id).await;
+                            let (ack_text, synthetic_user) = match resolved {
+                                Ok(Some(file_data)) => {
+                                    let body = format!(
+                                        "[Attachment '{}' loaded; content follows in the next message]",
+                                        document_id
+                                    );
+                                    let synth = LlmMessage::user_with_files(
+                                        format!("[Attachment requested by the model: {}]", document_id),
+                                        vec![file_data],
+                                    )?;
+                                    (body, Some(synth))
+                                }
+                                Ok(None) => (
+                                    format!(
+                                        "{{\"error\":\"unknown_document_id\",\"document_id\":\"{}\"}}",
+                                        document_id
+                                    ),
+                                    None,
+                                ),
+                                Err(e) => (
+                                    format!(
+                                        "{{\"error\":\"attachment_expired_unrecoverable\",\"document_id\":\"{}\",\"reason\":\"{}\"}}",
+                                        document_id,
+                                        e.replace('"', "'")
+                                    ),
+                                    None,
+                                ),
+                            };
+                            let tool_message = LlmMessage::tool(result.tool_call_id.clone(), ack_text)?;
+                            messages.push(tool_message.clone());
+                            self.conversation_repository
+                                .add_message(session_id, tool_message)
+                                .await?;
+                            if let Some(user_msg) = synthetic_user {
+                                messages.push(user_msg.clone());
+                                self.conversation_repository
+                                    .add_message(session_id, user_msg)
+                                    .await?;
+                            }
+                            continue;
                         }
                     }
 
@@ -448,6 +558,8 @@ mod tests {
                 max_iterations: None,
                 on_token: None,
                 tools_provider: None,
+                attachment_resolver: None,
+                agent_session_id: None,
             })
             .await;
 
@@ -549,6 +661,8 @@ mod tests {
                 max_iterations: None,
                 on_token: None,
                 tools_provider: None,
+                attachment_resolver: None,
+                agent_session_id: None,
             })
             .await;
 
@@ -609,6 +723,8 @@ mod tests {
                 max_iterations: None,
                 on_token: None,
                 tools_provider: None,
+                attachment_resolver: None,
+                agent_session_id: None,
             })
             .await;
 
@@ -680,6 +796,8 @@ mod tests {
                 max_iterations: Some(3), // Max 3 iterations
                 on_token: None,
                 tools_provider: None,
+                attachment_resolver: None,
+                agent_session_id: None,
             })
             .await;
 
@@ -767,6 +885,8 @@ mod tests {
                 max_iterations: None,
                 on_token: None,
                 tools_provider: None,
+                attachment_resolver: None,
+                agent_session_id: None,
             })
             .await;
 
@@ -783,5 +903,156 @@ mod tests {
             .expect("questions must be an array");
         assert_eq!(questions.len(), 1);
         assert_eq!(questions[0]["id"], "q1");
+    }
+
+    #[tokio::test]
+    async fn load_attachment_sentinel_injects_synthetic_user_message_and_continues() {
+        use crate::llm::domain::{
+            FileData, FileSource, ProviderFileRef, ProviderKind as PK,
+            tools::FunctionCall as FC,
+        };
+        use std::sync::Mutex;
+
+        let mut mock_llm = MockLlmRepo::new();
+        let mut mock_conv = MockConversationRepo::new();
+
+        let call_id = "call_la_1".to_string();
+
+        // Turn 1: LLM emits a load_attachment tool call.
+        {
+            let llm_call_id = call_id.clone();
+            mock_llm
+                .expect_call()
+                .times(1)
+                .returning(move |_req| {
+                    let tc = ToolCall {
+                        id: llm_call_id.clone(),
+                        call_type: "function".to_string(),
+                        function: FC::new(
+                            "load_attachment".to_string(),
+                            r#"{"document_id":"doc-1"}"#.to_string(),
+                        ),
+                        response: None,
+                    };
+                    Ok(LlmResponse::new(
+                        LlmRequestId::from_string("req-la-1".to_string()).unwrap(),
+                        "".to_string(),
+                        LlmProvider::new(PK::OpenAi, "key".to_string(), Some("gpt-4".to_string()))
+                            .unwrap(),
+                    )
+                    .unwrap()
+                    .with_tool_calls(vec![tc]))
+                });
+        }
+
+        // Turn 2: LLM emits a final text response.
+        mock_llm
+            .expect_call()
+            .times(1)
+            .returning(|_req| {
+                Ok(LlmResponse::new(
+                    LlmRequestId::from_string("req-la-2".to_string()).unwrap(),
+                    "Final answer".to_string(),
+                    LlmProvider::new(PK::OpenAi, "key".to_string(), Some("gpt-4".to_string()))
+                        .unwrap(),
+                )
+                .unwrap())
+            });
+
+        // In-memory conversation repo.
+        mock_conv.expect_get_by_id().returning(|key| {
+            Ok(Conversation {
+                key: key.clone(),
+                messages: vec![],
+            })
+        });
+        let persisted: Arc<Mutex<Vec<LlmMessage>>> = Arc::new(Mutex::new(Vec::new()));
+        let persisted_for_mock = persisted.clone();
+        mock_conv
+            .expect_add_message()
+            .returning(move |_k, m| {
+                persisted_for_mock.lock().unwrap().push(m);
+                Ok(())
+            });
+
+        // Tool executor: returns the LOAD_ATTACHMENT sentinel.
+        struct SentinelExec;
+        #[async_trait::async_trait]
+        impl ToolExecutor for SentinelExec {
+            async fn execute(&self, tc: &ToolCall) -> Result<ToolResult, LlmError> {
+                Ok(ToolResult {
+                    tool_call_id: tc.id.clone(),
+                    output: r#"{"__colmena_status":"LOAD_ATTACHMENT","document_id":"doc-1"}"#
+                        .to_string(),
+                    success: true,
+                    error: None,
+                })
+            }
+            async fn available_tools(&self) -> Vec<ToolDefinition> {
+                vec![]
+            }
+        }
+
+        // Resolver: returns a fake Uploaded FileData for "doc-1".
+        struct FakeResolver;
+        #[async_trait::async_trait]
+        impl LoadAttachmentResolver for FakeResolver {
+            async fn resolve(
+                &self,
+                _sid: &str,
+                doc_id: &str,
+            ) -> Result<Option<FileData>, String> {
+                if doc_id == "doc-1" {
+                    Ok(Some(FileData {
+                        document_id: Some(doc_id.to_string()),
+                        mime_type: "application/pdf".to_string(),
+                        filename: "x.pdf".to_string(),
+                        size_hint: Some(10),
+                        source: FileSource::Uploaded(ProviderFileRef {
+                            provider: PK::OpenAi,
+                            provider_file_id: "pf-1".to_string(),
+                            mime_type: "application/pdf".to_string(),
+                            filename: "x.pdf".to_string(),
+                            expires_at: None,
+                        }),
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+
+        let svc = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let session = ConversationKey {
+            session_id: SessionId("s1".to_string()),
+            agent_session_id: Some(AgentSessionId("agent_1".to_string())),
+            node_id: NodeIdPath("llm_call".to_string()),
+        };
+        let params = AgentRunParams {
+            session_id: &session,
+            prompt: Some("read the doc".to_string()),
+            messages: None,
+            config: create_config(),
+            tools: vec![],
+            tool_executor: &SentinelExec,
+            max_iterations: Some(5),
+            on_token: None,
+            tools_provider: None,
+            attachment_resolver: Some(Arc::new(FakeResolver)),
+            agent_session_id: Some("agent_1".to_string()),
+        };
+        let resp = svc.run(params).await.unwrap();
+        assert_eq!(resp.content(), "Final answer");
+
+        // The persisted message stream must contain a user message with files attached.
+        let msgs = persisted.lock().unwrap().clone();
+        let has_user_with_files = msgs.iter().any(|m| {
+            m.role().as_str() == "user"
+                && m.files().map(|f| !f.is_empty()).unwrap_or(false)
+        });
+        assert!(
+            has_user_with_files,
+            "expected a synthetic user message with files"
+        );
     }
 }
