@@ -81,6 +81,80 @@ struct SkillLoadedLogEntry {
     source: String,
 }
 
+#[derive(Debug, Clone)]
+struct SummaryTarget {
+    document_id: String,
+    source: crate::llm::domain::attachments::AttachmentSource,
+    mime_type: String,
+    filename: String,
+    /// Carries bytes from `FileSource::InlineBytes` because they are not
+    /// retained anywhere else.
+    inline_bytes: Option<Vec<u8>>,
+}
+
+async fn generate_one_summary(
+    gen: &dyn crate::llm::domain::attachments::AttachmentSummaryGenerator,
+    cfg: &crate::llm::domain::attachments::SummaryConfig,
+    target: &SummaryTarget,
+    fetcher: std::sync::Arc<dyn crate::llm::domain::signed_url_fetcher::SignedUrlFetcher>,
+    max_chars: usize,
+) -> crate::llm::domain::attachments::SummaryOutcome {
+    use crate::llm::domain::attachments::{SummaryInput, SummaryOutcome, SummarySource};
+    use crate::llm::infrastructure::attachment_summary::{
+        acquire_bytes, extract_text, truncate_chars,
+    };
+
+    // 1. Acquire bytes (no size bound — frontend enforces 100 MB).
+    let bytes = match acquire_bytes(&target.source, target.inline_bytes.as_deref(), fetcher).await {
+        Ok(b) => b,
+        Err(e) => {
+            return SummaryOutcome::Skipped {
+                reason: format!("byte acquisition failed: {}", e),
+            }
+        }
+    };
+
+    // 2. Build SummarySource based on mime.
+    let source = if target.mime_type.starts_with("image/") {
+        SummarySource::ImageBytes(bytes)
+    } else {
+        match extract_text(&target.mime_type, &bytes) {
+            Ok(Some(text)) => {
+                let truncated = truncate_chars(&text, max_chars);
+                if truncated.trim().is_empty() {
+                    return SummaryOutcome::Skipped {
+                        reason: "extraction returned empty text".into(),
+                    };
+                }
+                SummarySource::ExtractedText(truncated)
+            }
+            Ok(None) => {
+                return SummaryOutcome::Skipped {
+                    reason: format!("mime {} not extractable", target.mime_type),
+                }
+            }
+            Err(e) => {
+                return SummaryOutcome::Skipped {
+                    reason: format!("extraction error: {}", e),
+                }
+            }
+        }
+    };
+
+    let input = SummaryInput {
+        filename: target.filename.clone(),
+        mime_type: target.mime_type.clone(),
+        source,
+    };
+
+    match gen.generate(input, cfg).await {
+        Ok(outcome) => outcome,
+        Err(e) => SummaryOutcome::Failed {
+            reason: format!("generator error: {}", e),
+        },
+    }
+}
+
 pub struct LlmNode {
     repository_factory: Arc<ConversationRepositoryFactory>,
     registry: Weak<dyn NodeRegistryPort>,
@@ -821,7 +895,42 @@ impl ExecutableNode for LlmNode {
             }
         }
 
+        // ---- Auto-summary configuration ----------------------------------------------
+        let summary_enabled: bool = inputs
+            .get("summary_enabled")
+            .and_then(|v| v.as_bool())
+            .or_else(|| config.get("summary_enabled").and_then(|v| v.as_bool()))
+            .unwrap_or(true);
+        let summary_max_chars: usize = inputs
+            .get("summary_max_chars")
+            .and_then(|v| v.as_u64())
+            .or_else(|| config.get("summary_max_chars").and_then(|v| v.as_u64()))
+            .map(|v| v as usize)
+            .unwrap_or(5000);
+        let summary_max_output_chars: usize = inputs
+            .get("summary_max_output_chars")
+            .and_then(|v| v.as_u64())
+            .or_else(|| config.get("summary_max_output_chars").and_then(|v| v.as_u64()))
+            .map(|v| v as usize)
+            .unwrap_or(200);
+        let summary_timeout_secs: u64 = inputs
+            .get("summary_timeout_secs")
+            .and_then(|v| v.as_u64())
+            .or_else(|| config.get("summary_timeout_secs").and_then(|v| v.as_u64()))
+            .unwrap_or(15);
+        let summary_model_override: Option<String> = inputs
+            .get("summary_model")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| {
+                config
+                    .get("summary_model")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            });
+
         // ---- Step 3: Auto-register resolved uploads in AttachmentRegistry -----------
+        let mut summary_targets: Vec<SummaryTarget> = Vec::new();
         if let (Some(reg), Some(sid)) =
             (attachment_registry.as_ref(), agent_session_id_str.as_ref())
         {
@@ -891,7 +1000,7 @@ impl ExecutableNode for LlmNode {
                     size_bytes: file.size_hint,
                     label: label.clone(),
                     description: description.clone(),
-                    source,
+                    source: source.clone(),
                 };
                 reg.upsert(input)
                     .await
@@ -903,6 +1012,20 @@ impl ExecutableNode for LlmNode {
                     document_id = %document_id,
                     "registered attachment"
                 );
+
+                if summary_enabled && description.is_none() {
+                    let inline_bytes = match &file.source {
+                        FileSource::InlineBytes { bytes } => Some(bytes.clone()),
+                        _ => None,
+                    };
+                    summary_targets.push(SummaryTarget {
+                        document_id: document_id.clone(),
+                        source,
+                        mime_type: file.mime_type.clone(),
+                        filename: file.filename.clone(),
+                        inline_bytes,
+                    });
+                }
             }
         }
 
@@ -1603,7 +1726,123 @@ impl ExecutableNode for LlmNode {
             colmena_log!("═══════════════════════════════════════\n");
         }
 
-        let response = agent_service.run(params).await?;
+        // ---- Step 4: Build summary tasks (run in parallel with answer call below) -----
+        use crate::llm::domain::attachments::{
+            AttachmentSummaryGenerator, SummaryConfig, SummaryOutcome,
+        };
+        use crate::llm::infrastructure::attachment_summary::{
+            provider_cheap_tier, LlmAttachmentSummaryGenerator,
+        };
+        use crate::llm::infrastructure::files::signed_url_downloader::SignedUrlDownloader;
+
+        let summary_generator: Option<std::sync::Arc<dyn AttachmentSummaryGenerator>> =
+            if summary_enabled && !summary_targets.is_empty() && attachment_registry.is_some() {
+                let repo = LlmProviderFactory::create(provider_kind.clone());
+                Some(std::sync::Arc::new(LlmAttachmentSummaryGenerator::new(repo)))
+            } else {
+                None
+            };
+
+        let summary_cfg = SummaryConfig {
+            provider: provider_kind.clone(),
+            model: summary_model_override
+                .clone()
+                .unwrap_or_else(|| provider_cheap_tier(&provider_kind).to_string()),
+            api_key: api_key.clone(),
+            max_output_chars: summary_max_output_chars,
+            timeout: std::time::Duration::from_secs(summary_timeout_secs),
+        };
+
+        let fetcher_for_summary: std::sync::Arc<
+            dyn crate::llm::domain::signed_url_fetcher::SignedUrlFetcher,
+        > = std::sync::Arc::new(SignedUrlDownloader::new());
+
+        let summary_fut = {
+            let gen_opt = summary_generator.clone();
+            let reg_opt = attachment_registry.clone();
+            let sid_opt = agent_session_id_str.clone();
+            let provider_kind_cap = provider_kind.clone();
+            let cfg = summary_cfg.clone();
+            let targets = std::mem::take(&mut summary_targets);
+            async move {
+                let (Some(gen), Some(reg), Some(sid)) = (gen_opt, reg_opt, sid_opt) else {
+                    return;
+                };
+                // Each target runs concurrently with the others.
+                let mut handles = Vec::new();
+                for t in targets {
+                    let gen = gen.clone();
+                    let reg = reg.clone();
+                    let sid = sid.clone();
+                    let provider_kind = provider_kind_cap.clone();
+                    let cfg = cfg.clone();
+                    let fetcher = fetcher_for_summary.clone();
+                    handles.push(tokio::spawn(async move {
+                        let outcome = generate_one_summary(
+                            &*gen,
+                            &cfg,
+                            &t,
+                            fetcher,
+                            summary_max_chars,
+                        )
+                        .await;
+                        match &outcome {
+                            SummaryOutcome::Generated(text) => {
+                                if let Err(e) = reg
+                                    .update_description(&sid, &t.document_id, provider_kind, text)
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        target: "colmena::attachment",
+                                        event = "summary.persist_failed",
+                                        document_id = %t.document_id,
+                                        error = %e,
+                                        "failed to persist summary"
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        target: "colmena::attachment",
+                                        event = "summary.persisted",
+                                        document_id = %t.document_id,
+                                        summary_len = text.len(),
+                                        "summary persisted"
+                                    );
+                                }
+                            }
+                            other => {
+                                tracing::info!(
+                                    target: "colmena::attachment",
+                                    event = "summary.skipped_or_failed",
+                                    document_id = %t.document_id,
+                                    outcome = ?other,
+                                    "summary skipped or failed"
+                                );
+                            }
+                        }
+                    }));
+                }
+                for h in handles {
+                    let _ = h.await;
+                }
+            }
+        };
+
+        let summary_timeout_dur = std::time::Duration::from_secs(summary_timeout_secs);
+        let (agent_run_result, summary_outcome) = tokio::join!(
+            agent_service.run(params),
+            tokio::time::timeout(summary_timeout_dur, summary_fut),
+        );
+
+        if summary_outcome.is_err() {
+            tracing::warn!(
+                target: "colmena::attachment",
+                event = "summary.batch_timeout",
+                timeout_secs = summary_timeout_secs,
+                "summary batch exceeded timeout"
+            );
+        }
+
+        let response = agent_run_result?;
 
         // 3.0a SUSPENDED propagation — when the agent loop short-circuited because a tool
         // returned `__colmena_status: SUSPENDED`, surface that signal upward to the DAG
