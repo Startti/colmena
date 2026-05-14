@@ -1218,6 +1218,13 @@
           "description": "When true, auto-registers a tool named `ask_secret` backed by the `secure_suspend` node. The LLM sees the canonical description and node_schema (a `secrets: [{question, name}]` array) without any entry in `tool_configurations`. Use this as the simplest way to let an agent ask the user for credentials. Explicit `tool_configurations` entries with `node_type: \"secure_suspend\"` take precedence — the flag is a no-op if the user already declared the tool. See developer_guide/13_security_strategy.md.",
           "example": true
         },
+        "attachments_enabled": {
+          "type": "boolean",
+          "required": false,
+          "default": true,
+          "description": "When true (default), this llm_call exposes the synthetic load_attachment tool and contributes any files[] entries it receives to the session-wide attachment catalog. When false, the node still registers its files[] (so other nodes can read them) but the LLM in this node will NOT see the load_attachment tool — use for specialist agents that must not read documents uploaded elsewhere in the session.",
+          "example": false
+        },
         "tool_configurations": {
           "type": "object",
           "required": false,
@@ -1293,7 +1300,7 @@
           "type": "array",
           "required": false,
           "default": null,
-          "description": "An array of file objects for multimodal LLM input (images, PDFs, documents). Each file can be provided either as a local file path or as base64-encoded inline data. The files are sent alongside the text prompt, enabling vision tasks (describe an image), document analysis (extract data from a PDF), and other multimodal use cases. Each file object requires 'mime_type' and either 'path' or 'data'.",
+          "description": "An array of file objects for multimodal LLM input (images, PDFs, documents). Each file can be provided either as a local file path or as base64-encoded inline data. The files are sent alongside the text prompt, enabling vision tasks (describe an image), document analysis (extract data from a PDF), and other multimodal use cases. Each file object requires 'mime_type' and either 'path' or 'data'. Optional fields per entry: 'id' (auto-generated if absent), 'label' (catalog label, falls back to filename), 'description' (short summary added to the catalog line).",
           "items_schema": {
             "mime_type": {
               "type": "string",
