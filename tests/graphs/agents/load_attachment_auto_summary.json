@@ -1,0 +1,29 @@
+{
+  "nodes": {
+    "ask": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "session_id": "load_attachment_auto_summary",
+        "attachments_enabled": true,
+        "summary_enabled": true,
+        "system_message": "You are a helpful assistant. Answer concisely.",
+        "prompt": "What is in the attached document? One sentence.",
+        "files": [
+          {
+            "id": "demo_doc",
+            "label": "Demo PDF",
+            "url": "$REPLACE_WITH_SIGNED_URL",
+            "mime_type": "application/pdf",
+            "filename": "demo.pdf"
+          }
+        ]
+      }
+    },
+    "out": { "type": "log" }
+  },
+  "edges": [{ "from": "ask", "to": "out" }]
+}
