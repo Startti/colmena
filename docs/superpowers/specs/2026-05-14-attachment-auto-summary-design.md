@@ -45,7 +45,8 @@ We need a way to populate `description` automatically, cheaply, and reliably —
 - **Office formats in v1.** `docx`, `xlsx`, `pptx` get `filename` fallback initially. Extractors can be added later without rearchitecting.
 - **Token-exact truncation.** We truncate by characters (cheap, deterministic) instead of by provider tokens. Estimation is "~4 chars per token", precise enough for cost prediction.
 - **Caching the summary cross-session.** Each `agent_session_id` gets its own registry row; same physical file uploaded into two sessions will be summarised twice.
-- **Background / fire-and-forget tasks.** Summary completes within the turn (parallel with answer, bounded by timeout). No `tokio::spawn` orphans.
+- **Background / fire-and-forget tasks.** Summary completes within the turn (parallel with answer, bounded by timeout). Tasks live inside a `tokio::task::JoinSet` that aborts every member on drop — no orphan `tokio::spawn` handles.
+- **Inline (base64) attachments.** When a file is uploaded as inline bytes (no signed URL or path), the bytes are consumed by `upload_streaming` and not retained. Summary path skips `AttachmentSource::Inline` rows in v1. Callers should pass `description` manually for inline uploads. v2 may tee the upload stream to retain bytes for second-read.
 
 ## Architecture
 
@@ -244,32 +245,62 @@ Post-process the model output:
 The summary tasks and the answer call run via `tokio::join!`:
 
 ```rust
-let summary_fut = tokio::time::timeout(
-    summary_timeout,
-    run_summaries(summary_inputs, &summary_generator),
+let summary_fut = async move {
+    let mut set = tokio::task::JoinSet::new();
+    for target in targets {
+        set.spawn(async move {
+            let outcome = generate_one_summary(...).await;
+            // persist on Generated
+        });
+    }
+    while set.join_next().await.is_some() {}
+};
+
+let (answer, summary_outcome) = tokio::join!(
+    agent_service.run(params),
+    tokio::time::timeout(summary_timeout, summary_fut),
 );
-let (answer, summary_outcomes) = tokio::join!(answer_fut, summary_fut);
 ```
 
-If multiple files need summarising in the same turn, their summary calls run **concurrently** with each other (not sequentially) via `futures::future::join_all`, so total time is `max(individual_summary_calls)` not the sum.
+If multiple files need summarising in the same turn, each spawns into the `JoinSet` and runs **concurrently** with the others — total batch time is `max(individual_summary_calls)` not the sum.
 
-### Timeout
+### Two-layer timeout
 
-`tokio::time::timeout(summary_timeout_secs, ...)` wraps the whole batch of summary tasks. On timeout, the batch is cancelled (drops the futures); the answer call is unaffected because the two are joined, not raced.
+There are two `tokio::time::timeout` wraps:
 
-Worst-case turn-1 latency: `max(answer_latency, summary_timeout_secs)`. With the default 15s timeout, this is bounded.
+1. **Per-call timeout** (inside `LlmAttachmentSummaryGenerator::generate`): wraps the single `repo.call(request).await`. Bounds each individual attachment's summary call. On elapse, returns `SummaryError::LlmCallFailed("timeout after Xs")`. Uses `SummaryConfig.timeout` (= `summary_timeout_secs`).
+
+2. **Batch-level timeout** (in `llm.rs::execute`): wraps the entire `summary_fut` (the `JoinSet` drain). Acts as a hard ceiling on user-facing latency. On elapse, the future is dropped, which drops the `JoinSet`, which aborts every in-flight task. Uses the same `summary_timeout_secs` value.
+
+The answer call is never wrapped — it runs uninterrupted. Worst-case `execute` latency: `max(answer_latency, summary_timeout_secs)`.
+
+### Cancellation via JoinSet drop
+
+The summary path uses `tokio::task::JoinSet` (not raw `tokio::spawn` with detached `JoinHandle`s). Dropping the `JoinSet` aborts every member task. This means:
+
+- **Batch timeout fires** → the wrapping `summary_fut` is dropped → `JoinSet` drops → all in-flight LLM calls and DB writes are aborted cleanly. No orphan tasks writing stale summaries after the node returned.
+- **Caller cancels `execute`** (CTRL+C, DAG abort, user closes connection) → same chain. No task survives the parent future.
+
+This is the critical fix vs naive `tokio::spawn(...)` + `Vec<JoinHandle>`: dropping a `JoinHandle` does **not** abort its task; the task keeps running detached. The original Task 9 implementation used the naive pattern and was caught in code review (see fix commit `9ea5d02`).
 
 ### Persistence ordering
 
 After `tokio::join!` returns:
 
-1. If `summary_outcomes` is `Ok(results)`: for each result with a non-empty summary, call `registry.update_description(document_id, summary)`. Failures (per-file) are logged; we continue to the next file.
-2. If `summary_outcomes` is `Err(_)` (timeout): no updates. Rows stay with `description=null`.
-3. If `answer` is `Err(_)`: we **still** persist any successful summaries before returning the answer error. The summary helps turn 2 regardless of turn-1 success.
+1. Each `set.spawn(...)` task that produced `SummaryOutcome::Generated(text)` already called `registry.update_description(...)` from inside the task body. Writes happen as each summary completes, not batched at the end.
+2. `Skipped` / `Failed` outcomes log info/warn and do not write.
+3. Errors from `update_description` are logged but do not propagate (best-effort).
+4. If the batch-level timeout fires: in-flight tasks are aborted mid-write (race-safe because Postgres / SQLite transactions either commit or roll back atomically). Rows not yet updated stay with `description = null`.
+5. If `agent_run_result` is `Err`: we still wait for `summary_fut` to finish (within timeout) so any in-flight summaries are persisted. The summary helps turn 2 regardless of turn-1 success.
 
-### Cancellation
+### Cancellation summary
 
-If the parent `execute()` future is dropped (user aborts the request), both `answer_fut` and `summary_fut` are dropped — Rust's `Drop` for futures cancels the in-flight tasks naturally. No orphans.
+| Trigger | Effect |
+|---|---|
+| `execute()` future dropped (caller abort) | `JoinSet` drops → all summary tasks aborted, no stale writes |
+| Batch timeout (`summary_timeout_secs`) | `JoinSet` drops → all in-flight tasks aborted |
+| Per-call timeout (inside generator) | That one attachment's call returns `LlmCallFailed("timeout")`; other tasks unaffected |
+| One task panics | Tokio captures the panic; other tasks continue; the failing task is treated as `Failed` |
 
 ## Error handling matrix
 

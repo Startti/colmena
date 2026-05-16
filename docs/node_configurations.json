@@ -1225,6 +1225,41 @@
           "description": "When true (default), this llm_call exposes the synthetic load_attachment tool and contributes any files[] entries it receives to the session-wide attachment catalog. When false, the node still registers its files[] (so other nodes can read them) but the LLM in this node will NOT see the load_attachment tool — use for specialist agents that must not read documents uploaded elsewhere in the session.",
           "example": false
         },
+        "summary_enabled": {
+          "type": "boolean",
+          "required": false,
+          "default": true,
+          "description": "Master switch for attachment auto-summary. When true (default), files registered via `files[]` WITHOUT a caller-supplied `description` trigger a one-shot LLM call that generates a one-line description and persists it in `conversation_attachments.description`. The summary call runs in parallel with the main answer call via `tokio::join!`, so it does not add to user-facing latency unless the timeout is hit. Set to `false` to disable auto-summary entirely (callers must provide their own `description` per file, or the catalog falls back to `filename`). The summary call is one-shot and history-less — it does NOT touch `llm_node_history` or count toward conversation memory. Failure modes (extraction error, LLM error, timeout) are silent: `description` stays null and the catalog falls back to `filename`. See developer_guide/31_load_attachment.md for the full pipeline.",
+          "example": false
+        },
+        "summary_max_chars": {
+          "type": "integer",
+          "required": false,
+          "default": 5000,
+          "description": "Maximum number of Unicode characters of extracted text sent to the summary LLM after local extraction (PDF via `pdf-extract`, UTF-8 decode for `text/*` mimes). Truncation is char-indexed and safe across multi-byte sequences. The default 5000 ≈ first 2 pages of typical prose, which is enough for the cataloging model to identify document type/topic without paying for the full input. Increase if your documents have important content past the first 2 pages (e.g., long forms where the relevant block is on page 5). Ignored for images — `image/*` mimes are sent whole to the vision model regardless of this value. Char-based (not token-based) for determinism: ~4 chars ≈ 1 token rule of thumb means 5000 chars ≈ 1250 tokens of cataloger input.",
+          "example": 8000
+        },
+        "summary_model": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Override the model used for the summary LLM call. When omitted (null), the engine picks the cheap tier of the main `llm_call`'s provider: Google→`gemini-2.5-flash`, OpenAI→`gpt-4o-mini`, Anthropic→`claude-haiku-4-5-20251001`. The summary call always uses the SAME provider as the main call to reuse the single `api_key` — there is no separate provider field. Use this to upgrade the summary quality (e.g., set to `gemini-2.5-pro` when document descriptions matter more than cost) or to pin to a specific model version. If your provider releases a cheaper variant, you can either set this field per node or wait for the engine to update the default mapping in `provider_cheap_tier`.",
+          "example": "gemini-2.5-flash"
+        },
+        "summary_timeout_secs": {
+          "type": "integer",
+          "required": false,
+          "default": 15,
+          "description": "Hard per-call timeout (in seconds) wrapping the LLM call inside `LlmAttachmentSummaryGenerator`. If the cheap-tier model takes longer than this for a single attachment, the call is cancelled and that attachment's `description` stays null. The default 15s is generous for Flash/Haiku/4o-mini with ~5000 chars of input (typical p99 < 3s). A SECOND layer of timeout — a batch-level ceiling using the same value — also wraps the entire summary future in `llm.rs::execute` to bound user-facing latency: even if N attachments fan out concurrently and one stalls past the timeout, the batch is dropped and the main answer call returns. Summary tasks run inside a `tokio::task::JoinSet`, so dropping the future aborts all in-flight LLM calls cleanly (no orphaned tasks writing stale summaries after the node returns). Increase if you regularly summarise large PDFs and see false-positive cancellations; decrease for tighter SLAs.",
+          "example": 20
+        },
+        "summary_max_output_chars": {
+          "type": "integer",
+          "required": false,
+          "default": 200,
+          "description": "Hard cap on the produced summary's length, in characters. Applied at two layers: (1) the summary prompt instructs the cataloger model to keep its output under this many chars (soft hint to the LLM), and (2) the adapter char-truncates the response post-hoc to enforce the limit regardless of the model's compliance. The default 200 chars fits a one-line description like `\"Q3 2026 Financial Report — revenue, expenses, EBITDA\"` which is what the `load_attachment` catalog renders per row. Increasing past ~300 starts bloating the tool description shown to the main LLM, which can hurt routing accuracy when many attachments exist. Decrease for very terse catalogs.",
+          "example": 150
+        },
         "tool_configurations": {
           "type": "object",
           "required": false,
