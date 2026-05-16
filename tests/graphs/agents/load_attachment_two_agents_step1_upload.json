@@ -16,10 +16,10 @@
         "files": [
           {
             "id": "shared_doc",
-            "label": "Shared invoice",
-            "url": "$REPLACE_WITH_SIGNED_URL",
+            "label": "Hello PDF fixture",
+            "path": "src/libs/colmena/tests/fixtures/hello.pdf",
             "mime_type": "application/pdf",
-            "filename": "DelayedReceipt.pdf"
+            "filename": "hello.pdf"
           }
         ]
       }
