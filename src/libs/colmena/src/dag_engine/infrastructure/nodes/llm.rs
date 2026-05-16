@@ -890,6 +890,53 @@ impl ExecutableNode for LlmNode {
                                 }
                             }
                         }
+                        FileSource::InlineBytes { bytes } => {
+                            let bytes_owned = bytes.clone();
+                            let mime_type = file.mime_type.clone();
+                            let filename = file.filename.clone();
+                            let document_id = file.document_id.clone();
+                            let size_hint = file.size_hint;
+
+                            crate::colmena_log!(
+                                "[file-resolve-no-cache] '{}' (inline, {} B) uploading to {} Files API",
+                                filename,
+                                bytes_owned.len(),
+                                provider_kind
+                            );
+
+                            let stream: crate::llm::domain::BoxedByteStream =
+                                Box::pin(futures::stream::once(async move {
+                                    Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(
+                                        bytes_owned,
+                                    ))
+                                }));
+                            match file_provider
+                                .upload_streaming(stream, &mime_type, &filename)
+                                .await
+                            {
+                                Ok(provider_ref) => {
+                                    crate::colmena_log!(
+                                        "[file-resolve-no-cache] '{}' (inline) uploaded as id '{}'",
+                                        filename,
+                                        provider_ref.provider_file_id
+                                    );
+                                    new_files.push(crate::llm::domain::FileData {
+                                        document_id,
+                                        mime_type,
+                                        filename,
+                                        size_hint,
+                                        source: FileSource::Uploaded(provider_ref),
+                                    });
+                                }
+                                Err(e) => {
+                                    crate::colmena_log!(
+                                        "[file-resolve-no-cache] WARN inline upload failed for '{}': {}",
+                                        filename,
+                                        e
+                                    );
+                                }
+                            }
+                        }
                         _ => new_files.push(file),
                     }
                 }
