@@ -1,6 +1,6 @@
 # Issue — `load_attachment` registration skipped for `path:` / `data:` (base64) files
 
-**Status:** Known v1 limitation — fix deferred to v2
+**Status:** Fixed in [docs/superpowers/plans/2026-05-16-load-attachment-path-data-fix.md](../plans/2026-05-16-load-attachment-path-data-fix.md)
 **Date raised:** 2026-05-16
 **Discovered during:** Two-agent integration testing of the auto-summary feature
 **Affects:** Both `load_attachment` (the base feature) and the new auto-summary path. They share the same registration code so neither works for inline-source files.
