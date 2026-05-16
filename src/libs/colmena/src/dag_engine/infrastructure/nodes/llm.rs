@@ -776,14 +776,13 @@ impl ExecutableNode for LlmNode {
         // C1: resolve FileSource::SignedUrl entries via cache + download + upload pipe.
         // Uses the canonical LlmCallUseCase::resolve_files orchestration when DATABASE_URL
         // is available; falls back to a bare download+upload loop otherwise.
-        // TODO(v2): this gate only fires for SignedUrl, leaving path: and data: (base64)
-        // files un-uploaded and therefore un-registered in conversation_attachments. See
-        // docs/superpowers/specs/2026-05-16-load-attachment-path-data-registration-issue.md
-        // for the full diagnosis and fix plan. Workaround for v1: use `url:` (signed URL).
-        if resolved_files
-            .iter()
-            .any(|f| matches!(f.source, crate::llm::domain::FileSource::SignedUrl(_)))
-        {
+        if resolved_files.iter().any(|f| {
+            matches!(
+                f.source,
+                crate::llm::domain::FileSource::SignedUrl(_)
+                    | crate::llm::domain::FileSource::InlineBytes { .. }
+            )
+        }) {
             use crate::llm::application::LlmCallUseCase;
             use crate::llm::infrastructure::files::{
                 FileProviderFactory, PostgresFileCache, SignedUrlDownloader,
