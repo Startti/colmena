@@ -296,12 +296,53 @@ impl LlmCallUseCase {
         dedup: &mut HashMap<String, ProviderFileRef>,
     ) -> Result<FileData, LlmError> {
         match &file.source {
-            FileSource::InlineBytes { .. } => {
+            FileSource::InlineBytes { bytes } => {
+                let bytes_owned = bytes.clone();
                 crate::colmena_log!(
-                    "[file-resolve] '{}' is inline bytes ({}), passing through unchanged",
+                    "[file-resolve] '{}' is inline bytes ({}, {} B), uploading to {} Files API",
                     file.filename,
-                    file.mime_type
+                    file.mime_type,
+                    bytes_owned.len(),
+                    provider_kind
                 );
+
+                // Intra-request dedup when the caller supplied a document_id.
+                if let Some(doc_id) = file.document_id.as_deref() {
+                    if let Some(r) = dedup.get(doc_id) {
+                        crate::colmena_log!(
+                            "[file-resolve] '{}' (id={}) inline-bytes intra-request dedup HIT — reusing file_id {}",
+                            file.filename,
+                            doc_id,
+                            r.provider_file_id
+                        );
+                        file.source = FileSource::Uploaded(r.clone());
+                        return Ok(file);
+                    }
+                }
+
+                // Cross-request cache is intentionally NOT consulted for InlineBytes:
+                // the cache key is (document_id, provider) and does not include a
+                // content hash, so a stale entry could hand out a file_id pointing
+                // at outdated content. The conversation_attachments registry covers
+                // cross-turn reuse via load_attachment.
+
+                let stream: BoxedByteStream = Box::pin(futures::stream::once(async move {
+                    Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(bytes_owned))
+                }));
+                let provider_ref = provider
+                    .upload_streaming(stream, &file.mime_type, &file.filename)
+                    .await?;
+
+                crate::colmena_log!(
+                    "[file-resolve] '{}' inline-bytes upload complete (file_id={})",
+                    file.filename,
+                    provider_ref.provider_file_id
+                );
+
+                if let Some(doc_id) = file.document_id.as_deref() {
+                    dedup.insert(doc_id.to_string(), provider_ref.clone());
+                }
+                file.source = FileSource::Uploaded(provider_ref);
                 Ok(file)
             }
             FileSource::Uploaded(r) => {
@@ -788,35 +829,6 @@ mod resolve_files_tests {
         match &files[0].source {
             FileSource::SignedUrl(_) => {}
             _ => panic!("expected SignedUrl preserved for OpenAI image"),
-        }
-    }
-
-    #[tokio::test]
-    async fn inline_bytes_passes_through_untouched() {
-        let cache = Arc::new(StubCache::new());
-        let provider = Arc::new(StubProvider::new());
-        let downloader = SignedUrlDownloader::new();
-
-        let mut files = vec![FileData::inline(
-            "application/pdf".into(),
-            "x.pdf".into(),
-            b"hello".to_vec(),
-        )];
-
-        LlmCallUseCase::resolve_files(
-            &mut files,
-            ProviderKind::Anthropic,
-            provider.clone(),
-            cache.clone(),
-            &downloader,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(*provider.upload_count.lock().unwrap(), 0);
-        match &files[0].source {
-            FileSource::InlineBytes { .. } => {}
-            _ => panic!("inline should pass through"),
         }
     }
 
