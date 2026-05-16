@@ -819,6 +819,100 @@ mod resolve_files_tests {
             _ => panic!("inline should pass through"),
         }
     }
+
+    #[tokio::test]
+    async fn resolve_files_uploads_inline_bytes_and_marks_uploaded() {
+        // GIVEN a single InlineBytes file (e.g. from path: or data: input)
+        let bytes = b"%PDF-1.4 hello world".to_vec();
+        let mut files = vec![FileData {
+            document_id: Some("doc-inline-1".to_string()),
+            mime_type: "application/pdf".to_string(),
+            filename: "hello.pdf".to_string(),
+            size_hint: Some(bytes.len() as u64),
+            source: FileSource::InlineBytes { bytes },
+        }];
+
+        // WHEN we run resolve_files with stub provider + stub cache
+        let provider: Arc<dyn FileProviderRepository> = Arc::new(StubProvider::new());
+        let cache: Arc<dyn FileCacheRepository> = Arc::new(StubCache::new());
+        let fetcher = SignedUrlDownloader::new();
+
+        LlmCallUseCase::resolve_files(
+            &mut files,
+            ProviderKind::Anthropic,
+            provider.clone(),
+            cache,
+            &fetcher,
+        )
+        .await
+        .expect("resolve_files should succeed");
+
+        // THEN the file's source should be Uploaded with the stub-provided id
+        assert_eq!(files.len(), 1);
+        match &files[0].source {
+            FileSource::Uploaded(r) => {
+                assert_eq!(r.provider_file_id, "uploaded-1");
+                assert_eq!(r.mime_type, "application/pdf");
+                assert_eq!(r.filename, "hello.pdf");
+            }
+            other => panic!("expected Uploaded, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_files_inline_bytes_intra_request_dedup() {
+        // GIVEN two InlineBytes entries with the SAME document_id
+        let bytes = b"same content".to_vec();
+        let mut files = vec![
+            FileData {
+                document_id: Some("doc-dedup".to_string()),
+                mime_type: "application/pdf".to_string(),
+                filename: "a.pdf".to_string(),
+                size_hint: Some(bytes.len() as u64),
+                source: FileSource::InlineBytes {
+                    bytes: bytes.clone(),
+                },
+            },
+            FileData {
+                document_id: Some("doc-dedup".to_string()),
+                mime_type: "application/pdf".to_string(),
+                filename: "b.pdf".to_string(),
+                size_hint: Some(bytes.len() as u64),
+                source: FileSource::InlineBytes { bytes },
+            },
+        ];
+
+        let stub_provider = Arc::new(StubProvider::new());
+        let provider: Arc<dyn FileProviderRepository> = stub_provider.clone();
+        let cache: Arc<dyn FileCacheRepository> = Arc::new(StubCache::new());
+        let fetcher = SignedUrlDownloader::new();
+
+        LlmCallUseCase::resolve_files(
+            &mut files,
+            ProviderKind::Anthropic,
+            provider,
+            cache,
+            &fetcher,
+        )
+        .await
+        .unwrap();
+
+        // THEN only ONE upload was issued (second was deduped)
+        let upload_count = *stub_provider.upload_count.lock().unwrap();
+        assert_eq!(
+            upload_count, 1,
+            "expected exactly 1 upload for two files with same document_id, got {}",
+            upload_count
+        );
+
+        // Both entries should be Uploaded with the same provider_file_id
+        match (&files[0].source, &files[1].source) {
+            (FileSource::Uploaded(a), FileSource::Uploaded(b)) => {
+                assert_eq!(a.provider_file_id, b.provider_file_id);
+            }
+            _ => panic!("expected both Uploaded"),
+        }
+    }
 }
 
 #[cfg(test)]
