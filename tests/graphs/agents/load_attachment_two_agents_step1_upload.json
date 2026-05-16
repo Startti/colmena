@@ -1,0 +1,32 @@
+{
+  "$comment": "Step 1 of the two-agents test. The uploader agent receives a PDF via files[] and registers it in conversation_attachments. Run this first with a stable --agent-session-id (e.g. agent_two_001). Then run step2 (read) or step3 (isolated) with the SAME agent-session-id to verify cross-turn attachment visibility.",
+  "nodes": {
+    "uploader": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "session_id": "two_agents_step1_uploader",
+        "attachments_enabled": true,
+        "summary_enabled": true,
+        "system_message": "You are an upload acknowledger. Reply in one short sentence confirming the document was received. Do not describe its contents.",
+        "prompt": "Confirma que recibiste el documento adjunto.",
+        "files": [
+          {
+            "id": "shared_doc",
+            "label": "Shared invoice",
+            "url": "$REPLACE_WITH_SIGNED_URL",
+            "mime_type": "application/pdf",
+            "filename": "DelayedReceipt.pdf"
+          }
+        ]
+      }
+    },
+    "out": { "type": "log" }
+  },
+  "edges": [
+    { "from": "uploader", "to": "out" }
+  ]
+}

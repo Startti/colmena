@@ -1,0 +1,22 @@
+{
+  "$comment": "Step 3 of the two-agents test. Same shape as step2 but attachments_enabled=false on the reader. The reader should NOT see load_attachment in its tools, even though the row exists in conversation_attachments for this agent_session_id. Expected behaviour: the model answers honestly that it has no access. Run with the SAME --agent-session-id used in step 1.",
+  "nodes": {
+    "isolated_reader": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "session_id": "two_agents_step3_isolated",
+        "attachments_enabled": false,
+        "system_message": "You are an honest assistant. If you do not have access to any documents, say so explicitly. Do not invent contents.",
+        "prompt": "¿Qué dice el documento que se subió antes en esta sesión? Si no tenés acceso a ningún documento, decímelo claramente."
+      }
+    },
+    "out": { "type": "log" }
+  },
+  "edges": [
+    { "from": "isolated_reader", "to": "out" }
+  ]
+}

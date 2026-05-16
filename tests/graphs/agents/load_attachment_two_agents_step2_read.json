@@ -1,0 +1,22 @@
+{
+  "$comment": "Step 2 of the two-agents test. The reader agent has NO files[] of its own — it only inherits the session catalog via agent_session_id. With attachments_enabled=true (default), the LLM sees load_attachment in its tools and should call it to read the doc registered in step 1. Run with the SAME --agent-session-id used in step 1.",
+  "nodes": {
+    "reader": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "session_id": "two_agents_step2_reader",
+        "attachments_enabled": true,
+        "system_message": "You are a document analyst. When the user asks about a document, use the load_attachment tool to fetch it, then describe its contents based on what you read. If no documents are available, say so explicitly.",
+        "prompt": "¿Qué dice el documento que se subió antes en esta sesión? Léelo con load_attachment y cuéntame en una línea qué contiene."
+      }
+    },
+    "out": { "type": "log" }
+  },
+  "edges": [
+    { "from": "reader", "to": "out" }
+  ]
+}
