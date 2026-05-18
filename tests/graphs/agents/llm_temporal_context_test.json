@@ -1,0 +1,22 @@
+{
+  "_comment": "Smoke test for LLM temporal/geographic/locale context injection. Run with `source .env && cargo run --bin dag_engine -- run tests/graphs/agents/llm_temporal_context_test.json`. Expected: the assistant response references the current date/time in ISO 8601, the Bogotá location, the America/Bogota timezone (UTC-5), and answers in Spanish (per es-CO locale).",
+  "timezone": "America/Bogota",
+  "location": "Bogotá, Colombia",
+  "locale": "es-CO",
+  "nodes": {
+    "ask": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "system_message": "You are a helpful local assistant. Answer using the contextual information you have. Respond in the user's locale language.",
+        "prompt": "¿Qué fecha y hora es ahora? ¿Dónde estoy ubicado? ¿En qué idioma debo responder?"
+      }
+    },
+    "out": { "type": "log" }
+  },
+  "edges": [
+    { "from": "ask", "to": "out" }
+  ]
+}
