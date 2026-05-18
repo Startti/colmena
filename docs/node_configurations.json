@@ -73,6 +73,33 @@
     }
   },
 
+  "graph_root_fields": {
+    "description": "Optional fields declared at the top level of the graph JSON, alongside `nodes` and `edges`. The engine propagates them to every node via the `__colmena_*` namespace, so individual nodes can read them as needed (most relevantly the `llm_call` node, which renders them into the system message). Defaults apply per-field when the key is omitted; see each field's `default` below.",
+    "fields": {
+      "timezone": {
+        "type": "string",
+        "required": false,
+        "default": "America/Bogota",
+        "description": "IANA timezone identifier (e.g. `America/Bogota`, `Europe/Madrid`, `Asia/Kolkata`). Used by `llm_call` to render the temporal context block at the top of the system message: the current date/time is computed at execution time from the server clock + this timezone, then formatted as ISO 8601 (`2026-05-17T10:34:00-05:00`) with a human-readable echo. Invalid IANA strings silently fall back to `America/Bogota`, and the displayed timezone label is rewritten to match the fallback so the rendered block stays internally coherent (offset always matches the label). See developer_guide/31 (temporal context section) for the rendered format.",
+        "example": "Europe/Madrid"
+      },
+      "location": {
+        "type": "string",
+        "required": false,
+        "default": "Bogotá, Colombia",
+        "description": "Free-text geographic location shown to the LLM in the temporal context block. No validation; used verbatim. Use whatever level of detail you want the LLM to see (city + country, country only, region, address, etc.). Pair with `locale` when language matters — `location` describes where the user is, `locale` declares which language to respond in.",
+        "example": "Madrid, España"
+      },
+      "locale": {
+        "type": "string",
+        "required": false,
+        "default": "es-CO",
+        "description": "BCP 47 language+region tag (e.g. `es-CO`, `en-US`, `pt-BR`, `hi-IN`). Tells the LLM which language to respond in, independently of `location` — a user in `Bogotá, Colombia` might still want English replies (`en-CO`). No validation; passed verbatim to the model, which is the final arbiter of which language to use. Full BCP 47 grammar is supported (script subtags, region subtags, variants, extensions) but most graphs only need the `language-region` form.",
+        "example": "en-US"
+      }
+    }
+  },
+
   "llm_shared_fields": {
     "description": "These configuration fields are shared across all LLM-powered nodes: llm_call, information_extraction, planner, critic, reactor, and the sub-components of orchestrator (planner, critic, phase_reactor, final_reactor). Each LLM node reads these from its config object.",
     "fields": {
