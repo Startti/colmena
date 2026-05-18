@@ -87,6 +87,7 @@ struct SummaryTarget {
     source: crate::llm::domain::attachments::AttachmentSource,
     mime_type: String,
     filename: String,
+    inline_bytes: Option<Vec<u8>>,
 }
 
 async fn generate_one_summary(
@@ -102,9 +103,9 @@ async fn generate_one_summary(
     };
 
     // 1. Acquire bytes (no size bound — frontend enforces 100 MB).
-    // v1: inline-bytes attachments are skipped before reaching here (see
-    // auto-registration loop), so we always pass `None`.
-    let bytes = match acquire_bytes(&target.source, None, fetcher).await {
+    // `target.inline_bytes` carries the original bytes for Inline sources
+    // (data: base64 uploads), since the upload pipeline consumed the first clone.
+    let bytes = match acquire_bytes(&target.source, target.inline_bytes.as_deref(), fetcher).await {
         Ok(b) => b,
         Err(e) => {
             return SummaryOutcome::Skipped {
@@ -1068,20 +1069,20 @@ impl ExecutableNode for LlmNode {
                 );
 
                 if summary_enabled && description.is_none() {
-                    // v1 limitation: inline-bytes attachments lost their original
-                    // bytes before reaching this point (they were uploaded to the
-                    // provider, and the registry source resolves to `Inline`
-                    // with no fetchable URL/path). Skip summary for them — the
-                    // caller can pass `description` explicitly if a catalog
-                    // entry is required. TODO(v2): retain the original bytes
-                    // through the upload pipeline so they can be summarised
-                    // here as well.
-                    if !matches!(source, AttachmentSource::Inline) {
+                    let inline_bytes_for_summary = if matches!(source, AttachmentSource::Inline) {
+                        file.retained_inline_bytes.clone()
+                    } else {
+                        None
+                    };
+                    let has_summarisable_source =
+                        !matches!(source, AttachmentSource::Inline) || inline_bytes_for_summary.is_some();
+                    if has_summarisable_source {
                         summary_targets.push(SummaryTarget {
                             document_id: document_id.clone(),
                             source,
                             mime_type: file.mime_type.clone(),
                             filename: file.filename.clone(),
+                            inline_bytes: inline_bytes_for_summary,
                         });
                     }
                 }
