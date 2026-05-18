@@ -2658,3 +2658,58 @@ mod temporal_context_helper_tests {
         assert!(out.contains("Locale: en-US"));
     }
 }
+
+#[cfg(test)]
+mod inline_bytes_auto_summary_tests {
+    //! RED gate for the `data:` (base64) inline-bytes auto-summary fix.
+    //!
+    //! Today the auto-register loop drops inline-bytes attachments before
+    //! they reach the summary generator (llm.rs ~line 1074): the original
+    //! decoded bytes are consumed by the upload to the provider's Files
+    //! API and never reach `SummaryTarget`. The fix retains the original
+    //! bytes on `FileData::retained_inline_bytes` and threads them into a
+    //! new `SummaryTarget::inline_bytes` field, so summarisation works
+    //! for inline uploads too.
+    //!
+    //! This test references both fields by name. Both are absent in the
+    //! current production structs — compile failure IS the RED signal.
+    use super::SummaryTarget;
+    use crate::llm::domain::attachments::AttachmentSource;
+    use crate::llm::domain::{FileData, FileSource, ProviderFileRef, ProviderKind};
+
+    #[test]
+    fn summary_target_for_inline_data_carries_decoded_bytes() {
+        // Mimics the post-upload state: `data: "aGVsbG8="` was parsed into
+        // InlineBytes(b"hello"), then `resolve_one` uploaded it and
+        // replaced `source` with `Uploaded(..)`. The fix preserves the
+        // original bytes on `retained_inline_bytes`.
+        let file = FileData {
+            document_id: None,
+            mime_type: "text/plain".into(),
+            filename: "hello.txt".into(),
+            size_hint: Some(5),
+            source: FileSource::Uploaded(ProviderFileRef {
+                provider: ProviderKind::Google,
+                provider_file_id: "files/abc123".into(),
+                mime_type: "text/plain".into(),
+                filename: "hello.txt".into(),
+                expires_at: None,
+            }),
+            retained_inline_bytes: Some(b"hello".to_vec()),
+        };
+
+        // The auto-register loop must build a SummaryTarget whose
+        // `inline_bytes` field carries the retained bytes.
+        let target = SummaryTarget {
+            document_id: "doc-1".into(),
+            source: AttachmentSource::Inline,
+            mime_type: file.mime_type.clone(),
+            filename: file.filename.clone(),
+            inline_bytes: file.retained_inline_bytes.clone(),
+        };
+
+        assert_eq!(target.inline_bytes.as_deref(), Some(b"hello".as_ref()));
+        assert_eq!(target.mime_type, "text/plain");
+        assert_eq!(target.filename, "hello.txt");
+    }
+}
