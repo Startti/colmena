@@ -1,8 +1,8 @@
-# Cambios recientes — auditoría 2026-05-03 al 2026-05-17
+# Cambios recientes — auditoría 2026-05-03 al 2026-05-18
 
-> **Generado:** 2026-05-17
+> **Generado:** 2026-05-17 · **Actualizado:** 2026-05-18 (cierre de Gap #2 + diagramas)
 > **Alcance:** Commits sobre `develop` desde 2026-05-11 (los anteriores a esta ventana fueron auditados previamente).
-> **Total:** ~80 commits agrupados en 7 features.
+> **Total:** ~90 commits agrupados en 8 features.
 
 ## Cómo leer este documento
 
@@ -68,14 +68,34 @@ Al final hay una **matriz de completitud** por feature y una sección de **gaps 
 
 ## 4. LLM temporal & geographic context injection
 
-**Qué cambió.** Spec aprobado, **sin implementación todavía**. Diseña la inyección automática de contexto temporal (fecha/hora actual) y geográfico (timezone / locale) al system message del `llm_call`, evitando que cada graph author lo escriba manualmente.
+**Qué cambió.** Inyección automática al inicio del `system_message` de cada `llm_call` de un bloque con fecha/hora local (**ISO 8601** + echo human-readable), timezone IANA, location free-text, y locale BCP 47. Tres fields opcionales al root del graph JSON (`timezone`, `location`, `locale`) propagan vía `__colmena_*` a todos los nodos; el `llm_call` los lee y llama al helper `format_temporal_context_block` que renderiza el bloque con `chrono` + `chrono-tz`. Defaults: `America/Bogota` / `Bogotá, Colombia` / `es-CO`. IANA inválido cae a Bogotá silenciosamente y reescribe el label visible para que `(timezone, offset)` queden coherentes.
+
+Ejemplo del bloque renderizado:
+
+```
+## Temporal & Geographic Context
+Current date and time: 2026-05-18T10:34:00-05:00 (Sunday, May 18, 2026, 10:34 AM)
+Timezone: America/Bogota (UTC-5)
+Location: Bogotá, Colombia
+Locale: es-CO
+```
+
+**Standards seguidos** (revisión hecha el 2026-05-18 antes de implementar):
+- ISO 8601 / RFC 3339 — mismo formato que Anthropic Claude inyecta en sus system prompts.
+- IANA TZDB para timezones (universal).
+- BCP 47 (RFC 5646) para locale (estándar formal de "idioma+región", usado por iOS/Android/CLDR).
 
 **Documentación:**
-- Spec: [docs/superpowers/specs/2026-05-12-llm-temporal-geographic-context-design.md](superpowers/specs/2026-05-12-llm-temporal-geographic-context-design.md) — status: approved.
-- Plan: ❌ no existe.
-- Implementación: ❌ ningún commit asociado.
+- Spec: [docs/superpowers/specs/2026-05-12-llm-temporal-geographic-context-design.md](superpowers/specs/2026-05-12-llm-temporal-geographic-context-design.md) — status: approved (revisado 2026-05-18 para alinear a ISO 8601 + BCP 47).
+- Plan: [docs/superpowers/plans/2026-05-18-llm-temporal-geographic-context.md](superpowers/plans/2026-05-18-llm-temporal-geographic-context.md) — 7 tasks TDD ejecutadas.
+- **Dev guide: [docs/developer_guide/35_temporal_geographic_context.md](developer_guide/35_temporal_geographic_context.md)** — incluye diagrama detallado del pipeline end-to-end (JSON → struct → inputs → helper → bloque → system message → request al provider).
+- Index: [docs/DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) entrada #35.
+- Schema: [docs/node_configurations.json](node_configurations.json) → nueva sección `graph_root_fields` con los 3 campos.
+- Test graph: `tests/graphs/agents/llm_temporal_context_test.json` — smoke con Gemini Flash + Bogotá + es-CO, verificado e2e (modelo respondió en español citando fecha actual y Bogotá).
 
-**Estado:** 📐 Spec-only. Pendiente: escribir el plan TDD y ejecutarlo.
+**Commits:** `4d0cca5` (spec + plan revision aligning to ISO 8601/BCP 47), `9a3bc0b` (chrono-tz dep), `6cd8e79` (Graph struct), `72e8304` (helper TDD), `be99117` (dead_code fix interino), `bc4c513` (engine injection), `6bbfba8` (wire en llm.rs + dead_code removal), `1581a6e` (smoke graph), `1a6bafb` (docs/node_configurations.json), `<this commit>` (dev guide 35 + diagrama + actualización de este changelog) (2026-05-18).
+
+**Estado:** ✅ Done + verificado e2e contra Gemini Flash real.
 
 ---
 
@@ -185,8 +205,8 @@ Después del fix, `path:` y `data:` se vuelven `Uploaded` antes de la registraci
 |---|---|---|---|---|---|---|
 | 1. ProviderKind rename | — | ✅ | ✅ | ✅ | ✅ (renamed) | Tarea de refactor, no de feature; no necesita spec |
 | 2. `secure_suspend_allowed` flag | — | ✅ | ✅ | ✅ | ✅ | OK |
-| 3. Secure values sliding TTL + masking | ✅ | ✅ | ⚠️ parcial | (n/a, no son fields del schema) | ✅ | Falta sección dedicada en dev guide |
-| 4. LLM temporal/geographic context | ✅ | ❌ | ❌ | ❌ | ❌ | Spec aprobado, sin implementación |
+| 3. Secure values sliding TTL + masking | ✅ | ✅ | ✅ | (n/a, no son fields del schema) | ✅ | Gap #1 cerrado el 2026-05-18 — sección dedicada en `13_security_strategy.md` |
+| 4. LLM temporal/geographic context | ✅ | ✅ | ✅ | ✅ (3 fields en `graph_root_fields`) | ✅ | Gap #2 cerrado el 2026-05-18 — implementado + dev guide con diagrama |
 | 5. `load_attachment` base | ✅ | ✅ | ✅ | ✅ | ✅ | OK |
 | 6. Attachment auto-summary | ✅ | ✅ | ✅ | ✅ (5 fields) | ✅ | OK |
 | 7. path/data registration fix | ✅ (issue) | ✅ | ✅ | (n/a) | ✅ (two-agent) | OK |
@@ -197,28 +217,30 @@ Después del fix, `path:` y `data:` se vuelven `Uploaded` antes de la registraci
 
 ## Gaps y acciones recomendadas
 
-### Gap #1 — Secure values sliding TTL no tiene sección en el dev guide
+> **Update 2026-05-18:** los tres gaps abajo se cerraron en una pasada paralela. Esta sección queda como histórico — para gaps activos, ver [docs/BACKLOG.md](BACKLOG.md).
 
-[docs/developer_guide/13_security_strategy.md](developer_guide/13_security_strategy.md) cubre la mecánica original de Secure Values pero **no explica las garantías nuevas** introducidas por el spec/plan del 2026-05-11:
+### Gap #1 — Secure values sliding TTL no tiene sección en el dev guide ✅ CERRADO 2026-05-18
 
-- TTL deslizante (24h, extendido en cada `decrypt`).
-- Cleanup periódico por expiración (no más barrido total al final del run).
-- Hardening del handle (sufijo random + min-length).
-- Outbound masking de tool responses.
+Estaba: doc gap. Implementación ya existía (2026-05-11) pero el dev guide no la reflejaba.
 
-**Acción:** agregar sección "## Sliding TTL + outbound masking" a `13_security_strategy.md` apuntando al spec.
+**Acción aplicada:** sección nueva "## Sliding TTL y outbound masking (desde 2026-05-11)" agregada a `13_security_strategy.md` (commit `b5b65d7`), cubriendo las 4 garantías con snippets SQL/Rust y cross-refs al spec. Footer del guide bumped a v1.3.
 
-### Gap #2 — LLM temporal/geographic context: spec aprobado sin implementación
+### Gap #2 — LLM temporal/geographic context: spec aprobado sin implementación ✅ CERRADO 2026-05-18
 
-Spec del 2026-05-12 marcado como `status: approved` pero ningún commit asociado en los 5 días siguientes. Pendiente: invocar `superpowers:writing-plans` para generar el plan TDD y ejecutarlo.
+Estaba: spec-only desde 2026-05-12.
 
-**Acción:** decidir si seguir adelante con el feature (escribir plan + implementar) o pausarlo y bajar el `status` a `parked` para evitar confusión.
+**Acción aplicada:**
+1. Spec **revisada** el 2026-05-18 para alinear a estándares (ISO 8601 + BCP 47 + locale field nuevo). Sin esta revisión, el formato human-only del datetime hubiera divergido de Anthropic y la industria. Commit `4d0cca5`.
+2. Plan TDD escrito (`2026-05-18-llm-temporal-geographic-context.md`, 7 tasks).
+3. Plan **ejecutado end-to-end** via subagent-driven-development (commits `9a3bc0b` a `1a6bafb`, 8 commits).
+4. Smoke graph verificado contra Gemini Flash real — modelo respondió en español citando fecha actual y Bogotá.
+5. Dev guide nueva: [`docs/developer_guide/35_temporal_geographic_context.md`](developer_guide/35_temporal_geographic_context.md) con **diagrama end-to-end del pipeline** (JSON → struct → inputs → helper → bloque → system message → provider). Index `DEVELOPER_GUIDE.md` actualizado con entrada #35.
 
-### Gap #3 — `data:` (base64 inline) sigue sin auto-summary
+### Gap #3 — `data:` (base64 inline) sigue sin auto-summary ✅ PARQUEADO 2026-05-18
 
-Conocido y documentado en `31_load_attachment.md` limitación #1 (post-fix de path/data): los bytes inline se consumen en el upload streaming y no se retienen, así que el summary path skipea esa fila. **Workaround:** caller pasa `description` manualmente. **Plan v2:** tee del upload stream para retener bytes — no escrito todavía.
+Estaba: limitación conocida del feature de auto-summary, documentada pero sin owner ni trigger explícito.
 
-**Acción:** opcional. Si producción usa principalmente signed URLs, no es urgente.
+**Acción aplicada:** parqueado formalmente en [docs/BACKLOG.md](BACKLOG.md) entrada #1 con template completo (origen, problema, workaround actual, por qué parqueado, fix v2 propuesto con tee de upload stream, acceptance criteria, estimación ~80-120 LOC, trigger explícito "cuando ADP empiece a usar uploads inline"). Commit `947bc06`.
 
 ---
 
