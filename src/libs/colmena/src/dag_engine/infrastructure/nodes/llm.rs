@@ -2141,6 +2141,10 @@ fn sqlite_url_for_node(config: &serde_json::Value) -> Option<String> {
 /// The block renders ISO 8601 as the primary timestamp (canonical, locale-
 /// neutral, machine-friendly for time reasoning) with a human-readable echo
 /// in parentheses so the model can surface time naturally in its replies.
+// TODO(TC-Task 5): remove #[allow(dead_code)] once wired into
+// LlmNode::execute. The helper is tested in isolation here; the
+// production caller is added in the next plan task.
+#[allow(dead_code)]
 fn format_temporal_context_block(
     timezone_str: &str,
     location_str: &str,
