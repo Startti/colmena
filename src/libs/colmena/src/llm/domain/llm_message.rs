@@ -59,6 +59,11 @@ pub struct FileData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_hint: Option<u64>,
     pub source: FileSource,
+    /// Bytes inline retenidos en memoria para uso runtime (ej: auto-summary tras Uploaded).
+    /// No se serializa — solo se mantiene durante la ejecución del nodo.
+    #[serde(skip)]
+    #[serde(default)]
+    pub retained_inline_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +98,7 @@ impl FileData {
             filename,
             size_hint: None,
             source: FileSource::InlineBytes { bytes },
+            retained_inline_bytes: None,
         }
     }
 }
@@ -253,6 +259,7 @@ mod tests {
             source: FileSource::SignedUrl(
                 "https://storage.googleapis.com/bucket/x?sig=abc".to_string(),
             ),
+            retained_inline_bytes: None,
         };
         assert_eq!(file.document_id.as_deref(), Some("doc-123"));
         match &file.source {

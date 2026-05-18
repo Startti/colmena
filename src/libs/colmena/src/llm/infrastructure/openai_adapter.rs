@@ -898,6 +898,7 @@ mod tests {
                 filename: "x.pdf".into(),
                 expires_at: None,
             }),
+            retained_inline_bytes: None,
         };
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
         let provider =
@@ -933,6 +934,7 @@ mod tests {
             filename: "x.pdf".into(),
             size_hint: None,
             source: FileSource::SignedUrl("https://example/x?sig=y".into()),
+            retained_inline_bytes: None,
         };
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
         let provider =
@@ -959,6 +961,7 @@ mod tests {
             filename: "x.png".into(),
             size_hint: None,
             source: FileSource::SignedUrl("https://storage.googleapis.com/bucket/x?sig=y".into()),
+            retained_inline_bytes: None,
         };
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
         let provider =
@@ -996,6 +999,7 @@ mod tests {
                 filename: "x.png".into(),
                 expires_at: None,
             }),
+            retained_inline_bytes: None,
         };
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
         let provider =

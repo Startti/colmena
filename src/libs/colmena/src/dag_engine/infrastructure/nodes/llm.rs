@@ -410,6 +410,7 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
                 filename: att.filename.clone(),
                 expires_at: None,
             }),
+            retained_inline_bytes: None,
         };
 
         if att.source.is_recoverable() {
@@ -462,6 +463,7 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
                     filename: att.filename.clone(),
                     size_hint: att.size_bytes,
                     source: FileSource::Uploaded(provider_ref),
+                    retained_inline_bytes: None,
                 }));
             }
         }
@@ -872,6 +874,7 @@ impl ExecutableNode for LlmNode {
                                             filename,
                                             size_hint,
                                             source: FileSource::Uploaded(provider_ref),
+                                            retained_inline_bytes: None,
                                         });
                                     }
                                     Err(e) => {
@@ -892,6 +895,7 @@ impl ExecutableNode for LlmNode {
                         }
                         FileSource::InlineBytes { bytes } => {
                             let bytes_owned = bytes.clone();
+                            let retained = bytes.clone();
                             let mime_type = file.mime_type.clone();
                             let filename = file.filename.clone();
                             let document_id = file.document_id.clone();
@@ -926,6 +930,7 @@ impl ExecutableNode for LlmNode {
                                         filename,
                                         size_hint,
                                         source: FileSource::Uploaded(provider_ref),
+                                        retained_inline_bytes: Some(retained),
                                     });
                                 }
                                 Err(e) => {
@@ -2330,6 +2335,7 @@ pub(crate) fn parse_file_entries(
             filename,
             size_hint,
             source,
+            retained_inline_bytes: None,
         });
     }
 

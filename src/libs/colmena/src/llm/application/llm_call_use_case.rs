@@ -298,6 +298,7 @@ impl LlmCallUseCase {
         match &file.source {
             FileSource::InlineBytes { bytes } => {
                 let bytes_owned = bytes.clone();
+                let retained = bytes.clone();
                 crate::colmena_log!(
                     "[file-resolve] '{}' is inline bytes ({}, {} B), uploading to {} Files API",
                     file.filename,
@@ -315,6 +316,7 @@ impl LlmCallUseCase {
                             doc_id,
                             r.provider_file_id
                         );
+                        file.retained_inline_bytes = Some(retained);
                         file.source = FileSource::Uploaded(r.clone());
                         return Ok(file);
                     }
@@ -342,6 +344,7 @@ impl LlmCallUseCase {
                 if let Some(doc_id) = file.document_id.as_deref() {
                     dedup.insert(doc_id.to_string(), provider_ref.clone());
                 }
+                file.retained_inline_bytes = Some(retained);
                 file.source = FileSource::Uploaded(provider_ref);
                 Ok(file)
             }
@@ -668,6 +671,7 @@ mod resolve_files_tests {
             filename: "x.pdf".into(),
             size_hint: Some(40_000_000),
             source: FileSource::SignedUrl("http://example.invalid/file?sig=x".into()),
+            retained_inline_bytes: None,
         }
     }
 
@@ -753,6 +757,7 @@ mod resolve_files_tests {
             filename: "x.pdf".into(),
             size_hint: None,
             source: FileSource::SignedUrl("http://x".into()),
+            retained_inline_bytes: None,
         }];
 
         // Per-file resilience: error logged and dropped. With only one file
@@ -780,6 +785,7 @@ mod resolve_files_tests {
             filename: "x.jpeg".into(),
             size_hint: None,
             source: FileSource::SignedUrl("https://example/img?sig=y".into()),
+            retained_inline_bytes: None,
         }];
 
         LlmCallUseCase::resolve_files(
@@ -813,6 +819,7 @@ mod resolve_files_tests {
             filename: "x.png".into(),
             size_hint: None,
             source: FileSource::SignedUrl("https://example/img?sig=y".into()),
+            retained_inline_bytes: None,
         }];
 
         LlmCallUseCase::resolve_files(
@@ -842,6 +849,7 @@ mod resolve_files_tests {
             filename: "hello.pdf".to_string(),
             size_hint: Some(bytes.len() as u64),
             source: FileSource::InlineBytes { bytes },
+            retained_inline_bytes: None,
         }];
 
         // WHEN we run resolve_files with stub provider + stub cache
@@ -884,6 +892,7 @@ mod resolve_files_tests {
                 source: FileSource::InlineBytes {
                     bytes: bytes.clone(),
                 },
+                retained_inline_bytes: None,
             },
             FileData {
                 document_id: Some("doc-dedup".to_string()),
@@ -891,6 +900,7 @@ mod resolve_files_tests {
                 filename: "b.pdf".to_string(),
                 size_hint: Some(bytes.len() as u64),
                 source: FileSource::InlineBytes { bytes },
+                retained_inline_bytes: None,
             },
         ];
 
@@ -939,6 +949,7 @@ mod snapshot_and_reset_tests {
             filename: "x.pdf".into(),
             size_hint: None,
             source: FileSource::SignedUrl(url.into()),
+            retained_inline_bytes: None,
         }
     }
 
@@ -955,6 +966,7 @@ mod snapshot_and_reset_tests {
                 filename: "x.pdf".into(),
                 expires_at: None,
             }),
+            retained_inline_bytes: None,
         }
     }
 
@@ -1148,6 +1160,7 @@ mod retry_tests {
             filename: "x.pdf".into(),
             size_hint: Some(40_000_000),
             source: FileSource::SignedUrl(url.clone()),
+            retained_inline_bytes: None,
         };
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
 

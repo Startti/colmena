@@ -814,6 +814,7 @@ mod tests {
                 filename: "x.pdf".into(),
                 expires_at: None,
             }),
+            retained_inline_bytes: None,
         };
         let request = build_request_with_file(file);
 
@@ -840,6 +841,7 @@ mod tests {
             filename: "x.pdf".into(),
             size_hint: None,
             source: FileSource::SignedUrl("https://example/x?sig=y".into()),
+            retained_inline_bytes: None,
         };
         let request = build_request_with_file(file);
 
@@ -859,6 +861,7 @@ mod tests {
             filename: "x.jpeg".into(),
             size_hint: None,
             source: FileSource::SignedUrl("https://storage.googleapis.com/bucket/x?sig=y".into()),
+            retained_inline_bytes: None,
         };
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
         let provider =
@@ -894,6 +897,7 @@ mod tests {
             filename: "x.pdf".into(),
             size_hint: None,
             source: FileSource::SignedUrl("https://example/x?sig=y".into()),
+            retained_inline_bytes: None,
         };
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
         let provider =
@@ -920,6 +924,7 @@ mod tests {
             source: FileSource::InlineBytes {
                 bytes: b"%PDF-1.4 hello".to_vec(),
             },
+            retained_inline_bytes: None,
         };
         let request = build_request_with_file(file);
 
