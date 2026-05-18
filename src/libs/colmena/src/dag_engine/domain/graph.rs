@@ -11,6 +11,21 @@ pub struct Graph {
 
     /// Una lista de todas las conexiones (bordes) entre los nodos.
     pub edges: Vec<Edge>,
+
+    /// Optional IANA timezone identifier (e.g. `"Europe/Madrid"`) for the graph.
+    /// Consumed by temporal-context features when injecting time-aware data into LLM prompts.
+    #[serde(default)]
+    pub timezone: Option<String>,
+
+    /// Optional human-readable location string (e.g. `"Madrid, España"`).
+    /// Consumed by geographic-context features for prompt injection.
+    #[serde(default)]
+    pub location: Option<String>,
+
+    /// Optional BCP-47 locale tag (e.g. `"es-ES"`, `"en-US"`).
+    /// Consumed by localization features for prompt injection.
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 /// Representa la configuración de un único nodo en el grafo.
@@ -106,5 +121,47 @@ mod tests {
     fn validate_accepts_clean_node_id() {
         let g = graph_with_node_id("router_inner");
         assert!(g.validate().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod temporal_context_tests {
+    use super::*;
+
+    #[test]
+    fn graph_without_optional_fields_parses_with_none_defaults() {
+        let json = r#"{"nodes": {}, "edges": []}"#;
+        let g: Graph = serde_json::from_str(json).expect("must parse");
+        assert!(g.timezone.is_none(), "timezone should be None when omitted");
+        assert!(g.location.is_none(), "location should be None when omitted");
+        assert!(g.locale.is_none(), "locale should be None when omitted");
+    }
+
+    #[test]
+    fn graph_with_all_three_fields_parses_them() {
+        let json = r#"{
+            "nodes": {},
+            "edges": [],
+            "timezone": "Europe/Madrid",
+            "location": "Madrid, España",
+            "locale": "es-ES"
+        }"#;
+        let g: Graph = serde_json::from_str(json).expect("must parse");
+        assert_eq!(g.timezone.as_deref(), Some("Europe/Madrid"));
+        assert_eq!(g.location.as_deref(), Some("Madrid, España"));
+        assert_eq!(g.locale.as_deref(), Some("es-ES"));
+    }
+
+    #[test]
+    fn graph_with_partial_fields_parses() {
+        let json = r#"{
+            "nodes": {},
+            "edges": [],
+            "locale": "en-US"
+        }"#;
+        let g: Graph = serde_json::from_str(json).expect("must parse");
+        assert!(g.timezone.is_none());
+        assert!(g.location.is_none());
+        assert_eq!(g.locale.as_deref(), Some("en-US"));
     }
 }
