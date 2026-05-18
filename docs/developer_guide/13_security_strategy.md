@@ -949,6 +949,121 @@ Si se necesita CA privada o mTLS en HTTP/Socket.IO hay que extender la config de
 
 ---
 
+## Sliding TTL y outbound masking (desde 2026-05-11)
+
+> **Spec:** [docs/superpowers/specs/2026-05-11-secure-values-sliding-ttl-design.md](../superpowers/specs/2026-05-11-secure-values-sliding-ttl-design.md)
+> **Plan:** [docs/superpowers/plans/2026-05-11-secure-values-sliding-ttl.md](../superpowers/plans/2026-05-11-secure-values-sliding-ttl.md)
+
+Cuatro garantías nuevas reemplazan al cleanup unconditional al final del run y blindan la superficie de secretos contra leaks via response bodies.
+
+### 1. TTL deslizante de 24h, extendido en cada `decrypt`
+
+El `expires_at` se setea a `NOW() + 24h` cuando se persiste un secreto y se **extiende otras 24h en cada uso** (`decrypt` exitoso). La extensión es atómica con el lookup vía `UPDATE … RETURNING`:
+
+```sql
+UPDATE secure_value_mappings
+   SET expires_at = NOW() + INTERVAL '24 hours'
+ WHERE handle = $1
+   AND (session_id = $2 OR agent_session_id = $3)
+   AND expires_at > NOW()
+RETURNING decrypted_value;
+```
+
+`exists()` también filtra `expires_at > NOW()` pero **NO** extiende la ventana — es una precondición de chequeo, no un uso. Resultado: una conversación activa que se prolonga más de 24h no se queda sin credenciales abruptamente; el cap efectivo pasa de "24h desde el persist" a "24h desde el último uso".
+
+Implementación: `src/libs/colmena/src/secure_values/infrastructure/postgres_secure_value_repository.rs`. La constante de TTL (`SECURE_VALUE_TTL_HOURS = 24`) está hardcodeada por ahora — configurabilidad vía env var queda explícitamente fuera de scope.
+
+### 2. Cleanup periódico por expiración (no más barrido total)
+
+Antes: al final de cada run, `run_use_case.rs` llamaba `cleanup(session_id)` que borraba **todas** las filas del `session_id` ephemeral, incluyendo las que se acababan de persistir en el mismo run para uso multi-turno. Esto rompía cross-run flows donde una conversación canvas-builder/A-B reusaba un token persistido en un turno anterior.
+
+Ahora: `cleanup_expired_for_run(session_id, agent_session_id)` borra **solo filas expiradas** (`expires_at < NOW()`) scoped a `session_id` OR `agent_session_id` del run. Filas vivas sobreviven. Cada turno limpia su propio scope — patrón B3 (bounded per-run sweep) descripto en la sección "Decision" del spec.
+
+Implementación: `src/libs/colmena/src/secure_values/application/secure_value_service.rs` (método `cleanup_expired_for_run`) + el repo Postgres correspondiente. Engine call site: `src/libs/colmena/src/dag_engine/application/run_use_case.rs` (línea ~687 del antes; ahora invoca la versión bounded).
+
+### 3. Handle hardening — sufijo random + min-length
+
+**Antes** los handles eran `<sv_user>`, `<sv_pass>`, `<sv_token>` — predecibles. Un LLM que viera el formato una vez podría intentar inyectar `<sv_admin>` y, si existía en el scope, decrypt accidentalmente le devolvería el valor.
+
+**Ahora** el `SecureValueService::persist_secret` genera un sufijo random de 8 hex chars al handle:
+
+```rust
+fn new_handle(name: &str) -> String {
+    let id = uuid::Uuid::new_v4().simple().to_string();  // 32 hex
+    let suffix: String = id.chars().take(8).collect();
+    format!("<sv_{name}_{suffix}>")
+}
+```
+
+Ejemplos:
+- Viejo: `<sv_user>`
+- Nuevo: `<sv_user_4f3a2b9c>`
+
+Adicionalmente, **`secure_suspend` rechaza valores con menos de 4 caracteres**:
+
+```rust
+const MIN_SECRET_VALUE_LEN: usize = 4;
+// ... después de parse_qa_response ...
+if value.chars().count() < MIN_SECRET_VALUE_LEN {
+    return Err(format!(
+        "secure_suspend: value for secret '{}' is too short (min 4 chars). \
+         Short values cause unsafe outbound masking — please supply ≥4 chars.",
+        secret.name
+    ).into());
+}
+```
+
+El mínimo de 4 chars permite PINs estándar pero rechaza strings de alta colisión (`"on"`, `"ok"`, `"42"`). Es un prerequisito de la garantía #4 — substring matching sobre valores muy cortos causaría sobre-enmascarado patológico en response bodies.
+
+Implementación: `src/libs/colmena/src/secure_values/application/secure_value_service.rs::persist_secret` (handle generation), `src/libs/colmena/src/dag_engine/infrastructure/nodes/secure_suspend.rs` (min-length check).
+
+**Compatibilidad backward.** Los handles viejos (`<sv_user>` sin sufijo) **siguen resolviendo** porque el lookup es match exacto sobre `hash_key` — no hay parsing del formato. No hay backfill ni flag de versión. Conversaciones en curso siguen funcionando sin tocar nada.
+
+### 4. Outbound masking en `DagToolExecutor`
+
+**El leak vector.** Cuando un nodo consume un secreto (decrypted por `inject_secrets` antes de ejecutar), su response puede echo el valor al LLM. Ejemplo: un login HTTP recibe `username = <sv_user_4f3a2b9c>`, lo resuelve a `"alice"`, llama al endpoint, y la respuesta es `{"token": "abc", "username": "alice"}` — `"alice"` era secreto y ahora va de vuelta al LLM verbatim.
+
+**El choke point.** Una pasada de masking en `DagToolExecutor::execute_inner`, antes de retornar al `agent_service`. Funciona porque CADA tool result pasa por ese punto, incluyendo errors:
+
+```rust
+// Inside DagToolExecutor::execute_inner, after node execution:
+let applied = self.secure_value_service
+    .inject_secrets(&mut node_inputs, session_id, agent_session_id)
+    .await?;  // applied: HashMap<decrypted_value, handle>
+
+let mut result = node.execute(...).await;
+// MASK every tool response — Ok and Err paths
+match &mut result {
+    Ok(v)  => self.secure_value_service.mask_outbound(v, &applied),
+    Err(e) => self.secure_value_service.mask_outbound_string(e, &applied),
+}
+result
+```
+
+**Cómo funciona el masking.** Walk recursivo de la `serde_json::Value`. Para cada JSON string, reemplazar cada substring que coincida con un valor decrypted por su handle. Reemplazos aplicados **longest-key-first** para evitar leaks parciales cuando dos secretos comparten prefix.
+
+```rust
+pub fn mask_outbound(&self, value: &mut serde_json::Value, mapping: &HashMap<String, String>) {
+    let mut sorted: Vec<&String> = mapping.keys().collect();
+    sorted.sort_by_key(|k| std::cmp::Reverse(k.len()));  // longest first
+    // ... recursive walk replacing substrings ...
+}
+```
+
+**Diff en la API de `inject_secrets`.** Cambió de retornar `Result<()>` a `Result<HashMap<String, String>>` (mapeo de `decrypted_value → handle`). Callers que no necesitan el mapeo (ej. `run_use_case` para nodos non-LLM) simplemente ignoran el return.
+
+Implementación:
+- `src/libs/colmena/src/secure_values/application/secure_value_service.rs` — nueva firma de `inject_secrets` + `mask_outbound`.
+- `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs::execute_inner` — call site del masking.
+
+### Consecuencia para graph authors
+
+Nada cambia en tu graph JSON. Los handles que ves en los logs son levemente más largos (con sufijo), las respuestas de tools que contenían el valor decrypted ahora muestran el handle en su lugar, y los secretos que no se usan en 24h se borran solos sin afectar los activos.
+
+Si pasaste handles viejos (`<sv_*>` sin sufijo) en conversation history persistida antes del 2026-05-11, siguen resolviendo. Si tu test depende de handles deterministas (ej. snapshot de output), tenés que actualizar el snapshot a la nueva forma con sufijo.
+
+---
+
 ## References
 
 - [Secure Values Design](SECURE_VALUES_DESIGN.md)
@@ -961,6 +1076,6 @@ Si se necesita CA privada o mTLS en HTTP/Socket.IO hay que extender la config de
 ---
 
 **Status:** Documentation Updated  
-**Date:** 2026-05-08  
-**Version:** 1.2  
-**Changes:** Added Strategy 6 (`secure_suspend` — interactive credential collection as top-level DAG node or LLM tool). Documented `inject_secrets` now covers node `config` in addition to `inputs`. Added note on `llm_call` propagating `SUSPENDED` from tool results with replay-on-resume. Added note on `agent_session_id`-first lookup in `secure_value_mappings` for cross-session flows. Updated Comparison Matrix and Roadmap Phase 1. Previous: Strategy 5 (LLM-Driven Auth via secure tools), `secure=true` query-param fix, HttpNode body/query param docs.
+**Date:** 2026-05-18  
+**Version:** 1.3  
+**Changes:** Added section "Sliding TTL y outbound masking (desde 2026-05-11)" covering the four guarantees introduced by spec `2026-05-11-secure-values-sliding-ttl-design.md`: (1) sliding 24h TTL extended on `decrypt`, (2) per-run cleanup of expired rows replacing the unconditional run-end sweep, (3) handle hardening with 8-hex random suffix + min-length 4 chars, (4) outbound masking of tool responses in `DagToolExecutor::execute_inner`. Previous (v1.2, 2026-05-08): Added Strategy 6 (`secure_suspend` — interactive credential collection as top-level DAG node or LLM tool). Documented `inject_secrets` now covers node `config` in addition to `inputs`. Added note on `llm_call` propagating `SUSPENDED` from tool results with replay-on-resume. Added note on `agent_session_id`-first lookup in `secure_value_mappings` for cross-session flows. Updated Comparison Matrix and Roadmap Phase 1. Previous: Strategy 5 (LLM-Driven Auth via secure tools), `secure=true` query-param fix, HttpNode body/query param docs.
