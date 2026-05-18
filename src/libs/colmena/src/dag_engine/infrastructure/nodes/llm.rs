@@ -1550,6 +1550,21 @@ impl ExecutableNode for LlmNode {
         // produced AND no prior history already supplies a system message.
         if !history_exists {
             let mut sections: Vec<String> = Vec::new();
+            // Temporal & geographic context — always the first section.
+            let tz_str = inputs
+                .get("__colmena_timezone")
+                .and_then(|v| v.as_str())
+                .unwrap_or("America/Bogota");
+            let loc_str = inputs
+                .get("__colmena_location")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Bogotá, Colombia");
+            let locale_str = inputs
+                .get("__colmena_locale")
+                .and_then(|v| v.as_str())
+                .unwrap_or("es-CO");
+            let context_block = format_temporal_context_block(tz_str, loc_str, locale_str);
+            sections.push(context_block);
             if let Some(sys_msg) = system_message {
                 sections.push(sys_msg.to_string());
             }
@@ -2141,10 +2156,6 @@ fn sqlite_url_for_node(config: &serde_json::Value) -> Option<String> {
 /// The block renders ISO 8601 as the primary timestamp (canonical, locale-
 /// neutral, machine-friendly for time reasoning) with a human-readable echo
 /// in parentheses so the model can surface time naturally in its replies.
-// TODO(TC-Task 5): remove #[allow(dead_code)] once wired into
-// LlmNode::execute. The helper is tested in isolation here; the
-// production caller is added in the next plan task.
-#[allow(dead_code)]
 fn format_temporal_context_block(
     timezone_str: &str,
     location_str: &str,
