@@ -1,6 +1,7 @@
 ---
 title: LLM Temporal & Geographic Context Injection
 date: 2026-05-12
+revised: 2026-05-18
 status: approved
 ---
 
@@ -8,32 +9,44 @@ status: approved
 
 ## Problem
 
-LLM nodes have no awareness of the current date, time, or user location. This causes agents to give stale or geographically incorrect responses when asked time-sensitive or location-sensitive questions. The model cannot know "what day is it today" or "what time is it in the user's city" without this context being injected at runtime.
+LLM nodes have no awareness of the current date, time, user location, or user language. This causes agents to give stale, geographically incorrect, or wrong-language responses when asked time-sensitive, location-sensitive, or language-sensitive questions. The model cannot know "what day is it today", "what time is it in the user's city", or "should I answer in Spanish or English" without this context being injected at runtime.
 
 ## Goals
 
 - Every `llm_call` node automatically receives the current local date and time at execution.
-- Timezone and location are declared once at the graph root level — not repeated per node.
-- The config only stores the IANA timezone string; the engine computes the actual time at runtime from the server clock.
-- Default: `America/Bogota` / `Bogotá, Colombia`.
+- Timezone, location, and locale are declared once at the graph root level — not repeated per node.
+- The config only stores IANA / BCP 47 strings; the engine computes the actual time at runtime from the server clock.
+- The rendered datetime uses **ISO 8601** as the primary format (machine-friendly, no locale ambiguity) with a human-readable echo in parentheses so the model can echo it back naturally.
+- The rendered locale is **BCP 47** (`es-CO`, `en-US`, …) so the LLM can pick the right response language.
+- Defaults: `America/Bogota` / `Bogotá, Colombia` / `es-CO`.
 
 ## Non-Goals
 
-- Per-node timezone override via node config.
-- Dynamic timezone override via input port from upstream nodes.
-- Exposing timezone/location as node output ports.
+- Per-node timezone / locale override via node config.
+- Dynamic timezone / locale override via input port from upstream nodes.
+- Exposing timezone / location / locale as node output ports.
+- Automatic locale-aware formatting of dates inside the rendered block (ISO 8601 is locale-neutral by design).
+
+## Standards baseline
+
+This revision was added on 2026-05-18 after an audit of industry practice (see [docs/CHANGELOG_2026-05.md](../../CHANGELOG_2026-05.md) Gap #2 follow-up). Key sources:
+
+- **Date/time format:** ISO 8601 (`YYYY-MM-DDTHH:MM:SS±HH:MM`). This is what Anthropic Claude (web/mobile) injects in its own system prompt, and what production LLM applications use to avoid `M/D/Y` vs `D/M/Y` ambiguity (Damián Galarza, *How to Fix LLM Date and Time Issues in Production*, 2026-01).
+- **Timezone:** IANA timezone database identifiers (`America/Bogota`). Universal standard, used by everything from Linux to JavaScript `Intl`.
+- **Locale:** BCP 47 IETF language tags (`es-CO`, `en-US`, `pt-BR`). The formal standard for "language + region" identifiers, used by iOS, Android, browsers, Microsoft, and the Unicode CLDR ecosystem.
 
 ## Design
 
 ### 1. Graph JSON Schema
 
-Two new optional fields at the graph root, alongside `_comment`, `_test_instructions`, `nodes`, and `edges`:
+Three new optional fields at the graph root, alongside `_comment`, `_test_instructions`, `nodes`, and `edges`:
 
 ```json
 {
   "_comment": "...",
   "timezone": "America/Bogota",
   "location": "Bogotá, Colombia",
+  "locale": "es-CO",
   "nodes": { ... },
   "edges": [ ... ]
 }
@@ -41,8 +54,9 @@ Two new optional fields at the graph root, alongside `_comment`, `_test_instruct
 
 - `timezone`: IANA timezone string (e.g. `"America/New_York"`, `"Europe/Madrid"`). Optional. Default: `"America/Bogota"`.
 - `location`: free-text geographic description shown to the LLM (e.g. `"Bogotá, Colombia"`). Optional. Default: `"Bogotá, Colombia"`.
+- `locale`: BCP 47 language+region tag (e.g. `"es-CO"`, `"en-US"`, `"pt-BR"`). Optional. Default: `"es-CO"`. Tells the LLM what language to respond in independently of the location string.
 
-Both fields are optional. If omitted, the defaults apply automatically in the LLM node — no engine-level default injection needed.
+All three fields are optional. If omitted, the defaults apply automatically in the LLM node — no engine-level default injection needed.
 
 ### 2. Graph Struct (`domain/graph.rs`)
 
@@ -55,6 +69,8 @@ pub struct Graph {
     pub timezone: Option<String>,
     #[serde(default)]
     pub location: Option<String>,
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 ```
 
@@ -62,7 +78,7 @@ Serde ignores these fields for all existing graphs without them (backward compat
 
 ### 3. Engine Injection (`application/run_use_case.rs`)
 
-In `execute_stream`, immediately after the existing `__colmena_session_id` / `__colmena_agent_session_id` injections (~line 409), inject two new special inputs into every node's input map:
+In `execute_stream`, immediately after the existing `__colmena_session_id` / `__colmena_agent_session_id` injections (~line 409), inject three new special inputs into every node's input map:
 
 ```rust
 if let Some(tz) = &graph.timezone {
@@ -71,13 +87,16 @@ if let Some(tz) = &graph.timezone {
 if let Some(loc) = &graph.location {
     inputs.insert("__colmena_location".to_string(), Value::String(loc.clone()));
 }
+if let Some(lc) = &graph.locale {
+    inputs.insert("__colmena_locale".to_string(), Value::String(lc.clone()));
+}
 ```
 
 These are injected into ALL nodes (not just `llm_call`) — non-LLM nodes simply ignore unknown inputs, so there is no impact.
 
 ### 4. LLM Node Runtime (`infrastructure/nodes/llm.rs`)
 
-At the start of `execute`, after the existing field reads, resolve timezone and location:
+Inside the `if !history_exists` guard (so the block is computed only when it's actually consumed), resolve the three injected inputs:
 
 ```rust
 let timezone_str = inputs
@@ -89,37 +108,61 @@ let location_str = inputs
     .get("__colmena_location")
     .and_then(|v| v.as_str())
     .unwrap_or("Bogotá, Colombia");
+
+let locale_str = inputs
+    .get("__colmena_locale")
+    .and_then(|v| v.as_str())
+    .unwrap_or("es-CO");
 ```
 
-Compute local time using `chrono` + `chrono-tz`:
+Compute local time using `chrono` + `chrono-tz` and render BOTH ISO 8601 (primary) and a human-readable form (parenthesised echo):
 
 ```rust
 use chrono::Utc;
 use chrono_tz::Tz;
 
-let tz: Tz = timezone_str
-    .parse()
-    .unwrap_or(chrono_tz::America::Bogota);  // fallback on invalid IANA string
+// Parse IANA; on invalid input, fall back to Bogotá AND rewrite the
+// displayed label so (label, offset) stay coherent.
+let (tz, tz_display) = match timezone_str.parse::<Tz>() {
+    Ok(tz) => (tz, timezone_str.to_string()),
+    Err(_) => (chrono_tz::America::Bogota, "America/Bogota".to_string()),
+};
 
 let local_dt = Utc::now().with_timezone(&tz);
-// Format offset "-05:00" → "UTC-5" (drop minutes if zero, drop leading zero from hour)
-let raw_offset = local_dt.format("%:z").to_string(); // e.g. "-05:00" or "+05:30"
-let offset_display = {
-    let sign = if raw_offset.starts_with('-') { "-" } else { "+" };
-    let parts: Vec<&str> = raw_offset.trim_start_matches(['+', '-']).split(':').collect();
-    let hours: i32 = parts[0].parse().unwrap_or(0);
-    let mins: i32 = parts.get(1).and_then(|m| m.parse().ok()).unwrap_or(0);
-    if mins == 0 {
-        format!("UTC{}{}", sign, hours)
-    } else {
-        format!("UTC{}{}:{:02}", sign, hours, mins)
-    }
-}; // e.g. "UTC-5" or "UTC+5:30"
 
-let formatted = local_dt.format("%A, %B %-d, %Y, %-I:%M %p").to_string();
+// ISO 8601 (canonical, machine-friendly, locale-neutral):
+//   "2026-05-17T10:34:00-05:00"
+let iso_8601 = local_dt.format("%Y-%m-%dT%H:%M:%S%:z").to_string();
+
+// Human-readable echo for the LLM to naturally surface in its replies:
+//   "Tuesday, May 17, 2026, 10:34 AM"
+let human = local_dt.format("%A, %B %-d, %Y, %-I:%M %p").to_string();
+
+// Offset display: "UTC-5" / "UTC+5:30" (drop ":00" minutes; drop leading
+// zero from hour count).
+let raw_offset = local_dt.format("%:z").to_string();
+let sign = if raw_offset.starts_with('-') { "-" } else { "+" };
+let parts: Vec<&str> = raw_offset.trim_start_matches(['+', '-']).split(':').collect();
+let hours: i32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+let mins: i32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+let offset_display = if mins == 0 {
+    format!("UTC{}{}", sign, hours)
+} else {
+    format!("UTC{}{}:{:02}", sign, hours, mins)
+};
+
 let context_block = format!(
-    "## Temporal & Geographic Context\nCurrent date and time: {} ({}, {})\nUser location: {}",
-    formatted, timezone_str, offset_display, location_str
+    "## Temporal & Geographic Context\n\
+     Current date and time: {iso} ({human})\n\
+     Timezone: {tz_display} ({offset})\n\
+     Location: {location}\n\
+     Locale: {locale}",
+    iso = iso_8601,
+    human = human,
+    tz_display = tz_display,
+    offset = offset_display,
+    location = location_str,
+    locale = locale_str,
 );
 ```
 
@@ -144,13 +187,17 @@ Sections are joined with `\n\n---\n` (existing convention).
 
 ```
 ## Temporal & Geographic Context
-Current date and time: Tuesday, May 12, 2026, 10:34 AM (America/Bogota, UTC-5)
-User location: Bogotá, Colombia
+Current date and time: 2026-05-17T10:34:00-05:00 (Tuesday, May 17, 2026, 10:34 AM)
+Timezone: America/Bogota (UTC-5)
+Location: Bogotá, Colombia
+Locale: es-CO
 
 ---
 
 You are a travel expert specializing in Latin American destinations.
 ```
+
+The ISO 8601 string is the canonical source of truth for the model when reasoning about time (date math, "is X in the past", etc.). The parenthesised human-readable form lets the model echo the time back to the user in a natural way without needing to reformat. The `Locale` line tells the model which language + region conventions to use in its response.
 
 ### 6. New Dependency
 
@@ -168,28 +215,32 @@ chrono-tz = "0.9"
 |-----------|--------|
 | `timezone` omitted from graph | `"America/Bogota"` used |
 | `location` omitted from graph | `"Bogotá, Colombia"` used |
-| `timezone` present but invalid IANA string | Falls back to `America/Bogota`; no error |
+| `locale` omitted from graph | `"es-CO"` used |
+| `timezone` present but invalid IANA string | Falls back to `America/Bogota`; displayed label is rewritten to the fallback so the rendered block stays coherent; no error |
+| `locale` present but malformed | Taken verbatim (no validation). BCP 47 parsing is intentionally lenient — the LLM is the final arbiter of language. |
 | Graph has no LLM nodes | Fields are ignored silently |
 
 ### 8. Backward Compatibility
 
-- Existing graphs without `timezone`/`location` fields: no change in behavior (serde `#[serde(default)]` = `None`, defaults apply in the LLM node).
+- Existing graphs without `timezone`/`location`/`locale` fields: no change in behavior (serde `#[serde(default)]` = `None`, defaults apply in the LLM node).
 - No breaking changes to the node API, input ports, or output ports.
+- Tests that snapshot the rendered system message will need to update their fixtures — the temporal context block is now the first section in the assembled system message and includes an ISO 8601 timestamp that varies per run.
 
 ## Files to Modify
 
 | File | Change |
 |------|--------|
-| `src/libs/colmena/src/dag_engine/domain/graph.rs` | Add `timezone` and `location` fields to `Graph` |
-| `src/libs/colmena/src/dag_engine/application/run_use_case.rs` | Inject `__colmena_timezone` / `__colmena_location` after session_id injections |
+| `src/libs/colmena/src/dag_engine/domain/graph.rs` | Add `timezone`, `location`, and `locale` fields to `Graph` |
+| `src/libs/colmena/src/dag_engine/application/run_use_case.rs` | Inject `__colmena_timezone` / `__colmena_location` / `__colmena_locale` after session_id injections |
 | `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs` | Read injected values, compute local time, prepend context block to system message |
 | `src/libs/colmena/Cargo.toml` | Add `chrono-tz = "0.9"` |
-| `docs/node_configurations.json` | Document `timezone` and `location` as graph-root fields |
+| `docs/node_configurations.json` | Document `timezone`, `location`, and `locale` as graph-root fields |
 
 ## Test Graph
 
 A new graph at `tests/graphs/agents/llm_temporal_context_test.json` with:
 - `"timezone": "America/Bogota"` at root
 - `"location": "Bogotá, Colombia"` at root
-- One `llm_call` node with `prompt: "What day and time is it? Where am I located?"`
-- Expected: LLM response reflects the correct local date/time and Bogotá location
+- `"locale": "es-CO"` at root
+- One `llm_call` node with `prompt: "What day and time is it? Where am I located? In what language should you respond?"`
+- Expected: LLM response reflects the correct local date/time (ISO 8601 + human-readable), Bogotá location, and answers in Spanish (per `es-CO`).
