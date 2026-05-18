@@ -418,6 +418,24 @@ impl DagRunUseCase {
                         Value::String(a.to_string()),
                     );
                 }
+                if let Some(tz) = graph.timezone.as_deref() {
+                    inputs.insert(
+                        "__colmena_timezone".to_string(),
+                        Value::String(tz.to_string()),
+                    );
+                }
+                if let Some(loc) = graph.location.as_deref() {
+                    inputs.insert(
+                        "__colmena_location".to_string(),
+                        Value::String(loc.to_string()),
+                    );
+                }
+                if let Some(lc) = graph.locale.as_deref() {
+                    inputs.insert(
+                        "__colmena_locale".to_string(),
+                        Value::String(lc.to_string()),
+                    );
+                }
 
                 // INJECT GLOBAL SHARED STATE (so nodes can use {{key}} out of the box).
                 // We override None, Null, AND empty objects — the latter arise when an
