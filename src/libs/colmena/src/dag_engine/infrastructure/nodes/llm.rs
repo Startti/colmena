@@ -2127,6 +2127,70 @@ fn sqlite_url_for_node(config: &serde_json::Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Format the temporal & geographic context block that goes at the top of
+/// the LLM system message.
+///
+/// - `timezone_str`: IANA timezone identifier (e.g. "America/Bogota"). Invalid
+///   inputs fall back to `America/Bogota` and the displayed label is rewritten
+///   to match the fallback so the rendered block stays internally coherent.
+/// - `location_str`: free-text geographic description. No validation; taken
+///   verbatim.
+/// - `locale_str`: BCP 47 language+region tag (e.g. "es-CO"). No validation;
+///   taken verbatim — the LLM is the final arbiter of which language to use.
+///
+/// The block renders ISO 8601 as the primary timestamp (canonical, locale-
+/// neutral, machine-friendly for time reasoning) with a human-readable echo
+/// in parentheses so the model can surface time naturally in its replies.
+fn format_temporal_context_block(
+    timezone_str: &str,
+    location_str: &str,
+    locale_str: &str,
+) -> String {
+    use chrono::Utc;
+    use chrono_tz::Tz;
+
+    let (tz, tz_display) = match timezone_str.parse::<Tz>() {
+        Ok(tz) => (tz, timezone_str.to_string()),
+        Err(_) => (
+            "America/Bogota"
+                .parse::<Tz>()
+                .expect("hardcoded literal must parse"),
+            "America/Bogota".to_string(),
+        ),
+    };
+
+    let local_dt = Utc::now().with_timezone(&tz);
+
+    let iso_8601 = local_dt.format("%Y-%m-%dT%H:%M:%S%:z").to_string();
+    let human = local_dt.format("%A, %B %-d, %Y, %-I:%M %p").to_string();
+
+    let raw_offset = local_dt.format("%:z").to_string();
+    let sign = if raw_offset.starts_with('-') { "-" } else { "+" };
+    let trimmed = raw_offset.trim_start_matches(['+', '-']);
+    let parts: Vec<&str> = trimmed.split(':').collect();
+    let hours: i32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let mins: i32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let offset_display = if mins == 0 {
+        format!("UTC{}{}", sign, hours)
+    } else {
+        format!("UTC{}{}:{:02}", sign, hours, mins)
+    };
+
+    format!(
+        "## Temporal & Geographic Context\n\
+         Current date and time: {iso} ({human})\n\
+         Timezone: {tz_display} ({offset})\n\
+         Location: {location}\n\
+         Locale: {locale}",
+        iso = iso_8601,
+        human = human,
+        tz_display = tz_display,
+        offset = offset_display,
+        location = location_str,
+        locale = locale_str,
+    )
+}
+
 const FILE_DATA_LIMIT_BYTES: u64 = 30 * 1024 * 1024;
 
 /// Parses a JSON array of FileEntry objects into `Vec<FileData>`.
@@ -2507,5 +2571,75 @@ mod resolver_tests {
         };
         let res = resolver.resolve("agent_1", "missing").await.unwrap();
         assert!(res.is_none());
+    }
+}
+
+#[cfg(test)]
+mod temporal_context_helper_tests {
+    use super::*;
+
+    #[test]
+    fn block_starts_with_canonical_header() {
+        let out = format_temporal_context_block("America/Bogota", "Bogotá, Colombia", "es-CO");
+        assert!(
+            out.starts_with("## Temporal & Geographic Context"),
+            "missing header: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn iso_8601_appears_as_primary_timestamp() {
+        let out = format_temporal_context_block("America/Bogota", "Bogotá, Colombia", "es-CO");
+        let body = out
+            .lines()
+            .find(|l| l.starts_with("Current date and time:"))
+            .expect("missing 'Current date and time:' line");
+        assert!(body.contains("T"), "expected 'T' separator in: {}", body);
+        assert!(
+            body.contains("-05:00"),
+            "expected Bogotá ISO offset -05:00 in: {}",
+            body
+        );
+    }
+
+    #[test]
+    fn human_echo_appears_in_parens() {
+        let out = format_temporal_context_block("America/Bogota", "Bogotá, Colombia", "es-CO");
+        let body = out
+            .lines()
+            .find(|l| l.starts_with("Current date and time:"))
+            .unwrap();
+        assert!(body.contains("("), "missing opening paren in: {}", body);
+        assert!(body.contains(")"), "missing closing paren in: {}", body);
+        assert!(
+            body.contains("AM") || body.contains("PM"),
+            "missing AM/PM marker in: {}",
+            body
+        );
+    }
+
+    #[test]
+    fn block_has_timezone_location_locale_lines() {
+        let out = format_temporal_context_block("America/Bogota", "Bogotá, Colombia", "es-CO");
+        assert!(out.contains("Timezone: America/Bogota (UTC-5)"), "tz line: {}", out);
+        assert!(out.contains("Location: Bogotá, Colombia"), "loc line: {}", out);
+        assert!(out.contains("Locale: es-CO"), "locale line: {}", out);
+    }
+
+    #[test]
+    fn half_hour_offset_renders_correctly() {
+        let out = format_temporal_context_block("Asia/Kolkata", "Mumbai, India", "hi-IN");
+        assert!(out.contains("Timezone: Asia/Kolkata (UTC+5:30)"), "expected UTC+5:30 in: {}", out);
+        assert!(out.contains("Locale: hi-IN"));
+    }
+
+    #[test]
+    fn invalid_iana_falls_back_coherently() {
+        let out = format_temporal_context_block("Mars/Olympus", "Mars Base", "en-US");
+        assert!(out.contains("Timezone: America/Bogota (UTC-5)"), "fallback tz: {}", out);
+        assert!(out.contains("-05:00"), "fallback ISO offset: {}", out);
+        assert!(out.contains("Location: Mars Base"));
+        assert!(out.contains("Locale: en-US"));
     }
 }
