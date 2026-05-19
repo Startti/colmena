@@ -1,8 +1,8 @@
 # Cambios recientes — auditoría 2026-05-03 al 2026-05-18
 
-> **Generado:** 2026-05-17 · **Actualizado:** 2026-05-18 (cierre de Gap #2 + diagramas + inline data: auto-summary v2)
+> **Generado:** 2026-05-17 · **Actualizado:** 2026-05-18 (lifecycle simplification: TTL passive + process death)
 > **Alcance:** Commits sobre `develop` desde 2026-05-11 (los anteriores a esta ventana fueron auditados previamente).
-> **Total:** ~90 commits agrupados en 9 features.
+> **Total:** ~90 commits agrupados en 10 features.
 
 ## Cómo leer este documento
 
@@ -187,6 +187,18 @@ When a file enters via `data:` (base64 inline), the bytes used to be consumed by
 
 Commits: aeea269 (RED), cc924a3 (domain field + resolve_one), a3053cd (GREEN), 50a021d (E2E graph).
 Test graph: `tests/graphs/agents/load_attachment_inline_summary.json`.
+
+---
+
+## Lifecycle simplification — TTL passive + process death
+
+**Date.** 2026-05-18.
+**Status.** Done.
+**Why.** Closes Plan-C TODOs; removes dead code.
+
+The `ConversationLifecycleBus`, `ConversationLifecycleSubscriber` trait, `with_conversation_lifecycle` builder, `subscribe_lifecycle` plumbing, and two TODOs in `run_use_case.rs` were never wired to an external signal. ADP's worker (long-lived axum service holding `Arc<ColmenaEngine>`) processes Redis jobs one at a time and has no notion of "conversation closed". Replaced with passive TTL sweeping inside `SessionRegistry` (sweep period 60s, eviction at 15min idle / 1h max), already implemented and tested but never enabled in production. The sweeper now starts automatically inside `ApiExplorerNode::new()` when constructed within a tokio runtime.
+
+Commit: 8a6a17a. Net delta: −174 LOC.
 
 ---
 

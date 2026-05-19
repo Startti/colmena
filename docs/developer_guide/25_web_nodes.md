@@ -216,7 +216,19 @@ Los headers de auth usan el placeholder `${SECURE:<ref>}` que el nodo `http_requ
 
 ### Caché por conversación + lifecycle
 
-Las specs cacheadas viven en un `SessionRegistry<Arc<SpecCache>>` indexado por `conversation_id`. El orquestador del DAG suscribe cada instancia de `api_explorer` al `ConversationLifecycleBus`, así que las specs de una conversación cerrada se evictan inmediatamente sin esperar al TTL.
+Las specs cacheadas viven en un `SessionRegistry<Arc<SpecCache>>` indexado por `conversation_id + session_name`. Cada instancia de `api_explorer` arranca un *sweeper* TTL pasivo al construirse dentro de un runtime tokio (`ApiExplorerNode::new()` invoca `SessionRegistry::start_sweeper`).
+
+**Política de eviction** (`TtlConfig::default()`):
+
+| Parámetro | Valor |
+|---|---|
+| Idle timeout (sin acceso) | 15 min |
+| Max lifetime (desde creación) | 1 h |
+| Sweep period | 60 s |
+
+**No hay señal eager de "conversación cerrada".** Los hosts (worker de ADP, CLI `dag_engine`) confían únicamente en (a) el sweeper pasivo y (b) la muerte del proceso — cuando el proceso worker termina, el engine y todos sus registries se van con él. ADP corre un servicio axum long-lived que procesa jobs de Redis uno a uno y no tiene noción de "conversación cerrada", así que un bus de lifecycle sin productor era código muerto (eliminado en commit `8a6a17a`, ver [CHANGELOG_2026-05.md](../CHANGELOG_2026-05.md)).
+
+Si un host futuro adquiere la señal explícita (p. ej. un endpoint `/conversations/:id/close`), el patrón recomendado es exponer un helper de cleanup por nodo (`ApiExplorerNode::evict_conversation(conversation_id)`); no existe hoy — construirlo cuando aparezca el primer consumidor.
 
 Cada `load_spec` indexa la spec **bajo dos llaves**: el `input_url` que pasó el LLM y el `resolved_url` post-normalización (cuando difieren, p. ej. tras un rewrite de Git-forge). Esto evita que un sub-tool subsecuente que use cualquiera de las dos formas tenga que reabrir la red.
 
