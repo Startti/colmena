@@ -1,0 +1,32 @@
+{
+  "$comment": "E2E smoke test for inline data: base64 auto-summary path. Uses the 580B hello.pdf fixture as data: URI (no path, no url). Run with a stable --agent-session-id (e.g. inline_summary_e2e_001) and query conversation_attachments afterwards to confirm description IS NOT NULL for document_id starting with 'inline_'.",
+  "nodes": {
+    "uploader": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "session_id": "inline_summary_e2e_uploader",
+        "attachments_enabled": true,
+        "summary_enabled": true,
+        "system_message": "You are an upload acknowledger. Reply in one short sentence confirming the document was received. Do not describe its contents.",
+        "prompt": "Confirma que recibiste el documento adjunto.",
+        "files": [
+          {
+            "id": "inline_doc_e2e_001",
+            "label": "Hello PDF inline fixture",
+            "data": "JVBERi0xLjQKJeLjz9MKMSAwIG9iago8PC9UeXBlL0NhdGFsb2cvUGFnZXMgMiAwIFI+PgplbmRvYmoKMiAwIG9iago8PC9UeXBlL1BhZ2VzL0tpZHNbMyAwIFJdL0NvdW50IDE+PgplbmRvYmoKMyAwIG9iago8PC9UeXBlL1BhZ2UvUGFyZW50IDIgMCBSL01lZGlhQm94WzAgMCA2MTIgNzkyXS9Db250ZW50cyA0IDAgUi9SZXNvdXJjZXM8PC9Gb250PDwvRjEgNSAwIFI+Pj4+Pj4KZW5kb2JqCjQgMCBvYmoKPDwvTGVuZ3RoIDQ5L0ZpbHRlci9GbGF0ZURlY29kZT4+c3RyZWFtCniccwpR0HczVDAyUQhJUzA0MFAwB+KQFAUNj9ScnHyF8PyinBRNhZAsBdcQAN9uCyEKZW5kc3RyZWFtCmVuZG9iago1IDAgb2JqCjw8L1R5cGUvRm9udC9TdWJ0eXBlL1R5cGUxL0Jhc2VGb250L0hlbHZldGljYT4+CmVuZG9iagp4cmVmCjAgNgowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMTUgMDAwMDAgbiAKMDAwMDAwMDA2MCAwMDAwMCBuIAowMDAwMDAwMTExIDAwMDAwIG4gCjAwMDAwMDAyMjMgMDAwMDAgbiAKMDAwMDAwMDMzOCAwMDAwMCBuIAp0cmFpbGVyPDwvU2l6ZSA2L1Jvb3QgMSAwIFI+PgpzdGFydHhyZWYKNDAxCiUlRU9GCg==",
+            "mime_type": "application/pdf",
+            "filename": "hello.pdf"
+          }
+        ]
+      }
+    },
+    "out": { "type": "log" }
+  },
+  "edges": [
+    { "from": "uploader", "to": "out" }
+  ]
+}
