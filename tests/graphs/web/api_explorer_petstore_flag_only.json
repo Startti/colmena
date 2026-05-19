@@ -1,0 +1,29 @@
+{
+  "$comment": "Flag-only variant of api_explorer_petstore.json. Activates the toolkit via enabled_tools: [\"api_explorer\"] WITHOUT a tool_configurations entry. Demonstrates the simplified frontend UX added on 2026-05-19 (commits 131c540 + 3f1a9f3 + dd47a54).",
+  "nodes": {
+    "ask": {
+      "type": "input",
+      "config": {
+        "default": "Using the Petstore OpenAPI 3.0 spec at https://petstore3.swagger.io/api/v3/openapi.json, build a request to add a new pet named 'Rex' (id 42, status 'available'). Return only the final http_request JSON config you would execute."
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "api_key": "${OPENAI_API_KEY}",
+        "enabled_tools": ["api_explorer"],
+        "system_message": "You are an integration agent. Use api_explorer__load_spec to load an OpenAPI URL, api_explorer__search_endpoint to find what you need, api_explorer__get_endpoint_details to check argument shapes, and api_explorer__build_http_request (which requires a `params` object mapping each parameter name to its value, and merges request-body fields into that same object) to construct a valid call. Never guess parameter names — always call api_explorer__get_endpoint_details first."
+      }
+    },
+    "sink": {
+      "type": "output",
+      "config": {}
+    }
+  },
+  "edges": [
+    { "from": "ask", "to": "agent", "field": "prompt" },
+    { "from": "agent", "to": "sink" }
+  ]
+}
