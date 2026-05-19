@@ -1091,6 +1091,32 @@ impl ToolExecutor for DagToolExecutor {
                 continue;
             }
 
+            // Special case: auto-expand `api_explorer` into its sub-tool catalog
+            // even without an explicit `tool_configurations` entry, so the LLM
+            // sees `api_explorer__load_spec`, `api_explorer__search_endpoint`,
+            // etc. rather than a single opaque `api_explorer` raw tool. Any
+            // explicit `tool_configurations` entry above takes precedence
+            // (handled by the `contains_key` guard immediately above).
+            if name == "api_explorer" {
+                if let Some(toolkit) = self.registry.get_toolkit_node(&name) {
+                    let node_cfg = Value::Object(Default::default());
+                    let catalog = toolkit.sub_tool_catalog(&node_cfg);
+                    for sub in catalog {
+                        tools.push(crate::llm::domain::ToolDefinition {
+                            name: format!("{}__{}", name, sub.name),
+                            description: sub.description,
+                            parameters: crate::llm::domain::ToolParameters {
+                                schema_type: "object".to_string(),
+                                properties: sub.properties,
+                                required: sub.required,
+                            },
+                            input_schema_override: None,
+                        });
+                    }
+                    continue;
+                }
+            }
+
             let schema = node.schema();
 
             // Convert node schema to ToolDefinition
@@ -2314,6 +2340,87 @@ mod toolkit_runtime_tests {
         let names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
         assert!(names.contains(&"web__echo".to_string()));
         assert!(!names.contains(&"web__double".to_string()));
+    }
+
+    /// Test registry that exposes `api_explorer` as both an `ExecutableNode`
+    /// and a `ToolkitNode`, plus a stand-in raw `tavily_client` ExecutableNode.
+    /// Used to verify that `available_tools()` auto-expands `api_explorer`
+    /// sub-tools when no `tool_configurations` entry exists, while leaving
+    /// other raw nodes (`tavily_client`) untouched.
+    struct ApiExplorerOnlyRegistry {
+        api_explorer: Arc<crate::dag_engine::infrastructure::nodes::api_explorer::ApiExplorerNode>,
+        tavily_stub: Arc<EchoToolkitNode>,
+    }
+
+    impl crate::dag_engine::application::ports::NodeRegistryPort for ApiExplorerOnlyRegistry {
+        fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            match node_type {
+                "api_explorer" => Some(self.api_explorer.clone() as Arc<dyn ExecutableNode>),
+                "tavily_client" => Some(self.tavily_stub.clone() as Arc<dyn ExecutableNode>),
+                _ => None,
+            }
+        }
+
+        fn get_all_nodes(&self) -> std::collections::HashMap<String, Arc<dyn ExecutableNode>> {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "api_explorer".to_string(),
+                self.api_explorer.clone() as Arc<dyn ExecutableNode>,
+            );
+            m.insert(
+                "tavily_client".to_string(),
+                self.tavily_stub.clone() as Arc<dyn ExecutableNode>,
+            );
+            m
+        }
+
+        fn get_toolkit_node(&self, node_type: &str) -> Option<Arc<dyn ToolkitNode>> {
+            match node_type {
+                "api_explorer" => Some(self.api_explorer.clone() as Arc<dyn ToolkitNode>),
+                _ => None,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn api_explorer_auto_expands_subtools_without_tool_configurations() {
+        use crate::dag_engine::infrastructure::nodes::api_explorer::ApiExplorerNode;
+
+        let registry = Arc::new(ApiExplorerOnlyRegistry {
+            api_explorer: Arc::new(ApiExplorerNode::new()),
+            tavily_stub: Arc::new(EchoToolkitNode),
+        });
+        // EMPTY tool_configurations — auto-expansion must happen in loop 2.
+        let executor = DagToolExecutor::new(registry, HashMap::new());
+
+        let tools = executor.available_tools().await;
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+
+        // The 4 mandated sub-tools must all be auto-exposed.
+        for required in [
+            "api_explorer__load_spec",
+            "api_explorer__search_endpoint",
+            "api_explorer__get_endpoint_details",
+            "api_explorer__build_http_request",
+        ] {
+            assert!(
+                names.contains(&required),
+                "expected `{required}` in auto-exposed tools, got {names:?}"
+            );
+        }
+
+        // No raw-node fallthrough: bare `api_explorer` must NOT appear.
+        assert!(
+            !names.contains(&"api_explorer"),
+            "raw `api_explorer` leaked into tool list — expansion fell through to raw branch: {names:?}"
+        );
+
+        // Other raw nodes (e.g. tavily_client) are unaffected: this special
+        // case must target ONLY api_explorer.
+        assert!(
+            names.contains(&"tavily_client"),
+            "tavily_client should still appear as a raw tool — only api_explorer is special-cased: {names:?}"
+        );
     }
 
     #[tokio::test]
