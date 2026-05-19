@@ -614,6 +614,119 @@
       ]
     },
 
+    "api_explorer": {
+      "summary": "Toolkit node — exposes 5 sub-tools that let an LLM discover endpoints in an OpenAPI 3.x / Swagger 2.0 spec and deterministically build a valid http_request config. Sub-tools: load_spec, list_endpoints, search_endpoint, get_endpoint_details, build_http_request. Swagger 2.0 docs are converted transparently to OpenAPI 3.0.3 inside the adapter.",
+      "see_also": "docs/developer_guide/25_web_nodes.md — full guide (cache lifecycle, URL normalization, $ref inlining, error model).",
+      "special_behaviors": [
+        "Sub-tool names follow the pattern '<alias>__<subtool>' — if the map key (or enabled_tools entry) is 'apis', the LLM sees 'apis__load_spec', etc.",
+        "Spec cache is per-conversation (SessionRegistry keyed by conversation_id + session_name) with passive TTL sweeping (15 min idle / 1 h max).",
+        "build_http_request output matches the input shape of the http_request node exactly. Secret headers use the '${SECURE:<ref>}' placeholder.",
+        "get_endpoint_details inlines $ref resolution (Gemini-safe — no raw '#/components/...' strings)."
+      ],
+      "flag_only_shortcut": {
+        "summary": "api_explorer is the only toolkit today that can be activated WITHOUT a tool_configurations entry. Setting 'enabled_tools' to include the literal alias 'api_explorer' auto-exposes all 5 sub-tools with a synthesised default ToolConfiguration (empty node_config, expose_sub_tools: All).",
+        "activation": {
+          "minimal_llm_call_config": {
+            "enabled_tools": ["api_explorer"]
+          },
+          "effect": "Engine catalog auto-expands the 5 sub-tools; enabled_tools matches the 'api_explorer' entry as a toolkit prefix (exact OR 'api_explorer__*'); dispatch synthesises a default ToolConfiguration when no explicit entry exists.",
+          "exposed_sub_tools": [
+            "api_explorer__load_spec",
+            "api_explorer__search_endpoint",
+            "api_explorer__list_endpoints",
+            "api_explorer__get_endpoint_details",
+            "api_explorer__build_http_request"
+          ]
+        },
+        "when_to_use": [
+          "Frontend UX where the user toggles OpenAPI tooling with a single boolean — no per-instance config to surface in the UI.",
+          "You want the default alias 'api_explorer' (sub-tools are namespaced as 'api_explorer__*') and the default empty node_config.",
+          "You do NOT need to filter the 5 sub-tools — all are exposed."
+        ],
+        "when_not_to_use": [
+          "You need a custom alias other than 'api_explorer' — declare an explicit tool_configurations entry and pick your own map key.",
+          "You need to filter the sub-tools via expose_sub_tools (e.g. only 'load_spec' + 'build_http_request') — only an explicit entry supports this.",
+          "You need per-instance node_config (custom cache_ttl_seconds, max_spec_size_bytes, fuzzy_match_threshold) — only an explicit entry exposes node_config.",
+          "You want multiple api_explorer toolkits side-by-side (different aliases for different use-cases)."
+        ],
+        "reference_graph": "tests/graphs/web/api_explorer_petstore_flag_only.json — verified end-to-end with OpenAI gpt-4o-mini + real petstore3.swagger.io spec.",
+        "implementation_commits": ["131c540", "3f1a9f3", "dd47a54"]
+      },
+      "sub_tools": {
+        "load_spec": {
+          "description": "Download + parse + cache an OpenAPI/Swagger spec. MUST be called before the other sub-tools.",
+          "llm_parameters": {
+            "spec_url": { "type": "string", "required": true, "description": "Public URL to the spec (OpenAPI 3.x JSON/YAML or Swagger 2.0). Git-forge URLs are auto-normalised to raw form." }
+          }
+        },
+        "list_endpoints": {
+          "description": "Browse endpoints by tag with pagination.",
+          "llm_parameters": {
+            "spec_url": { "type": "string", "required": true },
+            "tag":      { "type": "string", "required": false, "description": "Filter by OpenAPI tag." },
+            "limit":    { "type": "integer", "required": false },
+            "offset":   { "type": "integer", "required": false }
+          }
+        },
+        "search_endpoint": {
+          "description": "Fuzzy search across path, summary, operationId, tags and description.",
+          "llm_parameters": {
+            "spec_url": { "type": "string", "required": true },
+            "query":    { "type": "string", "required": true }
+          }
+        },
+        "get_endpoint_details": {
+          "description": "Return parameters, request body, responses and security for a specific endpoint. Resolves $ref inline.",
+          "llm_parameters": {
+            "spec_url": { "type": "string", "required": true },
+            "path":     { "type": "string", "required": true },
+            "method":   { "type": "string", "required": true }
+          }
+        },
+        "build_http_request": {
+          "description": "Emit a JSON object with the exact shape of an http_request node input, with SECURE placeholders for auth.",
+          "llm_parameters": {
+            "spec_url": { "type": "string", "required": true },
+            "path":     { "type": "string", "required": true },
+            "method":   { "type": "string", "required": true },
+            "params":   { "type": "object", "required": true, "description": "Map of parameter name to value (merges request-body fields into the same object)." }
+          }
+        }
+      },
+      "examples": {
+        "flag_only_minimal": {
+          "description": "Single boolean toggle. No tool_configurations entry. Verified e2e against OpenAI gpt-4o-mini + petstore3.swagger.io (commit 99a128f).",
+          "llm_call_config": {
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "api_key": "${OPENAI_API_KEY}",
+            "enabled_tools": ["api_explorer"]
+          }
+        },
+        "explicit_with_custom_alias": {
+          "description": "Explicit tool_configurations entry — needed for custom alias, sub-tool filtering, or per-instance node_config.",
+          "tool_configurations_entry": {
+            "apis": {
+              "name": "apis",
+              "description": "OpenAPI spec discovery + request builder",
+              "node_type": "api_explorer",
+              "node_config": {
+                "cache_ttl_seconds": 3600,
+                "fuzzy_match_threshold": 0.2
+              },
+              "expose_sub_tools": "all"
+            }
+          }
+        }
+      },
+      "reference_graphs": [
+        "tests/graphs/web/api_explorer_petstore_flag_only.json",
+        "tests/graphs/web/api_explorer_petstore.json",
+        "tests/graphs/web/api_explorer_amadeus_swagger2.json",
+        "tests/graphs/web/api_explorer_hubspot_conversation.json"
+      ]
+    },
+
     "python_script": {
       "summary": "Run a Python snippet as a tool. Two patterns: (A) Fixed code + LLM provides input variables. (B) LLM generates the code itself — use sandbox_mode: 'restricted' to validate it safely.",
       "see_also": "docs/developer_guide/26_python_node.md — full guide with architecture, threading model, troubleshooting.",

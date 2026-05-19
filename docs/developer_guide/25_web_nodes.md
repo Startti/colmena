@@ -167,6 +167,12 @@ Ver el schema canónico en `docs/node_configurations.json` (clave `api_explorer`
 
 El LLM verá las cinco herramientas con prefijo del alias: `apis__load_spec`, `apis__list_endpoints`, `apis__search_endpoint`, `apis__get_endpoint_details`, `apis__build_http_request`.
 
+#### Shortcut: activación por flag (sin `tool_configurations`)
+
+Desde 2026-05-19 `api_explorer` puede activarse con solo `enabled_tools: ["api_explorer"]`. El engine sintetiza una `ToolConfiguration` por defecto (`node_config: {}`, `expose_sub_tools: All`) y expone las 5 sub-tools con el prefijo fijo `api_explorer__*`. Útil cuando el frontend ofrece un único toggle booleano para OpenAPI tooling. Para alias custom, filtrado de sub-tools, o knobs (`cache_ttl_seconds`, `fuzzy_match_threshold`), seguí usando el entry explícito de arriba.
+
+Ver [CLAUDE.md → Tool Config Standard — `enabled_tools`](../../CLAUDE.md) y [09_tool_calling.md → Activación por flag](09_tool_calling.md) para el contrato completo. Grafo de referencia: [`tests/graphs/web/api_explorer_petstore_flag_only.json`](../../tests/graphs/web/api_explorer_petstore_flag_only.json).
+
 ### Normalización de URL
 
 El adaptador reescribe estos patrones de Git-forge antes de hacer la petición HTTP:

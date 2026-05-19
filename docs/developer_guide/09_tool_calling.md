@@ -29,6 +29,35 @@ Rules:
 
 ---
 
+## Activación por flag — `api_explorer`
+
+`api_explorer` es el **único toolkit** hoy que puede activarse sin un entry en `tool_configurations`. Basta con incluir el alias literal `"api_explorer"` en `enabled_tools`:
+
+```json
+"agent": {
+  "type": "llm_call",
+  "config": {
+    "provider": "openai",
+    "model": "gpt-4o-mini",
+    "api_key": "${OPENAI_API_KEY}",
+    "enabled_tools": ["api_explorer"]
+  }
+}
+```
+
+Efecto:
+1. El catálogo auto-expande las 5 sub-tools (`api_explorer__load_spec`, `__search_endpoint`, `__list_endpoints`, `__get_endpoint_details`, `__build_http_request`).
+2. El filtro de `enabled_tools` trata cada entry como prefijo de toolkit (match exacto o `{alias}__*`), así que `"api_explorer"` habilita las 5.
+3. El path de dispatch sintetiza una `ToolConfiguration` por defecto (`node_config: {}`, `expose_sub_tools: All`) cuando no hay entry explícito.
+
+Cuándo usar el shortcut: la UI del frontend ofrece un toggle booleano único para activar OpenAPI tooling — sin config per-instance que mostrar. Cuándo NO: si necesitás alias custom (≠ `api_explorer`), filtrado de sub-tools (`expose_sub_tools: ["load_spec"]`), o knobs como `cache_ttl_seconds`/`fuzzy_match_threshold` — en esos casos declará un entry explícito en `tool_configurations`.
+
+Otros toolkits (`tavily_client`, futuro `browser`) **siguen requiriendo** `tool_configurations` porque necesitan config per-instance (`api_key`, defaults).
+
+Grafo de referencia verificado end-to-end con OpenAI gpt-4o-mini + spec real de Petstore: [`tests/graphs/web/api_explorer_petstore_flag_only.json`](../../tests/graphs/web/api_explorer_petstore_flag_only.json).
+
+---
+
 ## Regla de oro: ¿qué enfoque usar?
 
 ```

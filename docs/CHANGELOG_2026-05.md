@@ -1,8 +1,8 @@
-# Cambios recientes — auditoría 2026-05-03 al 2026-05-18
+# Cambios recientes — auditoría 2026-05-03 al 2026-05-19
 
-> **Generado:** 2026-05-17 · **Actualizado:** 2026-05-18 (lifecycle simplification: TTL passive + process death)
+> **Generado:** 2026-05-17 · **Actualizado:** 2026-05-19 (api_explorer flag-only activation)
 > **Alcance:** Commits sobre `develop` desde 2026-05-11 (los anteriores a esta ventana fueron auditados previamente).
-> **Total:** ~90 commits agrupados en 10 features.
+> **Total:** ~90 commits agrupados en 11 features.
 
 ## Cómo leer este documento
 
@@ -17,7 +17,7 @@ Al final hay una **matriz de completitud** por feature y una sección de **gaps 
 
 ---
 
-## 1. ProviderKind rename: `gemini` → `google`
+## 1. ProviderKind rename: `gemini` → `google` (ok)
 
 **Qué cambió.** El identificador del provider de Google cambió de `gemini` a `google` en todo el stack — `ProviderKind`, parser de configs JSON, factories de adapters, test graphs y developer guides. Tu graph JSON ahora debe usar `"provider": "google"` (el string `"gemini"` ya no se reconoce).
 
@@ -199,6 +199,26 @@ Test graph: `tests/graphs/agents/load_attachment_inline_summary.json`.
 The `ConversationLifecycleBus`, `ConversationLifecycleSubscriber` trait, `with_conversation_lifecycle` builder, `subscribe_lifecycle` plumbing, and two TODOs in `run_use_case.rs` were never wired to an external signal. ADP's worker (long-lived axum service holding `Arc<ColmenaEngine>`) processes Redis jobs one at a time and has no notion of "conversation closed". Replaced with passive TTL sweeping inside `SessionRegistry` (sweep period 60s, eviction at 15min idle / 1h max), already implemented and tested but never enabled in production. The sweeper now starts automatically inside `ApiExplorerNode::new()` when constructed within a tokio runtime.
 
 Commit: 8a6a17a. Net delta: −174 LOC.
+
+---
+
+## api_explorer flag-only activation
+
+**Date.** 2026-05-19.
+**Status.** Done.
+**Why.** Frontend UX: single boolean toggle replaces the verbose `tool_configurations` block.
+
+Three coordinated changes let graphs activate the `api_explorer` toolkit with just `enabled_tools: ["api_explorer"]`:
+
+1. `available_tools()` (catalog) auto-expands the 5 sub-tools when no `tool_configurations` entry exists.
+2. The `enabled_tools` filter in `LlmNode` matches entries as toolkit prefixes (exact OR `{alias}__*`).
+3. The dispatch path in `DagToolExecutor::execute_inner` synthesises a default `ToolConfiguration` (empty `node_config`, `expose_sub_tools: All`) when no explicit entry exists for `api_explorer`.
+
+Other toolkits (`tavily_client`, future `browser`) are unaffected and still require explicit `tool_configurations` because they need per-instance config (e.g., `api_key`).
+
+E2E verified against OpenAI gpt-4o-mini + real petstore3.swagger.io spec. Test graph: `tests/graphs/web/api_explorer_petstore_flag_only.json`.
+
+Commits: 131c540, 3f1a9f3, dd47a54.
 
 ---
 

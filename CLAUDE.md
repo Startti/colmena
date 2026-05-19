@@ -237,6 +237,8 @@ Full reference: `docs/node_as_tools_reference.json` → `parameter_strategies.no
 
 Tools defined in `tool_configurations` are **auto-enabled** — you do NOT need `enabled_tools` to activate them.
 
+> **Flag-only toolkits.** Today only `api_explorer` supports activation by flag alone (toolkit-prefix match + dispatch fallback synthesises a default `ToolConfiguration`). Other toolkits (`tavily_client`, future `browser`) still require an explicit `tool_configurations` entry because they need per-instance config (`api_key`, defaults, etc.).
+
 ```json
 // CORRECT — omit enabled_tools when all tools are in tool_configurations
 "tool_configurations": { "run_python": { ... }, "search_products": { ... } }
@@ -244,6 +246,11 @@ Tools defined in `tool_configurations` are **auto-enabled** — you do NOT need 
 // ONLY needed for built-in toolkit tools (tavily_client, etc.) or wildcard
 "enabled_tools": "*"            // expose everything including built-ins
 "enabled_tools": ["tavily_web"] // enable a built-in alongside tool_configurations
+"enabled_tools": ["api_explorer"]  // shortcut: auto-exposes all 5 sub-tools
+                                    // (load_spec, search_endpoint, list_endpoints,
+                                    //  get_endpoint_details, build_http_request)
+                                    // with default empty node_config — no
+                                    // tool_configurations entry needed
 ```
 
 ## Skills
