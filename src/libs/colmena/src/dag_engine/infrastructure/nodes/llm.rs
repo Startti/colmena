@@ -34,6 +34,75 @@ use std::sync::Weak;
 /// specific facts that are not present in the conversation.
 const LLM_DEFAULT_SYSTEM: &str = include_str!("prompts/llm_default_system.md");
 
+/// Filter the catalog of available tools down to the set the LLM should see.
+///
+/// Two inputs drive the decision:
+///   - `configured_aliases` — names declared via `tool_configurations`; each is
+///     auto-enabled. For toolkit-style nodes, the catalog already contains the
+///     expanded `{alias}__{sub_tool}` entries, so the prefix-match below picks
+///     them up automatically.
+///   - `enabled_tools_config` — optional allow-list at `inputs.enabled_tools`
+///     or `config.enabled_tools`. Accepts:
+///       * `"*"` wildcard → expose every available tool
+///       * a string → enable a single named alias
+///       * an array of strings → enable each named alias
+pub(crate) fn filter_enabled_tools(
+    all_tools: Vec<crate::llm::domain::ToolDefinition>,
+    enabled_tools_config: Option<&Value>,
+    configured_aliases: &std::collections::HashSet<String>,
+) -> Vec<crate::llm::domain::ToolDefinition> {
+    let is_auto_enabled = |tool_name: &str| -> bool {
+        configured_aliases.iter().any(|alias| {
+            tool_name == alias.as_str() || tool_name.starts_with(&format!("{}__", alias))
+        })
+    };
+
+    let mut enabled_names: Vec<String> = all_tools
+        .iter()
+        .filter(|t| is_auto_enabled(&t.name))
+        .map(|t| t.name.clone())
+        .collect();
+
+    let mut wildcard_all = false;
+    if let Some(enabled) = enabled_tools_config {
+        if let Some(value) = enabled.as_str() {
+            if value == "*" {
+                wildcard_all = true;
+            } else if !enabled_names.iter().any(|n| n == value) {
+                enabled_names.push(value.to_string());
+            }
+        } else if let Some(tool_names) = enabled.as_array() {
+            for v in tool_names {
+                if let Some(name) = v.as_str() {
+                    if !enabled_names.iter().any(|n| n == name) {
+                        enabled_names.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    if wildcard_all {
+        return all_tools;
+    }
+
+    // Each entry in `enabled_names` is treated as an alias: it matches a
+    // catalog tool by EXACT equality OR by the toolkit prefix rule
+    // (`tool_name.starts_with(format!("{alias}__"))`). This lets a user write
+    // `enabled_tools: ["api_explorer"]` and have every `api_explorer__*`
+    // sub-tool exposed without listing each one — the same expansion rule
+    // `tool_configurations` already applies. Full sub-tool names
+    // (`api_explorer__load_spec`) still match via the exact-equality branch,
+    // so there is no back-compat break.
+    let is_enabled = |tool_name: &str| -> bool {
+        enabled_names.iter().any(|alias| {
+            tool_name == alias.as_str() || tool_name.starts_with(&format!("{}__", alias))
+        })
+    };
+
+    all_tools.into_iter().filter(|t| is_enabled(&t.name)).collect()
+}
+
 /// Walk a message history and return the first `ToolCall` from the latest
 /// `Assistant` message-with-tool_calls that has NO matching `Tool` message
 /// (by `tool_call_id`) appearing later in the list.
@@ -1485,45 +1554,8 @@ impl ExecutableNode for LlmNode {
 
         let all_tools = tool_executor.available_tools().await;
 
-        let is_auto_enabled = |tool_name: &str| -> bool {
-            configured_aliases.iter().any(|alias| {
-                tool_name == alias.as_str() || tool_name.starts_with(&format!("{}__", alias))
-            })
-        };
-
-        let mut enabled_names: Vec<String> = all_tools
-            .iter()
-            .filter(|t| is_auto_enabled(&t.name))
-            .map(|t| t.name.clone())
-            .collect();
-
-        let mut wildcard_all = false;
-        if let Some(enabled) = enabled_tools_config {
-            if let Some(value) = enabled.as_str() {
-                if value == "*" {
-                    wildcard_all = true;
-                } else if !enabled_names.iter().any(|n| n == value) {
-                    enabled_names.push(value.to_string());
-                }
-            } else if let Some(tool_names) = enabled.as_array() {
-                for v in tool_names {
-                    if let Some(name) = v.as_str() {
-                        if !enabled_names.iter().any(|n| n == name) {
-                            enabled_names.push(name.to_string());
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut tools: Vec<crate::llm::domain::ToolDefinition> = if wildcard_all {
-            all_tools
-        } else {
-            all_tools
-                .into_iter()
-                .filter(|t| enabled_names.iter().any(|n| n == &t.name))
-                .collect()
-        };
+        let mut tools: Vec<crate::llm::domain::ToolDefinition> =
+            filter_enabled_tools(all_tools, enabled_tools_config, &configured_aliases);
 
         if let Some(repo) = skill_repo.as_ref() {
             tools.push(build_load_skill_tool_definition(repo));
@@ -2718,5 +2750,147 @@ mod inline_bytes_auto_summary_tests {
         assert_eq!(target.inline_bytes.as_deref(), Some(b"hello".as_ref()));
         assert_eq!(target.mime_type, "text/plain");
         assert_eq!(target.filename, "hello.txt");
+    }
+}
+
+#[cfg(test)]
+mod filter_enabled_tools_tests {
+    //! Coverage for `filter_enabled_tools`, the pure helper that decides which
+    //! tools from `tool_executor.available_tools()` are exposed to the LLM.
+    //!
+    //! Key behaviors verified:
+    //!   - Wildcard `"*"` keeps every tool.
+    //!   - Exact-name match works (back-compat — listing
+    //!     `api_explorer__load_spec` still enables that single sub-tool).
+    //!   - Toolkit prefix match works (listing the alias `api_explorer`
+    //!     enables every `api_explorer__*` sub-tool — flag-only ergonomic
+    //!     parity with `tool_configurations`).
+    //!   - `configured_aliases` are auto-enabled (no need to also list them
+    //!     under `enabled_tools`).
+    use super::filter_enabled_tools;
+    use crate::llm::domain::{ToolDefinition, ToolParameters};
+    use serde_json::json;
+    use std::collections::{HashMap, HashSet};
+
+    fn td(name: &str) -> ToolDefinition {
+        ToolDefinition::new(
+            name.to_string(),
+            format!("desc for {}", name),
+            ToolParameters {
+                schema_type: "object".to_string(),
+                properties: HashMap::new(),
+                required: Vec::new(),
+            },
+        )
+    }
+
+    fn api_explorer_catalog() -> Vec<ToolDefinition> {
+        vec![
+            td("api_explorer__load_spec"),
+            td("api_explorer__search_endpoint"),
+            td("api_explorer__get_endpoint_details"),
+            td("api_explorer__build_http_request"),
+            td("api_explorer__list_endpoints"),
+            td("current_time"),
+        ]
+    }
+
+    #[test]
+    fn enabled_tools_api_explorer_alias_enables_all_subtools() {
+        // Flag-only path: NO tool_configurations (so configured_aliases is
+        // empty), and the user writes `enabled_tools: ["api_explorer"]`.
+        // The catalog returned by `available_tools()` already contains the
+        // five expanded sub-tools (commit 131c540 made that change). The
+        // filter must accept the alias and yield all five sub-tools.
+        let enabled = json!(["api_explorer"]);
+        let configured: HashSet<String> = HashSet::new();
+
+        let out = filter_enabled_tools(api_explorer_catalog(), Some(&enabled), &configured);
+        let names: Vec<&str> = out.iter().map(|t| t.name.as_str()).collect();
+
+        assert!(
+            names.contains(&"api_explorer__load_spec"),
+            "expected api_explorer__load_spec in {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"api_explorer__search_endpoint"),
+            "expected api_explorer__search_endpoint in {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"api_explorer__get_endpoint_details"),
+            "expected api_explorer__get_endpoint_details in {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"api_explorer__build_http_request"),
+            "expected api_explorer__build_http_request in {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"api_explorer__list_endpoints"),
+            "expected api_explorer__list_endpoints in {:?}",
+            names
+        );
+        assert!(
+            !names.contains(&"current_time"),
+            "current_time was not requested but slipped through: {:?}",
+            names
+        );
+        assert_eq!(
+            out.len(),
+            5,
+            "expected exactly the 5 api_explorer sub-tools, got {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn enabled_tools_exact_subtool_name_still_works() {
+        // Back-compat: listing the fully-qualified sub-tool name keeps
+        // working via the exact-equality branch and enables ONLY that one.
+        let enabled = json!(["api_explorer__load_spec"]);
+        let configured: HashSet<String> = HashSet::new();
+
+        let out = filter_enabled_tools(api_explorer_catalog(), Some(&enabled), &configured);
+        let names: Vec<&str> = out.iter().map(|t| t.name.as_str()).collect();
+
+        assert_eq!(names, vec!["api_explorer__load_spec"], "names: {:?}", names);
+    }
+
+    #[test]
+    fn enabled_tools_wildcard_exposes_everything() {
+        let enabled = json!("*");
+        let configured: HashSet<String> = HashSet::new();
+
+        let out = filter_enabled_tools(api_explorer_catalog(), Some(&enabled), &configured);
+
+        assert_eq!(out.len(), 6, "wildcard must keep all tools");
+    }
+
+    #[test]
+    fn configured_aliases_auto_enable_subtools_without_enabled_tools() {
+        // When `tool_configurations` declares `api_explorer`, the alias is
+        // auto-enabled — the user does NOT need to also list it under
+        // `enabled_tools`. This is the legacy path and must keep working.
+        let mut configured: HashSet<String> = HashSet::new();
+        configured.insert("api_explorer".to_string());
+
+        let out = filter_enabled_tools(api_explorer_catalog(), None, &configured);
+        let names: Vec<&str> = out.iter().map(|t| t.name.as_str()).collect();
+
+        assert_eq!(out.len(), 5, "expected 5 api_explorer sub-tools, got {:?}", names);
+        assert!(!names.contains(&"current_time"));
+    }
+
+    #[test]
+    fn unknown_name_in_enabled_tools_is_silently_dropped() {
+        let enabled = json!(["definitely_not_a_tool"]);
+        let configured: HashSet<String> = HashSet::new();
+
+        let out = filter_enabled_tools(api_explorer_catalog(), Some(&enabled), &configured);
+
+        assert!(out.is_empty(), "expected empty result, got {:?}", out);
     }
 }
