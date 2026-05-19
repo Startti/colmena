@@ -2,7 +2,6 @@
 
 pub mod api_spec_port;
 pub mod errors;
-pub mod lifecycle;
 pub mod search_port;
 pub mod session;
 
@@ -12,7 +11,6 @@ pub use api_spec_port::{
     SpecFormat,
 };
 pub use errors::WebDomainError;
-pub use lifecycle::{ConversationLifecycleBus, ConversationLifecycleSubscriber};
 pub use search_port::{
     ExtractFormat, FetchRequest, FetchResponse, SearchDepth, SearchPort, SearchRequest,
     SearchResponse, SearchResult, TimeRange,

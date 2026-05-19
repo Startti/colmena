@@ -107,19 +107,11 @@ impl ColmenaEngine {
             Some(secure_value_service.clone()),
         );
 
-        // Build the shared lifecycle bus and subscribe stateful web nodes once.
-        // The same bus is handed to the use case so it can fire close events.
-        let lifecycle_bus = crate::web::domain::lifecycle::ConversationLifecycleBus::new();
-        node_registry.subscribe_lifecycle(&lifecycle_bus).await;
-
-        let use_case = Arc::new(
-            DagRunUseCase::with_secure_values_and_service(
-                node_registry.clone(),
-                Some(state_repo.clone()),
-                secure_value_service,
-            )
-            .with_conversation_lifecycle(lifecycle_bus),
-        );
+        let use_case = Arc::new(DagRunUseCase::with_secure_values_and_service(
+            node_registry.clone(),
+            Some(state_repo.clone()),
+            secure_value_service,
+        ));
         node_registry.set_subgraph_executor(use_case.clone());
 
         tracing::info!(

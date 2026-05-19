@@ -17,10 +17,6 @@ pub struct DagRunUseCase {
     registry: Arc<dyn NodeRegistryPort>,
     state_repository: Option<Arc<dyn DagStateRepository>>,
     secure_value_service: Option<Arc<SecureValueService>>,
-    /// Optional bus notified when a conversation is considered finished.
-    /// Registries (web nodes) subscribe to eagerly evict scoped state.
-    /// Fire-site is deferred to Plan C (see TODO near `DagRunStatus::Completed`).
-    conversation_lifecycle: Option<crate::web::domain::ConversationLifecycleBus>,
 }
 
 impl DagRunUseCase {
@@ -32,22 +28,7 @@ impl DagRunUseCase {
             registry,
             state_repository,
             secure_value_service: None,
-            conversation_lifecycle: None,
         }
-    }
-
-    /// Attaches a conversation lifecycle bus so that session-bearing web registries
-    /// can be notified when the engine considers a conversation finished.
-    ///
-    /// **Order matters:** this is a builder-style method (takes `self` and returns `Self`),
-    /// so it must be called AFTER `with_secure_values_and_service`. Calling that
-    /// constructor afterwards produces a fresh instance and will silently drop the bus.
-    pub fn with_conversation_lifecycle(
-        mut self,
-        bus: crate::web::domain::ConversationLifecycleBus,
-    ) -> Self {
-        self.conversation_lifecycle = Some(bus);
-        self
     }
 
     /// Creates a new DagRunUseCase with a pre-built SecureValueService (shared with the registry).
@@ -55,10 +36,6 @@ impl DagRunUseCase {
     /// Esta es la única vía oficial para inyectar secure values. La aplicación
     /// no debe tocar `infrastructure/`: el caller construye el adapter
     /// concreto (`PostgresSecureValueRepository`) y arma el service afuera.
-    ///
-    /// Note: this is a fresh constructor — it does not preserve a previously attached
-    /// `ConversationLifecycleBus`. Chain `.with_conversation_lifecycle(...)` after this
-    /// call if you need lifecycle notifications.
     pub fn with_secure_values_and_service(
         registry: Arc<dyn NodeRegistryPort>,
         state_repository: Option<Arc<dyn DagStateRepository>>,
@@ -68,7 +45,6 @@ impl DagRunUseCase {
             registry,
             state_repository,
             secure_value_service: Some(secure_value_service),
-            conversation_lifecycle: None,
         }
     }
 
@@ -677,13 +653,6 @@ impl DagRunUseCase {
                 };
                 repo.save(&state).await?;
             }
-            // TODO(plan-C): when conversations span multiple runs and a final
-            // "conversation closed" signal is available here, fire:
-            //   if let Some(bus) = &self.conversation_lifecycle {
-            //       bus.notify_conversation_closed(&conversation_id).await;
-            //   }
-            // Today a DAG run !== a conversation, so firing on every completion
-            // would be premature.
 
             let mut final_aggregated_output = serde_json::to_value(&all_outputs).unwrap_or(Value::Null);
             if !include_extra_info {

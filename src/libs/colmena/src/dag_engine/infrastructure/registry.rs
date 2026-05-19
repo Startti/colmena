@@ -17,10 +17,6 @@ pub struct HashMapNodeRegistry {
     nodes: HashMap<String, Arc<dyn ExecutableNode>>,
     toolkit_nodes: HashMap<String, Arc<dyn ToolkitNode>>,
     subgraph_node: Option<Arc<SubGraphNode>>,
-    /// Nodes that need to be notified on conversation close. Populated at
-    /// construction time and consumed by `subscribe_lifecycle`.
-    lifecycle_subscribers:
-        Vec<Arc<dyn crate::web::domain::lifecycle::ConversationLifecycleSubscriber>>,
 }
 
 use crate::llm::infrastructure::ConversationRepositoryFactory;
@@ -241,30 +237,12 @@ impl HashMapNodeRegistry {
                 api_explorer.clone() as Arc<dyn ToolkitNode>,
             );
 
-            let lifecycle_subscribers: Vec<
-                Arc<dyn crate::web::domain::lifecycle::ConversationLifecycleSubscriber>,
-            > = vec![api_explorer.clone()
-                as Arc<dyn crate::web::domain::lifecycle::ConversationLifecycleSubscriber>];
-
             Self {
                 nodes,
                 toolkit_nodes,
                 subgraph_node: Some(sub_node),
-                lifecycle_subscribers,
             }
         })
-    }
-
-    /// Subscribes every lifecycle-aware node held by this registry to the shared
-    /// [`ConversationLifecycleBus`]. Call once at engine setup so closing a
-    /// conversation evicts per-conversation caches in stateful web nodes.
-    pub async fn subscribe_lifecycle(
-        &self,
-        bus: &crate::web::domain::lifecycle::ConversationLifecycleBus,
-    ) {
-        for sub in &self.lifecycle_subscribers {
-            bus.subscribe(sub.clone()).await;
-        }
     }
 }
 
@@ -420,7 +398,6 @@ mod registry_tavily_tests {
 #[cfg(test)]
 mod registry_api_explorer_tests {
     use super::*;
-    use crate::web::domain::lifecycle::ConversationLifecycleBus;
 
     #[test]
     fn api_explorer_registered_as_executable_node() {
@@ -439,15 +416,6 @@ mod registry_api_explorer_tests {
         );
         let cat = tk.unwrap().sub_tool_catalog(&serde_json::json!({}));
         assert_eq!(cat.len(), 5);
-    }
-
-    #[tokio::test]
-    async fn subscribe_lifecycle_attaches_api_explorer_subscriber() {
-        let reg = super::registry_tavily_tests::build_registry();
-        let bus = ConversationLifecycleBus::new();
-        reg.subscribe_lifecycle(&bus).await;
-        // Notification should reach api_explorer's lifecycle hook without panic.
-        bus.notify_conversation_closed("conv-x").await;
     }
 }
 

@@ -280,8 +280,7 @@ impl ExecutableNode for TavilyClientNode {
             .and_then(|v| v.as_str())
             .ok_or("tavily_client: missing __sub_tool")?;
         // `dag_run_id` not yet threaded through ExecutableNode — we reuse a
-        // stable default session id for rate-limiting. See Plan 0 Task 12 for
-        // the full ConversationLifecycleBus story.
+        // stable default session id for rate-limiting.
         let session_id = "default";
         match sub {
             "search" => self.handle_search(inputs, config, session_id).await,

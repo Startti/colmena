@@ -6,8 +6,8 @@
 //!
 //! The node holds a single [`ApiSpecUseCase`] plus its shared
 //! [`SessionRegistry`] so per-conversation spec caches survive across
-//! sub-tool calls. It subscribes to [`ConversationLifecycleBus`] so the
-//! registry is evicted eagerly when a conversation closes.
+//! sub-tool calls. Stale entries are evicted by the registry's passive
+//! TTL sweeper, started at construction time.
 
 use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
@@ -16,7 +16,6 @@ use crate::dag_engine::domain::toolkit_node::{SubToolDefinition, ToolkitNode, SU
 use crate::llm::domain::ParameterProperty;
 use crate::web::application::api_spec_use_case::{ApiSpecUseCase, ApiSpecUseCaseConfig, SpecCache};
 use crate::web::domain::api_spec_port::ApiSpecPort;
-use crate::web::domain::lifecycle::ConversationLifecycleSubscriber;
 use crate::web::domain::{SessionRegistry, TtlConfig};
 use crate::web::infrastructure::openapi_adapter::{OpenApiAdapter, OpenApiAdapterConfig};
 use async_trait::async_trait;
@@ -45,6 +44,16 @@ impl ApiExplorerNode {
                 .expect("OpenApiAdapter init failed"),
         );
         let registry = SessionRegistry::<Arc<SpecCache>>::new(TtlConfig::default());
+        // Passive TTL sweeper: evicts entries idle > 15min or older than 1h.
+        // The spawned task owns its own Arc<Self> and runs for the registry's
+        // lifetime; the handle is intentionally dropped (see start_sweeper docs).
+        // Guarded by Handle::try_current so sync tests that build the node
+        // without a Tokio runtime do not panic.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let _sweeper_handle = registry
+                .clone()
+                .start_sweeper(std::time::Duration::from_secs(60), |_evicted| {});
+        }
         let cfg = ApiSpecUseCaseConfig::default();
         let use_case = Arc::new(ApiSpecUseCase::new(port, registry.clone(), cfg));
         Self {
@@ -80,8 +89,7 @@ impl ApiExplorerNode {
         self
     }
 
-    /// Registry handle so the registrar can subscribe the node to a
-    /// `ConversationLifecycleBus`.
+    /// Registry handle (exposed for tests and diagnostics).
     pub fn registry(&self) -> Arc<SessionRegistry<Arc<SpecCache>>> {
         self.registry.clone()
     }
@@ -469,15 +477,6 @@ fn format_spec_error(e: crate::web::domain::WebDomainError) -> Value {
 impl Default for ApiExplorerNode {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[async_trait]
-impl ConversationLifecycleSubscriber for ApiExplorerNode {
-    async fn on_conversation_closed(&self, conversation_id: &str) {
-        self.registry
-            .cleanup_conversation(conversation_id, |_v| {})
-            .await;
     }
 }
 
