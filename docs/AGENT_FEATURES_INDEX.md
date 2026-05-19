@@ -57,10 +57,11 @@ Convención de output: el script asigna su resultado a una variable `output`. Re
 
 Descubrimiento de specs OpenAPI/Swagger + builder de payloads para `http_request`. **No ejecuta llamadas** — solo describe.
 
-- **Guía:** [`docs/developer_guide/25_web_nodes.md`](developer_guide/25_web_nodes.md) §"api_explorer"
+- **Guía:** [`docs/developer_guide/25_web_nodes.md`](developer_guide/25_web_nodes.md) §"Api Explorer"
 - **Spec:** [`docs/superpowers/specs/2026-04-23-web-nodes-c-api-explorer-design.md`](superpowers/specs/2026-04-23-web-nodes-c-api-explorer-design.md)
-- **5 sub-tools** expuestos vía `expose_sub_tools: "all"`: load_spec, list_endpoints, describe_endpoint, search_endpoints, build_http_request.
-- Caché de specs por `conversation_id` con eviction al cerrar la conversación.
+- **Activación recomendada:** `enabled_tools: ["api_explorer"]` (flag-only — no `tool_configurations` necesario desde 2026-05-19).
+- **5 sub-tools** expuestas automáticamente: `load_spec`, `list_endpoints`, `search_endpoint`, `get_endpoint_details`, `build_http_request`.
+- Caché de specs vía `SessionRegistry<Arc<SpecCache>>` con TTL pasivo (15min idle / 1h max, sweeper cada 60s). No hay señal eager de "conversación cerrada" — confiamos en sweeper + muerte del proceso.
 - Conversión automática Swagger 2.0 → OpenAPI 3.0; resolución inline de `$ref`.
 
 **Patrón canónico**: el LLM usa api_explorer para entender la API, luego llama un `http_request` separado para ejecutar. Nunca encadenar como un solo nodo.

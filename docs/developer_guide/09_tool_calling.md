@@ -29,9 +29,9 @@ Rules:
 
 ---
 
-## Activación por flag — `api_explorer`
+## Activación por flag — `api_explorer` (recommended)
 
-`api_explorer` es el **único toolkit** hoy que puede activarse sin un entry en `tool_configurations`. Basta con incluir el alias literal `"api_explorer"` en `enabled_tools`:
+`api_explorer` es el **único toolkit** hoy que puede activarse sin un entry en `tool_configurations`. Es el patrón **recomendado** cuando solo se necesitan las defaults — basta con incluir el alias literal `"api_explorer"` en `enabled_tools`:
 
 ```json
 "agent": {
@@ -46,15 +46,29 @@ Rules:
 ```
 
 Efecto:
-1. El catálogo auto-expande las 5 sub-tools (`api_explorer__load_spec`, `__search_endpoint`, `__list_endpoints`, `__get_endpoint_details`, `__build_http_request`).
+1. El catálogo auto-expande las 5 sub-tools (`api_explorer__load_spec`, `__list_endpoints`, `__search_endpoint`, `__get_endpoint_details`, `__build_http_request`).
 2. El filtro de `enabled_tools` trata cada entry como prefijo de toolkit (match exacto o `{alias}__*`), así que `"api_explorer"` habilita las 5.
 3. El path de dispatch sintetiza una `ToolConfiguration` por defecto (`node_config: {}`, `expose_sub_tools: All`) cuando no hay entry explícito.
 
-Cuándo usar el shortcut: la UI del frontend ofrece un toggle booleano único para activar OpenAPI tooling — sin config per-instance que mostrar. Cuándo NO: si necesitás alias custom (≠ `api_explorer`), filtrado de sub-tools (`expose_sub_tools: ["load_spec"]`), o knobs como `cache_ttl_seconds`/`fuzzy_match_threshold` — en esos casos declará un entry explícito en `tool_configurations`.
+Por qué `api_explorer` permite flag-only: no requiere config per-instance (auth viene de la spec misma, no del node_config). Otros toolkits (`tavily_client`, futuro `browser`) **siguen requiriendo** `tool_configurations` porque necesitan campos como `api_key`.
 
-Otros toolkits (`tavily_client`, futuro `browser`) **siguen requiriendo** `tool_configurations` porque necesitan config per-instance (`api_key`, defaults).
+Grafo de referencia verificado end-to-end con OpenAI gpt-4o-mini + spec real de petstore3.swagger.io: [`tests/graphs/web/api_explorer_petstore_flag_only.json`](../../tests/graphs/web/api_explorer_petstore_flag_only.json). Documentación completa (5 sub-tools + dispatch flow + cache lifecycle): [`25_web_nodes.md` → `api_explorer`](25_web_nodes.md#3-api_explorer).
 
-Grafo de referencia verificado end-to-end con OpenAI gpt-4o-mini + spec real de Petstore: [`tests/graphs/web/api_explorer_petstore_flag_only.json`](../../tests/graphs/web/api_explorer_petstore_flag_only.json).
+### Fallback: `tool_configurations` explícito
+
+Usar entry explícito solo cuando se necesite alias custom (≠ `api_explorer`), filtrado de sub-tools (`expose_sub_tools: ["load_spec"]`), o knobs como `cache_ttl_seconds`/`fuzzy_match_threshold`:
+
+```json
+"tool_configurations": {
+  "my_apis": {
+    "node_type": "api_explorer",
+    "expose_sub_tools": ["load_spec", "search_endpoint"],
+    "node_config": { "cache_ttl_seconds": 3600 }
+  }
+}
+```
+
+El LLM verá `my_apis__load_spec` y `my_apis__search_endpoint`.
 
 ---
 

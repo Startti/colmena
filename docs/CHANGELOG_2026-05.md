@@ -218,6 +218,8 @@ Other toolkits (`tavily_client`, future `browser`) are unaffected and still requ
 
 E2E verified against OpenAI gpt-4o-mini + real petstore3.swagger.io spec. Test graph: `tests/graphs/web/api_explorer_petstore_flag_only.json`.
 
+**References.** Canonical reference rewritten on 2026-05-19: [`docs/developer_guide/25_web_nodes.md` → Api Explorer](developer_guide/25_web_nodes.md) now contains the dispatch-flow ASCII diagram, the data-injection table (what gets injected vs not under the toolkit path), the 5 sub-tool full schema, and the lazy-vs-eager clarification. `09_tool_calling.md` and `CLAUDE.md` now present the flag-only pattern as recommended; `node_as_tools_reference.json` adds `recommended_activation`, `data_injection`, `is_lazy_tool`, `dispatch_flow` fields (and fixes wrong sub-tool param names: `load_spec` takes `url` not `spec_url`; `get_endpoint_details` / `build_http_request` take `operation_id` not `path`+`method`).
+
 Commits: 131c540, 3f1a9f3, dd47a54.
 
 ---

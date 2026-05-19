@@ -616,10 +616,32 @@
 
     "api_explorer": {
       "summary": "Toolkit node — exposes 5 sub-tools that let an LLM discover endpoints in an OpenAPI 3.x / Swagger 2.0 spec and deterministically build a valid http_request config. Sub-tools: load_spec, list_endpoints, search_endpoint, get_endpoint_details, build_http_request. Swagger 2.0 docs are converted transparently to OpenAPI 3.0.3 inside the adapter.",
-      "see_also": "docs/developer_guide/25_web_nodes.md — full guide (cache lifecycle, URL normalization, $ref inlining, error model).",
+      "recommended_activation": "enabled_tools: [\"api_explorer\"] — flag-only activation. The 5 sub-tools auto-expand in the catalog with default node_config. Use tool_configurations only when you need a custom alias, expose_sub_tools filtering, or per-instance config (cache_ttl_seconds, etc.).",
+      "is_lazy_tool": false,
+      "lazy_loading_note": "The framework-level lazy_tool_loading feature (summary/eager per tool, see developer_guide/29_lazy_tool_loading.md) does NOT apply to flag-only toolkits. All 5 sub-tools always appear in the initial catalog. However, api_explorer embodies an application-level 'lazy spec exploration' pattern by design: the LLM calls load_spec (compact summary), then search_endpoint (~5KB matches), then get_endpoint_details (full schema for ONE endpoint). The LLM never injects the full spec (100KB+) into the prompt.",
+      "dispatch_flow": [
+        "LLM emits tool_call with name='api_explorer__<sub_tool>' and arguments=<JSON of LLM args>.",
+        "DagToolExecutor::execute_inner splits the name on '__' → alias='api_explorer', sub_tool=<sub_tool>.",
+        "Looks up tool_configurations[alias]: HIT uses the explicit entry, MISS calls synthesise_default_toolkit_config(alias) (node_config: None, expose_sub_tools: All).",
+        "execute_toolkit parses arguments into inputs map, injects ONLY '__sub_tool' as a reserved discriminator, then calls ApiExplorerNode::execute.",
+        "ApiExplorerNode reads conversation_id from inputs (falls back to 'default' if absent — which is always under flag-only) and routes by __sub_tool.",
+        "ApiSpecUseCase looks up the spec in SessionRegistry<Arc<SpecCache>>; on miss, fetches + parses + caches.",
+        "Background TTL sweeper (60s period) evicts idle (>15min) or aged (>1h) entries from the registry."
+      ],
+      "data_injection": {
+        "summary": "When dispatched via the toolkit path (which is what flag-only activation uses), execute_toolkit builds the inputs map from scratch and injects ONE reserved key only. The non-toolkit dispatch DOES inject __colmena_session_id and __colmena_agent_session_id, but the toolkit path does NOT.",
+        "fields": {
+          "__sub_tool": "Set by DagToolExecutor::execute_toolkit. Hardcoded discriminator (e.g. 'load_spec').",
+          "<llm_args>": "Set by LLM. Whatever the model passes in tool_call.function.arguments (url, spec_url, query, params, operation_id, etc.).",
+          "conversation_id": "NOT injected by toolkit path. extract_conversation_id falls back to 'default'. Cache is effectively process-wide (safe — OpenAPI specs are public + immutable, sharing amortises fetch cost).",
+          "__colmena_session_id": "NOT injected by toolkit path.",
+          "__colmena_agent_session_id": "NOT injected by toolkit path."
+        }
+      },
+      "see_also": "docs/developer_guide/25_web_nodes.md — full guide with ASCII dispatch diagram, cache lifecycle, URL normalization, $ref inlining, error model.",
       "special_behaviors": [
-        "Sub-tool names follow the pattern '<alias>__<subtool>' — if the map key (or enabled_tools entry) is 'apis', the LLM sees 'apis__load_spec', etc.",
-        "Spec cache is per-conversation (SessionRegistry keyed by conversation_id + session_name) with passive TTL sweeping (15 min idle / 1 h max).",
+        "Sub-tool names follow the pattern '<alias>__<subtool>' — if the map key (or enabled_tools entry) is 'apis', the LLM sees 'apis__load_spec', etc. Under flag-only activation the alias is the literal 'api_explorer'.",
+        "Spec cache is per-conversation (SessionRegistry keyed by conversation_id + session_name) with passive TTL sweeping (15 min idle / 1 h max). Inside each SpecCache entry is an LRU per spec_url (default 100).",
         "build_http_request output matches the input shape of the http_request node exactly. Secret headers use the '${SECURE:<ref>}' placeholder.",
         "get_endpoint_details inlines $ref resolution (Gemini-safe — no raw '#/components/...' strings)."
       ],
@@ -656,40 +678,42 @@
         "load_spec": {
           "description": "Download + parse + cache an OpenAPI/Swagger spec. MUST be called before the other sub-tools.",
           "llm_parameters": {
-            "spec_url": { "type": "string", "required": true, "description": "Public URL to the spec (OpenAPI 3.x JSON/YAML or Swagger 2.0). Git-forge URLs are auto-normalised to raw form." }
+            "url":          { "type": "string",  "required": true,  "description": "Public URL to the spec (OpenAPI 3.x JSON/YAML or Swagger 2.0). Git-forge URLs are auto-normalised to raw form." },
+            "force_reload": { "type": "boolean", "required": false, "description": "When true, invalidates the cached entry and re-fetches. Default false." }
           }
         },
         "list_endpoints": {
           "description": "Browse endpoints by tag with pagination.",
           "llm_parameters": {
-            "spec_url": { "type": "string", "required": true },
-            "tag":      { "type": "string", "required": false, "description": "Filter by OpenAPI tag." },
-            "limit":    { "type": "integer", "required": false },
-            "offset":   { "type": "integer", "required": false }
+            "spec_url": { "type": "string",  "required": true,  "description": "URL of the previously-loaded spec (accepts the input URL or the resolved URL returned by load_spec)." },
+            "tag":      { "type": "string",  "required": false, "description": "Filter by OpenAPI tag." },
+            "limit":    { "type": "integer", "required": false, "description": "1-200, default 50." },
+            "offset":   { "type": "integer", "required": false, "description": "Default 0." }
           }
         },
         "search_endpoint": {
           "description": "Fuzzy search across path, summary, operationId, tags and description.",
           "llm_parameters": {
-            "spec_url": { "type": "string", "required": true },
-            "query":    { "type": "string", "required": true }
+            "spec_url":    { "type": "string",  "required": true },
+            "query":       { "type": "string",  "required": true,  "description": "Search terms." },
+            "method":      { "type": "string",  "required": false, "description": "Filter by HTTP method (GET / POST / PUT / PATCH / DELETE)." },
+            "max_results": { "type": "integer", "required": false, "description": "1-50, default 10." }
           }
         },
         "get_endpoint_details": {
           "description": "Return parameters, request body, responses and security for a specific endpoint. Resolves $ref inline.",
           "llm_parameters": {
-            "spec_url": { "type": "string", "required": true },
-            "path":     { "type": "string", "required": true },
-            "method":   { "type": "string", "required": true }
+            "spec_url":     { "type": "string", "required": true },
+            "operation_id": { "type": "string", "required": true, "description": "operation_id from list_endpoints or search_endpoint. If wrong, the error includes a did_you_mean list." }
           }
         },
         "build_http_request": {
           "description": "Emit a JSON object with the exact shape of an http_request node input, with SECURE placeholders for auth.",
           "llm_parameters": {
-            "spec_url": { "type": "string", "required": true },
-            "path":     { "type": "string", "required": true },
-            "method":   { "type": "string", "required": true },
-            "params":   { "type": "object", "required": true, "description": "Map of parameter name to value (merges request-body fields into the same object)." }
+            "spec_url":         { "type": "string", "required": true },
+            "operation_id":     { "type": "string", "required": true },
+            "params":           { "type": "object", "required": false, "description": "Flat map of parameter name to value. Path params, query params, and request-body fields all merge into this single object. Default {}." },
+            "auth_secret_ref":  { "type": "string", "required": false, "description": "Secret reference. The auth header is emitted as ${SECURE:<ref>} for http_request to resolve later." }
           }
         }
       },

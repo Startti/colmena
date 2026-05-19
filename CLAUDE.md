@@ -239,19 +239,24 @@ Tools defined in `tool_configurations` are **auto-enabled** — you do NOT need 
 
 > **Flag-only toolkits.** Today only `api_explorer` supports activation by flag alone (toolkit-prefix match + dispatch fallback synthesises a default `ToolConfiguration`). Other toolkits (`tavily_client`, future `browser`) still require an explicit `tool_configurations` entry because they need per-instance config (`api_key`, defaults, etc.).
 
+Because `api_explorer` has no required per-instance configuration (auth comes from the spec itself, not from node config), it's the only toolkit with flag-only activation today; other toolkits like `tavily_client` still need a `tool_configurations` entry to pass `api_key`.
+
 ```json
+// RECOMMENDED — flag-only activation for api_explorer (auto-exposes 5 sub-tools:
+// load_spec, list_endpoints, search_endpoint, get_endpoint_details, build_http_request)
+"enabled_tools": ["api_explorer"]
+
+// Wildcard — expose everything including built-ins
+"enabled_tools": "*"
+
+// Enable a built-in alongside tool_configurations
+"enabled_tools": ["tavily_web"]
+
 // CORRECT — omit enabled_tools when all tools are in tool_configurations
 "tool_configurations": { "run_python": { ... }, "search_products": { ... } }
-
-// ONLY needed for built-in toolkit tools (tavily_client, etc.) or wildcard
-"enabled_tools": "*"            // expose everything including built-ins
-"enabled_tools": ["tavily_web"] // enable a built-in alongside tool_configurations
-"enabled_tools": ["api_explorer"]  // shortcut: auto-exposes all 5 sub-tools
-                                    // (load_spec, search_endpoint, list_endpoints,
-                                    //  get_endpoint_details, build_http_request)
-                                    // with default empty node_config — no
-                                    // tool_configurations entry needed
 ```
+
+For overrides (custom alias, `expose_sub_tools` filtering, `cache_ttl_seconds`, etc.), declare an explicit `tool_configurations` entry with `node_type: "api_explorer"` — see `docs/developer_guide/25_web_nodes.md`.
 
 ## Skills
 - `/rust_dev` — Rust development protocol (architecture-aware, includes documentation)
