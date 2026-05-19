@@ -53,7 +53,6 @@
   - `examples/` — `USAGE_EXAMPLES.md`, `amadeus_test.md`, `python_usage.md`
   - `testing/` — `critic_feedback_test_plan.md`
   - `history/` — Past implementation notes (superseded, for historical context only)
-  - `AUDIT_ENGINEERING_REPORT.md` — Audit findings and gaps
 
 ## Node Documentation — Where to Look
 When you need to understand or modify any node (HTTP, LLM, orchestrator, etc.):
@@ -266,7 +265,4 @@ For overrides (custom alias, `expose_sub_tools` filtering, `cache_ttl_seconds`, 
 - `/test_graph` — Run, validate, and debug JSON DAG graph files via the DAG engine CLI
 
 ## Current Status
-- **Audit v0.3.0**: Systematic audit of docs 01-12 completed.
-- **Critical Finding**: Tool calling with Secure Values is currently broken (see report).
-- **Engineering Report**: See [docs/AUDIT_ENGINEERING_REPORT.md](file:///home/daniel-garcia4/startti/colmena/docs/AUDIT_ENGINEERING_REPORT.md) for detailed gaps and next steps.
-- **Tasks**: See `docs/PENDING_TASKS.md` for overall project tracking.
+- **Active development on `develop`**. See `docs/CHANGELOG_*.md` for the rolling change log; `docs/BACKLOG.md` for parked items.
