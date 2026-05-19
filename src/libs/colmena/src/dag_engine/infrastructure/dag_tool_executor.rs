@@ -659,6 +659,19 @@ impl DagToolExecutor {
                     return self.execute_toolkit(alias, sub_tool, cfg, tool_call).await;
                 }
             }
+            // Flag-only fallback for `api_explorer`: when no `tool_configurations`
+            // entry exists, `available_tools()` still auto-exposes the
+            // `api_explorer__*` sub-tools (see loop 2 in `available_tools`).
+            // For dispatch to match, synthesise a default ToolConfiguration here
+            // so `execute_toolkit` can route the call. Scoped strictly to
+            // `api_explorer` — other toolkits (tavily_client, browser, etc.)
+            // still require an explicit `tool_configurations` entry.
+            if alias == "api_explorer" && self.registry.get_toolkit_node(alias).is_some() {
+                let synth_cfg = synthesise_default_toolkit_config(alias);
+                return self
+                    .execute_toolkit(alias, sub_tool, &synth_cfg, tool_call)
+                    .await;
+            }
         }
 
         let node_type = &tool_call.function.name;
@@ -1177,6 +1190,37 @@ impl ToolExecutor for DagToolExecutor {
         }
 
         tools
+    }
+}
+
+/// Build a default `ToolConfiguration` for a toolkit alias that was advertised
+/// to the LLM via flag-only auto-exposure (no explicit `tool_configurations`
+/// entry). Used by the dispatch fallback in `execute_inner` so
+/// `execute_toolkit` has the shape it expects.
+///
+/// The synthesised config sets:
+/// - `node_type == alias` (toolkit nodes are registered under the alias name).
+/// - `expose_sub_tools = SubToolFilter::All` so the filter inside
+///   `execute_toolkit` does not reject the call.
+/// - Empty `fixed_config` and absent `node_config` — the toolkit runs with its
+///   own defaults, just as it does in the auto-exposed catalog path.
+#[allow(deprecated)] // Synthesises legacy fields with defaults for backward compatibility.
+fn synthesise_default_toolkit_config(alias: &str) -> ToolConfiguration {
+    use crate::dag_engine::domain::tool_configuration::SubToolFilter;
+    ToolConfiguration {
+        name: alias.to_string(),
+        description: String::new(),
+        node_type: alias.to_string(),
+        fixed_config: HashMap::new(),
+        exposed_inputs: None,
+        parameters: None,
+        mergeable_fields: None,
+        field_mapping: None,
+        node_schema: None,
+        node_config: None,
+        expose_sub_tools: Some(SubToolFilter::all()),
+        summary: None,
+        eager: false,
     }
 }
 
@@ -2421,6 +2465,60 @@ mod toolkit_runtime_tests {
             names.contains(&"tavily_client"),
             "tavily_client should still appear as a raw tool — only api_explorer is special-cased: {names:?}"
         );
+    }
+
+    /// Companion to `api_explorer_auto_expands_subtools_without_tool_configurations`:
+    /// once the catalog exposes `api_explorer__<sub>` tools, the LLM must also be
+    /// able to *call* them. Before the dispatch fallback existed, the executor
+    /// would fall through to `registry.get_node("api_explorer__load_spec")` (no
+    /// such node) and return `ToolNotFound` — even though `available_tools()`
+    /// had advertised the sub-tool.
+    ///
+    /// This test pins the dispatch path: empty `tool_configurations`, but the
+    /// registry has `api_explorer` as a toolkit. Calling
+    /// `api_explorer__load_spec` must reach the underlying node (we do not care
+    /// whether the call itself succeeds — only that dispatch routes correctly).
+    #[tokio::test]
+    async fn flag_only_dispatch_api_explorer_subtool_succeeds() {
+        use crate::dag_engine::infrastructure::nodes::api_explorer::ApiExplorerNode;
+        use crate::llm::domain::{FunctionCall, ToolCall};
+
+        let registry = Arc::new(ApiExplorerOnlyRegistry {
+            api_explorer: Arc::new(ApiExplorerNode::new()),
+            tavily_stub: Arc::new(EchoToolkitNode),
+        });
+        // EMPTY tool_configurations — the dispatch fallback must synthesise one.
+        let executor = DagToolExecutor::new(registry, HashMap::new());
+
+        let call = ToolCall {
+            id: "test1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "api_explorer__load_spec".to_string(),
+                // An obviously-invalid URL: the toolkit will return a domain
+                // error, but dispatch will have reached the node. That's what
+                // we're asserting — NOT that the load itself succeeds.
+                arguments: r#"{"url":"not-a-real-url-xyz"}"#.to_string(),
+            },
+            response: None,
+        };
+
+        let result = executor
+            .execute(&call)
+            .await
+            .expect("dispatch must reach the toolkit, not return ToolNotFound");
+
+        // Whatever the underlying node returned, the dispatch path produced a
+        // ToolResult — that proves the synthesised config was used. The
+        // toolkit returns a structured payload (success or domain error JSON);
+        // both are encoded as a non-empty JSON-stringified output.
+        assert!(
+            !result.output.is_empty(),
+            "expected a tool result payload (success or domain error), got empty output"
+        );
+        // Sanity: the result must NOT be a "tool not found" surface. The
+        // `execute_toolkit` path always sets tool_call_id to the original id.
+        assert_eq!(result.tool_call_id, "test1");
     }
 
     #[tokio::test]
