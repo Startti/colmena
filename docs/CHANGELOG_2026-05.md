@@ -1,8 +1,8 @@
 # Cambios recientes — auditoría 2026-05-03 al 2026-05-18
 
-> **Generado:** 2026-05-17 · **Actualizado:** 2026-05-18 (cierre de Gap #2 + diagramas)
+> **Generado:** 2026-05-17 · **Actualizado:** 2026-05-18 (cierre de Gap #2 + diagramas + inline data: auto-summary v2)
 > **Alcance:** Commits sobre `develop` desde 2026-05-11 (los anteriores a esta ventana fueron auditados previamente).
-> **Total:** ~90 commits agrupados en 8 features.
+> **Total:** ~90 commits agrupados en 9 features.
 
 ## Cómo leer este documento
 
@@ -174,6 +174,19 @@ Después del fix, `path:` y `data:` se vuelven `Uploaded` antes de la registraci
 **Commits:** `0d17246` (issue spec + test graphs), `89bb6e3` (plan), `3ade96d` (failing tests), `34cd7c2`, `7bcb54b`, `806e862` (fix), `f438e8a` (docs), `a6c77e7` (e2e revert) (2026-05-16).
 
 **Estado:** ✅ Done + verificado e2e contra Postgres real (`agent_path_fix_001`).
+
+---
+
+## Inline data: auto-summary (v2)
+
+**Date.** 2026-05-18.
+**Status.** Done.
+**Why.** Closes BACKLOG entry #1.
+
+When a file enters via `data:` (base64 inline), the bytes used to be consumed by the upload pipeline so the auto-summary path skipped them. Now `resolve_one` clones the bytes a second time into a `retained_inline_bytes` field on `FileData`, and the auto-register loop passes them to `acquire_bytes` for the inline source. End-to-end verified against Gemini Flash: `source_kind = inline` rows now carry a non-null description.
+
+Commits: aeea269 (RED), cc924a3 (domain field + resolve_one), a3053cd (GREEN), 50a021d (E2E graph).
+Test graph: `tests/graphs/agents/load_attachment_inline_summary.json`.
 
 ---
 

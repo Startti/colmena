@@ -117,7 +117,7 @@ El path de generación corre durante el turno en que el archivo se **registra po
 | `summary_enabled: true` en `config` | Master switch (default `true`) |
 | La entrada de `files[]` NO trae `description` | Si el caller pasó descripción, se respeta sin overhead |
 | El archivo NO existe ya en `conversation_attachments` para `(agent_session_id, document_id, provider)` | Solo se genera en la primera registración; turnos subsiguientes leen la fila existente |
-| El `AttachmentSource` resultante NO es `Inline` | v1 limitation — ver [Limitaciones conocidas](#limitaciones-conocidas-v1) |
+| `AttachmentSource` válido (`SignedUrl`, `Path` o `Inline` con bytes retenidos) | El summary necesita una fuente de bytes — todas funcionan post-fix 2026-05-18 |
 | `agent_session_id` está disponible y hay registry conectado | El summary necesita persistirse |
 
 Cuando cualquiera falla, el campo `description` queda `null` y el catálogo cae a `filename` como label.
@@ -127,10 +127,10 @@ Cuando cualquiera falla, el campo `description` queda `null` y el catálogo cae 
 ```
 files[i] sin description
    ↓
-acquire_bytes(source, fetcher)
+acquire_bytes(source, fetcher, inline_bytes)
    ├─ AttachmentSource::SignedUrl → fetcher.stream(url) → Vec<u8>
    ├─ AttachmentSource::Path      → tokio::fs::read(path)
-   └─ AttachmentSource::Inline    → SKIP (v1 no retiene bytes inline post-upload)
+   └─ AttachmentSource::Inline    → SummaryTarget::inline_bytes (clonados en resolve_one antes del upload)
    ↓
 extract_text(mime, bytes) → Option<String>
    ├─ application/pdf                                           → pdf-extract::extract_text_from_mem
@@ -259,7 +259,7 @@ Cada task individual aplica `tokio::time::timeout(summary_timeout_secs, repo.cal
 |---|---|---|
 | `summary_enabled: false` | Skip total | `description = caller-supplied or null` |
 | Caller pasó `description` no vacío | Skip generación, usa el valor pasado | `description = caller value` |
-| `AttachmentSource::Inline` (no url/path) | Skip (v1 limitation) | `description = null` |
+| `AttachmentSource::Inline` (data: base64) | Summary corre con bytes retenidos vía `retained_inline_bytes` (clon en `resolve_one`) | `description = summary` |
 | MIME no soportado (zip, docx, etc.) | Skip extracción, no LLM call | `description = null` |
 | PDF solo-imagen (`pdf-extract` retorna empty) | Skip LLM call | `description = null` |
 | PDF corrupto (`pdf-extract` retorna Err) | Skip LLM call, log warn | `description = null` |
@@ -286,15 +286,15 @@ Comparado con mandar el doc entero (PDF de 200 pp ≈ 120 000 tokens visión + t
 
 ### Limitaciones conocidas (v1)
 
-1. **Archivos `data:` (base64 inline) no se summarizan.** Cuando el integrator sube un archivo embebido en el JSON (campo `data`) sin un `url` o `path` que lo respalde, los bytes se consumen durante el upload streaming al provider y no se retienen para una segunda lectura. En esos casos `AttachmentSource::Inline` se guarda en el registry pero el path de summary salta esa fila. Los archivos con `path:` SÍ se summarizan correctamente — el summary path re-lee del disco via `AttachmentSource::Path`. **Workaround para `data:`:** pasá `description` manualmente en el `files[]` entry. **Plan v2:** tee el stream de upload para retener bytes sin doble-descarga.
+> **Resuelto (2026-05-18):** La limitación previa "archivos `data:` (base64 inline) no se summarizan" se cerró. `LlmCallUseCase::resolve_one` ahora clona los bytes inline a un nuevo campo `FileData::retained_inline_bytes` antes de que el upload streaming los consuma, y el auto-register loop los pasa a `acquire_bytes` vía `SummaryTarget::inline_bytes` para la fuente `Inline`. Verificado e2e contra Gemini Flash: `source_kind = inline` ahora produce filas con `description` no-null.
 
-2. **Office formats no soportados.** `docx`, `xlsx`, `pptx`, `odt`, etc. caen a `Ok(None)` en `extract_text` y skipean el summary. **Workaround:** pasá `description` manualmente. **Plan v2:** agregar extractores específicos (`docx-rs`, `calamine`).
+1. **Office formats no soportados.** `docx`, `xlsx`, `pptx`, `odt`, etc. caen a `Ok(None)` en `extract_text` y skipean el summary. **Workaround:** pasá `description` manualmente. **Plan v2:** agregar extractores específicos (`docx-rs`, `calamine`).
 
-3. **PDFs encriptados o solo-imagen.** `pdf-extract` retorna error o texto vacío. **Workaround:** pre-procesar con OCR fuera del engine y pasar `description` manualmente.
+2. **PDFs encriptados o solo-imagen.** `pdf-extract` retorna error o texto vacío. **Workaround:** pre-procesar con OCR fuera del engine y pasar `description` manualmente.
 
-4. **No hay retry automático.** Si el LLM falla en la primera generación, la fila queda con `description = null` para siempre (en la sesión). **Plan v2:** flag `force_resummary` o background worker.
+3. **No hay retry automático.** Si el LLM falla en la primera generación, la fila queda con `description = null` para siempre (en la sesión). **Plan v2:** flag `force_resummary` o background worker.
 
-5. **No hay cross-session deduplication.** Si el mismo archivo se sube a dos `agent_session_id` distintos, se summariza dos veces. **Plan v2:** cache por content hash.
+4. **No hay cross-session deduplication.** Si el mismo archivo se sube a dos `agent_session_id` distintos, se summariza dos veces. **Plan v2:** cache por content hash.
 
 ### Test graph para auto-summary
 
