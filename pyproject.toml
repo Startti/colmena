@@ -50,6 +50,7 @@ Issues = "https://github.com/Startti/colmena/issues"
 [tool.maturin]
 module-name = "colmena"
 features = ["pyo3/extension-module", "python"]
+manifest-path = "src/libs/colmena/Cargo.toml"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
