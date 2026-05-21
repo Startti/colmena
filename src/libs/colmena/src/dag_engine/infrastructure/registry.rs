@@ -8,6 +8,8 @@ use crate::dag_engine::infrastructure::nodes::{
     orchestrator::*, output::*, python_node::*, socketio::*, sql::*, subgraph::*,
     task_memory_writer::*, trigger::*,
 }; // Importa nuestros nodos
+use crate::llm::domain::AttachmentRegistry;
+use crate::storage::domain::OutputStorageRepository;
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
@@ -35,10 +37,18 @@ impl HashMapNodeRegistry {
             sql_port_factory,
             task_memory_repo,
             None,
+            None,
+            None,
         )
     }
 
-    /// Construye el registro inyectando además un SecureValueService (para Secure Values en Tool Calling).
+    /// Construye el registro inyectando además un SecureValueService (para
+    /// Secure Values en Tool Calling), un adapter de almacenamiento de
+    /// outputs generados, y un AttachmentRegistry compartido. Cuando `storage`
+    /// es `None`, los nodos de generación de media (image_generation, etc.)
+    /// no quedan registrados — igual patrón que `secure_suspend` con
+    /// `SecureValueService`. Cuando `attachment_registry` es `None`, los
+    /// nodos media siguen registrados pero NO registran sus outputs (fail-soft).
     pub fn new_with_secure_values(
         repository_factory: Arc<ConversationRepositoryFactory>,
         sql_port_factory: Arc<crate::dag_engine::infrastructure::sql_port_factory::SqlPortFactory>,
@@ -46,6 +56,8 @@ impl HashMapNodeRegistry {
             Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>,
         >,
         secure_value_service: Option<Arc<SecureValueService>>,
+        storage: Option<Arc<dyn OutputStorageRepository>>,
+        attachment_registry: Option<Arc<dyn AttachmentRegistry>>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|weak_self| {
             let mut nodes: HashMap<String, Arc<dyn ExecutableNode>> = HashMap::new();
@@ -71,7 +83,15 @@ impl HashMapNodeRegistry {
             nodes.insert("input".to_string(), Arc::new(InputNode));
 
             // --- Registrar Nodos HTTP ---
-            nodes.insert("http_request".to_string(), Arc::new(HttpNode));
+            // Pass the storage adapter so the HTTP node can resolve
+            // `$attachment:<id>` placeholders in the body to bytes read
+            // from outputs of image_generation/edit/tts.
+            let http_node = if let Some(st) = storage.clone() {
+                HttpNode::new().with_storage(st)
+            } else {
+                HttpNode::new()
+            };
+            nodes.insert("http_request".to_string(), Arc::new(http_node));
 
             // --- Registrar Nodos Socket.IO ---
             nodes.insert("socketio_request".to_string(), Arc::new(SocketIoNode));
@@ -85,17 +105,20 @@ impl HashMapNodeRegistry {
             // --- Registrar Nodos LLM ---
             // Pass the weak reference to the registry to LlmNode
             let registry_weak = weak_self.clone() as Weak<dyn NodeRegistryPort>;
-            let llm_node = LlmNode::new(
+            let mut llm_node = LlmNode::new(
                 repository_factory.clone(),
                 registry_weak,
                 task_memory_repo.clone(),
             );
             // If a SecureValueService is available, attach it so tool calls can decrypt secrets
-            let llm_node = if let Some(svc) = secure_value_service.clone() {
-                llm_node.with_secure_values(svc)
-            } else {
-                llm_node
-            };
+            if let Some(svc) = secure_value_service.clone() {
+                llm_node = llm_node.with_secure_values(svc);
+            }
+            // Attach storage so the AttachmentResolver can read bytes for
+            // `provider: Generated` rows when doing cross-provider lazy upload.
+            if let Some(st) = storage.clone() {
+                llm_node = llm_node.with_storage(st);
+            }
             nodes.insert("llm_call".to_string(), Arc::new(llm_node));
 
             // --- Registrar Nodos Python ---
@@ -219,6 +242,45 @@ impl HashMapNodeRegistry {
                 "api_explorer".to_string(),
                 api_explorer.clone() as Arc<dyn ExecutableNode>,
             );
+
+            // --- Registrar Image Generation (solo si hay storage adapter) ---
+            if let Some(storage_arc) = storage.clone() {
+                use crate::dag_engine::infrastructure::nodes::image_generation::ImageGenerationNode;
+                let mut img = ImageGenerationNode::new(storage_arc);
+                if let Some(svc) = secure_value_service.clone() {
+                    img = img.with_secure_values(svc);
+                }
+                if let Some(reg) = attachment_registry.clone() {
+                    img = img.with_attachment_registry(reg);
+                }
+                nodes.insert("image_generation".to_string(), Arc::new(img));
+            }
+
+            // --- Registrar TTS (solo si hay storage adapter) ---
+            if let Some(storage_arc) = storage.clone() {
+                use crate::dag_engine::infrastructure::nodes::tts::TtsNode;
+                let mut tts = TtsNode::new(storage_arc);
+                if let Some(svc) = secure_value_service.clone() {
+                    tts = tts.with_secure_values(svc);
+                }
+                if let Some(reg) = attachment_registry.clone() {
+                    tts = tts.with_attachment_registry(reg);
+                }
+                nodes.insert("tts".to_string(), Arc::new(tts));
+            }
+
+            // --- Registrar Image Edit (solo si hay storage adapter) ---
+            if let Some(storage_arc) = storage.clone() {
+                use crate::dag_engine::infrastructure::nodes::image_edit::ImageEditNode;
+                let mut edit = ImageEditNode::new(storage_arc);
+                if let Some(svc) = secure_value_service.clone() {
+                    edit = edit.with_secure_values(svc);
+                }
+                if let Some(reg) = attachment_registry.clone() {
+                    edit = edit.with_attachment_registry(reg);
+                }
+                nodes.insert("image_edit".to_string(), Arc::new(edit));
+            }
 
             // --- Registrar SubGraph ---
             let sub_node = Arc::new(SubGraphNode::new());
@@ -488,6 +550,8 @@ mod registry_secure_suspend_tests {
             sql_factory,
             Some(task_memory),
             Some(svc),
+            None,
+            None,
         )
     }
 
@@ -507,5 +571,223 @@ mod registry_secure_suspend_tests {
             reg.get_node("secure_suspend").is_none(),
             "secure_suspend must NOT be registered without SecureValueService"
         );
+    }
+}
+
+#[cfg(test)]
+mod media_tools_injection_tests {
+    //! Verifies that when the LLM node is configured with `tool_configurations`
+    //! referencing media nodes (image_generation, image_edit, tts), the
+    //! resulting `DagToolExecutor::available_tools()` returns ToolDefinitions
+    //! for each — same path the LLM node uses before sending to the provider.
+    //!
+    //! Reproduces the exact tool_configurations shape from
+    //! `tests/graphs/agents/multimedia_agent.json`. If this passes but the
+    //! real graph doesn't tool-call, the bug lives downstream (request body,
+    //! provider adapter, etc.). If this fails, the bug is in tool_configurations
+    //! parsing or registry wiring.
+    use super::*;
+    use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
+    use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
+    use crate::llm::domain::tool_executor::ToolExecutor;
+    use crate::storage::domain::OutputStorageRepository;
+    use crate::storage::infrastructure::LocalCacheStorageAdapter;
+    use std::collections::HashMap;
+
+    fn build_registry_with_storage() -> Arc<HashMapNodeRegistry> {
+        let pool_registry = Arc::new(
+            crate::dag_engine::infrastructure::pool_registry::PgPoolRegistry::new(
+                crate::dag_engine::infrastructure::pool_registry::PoolConfig::defaults(),
+            ),
+        );
+        let repo_factory = Arc::new(
+            crate::llm::infrastructure::ConversationRepositoryFactory::new(pool_registry.clone()),
+        );
+        let sql_factory = Arc::new(
+            crate::dag_engine::infrastructure::sql_port_factory::SqlPortFactory::new(pool_registry),
+        );
+        let task_memory: Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository> =
+            Arc::new(super::registry_tavily_tests::StubTaskMemory);
+        let storage: Arc<dyn OutputStorageRepository> = Arc::new(LocalCacheStorageAdapter::new());
+        HashMapNodeRegistry::new_with_secure_values(
+            repo_factory,
+            sql_factory,
+            Some(task_memory),
+            None,
+            Some(storage),
+            None,
+        )
+    }
+
+    /// Reproduce the multimedia_agent.json tool_configurations as a parsed
+    /// HashMap<String, ToolConfiguration>. Mirrors what `llm.rs` builds from
+    /// the user's config JSON at execute time.
+    fn media_tool_configs() -> HashMap<String, ToolConfiguration> {
+        let json = serde_json::json!({
+            "generate_image": {
+                "name": "generate_image",
+                "node_type": "image_generation",
+                "description": "Generate an image from a prompt.",
+                "node_schema": {
+                    "provider": { "type": "string",  "fixed": "openai" },
+                    "model":    { "type": "string",  "fixed": "gpt-image-1" },
+                    "api_key":  { "type": "string",  "fixed": "${OPENAI_API_KEY}" },
+                    "size":     { "type": "string",  "fixed": "1024x1024" },
+                    "n":        { "type": "integer", "fixed": 1 },
+                    "prompt":   { "type": "string", "required": true, "description": "Prompt." }
+                }
+            },
+            "edit_image": {
+                "name": "edit_image",
+                "node_type": "image_edit",
+                "description": "Edit an existing image.",
+                "node_schema": {
+                    "provider":   { "type": "string",  "fixed": "openai" },
+                    "model":      { "type": "string",  "fixed": "gpt-image-1" },
+                    "api_key":    { "type": "string",  "fixed": "${OPENAI_API_KEY}" },
+                    "size":       { "type": "string",  "fixed": "1024x1024" },
+                    "n":          { "type": "integer", "fixed": 1 },
+                    "source_url": { "type": "string", "required": true, "description": "URL." },
+                    "prompt":     { "type": "string", "required": true, "description": "Edit." }
+                }
+            },
+            "synthesize_speech": {
+                "name": "synthesize_speech",
+                "node_type": "tts",
+                "description": "TTS.",
+                "node_schema": {
+                    "provider": { "type": "string", "fixed": "openai" },
+                    "model":    { "type": "string", "fixed": "tts-1" },
+                    "api_key":  { "type": "string", "fixed": "${OPENAI_API_KEY}" },
+                    "voice":    { "type": "string", "fixed": "alloy" },
+                    "format":   { "type": "string", "fixed": "mp3" },
+                    "text":     { "type": "string", "required": true, "description": "Text." }
+                }
+            }
+        });
+        serde_json::from_value(json).expect("tool_configurations must parse")
+    }
+
+    #[tokio::test]
+    async fn registry_has_three_media_nodes_when_storage_present() {
+        let reg = build_registry_with_storage();
+        assert!(reg.get_node("image_generation").is_some());
+        assert!(reg.get_node("image_edit").is_some());
+        assert!(reg.get_node("tts").is_some());
+    }
+
+    #[tokio::test]
+    async fn available_tools_exposes_all_three_media_tools() {
+        let reg = build_registry_with_storage();
+        let configs = media_tool_configs();
+        let executor = DagToolExecutor::new(
+            reg as Arc<dyn crate::dag_engine::application::ports::NodeRegistryPort>,
+            configs,
+        );
+        let tools = executor.available_tools().await;
+
+        let names: std::collections::HashSet<&str> =
+            tools.iter().map(|t| t.name.as_str()).collect();
+        // The three media tool names from the configurations MUST be present.
+        for required in ["generate_image", "edit_image", "synthesize_speech"] {
+            assert!(
+                names.contains(required),
+                "expected tool '{}' to be exposed; got: {:?}",
+                required,
+                names
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_enable_filter_keeps_configured_tools_without_enabled_tools_field() {
+        // Reproduces `filter_enabled_tools` behavior — the default code path
+        // when the graph does NOT declare `enabled_tools`. Configured aliases
+        // alone must be enough to keep the tools in the array passed to OpenAI.
+        use crate::dag_engine::infrastructure::nodes::llm::filter_enabled_tools;
+
+        let reg = build_registry_with_storage();
+        let configs = media_tool_configs();
+        let aliases: std::collections::HashSet<String> = configs.keys().cloned().collect();
+        let executor = DagToolExecutor::new(
+            reg as Arc<dyn crate::dag_engine::application::ports::NodeRegistryPort>,
+            configs,
+        );
+        let all_tools = executor.available_tools().await;
+
+        // No enabled_tools provided → filter relies on auto-enable.
+        let filtered = filter_enabled_tools(all_tools, None, &aliases);
+        let names: std::collections::HashSet<&str> =
+            filtered.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            names.contains("generate_image"),
+            "generate_image dropped after filter_enabled_tools(None): got {:?}",
+            names
+        );
+        assert!(names.contains("edit_image"));
+        assert!(names.contains("synthesize_speech"));
+    }
+
+    /// Reproduces the broken JSON shape we hit before adding `type` on every
+    /// fixed field. The `type` field is now OPTIONAL when `fixed` is present —
+    /// so this configuration must parse cleanly and produce 3 tools.
+    /// (Before the fix, parsing failed silently and tools array was empty.)
+    #[tokio::test]
+    async fn tool_configurations_with_only_fixed_fields_parse_cleanly() {
+        let raw = serde_json::json!({
+            "generate_image": {
+                "name": "generate_image",
+                "node_type": "image_generation",
+                "node_schema": {
+                    "provider": { "fixed": "openai" },
+                    "model":    { "fixed": "gpt-image-1" },
+                    "api_key":  { "fixed": "${OPENAI_API_KEY}" },
+                    "prompt":   { "type": "string", "required": true, "description": "p" }
+                }
+            }
+        });
+        let configs: HashMap<String, ToolConfiguration> =
+            serde_json::from_value(raw).expect("must parse cleanly without type on fixed fields");
+        assert_eq!(configs.len(), 1);
+
+        let reg = build_registry_with_storage();
+        let executor = DagToolExecutor::new(
+            reg as Arc<dyn crate::dag_engine::application::ports::NodeRegistryPort>,
+            configs,
+        );
+        let tools = executor.available_tools().await;
+        let names: std::collections::HashSet<&str> =
+            tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains("generate_image"));
+    }
+
+    #[tokio::test]
+    async fn generate_image_tool_has_only_prompt_as_llm_visible_param() {
+        let reg = build_registry_with_storage();
+        let configs = media_tool_configs();
+        let executor = DagToolExecutor::new(
+            reg as Arc<dyn crate::dag_engine::application::ports::NodeRegistryPort>,
+            configs,
+        );
+        let tools = executor.available_tools().await;
+
+        let gen = tools
+            .iter()
+            .find(|t| t.name == "generate_image")
+            .expect("generate_image must be present");
+        // All `fixed` fields should be hidden; only `prompt` is LLM-visible.
+        let props: Vec<&str> = gen
+            .parameters
+            .properties
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+        assert_eq!(
+            props,
+            vec!["prompt"],
+            "expected exactly ['prompt']; got {:?}",
+            props
+        );
+        assert_eq!(gen.parameters.required, vec!["prompt"]);
     }
 }

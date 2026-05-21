@@ -22,6 +22,7 @@ pub async fn run_dag(
     dotenvy::dotenv().ok();
 
     let engine_config = crate::dag_engine::engine::EngineConfig::from_env()
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
     let engine = crate::dag_engine::engine::ColmenaEngine::new(engine_config)
         .await
@@ -137,6 +138,7 @@ pub async fn serve_dag(
     dotenvy::dotenv().ok();
 
     let engine_config = crate::dag_engine::engine::EngineConfig::from_env()
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
     let engine = Arc::new(
         crate::dag_engine::engine::ColmenaEngine::new(engine_config)

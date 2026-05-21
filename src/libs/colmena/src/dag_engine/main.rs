@@ -72,6 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             dotenvy::dotenv().ok();
             let engine_config = colmena::dag_engine::engine::EngineConfig::from_env()
+                .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
             let engine = colmena::dag_engine::engine::ColmenaEngine::new(engine_config)
                 .await

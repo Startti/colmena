@@ -110,6 +110,12 @@ google-cloud-storage = { version = "1", optional = true }
 # Socket.IO client
 rust_socketio = { version = "0.6", features = ["async"] }
 
+# Google service account auth — used by image_generation node when calling
+# Vertex AI Imagen. Exchanges a service-account JSON for a short-lived bearer
+# token (caches inside the Authenticator). Reads service account from the
+# standard `GOOGLE_APPLICATION_CREDENTIALS` env var.
+yup-oauth2 = "11"
+
 [features]
 default = []
 python = ["pyo3-asyncio-0-21"]

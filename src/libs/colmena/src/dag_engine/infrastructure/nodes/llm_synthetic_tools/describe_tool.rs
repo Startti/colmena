@@ -34,7 +34,10 @@ pub fn generate_tool_markdown(cfg: &ToolConfiguration) -> String {
         out.push_str("| Name | Type | Required | Description |\n");
         out.push_str("|------|------|----------|-------------|\n");
         for (name, field) in &visible_fields {
-            let ty = field.field_type.as_str();
+            // visible_fields by construction only contains LLM-visible entries,
+            // so `type` SHOULD be present. Fall back to "unknown" defensively
+            // rather than panic on malformed inputs.
+            let ty = field.field_type.as_deref().unwrap_or("unknown");
             let required = if field.required.unwrap_or(false) {
                 "yes"
             } else {
@@ -125,7 +128,7 @@ mod tests {
 
     fn empty_field(field_type: &str, required: bool, description: &str) -> NodeSchemaField {
         NodeSchemaField {
-            field_type: field_type.to_string(),
+            field_type: Some(field_type.to_string()),
             fixed: None,
             required: Some(required),
             description: Some(description.to_string()),
@@ -137,7 +140,7 @@ mod tests {
 
     fn fixed_field(value: serde_json::Value) -> NodeSchemaField {
         NodeSchemaField {
-            field_type: "string".to_string(),
+            field_type: None, // fixed fields don't need `type` anymore
             fixed: Some(value),
             required: None,
             description: None,

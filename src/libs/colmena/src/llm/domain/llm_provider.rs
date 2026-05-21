@@ -9,6 +9,14 @@ pub enum ProviderKind {
     Google,
     Anthropic,
     Mock,
+    /// Synthetic provider used by `AttachmentRegistry` rows for outputs that
+    /// originated from Colmena itself (image_generation, image_edit, tts).
+    /// These rows store the `storage_key` in `provider_file_id` and are
+    /// resolved lazily — the first time `load_attachment` is called from an
+    /// actual chat provider (OpenAI/Anthropic/Google), the bytes are read
+    /// via `OutputStorageRepository`, uploaded to that provider's Files API,
+    /// and a sibling row is inserted with the real provider_file_id.
+    Generated,
 }
 
 impl Display for ProviderKind {
@@ -18,6 +26,7 @@ impl Display for ProviderKind {
             ProviderKind::Google => write!(f, "google"),
             ProviderKind::Anthropic => write!(f, "anthropic"),
             ProviderKind::Mock => write!(f, "mock"),
+            ProviderKind::Generated => write!(f, "generated"),
         }
     }
 }
@@ -31,6 +40,7 @@ impl FromStr for ProviderKind {
             "google" => Ok(ProviderKind::Google),
             "anthropic" => Ok(ProviderKind::Anthropic),
             "mock" => Ok(ProviderKind::Mock),
+            "generated" => Ok(ProviderKind::Generated),
             _ => Err(LlmError::UnsupportedProvider {
                 provider: s.to_string(),
             }),
@@ -46,6 +56,9 @@ impl ProviderKind {
             ProviderKind::Google => "gemini-pro",
             ProviderKind::Anthropic => "claude-3-sonnet",
             ProviderKind::Mock => "mock-model",
+            // `Generated` is never used to call an LLM — these constants are
+            // sentinel placeholders to satisfy the enum's exhaustive matching.
+            ProviderKind::Generated => "(generated artifact — no model)",
         }
     }
 
@@ -56,6 +69,7 @@ impl ProviderKind {
             ProviderKind::Google => "GEMINI_API_KEY",
             ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
             ProviderKind::Mock => "MOCK_API_KEY",
+            ProviderKind::Generated => "GENERATED_API_KEY_UNUSED",
         }
     }
 }

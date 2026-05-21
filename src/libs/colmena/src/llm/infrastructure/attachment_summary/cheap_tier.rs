@@ -12,6 +12,10 @@ pub fn provider_cheap_tier(provider: &ProviderKind) -> &'static str {
         ProviderKind::OpenAi => "gpt-4o-mini",
         ProviderKind::Anthropic => "claude-haiku-4-5-20251001",
         ProviderKind::Mock => "mock-model",
+        // `Generated` is a sentinel for output-storage rows and is never used
+        // to call an LLM. Return a placeholder; callers that route on this
+        // would already have failed earlier with InvalidProvider.
+        ProviderKind::Generated => "(generated artifact — no cheap-tier model)",
     }
 }
 
@@ -21,7 +25,10 @@ mod tests {
 
     #[test]
     fn google_cheap_tier_is_gemini_flash() {
-        assert_eq!(provider_cheap_tier(&ProviderKind::Google), "gemini-2.5-flash");
+        assert_eq!(
+            provider_cheap_tier(&ProviderKind::Google),
+            "gemini-2.5-flash"
+        );
     }
 
     #[test]

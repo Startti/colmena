@@ -631,7 +631,7 @@
 
     "http_request": {
       "name": "HTTP Request",
-      "description": "Makes HTTP requests to external APIs and returns the response. Supports GET, POST, PUT, DELETE, and PATCH methods with configurable headers, query parameters, request body, and authentication. All string values in config support '${VAR_NAME}' environment variable resolution — essential for injecting API keys and tokens securely. Input values override config values (inputs take priority). When used as an LLM tool (via tool_configurations), extra non-reserved input keys are automatically added as query parameters, enabling the LLM to control request parameters dynamically.",
+      "description": "Makes HTTP requests to external APIs and returns the response. Supports GET, POST, PUT, DELETE, and PATCH methods with configurable headers, query parameters, request body, and authentication. All string values in config support '${VAR_NAME}' environment variable resolution — essential for injecting API keys and tokens securely. Input values override config values (inputs take priority). When used as an LLM tool (via tool_configurations), extra non-reserved input keys are automatically added as query parameters, enabling the LLM to control request parameters dynamically. NEW: any string value in the body that matches the pattern '$attachment:<storage_key>' is resolved by reading bytes from OutputStorageRepository and replaced with 'data:<mime>;base64,...'. This lets agents ship generated images/audio to external endpoints without ever seeing the raw bytes.",
       "category": "integration",
       "config_fields": {
         "base_url": {
@@ -2357,6 +2357,258 @@
           }
         }
       }
+    },
+
+    "image_generation": {
+      "name": "Image Generation",
+      "description": "Generates one or more images from a text prompt using OpenAI (gpt-image-1, dall-e-3) or Google Vertex AI Imagen 4. Persists outputs via the configured OutputStorageRepository — default `LocalCacheStorageAdapter` returns `data:` URIs; when the engine env vars COLMENA_STORAGE_CALLBACK_URL + COLMENA_STORAGE_CALLBACK_SECRET are set, uploads go through an external signed-PUT callback (no GCS credentials inside colmena). Returns small handles (attachment_id, url) — not raw bytes — so the value can be embedded in agent tool outputs without bloating context.",
+      "category": "media",
+      "config_fields": {
+        "provider": {
+          "type": "string",
+          "required": true,
+          "valid_values": ["openai", "google"],
+          "description": "Which image-generation backend to call.",
+          "example": "openai"
+        },
+        "model": {
+          "type": "string",
+          "required": true,
+          "description": "Model identifier. For openai: 'gpt-image-1' or 'dall-e-3'. For google: 'imagen-4.0-generate-001' (or other Vertex Imagen variants).",
+          "example": "gpt-image-1"
+        },
+        "api_key": {
+          "type": "string",
+          "required": false,
+          "description": "OpenAI API key. Required only when provider='openai'. Supports ${ENV_VAR} resolution and secure-value placeholders. For Google, auth comes from GOOGLE_APPLICATION_CREDENTIALS (service-account JSON) via yup-oauth2 — no api_key needed in config.",
+          "supports_env_vars": true,
+          "example": "${OPENAI_API_KEY}"
+        },
+        "prompt": {
+          "type": "string",
+          "required": true,
+          "description": "Text prompt describing the image to generate. May come from inputs via $ref or be set inline.",
+          "example": "A minimalist red circle on a white background"
+        },
+        "size": {
+          "type": "string",
+          "required": false,
+          "default": "1024x1024",
+          "description": "Output dimensions in WxH pixels. Provider-dependent — gpt-image-1 supports 1024x1024, 1792x1024, 1024x1792.",
+          "example": "1024x1024"
+        },
+        "quality": {
+          "type": "string",
+          "required": false,
+          "valid_values": ["low", "medium", "high", "auto"],
+          "description": "OpenAI quality tier. Ignored when provider='google'.",
+          "example": "high"
+        },
+        "n": {
+          "type": "integer",
+          "required": false,
+          "default": 1,
+          "validation": { "min": 1, "max": 10 },
+          "description": "Number of images to generate in one call. Each is persisted as a separate attachment.",
+          "example": 1
+        },
+        "google_project_id": {
+          "type": "string",
+          "required": false,
+          "description": "GCP project id. Required when provider='google'.",
+          "example": "my-gcp-project"
+        },
+        "google_location": {
+          "type": "string",
+          "required": false,
+          "default": "us-central1",
+          "description": "Vertex AI region (e.g. 'us-central1', 'europe-west4'). Ignored when provider='openai'.",
+          "example": "us-central1"
+        }
+      },
+      "output_shape": {
+        "output": {
+          "images": [
+            {
+              "attachment_id": "string — stable handle (e.g. 'local://<uuid>' or 'chat-attachments/.../generated/<id>.png')",
+              "url": "string — short-lived signed URL or 'data:image/png;base64,...' URI",
+              "mime_type": "string",
+              "size_bytes": "integer",
+              "description": "string — 'Image generated with <model>: <prompt prefix truncated to 80 chars>'"
+            }
+          ],
+          "provider": "string — echo of config.provider",
+          "model": "string — echo of config.model"
+        }
+      },
+      "notes": [
+        "Only registered when the engine has a storage adapter configured (always true when built via EngineConfig::from_env).",
+        "Google Vertex auth: reads GOOGLE_APPLICATION_CREDENTIALS at first use; token is cached (~50 min TTL) inside the node.",
+        "Output `attachment_id` is the canonical handle — pass it to a future image_edit node (next iteration) to chain operations.",
+        "Use as agent tool: define a tool_configurations entry with node_type='image_generation' and `prompt` exposed via node_schema (LLM-visible) and the rest as fixed."
+      ]
+    },
+
+    "tts": {
+      "name": "Text-to-Speech",
+      "description": "Synthesizes speech from text via OpenAI, ElevenLabs, or Google Gemini TTS. Persists the audio via the configured OutputStorageRepository — default `LocalCacheStorageAdapter` returns `data:` URIs; with `HttpCallbackStorageAdapter` (production) uploads go to GCS via signed PUT. Returns an attachment handle (attachment_id, url, mime_type, size_bytes, duration_ms).",
+      "category": "media",
+      "config_fields": {
+        "provider": {
+          "type": "string",
+          "required": true,
+          "valid_values": ["openai", "elevenlabs", "google"],
+          "description": "Which TTS backend to call.",
+          "example": "openai"
+        },
+        "model": {
+          "type": "string",
+          "required": true,
+          "description": "Model identifier. OpenAI: 'tts-1' | 'tts-1-hd' | 'gpt-4o-mini-tts'. ElevenLabs: 'eleven_multilingual_v2' | 'eleven_turbo_v2_5'. Google: 'gemini-2.5-flash-preview-tts' (preview).",
+          "example": "tts-1"
+        },
+        "api_key": {
+          "type": "string",
+          "required": true,
+          "description": "Provider API key. Supports ${ENV_VAR} resolution and secure-value placeholders. For Google uses the GEMINI_API_KEY pattern (same as the regular Gemini text adapter).",
+          "supports_env_vars": true,
+          "example": "${OPENAI_API_KEY}"
+        },
+        "text": {
+          "type": "string",
+          "required": true,
+          "description": "Text to synthesize.",
+          "example": "Hello, this is a test."
+        },
+        "voice": {
+          "type": "string",
+          "required": true,
+          "description": "Provider-specific voice id. OpenAI: 'alloy' | 'echo' | 'fable' | 'onyx' | 'nova' | 'shimmer'. ElevenLabs: voice_id from your library (alphanumeric/-/_ only). Google: prebuilt voice name (e.g. 'Kore', 'Puck').",
+          "example": "alloy"
+        },
+        "format": {
+          "type": "string",
+          "required": false,
+          "default": "mp3",
+          "valid_values": ["mp3", "wav", "opus", "pcm"],
+          "description": "Output container. For Google Gemini TTS the API ignores this and always returns L16 PCM — the response carries the actual mime_type from the provider.",
+          "example": "mp3"
+        },
+        "speed": {
+          "type": "number",
+          "required": false,
+          "validation": { "min": 0.25, "max": 4.0 },
+          "description": "Playback speed multiplier. OpenAI 0.25-4.0. Google maps to speakingRate. ElevenLabs ignores this (logged as warn).",
+          "example": 1.0
+        }
+      },
+      "output_shape": {
+        "output": {
+          "audio": {
+            "attachment_id": "string — stable handle",
+            "url": "string — signed read URL or data: URI",
+            "mime_type": "string — 'audio/mpeg' | 'audio/wav' | 'audio/L16;rate=24000' (Gemini) | ...",
+            "size_bytes": "integer",
+            "duration_ms": "integer or null (best-effort; providers usually don't return this)",
+            "description": "string — 'TTS synthesized with <model>: <text prefix>'"
+          },
+          "provider": "string — echo of config.provider",
+          "model": "string — echo of config.model"
+        }
+      },
+      "notes": [
+        "Only registered when the engine has a storage adapter configured.",
+        "ElevenLabs voice IDs are alphanumeric (plus '-' and '_'). The adapter rejects other characters to keep URL building safe without a URL-encoding dep.",
+        "Use as agent tool: same pattern as image_generation — `text` LLM-visible via node_schema, the rest fixed."
+      ]
+    },
+
+    "image_edit": {
+      "name": "Image Edit",
+      "description": "Edits an existing image given a text prompt. Today only OpenAI (`gpt-image-1`, `dall-e-2`) via the `/v1/images/edits` endpoint — Google Vertex image editing is on the roadmap. The source image is fetched from a URL (data: URI or http(s)). Optional mask marks the edit region (PNG with transparency). Returns same output shape as `image_generation` so the result chains naturally back into another `image_edit` call.",
+      "category": "media",
+      "config_fields": {
+        "provider": {
+          "type": "string",
+          "required": true,
+          "valid_values": ["openai"],
+          "description": "Only 'openai' is implemented today.",
+          "example": "openai"
+        },
+        "model": {
+          "type": "string",
+          "required": false,
+          "default": "gpt-image-1",
+          "description": "OpenAI image edit model. 'gpt-image-1' (recommended) or 'dall-e-2'.",
+          "example": "gpt-image-1"
+        },
+        "api_key": {
+          "type": "string",
+          "required": true,
+          "supports_env_vars": true,
+          "description": "OpenAI API key. Supports ${ENV_VAR} + secure-value placeholders.",
+          "example": "${OPENAI_API_KEY}"
+        },
+        "source_url": {
+          "type": "string",
+          "required": true,
+          "description": "Image to edit. Accepted: `data:<mime>;base64,...` URI OR http(s) URL. Typical usage chains the output of `image_generation` — pass the `url` field from that output here. Note: signed URLs from the production storage adapter expire after ~1h.",
+          "example": "data:image/png;base64,iVBORw0KGgo..."
+        },
+        "mask_url": {
+          "type": "string",
+          "required": false,
+          "description": "Optional PNG with transparency marking the area to edit. Same URL formats as `source_url`.",
+          "example": null
+        },
+        "prompt": {
+          "type": "string",
+          "required": true,
+          "description": "Describes the desired edit (e.g. 'Replace the sky with a sunset').",
+          "example": "Add a small bright moon in the top-right corner"
+        },
+        "size": {
+          "type": "string",
+          "required": false,
+          "description": "Output dimensions in WxH pixels. Provider-dependent.",
+          "example": "1024x1024"
+        },
+        "quality": {
+          "type": "string",
+          "required": false,
+          "valid_values": ["low", "medium", "high", "auto"],
+          "description": "OpenAI quality tier (gpt-image-1).",
+          "example": "high"
+        },
+        "n": {
+          "type": "integer",
+          "required": false,
+          "default": 1,
+          "validation": { "min": 1, "max": 10 },
+          "description": "Number of edits to generate per call.",
+          "example": 1
+        }
+      },
+      "output_shape": {
+        "output": {
+          "images": [
+            {
+              "attachment_id": "string",
+              "url": "string — data: URI or signed read URL",
+              "mime_type": "image/png",
+              "size_bytes": "integer",
+              "description": "string — 'Image edited with <model>: <prompt prefix>'"
+            }
+          ],
+          "provider": "string — echo of config.provider",
+          "model": "string — echo of config.model"
+        }
+      },
+      "notes": [
+        "Only registered when the engine has a storage adapter configured.",
+        "Fetches `source_url` and `mask_url` at execute-time. For data: URIs decodes locally (no HTTP).",
+        "When the LLM agent chains generate → edit, the agent passes the `url` field of the previous image_generation tool output into this node's `source_url`. The handle (`attachment_id`) is a stable reference but resolving it back to bytes is not implemented yet (planned: read() method on OutputStorageRepository)."
+      ]
     }
   },
 
@@ -2395,6 +2647,11 @@
       "name": "Web",
       "description": "Toolkit nodes that give LLM agents internet access: search, fetch, API exploration, browser automation.",
       "node_types": ["tavily_client", "api_explorer"]
+    },
+    "media": {
+      "name": "Media Generation",
+      "description": "Nodes that produce media artifacts (images, audio) from a prompt and persist them via the OutputStorageRepository port. Returned as attachment handles suitable for agent tool outputs.",
+      "node_types": ["image_generation", "tts", "image_edit"]
     }
   }
 }

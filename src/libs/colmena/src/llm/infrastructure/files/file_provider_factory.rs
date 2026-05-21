@@ -37,6 +37,12 @@ impl FileProviderFactory {
                 provider: "mock".into(),
                 feature: "Files API".into(),
             }),
+            ProviderKind::Generated => Err(LlmError::ProviderLimitation {
+                provider: "generated".into(),
+                feature:
+                    "Files API (Generated is a sentinel for storage rows, not an LLM provider)"
+                        .into(),
+            }),
         }
     }
 }

@@ -25,9 +25,79 @@ use std::sync::Arc;
 
 /// Executes HTTP requests. Implements [`ExecutableNode`]. Stateless — all configuration
 /// comes from `inputs` (highest priority) and `config`.
-pub struct HttpNode;
+pub struct HttpNode {
+    /// Optional storage adapter — used to resolve `$attachment:<id>` placeholders
+    /// in the body. When None, placeholders pass through unchanged (logged warn).
+    storage: Option<Arc<dyn crate::storage::domain::OutputStorageRepository>>,
+}
+
+impl Default for HttpNode {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+const ATTACHMENT_PLACEHOLDER_PREFIX: &str = "$attachment:";
 
 impl HttpNode {
+    pub fn new() -> Self {
+        Self { storage: None }
+    }
+
+    pub fn with_storage(
+        mut self,
+        storage: Arc<dyn crate::storage::domain::OutputStorageRepository>,
+    ) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
+    /// Recursively walks a JSON value, replacing every string of the form
+    /// `$attachment:<storage_key>` with `data:<mime>;base64,<bytes>`. Returns
+    /// an error if any placeholder cannot be resolved (no storage adapter,
+    /// or storage.read fails).
+    async fn resolve_attachment_placeholders(
+        &self,
+        val: Value,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+        use base64::Engine;
+
+        match val {
+            Value::String(s) if s.starts_with(ATTACHMENT_PLACEHOLDER_PREFIX) => {
+                let id = &s[ATTACHMENT_PLACEHOLDER_PREFIX.len()..];
+                let storage = self.storage.as_ref().ok_or_else(|| {
+                    format!(
+                        "http_request: body contains '{s}' but no OutputStorageRepository is wired"
+                    )
+                })?;
+                let bytes = storage
+                    .read(id)
+                    .await
+                    .map_err(|e| -> Box<dyn StdError + Send + Sync> { Box::new(e) })?;
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes.bytes);
+                Ok(Value::String(format!(
+                    "data:{};base64,{}",
+                    bytes.mime_type, encoded
+                )))
+            }
+            Value::Object(map) => {
+                let mut out = serde_json::Map::new();
+                for (k, v) in map {
+                    out.insert(k, Box::pin(self.resolve_attachment_placeholders(v)).await?);
+                }
+                Ok(Value::Object(out))
+            }
+            Value::Array(arr) => {
+                let mut out = Vec::with_capacity(arr.len());
+                for v in arr {
+                    out.push(Box::pin(self.resolve_attachment_placeholders(v)).await?);
+                }
+                Ok(Value::Array(out))
+            }
+            other => Ok(other),
+        }
+    }
+
     fn resolve_env_vars(input: &str) -> Result<String, String> {
         let mut result = String::new();
         let mut last_end = 0;
@@ -279,6 +349,11 @@ impl ExecutableNode for HttpNode {
             } else {
                 // Resolve ${ENV_VAR} in body object string values before sending
                 let resolved_body = Self::resolve_env_vars_in_value(body);
+                // Then resolve any `$attachment:<id>` placeholders to data: URIs
+                // by reading bytes via OutputStorageRepository. This is what
+                // lets agents pass generated artifacts to external endpoints
+                // without ever seeing the raw bytes in their context.
+                let resolved_body = self.resolve_attachment_placeholders(resolved_body).await?;
                 // Never log body contents — may contain credentials or PII
                 request_builder = request_builder.json(&resolved_body);
             }
@@ -345,5 +420,176 @@ impl ExecutableNode for HttpNode {
                 "body": "any"
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod attachment_placeholder_tests {
+    use super::*;
+    use crate::storage::domain::{MockOutputStorageRepository, StoredBytes};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn body_attachment_placeholder_resolved_to_data_uri() {
+        let server = MockServer::start().await;
+
+        // Server expects a JSON body whose `image` field is a data URI for [0xDE, 0xAD]
+        // base64 = "3q0=" (4 chars). Use that exact bytes/encoding in the assertion.
+        Mock::given(method("POST"))
+            .and(path("/upload"))
+            .and(body_json(serde_json::json!({
+                "image": "data:image/png;base64,3q0="
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true
+            })))
+            .mount(&server)
+            .await;
+
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_read()
+            .times(1)
+            .withf(|key: &str| key == "gen-abc")
+            .returning(|_| {
+                Ok(StoredBytes {
+                    bytes: vec![0xDE, 0xAD],
+                    mime_type: "image/png".to_string(),
+                    filename: "img.png".to_string(),
+                })
+            });
+
+        let node = HttpNode::new().with_storage(Arc::new(storage));
+
+        let config = serde_json::json!({
+            "base_url": server.uri(),
+            "endpoint": "/upload",
+            "method": "POST",
+            "body": {
+                // The placeholder must be resolved BEFORE the body is JSON-serialized
+                "image": "$attachment:gen-abc"
+            }
+        });
+        let mut state = serde_json::json!({});
+        let out = node
+            .execute(&HashMap::<String, Value>::new(), &config, &mut state, None)
+            .await
+            .expect("execute ok — placeholder resolved + POST succeeded");
+        assert_eq!(out["status"], 200);
+    }
+
+    #[tokio::test]
+    async fn body_without_placeholder_passes_through_unchanged() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/plain"))
+            .and(body_json(serde_json::json!({ "hello": "world" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true
+            })))
+            .mount(&server)
+            .await;
+
+        let storage = MockOutputStorageRepository::new(); // never called
+        let node = HttpNode::new().with_storage(Arc::new(storage));
+
+        let config = serde_json::json!({
+            "base_url": server.uri(),
+            "endpoint": "/plain",
+            "method": "POST",
+            "body": { "hello": "world" }
+        });
+        let out = node
+            .execute(
+                &HashMap::<String, Value>::new(),
+                &config,
+                &mut serde_json::json!({}),
+                None,
+            )
+            .await
+            .expect("ok");
+        assert_eq!(out["status"], 200);
+    }
+
+    #[tokio::test]
+    async fn placeholder_without_storage_errors_with_clear_hint() {
+        let server = MockServer::start().await;
+        // Server should NEVER be hit because resolution must fail first.
+        Mock::given(method("POST"))
+            .and(path("/upload"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let node = HttpNode::new(); // no storage
+
+        let config = serde_json::json!({
+            "base_url": server.uri(),
+            "endpoint": "/upload",
+            "method": "POST",
+            "body": { "image": "$attachment:gen-abc" }
+        });
+        let err = node
+            .execute(
+                &HashMap::<String, Value>::new(),
+                &config,
+                &mut serde_json::json!({}),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("OutputStorageRepository"),
+            "error must mention storage: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn placeholder_nested_in_array_resolved() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/batch"))
+            .and(body_json(serde_json::json!({
+                "items": [
+                    { "name": "a", "data": "data:image/png;base64,3q0=" }
+                ]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+
+        let mut storage = MockOutputStorageRepository::new();
+        storage.expect_read().returning(|_| {
+            Ok(StoredBytes {
+                bytes: vec![0xDE, 0xAD],
+                mime_type: "image/png".to_string(),
+                filename: "x.png".to_string(),
+            })
+        });
+        let node = HttpNode::new().with_storage(Arc::new(storage));
+
+        let config = serde_json::json!({
+            "base_url": server.uri(),
+            "endpoint": "/batch",
+            "method": "POST",
+            "body": {
+                "items": [
+                    { "name": "a", "data": "$attachment:gen-1" }
+                ]
+            }
+        });
+        let out = node
+            .execute(
+                &HashMap::<String, Value>::new(),
+                &config,
+                &mut serde_json::json!({}),
+                None,
+            )
+            .await
+            .expect("nested placeholder ok");
+        assert_eq!(out["status"], 200);
     }
 }

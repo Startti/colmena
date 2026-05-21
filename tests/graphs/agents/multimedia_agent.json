@@ -1,0 +1,74 @@
+{
+  "comment": "Agent with 3 media tools — generate_image, edit_image, synthesize_speech. The model picks which to call. Fixed fields omit `type` (now optional when `fixed` is present). Tools are auto-enabled by virtue of being declared in tool_configurations — `enabled_tools` is NOT required.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/multimedia",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "quiero crear una imagen de un perrito con una gorra azul, despues quiero que le pongas una pelota de tenis en la boca y de fondo quiero que haya un conejo que esta mirando a la camara."
+        }
+      }
+    },
+
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o",
+        "system_message": "You are a multimedia assistant with three tools: generate_image, edit_image, synthesize_speech. CRITICAL: do NOT reply in plain text describing what you are about to do — invoke the tool directly. Workflow: (1) When the user asks for an image, IMMEDIATELY call generate_image with a detailed visual prompt. (2) When the user asks to modify the previous image, call edit_image with source_url set to the `url` value from the most recent image tool output. (3) Only after the last tool returns successfully, write a 1-2 sentence summary mentioning each resulting attachment_id so the host can render them. Never describe an action you will take — perform it.",
+        "tool_configurations": {
+          "generate_image": {
+            "name": "generate_image",
+            "node_type": "image_generation",
+            "description": "Generate a brand-new image from a text prompt using gpt-image-1. Returns { images: [{ attachment_id, url, mime_type, size_bytes, description }], provider, model }. Use the returned `url` as the `source_url` argument to edit_image if you need to follow up with an edit.",
+            "node_schema": {
+              "provider": { "fixed": "openai" },
+              "model":    { "fixed": "gpt-image-1" },
+              "api_key":  { "fixed": "${OPENAI_API_KEY}" },
+              "size":     { "fixed": "1024x1024" },
+              "n":        { "fixed": 1 },
+              "prompt":   { "type": "string", "required": true, "description": "Detailed text prompt describing the image to generate." }
+            }
+          },
+          "edit_image": {
+            "name": "edit_image",
+            "node_type": "image_edit",
+            "description": "Edit an existing image given a text prompt. Pass the `url` value from a previous generate_image (or edit_image) tool output as `source_url`. Returns the same shape as generate_image so you can chain further edits.",
+            "node_schema": {
+              "provider":   { "fixed": "openai" },
+              "model":      { "fixed": "gpt-image-1" },
+              "api_key":    { "fixed": "${OPENAI_API_KEY}" },
+              "size":       { "fixed": "1024x1024" },
+              "n":          { "fixed": 1 },
+              "source_url": { "type": "string", "required": true, "description": "URL of the image to edit. Use the `url` field returned by a previous image tool call." },
+              "prompt":     { "type": "string", "required": true, "description": "Describes the desired edit (e.g. 'add a moon in the top-right corner')." }
+            }
+          },
+          "synthesize_speech": {
+            "name": "synthesize_speech",
+            "node_type": "tts",
+            "description": "Convert text into spoken audio using OpenAI tts-1 with the 'alloy' voice. Returns { audio: { attachment_id, url, mime_type, ... }, provider, model }. Use this when the user explicitly asks for voice/audio output.",
+            "node_schema": {
+              "provider": { "fixed": "openai" },
+              "model":    { "fixed": "tts-1" },
+              "api_key":  { "fixed": "${OPENAI_API_KEY}" },
+              "voice":    { "fixed": "alloy" },
+              "format":   { "fixed": "mp3" },
+              "text":     { "type": "string", "required": true, "description": "Text to speak aloud." }
+            }
+          }
+        }
+      }
+    },
+
+    "log_step": { "type": "log" }
+  },
+
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent",   "to": "log_step" }
+  ]
+}

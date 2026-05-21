@@ -6,9 +6,7 @@ use crate::llm::domain::attachments::{
     AttachmentSummaryGenerator, SummaryConfig, SummaryError, SummaryInput, SummaryOutcome,
     SummarySource,
 };
-use crate::llm::domain::{
-    FileData, LlmConfig, LlmMessage, LlmProvider, LlmRepository, LlmRequest,
-};
+use crate::llm::domain::{FileData, LlmConfig, LlmMessage, LlmProvider, LlmRepository, LlmRequest};
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -60,8 +58,8 @@ impl AttachmentSummaryGenerator for LlmAttachmentSummaryGenerator {
                         reason: "extracted text was empty".into(),
                     });
                 }
-                let sys = SYSTEM_PROMPT_TEXT
-                    .replace("{MAX_CHARS}", &config.max_output_chars.to_string());
+                let sys =
+                    SYSTEM_PROMPT_TEXT.replace("{MAX_CHARS}", &config.max_output_chars.to_string());
                 let usr = format!(
                     "Filename: {}\nMIME type: {}\nExtracted text (truncated):\n---\n{}\n---",
                     input.filename, input.mime_type, text

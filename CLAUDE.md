@@ -27,7 +27,7 @@
   - `node_configurations.json` — **Canonical config schema** for every node type (fields, types, defaults)
   - `node_as_tools_reference.json` — **How to use nodes as LLM tools** (tool_configurations schema, node_schema, expose_sub_tools, examples per node type)
   - `agent_context/node_ports_reference.md` — Ports & outputs per node type
-  - `developer_guide/` — 20 guides:
+  - `developer_guide/` — 27 guides (numbered up to 36; key entries highlighted below — see `DEVELOPER_GUIDE.md` for the full index):
     - `01_architecture.md` — Hexagonal architecture, layers, data flow
     - `05_testing.md` — Test strategy, mocking, commands
     - `09_tool_calling.md` — Tool calling setup and usage in DAG
@@ -45,6 +45,9 @@
     - `23_sql_node.md` — SQL node: permissions, validation pipeline, RLS, sandbox, LLM tool examples
     - `24_skills.md` — Skills feature: built-in + user-provided markdown packages loaded on-demand via `load_skill` tool
     - `29_lazy_tool_loading.md` — Lazy tool loading: progressive `describe_tool` reveal, `summary`/`eager` per tool, `tools_discovered` summary
+    - `31_load_attachment.md` — On-demand attachment loading inside the LLM loop; auto-summary via cheap-tier provider
+    - `32_multimedia_generation.md` — `image_generation` / `image_edit` / `tts` nodes; artifact storage with 3 adapters (LocalCache/LocalHttp/HttpCallback); `COLMENA_LOCAL` env guard; `$attachment:<key>` placeholder; binary scrubber
+    - `35_temporal_geographic_context.md` — Auto-injected date/time/location/locale block in every llm_call system message
   - `dds/` — Design documents:
     - `ARQUITECTURA_HEXAGONAL_GUIA.md`, `DAG_ENGINE_DISEÑO.md`, `DISEÑO_AGENTES_Y_TOOLS.md`
     - `MODULO_LLM_DISEÑO.md`, `RAG_DISEÑO.md`

@@ -25,6 +25,10 @@ impl LlmProviderFactory {
             ProviderKind::Google => Arc::new(GeminiAdapter::new()),
             ProviderKind::Anthropic => Arc::new(AnthropicAdapter::new()),
             ProviderKind::Mock => Arc::new(MockAdapter::new()),
+            // `Generated` is a sentinel for AttachmentRegistry rows — never a
+            // live LLM provider. Return the mock as a safe placeholder; any
+            // code path that actually calls it would be a logic bug.
+            ProviderKind::Generated => Arc::new(MockAdapter::new()),
         }
     }
 

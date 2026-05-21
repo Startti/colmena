@@ -25,7 +25,9 @@ use std::sync::Arc;
 
 async fn engine() -> ColmenaEngine {
     dotenvy::dotenv().ok();
-    let cfg = EngineConfig::from_env().expect("EngineConfig from env");
+    let cfg = EngineConfig::from_env()
+        .await
+        .expect("EngineConfig from env");
     ColmenaEngine::new(cfg).await.expect("engine construction")
 }
 

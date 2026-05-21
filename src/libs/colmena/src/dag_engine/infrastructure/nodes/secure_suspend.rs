@@ -47,7 +47,7 @@ pub fn secure_suspend_tool_node_schema() -> NodeSchema {
     schema.insert(
         "secrets".to_string(),
         NodeSchemaField {
-            field_type: "array".to_string(),
+            field_type: Some("array".to_string()),
             fixed: None,
             required: Some(true),
             description: Some(
@@ -57,7 +57,7 @@ pub fn secure_suspend_tool_node_schema() -> NodeSchema {
             pattern: None,
             properties: None,
             items: Some(Box::new(NodeSchemaField {
-                field_type: "object".to_string(),
+                field_type: Some("object".to_string()),
                 fixed: None,
                 required: None,
                 description: Some("Objeto con campos `question` y `name`.".to_string()),
@@ -400,10 +400,10 @@ mod tool_defaults_tests {
         assert_eq!(cfg.description, SECURE_SUSPEND_TOOL_DESCRIPTION);
         let schema = cfg.node_schema.expect("schema injected");
         let secrets = schema.get("secrets").expect("secrets field");
-        assert_eq!(secrets.field_type, "array");
+        assert_eq!(secrets.field_type.as_deref(), Some("array"));
         assert_eq!(secrets.required, Some(true));
         let items = secrets.items.as_ref().expect("items declared");
-        assert_eq!(items.field_type, "object");
+        assert_eq!(items.field_type.as_deref(), Some("object"));
     }
 
     #[test]
@@ -436,7 +436,10 @@ mod tool_defaults_tests {
         // schema preserved as-is — items must still be string, not object
         let schema = cfg.node_schema.expect("schema preserved");
         let secrets = schema.get("secrets").unwrap();
-        assert_eq!(secrets.items.as_ref().unwrap().field_type, "string");
+        assert_eq!(
+            secrets.items.as_ref().unwrap().field_type.as_deref(),
+            Some("string")
+        );
     }
 
     #[test]

@@ -1,8 +1,8 @@
-# Cambios recientes — auditoría 2026-05-03 al 2026-05-19
+# Cambios recientes — auditoría 2026-05-03 al 2026-05-20
 
-> **Generado:** 2026-05-17 · **Actualizado:** 2026-05-19 (api_explorer flag-only activation)
+> **Generado:** 2026-05-17 · **Actualizado:** 2026-05-20 (multimedia generation pipeline + artifacts unification)
 > **Alcance:** Commits sobre `develop` desde 2026-05-11 (los anteriores a esta ventana fueron auditados previamente).
-> **Total:** ~90 commits agrupados en 11 features.
+> **Total:** ~90 commits committed + 31 modified files + 20 new files pending commit (feature 8) agrupados en 12 features.
 
 ## Cómo leer este documento
 
@@ -224,6 +224,45 @@ Commits: 131c540, 3f1a9f3, dd47a54.
 
 ---
 
+## 8. Multimedia generation pipeline + artifacts unification (2026-05-19/20)
+
+**Qué cambió.** Tres nodos nuevos para generar media (`image_generation`, `image_edit`, `tts`), un sistema de storage abstraído por trait con 3 adapters (in-memory para CI, HTTP-callback para prod via ADP→GCS, HTTP local con server `axum` para dev), y la unificación de outputs generados con el `AttachmentRegistry` existente — el agente puede ABRIR sus propias generaciones via `load_attachment`, ENCADENAR ediciones por `attachment_id`, y ENVIAR los bytes a endpoints externos via `$attachment:<key>` placeholder en `http_request`, todo sin que el LLM vea nunca bytes binarios crudos.
+
+El principio arquitectónico que se locked-in: **el contexto del LLM nunca contiene bytes binarios**. Tres mecanismos lo enforcen:
+- **Output direction** (tool → LLM): URLs cortas en `read_url` (handles, signed GCS, o `http://127.0.0.1` según adapter).
+- **Input direction** (LLM → tool): el LLM pasa `$attachment:<storage_key>` y el engine resuelve a `data:` URI antes de salir.
+- **Echo direction** (external endpoint → tool result → LLM): scrubber universal en `DagToolExecutor` reemplaza `data:*;base64,*` por `[binary elided: mime=X, encoded_size=N bytes]` y trunca strings > 50 KB (configurable via `max_tool_result_bytes` en `llm_call.config`).
+
+Para dev/prod symmetry agregamos `COLMENA_LOCAL=true|false` como guard rail explícito: `true` fuerza `LocalHttpStorageAdapter` con defaults sanos (`/tmp/colmena-out`, port 8765); `false` fuerza `HttpCallbackStorageAdapter` y **panica loud** si faltan callback URL/secret (previene "deploy a prod sin el callback configurado y silenciosamente cae a in-memory"). Cada modo emite `tracing::info!(target: "colmena::engine", "storage_mode_selected …")` al startup.
+
+**Nodos** (todos siguen el patrón inputs-over-config para campos LLM-controllable y registran sus outputs en `AttachmentRegistry` con `provider: Generated`):
+
+| Nodo | Provider(s) | Endpoint | Notas |
+|---|---|---|---|
+| `image_generation` | OpenAI (gpt-image-1, dall-e-3), Google Vertex Imagen 4 | OpenAI `/v1/images/generations` o Vertex `:predict` | Vertex auth via `yup-oauth2` (service-account JWT exchange, token cacheado ~50min) |
+| `image_edit` | OpenAI gpt-image-1 / dall-e-2 | `/v1/images/edits` multipart | `source_url` acepta `data:`, `http(s)://`, `local://<key>` (resuelve via storage) |
+| `tts` | OpenAI tts-1/gpt-4o-mini-tts, ElevenLabs eleven_multilingual_v2, Google gemini-2.5-flash-preview-tts | varía | Factory dispatch via trait `TtsRepository` |
+
+**Side effects de calidad** durante este feature también arreglamos dos bugs heredados:
+
+- `tool_configurations` parse failure ahora **fail-hard con mensaje pedagógico** (antes: silent log + tools array vacío — modelo "improvisaba" tool calls como JSON inline en texto, hard to debug)
+- `NodeSchemaField.type` ahora es opcional cuando `fixed` está presente (antes: error críptico `missing field 'type'` para schemas que tenían `{"fixed": "openai"}` sin `"type": "string"`)
+
+**Documentación:**
+- Spec/plan: [`docs/superpowers/plans/2026-05-19-multimedia-generation-nodes.md`](superpowers/plans/2026-05-19-multimedia-generation-nodes.md) — diseño original + status banner + delta de shipped-vs-planned.
+- Dev guide: [`docs/developer_guide/32_multimedia_generation.md`](developer_guide/32_multimedia_generation.md) — onboarding completo con architectural invariant, URL strategy table, tool configurations, $attachment placeholder, cross-provider lazy upload flow, COLMENA_LOCAL setup, troubleshooting.
+- Schema: [`docs/node_configurations.json`](node_configurations.json) → entradas nuevas para `image_generation`, `image_edit`, `tts` + categoría `media` + nota sobre `$attachment:<key>` en `http_request`.
+- Ports: [`docs/agent_context/node_ports_reference.md`](agent_context/node_ports_reference.md) → 3 nodos nuevos en la tabla.
+- Sample graphs: `tests/graphs/media/{image_generation_basic,tts_basic,image_edit_basic,image_gen_then_edit}.json` y `tests/graphs/agents/{multimedia_agent,multimedia_agent_with_load}.json`.
+
+**Tests:** +26 unit tests entre storage, scrubber, image_generation, image_edit, tts, http $attachment, env guard rail, y cross-prov lazy upload. Total suite: **852 pass / 0 fail**. Smoke E2E verificado contra OpenAI gpt-image-1 real (LocalHttpStorageAdapter mode + scrubber active): gen → http_post → finish sin rate limits.
+
+**Pendiente — bloqueante para producción.** Phase 7 ADP wiring (otro repo: `/Users/danielgarcia/startti/adp/`): endpoint `POST /internal/gcs/sign-put` + `InternalServiceGuard` + env vars del worker (`COLMENA_LOCAL=false` + `COLMENA_STORAGE_CALLBACK_URL` + `COLMENA_STORAGE_CALLBACK_SECRET`) + `chat.service.ts persistColmenaResult` parsing → `AgentAttachment` rows + schema migration con enum `AttachmentSource (user | image_gen | tts | image_edit)`. El lado colmena ya implementa el client contract; solo es cuestión de wirear el lado ADP API.
+
+**Commits.** Pendientes de commit en `develop` — branch tiene 31 archivos modificados + 20 archivos nuevos sin commitear al momento de escribir esta entrada.
+
+---
+
 ## Misc
 
 ### `.gitignore` para `.DS_Store` y otros artifacts de OS
@@ -257,6 +296,7 @@ Commits: 131c540, 3f1a9f3, dd47a54.
 | 5. `load_attachment` base | ✅ | ✅ | ✅ | ✅ | ✅ | OK |
 | 6. Attachment auto-summary | ✅ | ✅ | ✅ | ✅ (5 fields) | ✅ | OK |
 | 7. path/data registration fix | ✅ (issue) | ✅ | ✅ | (n/a) | ✅ (two-agent) | OK |
+| 8. Multimedia generation + artifacts unification | — | ✅ | ✅ | ✅ (3 nodos + categoría `media`) | ✅ (4 media + 2 agents) | Phase 7 ADP wiring pendiente (otro repo). Spec absorbida en el plan. |
 
 **Leyenda:** ✅ presente y completo · ⚠️ parcial · ❌ ausente · — no aplica · (n/a) no requiere
 

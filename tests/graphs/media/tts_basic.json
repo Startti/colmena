@@ -1,0 +1,30 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/tts-basic",
+        "method": "POST",
+        "test_payload": {
+          "text": "Hola, esto es una prueba de síntesis de voz desde Colmena."
+        }
+      }
+    },
+    "speak": {
+      "type": "tts",
+      "config": {
+        "provider": "openai",
+        "model": "tts-1",
+        "api_key": "${OPENAI_API_KEY}",
+        "text": "Hola, esto es una prueba de síntesis de voz desde Colmena.",
+        "voice": "alloy",
+        "format": "mp3"
+      }
+    },
+    "log_step": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "speak" },
+    { "from": "speak", "to": "log_step" }
+  ]
+}

@@ -201,9 +201,13 @@ impl ToolConfiguration {
 /// Handles both leaf fields (with `fixed` or `required`) and container fields (with `properties`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeSchemaField {
-    /// JSON Schema type: "string", "number", "boolean", "object", "array"
-    #[serde(rename = "type")]
-    pub field_type: String,
+    /// JSON Schema type: "string", "number", "boolean", "object", "array".
+    /// **Required when the field is LLM-visible** (no `fixed`, no `properties`).
+    /// **Optional when `fixed` is present** — the LLM never sees the field, so
+    /// the type is irrelevant. Container fields (with `properties`) default to
+    /// `"object"` if omitted.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub field_type: Option<String>,
 
     /// If present, this field is hidden from the LLM and always set to this value.
     /// Supports runtime template syntax like "${context.foo}" (resolved elsewhere).
@@ -307,9 +311,14 @@ pub fn parse_node_schema(schema: &NodeSchema) -> Result<ParsedNodeSchema, String
                         container_fixed.insert(child_key.clone(), Value::Object(nested_fixed));
                     }
 
-                    // Collect as LLM-visible (deferred to pass 2 for collision detection)
+                    // Container fields default to "object" when `type` is omitted —
+                    // the presence of `properties` already implies object semantics.
+                    let nested_type = child_field
+                        .field_type
+                        .clone()
+                        .unwrap_or_else(|| "object".to_string());
                     let mut prop = ParameterProperty::new(
-                        child_field.field_type.clone(),
+                        nested_type,
                         child_field.description.clone().unwrap_or_default(),
                     );
                     if let Some(pattern) = &child_field.pattern {
@@ -322,9 +331,19 @@ pub fn parse_node_schema(schema: &NodeSchema) -> Result<ParsedNodeSchema, String
                         child_field.required == Some(true),
                     ));
                 } else {
-                    // Child is LLM-visible (deferred to pass 2 for collision detection)
+                    // Child is LLM-visible (deferred to pass 2 for collision detection).
+                    // `type` is required for LLM-visible fields — without it the LLM
+                    // has no idea what shape of value to emit.
+                    let child_type = child_field.field_type.as_ref().ok_or_else(|| {
+                        format!(
+                            "node_schema field '{}.{}' is LLM-visible but missing `type`. \
+                             Add e.g. \"type\": \"string\" — required because the LLM needs \
+                             to know what to generate. (Fields with `fixed` may omit `type`.)",
+                            top_key, child_key
+                        )
+                    })?;
                     let mut prop = ParameterProperty::new(
-                        child_field.field_type.clone(),
+                        child_type.clone(),
                         child_field.description.clone().unwrap_or_default(),
                     );
 
@@ -346,10 +365,19 @@ pub fn parse_node_schema(schema: &NodeSchema) -> Result<ParsedNodeSchema, String
                 fixed_values.insert(top_key.clone(), Value::Object(container_fixed));
             }
         }
-        // Case 3: Top-level LLM-visible field (no fixed, no properties)
+        // Case 3: Top-level LLM-visible field (no fixed, no properties).
+        // `type` is mandatory here because the LLM needs to know what to emit.
         else {
+            let top_type = top_field.field_type.as_ref().ok_or_else(|| {
+                format!(
+                    "node_schema field '{}' is LLM-visible but missing `type`. \
+                     Add e.g. \"type\": \"string\" — required because the LLM needs \
+                     to know what to generate. (Fields with `fixed` may omit `type`.)",
+                    top_key
+                )
+            })?;
             let mut prop = ParameterProperty::new(
-                top_field.field_type.clone(),
+                top_type.clone(),
                 top_field.description.clone().unwrap_or_default(),
             );
 
@@ -362,7 +390,7 @@ pub fn parse_node_schema(schema: &NodeSchema) -> Result<ParsedNodeSchema, String
             // silently defaulting would hide the mismatch when an author
             // intended e.g. `array of strings` but the LLM emits objects.
             // Fail fast with a message that points to the exact remedy.
-            if top_field.field_type == "array" {
+            if top_type == "array" {
                 let items_field = top_field.items.as_ref().ok_or_else(|| {
                     format!(
                         "node_schema field '{}' has type 'array' but no 'items' was specified. \
@@ -371,8 +399,17 @@ pub fn parse_node_schema(schema: &NodeSchema) -> Result<ParsedNodeSchema, String
                         top_key
                     )
                 })?;
+                // `items` describes what each element looks like to the LLM — so
+                // its `type` is mandatory for the same reason as top-level fields.
+                let items_type = items_field.field_type.as_ref().ok_or_else(|| {
+                    format!(
+                        "node_schema field '{}' has type 'array' but `items.type` is missing. \
+                         Add e.g. \"items\": {{ \"type\": \"string\" }}.",
+                        top_key
+                    )
+                })?;
                 let mut items_prop = ParameterProperty::new(
-                    items_field.field_type.clone(),
+                    items_type.clone(),
                     items_field.description.clone().unwrap_or_default(),
                 );
                 if let Some(pattern) = &items_field.pattern {
@@ -909,5 +946,71 @@ mod tests {
         let cfg: ToolConfiguration = serde_json::from_value(json).unwrap();
         assert!(cfg.summary.is_none());
         assert!(!cfg.eager);
+    }
+
+    /// Regression: `type` MUST stay optional in serde so authors can omit it
+    /// on `fixed` fields. Before this change, every entry inside `node_schema`
+    /// required `type` even when `fixed` was present — causing the silent
+    /// parse failure that stripped all tools from agents (see media nodes
+    /// debug session).
+    #[test]
+    fn fixed_field_parses_without_type() {
+        let raw = serde_json::json!({
+            "name": "generate_image",
+            "node_type": "image_generation",
+            "node_schema": {
+                "provider": { "fixed": "openai" },
+                "model":    { "fixed": "gpt-image-1" },
+                "prompt":   { "type": "string", "required": true, "description": "p" }
+            }
+        });
+        let cfg: ToolConfiguration =
+            serde_json::from_value(raw).expect("fixed fields must parse without `type`");
+        let schema = cfg.node_schema.expect("schema present");
+        assert!(schema.get("provider").unwrap().field_type.is_none());
+        assert_eq!(
+            schema.get("prompt").unwrap().field_type.as_deref(),
+            Some("string")
+        );
+        // Parsed schema produces exactly one LLM-visible param.
+        let parsed = parse_node_schema(&schema).expect("parse ok");
+        let llm_keys: Vec<&str> = parsed.llm_properties.keys().map(|s| s.as_str()).collect();
+        assert_eq!(llm_keys, vec!["prompt"]);
+        assert_eq!(parsed.required_params, vec!["prompt"]);
+    }
+
+    #[test]
+    fn llm_visible_field_missing_type_errors_with_helpful_hint() {
+        // Field has no `fixed` and no `type` → must error with a message
+        // that points at the field name and suggests the fix.
+        let raw = serde_json::json!({
+            "broken": { "required": true, "description": "no type here" }
+        });
+        let schema: NodeSchema = serde_json::from_value(raw).unwrap();
+        let err = parse_node_schema(&schema).unwrap_err();
+        assert!(err.contains("'broken'"), "error must name the field: {err}");
+        assert!(
+            err.contains("LLM-visible") && err.contains("`type`"),
+            "error must explain the missing type: {err}"
+        );
+    }
+
+    #[test]
+    fn array_items_still_require_type() {
+        // Even for fixed-less arrays, items.type stays mandatory because
+        // it determines the LLM-emitted element shape.
+        let raw = serde_json::json!({
+            "tags": {
+                "type": "array",
+                "required": true,
+                "items": { "description": "missing type" }
+            }
+        });
+        let schema: NodeSchema = serde_json::from_value(raw).unwrap();
+        let err = parse_node_schema(&schema).unwrap_err();
+        assert!(
+            err.contains("items.type") || err.contains("`items"),
+            "error must mention items: {err}"
+        );
     }
 }

@@ -5,6 +5,8 @@
 
 use colmena::dag_engine::engine::{ColmenaEngine, EngineConfig};
 use colmena::dag_engine::infrastructure::pool_registry::PoolConfig;
+use colmena::storage::infrastructure::LocalCacheStorageAdapter;
+use std::sync::Arc;
 
 fn database_url() -> Option<String> {
     std::env::var("TEST_DATABASE_URL").ok()
@@ -20,6 +22,8 @@ async fn engine_boots_with_pinned_pool_and_migrates() {
     let engine = ColmenaEngine::new(EngineConfig {
         internal_database_url: db,
         pool_config: PoolConfig::defaults(),
+        storage: Arc::new(LocalCacheStorageAdapter::new()),
+        attachment_registry: None,
     })
     .await
     .expect("engine boots");
@@ -44,6 +48,8 @@ async fn shutdown_is_idempotent() {
     let engine = ColmenaEngine::new(EngineConfig {
         internal_database_url: db,
         pool_config: PoolConfig::defaults(),
+        storage: Arc::new(LocalCacheStorageAdapter::new()),
+        attachment_registry: None,
     })
     .await
     .unwrap();

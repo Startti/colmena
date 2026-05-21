@@ -91,7 +91,22 @@ pub struct DagToolExecutor {
     /// registry handle stays in the llm_call node; we only need the catalog
     /// here so dispatch can succeed without an extra dependency.
     attachment_catalog: Option<Vec<crate::llm::domain::ConversationAttachment>>,
+    /// Per-string size cap applied to tool results before they are returned
+    /// to the LLM. Strings whose byte length exceeds this value are replaced
+    /// with `[truncated: original_size=N bytes]`. Defaults to
+    /// [`DEFAULT_MAX_TOOL_RESULT_STRING_BYTES`].
+    ///
+    /// Independent from the data-URI elision, which is always applied because
+    /// binary base64 in the LLM context never makes sense — it just burns
+    /// tokens and risks tripping the model's TPM rate limit.
+    max_tool_result_bytes: usize,
 }
+
+/// Default per-string cap for tool results (50 KB). Above this, the string is
+/// replaced with a truncation marker. Set explicitly via
+/// [`DagToolExecutor::with_max_tool_result_bytes`] (or per-llm_call via the
+/// `max_tool_result_bytes` config field).
+pub const DEFAULT_MAX_TOOL_RESULT_STRING_BYTES: usize = 50 * 1024;
 
 impl DagToolExecutor {
     /// Resolve `${var}` and `${context.var}` placeholders in a string value
@@ -157,7 +172,15 @@ impl DagToolExecutor {
             describe_tool_lookup: None,
             describe_tool_observer: None,
             attachment_catalog: None,
+            max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_STRING_BYTES,
         }
+    }
+
+    /// Builder: override the per-string cap applied to tool results.
+    /// Increase for tools that legitimately return large text payloads.
+    pub fn with_max_tool_result_bytes(mut self, max: usize) -> Self {
+        self.max_tool_result_bytes = max;
+        self
     }
 
     /// Builder: attach a SecureValueService + session_id for secret injection.
@@ -1022,10 +1045,86 @@ impl DagToolExecutor {
     }
 }
 
+impl DagToolExecutor {
+    /// Walk a JSON value and scrub anything that would bloat the LLM context:
+    /// - Strings starting with `data:<mime>;base64,...` → replaced with a
+    ///   compact marker. Binary base64 in the LLM context is always a footgun
+    ///   (megabytes of useless tokens, TPM rate-limit risk), so this is
+    ///   always-on regardless of `max_string_bytes`.
+    /// - Strings whose byte length exceeds `max_string_bytes` → replaced with
+    ///   `[truncated: original_size=N bytes]`.
+    ///
+    /// Returns the cleaned value. Other types pass through unchanged.
+    fn scrub_value_for_llm(value: Value, max_string_bytes: usize) -> Value {
+        match value {
+            Value::String(s) => {
+                // Catch data: URIs (any mime, any encoding) — these only ever
+                // make sense when the consumer is a renderer, never an LLM.
+                if let Some(rest) = s.strip_prefix("data:") {
+                    if let Some(semi) = rest.find(";base64,") {
+                        let mime = &rest[..semi];
+                        let payload_len = rest.len() - semi - ";base64,".len();
+                        return Value::String(format!(
+                            "[binary elided: mime={mime}, encoded_size={payload_len} bytes]"
+                        ));
+                    }
+                }
+                if s.len() > max_string_bytes {
+                    Value::String(format!(
+                        "[truncated: original_size={} bytes (cap={} bytes); request via load_attachment if needed]",
+                        s.len(),
+                        max_string_bytes
+                    ))
+                } else {
+                    Value::String(s)
+                }
+            }
+            Value::Object(obj) => Value::Object(
+                obj.into_iter()
+                    .map(|(k, v)| (k, Self::scrub_value_for_llm(v, max_string_bytes)))
+                    .collect(),
+            ),
+            Value::Array(arr) => Value::Array(
+                arr.into_iter()
+                    .map(|v| Self::scrub_value_for_llm(v, max_string_bytes))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
+    /// Apply [`scrub_value_for_llm`](Self::scrub_value_for_llm) to a JSON-or-text
+    /// `output` string. Falls back to length-only truncation when the output
+    /// is not valid JSON.
+    fn scrub_tool_result_output(output: String, max_string_bytes: usize) -> String {
+        match serde_json::from_str::<Value>(&output) {
+            Ok(value) => {
+                let scrubbed = Self::scrub_value_for_llm(value, max_string_bytes);
+                serde_json::to_string(&scrubbed).unwrap_or(output)
+            }
+            Err(_) => {
+                if output.len() > max_string_bytes {
+                    format!(
+                        "[truncated: original_size={} bytes (cap={} bytes)]",
+                        output.len(),
+                        max_string_bytes
+                    )
+                } else {
+                    output
+                }
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl ToolExecutor for DagToolExecutor {
     async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, LlmError> {
-        self.execute_inner(tool_call, None).await
+        let mut result = self.execute_inner(tool_call, None).await?;
+        // Scrub binary / oversized strings from the tool result before it
+        // reaches the LLM. Keeps the LLM context free of raw bytes by design.
+        result.output = Self::scrub_tool_result_output(result.output, self.max_tool_result_bytes);
+        Ok(result)
     }
 
     async fn available_tools(&self) -> Vec<crate::llm::domain::ToolDefinition> {
@@ -2572,5 +2671,92 @@ mod toolkit_runtime_tests {
         let parsed: serde_json::Value = serde_json::from_str(&res.output).unwrap();
         assert_eq!(parsed["__colmena_status"], "LOAD_ATTACHMENT");
         assert_eq!(parsed["document_id"], "doc-x");
+    }
+}
+
+#[cfg(test)]
+mod scrubber_tests {
+    //! Unit tests for [`DagToolExecutor::scrub_value_for_llm`] +
+    //! [`DagToolExecutor::scrub_tool_result_output`]. The invariant we
+    //! enforce is: **the LLM never sees raw binary base64 in tool results,
+    //! and no single string blows past the configured byte cap**.
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn data_uri_with_base64_is_replaced_with_marker() {
+        let v = json!("data:image/png;base64,AAAABBBBCCCCDDDD");
+        let scrubbed = DagToolExecutor::scrub_value_for_llm(v, 1_000_000);
+        let s = scrubbed.as_str().unwrap();
+        assert!(s.starts_with("[binary elided"));
+        assert!(s.contains("mime=image/png"));
+    }
+
+    #[test]
+    fn nested_data_uri_inside_object_is_replaced() {
+        let v = json!({
+            "image": "data:image/png;base64,XX",
+            "name": "small.png",
+            "info": { "thumb": "data:image/jpeg;base64,YY" }
+        });
+        let out = DagToolExecutor::scrub_value_for_llm(v, 1_000_000);
+        assert!(out["image"].as_str().unwrap().starts_with("[binary elided"));
+        assert!(out["info"]["thumb"]
+            .as_str()
+            .unwrap()
+            .starts_with("[binary elided"));
+        assert_eq!(out["name"], "small.png");
+    }
+
+    #[test]
+    fn long_plain_string_above_cap_is_truncated() {
+        let s = "x".repeat(60_000);
+        let scrubbed = DagToolExecutor::scrub_value_for_llm(json!(s), 50_000);
+        let out = scrubbed.as_str().unwrap();
+        assert!(out.starts_with("[truncated"));
+        assert!(out.contains("original_size=60000"));
+    }
+
+    #[test]
+    fn short_strings_pass_through() {
+        let v = json!({ "hello": "world", "n": 42 });
+        let out = DagToolExecutor::scrub_value_for_llm(v.clone(), 1_000);
+        assert_eq!(out, v);
+    }
+
+    #[test]
+    fn scrub_tool_result_output_handles_json() {
+        // The exact failure mode we hit in the smoke test:
+        // httpbin echoes the image bytes back in its response body,
+        // which becomes part of the tool result JSON.
+        let echoed = json!({
+            "status": 200,
+            "body": { "image": "data:image/png;base64,AAAABBBBCCCC" }
+        })
+        .to_string();
+        let out = DagToolExecutor::scrub_tool_result_output(echoed, 50_000);
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["status"], 200);
+        assert!(parsed["body"]["image"]
+            .as_str()
+            .unwrap()
+            .starts_with("[binary elided"));
+    }
+
+    #[test]
+    fn scrub_tool_result_output_handles_non_json() {
+        let big = "x".repeat(100_000);
+        let out = DagToolExecutor::scrub_tool_result_output(big, 50_000);
+        assert!(out.starts_with("[truncated"));
+        assert!(out.contains("original_size=100000"));
+    }
+
+    #[test]
+    fn data_uri_without_base64_is_left_alone() {
+        // Conservative — only data:*;base64,* gets the binary-elision treatment.
+        // Other data: URIs (e.g. data:text/plain,hello) stay intact.
+        let v = json!("data:text/plain,hello world");
+        let out = DagToolExecutor::scrub_value_for_llm(v.clone(), 1_000);
+        assert_eq!(out, v);
     }
 }

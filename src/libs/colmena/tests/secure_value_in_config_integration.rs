@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 async fn engine() -> ColmenaEngine {
     dotenvy::dotenv().ok();
-    let cfg = EngineConfig::from_env().unwrap();
+    let cfg = EngineConfig::from_env().await.unwrap();
     ColmenaEngine::new(cfg).await.unwrap()
 }
 

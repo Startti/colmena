@@ -13,6 +13,8 @@ pub mod memory;
 pub mod signed_url_fetcher;
 pub mod tool_executor;
 pub mod tools;
+pub mod tts;
+pub mod tts_repository;
 
 pub mod value_objects;
 
@@ -40,4 +42,8 @@ pub use tool_executor::ToolExecutor;
 pub use tools::{
     FunctionCall, ParameterProperty, ToolCall, ToolDefinition, ToolParameters, ToolResult,
 };
+pub use tts::{AudioFormat, TtsRequest, TtsResponse};
+#[cfg(test)]
+pub use tts_repository::MockTtsRepository;
+pub use tts_repository::{TtsError, TtsRepository};
 pub use value_objects::*;

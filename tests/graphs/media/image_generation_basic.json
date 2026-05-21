@@ -1,0 +1,38 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/img-gen-basic",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "ahcer una imagen relaista de un gato negro, en el techo de uan casa vieja de 1880 en francia con un cielo anaranjado"
+        }
+      }
+    },
+    "gen": {
+      "type": "image_generation",
+      "config": {
+        "provider": "openai",
+        "model": "gpt-image-1",
+        "api_key": "${OPENAI_API_KEY}",
+        "prompt": "A minimalist red circle centered on a white background, vector style, no text",
+        "size": "1024x1024",
+        "n": 1
+      }
+    },
+    "log_step": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "gen"
+    },
+    {
+      "from": "gen",
+      "to": "log_step"
+    }
+  ]
+}

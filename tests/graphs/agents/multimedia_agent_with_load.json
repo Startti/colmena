@@ -1,0 +1,68 @@
+{
+  "comment": "Agent with full artifacts pipeline:\n  - generate_image: creates an image AND auto-registers it in AttachmentRegistry.\n  - load_attachment: lets the LLM 'see' a previously generated image (vision input on the next turn).\n  - http_post_image: POSTs an image to a webhook using $attachment:<id> in the body — the engine resolves the placeholder to a data: URI before sending.\nDemonstrates capabilities 1+2+3 from the artifacts unification design. Requires DATABASE_URL + OPENAI_API_KEY.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/multimedia-loaded",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Genera una imagen de un perrito con gorra azul. Después abrila para revisar lo que generaste y describime brevemente qué ves. Si la imagen está OK, mándala a https://httpbin.org/post."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o",
+        "attachments_enabled": true,
+        "system_message": "Three tools available: generate_image, load_attachment (auto-injected by the engine), http_post_image. Workflow: (1) call generate_image with a detailed prompt to create the image. (2) call load_attachment with the resulting attachment_id to inspect what you created — vision will let you describe it on the next turn. (3) call http_post_image with the destination URL and a body that contains the placeholder '$attachment:<the_attachment_id>'. The engine resolves the placeholder to a data: URI before sending the request, so you never see the raw bytes. Always invoke tools directly; never describe what you're about to do in plain text first.",
+        "tool_configurations": {
+          "generate_image": {
+            "name": "generate_image",
+            "node_type": "image_generation",
+            "description": "Generate an image from a prompt. Returns { images: [{ attachment_id, url, mime_type, ... }] }. Save the attachment_id to use it later with load_attachment or http_post_image.",
+            "node_schema": {
+              "provider": { "fixed": "openai" },
+              "model":    { "fixed": "gpt-image-1" },
+              "api_key":  { "fixed": "${OPENAI_API_KEY}" },
+              "size":     { "fixed": "1024x1024" },
+              "n":        { "fixed": 1 },
+              "prompt":   { "type": "string", "required": true, "description": "Detailed image prompt." }
+            }
+          },
+          "http_post_image": {
+            "name": "http_post_image",
+            "node_type": "http_request",
+            "description": "POST a previously-generated image to a webhook URL. The body's `image` field MUST be the literal string '$attachment:<attachment_id>' where <attachment_id> is from a previous generate_image call — e.g. '$attachment:gen-att-xyz'. The engine reads bytes from storage and replaces the placeholder with 'data:image/png;base64,...' before the request goes out.",
+            "node_schema": {
+              "method":   { "fixed": "POST" },
+              "endpoint": { "fixed": "" },
+              "headers":  { "fixed": { "Content-Type": "application/json" } },
+              "base_url": { "type": "string", "required": true, "description": "Full destination URL (e.g. https://httpbin.org/post)." },
+              "body": {
+                "type": "object",
+                "required": true,
+                "description": "Must include {\"image\": \"$attachment:<attachment_id>\"}",
+                "properties": {
+                  "image": {
+                    "type": "string",
+                    "required": true,
+                    "description": "The string '$attachment:<attachment_id>' — the engine resolves it to data: URI."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "log_step": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent",   "to": "log_step" }
+  ]
+}

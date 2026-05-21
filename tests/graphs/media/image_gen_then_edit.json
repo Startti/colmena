@@ -1,0 +1,46 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/gen-then-edit",
+        "method": "POST",
+        "test_payload": {
+          "gen_prompt": "A realistic black cat sitting on the roof of an old 1880s French house with an orange sky",
+          "edit_prompt": "Add a small bright crescent moon glowing in the top-right corner"
+        }
+      }
+    },
+
+    "gen": {
+      "type": "image_generation",
+      "config": {
+        "provider": "openai",
+        "model": "gpt-image-1",
+        "api_key": "${OPENAI_API_KEY}",
+        "size": "1024x1024",
+        "n": 1
+      }
+    },
+
+    "edit": {
+      "type": "image_edit",
+      "config": {
+        "provider": "openai",
+        "model": "gpt-image-1",
+        "api_key": "${OPENAI_API_KEY}",
+        "size": "1024x1024",
+        "n": 1
+      }
+    },
+
+    "log_step": { "type": "log" }
+  },
+
+  "edges": [
+    { "from": "trigger.gen_prompt",                  "to": "gen.prompt"        },
+    { "from": "trigger.edit_prompt",                 "to": "edit.prompt"       },
+    { "from": "gen.output.images.0.url",             "to": "edit.source_url"   },
+    { "from": "edit",                                "to": "log_step"          }
+  ]
+}

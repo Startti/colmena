@@ -100,7 +100,10 @@ pub(crate) fn filter_enabled_tools(
         })
     };
 
-    all_tools.into_iter().filter(|t| is_enabled(&t.name)).collect()
+    all_tools
+        .into_iter()
+        .filter(|t| is_enabled(&t.name))
+        .collect()
 }
 
 /// Walk a message history and return the first `ToolCall` from the latest
@@ -231,6 +234,10 @@ pub struct LlmNode {
     /// Optional SecureValueService — propagated to DagToolExecutor during tool calls.
     secure_value_service:
         Option<Arc<crate::dag_engine::application::secure_value_service::SecureValueService>>,
+    /// Optional storage adapter — used by the AttachmentResolver to lazy-upload
+    /// `provider: Generated` artifacts to a chat provider's Files API on first
+    /// `load_attachment` call.
+    storage: Option<Arc<dyn crate::storage::domain::OutputStorageRepository>>,
 }
 
 impl LlmNode {
@@ -246,6 +253,7 @@ impl LlmNode {
             registry,
             task_memory_repo,
             secure_value_service: None,
+            storage: None,
         }
     }
 
@@ -257,6 +265,17 @@ impl LlmNode {
         >,
     ) -> Self {
         self.secure_value_service = Some(secure_value_service);
+        self
+    }
+
+    /// Builder: attach the OutputStorageRepository so the AttachmentResolver
+    /// can read bytes for `provider: Generated` rows when doing cross-provider
+    /// lazy upload.
+    pub fn with_storage(
+        mut self,
+        storage: Arc<dyn crate::storage::domain::OutputStorageRepository>,
+    ) -> Self {
+        self.storage = Some(storage);
         self
     }
 
@@ -445,6 +464,12 @@ struct AttachmentResolverImpl {
     registry: std::sync::Arc<dyn crate::llm::domain::AttachmentRegistry>,
     provider: crate::llm::domain::ProviderKind,
     api_key: String,
+    /// Storage adapter for `ProviderKind::Generated` rows. When the LLM calls
+    /// `load_attachment` on a generated artifact for the first time from a
+    /// given provider, we read bytes via this and upload them to that
+    /// provider's Files API. None disables cross-provider lazy upload (only
+    /// pre-resolved rows work).
+    storage: Option<std::sync::Arc<dyn crate::storage::domain::OutputStorageRepository>>,
 }
 
 #[async_trait::async_trait]
@@ -454,15 +479,108 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
         agent_session_id: &str,
         document_id: &str,
     ) -> Result<Option<crate::llm::domain::FileData>, String> {
-        use crate::llm::domain::{FileData, FileSource, ProviderFileRef};
+        use crate::llm::domain::{
+            attachments::UpsertAttachmentInput, AttachmentSource, FileData, FileSource,
+            ProviderFileRef, ProviderKind,
+        };
 
         let row = self
             .registry
             .lookup(agent_session_id, document_id, self.provider.clone())
             .await
             .map_err(|e| e.to_string())?;
-        let Some(att) = row else {
-            return Ok(None);
+        let att = match row {
+            Some(a) => a,
+            None => {
+                // Fallback: maybe it's a Generated artifact that hasn't been
+                // uploaded to this provider yet. Lazy cross-provider upload.
+                let gen_row = self
+                    .registry
+                    .lookup(agent_session_id, document_id, ProviderKind::Generated)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let Some(gen) = gen_row else {
+                    return Ok(None);
+                };
+                let storage = self.storage.as_ref().ok_or_else(|| {
+                    "load_attachment: generated artifact present but no OutputStorageRepository \
+                     is wired — cannot resolve bytes for cross-provider upload"
+                        .to_string()
+                })?;
+
+                tracing::info!(
+                    target: "colmena::attachment",
+                    event = "attachment.cross_provider_lazy_upload",
+                    agent_session_id = %agent_session_id,
+                    document_id = %document_id,
+                    target_provider = %self.provider,
+                    storage_key = %gen.provider_file_id,
+                    "generated artifact has no row for current provider, uploading on demand"
+                );
+
+                let bytes = storage.read(&gen.provider_file_id).await.map_err(|e| {
+                    format!(
+                        "storage read for storage_key '{}': {e}",
+                        gen.provider_file_id
+                    )
+                })?;
+
+                let file_provider = crate::llm::infrastructure::files::FileProviderFactory::create(
+                    self.provider.clone(),
+                    self.api_key.clone(),
+                )
+                .map_err(|e| e.to_string())?;
+                let stream = futures::stream::once(async move {
+                    Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(bytes.bytes))
+                });
+                let provider_ref = file_provider
+                    .upload_streaming(Box::pin(stream), &gen.mime_type, &gen.filename)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                // Persist the resolved row so subsequent load_attachment calls
+                // from this provider hit the fast path.
+                let upsert = UpsertAttachmentInput {
+                    agent_session_id: agent_session_id.to_string(),
+                    document_id: document_id.to_string(),
+                    provider: self.provider.clone(),
+                    provider_file_id: provider_ref.provider_file_id.clone(),
+                    mime_type: gen.mime_type.clone(),
+                    filename: gen.filename.clone(),
+                    size_bytes: gen.size_bytes,
+                    label: gen.label.clone(),
+                    description: gen.description.clone(),
+                    // Keep the original source URL — it's how we'd re-fetch
+                    // bytes if THIS provider's file_id ever expires.
+                    source: AttachmentSource::SignedUrl(match gen.source.value() {
+                        Some(u) => u.to_string(),
+                        None => String::new(),
+                    }),
+                };
+                if let Err(e) = self.registry.upsert(upsert).await {
+                    tracing::warn!(
+                        target: "colmena::attachment",
+                        error = %e,
+                        "failed to persist cross-provider upload row — \
+                         will re-upload next time"
+                    );
+                }
+
+                crate::llm::domain::ConversationAttachment {
+                    agent_session_id: agent_session_id.to_string(),
+                    document_id: document_id.to_string(),
+                    provider: self.provider.clone(),
+                    provider_file_id: provider_ref.provider_file_id,
+                    mime_type: gen.mime_type,
+                    filename: gen.filename,
+                    size_bytes: gen.size_bytes,
+                    label: gen.label,
+                    description: gen.description,
+                    source: gen.source,
+                    registered_at: gen.registered_at,
+                    refreshed_at: chrono::Utc::now(),
+                }
+            }
         };
 
         // Attempt to use the cached provider_file_id as-is. The provider call
@@ -1034,7 +1152,11 @@ impl ExecutableNode for LlmNode {
         let summary_max_output_chars: usize = inputs
             .get("summary_max_output_chars")
             .and_then(|v| v.as_u64())
-            .or_else(|| config.get("summary_max_output_chars").and_then(|v| v.as_u64()))
+            .or_else(|| {
+                config
+                    .get("summary_max_output_chars")
+                    .and_then(|v| v.as_u64())
+            })
             .map(|v| v as usize)
             .unwrap_or(200);
         let summary_timeout_secs: u64 = inputs
@@ -1143,8 +1265,8 @@ impl ExecutableNode for LlmNode {
                     } else {
                         None
                     };
-                    let has_summarisable_source =
-                        !matches!(source, AttachmentSource::Inline) || inline_bytes_for_summary.is_some();
+                    let has_summarisable_source = !matches!(source, AttachmentSource::Inline)
+                        || inline_bytes_for_summary.is_some();
                     if has_summarisable_source {
                         summary_targets.push(SummaryTarget {
                             document_id: document_id.clone(),
@@ -1186,7 +1308,9 @@ impl ExecutableNode for LlmNode {
         // Parse tool_configurations. Surface parse errors instead of silently
         // falling back to an empty map — a malformed entry (e.g. an invalid
         // field inside node_schema) would otherwise strip ALL tools from the
-        // LLM with no visible diagnostic.
+        // LLM with no visible diagnostic, and the model would improvise tool
+        // calls as plain text. Hard-fail with a pedagogical message so the
+        // graph author sees the exact field that broke.
         let mut tool_configurations: HashMap<String, ToolConfiguration> = match inputs
             .get("tool_configurations")
             .or_else(|| config.get("tool_configurations"))
@@ -1195,11 +1319,13 @@ impl ExecutableNode for LlmNode {
                 match serde_json::from_value::<HashMap<String, ToolConfiguration>>(v.clone()) {
                     Ok(map) => map,
                     Err(e) => {
-                        colmena_log!(
-                            "WARN: tool_configurations failed to parse — no tools will be exposed to the LLM. Error: {}",
-                            e
-                        );
-                        HashMap::new()
+                        return Err(format!(
+                            "llm_call: tool_configurations failed to parse: {e}.\n\
+                             Hint: each entry needs `name` and `node_type`. Inside `node_schema`, \
+                             every LLM-visible field needs `type` (string|number|integer|boolean|object|array). \
+                             Fields with `fixed` may omit `type`. Fix the graph configuration and re-run."
+                        )
+                        .into());
                     }
                 }
             }
@@ -1341,6 +1467,11 @@ impl ExecutableNode for LlmNode {
         };
 
         // ---- Step 4 (catalog building) — must precede executor block ----------------
+        // Include both rows for the current provider AND `Generated` rows
+        // (outputs from image_generation/edit/tts). The latter are resolved
+        // lazily by the AttachmentResolver: on first `load_attachment` call,
+        // bytes are read via OutputStorageRepository, uploaded to the current
+        // provider's Files API, and a sibling row is upserted.
         let attachment_catalog: Vec<crate::llm::domain::ConversationAttachment> =
             if attachments_enabled {
                 if let (Some(reg), Some(sid)) =
@@ -1350,9 +1481,31 @@ impl ExecutableNode for LlmNode {
                         .list_for_session(sid)
                         .await
                         .map_err(|e| format!("attachment list: {}", e))?;
-                    all.into_iter()
-                        .filter(|a| a.provider == provider_kind)
-                        .collect()
+                    let mut by_doc: std::collections::HashMap<
+                        String,
+                        crate::llm::domain::ConversationAttachment,
+                    > = std::collections::HashMap::new();
+                    for a in all.into_iter().filter(|a| {
+                        a.provider == provider_kind
+                            || a.provider == crate::llm::domain::ProviderKind::Generated
+                    }) {
+                        // Prefer provider-specific row over the synthetic
+                        // Generated row when both exist (= cross-provider
+                        // lazy upload has already run for this artifact).
+                        match by_doc.get(&a.document_id) {
+                            Some(existing)
+                                if existing.provider == provider_kind
+                                    && a.provider
+                                        == crate::llm::domain::ProviderKind::Generated =>
+                            {
+                                // Keep existing provider-specific entry.
+                            }
+                            _ => {
+                                by_doc.insert(a.document_id.clone(), a);
+                            }
+                        }
+                    }
+                    by_doc.into_values().collect()
                 } else {
                     Vec::new()
                 }
@@ -1362,6 +1515,17 @@ impl ExecutableNode for LlmNode {
 
         let tool_executor = {
             let mut executor = DagToolExecutor::new(registry, tool_configurations);
+            // Per-llm_call override of the tool-result string cap. Inputs win
+            // over config so a graph can dynamically widen the cap when it
+            // expects a large legitimate payload (e.g. a long document body).
+            let max_tool_result_bytes = inputs
+                .get("max_tool_result_bytes")
+                .and_then(|v| v.as_u64())
+                .or_else(|| config.get("max_tool_result_bytes").and_then(|v| v.as_u64()))
+                .map(|v| v as usize);
+            if let Some(cap) = max_tool_result_bytes {
+                executor = executor.with_max_tool_result_bytes(cap);
+            }
             // Propagate SecureValueService + session_id so tool calls decrypt secrets.
             if let Some(svc) = self.secure_value_service.clone() {
                 executor = executor.with_secure_values(svc, session_id_str.clone());
@@ -1793,6 +1957,7 @@ impl ExecutableNode for LlmNode {
                         registry: reg.clone(),
                         provider: provider_kind.clone(),
                         api_key: api_key.clone(),
+                        storage: self.storage.clone(),
                     })
                         as std::sync::Arc<dyn crate::llm::application::LoadAttachmentResolver>
                 }),
@@ -1814,6 +1979,7 @@ impl ExecutableNode for LlmNode {
                         registry: reg.clone(),
                         provider: provider_kind.clone(),
                         api_key: api_key.clone(),
+                        storage: self.storage.clone(),
                     })
                         as std::sync::Arc<dyn crate::llm::application::LoadAttachmentResolver>
                 }),
@@ -1845,7 +2011,9 @@ impl ExecutableNode for LlmNode {
         let summary_generator: Option<std::sync::Arc<dyn AttachmentSummaryGenerator>> =
             if summary_enabled && !summary_targets.is_empty() && attachment_registry.is_some() {
                 let repo = LlmProviderFactory::create(provider_kind.clone());
-                Some(std::sync::Arc::new(LlmAttachmentSummaryGenerator::new(repo)))
+                Some(std::sync::Arc::new(LlmAttachmentSummaryGenerator::new(
+                    repo,
+                )))
             } else {
                 None
             };
@@ -1889,14 +2057,8 @@ impl ExecutableNode for LlmNode {
                     let cfg = cfg.clone();
                     let fetcher = fetcher_for_summary.clone();
                     set.spawn(async move {
-                        let outcome = generate_one_summary(
-                            &*gen,
-                            &cfg,
-                            &t,
-                            fetcher,
-                            summary_max_chars,
-                        )
-                        .await;
+                        let outcome =
+                            generate_one_summary(&*gen, &cfg, &t, fetcher, summary_max_chars).await;
                         match &outcome {
                             SummaryOutcome::Generated(text) => {
                                 if let Err(e) = reg
@@ -2218,7 +2380,11 @@ fn format_temporal_context_block(
     let human = local_dt.format("%A, %B %-d, %Y, %-I:%M %p").to_string();
 
     let raw_offset = local_dt.format("%:z").to_string();
-    let sign = if raw_offset.starts_with('-') { "-" } else { "+" };
+    let sign = if raw_offset.starts_with('-') {
+        "-"
+    } else {
+        "+"
+    };
     let trimmed = raw_offset.trim_start_matches(['+', '-']);
     let parts: Vec<&str> = trimmed.split(':').collect();
     let hours: i32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -2596,6 +2762,7 @@ mod resolver_tests {
             registry: registry.clone(),
             provider: ProviderKind::OpenAi,
             api_key: "dummy".to_string(),
+            storage: None,
         };
         let file = resolver.resolve("agent_1", "doc-1").await.unwrap().unwrap();
         match file.source {
@@ -2622,9 +2789,62 @@ mod resolver_tests {
             registry,
             provider: ProviderKind::OpenAi,
             api_key: "dummy".to_string(),
+            storage: None,
         };
         let res = resolver.resolve("agent_1", "missing").await.unwrap();
         assert!(res.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolver_returns_none_when_only_generated_row_exists_but_no_storage() {
+        // When a Generated row exists but storage adapter is missing, the
+        // resolver cannot upload bytes and must error (so the LLM gets a
+        // clear "attachment unavailable" rather than a successful but empty
+        // resolution).
+        use crate::llm::application::LoadAttachmentResolver;
+        use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
+        use crate::llm::domain::AttachmentRegistry;
+        use crate::llm::domain::ProviderKind;
+        use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+        use std::sync::Arc;
+
+        let registry = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        registry
+            .upsert(UpsertAttachmentInput {
+                agent_session_id: "agent_1".to_string(),
+                document_id: "gen-att-xyz".to_string(),
+                provider: ProviderKind::Generated,
+                provider_file_id: "local://abc".to_string(),
+                mime_type: "image/png".to_string(),
+                filename: "image_0.png".to_string(),
+                size_bytes: Some(100),
+                label: None,
+                description: Some("Image generated".to_string()),
+                source: AttachmentSource::SignedUrl("data:image/png;base64,XX".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let resolver = AttachmentResolverImpl {
+            registry: registry.clone(),
+            provider: ProviderKind::OpenAi,
+            api_key: "dummy".to_string(),
+            storage: None, // no storage adapter
+        };
+
+        // No storage → must error (not silently return None) so the LLM is
+        // informed that the artifact exists but cannot be loaded.
+        let res = resolver.resolve("agent_1", "gen-att-xyz").await;
+        assert!(res.is_err(), "expected error when storage missing");
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("OutputStorageRepository"),
+            "error message should mention storage: {err}"
+        );
     }
 }
 
@@ -2676,22 +2896,38 @@ mod temporal_context_helper_tests {
     #[test]
     fn block_has_timezone_location_locale_lines() {
         let out = format_temporal_context_block("America/Bogota", "Bogotá, Colombia", "es-CO");
-        assert!(out.contains("Timezone: America/Bogota (UTC-5)"), "tz line: {}", out);
-        assert!(out.contains("Location: Bogotá, Colombia"), "loc line: {}", out);
+        assert!(
+            out.contains("Timezone: America/Bogota (UTC-5)"),
+            "tz line: {}",
+            out
+        );
+        assert!(
+            out.contains("Location: Bogotá, Colombia"),
+            "loc line: {}",
+            out
+        );
         assert!(out.contains("Locale: es-CO"), "locale line: {}", out);
     }
 
     #[test]
     fn half_hour_offset_renders_correctly() {
         let out = format_temporal_context_block("Asia/Kolkata", "Mumbai, India", "hi-IN");
-        assert!(out.contains("Timezone: Asia/Kolkata (UTC+5:30)"), "expected UTC+5:30 in: {}", out);
+        assert!(
+            out.contains("Timezone: Asia/Kolkata (UTC+5:30)"),
+            "expected UTC+5:30 in: {}",
+            out
+        );
         assert!(out.contains("Locale: hi-IN"));
     }
 
     #[test]
     fn invalid_iana_falls_back_coherently() {
         let out = format_temporal_context_block("Mars/Olympus", "Mars Base", "en-US");
-        assert!(out.contains("Timezone: America/Bogota (UTC-5)"), "fallback tz: {}", out);
+        assert!(
+            out.contains("Timezone: America/Bogota (UTC-5)"),
+            "fallback tz: {}",
+            out
+        );
         assert!(out.contains("-05:00"), "fallback ISO offset: {}", out);
         assert!(out.contains("Location: Mars Base"));
         assert!(out.contains("Locale: en-US"));
@@ -2880,7 +3116,12 @@ mod filter_enabled_tools_tests {
         let out = filter_enabled_tools(api_explorer_catalog(), None, &configured);
         let names: Vec<&str> = out.iter().map(|t| t.name.as_str()).collect();
 
-        assert_eq!(out.len(), 5, "expected 5 api_explorer sub-tools, got {:?}", names);
+        assert_eq!(
+            out.len(),
+            5,
+            "expected 5 api_explorer sub-tools, got {:?}",
+            names
+        );
         assert!(!names.contains(&"current_time"));
     }
 
