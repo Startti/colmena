@@ -1,8 +1,114 @@
 # Multimedia Generation — image_generation, image_edit, tts
 
-> **Updated:** 2026-05-20 · **Status:** Shipped end-to-end (in-colmena). ADP Phase 7 pending.
+> **Updated:** 2026-05-21 · **Status:** Shipped end-to-end (in-colmena). Host-side wiring (Phase 7) tracked separately by the consuming application.
 
 Tres nodos para generar media + el sistema completo de "artifacts" (storage, registry, placeholders, scrubber) que permite encadenar generaciones, "ver" lo generado desde el LLM, y enviarlo a endpoints externos — todo **sin que el LLM vea bytes binarios nunca**.
+
+## Donde viven los artifacts — bucket-first, dev convenience
+
+> ⚠️ **Importante leer antes de cualquier setup.** Los artifacts (imágenes,
+> audios) **viven en un bucket de Google Cloud Storage** tanto en producción
+> como en dev "real". El modo `LocalHttpStorageAdapter` (`COLMENA_LOCAL=true`
+> que vas a ver más abajo) **NO es el modo "normal"** — es una conveniencia
+> de desarrollo local para iterar sin tener que setear credenciales GCS ni
+> levantar el callback a la host application en tu laptop.
+
+### Matriz canónica de modos
+
+| Entorno | Adapter | Dónde viven los bytes | URL que recibe el LLM | Cuándo usarlo |
+|---|---|---|---|---|
+| **Producción** (Cloud Run worker) | `HttpCallbackStorageAdapter` | Bucket GCS real (compartido con uploads del usuario) | Signed GCS URL firmado por host application (~1h TTL) | Siempre en deploys reales |
+| **Dev "real"** (apuntando a tu staging) | `HttpCallbackStorageAdapter` | Bucket GCS de staging | Signed GCS URL de staging | Cuando querés validar el flow end-to-end de prod sin desplegar |
+| **Dev local (conveniencia)** | `LocalHttpStorageAdapter` | Disco local `/tmp/colmena-out/` + axum server en `127.0.0.1` | `http://127.0.0.1:8765/files/<key>` | Iteración rápida sin GCS ni host application levantada |
+| **CI / tests unitarios** | `LocalCacheStorageAdapter` | RAM del proceso (se pierde al cerrar) | Handle opaco `local://<uuid>` | Solo tests automatizados — never user-facing |
+
+**Mental model**: en cualquier entorno donde hay agentes corriendo para usuarios reales (staging, prod, dev contra staging), los artifacts **están en GCS**. El `LocalHttp` es una "simulación local" del bucket para que un dev pueda probar la pipeline sin que su laptop necesite credenciales GCS ni callback URL a la host application.
+
+### El flujo prod en una imagen
+
+```
+   ┌────────────────────┐                    ┌──────────────────────┐
+   │  colmena worker    │                    │  host application    │
+   │  (Cloud Run, Rust) │                    │  (external service,  │
+   │                    │                    │   not part of this   │
+   │                    │                    │   repo)              │
+   │                    │                    │                      │
+   │  image_generation  │                    │  /internal/gcs/      │
+   │  node generates    │                    │  sign-put            │
+   │  bytes via OpenAI  │                    │  (InternalService    │
+   │                    │                    │   Guard)             │
+   └──────────┬─────────┘                    └──────┬───────────────┘
+              │                                      │
+              │ 1. POST {session_id, mime, filename} │ 2. lookup AgentSession
+              │    + X-Internal-Token header         │    derive userId
+              ├─────────────────────────────────────►│    build storage_key
+              │                                      │    generate signed PUT URL
+              │ 3. { put_url, read_url, storage_key}│
+              │◄─────────────────────────────────────┤
+              │                                      │
+              │ 4. PUT bytes → signed put_url ─────────────────────┐
+              │                                      │             ▼
+              │                                      │      ┌──────────────┐
+              │                                      │      │  GCS bucket  │
+              │                                      │      │  (real)      │
+              │                                      │      └──────────────┘
+              │                                      │
+              │ 5. emits tool output {                │
+              │      attachment_id: storage_key,     │
+              │      url: read_url,                  │
+              │      mime_type, size_bytes           │
+              │    }                                  │
+              ├─────────────────────────────────────►│
+              │                                      │
+              │                                      │  6. persistColmenaResult:
+              │                                      │     detects {attachment_id,url}
+              │                                      │     INSERT AgentAttachment
+              │                                      │     (cascade-delete inherits)
+```
+
+Cero credenciales GCS en el worker. host application es la única con creds y la única que firma URLs.
+
+### El flujo dev local (mismo modelo, sin bucket)
+
+```
+   ┌────────────────────┐
+   │  colmena worker    │  (cargo run)
+   │  LocalHttpAdapter  │
+   │  + embedded axum   │  → write to /tmp/colmena-out/<uuid>.png
+   │  on 127.0.0.1:8765 │  → return http://127.0.0.1:8765/files/<uuid>.png
+   └────────────────────┘
+              │
+              ▼
+       /tmp/colmena-out/<uuid>.png   ← inspeccionable con `open`
+```
+
+Sin red externa, sin GCS, sin host application. **Mismo shape de URL en el output** (HTTP fetchable) — por eso el flow del agente es idéntico bytes-wise: `load_attachment`, `$attachment:<key>`, vision input — todos funcionan sin código condicional.
+
+### Setup de cada modo
+
+```bash
+# Producción (worker en Cloud Run)
+COLMENA_LOCAL=false
+COLMENA_STORAGE_CALLBACK_URL=https://your-host-api.example.com/internal/gcs/sign-put
+COLMENA_STORAGE_CALLBACK_SECRET=<shared con COLMENA_INTERNAL_TOKEN en host application>
+
+# Dev contra la host application real (cuando querés validar el flujo prod)
+COLMENA_LOCAL=false
+COLMENA_STORAGE_CALLBACK_URL=https://your-host-api-staging.example.com/internal/gcs/sign-put
+COLMENA_STORAGE_CALLBACK_SECRET=<staging secret>
+
+# Dev local (la mayor parte del tiempo durante iteración)
+COLMENA_LOCAL=true
+# COLMENA_LOCAL_STORAGE_DIR=/tmp/colmena-out   (default — opcional)
+# COLMENA_LOCAL_STORAGE_PORT=8765              (default — opcional)
+
+# CI / tests
+# (no setear nada — cae a LocalCacheStorageAdapter)
+```
+
+Si seteás `COLMENA_LOCAL=false` y olvidás el callback URL o secret, el engine **panica al startup** con mensaje claro. Esto previene el footgun "olvidé sacar `COLMENA_LOCAL=true` de mi env y mi staging cae a in-memory silencioso".
+
+---
 
 ## TL;DR
 
@@ -57,7 +163,7 @@ Tres nodos para generar media + el sistema completo de "artifacts" (storage, reg
 | `COLMENA_LOCAL` | Adapter | URL shape | Bytes location |
 |---|---|---|---|
 | `true` | `LocalHttpStorageAdapter` | `http://127.0.0.1:<port>/files/<key>` | Disco bajo `COLMENA_LOCAL_STORAGE_DIR` (default `/tmp/colmena-out`) |
-| `false` | `HttpCallbackStorageAdapter` | URL firmada GCS (`https://storage.googleapis.com/...?X-Goog-Signature=...`) | GCS bucket — colmena pide el signed PUT URL al callback de ADP |
+| `false` | `HttpCallbackStorageAdapter` | URL firmada GCS (`https://storage.googleapis.com/...?X-Goog-Signature=...`) | GCS bucket — colmena pide el signed PUT URL al callback de la host application |
 | unset | Implicit fallback (back-compat): callback si vars set → local-http si dir set → else `LocalCacheStorageAdapter` (in-memory) | varía | varía |
 
 **Default values cuando `COLMENA_LOCAL=true`**:
@@ -65,7 +171,7 @@ Tres nodos para generar media + el sistema completo de "artifacts" (storage, reg
 - `COLMENA_LOCAL_STORAGE_PORT=8765` (use `0` para que el OS asigne uno random)
 
 **Required vars cuando `COLMENA_LOCAL=false`** (hard-fail si faltan):
-- `COLMENA_STORAGE_CALLBACK_URL` (ej: `https://adp-api/internal/gcs/sign-put`)
+- `COLMENA_STORAGE_CALLBACK_URL` (ej: `https://your-host-api.example.com/internal/gcs/sign-put`)
 - `COLMENA_STORAGE_CALLBACK_SECRET` (shared con el `InternalServiceGuard` del lado API)
 
 ### Logging al startup
@@ -117,13 +223,15 @@ El agente (LLM) ve **ambos** en el tool output:
 | `prompt` | sí | Detalle del prompt — inputs-over-config, podés pasarlo por edge o LLM tool arg |
 | `size` | opcional | Default `1024x1024` |
 | `quality` | opcional (openai) | `low | medium | high | auto` |
-| `n` | opcional | Default 1, max 10 |
-| `google_project_id` | sí (google) | GCP project id |
-| `google_location` | opcional (google) | Default `us-central1` |
+| `n` | opcional | Default 1, max 10 (clamped) |
+| `google_project_id` | opcional* (google) | **Best practice: omitir.** Si no está en config se lee de `GOOGLE_CLOUD_PROJECT` (o `GOOGLE_PROJECT_ID`) env var del worker. |
+| `google_location` | opcional (google) | Default `us-central1`. Si no está en config se lee de `GOOGLE_CLOUD_LOCATION` (o `GOOGLE_LOCATION`) env var. |
 
 **Output**: `{ "output": { "images": [...], "provider", "model" } }`.
 
-**Auth de Google Vertex** se hace internamente con `yup-oauth2`: lee la service-account JSON apuntada por `GOOGLE_APPLICATION_CREDENTIALS`, intercambia el JWT por un access token, lo cachea ~50min en una `tokio::sync::Mutex<Option<CachedToken>>` para evitar revalidar en cada call.
+**Best practice para `provider=google`:** dejá `google_project_id` y `google_location` FUERA del grafo JSON. El worker los inyecta desde sus env vars en deploy time (`GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`). El mismo grafo así es portable entre dev/staging/prod — cada environment provee su propio project sin tocar el JSON. Solo hardcodeá en el grafo si necesitás targetear un project distinto al del worker (raro).
+
+**Auth de Google Vertex** se hace internamente con `yup-oauth2` vía **Application Default Credentials**. Discovery order: (1) `GOOGLE_APPLICATION_CREDENTIALS` key file path, (2) `gcloud auth application-default login` creds en `~/.config/gcloud/`, (3) GCE/Cloud Run metadata server (runtime SA). El access token resultante se cachea ~50min en una `tokio::sync::Mutex<Option<CachedToken>>` para evitar revalidar en cada call.
 
 **Sample graph**: `tests/graphs/media/image_generation_basic.json`.
 
@@ -287,7 +395,7 @@ Verás:
 | Run hit OpenAI TPM rate limit en el siguiente turn después de un tool call | Tool result devolvió un body con base64 grande (echo de httpbin, o un endpoint que devuelve la imagen procesada) | El scrubber lo elide automático desde 2026-05-20. Si querés permitir bodies grandes (>50KB) para un caso específico, setear `max_tool_result_bytes: 200000` en el config del `llm_call`. |
 | LLM no llama tools y solo escribe texto sobre lo que va a hacer | `tool_configurations` malformado (cae al silent-empty fallback en versiones anteriores), o modelo chico (gpt-4o-mini) con instrucciones débiles | Verificar logs del startup buscando warns sobre `tool_configurations failed to parse`. Subir a gpt-4o + system_message más estricto ("invoke the tool directly, do not describe what you are about to do"). |
 | URL `http://127.0.0.1:8765/files/...` devuelve connection refused | El proceso `cargo run` ya terminó — el server local solo vive durante el run | Usar el path de disco: `open /tmp/colmena-out/<key>` |
-| `COLMENA_LOCAL=false` y error al startup pidiendo callback URL | Estás en modo prod sin haber configurado el callback ADP | Setear `COLMENA_STORAGE_CALLBACK_URL` + `COLMENA_STORAGE_CALLBACK_SECRET` o cambiar a `COLMENA_LOCAL=true` |
+| `COLMENA_LOCAL=false` y error al startup pidiendo callback URL | Estás en modo prod sin haber configurado el callback de la host application | Setear `COLMENA_STORAGE_CALLBACK_URL` + `COLMENA_STORAGE_CALLBACK_SECRET` o cambiar a `COLMENA_LOCAL=true` |
 | Cross-provider lazy upload da error "no OutputStorageRepository wired" | El AttachmentResolver no recibió storage adapter — bug si tenés `EngineConfig::from_env` standard | Verificar que `LlmNode::with_storage()` se llama en el registry init (ver `src/dag_engine/infrastructure/registry.rs`) |
 
 ## Referencias
@@ -304,14 +412,43 @@ Verás:
   - `src/dag_engine/infrastructure/dag_tool_executor.rs:1048+` — scrubber.
   - `src/dag_engine/engine.rs:73+` — `COLMENA_LOCAL` selection logic.
 
-## Pendiente (Phase 7 — fuera de colmena)
+## Host-side integration (out of scope for this repository)
 
-ADP repo (`/Users/danielgarcia/startti/adp/`):
+Colmena defines the **client contract** for `HttpCallbackStorageAdapter` —
+what the worker sends, what response it expects. The host application that
+consumes colmena (e.g. a chat backend) is responsible for implementing the
+server side. The contract is small:
 
-1. Endpoint `POST /internal/gcs/sign-put` que responde `{put_url, read_url, storage_key}` para que `HttpCallbackStorageAdapter` pueda subir generados a GCS.
-2. `InternalServiceGuard` (NestJS) que valida `x-internal-token` contra `COLMENA_INTERNAL_TOKEN` env de la API.
-3. Worker env vars (`COLMENA_LOCAL=false` + callback URL + secret).
-4. En `chat.service.ts persistColmenaResult`: detectar tool outputs con shape `{attachment_id, url, mime_type, size_bytes}` y crear filas `AgentAttachment` con `messageId` del turn assistant.
-5. `schema.prisma`: nuevo enum `AttachmentSource { user image_gen tts image_edit }`, migración Phase 6-pattern (nullable → backfill → NOT NULL).
+**Request from worker → host:**
+```
+POST <COLMENA_STORAGE_CALLBACK_URL>
+Headers:
+  X-Internal-Token: <shared secret from COLMENA_STORAGE_CALLBACK_SECRET>
+  Content-Type: application/json
+Body:
+{
+  "session_id":        "<colmena session id>",
+  "agent_session_id":  "<optional conversation id>",
+  "mime_type":         "image/png",
+  "filename":          "image_0.png",
+  "purpose":           "generated_output"
+}
+```
 
-Cuando esto esté, el worker flipea `COLMENA_LOCAL=false` y todo el flow corre contra GCS real con cero cambios en colmena.
+**Expected response (200):**
+```json
+{
+  "put_url":     "https://storage.googleapis.com/...?X-Goog-Signature=...",
+  "read_url":    "https://storage.googleapis.com/...?X-Goog-Signature=...",
+  "storage_key": "<host-derived path inside the bucket>"
+}
+```
+
+The host typically derives the storage_key from the `session_id` lookup
+(mapping it to a user / conversation in its own DB), reuses its existing
+GCS signed-URL helpers, and persists an attachment row when the
+worker emits the corresponding `tool_call_finish` event.
+
+For an example reference implementation living in a private host
+application this codebase ships against, see the host's internal docs —
+the contract above is the only thing colmena needs to be compatible.

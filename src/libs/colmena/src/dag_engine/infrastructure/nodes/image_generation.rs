@@ -17,10 +17,29 @@
 //!   "size": "1024x1024",                       // optional
 //!   "quality": "low" | "medium" | "high" | "auto",  // openai only, optional
 //!   "n": 1,                                    // optional, default 1
-//!   "google_project_id": "...",                // required if provider=google
+//!   "google_project_id": "...",                // optional — falls back to env (see below)
 //!   "google_location": "us-central1"           // optional, default us-central1
 //! }
 //! ```
+//!
+//! ## Best practice for Vertex (`provider=google`)
+//!
+//! **Do NOT set `google_project_id` / `google_location` in the graph JSON.**
+//! Leave them off and let the worker resolve them from the canonical Google
+//! Cloud env vars at runtime:
+//!
+//! | Field             | Primary env var         | Fallback env var      | Built-in default |
+//! |-------------------|-------------------------|-----------------------|------------------|
+//! | google_project_id | `GOOGLE_CLOUD_PROJECT`  | `GOOGLE_PROJECT_ID`   | none (required)  |
+//! | google_location   | `GOOGLE_CLOUD_LOCATION` | `GOOGLE_LOCATION`     | `us-central1`    |
+//!
+//! Why this matters: the same graph JSON ships unchanged across dev / staging
+//! / prod environments — each environment's worker injects its own project id
+//! through the deploy config. Hard-coding the project in the JSON couples the
+//! graph to one environment and forces JSON edits on promotion.
+//!
+//! Override the env defaults from the graph only when a single graph needs to
+//! target a project other than the worker's runtime project (rare).
 //!
 //! ## Output shape
 //!
