@@ -48,15 +48,15 @@ impl TtsRepository for GoogleTtsAdapter {
             ));
         }
 
-        // Gemini TTS returns audio whose container is determined by the model;
-        // for the preview TTS models it's PCM 24kHz wrapped as audio/L16 — we
-        // surface the API's reported mime_type in the response. The `format`
-        // field on the request is currently advisory only because the Gemini
-        // TTS API does not yet expose container selection.
+        // Gemini TTS preview models return raw 16-bit linear PCM (mime
+        // `audio/L16;rate=24000` or similar). We honor `format`:
+        //   - Pcm: pass through as audio/L16 (raw)
+        //   - Wav: wrap in a 44-byte WAV header so the file is playable
+        //   - Other formats (mp3/opus): can't synthesize — warn and pass raw
         if !matches!(req.format, AudioFormat::Pcm | AudioFormat::Wav) {
             tracing::warn!(
-                "google_tts_adapter: Gemini TTS returns L16 PCM regardless of requested format ({:?}). \
-                 Container conversion is the caller's responsibility.",
+                "google_tts_adapter: Gemini TTS returns L16 PCM; container conversion \
+                 to {:?} is not implemented — emitting raw PCM with audio/L16 mime.",
                 req.format
             );
         }
@@ -122,19 +122,32 @@ impl TtsRepository for GoogleTtsAdapter {
             }
         })?;
 
-        let mime_type = inline
+        let raw_mime = inline
             .get("mimeType")
             .and_then(|v| v.as_str())
             .unwrap_or("audio/L16")
             .to_string();
 
-        let audio_bytes = base64::engine::general_purpose::STANDARD
+        let raw_bytes = base64::engine::general_purpose::STANDARD
             .decode(b64)
             .map_err(|e| TtsError::Transport(format!("invalid base64: {e}")))?;
 
-        if audio_bytes.is_empty() {
+        if raw_bytes.is_empty() {
             return Err(TtsError::EmptyAudio);
         }
+
+        // If the caller asked for WAV and the provider returned raw L16,
+        // wrap with a 44-byte WAV header so the resulting file is playable
+        // by any standard audio player / browser.
+        let (audio_bytes, mime_type) = if matches!(req.format, AudioFormat::Wav)
+            && raw_mime.starts_with("audio/L16")
+        {
+            let sample_rate = parse_sample_rate_from_mime(&raw_mime);
+            let wav = wrap_pcm_in_wav(&raw_bytes, sample_rate, /* channels */ 1);
+            (wav, "audio/wav".to_string())
+        } else {
+            (raw_bytes, raw_mime)
+        };
 
         Ok(TtsResponse {
             audio_bytes,
@@ -146,6 +159,52 @@ impl TtsRepository for GoogleTtsAdapter {
     fn provider_name(&self) -> &'static str {
         "google"
     }
+}
+
+/// Parses the sample rate (Hz) from a Gemini `audio/L16;rate=24000` mime
+/// type. Returns `24000` as a fallback — the default rate of every Gemini
+/// TTS preview model documented as of 2026-05.
+fn parse_sample_rate_from_mime(mime: &str) -> u32 {
+    mime.split(';')
+        .find_map(|part| {
+            let trimmed = part.trim();
+            trimmed
+                .strip_prefix("rate=")
+                .and_then(|rate| rate.parse::<u32>().ok())
+        })
+        .unwrap_or(24000)
+}
+
+/// Builds a WAV file (RIFF/WAVE container, 44-byte header + PCM data) from
+/// raw 16-bit linear PCM samples. Little-endian, mono or stereo, no compression.
+/// The header layout follows the canonical WAVE PCM format
+/// (https://docs.fileformat.com/audio/wav/).
+fn wrap_pcm_in_wav(pcm: &[u8], sample_rate_hz: u32, channels: u16) -> Vec<u8> {
+    let bits_per_sample: u16 = 16;
+    let byte_rate: u32 = sample_rate_hz * channels as u32 * bits_per_sample as u32 / 8;
+    let block_align: u16 = channels * bits_per_sample / 8;
+    let data_size: u32 = pcm.len() as u32;
+    let chunk_size: u32 = 36 + data_size;
+
+    let mut wav = Vec::with_capacity(44 + pcm.len());
+    // RIFF chunk descriptor
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&chunk_size.to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    // fmt sub-chunk
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes()); // sub-chunk size for PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // audio format: 1 = PCM
+    wav.extend_from_slice(&channels.to_le_bytes());
+    wav.extend_from_slice(&sample_rate_hz.to_le_bytes());
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&block_align.to_le_bytes());
+    wav.extend_from_slice(&bits_per_sample.to_le_bytes());
+    // data sub-chunk
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_size.to_le_bytes());
+    wav.extend_from_slice(pcm);
+    wav
 }
 
 #[cfg(test)]
@@ -187,9 +246,60 @@ mod tests {
             .await;
 
         let adapter = GoogleTtsAdapter::new("g-key".into()).with_base_url(server.uri());
+        // Pcm request → no wrap, raw L16 passes through
         let out = adapter.synthesize(req("hola")).await.unwrap();
         assert_eq!(out.audio_bytes, vec![0u8, 0, 0]);
         assert_eq!(out.mime_type, "audio/L16;rate=24000");
+    }
+
+    #[tokio::test]
+    async fn wav_format_wraps_pcm_with_header_and_remimes() {
+        let server = MockServer::start().await;
+        // "AAAA" base64 = [0,0,0] — 3 bytes of PCM
+        Mock::given(method("POST"))
+            .and(path("/models/gemini-2.5-flash-preview-tts:generateContent"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "candidates": [{
+                    "content": {
+                        "parts": [{
+                            "inlineData": {
+                                "mimeType": "audio/L16;rate=24000",
+                                "data": "AAAA"
+                            }
+                        }]
+                    }
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let adapter = GoogleTtsAdapter::new("g-key".into()).with_base_url(server.uri());
+        let mut r = req("hola");
+        r.format = AudioFormat::Wav;
+        let out = adapter.synthesize(r).await.unwrap();
+        // Mime should be the standard playable container, not raw L16
+        assert_eq!(out.mime_type, "audio/wav");
+        // 44-byte header + 3 bytes of PCM
+        assert_eq!(out.audio_bytes.len(), 47);
+        // RIFF/WAVE magic bytes — confirms a real WAV header
+        assert_eq!(&out.audio_bytes[0..4], b"RIFF");
+        assert_eq!(&out.audio_bytes[8..12], b"WAVE");
+        assert_eq!(&out.audio_bytes[12..16], b"fmt ");
+        assert_eq!(&out.audio_bytes[36..40], b"data");
+        // PCM payload preserved verbatim
+        assert_eq!(&out.audio_bytes[44..], &[0u8, 0, 0]);
+    }
+
+    #[test]
+    fn parse_sample_rate_picks_rate_param_or_fallback() {
+        assert_eq!(parse_sample_rate_from_mime("audio/L16;rate=24000"), 24000);
+        assert_eq!(parse_sample_rate_from_mime("audio/L16;rate=48000"), 48000);
+        // Whitespace tolerated
+        assert_eq!(parse_sample_rate_from_mime("audio/L16; rate=16000"), 16000);
+        // No rate param → 24000 default for Gemini
+        assert_eq!(parse_sample_rate_from_mime("audio/L16"), 24000);
+        // Garbage rate → fallback
+        assert_eq!(parse_sample_rate_from_mime("audio/L16;rate=abc"), 24000);
     }
 
     #[tokio::test]
