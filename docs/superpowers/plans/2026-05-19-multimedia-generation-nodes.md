@@ -2,8 +2,8 @@
 
 > **Status (2026-05-20)**: All in-colmena scope is **SHIPPED** (Phases 1-6 of the
 > original plan + 4 extra capabilities + dev/prod URL symmetry). The only
-> remaining piece is **Phase 7 (ADP wiring)** which lives in the `adp`
-> repository.
+> remaining piece is **Phase 7 (host application wiring)** which lives in
+> the downstream host application repository (private, consuming this library).
 >
 > See [§ Implementation status](#implementation-status-2026-05-20) below for
 > the shipped-vs-planned delta. The rest of this document is preserved as the
@@ -52,7 +52,7 @@
 | Mode | `read_url` shape | Bytes location | LLM tool-result size |
 |---|---|---|---|
 | `COLMENA_LOCAL=true` (dev) | `http://127.0.0.1:<port>/files/<uuid>.png` | `/tmp/colmena-out/<uuid>.png` (disk) | small (URL only) |
-| `COLMENA_LOCAL=false` (prod) | `https://storage.googleapis.com/...?X-Goog-Signature=...` (signed GCS) | GCS bucket via callback to ADP API | small (URL only) |
+| `COLMENA_LOCAL=false` (prod) | `https://storage.googleapis.com/...?X-Goog-Signature=...` (signed GCS) | GCS bucket via callback to host application | small (URL only) |
 | unset (CI/tests) | `local://<uuid>` opaque handle | in-process `DashMap` | small (handle only) |
 
 **Architectural invariant locked in**: the LLM context never holds raw binary
@@ -69,21 +69,21 @@ LLM) is scrubbed at the executor boundary.
 - Smoke E2E with OpenAI gpt-image-1 + LocalHttp adapter: ✅ end-to-end (gen → POST httpbin → finish)
 - Smoke E2E of standalone `image_generation` and `tts`: ✅
 
-### What's still PENDING — Phase 7 (ADP repository)
+### What's still PENDING — Phase 7 (private host application repository (consumed downstream))
 
-Lives in `/Users/danielgarcia/startti/adp/`. From this document's perspective,
+Lives in `&lt;downstream host repo&gt;`. From this document's perspective,
 the colmena side already implements the client contract (`HttpCallbackStorageAdapter`
 calls `POST <callback>/sign-put` with `{session_id, agent_session_id, mime_type,
 filename, purpose}` and expects `{put_url, read_url, storage_key}` back).
 
-To activate Phase 7 in ADP:
+To activate Phase 7 in the host application:
 
 1. **`POST /internal/gcs/sign-put`** endpoint in `apps/api/src/gcs/gcs.controller.ts`
 2. **`InternalServiceGuard`** validating `x-internal-token` shared secret
 3. **Worker env vars** (`apps/service/ia/platform/worker`):
    ```
    COLMENA_LOCAL=false
-   COLMENA_STORAGE_CALLBACK_URL=https://adp-api/internal/gcs/sign-put
+   COLMENA_STORAGE_CALLBACK_URL=https://your-host-api/internal/gcs/sign-put
    COLMENA_STORAGE_CALLBACK_SECRET=<shared with InternalServiceGuard>
    ```
 4. **`persistColmenaResult`** in `chat.service.ts`: detect tool outputs with
@@ -145,18 +145,18 @@ MODIFIED:
 ## Summary
 Add three new DAG node types (`image_generation`, `image_edit`, `tts`) usable
 both as standalone DAG nodes and as agent tools. Outputs are persisted via a
-new `OutputStorageRepository` port; the ADP worker wires a callback adapter
-that asks the ADP API to issue a signed PUT URL and uploads to GCS — keeping
+new `OutputStorageRepository` port; the worker (consuming host application) wires a callback adapter
+that asks the host application to issue a signed PUT URL and uploads to GCS — keeping
 colmena storage-blind.
 
 ## Motivation
 Today the LLM module is text-in / text-out (with multimodal *input* but no
 *output*). Agents cannot generate images or speech as part of a conversation.
-The user-facing flow exists in ADP for inbound files (GCS + signed URLs +
+The user-facing flow exists in the host application for inbound files (GCS + signed URLs +
 hardening Phase 1-5) but there is no symmetric path for outbound media. This
 plan adds that capability while:
 - Respecting the invariant that colmena has zero GCS credentials.
-- Reusing ADP's existing path layout, ownership validation, MIME allowlist,
+- Reusing the host application's existing path layout, ownership validation, MIME allowlist,
   cascade-delete, and orphan-sweep.
 - Exposing the new nodes through the existing "nodes-as-tools" pattern so
   agents can call `generate_image()`, `edit_image()`, `synthesize_speech()`
@@ -166,7 +166,7 @@ plan adds that capability while:
 1. **Hybrid node strategy**: `image_generation` and `image_edit` are
    self-contained (A2 pattern, `match provider`); `tts` uses a trait + adapters
    (A1 pattern) because there are three serious providers from day 1.
-2. **Outbound storage via callback** (Pattern C): colmena calls the ADP API
+2. **Outbound storage via callback** (Pattern C): colmena calls the host application
    to get a one-shot signed PUT URL, uploads the bytes, returns the read URL.
    Colmena never sees GCS credentials.
 3. **Granular attachment source enum**: `AgentAttachment.source` becomes a
@@ -185,7 +185,7 @@ plan adds that capability while:
   - `colmena::llm::domain::TtsRepository`
 - **New adapters**:
   - `LocalCacheStorageAdapter` (CLI/tests)
-  - `HttpCallbackStorageAdapter` (worker/ADP)
+  - `HttpCallbackStorageAdapter` (worker / downstream host)
   - `OpenAiTtsAdapter`, `ElevenLabsTtsAdapter`, `GoogleTtsAdapter`
 - **New nodes**: `image_generation`, `image_edit`, `tts`
 - **Modified files**: see "Detailed Steps" below
@@ -296,7 +296,7 @@ plan adds that capability while:
     - Overview of the 3 nodes, output shape, storage adapter selection, agent
       usage patterns, error handling, sample graph walkthrough
 
-### Phase 7 — ADP side (separate PR in adp repo)
+### Phase 7 — host application side (separate PR in the downstream host repo)
 
 24. `apps/api/src/gcs/gcs.controller.ts` — `POST /internal/gcs/sign-put`
     - Guard: `InternalServiceGuard` (new) — validates `x-internal-token` against
@@ -343,14 +343,14 @@ plan adds that capability while:
   exercises an agent calling `generate_image` as tool, validates `attachment_id`
   shape in output. Ignored (requires LLM + image-gen API keys).
 
-### ADP
+### Host application (out of scope for this repo)
 - Unit: `InternalServiceGuard` rejects without token, accepts with valid token
 - Unit: `/internal/gcs/sign-put` derives correct path, returns expected shape
-- Integration (e2e): start worker against API, run a DAG with `image_generation`,
-  verify a row appears in `AgentAttachment` with `source: image_gen`
+- Integration (e2e): start worker against host API, run a DAG with `image_generation`,
+  verify a row appears in the host's attachment table with the right `source` value
 
 ### Manual verification
-- Run a chat in ADP frontend, ask the agent to "generate an image of X"
+- Run a chat in the host application frontend, ask the agent to "generate an image of X"
 - Verify image appears inline in the message
 - Refresh page → image still renders (URL refresh via existing `getSessionMessages`)
 - Wait >1h, refresh → URL is re-signed correctly
@@ -364,8 +364,7 @@ plan adds that capability while:
 - `docs/DEVELOPER_GUIDE.md` — add section 30 link
 - `docs/dds/MODULO_LLM_DISEÑO.md` — appendix on TTS extension
 - `docs/dds/MEDIA_GENERATION_DISEÑO.md` — new DDS for the whole subsystem
-- ADP: `docs/image-upload-flow.md` — new section "Output flow (generated)"
-- ADP: `docs/COLMENA_INTEGRATION.md` — document the callback contract
+- Host application repo (out of scope here): document the new "Output flow (generated)" alongside the existing image-upload-flow.md equivalent, and add the callback contract spec to the integration docs.
 
 ## Risks & Mitigations
 
@@ -382,7 +381,7 @@ plan adds that capability while:
 
 ## Open Questions
 
-- **`agent_session_id` end-to-end**: ADP API does not forward `agent_session_id`
+- **`agent_session_id` end-to-end**: host application does not forward `agent_session_id`
   to colmena today (only `session_id`). This works for the storage callback
   because we derive the conversation from `colmenaSessionId` lookup. But if
   Colmena ever wants to do its own conversation-scoped caching of generated
@@ -403,7 +402,7 @@ plan adds that capability while:
   part of the agent integration test.
 
 ## Execution
-Use `/rust_dev` for Colmena work (Phases 1-6), and the ADP repo's standard
+Use `/rust_dev` for Colmena work (Phases 1-6), and the downstream host repo's standard
 workflow for Phase 7. Phases 1-2 are foundation and can land first as a
 no-functional-change PR; Phases 3-5 each add one node and ship independently;
 Phase 7 ships when at least one node is merged.

@@ -226,7 +226,7 @@ Commits: 131c540, 3f1a9f3, dd47a54.
 
 ## 8. Multimedia generation pipeline + artifacts unification (2026-05-19/20)
 
-**Qué cambió.** Tres nodos nuevos para generar media (`image_generation`, `image_edit`, `tts`), un sistema de storage abstraído por trait con 3 adapters (in-memory para CI, HTTP-callback para prod via ADP→GCS, HTTP local con server `axum` para dev), y la unificación de outputs generados con el `AttachmentRegistry` existente — el agente puede ABRIR sus propias generaciones via `load_attachment`, ENCADENAR ediciones por `attachment_id`, y ENVIAR los bytes a endpoints externos via `$attachment:<key>` placeholder en `http_request`, todo sin que el LLM vea nunca bytes binarios crudos.
+**Qué cambió.** Tres nodos nuevos para generar media (`image_generation`, `image_edit`, `tts`), un sistema de storage abstraído por trait con 3 adapters (in-memory para CI, HTTP-callback para prod via host application → GCS, HTTP local con server `axum` para dev), y la unificación de outputs generados con el `AttachmentRegistry` existente — el agente puede ABRIR sus propias generaciones via `load_attachment`, ENCADENAR ediciones por `attachment_id`, y ENVIAR los bytes a endpoints externos via `$attachment:<key>` placeholder en `http_request`, todo sin que el LLM vea nunca bytes binarios crudos.
 
 El principio arquitectónico que se locked-in: **el contexto del LLM nunca contiene bytes binarios**. Tres mecanismos lo enforcen:
 - **Output direction** (tool → LLM): URLs cortas en `read_url` (handles, signed GCS, o `http://127.0.0.1` según adapter).
@@ -257,7 +257,7 @@ Para dev/prod symmetry agregamos `COLMENA_LOCAL=true|false` como guard rail expl
 
 **Tests:** +26 unit tests entre storage, scrubber, image_generation, image_edit, tts, http $attachment, env guard rail, y cross-prov lazy upload. Total suite: **852 pass / 0 fail**. Smoke E2E verificado contra OpenAI gpt-image-1 real (LocalHttpStorageAdapter mode + scrubber active): gen → http_post → finish sin rate limits.
 
-**Pendiente — bloqueante para producción.** Phase 7 ADP wiring (otro repo: `/Users/danielgarcia/startti/adp/`): endpoint `POST /internal/gcs/sign-put` + `InternalServiceGuard` + env vars del worker (`COLMENA_LOCAL=false` + `COLMENA_STORAGE_CALLBACK_URL` + `COLMENA_STORAGE_CALLBACK_SECRET`) + `chat.service.ts persistColmenaResult` parsing → `AgentAttachment` rows + schema migration con enum `AttachmentSource (user | image_gen | tts | image_edit)`. El lado colmena ya implementa el client contract; solo es cuestión de wirear el lado ADP API.
+**Pendiente — bloqueante para producción.** Wiring del lado de la host application (downstream private repo que consume esta librería): endpoint `POST /internal/gcs/sign-put` + guard de service-to-service auth + env vars del worker (`COLMENA_LOCAL=false` + `COLMENA_STORAGE_CALLBACK_URL` + `COLMENA_STORAGE_CALLBACK_SECRET`) + parsing del tool output en el handler que persiste mensajes → rows de attachment table + schema migration con enum `source` (user / image_gen / tts / image_edit). El lado colmena ya implementa el client contract; el lado server es responsabilidad del downstream host.
 
 **Commits.** Pendientes de commit en `develop` — branch tiene 31 archivos modificados + 20 archivos nuevos sin commitear al momento de escribir esta entrada.
 
@@ -296,7 +296,7 @@ Para dev/prod symmetry agregamos `COLMENA_LOCAL=true|false` como guard rail expl
 | 5. `load_attachment` base | ✅ | ✅ | ✅ | ✅ | ✅ | OK |
 | 6. Attachment auto-summary | ✅ | ✅ | ✅ | ✅ (5 fields) | ✅ | OK |
 | 7. path/data registration fix | ✅ (issue) | ✅ | ✅ | (n/a) | ✅ (two-agent) | OK |
-| 8. Multimedia generation + artifacts unification | — | ✅ | ✅ | ✅ (3 nodos + categoría `media`) | ✅ (4 media + 2 agents) | Phase 7 ADP wiring pendiente (otro repo). Spec absorbida en el plan. |
+| 8. Multimedia generation + artifacts unification | — | ✅ | ✅ | ✅ (3 nodos + categoría `media`) | ✅ (4 media + 2 agents) | Host application wiring pendiente (downstream private repo). Spec absorbida en el plan. |
 
 **Leyenda:** ✅ presente y completo · ⚠️ parcial · ❌ ausente · — no aplica · (n/a) no requiere
 
