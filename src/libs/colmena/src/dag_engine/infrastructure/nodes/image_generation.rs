@@ -235,18 +235,40 @@ impl ExecutableNode for ImageGenerationNode {
                     .await?
             }
             "google" => {
+                // Project + location follow the dual-source pattern (inputs → config)
+                // and additionally fall back to the canonical Google Cloud env vars
+                // that gcloud, the Vertex client libraries, and Cloud Run all use.
+                // This lets the same graph run unchanged in local dev (where the
+                // env vars are set in `.env`) and in prod (where the deploy may
+                // inject them via Cloud Run settings or rely on the runtime
+                // metadata).
                 let project = inputs
                     .get("google_project_id")
                     .and_then(|v| v.as_str())
-                    .or_else(|| cfg.get("google_project_id").and_then(|v| v.as_str()))
-                    .ok_or("image_generation: google_project_id is required when provider=google")?
-                    .to_string();
+                    .map(String::from)
+                    .or_else(|| {
+                        cfg.get("google_project_id")
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                    })
+                    .or_else(|| std::env::var("GOOGLE_CLOUD_PROJECT").ok())
+                    .or_else(|| std::env::var("GOOGLE_PROJECT_ID").ok())
+                    .ok_or(
+                        "image_generation: google_project_id is required when provider=google \
+                         (provide via config/inputs, or set GOOGLE_CLOUD_PROJECT env var)",
+                    )?;
                 let location = inputs
                     .get("google_location")
                     .and_then(|v| v.as_str())
-                    .or_else(|| cfg.get("google_location").and_then(|v| v.as_str()))
-                    .unwrap_or("us-central1")
-                    .to_string();
+                    .map(String::from)
+                    .or_else(|| {
+                        cfg.get("google_location")
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                    })
+                    .or_else(|| std::env::var("GOOGLE_CLOUD_LOCATION").ok())
+                    .or_else(|| std::env::var("GOOGLE_LOCATION").ok())
+                    .unwrap_or_else(|| "us-central1".to_string());
                 self.vertex_generate(&project, &location, &model, &prompt, n)
                     .await?
             }
@@ -751,6 +773,11 @@ mod tests {
 
     #[tokio::test]
     async fn google_without_project_errors() {
+        // Defensive cleanup in case another test left the env var set in this
+        // process. Both fallback names are checked by the node.
+        std::env::remove_var("GOOGLE_CLOUD_PROJECT");
+        std::env::remove_var("GOOGLE_PROJECT_ID");
+
         let storage = MockOutputStorageRepository::new();
         let node = ImageGenerationNode::new(Arc::new(storage));
 
@@ -763,8 +790,16 @@ mod tests {
             .execute(&HashMap::new(), &config, &mut json!({}), None)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("google_project_id"));
+        let msg = err.to_string();
+        assert!(msg.contains("google_project_id"));
+        // The error message should hint that env vars are also a valid source,
+        // so the user knows the two ways to fix it.
+        assert!(
+            msg.contains("GOOGLE_CLOUD_PROJECT"),
+            "error message should mention the env-var fallback, got: {msg}"
+        );
     }
+
 
     #[tokio::test]
     async fn session_ids_forwarded_to_storage_when_present_in_inputs() {
