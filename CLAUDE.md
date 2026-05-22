@@ -46,7 +46,7 @@
     - `24_skills.md` — Skills feature: built-in + user-provided markdown packages loaded on-demand via `load_skill` tool
     - `29_lazy_tool_loading.md` — Lazy tool loading: progressive `describe_tool` reveal, `summary`/`eager` per tool, `tools_discovered` summary
     - `31_load_attachment.md` — On-demand attachment loading inside the LLM loop; auto-summary via cheap-tier provider
-    - `32_multimedia_generation.md` — `image_generation` / `image_edit` / `tts` nodes; artifact storage with 3 adapters (LocalCache/LocalHttp/HttpCallback); `COLMENA_LOCAL` env guard; `$attachment:<key>` placeholder; binary scrubber
+    - `32_multimedia_generation.md` — `image_generation` / `image_edit` / `tts` nodes; artifact storage with 3 adapters (LocalCache/LocalHttp/HttpCallback); `COLMENA_LOCAL` env guard; `$attachment:<key>` placeholder; binary scrubber. **Live in dev as of 2026-05-22** — Vertex uses ADC (no key file needed on Cloud Run); Gemini TTS auto-wraps L16 PCM to playable WAV; Vertex `google_project_id`/`google_location` fall back to `GOOGLE_CLOUD_PROJECT`/`GOOGLE_CLOUD_LOCATION` env vars (best practice: omit from graph JSON). Canvas-side configuration reference (per-tool fields, accepted values per model, env-var resolution chain) lives in the ADP repo at `docs/MULTIMEDIA_TOOLS_CANVAS_CONFIG.md`.
     - `35_temporal_geographic_context.md` — Auto-injected date/time/location/locale block in every llm_call system message
   - `dds/` — Design documents:
     - `ARQUITECTURA_HEXAGONAL_GUIA.md`, `DAG_ENGINE_DISEÑO.md`, `DISEÑO_AGENTES_Y_TOOLS.md`
@@ -269,3 +269,5 @@ For overrides (custom alias, `expose_sub_tools` filtering, `cache_ttl_seconds`, 
 
 ## Current Status
 - **Active development on `develop`**. See `docs/CHANGELOG_*.md` for the rolling change log; `docs/BACKLOG.md` for parked items.
+- **Multimedia generation pipeline shipped 2026-05-22** — 3 nodes (image_generation, image_edit, tts) live in dev (`api.dev.startti.ai`). Deployed colmena commits on develop: `b6eaeb9`, `f2cc36d`, `058762e`, `4f50db2`, `a0c9e98`, `004489d`. The downstream ADP repo (`/Users/danielgarcia/startti/adp`) consumes colmena develop directly via its platform service (`apps/service/ia/platform/{api,worker}/`). Pending: cost tracking, frontend rendering (badge + audio player), prod deploy. See [`docs/superpowers/plans/2026-05-19-multimedia-generation-nodes.md`](docs/superpowers/plans/2026-05-19-multimedia-generation-nodes.md) for the original plan.
+- **Breaking-change discipline**: anything that changes colmena's public API (`EngineConfig`, `ColmenaEngine`, exported trait signatures) must be swept against the ADP worker (`apps/service/ia/platform/{worker,api}/src/` in the adp repo) BEFORE pushing to colmena develop — that worker pulls colmena develop directly via Cargo and a breaking change fails its next Cloud Build.
