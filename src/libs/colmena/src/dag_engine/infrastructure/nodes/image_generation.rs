@@ -500,9 +500,20 @@ impl ImageGenerationNode {
     }
 
     /// Returns a cached Vertex AI bearer token, refreshing via `yup-oauth2`
-    /// when within 60 s of expiry. Reads the service account JSON from
-    /// `GOOGLE_APPLICATION_CREDENTIALS`.
+    /// when within 60 s of expiry. Credentials are discovered via
+    /// Application Default Credentials, which tries — in order:
+    ///   1. `GOOGLE_APPLICATION_CREDENTIALS` (path to a service account JSON)
+    ///   2. The well-known `gcloud` user credentials location
+    ///   3. The GCE/Cloud Run metadata server (runtime service account)
+    ///
+    /// This means local dev with `gcloud auth application-default login` and
+    /// Cloud Run deploys both work without setting any env var explicitly.
     async fn get_vertex_token(&self) -> Result<String, Box<dyn StdError + Send + Sync>> {
+        use yup_oauth2::authenticator::ApplicationDefaultCredentialsTypes;
+        use yup_oauth2::{
+            ApplicationDefaultCredentialsAuthenticator, ApplicationDefaultCredentialsFlowOpts,
+        };
+
         let mut cache = self.vertex_token.lock().await;
         if let Some(c) = &*cache {
             if c.expires_at > Instant::now() + Duration::from_secs(60) {
@@ -510,18 +521,18 @@ impl ImageGenerationNode {
             }
         }
 
-        let key_path = std::env::var("GOOGLE_APPLICATION_CREDENTIALS").map_err(|_| {
-            "image_generation: GOOGLE_APPLICATION_CREDENTIALS env var must be set for provider=google"
-                .to_string()
-        })?;
+        let opts = ApplicationDefaultCredentialsFlowOpts::default();
+        let auth = match ApplicationDefaultCredentialsAuthenticator::builder(opts).await {
+            ApplicationDefaultCredentialsTypes::InstanceMetadata(builder) => builder
+                .build()
+                .await
+                .map_err(|e| format!("failed to build Vertex metadata authenticator: {e}"))?,
+            ApplicationDefaultCredentialsTypes::ServiceAccount(builder) => builder
+                .build()
+                .await
+                .map_err(|e| format!("failed to build Vertex service-account authenticator: {e}"))?,
+        };
 
-        let key = yup_oauth2::read_service_account_key(&key_path)
-            .await
-            .map_err(|e| format!("failed to read service account key at {key_path}: {e}"))?;
-        let auth = yup_oauth2::ServiceAccountAuthenticator::builder(key)
-            .build()
-            .await
-            .map_err(|e| format!("failed to build Vertex authenticator: {e}"))?;
         let token = auth
             .token(&[VERTEX_SCOPE])
             .await
