@@ -246,11 +246,36 @@ impl OutputStorageRepository for LocalHttpStorageAdapter {
 
     async fn read_stream(
         &self,
-        _storage_key: &str,
+        storage_key: &str,
     ) -> Result<crate::storage::domain::StoredStream, StorageError> {
-        Err(StorageError::BackendUnavailable(
-            "read_stream not yet implemented for LocalHttpStorageAdapter".to_string(),
-        ))
+        use bytes::Bytes;
+        use futures::stream;
+
+        if storage_key.contains('/') || storage_key.contains("..") || storage_key.is_empty() {
+            return Err(StorageError::InvalidInput(format!(
+                "invalid storage_key '{storage_key}'"
+            )));
+        }
+        let path = self.dir.join(storage_key);
+        let bytes = tokio::fs::read(&path).await.map_err(|e| {
+            StorageError::InvalidInput(format!(
+                "storage_key '{storage_key}' not readable at {}: {e}",
+                path.display()
+            ))
+        })?;
+
+        let size_bytes = bytes.len() as u64;
+        let mime_type = mime_from_filename(storage_key).to_string();
+        let filename = storage_key.to_string();
+        let chunk: Result<Bytes, StorageError> = Ok(Bytes::from(bytes));
+        let stream = stream::once(async move { chunk });
+
+        Ok(crate::storage::domain::StoredStream {
+            stream: Box::pin(stream),
+            size_bytes,
+            mime_type,
+            filename,
+        })
     }
 }
 
@@ -382,5 +407,46 @@ mod tests {
             .unwrap();
         let err = adapter.store(req(vec![], "image/png")).await.unwrap_err();
         assert!(matches!(err, StorageError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn read_stream_returns_disk_bytes_with_metadata() {
+        use futures::StreamExt;
+
+        let tmp = TempDir::new().unwrap();
+        let adapter = LocalHttpStorageAdapter::new(tmp.path().to_path_buf(), 0)
+            .await
+            .unwrap();
+        let bytes = vec![0x01, 0x02, 0x03, 0x04, 0x05];
+        let stored = adapter
+            .store(req(bytes.clone(), "image/png"))
+            .await
+            .unwrap();
+
+        let mut s = adapter.read_stream(&stored.storage_key).await.unwrap();
+        assert_eq!(s.size_bytes, 5);
+        assert_eq!(s.mime_type, "image/png");
+        assert_eq!(s.filename, stored.storage_key);
+
+        let mut collected = Vec::new();
+        while let Some(chunk) = s.stream.next().await {
+            collected.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(collected, bytes);
+    }
+
+    #[tokio::test]
+    async fn read_stream_rejects_path_traversal() {
+        let tmp = TempDir::new().unwrap();
+        let adapter = LocalHttpStorageAdapter::new(tmp.path().to_path_buf(), 0)
+            .await
+            .unwrap();
+        for bad in ["../etc/passwd", "/tmp/foo", "sub/dir/key"] {
+            let err = adapter.read_stream(bad).await.unwrap_err();
+            assert!(
+                matches!(err, StorageError::InvalidInput(_)),
+                "expected InvalidInput for '{bad}', got {err:?}"
+            );
+        }
     }
 }
