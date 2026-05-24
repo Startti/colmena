@@ -202,11 +202,53 @@ impl OutputStorageRepository for HttpCallbackStorageAdapter {
 
     async fn read_stream(
         &self,
-        _storage_key: &str,
+        storage_key: &str,
     ) -> Result<crate::storage::domain::StoredStream, StorageError> {
-        Err(StorageError::BackendUnavailable(
-            "read_stream not yet implemented for HttpCallbackStorageAdapter".to_string(),
-        ))
+        use futures::StreamExt;
+
+        let meta = self
+            .meta_cache
+            .get(storage_key)
+            .map(|e| e.value().clone())
+            .ok_or_else(|| {
+                StorageError::InvalidInput(format!(
+                    "storage_key '{storage_key}' not found in HttpCallback meta cache. \
+                     (Was it stored via this adapter in the current process? Cross-process \
+                     reads require a server-side sign-get endpoint — not implemented yet.)"
+                ))
+            })?;
+
+        let resp = self
+            .client
+            .get(&meta.read_url)
+            .send()
+            .await
+            .map_err(|e| StorageError::BackendUnavailable(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(StorageError::UploadFailed(format!(
+                "GET read_url for storage_key '{storage_key}' failed: status={status} body={body}"
+            )));
+        }
+
+        let size_bytes = resp.content_length().ok_or_else(|| {
+            StorageError::BackendUnavailable(format!(
+                "GET read_url for storage_key '{storage_key}' returned no Content-Length"
+            ))
+        })?;
+
+        let stream = resp
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(|e| StorageError::BackendUnavailable(e.to_string())));
+
+        Ok(crate::storage::domain::StoredStream {
+            stream: Box::pin(stream),
+            size_bytes,
+            mime_type: meta.mime_type,
+            filename: meta.filename,
+        })
     }
 }
 
@@ -403,5 +445,109 @@ mod tests {
         );
         let err = adapter.read("never-stored").await.unwrap_err();
         assert!(matches!(err, StorageError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn read_stream_after_store_streams_bytes_via_cached_read_url() {
+        use futures::StreamExt;
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path("/upload"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let put_url = format!("{}/upload", server.uri());
+        let read_url = format!("{}/read", server.uri());
+        let storage_key = "chat-attachments/u/s/generated/abc-out.png";
+
+        Mock::given(method("POST"))
+            .and(path("/sign-put"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "put_url": put_url,
+                "read_url": read_url,
+                "storage_key": storage_key,
+            })))
+            .mount(&server)
+            .await;
+
+        // GET returns a 4-byte payload; Content-Length header is set by wiremock automatically
+        Mock::given(method("GET"))
+            .and(path("/read"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]))
+            .mount(&server)
+            .await;
+
+        let adapter = HttpCallbackStorageAdapter::new(
+            format!("{}/sign-put", server.uri()),
+            "s3cr3t".to_string(),
+        );
+        let stored = adapter
+            .store(req(vec![0xDE, 0xAD, 0xBE, 0xEF], "image/png"))
+            .await
+            .unwrap();
+
+        let mut s = adapter.read_stream(&stored.storage_key).await.unwrap();
+        assert_eq!(s.size_bytes, 4);
+        assert_eq!(s.mime_type, "image/png");
+        assert_eq!(s.filename, "out.png");
+
+        let mut collected = Vec::new();
+        while let Some(chunk) = s.stream.next().await {
+            collected.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(collected, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[tokio::test]
+    async fn read_stream_unknown_key_errors_without_network_call() {
+        let adapter = HttpCallbackStorageAdapter::new(
+            "http://does-not-exist.invalid/sign-put".to_string(),
+            "s3cr3t".to_string(),
+        );
+        let err = adapter.read_stream("never-stored").await.unwrap_err();
+        assert!(matches!(err, StorageError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn read_stream_get_500_maps_to_upload_failed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path("/upload"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let put_url = format!("{}/upload", server.uri());
+        let read_url = format!("{}/read", server.uri());
+        Mock::given(method("POST"))
+            .and(path("/sign-put"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "put_url": put_url,
+                "read_url": read_url,
+                "storage_key": "k",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/read"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("oops"))
+            .mount(&server)
+            .await;
+
+        let adapter = HttpCallbackStorageAdapter::new(
+            format!("{}/sign-put", server.uri()),
+            "s3cr3t".to_string(),
+        );
+        let stored = adapter
+            .store(req(vec![1, 2], "image/png"))
+            .await
+            .unwrap();
+        let err = adapter.read_stream(&stored.storage_key).await.unwrap_err();
+        assert!(matches!(err, StorageError::UploadFailed(_)));
     }
 }
