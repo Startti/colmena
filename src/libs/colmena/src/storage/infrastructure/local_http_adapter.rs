@@ -243,6 +243,15 @@ impl OutputStorageRepository for LocalHttpStorageAdapter {
             filename: storage_key.to_string(),
         })
     }
+
+    async fn read_stream(
+        &self,
+        _storage_key: &str,
+    ) -> Result<crate::storage::domain::StoredStream, StorageError> {
+        Err(StorageError::InvalidInput(
+            "read_stream not yet implemented for LocalHttpStorageAdapter".to_string(),
+        ))
+    }
 }
 
 #[cfg(test)]

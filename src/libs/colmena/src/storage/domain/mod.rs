@@ -6,7 +6,7 @@ pub mod output_storage_repository;
 pub mod storage_error;
 
 pub use output_storage_repository::{
-    OutputStorageRepository, StoreRequest, StoredBytes, StoredOutput,
+    OutputStorageRepository, StoreRequest, StoredBytes, StoredOutput, StoredStream,
 };
 pub use storage_error::StorageError;
 
