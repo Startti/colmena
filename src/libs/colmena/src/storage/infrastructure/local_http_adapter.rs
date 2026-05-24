@@ -248,7 +248,7 @@ impl OutputStorageRepository for LocalHttpStorageAdapter {
         &self,
         _storage_key: &str,
     ) -> Result<crate::storage::domain::StoredStream, StorageError> {
-        Err(StorageError::InvalidInput(
+        Err(StorageError::BackendUnavailable(
             "read_stream not yet implemented for LocalHttpStorageAdapter".to_string(),
         ))
     }
