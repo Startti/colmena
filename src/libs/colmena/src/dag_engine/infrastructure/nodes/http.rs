@@ -142,6 +142,20 @@ impl HttpNode {
             other => other.clone(),
         }
     }
+
+    /// Returns `true` when the merged headers map contains a Content-Type
+    /// whose MIME type begins with `multipart/`. Header lookup is
+    /// case-insensitive per RFC 9110 §5.1.
+    pub(crate) fn is_multipart_mode(headers: &serde_json::Map<String, Value>) -> bool {
+        for (k, v) in headers {
+            if k.eq_ignore_ascii_case("content-type") {
+                if let Some(s) = v.as_str() {
+                    return s.trim_start().to_ascii_lowercase().starts_with("multipart/");
+                }
+            }
+        }
+        false
+    }
 }
 
 #[async_trait::async_trait]
@@ -591,5 +605,47 @@ mod attachment_placeholder_tests {
             .await
             .expect("nested placeholder ok");
         assert_eq!(out["status"], 200);
+    }
+}
+
+#[cfg(test)]
+mod multipart_detection_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn detects_multipart_from_form_data_header_lowercase() {
+        let headers = json!({ "content-type": "multipart/form-data" });
+        assert!(HttpNode::is_multipart_mode(headers.as_object().unwrap()));
+    }
+
+    #[test]
+    fn detects_multipart_with_boundary_param() {
+        let headers = json!({ "Content-Type": "multipart/form-data; boundary=foo" });
+        assert!(HttpNode::is_multipart_mode(headers.as_object().unwrap()));
+    }
+
+    #[test]
+    fn detects_other_multipart_subtypes() {
+        let headers = json!({ "Content-Type": "multipart/mixed" });
+        assert!(HttpNode::is_multipart_mode(headers.as_object().unwrap()));
+    }
+
+    #[test]
+    fn rejects_json_content_type() {
+        let headers = json!({ "Content-Type": "application/json" });
+        assert!(!HttpNode::is_multipart_mode(headers.as_object().unwrap()));
+    }
+
+    #[test]
+    fn rejects_missing_content_type() {
+        let headers = json!({ "X-Custom": "yes" });
+        assert!(!HttpNode::is_multipart_mode(headers.as_object().unwrap()));
+    }
+
+    #[test]
+    fn header_lookup_is_case_insensitive() {
+        let headers = json!({ "CONTENT-TYPE": "multipart/form-data" });
+        assert!(HttpNode::is_multipart_mode(headers.as_object().unwrap()));
     }
 }
