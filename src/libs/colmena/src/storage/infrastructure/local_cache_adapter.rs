@@ -99,11 +99,31 @@ impl OutputStorageRepository for LocalCacheStorageAdapter {
 
     async fn read_stream(
         &self,
-        _storage_key: &str,
+        storage_key: &str,
     ) -> Result<crate::storage::domain::StoredStream, StorageError> {
-        Err(StorageError::BackendUnavailable(
-            "read_stream not yet implemented for LocalCacheStorageAdapter".to_string(),
-        ))
+        use bytes::Bytes;
+        use futures::stream;
+
+        let entry = self.cache.get(storage_key).ok_or_else(|| {
+            StorageError::InvalidInput(format!(
+                "storage_key '{storage_key}' not found in LocalCache (was it stored in this process?)"
+            ))
+        })?;
+        let stored = entry.value().clone();
+        drop(entry); // release the DashMap guard before await points
+
+        let size_bytes = stored.bytes.len() as u64;
+        let mime_type = stored.mime_type.clone();
+        let filename = stored.filename.clone();
+        let chunk: Result<Bytes, StorageError> = Ok(Bytes::from(stored.bytes));
+        let stream = stream::once(async move { chunk });
+
+        Ok(crate::storage::domain::StoredStream {
+            stream: Box::pin(stream),
+            size_bytes,
+            mime_type,
+            filename,
+        })
     }
 }
 
@@ -183,6 +203,40 @@ mod tests {
     async fn read_unknown_key_errors() {
         let adapter = LocalCacheStorageAdapter::new();
         let err = adapter.read("local://does-not-exist").await.unwrap_err();
+        assert!(matches!(err, StorageError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn read_stream_returns_single_chunk_with_correct_metadata() {
+        use futures::StreamExt;
+
+        let adapter = LocalCacheStorageAdapter::new();
+        let bytes = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let stored = adapter
+            .store(req(bytes.clone(), "image/png"))
+            .await
+            .unwrap();
+
+        let mut s = adapter.read_stream(&stored.storage_key).await.unwrap();
+        assert_eq!(s.size_bytes, 4);
+        assert_eq!(s.mime_type, "image/png");
+        assert_eq!(s.filename, "x.bin"); // matches `req()` helper above
+
+        // Drain the stream into a Vec<u8>
+        let mut collected = Vec::new();
+        while let Some(chunk) = s.stream.next().await {
+            collected.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(collected, bytes);
+    }
+
+    #[tokio::test]
+    async fn read_stream_unknown_key_errors() {
+        let adapter = LocalCacheStorageAdapter::new();
+        let err = adapter
+            .read_stream("local://does-not-exist")
+            .await
+            .unwrap_err();
         assert!(matches!(err, StorageError::InvalidInput(_)));
     }
 }
