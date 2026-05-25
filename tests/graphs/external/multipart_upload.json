@@ -1,0 +1,46 @@
+{
+  "comment": "Smoke test: POSTs two signed URLs and a text field as multipart/form-data to httpbin's /post endpoint, which echoes back the parts received. Tweak base_url+endpoint for ADP smoke testing.",
+  "metadata": {
+    "category": "external",
+    "features": ["multipart", "http_request", "form-data"],
+    "difficulty": "basic",
+    "requires_env": []
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/multipart-test",
+        "method": "POST",
+        "test_payload": {
+          "files": ["https://httpbin.org/image/png"],
+          "metadata": "smoke"
+        }
+      }
+    },
+    "upload": {
+      "type": "http_request",
+      "config": {
+        "base_url": "https://httpbin.org",
+        "endpoint": "/post",
+        "method": "POST",
+        "headers": {
+          "Content-Type": "multipart/form-data"
+        },
+        "max_file_size_bytes": 5242880,
+        "url_download_timeout_secs": 20,
+        "body": {
+          "files": ["https://httpbin.org/image/png"],
+          "metadata": "smoke"
+        }
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "upload" },
+    { "from": "upload", "to": "log_result" }
+  ]
+}

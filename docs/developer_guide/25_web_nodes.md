@@ -401,3 +401,69 @@ Para un agente que mantiene contexto entre invocaciones del grafo:
 
 Spec: [2026-04-23-web-nodes-c-api-explorer-design.md](../superpowers/specs/2026-04-23-web-nodes-c-api-explorer-design.md).
 Implementación: `src/libs/colmena/src/dag_engine/infrastructure/nodes/api_explorer.rs`, `src/libs/colmena/src/web/application/api_spec_use_case.rs`, `src/libs/colmena/src/web/infrastructure/openapi_adapter.rs`, `src/libs/colmena/src/web/application/swagger2_to_oas3.rs`, `src/libs/colmena/src/web/application/url_normalizer.rs`.
+
+---
+
+## Subida de archivos por multipart (`http_request`)
+
+Cuando el header `Content-Type` empieza con `multipart/`, el nodo `http_request` cambia al modo multipart: cada campo del `body` se interpreta como una parte del form. Los archivos se transmiten por **streaming** (URLs vía `bytes_stream`, attachments vía `OutputStorageRepository::read_stream`), sin bufferizar el payload completo en RAM del worker — clave para escalar en Cloud Run.
+
+### Interpretación de cada campo del `body`
+
+| Forma del valor | Resultado |
+|---|---|
+| String `$attachment:<storage_key>` | Parte de archivo, bytes streameados desde el storage. |
+| String que empieza con `https://` (o `http://` si `allow_http_urls=true`) | Parte de archivo, HEAD para validar tamaño + GET streaming. |
+| Cualquier otro string | Text part (campo no-archivo). |
+| Number o boolean | Coerced a su representación string como text part. |
+| `null` | El campo se omite. |
+| Array | Se expande a N partes con el mismo `field_name`. |
+| Objeto `{ "url": "...", "filename": "...", "content_type": "..." }` | Parte de archivo con overrides explícitos. |
+| Objeto `{ "attachment": "<key>", "filename": "...", "content_type": "..." }` | Parte de archivo desde storage con overrides. |
+| Objeto `{ "value": "...", "content_type": "..." }` | Text part con content-type custom. |
+
+### Límites configurables
+
+| `config_field` | Default | Descripción |
+|---|---|---|
+| `max_file_size_bytes` | 100 MiB | Cap por parte de archivo. |
+| `max_parts` | 10 | Cap total de partes por request. |
+| `url_download_timeout_secs` | 30 | Timeout HEAD + connect/headers del GET. |
+| `allow_http_urls` | false | Permite `http://` plano (off por seguridad). |
+
+### Ejemplo — Subir archivos al KB de ADP (como LLM tool)
+
+```json
+"tool_configurations": {
+  "upload_to_kb": {
+    "node_type": "http_request",
+    "node_schema": {
+      "base_url":      { "fixed": "${ADP_API_BASE_URL}" },
+      "endpoint":      { "type": "string", "required": true, "description": "/knowledge-bases/<kb_id>/documents" },
+      "method":        { "fixed": "POST" },
+      "headers":       { "fixed": { "Content-Type": "multipart/form-data" } },
+      "authorization": { "fixed": "Bearer ${ADP_SESSION_TOKEN}" },
+      "body": {
+        "files": {
+          "type": "array",
+          "items": { "type": "string", "description": "Signed URL o $attachment:<storage_key>" },
+          "required": true,
+          "description": "Archivos a subir"
+        }
+      }
+    }
+  }
+}
+```
+
+El LLM solo ve `endpoint` y `files`. Todo lo demás (método, auth, content-type) es invisible para el modelo.
+
+### Política de errores
+
+- All-or-nothing: si una parte falla validación (oversize, HEAD error, scheme no permitido, attachment no encontrado, max_parts excedido), **no se envía nada al downstream**.
+- Stream interrumpido mid-flight: el downstream recibe una request incompleta y la rechaza; el nodo retorna `StreamInterrupted`. Sin reintentos automáticos en v1 — el loop del LLM puede reintentar.
+
+### Ver también
+
+- Spec de diseño: [`docs/superpowers/specs/2026-05-24-http-multipart-streaming-design.md`](../superpowers/specs/2026-05-24-http-multipart-streaming-design.md)
+- Test graph runnable: `tests/graphs/external/multipart_upload.json`

@@ -631,7 +631,7 @@
 
     "http_request": {
       "name": "HTTP Request",
-      "description": "Makes HTTP requests to external APIs and returns the response. Supports GET, POST, PUT, DELETE, and PATCH methods with configurable headers, query parameters, request body, and authentication. All string values in config support '${VAR_NAME}' environment variable resolution — essential for injecting API keys and tokens securely. Input values override config values (inputs take priority). When used as an LLM tool (via tool_configurations), extra non-reserved input keys are automatically added as query parameters, enabling the LLM to control request parameters dynamically. NEW: any string value in the body that matches the pattern '$attachment:<storage_key>' is resolved by reading bytes from OutputStorageRepository and replaced with 'data:<mime>;base64,...'. This lets agents ship generated images/audio to external endpoints without ever seeing the raw bytes.",
+      "description": "Makes HTTP requests to external APIs and returns the response. Supports GET, POST, PUT, DELETE, and PATCH methods with configurable headers, query parameters, request body, and authentication. All string values in config support '${VAR_NAME}' environment variable resolution — essential for injecting API keys and tokens securely. Input values override config values (inputs take priority). When used as an LLM tool (via tool_configurations), extra non-reserved input keys are automatically added as query parameters, enabling the LLM to control request parameters dynamically. NEW: any string value in the body that matches the pattern '$attachment:<storage_key>' is resolved by reading bytes from OutputStorageRepository and replaced with 'data:<mime>;base64,...'. This lets agents ship generated images/audio to external endpoints without ever seeing the raw bytes. MULTIPART MODE: When the resolved Content-Type header starts with 'multipart/', the body is interpreted as a multipart form. Each top-level field's value is treated as: a URL string (HEAD-validated then streamed in), a $attachment:<storage_key> string (streamed from OutputStorageRepository), a plain string (text part), an array (expanded to N parts under the same field), or an explicit object with url/attachment/value + optional filename/content_type. Number and boolean values are coerced to text. Null omits the field. Limits are configurable per request.",
       "category": "integration",
       "config_fields": {
         "base_url": {
@@ -700,6 +700,34 @@
           "required": false,
           "default": null,
           "description": "Internal Colmena flag used by the Secure Values system. When present, indicates that this request may contain injected secure values. This flag is NEVER sent to external APIs — it's stripped from the request before sending. Used internally to control logging behavior (preventing accidental exposure of credentials in logs).",
+          "example": true
+        },
+        "max_file_size_bytes": {
+          "type": "integer",
+          "required": false,
+          "default": 104857600,
+          "description": "Hard cap per file part in multipart mode. Validated against Content-Length (URL parts) or size_bytes (attachment parts).",
+          "example": 52428800
+        },
+        "max_parts": {
+          "type": "integer",
+          "required": false,
+          "default": 10,
+          "description": "Maximum total parts (file + text) per request in multipart mode.",
+          "example": 5
+        },
+        "url_download_timeout_secs": {
+          "type": "integer",
+          "required": false,
+          "default": 30,
+          "description": "Timeout (seconds) for HEAD pre-flight and GET connect/headers phase of URL parts in multipart mode. Does NOT bound body transfer duration.",
+          "example": 60
+        },
+        "allow_http_urls": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "When false, plain http:// URLs in multipart parts are rejected (SSRF mitigation). Set true to permit insecure URLs.",
           "example": true
         }
       },
