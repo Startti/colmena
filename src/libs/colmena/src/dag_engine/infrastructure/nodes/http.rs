@@ -46,7 +46,6 @@ const URL_HTTPS_PREFIX: &str = "https://";
 
 /// A single resolved multipart form part, prior to network I/O. Built by
 /// [`HttpNode::parse_multipart_body`] and consumed by the form assembler.
-#[allow(dead_code)] // variants used by Task 8 execute_multipart
 #[derive(Debug, Clone)]
 pub(crate) enum PartSpec {
     Url {
@@ -70,7 +69,6 @@ pub(crate) enum PartSpec {
 
 /// Resolution result for a single URL part: a streaming reader + the metadata
 /// we'll forward to the downstream multipart form.
-#[allow(dead_code)] // consumed by Task 8 execute_multipart
 pub(crate) struct ResolvedUrlPart {
     pub stream: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
     pub size_bytes: u64,
@@ -89,7 +87,6 @@ impl std::fmt::Debug for ResolvedUrlPart {
     }
 }
 
-#[allow(dead_code)] // consumed by Task 8 execute_multipart
 pub(crate) struct MultipartUrlResolver {
     pub max_file_size_bytes: u64,
     pub timeout_secs: u64,
@@ -97,7 +94,6 @@ pub(crate) struct MultipartUrlResolver {
 }
 
 impl MultipartUrlResolver {
-    #[allow(dead_code)] // consumed by Task 8 execute_multipart
     pub(crate) async fn resolve(
         &self,
         url: &str,
@@ -193,7 +189,6 @@ impl MultipartUrlResolver {
 /// Parse `Content-Disposition: attachment; filename="report.pdf"` (or unquoted)
 /// into the bare filename. Returns None for unrecognized shapes or absent
 /// header. RFC 5987 (`filename*=`) is intentionally not handled in v1.
-#[allow(dead_code)] // consumed by Task 8 execute_multipart
 fn filename_from_disposition(header: Option<&reqwest::header::HeaderValue>) -> Option<String> {
     let v = header?.to_str().ok()?;
     let after = v.split(';').find_map(|chunk| {
@@ -216,7 +211,6 @@ fn filename_from_disposition(header: Option<&reqwest::header::HeaderValue>) -> O
 
 /// Last path segment of the URL (after the final `/`), URL-decoded. Falls back
 /// to `"file"` for URLs with no usable path component.
-#[allow(dead_code)] // consumed by Task 8 execute_multipart
 fn filename_from_url_path(url: &Url) -> String {
     url.path_segments()
         .and_then(|mut s| s.next_back().filter(|seg| !seg.is_empty()).map(|s| s.to_string()))
@@ -330,7 +324,6 @@ impl HttpNode {
     /// Returns `true` when the merged headers map contains a Content-Type
     /// whose MIME type begins with `multipart/`. Header lookup is
     /// case-insensitive per RFC 9110 §5.1.
-    #[allow(dead_code)] // call site lands in Task 8 (execute() multipart branch)
     pub(crate) fn is_multipart_mode(headers: &serde_json::Map<String, Value>) -> bool {
         for (k, v) in headers {
             if k.eq_ignore_ascii_case("content-type") {
@@ -347,7 +340,6 @@ impl HttpNode {
     ///
     /// Returns an error for malformed bodies (non-object root, unrecognized
     /// explicit object shape, etc.).
-    #[allow(dead_code)] // call site lands in Task 8 (execute_multipart)
     pub(crate) fn parse_multipart_body(
         body: &Value,
     ) -> Result<Vec<PartSpec>, Box<dyn StdError + Send + Sync>> {
@@ -459,6 +451,200 @@ impl HttpNode {
                 field: field.to_string(),
                 value: s.to_string(),
                 content_type_override: None,
+            }
+        }
+    }
+
+    const DEFAULT_MAX_FILE_SIZE_BYTES: u64 = 104_857_600; // 100 MiB
+    const DEFAULT_MAX_PARTS: usize = 10;
+    const DEFAULT_URL_DOWNLOAD_TIMEOUT_SECS: u64 = 30;
+
+    fn limit_u64(config: &Value, key: &str, default: u64) -> u64 {
+        config
+            .get(key)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(default)
+    }
+    fn limit_usize(config: &Value, key: &str, default: usize) -> usize {
+        config
+            .get(key)
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(default)
+    }
+    fn limit_bool(config: &Value, key: &str, default: bool) -> bool {
+        config
+            .get(key)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(default)
+    }
+
+    async fn execute_multipart(
+        &self,
+        full_url: &str,
+        method_str: &str,
+        merged_headers: &serde_json::Map<String, Value>,
+        inputs: &NodeInputs,
+        config: &Value,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+        let body_val = inputs
+            .get("body")
+            .or_else(|| config.get("body"))
+            .ok_or("MultipartConfigError: body is required in multipart mode")?;
+
+        // Apply env-var resolution to string leaves before parsing so that
+        // `${VAR}` works inside URLs and text values, matching JSON path.
+        let body_resolved = Self::resolve_env_vars_in_value(body_val);
+
+        let parts = Self::parse_multipart_body(&body_resolved)?;
+
+        let max_parts = Self::limit_usize(config, "max_parts", Self::DEFAULT_MAX_PARTS);
+        if parts.len() > max_parts {
+            return Err(format!(
+                "TooManyParts: body produced {} parts, max is {}",
+                parts.len(),
+                max_parts
+            )
+            .into());
+        }
+
+        let max_file_size_bytes =
+            Self::limit_u64(config, "max_file_size_bytes", Self::DEFAULT_MAX_FILE_SIZE_BYTES);
+        let timeout_secs = Self::limit_u64(
+            config,
+            "url_download_timeout_secs",
+            Self::DEFAULT_URL_DOWNLOAD_TIMEOUT_SECS,
+        );
+        let allow_http_urls = Self::limit_bool(config, "allow_http_urls", false);
+
+        let resolver = MultipartUrlResolver {
+            max_file_size_bytes,
+            timeout_secs,
+            allow_http_urls,
+        };
+
+        let parts_count = parts.len();
+        let mut form = reqwest::multipart::Form::new();
+        for spec in parts {
+            form = self
+                .add_part_to_form(form, spec, &resolver, max_file_size_bytes)
+                .await?;
+        }
+
+        // Build the outbound request — same client tuning as JSON path
+        let client = reqwest::Client::builder().http1_only().build()?;
+        let url = Url::parse(full_url).map_err(|e| format!("Invalid URL '{full_url}': {e}"))?;
+        let method = reqwest::Method::from_str(method_str)
+            .map_err(|e| format!("Invalid HTTP method '{method_str}': {e}"))?;
+        let mut req = client.request(method, url);
+        req = req.header("User-Agent", "colmena-http-node/0.1");
+
+        // Forward all headers EXCEPT Content-Type — reqwest will set
+        // multipart/form-data; boundary=... itself.
+        for (k, v) in merged_headers {
+            if k.eq_ignore_ascii_case("content-type") {
+                continue;
+            }
+            if let Some(v_str) = v.as_str() {
+                let v_resolved = Self::resolve_env_vars(v_str).map_err(|e| {
+                    Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                        as Box<dyn StdError + Send + Sync>
+                })?;
+                req = req.header(k, v_resolved);
+            }
+        }
+        if let Some(token) = inputs.get("bearer_token").and_then(|v| v.as_str()) {
+            req = req.header("Authorization", format!("Bearer {token}"));
+        }
+        if let Some(auth) = inputs.get("authorization").and_then(|v| v.as_str()) {
+            req = req.header("Authorization", auth);
+        }
+
+        println!("[HttpNode] → {method_str} {full_url} (multipart, {parts_count} parts)");
+
+        let response = req.multipart(form).send().await?;
+        let status = response.status().as_u16();
+        println!("[HttpNode] ← {status} ({full_url})");
+
+        let response_body: Value = match response.json::<Value>().await {
+            Ok(json) => json,
+            Err(_) => Value::Null,
+        };
+
+        Ok(serde_json::json!({
+            "status": status,
+            "body": response_body
+        }))
+    }
+
+    async fn add_part_to_form(
+        &self,
+        form: reqwest::multipart::Form,
+        spec: PartSpec,
+        resolver: &MultipartUrlResolver,
+        max_file_size_bytes: u64,
+    ) -> Result<reqwest::multipart::Form, Box<dyn StdError + Send + Sync>> {
+        use futures::StreamExt;
+        match spec {
+            PartSpec::Text {
+                field,
+                value,
+                content_type_override,
+            } => {
+                let mut part = reqwest::multipart::Part::text(value);
+                if let Some(ct) = content_type_override {
+                    part = part.mime_str(&ct)?;
+                }
+                Ok(form.part(field, part))
+            }
+            PartSpec::Url {
+                field,
+                url,
+                filename_override,
+                content_type_override,
+            } => {
+                let resolved = resolver.resolve(&url).await?;
+                let filename = filename_override.unwrap_or(resolved.filename);
+                let content_type = content_type_override.unwrap_or(resolved.content_type);
+                let mapped = resolved
+                    .stream
+                    .map(|chunk| chunk.map_err(std::io::Error::other));
+                let body = reqwest::Body::wrap_stream(mapped);
+                let part = reqwest::multipart::Part::stream_with_length(body, resolved.size_bytes)
+                    .file_name(filename)
+                    .mime_str(&content_type)?;
+                Ok(form.part(field, part))
+            }
+            PartSpec::Attachment {
+                field,
+                storage_key,
+                filename_override,
+                content_type_override,
+            } => {
+                let storage = self.storage.as_ref().ok_or_else(|| -> Box<dyn StdError + Send + Sync> {
+                    format!("AttachmentNotFound: body references '$attachment:{storage_key}' but no OutputStorageRepository is wired").into()
+                })?;
+                let stored = storage
+                    .read_stream(&storage_key)
+                    .await
+                    .map_err(|e| -> Box<dyn StdError + Send + Sync> { Box::new(e) })?;
+                if stored.size_bytes > max_file_size_bytes {
+                    return Err(format!(
+                        "FileTooLarge: attachment '{storage_key}' is {} bytes, max is {max_file_size_bytes}",
+                        stored.size_bytes
+                    )
+                    .into());
+                }
+                let filename = filename_override.unwrap_or(stored.filename);
+                let content_type = content_type_override.unwrap_or(stored.mime_type);
+                let mapped = stored
+                    .stream
+                    .map(|chunk| chunk.map_err(std::io::Error::other));
+                let body = reqwest::Body::wrap_stream(mapped);
+                let part = reqwest::multipart::Part::stream_with_length(body, stored.size_bytes)
+                    .file_name(filename)
+                    .mime_str(&content_type)?;
+                Ok(form.part(field, part))
             }
         }
     }
@@ -655,7 +841,26 @@ impl ExecutableNode for HttpNode {
             request_builder = request_builder.query(&extra_params);
         }
 
-        // 6. Body (Inputs or Config)
+        // 6. Body (Inputs or Config) — branch on multipart vs JSON/string
+        // Build a merged headers map for the multipart detector
+        let mut merged_headers = serde_json::Map::new();
+        if let Some(h) = config.get("headers").and_then(|v| v.as_object()) {
+            for (k, v) in h {
+                merged_headers.insert(k.clone(), v.clone());
+            }
+        }
+        if let Some(h) = inputs.get("headers").and_then(|v| v.as_object()) {
+            for (k, v) in h {
+                merged_headers.insert(k.clone(), v.clone());
+            }
+        }
+
+        if Self::is_multipart_mode(&merged_headers) {
+            return self
+                .execute_multipart(&full_url_str, method_str, &merged_headers, inputs, config)
+                .await;
+        }
+
         let body_val = inputs.get("body").or_else(|| config.get("body"));
 
         if let Some(body) = body_val {
@@ -1235,5 +1440,198 @@ mod multipart_url_resolution_tests {
         let url = format!("{}/file", server.uri());
         let resolved = resolver.resolve(&url).await.unwrap();
         assert_eq!(resolved.filename, "report.pdf");
+    }
+}
+
+#[cfg(test)]
+mod multipart_execute_tests {
+    use super::*;
+    use crate::storage::domain::{MockOutputStorageRepository, StoredStream};
+    use bytes::Bytes;
+    use futures::stream;
+    use std::collections::HashMap;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Build a multipart-routed config that POSTs to `<server>/upload`.
+    fn mk_config(server_uri: &str, body: Value) -> Value {
+        serde_json::json!({
+            "base_url": server_uri,
+            "endpoint": "/upload",
+            "method": "POST",
+            "headers": { "Content-Type": "multipart/form-data" },
+            "allow_http_urls": true, // wiremock is http://
+            "body": body,
+        })
+    }
+
+    #[tokio::test]
+    async fn multipart_with_two_url_parts_sends_form() {
+        let server = MockServer::start().await;
+
+        // Two upstream files
+        Mock::given(method("HEAD"))
+            .and(path("/u1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Length", "4")
+                    .insert_header("Content-Type", "application/pdf"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/u1"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1, 2, 3, 4]))
+            .mount(&server)
+            .await;
+        Mock::given(method("HEAD"))
+            .and(path("/u2"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Length", "3")
+                    .insert_header("Content-Type", "application/pdf"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/u2"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![5, 6, 7]))
+            .mount(&server)
+            .await;
+
+        // Downstream upload — capture the multipart body and assert basic shape
+        Mock::given(method("POST"))
+            .and(path("/upload"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .mount(&server)
+            .await;
+
+        let url1 = format!("{}/u1", server.uri());
+        let url2 = format!("{}/u2", server.uri());
+        let body = serde_json::json!({ "files": [url1, url2] });
+        let config = mk_config(&server.uri(), body);
+
+        let node = HttpNode::new();
+        let out = node
+            .execute(
+                &HashMap::<String, Value>::new(),
+                &config,
+                &mut serde_json::json!({}),
+                None,
+            )
+            .await
+            .expect("execute ok");
+        assert_eq!(out["status"], 200);
+
+        // Verify the downstream actually got multipart by inspecting recorded requests
+        let received = server.received_requests().await.unwrap();
+        let upload_req = received
+            .iter()
+            .find(|r| r.url.path() == "/upload")
+            .expect("upload request received");
+        let ct = upload_req
+            .headers
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.starts_with("multipart/form-data"), "got {ct}");
+        assert!(ct.contains("boundary="), "boundary should be present in {ct}");
+    }
+
+    #[tokio::test]
+    async fn multipart_with_attachment_part_streams_via_storage() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/upload"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .mount(&server)
+            .await;
+
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_read_stream()
+            .times(1)
+            .withf(|key: &str| key == "k-abc")
+            .returning(|_| {
+                let chunk: Result<Bytes, crate::storage::domain::StorageError> =
+                    Ok(Bytes::from_static(b"hello"));
+                Ok(StoredStream {
+                    stream: Box::pin(stream::once(async move { chunk })),
+                    size_bytes: 5,
+                    mime_type: "text/plain".to_string(),
+                    filename: "hello.txt".to_string(),
+                })
+            });
+
+        let node = HttpNode::new().with_storage(std::sync::Arc::new(storage));
+        let body = serde_json::json!({ "files": "$attachment:k-abc" });
+        let config = mk_config(&server.uri(), body);
+        let out = node
+            .execute(
+                &HashMap::<String, Value>::new(),
+                &config,
+                &mut serde_json::json!({}),
+                None,
+            )
+            .await
+            .expect("execute ok");
+        assert_eq!(out["status"], 200);
+    }
+
+    #[tokio::test]
+    async fn multipart_with_too_many_parts_errors_before_upload() {
+        let server = MockServer::start().await;
+        // No upstream mocks needed — should fail before any HEAD.
+        let body = serde_json::json!({
+            "files": [
+                "https://a/1", "https://a/2", "https://a/3", "https://a/4",
+                "https://a/5", "https://a/6", "https://a/7", "https://a/8",
+                "https://a/9", "https://a/10", "https://a/11"
+            ]
+        });
+        let mut config = mk_config(&server.uri(), body);
+        config["max_parts"] = serde_json::json!(10);
+
+        let node = HttpNode::new();
+        let err = node
+            .execute(
+                &HashMap::<String, Value>::new(),
+                &config,
+                &mut serde_json::json!({}),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("TooManyParts"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn existing_json_path_unaffected_without_multipart_header() {
+        let server = MockServer::start().await;
+        use wiremock::matchers::body_json;
+        Mock::given(method("POST"))
+            .and(path("/json"))
+            .and(body_json(serde_json::json!({ "hi": "there" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .mount(&server)
+            .await;
+        let config = serde_json::json!({
+            "base_url": server.uri(),
+            "endpoint": "/json",
+            "method": "POST",
+            "body": { "hi": "there" }
+        });
+        let node = HttpNode::new();
+        let out = node
+            .execute(
+                &HashMap::<String, Value>::new(),
+                &config,
+                &mut serde_json::json!({}),
+                None,
+            )
+            .await
+            .expect("ok");
+        assert_eq!(out["status"], 200);
     }
 }
