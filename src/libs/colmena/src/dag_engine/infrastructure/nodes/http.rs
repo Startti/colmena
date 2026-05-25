@@ -137,6 +137,11 @@ impl MultipartUrlResolver {
             )
             .into());
         }
+        // Read Content-Length directly from the header instead of using
+        // head.content_length(): the reqwest method goes through the decoded
+        // body size_hint, which can return Some(0) for some HEAD response
+        // shapes and None when Content-Encoding is active — neither is
+        // reliable for sizing the multipart Part::stream_with_length below.
         let size_bytes = head
             .headers()
             .get(reqwest::header::CONTENT_LENGTH)
