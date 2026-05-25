@@ -20,18 +20,13 @@ async fn end_to_end_three_url_parts_multipart_upload() {
         ("/c", vec![0xCCu8; 2_000], "application/pdf"),
     ];
     for (p, body, ct) in &payloads {
-        Mock::given(method("HEAD"))
+        Mock::given(method("GET"))
             .and(path(*p))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .insert_header("Content-Length", body.len().to_string())
-                    .insert_header("Content-Type", *ct),
+                    .insert_header("Content-Type", *ct)
+                    .set_body_bytes(body.clone()),
             )
-            .mount(&upstream)
-            .await;
-        Mock::given(method("GET"))
-            .and(path(*p))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
             .mount(&upstream)
             .await;
     }
@@ -103,12 +98,14 @@ async fn end_to_end_oversized_upstream_aborts_before_downstream_post() {
     let upstream = MockServer::start().await;
     let downstream = MockServer::start().await;
 
-    Mock::given(method("HEAD"))
+    // GET returns a 1MB body — wiremock sets Content-Length automatically from
+    // the body length, so the size cap (100 bytes) trips before bytes flow.
+    Mock::given(method("GET"))
         .and(path("/big"))
         .respond_with(
             ResponseTemplate::new(200)
-                .insert_header("Content-Length", "1000000")
-                .insert_header("Content-Type", "application/octet-stream"),
+                .insert_header("Content-Type", "application/octet-stream")
+                .set_body_bytes(vec![0u8; 1_000_000]),
         )
         .mount(&upstream)
         .await;

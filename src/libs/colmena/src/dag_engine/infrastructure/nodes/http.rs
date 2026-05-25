@@ -122,52 +122,13 @@ impl MultipartUrlResolver {
             .http1_only()
             .build()?;
 
-        // HEAD pre-flight
-        let head = client
-            .head(parsed.clone())
-            .send()
-            .await
-            .map_err(|e| format!("UrlValidationFailed: HEAD for '{url}' failed: {e}"))?;
-        if !head.status().is_success() {
-            return Err(format!(
-                "UrlValidationFailed: HEAD for '{url}' returned status {}",
-                head.status()
-            )
-            .into());
-        }
-        // Read Content-Length directly from the header instead of using
-        // head.content_length(): the reqwest method goes through the decoded
-        // body size_hint, which can return Some(0) for some HEAD response
-        // shapes and None when Content-Encoding is active — neither is
-        // reliable for sizing the multipart Part::stream_with_length below.
-        let size_bytes = head
-            .headers()
-            .get(reqwest::header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .ok_or_else(|| {
-                format!("UrlValidationFailed: HEAD for '{url}' returned no Content-Length")
-            })?;
-        if size_bytes > self.max_file_size_bytes {
-            return Err(format!(
-                "FileTooLarge: '{url}' declared {size_bytes} bytes, max is {}",
-                self.max_file_size_bytes
-            )
-            .into());
-        }
-        let content_type = head
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.split(';').next().unwrap_or(s).trim().to_string())
-            .unwrap_or_else(|| "application/octet-stream".to_string());
-        let filename =
-            filename_from_disposition(head.headers().get(reqwest::header::CONTENT_DISPOSITION))
-                .unwrap_or_else(|| filename_from_url_path(&parsed));
-
-        // Streaming GET — the body is not buffered.
+        // GET-only: HEAD is intentionally skipped because V4-signed URLs (GCS,
+        // S3) are method-specific — a URL signed for GET returns 4xx on HEAD.
+        // `send().await?` resolves once response HEADERS arrive (body not
+        // consumed yet), so we can validate Content-Length and reject by
+        // dropping `resp` BEFORE any body bytes flow into the worker.
         let resp = client
-            .get(parsed)
+            .get(parsed.clone())
             .send()
             .await
             .map_err(|e| format!("UrlValidationFailed: GET for '{url}' failed: {e}"))?;
@@ -178,6 +139,36 @@ impl MultipartUrlResolver {
             )
             .into());
         }
+        // Read Content-Length directly from the response header. Using the raw
+        // header (not `resp.content_length()`) sidesteps reqwest's
+        // decoded-body size_hint quirks.
+        let size_bytes = resp
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .ok_or_else(|| {
+                format!("UrlValidationFailed: GET for '{url}' returned no Content-Length")
+            })?;
+        if size_bytes > self.max_file_size_bytes {
+            // Drop `resp` before returning so the TCP connection closes and the
+            // upstream stops transmitting. No body bytes ever reach the worker.
+            drop(resp);
+            return Err(format!(
+                "FileTooLarge: '{url}' declared {size_bytes} bytes, max is {}",
+                self.max_file_size_bytes
+            )
+            .into());
+        }
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.split(';').next().unwrap_or(s).trim().to_string())
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        let filename =
+            filename_from_disposition(resp.headers().get(reqwest::header::CONTENT_DISPOSITION))
+                .unwrap_or_else(|| filename_from_url_path(&parsed));
         let stream = resp.bytes_stream();
 
         Ok(ResolvedUrlPart {
@@ -1360,20 +1351,15 @@ mod multipart_url_resolution_tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
-    async fn happy_path_resolves_size_and_mime_from_head() {
+    async fn happy_path_resolves_size_and_mime_from_get() {
         let server = MockServer::start().await;
-        Mock::given(method("HEAD"))
+        Mock::given(method("GET"))
             .and(path("/file"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .insert_header("Content-Length", "4")
-                    .insert_header("Content-Type", "application/pdf"),
+                    .insert_header("Content-Type", "application/pdf")
+                    .set_body_bytes(vec![1, 2, 3, 4]),
             )
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/file"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1, 2, 3, 4]))
             .mount(&server)
             .await;
 
@@ -1387,6 +1373,25 @@ mod multipart_url_resolution_tests {
         assert_eq!(resolved.size_bytes, 4);
         assert_eq!(resolved.content_type, "application/pdf");
         assert_eq!(resolved.filename, "file");
+    }
+
+    #[tokio::test]
+    async fn rejects_when_get_returns_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/missing"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("Not Found"))
+            .mount(&server)
+            .await;
+
+        let resolver = MultipartUrlResolver {
+            max_file_size_bytes: 100_000,
+            timeout_secs: 5,
+            allow_http_urls: true,
+        };
+        let url = format!("{}/missing", server.uri());
+        let err = resolver.resolve(&url).await.unwrap_err();
+        assert!(err.to_string().contains("404"), "got {err}");
     }
 
     #[tokio::test]
@@ -1412,12 +1417,19 @@ mod multipart_url_resolution_tests {
     }
 
     #[tokio::test]
-    async fn rejects_when_content_length_missing() {
+    async fn no_head_request_is_issued_to_upstream() {
+        // V4-signed URLs (GCS / S3) are method-specific — a HEAD against a
+        // URL signed for GET returns 4xx. The resolver MUST NOT issue HEAD.
+        // We assert this by mounting a single GET mock; if the resolver ever
+        // reintroduces a HEAD pre-flight, the request will 404 against the
+        // catch-all wiremock default and the test fails.
         let server = MockServer::start().await;
-        Mock::given(method("HEAD"))
-            .and(path("/file"))
+        Mock::given(method("GET"))
+            .and(path("/signed"))
             .respond_with(
-                ResponseTemplate::new(200).insert_header("Content-Type", "application/pdf"),
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "application/pdf")
+                    .set_body_bytes(vec![1, 2, 3, 4]),
             )
             .mount(&server)
             .await;
@@ -1427,20 +1439,26 @@ mod multipart_url_resolution_tests {
             timeout_secs: 5,
             allow_http_urls: true,
         };
-        let url = format!("{}/file", server.uri());
-        let err = resolver.resolve(&url).await.unwrap_err();
-        assert!(err.to_string().contains("Content-Length"), "got {err}");
+        let url = format!("{}/signed", server.uri());
+        let resolved = resolver.resolve(&url).await.unwrap();
+        assert_eq!(resolved.size_bytes, 4);
+        // Confirm only one request was issued, and it was a GET.
+        let received = server.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1, "expected exactly 1 request, got {}", received.len());
+        assert_eq!(received[0].method.as_str(), "GET");
     }
 
     #[tokio::test]
     async fn rejects_when_oversized() {
         let server = MockServer::start().await;
-        Mock::given(method("HEAD"))
+        // wiremock sets Content-Length automatically from the body length, so
+        // a body of 999_999 bytes triggers the cap.
+        Mock::given(method("GET"))
             .and(path("/big"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .insert_header("Content-Length", "999999")
-                    .insert_header("Content-Type", "application/octet-stream"),
+                    .insert_header("Content-Type", "application/octet-stream")
+                    .set_body_bytes(vec![0u8; 999_999]),
             )
             .mount(&server)
             .await;
@@ -1458,19 +1476,14 @@ mod multipart_url_resolution_tests {
     #[tokio::test]
     async fn filename_from_content_disposition_overrides_url_path() {
         let server = MockServer::start().await;
-        Mock::given(method("HEAD"))
+        Mock::given(method("GET"))
             .and(path("/file"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .insert_header("Content-Length", "10")
                     .insert_header("Content-Type", "application/pdf")
-                    .insert_header("Content-Disposition", "attachment; filename=\"report.pdf\""),
+                    .insert_header("Content-Disposition", "attachment; filename=\"report.pdf\"")
+                    .set_body_bytes(vec![0u8; 10]),
             )
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/file"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0u8; 10]))
             .mount(&server)
             .await;
 
@@ -1511,33 +1524,23 @@ mod multipart_execute_tests {
     async fn multipart_with_two_url_parts_sends_form() {
         let server = MockServer::start().await;
 
-        // Two upstream files
-        Mock::given(method("HEAD"))
-            .and(path("/u1"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("Content-Length", "4")
-                    .insert_header("Content-Type", "application/pdf"),
-            )
-            .mount(&server)
-            .await;
+        // Two upstream files — GET only (Content-Length comes from body length).
         Mock::given(method("GET"))
             .and(path("/u1"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1, 2, 3, 4]))
-            .mount(&server)
-            .await;
-        Mock::given(method("HEAD"))
-            .and(path("/u2"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .insert_header("Content-Length", "3")
-                    .insert_header("Content-Type", "application/pdf"),
+                    .insert_header("Content-Type", "application/pdf")
+                    .set_body_bytes(vec![1, 2, 3, 4]),
             )
             .mount(&server)
             .await;
         Mock::given(method("GET"))
             .and(path("/u2"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![5, 6, 7]))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "application/pdf")
+                    .set_body_bytes(vec![5, 6, 7]),
+            )
             .mount(&server)
             .await;
 
