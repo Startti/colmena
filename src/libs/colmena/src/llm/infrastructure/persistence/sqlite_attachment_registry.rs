@@ -39,6 +39,19 @@ fn parse_ts(s: &str) -> Result<DateTime<Utc>, AttachmentError> {
         .map_err(|e| AttachmentError::RepositoryFailed(format!("bad ts '{}': {}", s, e)))
 }
 
+/// Tolerant timestamp parser for nullable columns (`last_used_at`).
+/// Accepts the SQLite default format and ISO-8601/RFC3339 strings; returns
+/// `None` if the column is NULL or unparseable rather than failing the row.
+fn parse_ts_opt(s: Option<String>) -> Option<DateTime<Utc>> {
+    let raw = s?;
+    if let Ok(n) = NaiveDateTime::parse_from_str(&raw, "%Y-%m-%d %H:%M:%S") {
+        return Some(DateTime::<Utc>::from_naive_utc_and_offset(n, Utc));
+    }
+    DateTime::parse_from_rfc3339(&raw)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
+}
+
 fn row_to_attachment(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<ConversationAttachment, AttachmentError> {
@@ -74,6 +87,11 @@ fn row_to_attachment(
     let size_bytes_db: Option<i64> = row.try_get("size_bytes").ok();
     let size_bytes = size_bytes_db.map(|n| n as u64);
 
+    let last_used_at_str: Option<String> = row
+        .try_get::<Option<String>, _>("last_used_at")
+        .ok()
+        .flatten();
+
     Ok(ConversationAttachment {
         agent_session_id: row
             .try_get("agent_session_id")
@@ -97,6 +115,10 @@ fn row_to_attachment(
         source,
         registered_at: parse_ts(&registered_at_str)?,
         refreshed_at: parse_ts(&refreshed_at_str)?,
+        // Plan A — additive nullable columns.
+        storage_key: row.try_get::<Option<String>, _>("storage_key").ok().flatten(),
+        origin: row.try_get::<Option<String>, _>("origin").ok().flatten(),
+        last_used_at: parse_ts_opt(last_used_at_str),
     })
 }
 
@@ -112,17 +134,20 @@ impl AttachmentRegistry for SqliteAttachmentRegistry {
             "INSERT INTO conversation_attachments (
                 agent_session_id, document_id, provider, provider_file_id,
                 mime_type, filename, size_bytes, label, description,
-                source_kind, source_value, registered_at, refreshed_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                source_kind, source_value, registered_at, refreshed_at,
+                storage_key, origin
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?)
             ON CONFLICT (agent_session_id, document_id, provider) DO UPDATE
             SET provider_file_id = excluded.provider_file_id,
                 mime_type        = excluded.mime_type,
                 filename         = excluded.filename,
                 size_bytes       = excluded.size_bytes,
-                label            = excluded.label,
-                description      = excluded.description,
+                label            = COALESCE(excluded.label, conversation_attachments.label),
+                description      = COALESCE(excluded.description, conversation_attachments.description),
                 source_kind      = excluded.source_kind,
                 source_value     = excluded.source_value,
+                storage_key      = COALESCE(excluded.storage_key, conversation_attachments.storage_key),
+                origin           = COALESCE(excluded.origin, conversation_attachments.origin),
                 refreshed_at     = CURRENT_TIMESTAMP",
         )
         .bind(&input.agent_session_id)
@@ -136,6 +161,8 @@ impl AttachmentRegistry for SqliteAttachmentRegistry {
         .bind(&input.description)
         .bind(&source_kind)
         .bind(&source_value)
+        .bind(&input.storage_key)
+        .bind(&input.origin)
         .execute(&*self.pool)
         .await
         .map_err(|e| AttachmentError::RepositoryFailed(format!("upsert: {}", e)))?;
@@ -152,7 +179,8 @@ impl AttachmentRegistry for SqliteAttachmentRegistry {
         let row = sqlx::query(
             "SELECT agent_session_id, document_id, provider, provider_file_id,
                     mime_type, filename, size_bytes, label, description,
-                    source_kind, source_value, registered_at, refreshed_at
+                    source_kind, source_value, registered_at, refreshed_at,
+                    storage_key, origin, last_used_at
              FROM conversation_attachments
              WHERE agent_session_id = ? AND document_id = ? AND provider = ?",
         )
@@ -205,7 +233,8 @@ impl AttachmentRegistry for SqliteAttachmentRegistry {
         let rows = sqlx::query(
             "SELECT agent_session_id, document_id, provider, provider_file_id,
                     mime_type, filename, size_bytes, label, description,
-                    source_kind, source_value, registered_at, refreshed_at
+                    source_kind, source_value, registered_at, refreshed_at,
+                    storage_key, origin, last_used_at
              FROM conversation_attachments
              WHERE agent_session_id = ?
              ORDER BY registered_at ASC",
@@ -246,6 +275,51 @@ impl AttachmentRegistry for SqliteAttachmentRegistry {
         }
         Ok(())
     }
+
+    async fn lookup_by_document_id(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+    ) -> Result<Option<ConversationAttachment>, AttachmentError> {
+        let row = sqlx::query(
+            "SELECT agent_session_id, document_id, provider, provider_file_id,
+                    mime_type, filename, size_bytes, label, description,
+                    source_kind, source_value, registered_at, refreshed_at,
+                    storage_key, origin, last_used_at
+             FROM conversation_attachments
+             WHERE agent_session_id = ? AND document_id = ?
+             ORDER BY refreshed_at DESC
+             LIMIT 1",
+        )
+        .bind(agent_session_id)
+        .bind(document_id)
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|e| AttachmentError::RepositoryFailed(format!("lookup_by_doc: {}", e)))?;
+
+        match row {
+            None => Ok(None),
+            Some(r) => Ok(Some(row_to_attachment(&r)?)),
+        }
+    }
+
+    async fn touch_last_used(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+    ) -> Result<(), AttachmentError> {
+        sqlx::query(
+            "UPDATE conversation_attachments
+                SET last_used_at = CURRENT_TIMESTAMP
+              WHERE agent_session_id = ? AND document_id = ?",
+        )
+        .bind(agent_session_id)
+        .bind(document_id)
+        .execute(&*self.pool)
+        .await
+        .map_err(|e| AttachmentError::RepositoryFailed(format!("touch_last_used: {}", e)))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -273,6 +347,8 @@ mod tests {
             label: Some("X".to_string()),
             description: Some("desc".to_string()),
             source: AttachmentSource::Path("/tmp/x.pdf".to_string()),
+            storage_key: None,
+            origin: None,
         };
         reg.upsert(input).await.unwrap();
         let got = reg
@@ -300,6 +376,8 @@ mod tests {
                 label: None,
                 description: None,
                 source: AttachmentSource::Inline,
+                storage_key: None,
+                origin: None,
             })
             .await
             .unwrap();
@@ -323,6 +401,8 @@ mod tests {
             label: None,
             description: None,
             source: AttachmentSource::Inline,
+            storage_key: None,
+            origin: None,
         })
         .await
         .unwrap();
@@ -364,6 +444,8 @@ mod tests {
             label: None,
             description: None,
             source: AttachmentSource::Inline,
+            storage_key: None,
+            origin: None,
         })
         .await
         .unwrap();
@@ -389,5 +471,203 @@ mod tests {
             .update_description("s1", "missing", ProviderKind::Mock, "x")
             .await;
         assert!(matches!(r, Err(AttachmentError::NotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn upsert_persists_storage_key_and_origin() {
+        let reg = make_registry().await;
+        reg.upsert(UpsertAttachmentInput {
+            agent_session_id: "s1".to_string(),
+            document_id: "doc-1".to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf-1".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "a.pdf".to_string(),
+            size_bytes: Some(100),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+            storage_key: Some("sk-1".to_string()),
+            origin: Some("user_upload".to_string()),
+        })
+        .await
+        .unwrap();
+
+        let row = reg
+            .lookup("s1", "doc-1", ProviderKind::OpenAi)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.storage_key.as_deref(), Some("sk-1"));
+        assert_eq!(row.origin.as_deref(), Some("user_upload"));
+        assert!(row.last_used_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn upsert_preserves_storage_key_when_subsequent_call_omits_it() {
+        let reg = make_registry().await;
+        // First upsert: provide storage_key.
+        reg.upsert(UpsertAttachmentInput {
+            agent_session_id: "s1".to_string(),
+            document_id: "doc-1".to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf-1".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "a.pdf".to_string(),
+            size_bytes: Some(100),
+            label: Some("Q3 report".to_string()),
+            description: Some("desc".to_string()),
+            source: AttachmentSource::Inline,
+            storage_key: Some("sk-1".to_string()),
+            origin: Some("user_upload".to_string()),
+        })
+        .await
+        .unwrap();
+
+        // Second upsert: same key but storage_key/origin/label/description omitted.
+        reg.upsert(UpsertAttachmentInput {
+            agent_session_id: "s1".to_string(),
+            document_id: "doc-1".to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf-2".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "a.pdf".to_string(),
+            size_bytes: Some(100),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+            storage_key: None,
+            origin: None,
+        })
+        .await
+        .unwrap();
+
+        let row = reg
+            .lookup("s1", "doc-1", ProviderKind::OpenAi)
+            .await
+            .unwrap()
+            .unwrap();
+        // COALESCE keeps previous values when EXCLUDED is NULL.
+        assert_eq!(row.storage_key.as_deref(), Some("sk-1"));
+        assert_eq!(row.origin.as_deref(), Some("user_upload"));
+        assert_eq!(row.label.as_deref(), Some("Q3 report"));
+        assert_eq!(row.description.as_deref(), Some("desc"));
+        // But provider_file_id was updated.
+        assert_eq!(row.provider_file_id, "pf-2");
+    }
+
+    #[tokio::test]
+    async fn lookup_by_document_id_returns_row_when_present() {
+        let reg = make_registry().await;
+        reg.upsert(UpsertAttachmentInput {
+            agent_session_id: "s1".to_string(),
+            document_id: "doc-1".to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf-1".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "a.pdf".to_string(),
+            size_bytes: Some(100),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+            storage_key: Some("sk-1".to_string()),
+            origin: Some("user_upload".to_string()),
+        })
+        .await
+        .unwrap();
+
+        let got = reg.lookup_by_document_id("s1", "doc-1").await.unwrap();
+        assert!(got.is_some());
+        let row = got.unwrap();
+        assert_eq!(row.storage_key.as_deref(), Some("sk-1"));
+        assert_eq!(row.origin.as_deref(), Some("user_upload"));
+    }
+
+    #[tokio::test]
+    async fn lookup_by_document_id_returns_none_when_absent() {
+        let reg = make_registry().await;
+        let got = reg.lookup_by_document_id("s1", "missing").await.unwrap();
+        assert!(got.is_none());
+    }
+
+    #[tokio::test]
+    async fn lookup_by_document_id_returns_most_recent_when_multiple_providers() {
+        let reg = make_registry().await;
+        // Two rows with same (session, doc) but different providers.
+        for (provider, pf) in [
+            (ProviderKind::OpenAi, "pf-openai"),
+            (ProviderKind::Google, "pf-google"),
+        ] {
+            reg.upsert(UpsertAttachmentInput {
+                agent_session_id: "s1".to_string(),
+                document_id: "doc-1".to_string(),
+                provider,
+                provider_file_id: pf.to_string(),
+                mime_type: "application/pdf".to_string(),
+                filename: "a.pdf".to_string(),
+                size_bytes: Some(100),
+                label: None,
+                description: None,
+                source: AttachmentSource::Inline,
+                storage_key: Some(format!("sk-{}", pf)),
+                origin: Some("user_upload".to_string()),
+            })
+            .await
+            .unwrap();
+            // Tiny gap so CURRENT_TIMESTAMP differs on the second row.
+            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        }
+
+        let got = reg
+            .lookup_by_document_id("s1", "doc-1")
+            .await
+            .unwrap()
+            .expect("row present");
+        // Second insert (Google) refreshed later → it must win.
+        assert_eq!(got.provider, ProviderKind::Google);
+    }
+
+    #[tokio::test]
+    async fn touch_last_used_updates_timestamp() {
+        let reg = make_registry().await;
+        reg.upsert(UpsertAttachmentInput {
+            agent_session_id: "s1".to_string(),
+            document_id: "doc-1".to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf-1".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "a.pdf".to_string(),
+            size_bytes: Some(100),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+            storage_key: Some("sk-1".to_string()),
+            origin: Some("user_upload".to_string()),
+        })
+        .await
+        .unwrap();
+
+        let before = reg
+            .lookup_by_document_id("s1", "doc-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(before.last_used_at.is_none());
+
+        reg.touch_last_used("s1", "doc-1").await.unwrap();
+
+        let after = reg
+            .lookup_by_document_id("s1", "doc-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(after.last_used_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn touch_last_used_is_noop_when_missing() {
+        let reg = make_registry().await;
+        // No row inserted — must not error.
+        reg.touch_last_used("s1", "missing").await.unwrap();
     }
 }

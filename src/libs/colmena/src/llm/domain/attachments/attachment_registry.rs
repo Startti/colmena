@@ -66,4 +66,25 @@ pub trait AttachmentRegistry: Send + Sync {
         &self,
         agent_session_id: &str,
     ) -> Result<Vec<ConversationAttachment>, AttachmentError>;
+
+    /// Plan A: lookup attachment by `(agent_session_id, document_id)` across
+    /// all providers. Returns the most recently refreshed row if multiple
+    /// providers have entries for the same document (one row per provider in
+    /// practice — cross-provider lazy upload creates additional rows). Used by
+    /// `AttachmentStreamResolver` which only needs `storage_key`, not
+    /// `provider_file_id`.
+    async fn lookup_by_document_id(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+    ) -> Result<Option<ConversationAttachment>, AttachmentError>;
+
+    /// Plan A: update `last_used_at = now()` for all rows matching
+    /// `(agent_session_id, document_id)`. Called by `AttachmentStreamResolver`
+    /// on every successful resolve. No-op when no row matches.
+    async fn touch_last_used(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+    ) -> Result<(), AttachmentError>;
 }
