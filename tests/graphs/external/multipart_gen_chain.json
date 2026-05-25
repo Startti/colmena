@@ -1,0 +1,57 @@
+{
+  "comment": "Chained smoke: image_generation creates an image, build_body wraps its storage_key as '$attachment:<key>', and http_request uploads it via multipart streaming to httpbin /post which echoes it back. Exercises the storage attachment path end-to-end (read_stream).",
+  "metadata": {
+    "category": "external",
+    "features": ["multipart", "http_request", "image_generation", "attachment_streaming"],
+    "difficulty": "intermediate",
+    "requires_env": ["OPENAI_API_KEY"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/multipart-gen-chain",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "A minimalist cat driving a motocicle on the moon, digital art"
+        }
+      }
+    },
+    "gen": {
+      "type": "image_generation",
+      "config": {
+        "provider": "openai",
+        "model": "gpt-image-1",
+        "api_key": "${OPENAI_API_KEY}",
+        "size": "1024x1024",
+        "n": 1
+      }
+    },
+    "build_body": {
+      "type": "python_script",
+      "config": {
+        "code": "output = {'body': {'files': [f'$attachment:{gen}'], 'metadata': 'from chained gen graph'}}"
+      }
+    },
+    "upload": {
+      "type": "http_request",
+      "config": {
+        "base_url": "https://httpbin.org",
+        "endpoint": "/post",
+        "method": "POST",
+        "headers": {
+          "Content-Type": "multipart/form-data"
+        },
+        "max_file_size_bytes": 10485760,
+        "url_download_timeout_secs": 30
+      }
+    },
+    "log_result": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger.prompt", "to": "gen.prompt" },
+    { "from": "gen.output.images.0.attachment_id", "to": "build_body" },
+    { "from": "build_body.body", "to": "upload.body" },
+    { "from": "upload", "to": "log_result" }
+  ]
+}
