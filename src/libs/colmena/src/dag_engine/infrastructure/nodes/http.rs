@@ -146,6 +146,7 @@ impl HttpNode {
     /// Returns `true` when the merged headers map contains a Content-Type
     /// whose MIME type begins with `multipart/`. Header lookup is
     /// case-insensitive per RFC 9110 §5.1.
+    #[allow(dead_code)] // call site lands in Task 8 (execute() multipart branch)
     pub(crate) fn is_multipart_mode(headers: &serde_json::Map<String, Value>) -> bool {
         for (k, v) in headers {
             if k.eq_ignore_ascii_case("content-type") {
