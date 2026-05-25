@@ -38,6 +38,32 @@ impl Default for HttpNode {
 }
 
 const ATTACHMENT_PLACEHOLDER_PREFIX: &str = "$attachment:";
+const URL_HTTP_PREFIX: &str = "http://";
+const URL_HTTPS_PREFIX: &str = "https://";
+
+/// A single resolved multipart form part, prior to network I/O. Built by
+/// [`HttpNode::parse_multipart_body`] and consumed by the form assembler.
+#[allow(dead_code)] // variants used by Task 8 execute_multipart
+#[derive(Debug, Clone)]
+pub(crate) enum PartSpec {
+    Url {
+        field: String,
+        url: String,
+        filename_override: Option<String>,
+        content_type_override: Option<String>,
+    },
+    Attachment {
+        field: String,
+        storage_key: String,
+        filename_override: Option<String>,
+        content_type_override: Option<String>,
+    },
+    Text {
+        field: String,
+        value: String,
+        content_type_override: Option<String>,
+    },
+}
 
 impl HttpNode {
     pub fn new() -> Self {
@@ -156,6 +182,127 @@ impl HttpNode {
             }
         }
         false
+    }
+
+    /// Parse a `body` JSON object into a flat list of `PartSpec`s. Pure logic,
+    /// no I/O. The rules match the design spec D2 table.
+    ///
+    /// Returns an error for malformed bodies (non-object root, unrecognized
+    /// explicit object shape, etc.).
+    #[allow(dead_code)] // call site lands in Task 8 (execute_multipart)
+    pub(crate) fn parse_multipart_body(
+        body: &Value,
+    ) -> Result<Vec<PartSpec>, Box<dyn StdError + Send + Sync>> {
+        let map = body.as_object().ok_or_else(|| -> Box<dyn StdError + Send + Sync> {
+            "MultipartConfigError: body must be a JSON object in multipart mode".into()
+        })?;
+
+        let mut parts = Vec::new();
+        for (field, value) in map {
+            Self::push_parts_for_value(field, value, &mut parts)?;
+        }
+        Ok(parts)
+    }
+
+    fn push_parts_for_value(
+        field: &str,
+        value: &Value,
+        out: &mut Vec<PartSpec>,
+    ) -> Result<(), Box<dyn StdError + Send + Sync>> {
+        match value {
+            Value::Null => Ok(()),
+            Value::String(s) => {
+                out.push(Self::classify_string_part(field, s));
+                Ok(())
+            }
+            Value::Number(n) => {
+                out.push(PartSpec::Text {
+                    field: field.to_string(),
+                    value: n.to_string(),
+                    content_type_override: None,
+                });
+                Ok(())
+            }
+            Value::Bool(b) => {
+                out.push(PartSpec::Text {
+                    field: field.to_string(),
+                    value: b.to_string(),
+                    content_type_override: None,
+                });
+                Ok(())
+            }
+            Value::Array(arr) => {
+                for item in arr {
+                    Self::push_parts_for_value(field, item, out)?;
+                }
+                Ok(())
+            }
+            Value::Object(obj) => {
+                let filename_override = obj
+                    .get("filename")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let content_type_override = obj
+                    .get("content_type")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                if let Some(url) = obj.get("url").and_then(|v| v.as_str()) {
+                    out.push(PartSpec::Url {
+                        field: field.to_string(),
+                        url: url.to_string(),
+                        filename_override,
+                        content_type_override,
+                    });
+                    Ok(())
+                } else if let Some(key) = obj.get("attachment").and_then(|v| v.as_str()) {
+                    out.push(PartSpec::Attachment {
+                        field: field.to_string(),
+                        storage_key: key.to_string(),
+                        filename_override,
+                        content_type_override,
+                    });
+                    Ok(())
+                } else if let Some(value_s) = obj.get("value").and_then(|v| v.as_str()) {
+                    out.push(PartSpec::Text {
+                        field: field.to_string(),
+                        value: value_s.to_string(),
+                        content_type_override,
+                    });
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "MultipartConfigError: object under field '{field}' has none of \
+                         'url', 'attachment', 'value' (unrecognized shape)"
+                    )
+                    .into())
+                }
+            }
+        }
+    }
+
+    fn classify_string_part(field: &str, s: &str) -> PartSpec {
+        if let Some(rest) = s.strip_prefix(ATTACHMENT_PLACEHOLDER_PREFIX) {
+            PartSpec::Attachment {
+                field: field.to_string(),
+                storage_key: rest.to_string(),
+                filename_override: None,
+                content_type_override: None,
+            }
+        } else if s.starts_with(URL_HTTPS_PREFIX) || s.starts_with(URL_HTTP_PREFIX) {
+            PartSpec::Url {
+                field: field.to_string(),
+                url: s.to_string(),
+                filename_override: None,
+                content_type_override: None,
+            }
+        } else {
+            PartSpec::Text {
+                field: field.to_string(),
+                value: s.to_string(),
+                content_type_override: None,
+            }
+        }
     }
 }
 
@@ -648,5 +795,157 @@ mod multipart_detection_tests {
     fn header_lookup_is_case_insensitive() {
         let headers = json!({ "CONTENT-TYPE": "multipart/form-data" });
         assert!(HttpNode::is_multipart_mode(headers.as_object().unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod multipart_body_parser_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn string_url_becomes_url_part() {
+        let body = json!({ "files": "https://example.com/a.pdf" });
+        let parts = HttpNode::parse_multipart_body(&body).unwrap();
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            PartSpec::Url { field, url, filename_override, content_type_override } => {
+                assert_eq!(field, "files");
+                assert_eq!(url, "https://example.com/a.pdf");
+                assert!(filename_override.is_none());
+                assert!(content_type_override.is_none());
+            }
+            other => panic!("expected Url, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn string_attachment_becomes_attachment_part() {
+        let body = json!({ "files": "$attachment:abc123" });
+        let parts = HttpNode::parse_multipart_body(&body).unwrap();
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            PartSpec::Attachment { field, storage_key, filename_override, content_type_override } => {
+                assert_eq!(field, "files");
+                assert_eq!(storage_key, "abc123");
+                assert!(filename_override.is_none());
+                assert!(content_type_override.is_none());
+            }
+            other => panic!("expected Attachment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plain_string_becomes_text_part() {
+        let body = json!({ "metadata": "uploaded by agent" });
+        let parts = HttpNode::parse_multipart_body(&body).unwrap();
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            PartSpec::Text { field, value, content_type_override } => {
+                assert_eq!(field, "metadata");
+                assert_eq!(value, "uploaded by agent");
+                assert!(content_type_override.is_none());
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn array_expands_to_multiple_parts_under_same_field() {
+        let body = json!({ "files": ["https://a/1", "https://a/2", "$attachment:k"] });
+        let parts = HttpNode::parse_multipart_body(&body).unwrap();
+        assert_eq!(parts.len(), 3);
+        assert!(matches!(&parts[0], PartSpec::Url { field, .. } if field == "files"));
+        assert!(matches!(&parts[1], PartSpec::Url { field, .. } if field == "files"));
+        assert!(matches!(&parts[2], PartSpec::Attachment { field, .. } if field == "files"));
+    }
+
+    #[test]
+    fn explicit_url_object_with_overrides() {
+        let body = json!({
+            "files": [{
+                "url": "https://example.com/x",
+                "filename": "report.pdf",
+                "content_type": "application/pdf"
+            }]
+        });
+        let parts = HttpNode::parse_multipart_body(&body).unwrap();
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            PartSpec::Url { url, filename_override, content_type_override, .. } => {
+                assert_eq!(url, "https://example.com/x");
+                assert_eq!(filename_override.as_deref(), Some("report.pdf"));
+                assert_eq!(content_type_override.as_deref(), Some("application/pdf"));
+            }
+            other => panic!("expected Url, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_attachment_object_with_overrides() {
+        let body = json!({
+            "files": [{
+                "attachment": "key-1",
+                "filename": "x.png",
+                "content_type": "image/png"
+            }]
+        });
+        let parts = HttpNode::parse_multipart_body(&body).unwrap();
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            PartSpec::Attachment { storage_key, filename_override, content_type_override, .. } => {
+                assert_eq!(storage_key, "key-1");
+                assert_eq!(filename_override.as_deref(), Some("x.png"));
+                assert_eq!(content_type_override.as_deref(), Some("image/png"));
+            }
+            other => panic!("expected Attachment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_text_object_with_content_type() {
+        let body = json!({
+            "metadata": { "value": "hello", "content_type": "text/csv" }
+        });
+        let parts = HttpNode::parse_multipart_body(&body).unwrap();
+        match &parts[0] {
+            PartSpec::Text { value, content_type_override, .. } => {
+                assert_eq!(value, "hello");
+                assert_eq!(content_type_override.as_deref(), Some("text/csv"));
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn number_and_boolean_become_text_parts() {
+        let body = json!({ "count": 5, "flag": true });
+        let parts = HttpNode::parse_multipart_body(&body).unwrap();
+        assert_eq!(parts.len(), 2);
+        let has_count = parts.iter().any(|p| matches!(p, PartSpec::Text { field, value, .. } if field == "count" && value == "5"));
+        let has_flag = parts.iter().any(|p| matches!(p, PartSpec::Text { field, value, .. } if field == "flag" && value == "true"));
+        assert!(has_count && has_flag);
+    }
+
+    #[test]
+    fn null_value_omits_field() {
+        let body = json!({ "ignored": null, "kept": "yes" });
+        let parts = HttpNode::parse_multipart_body(&body).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0], PartSpec::Text { field, .. } if field == "kept"));
+    }
+
+    #[test]
+    fn malformed_object_errors() {
+        let body = json!({ "files": [{ "unknown_field": "x" }] });
+        let err = HttpNode::parse_multipart_body(&body).unwrap_err();
+        assert!(err.to_string().contains("MultipartConfigError") || err.to_string().contains("unrecognized"));
+    }
+
+    #[test]
+    fn body_must_be_object() {
+        let body = json!("just a string");
+        let err = HttpNode::parse_multipart_body(&body).unwrap_err();
+        assert!(err.to_string().contains("object"));
     }
 }
