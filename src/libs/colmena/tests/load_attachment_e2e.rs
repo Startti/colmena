@@ -127,6 +127,7 @@ impl LoadAttachmentResolver for FakeResolver {
                 filename: "x.pdf".to_string(),
                 expires_at: None,
             }),
+            retained_inline_bytes: None,
         }))
     }
 }

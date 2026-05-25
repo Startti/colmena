@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn definition_lists_pending_in_alphabetical_order() {
-        let entries = vec![entry("zebra"), entry("apple"), entry("mango")];
+        let entries = [entry("zebra"), entry("apple"), entry("mango")];
         let pending: Vec<&CatalogEntry> = entries.iter().collect();
         let td = build_describe_tool_definition(&pending);
         let enum_values = td
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn definition_description_includes_summaries() {
-        let entries = vec![CatalogEntry {
+        let entries = [CatalogEntry {
             name: "search_orders".into(),
             summary: "Find orders. Use for past purchases.".into(),
         }];
@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn definition_required_param_is_name() {
-        let entries = vec![entry("a")];
+        let entries = [entry("a")];
         let pending: Vec<&CatalogEntry> = entries.iter().collect();
         let td = build_describe_tool_definition(&pending);
         assert_eq!(td.parameters.required, vec!["name".to_string()]);

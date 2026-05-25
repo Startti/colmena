@@ -39,10 +39,10 @@ async fn discovered_set_grows_across_turns_with_describe_then_direct_call() {
         summary: "tool X".to_string(),
     }];
 
-    let after_t1 = reconstruct_discovered_set(&[m1.clone()], &catalog);
+    let after_t1 = reconstruct_discovered_set(std::slice::from_ref(&m1), &catalog);
     assert!(after_t1.contains("X"), "rule (1) must catch describe_tool");
 
-    let after_t2_only = reconstruct_discovered_set(&[m2.clone()], &catalog);
+    let after_t2_only = reconstruct_discovered_set(std::slice::from_ref(&m2), &catalog);
     assert!(
         after_t2_only.contains("X"),
         "rule (2) must catch direct calls — needed for truncation/seeded-history cases"

@@ -568,10 +568,11 @@ impl ImageGenerationNode {
                 .build()
                 .await
                 .map_err(|e| format!("failed to build Vertex metadata authenticator: {e}"))?,
-            ApplicationDefaultCredentialsTypes::ServiceAccount(builder) => builder
-                .build()
-                .await
-                .map_err(|e| format!("failed to build Vertex service-account authenticator: {e}"))?,
+            ApplicationDefaultCredentialsTypes::ServiceAccount(builder) => {
+                builder.build().await.map_err(|e| {
+                    format!("failed to build Vertex service-account authenticator: {e}")
+                })?
+            }
         };
 
         let token = auth
@@ -818,7 +819,6 @@ mod tests {
             "error message should mention the env-var fallback, got: {msg}"
         );
     }
-
 
     #[tokio::test]
     async fn session_ids_forwarded_to_storage_when_present_in_inputs() {

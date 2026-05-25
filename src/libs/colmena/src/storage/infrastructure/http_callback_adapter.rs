@@ -543,10 +543,7 @@ mod tests {
             format!("{}/sign-put", server.uri()),
             "s3cr3t".to_string(),
         );
-        let stored = adapter
-            .store(req(vec![1, 2], "image/png"))
-            .await
-            .unwrap();
+        let stored = adapter.store(req(vec![1, 2], "image/png")).await.unwrap();
         let err = adapter.read_stream(&stored.storage_key).await.unwrap_err();
         assert!(matches!(err, StorageError::UploadFailed(_)));
     }

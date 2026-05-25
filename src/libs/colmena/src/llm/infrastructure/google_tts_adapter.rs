@@ -139,15 +139,14 @@ impl TtsRepository for GoogleTtsAdapter {
         // If the caller asked for WAV and the provider returned raw L16,
         // wrap with a 44-byte WAV header so the resulting file is playable
         // by any standard audio player / browser.
-        let (audio_bytes, mime_type) = if matches!(req.format, AudioFormat::Wav)
-            && raw_mime.starts_with("audio/L16")
-        {
-            let sample_rate = parse_sample_rate_from_mime(&raw_mime);
-            let wav = wrap_pcm_in_wav(&raw_bytes, sample_rate, /* channels */ 1);
-            (wav, "audio/wav".to_string())
-        } else {
-            (raw_bytes, raw_mime)
-        };
+        let (audio_bytes, mime_type) =
+            if matches!(req.format, AudioFormat::Wav) && raw_mime.starts_with("audio/L16") {
+                let sample_rate = parse_sample_rate_from_mime(&raw_mime);
+                let wav = wrap_pcm_in_wav(&raw_bytes, sample_rate, /* channels */ 1);
+                (wav, "audio/wav".to_string())
+            } else {
+                (raw_bytes, raw_mime)
+            };
 
         Ok(TtsResponse {
             audio_bytes,

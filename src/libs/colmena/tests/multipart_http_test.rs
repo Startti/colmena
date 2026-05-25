@@ -79,12 +79,7 @@ async fn end_to_end_three_url_parts_multipart_upload() {
         .iter()
         .find(|r| r.url.path() == "/kb/upload")
         .expect("downstream POST received");
-    let ct = req
-        .headers
-        .get("content-type")
-        .unwrap()
-        .to_str()
-        .unwrap();
+    let ct = req.headers.get("content-type").unwrap().to_str().unwrap();
     assert!(ct.starts_with("multipart/form-data"), "got {ct}");
     assert!(ct.contains("boundary="), "boundary missing in {ct}");
 

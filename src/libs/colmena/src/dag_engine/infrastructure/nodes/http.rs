@@ -123,9 +123,11 @@ impl MultipartUrlResolver {
             .build()?;
 
         // HEAD pre-flight
-        let head = client.head(parsed.clone()).send().await.map_err(|e| {
-            format!("UrlValidationFailed: HEAD for '{url}' failed: {e}")
-        })?;
+        let head = client
+            .head(parsed.clone())
+            .send()
+            .await
+            .map_err(|e| format!("UrlValidationFailed: HEAD for '{url}' failed: {e}"))?;
         if !head.status().is_success() {
             return Err(format!(
                 "UrlValidationFailed: HEAD for '{url}' returned status {}",
@@ -143,9 +145,9 @@ impl MultipartUrlResolver {
             .get(reqwest::header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.trim().parse::<u64>().ok())
-            .ok_or_else(|| format!(
-                "UrlValidationFailed: HEAD for '{url}' returned no Content-Length"
-            ))?;
+            .ok_or_else(|| {
+                format!("UrlValidationFailed: HEAD for '{url}' returned no Content-Length")
+            })?;
         if size_bytes > self.max_file_size_bytes {
             return Err(format!(
                 "FileTooLarge: '{url}' declared {size_bytes} bytes, max is {}",
@@ -159,15 +161,16 @@ impl MultipartUrlResolver {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.split(';').next().unwrap_or(s).trim().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
-        let filename = filename_from_disposition(
-            head.headers().get(reqwest::header::CONTENT_DISPOSITION),
-        )
-        .unwrap_or_else(|| filename_from_url_path(&parsed));
+        let filename =
+            filename_from_disposition(head.headers().get(reqwest::header::CONTENT_DISPOSITION))
+                .unwrap_or_else(|| filename_from_url_path(&parsed));
 
         // Streaming GET — the body is not buffered.
-        let resp = client.get(parsed).send().await.map_err(|e| {
-            format!("UrlValidationFailed: GET for '{url}' failed: {e}")
-        })?;
+        let resp = client
+            .get(parsed)
+            .send()
+            .await
+            .map_err(|e| format!("UrlValidationFailed: GET for '{url}' failed: {e}"))?;
         if !resp.status().is_success() {
             return Err(format!(
                 "UrlValidationFailed: GET for '{url}' returned status {}",
@@ -213,7 +216,11 @@ fn filename_from_disposition(header: Option<&reqwest::header::HeaderValue>) -> O
 /// to `"file"` for URLs with no usable path component.
 fn filename_from_url_path(url: &Url) -> String {
     url.path_segments()
-        .and_then(|mut s| s.next_back().filter(|seg| !seg.is_empty()).map(|s| s.to_string()))
+        .and_then(|mut s| {
+            s.next_back()
+                .filter(|seg| !seg.is_empty())
+                .map(|s| s.to_string())
+        })
         .unwrap_or_else(|| "file".to_string())
 }
 
@@ -328,7 +335,10 @@ impl HttpNode {
         for (k, v) in headers {
             if k.eq_ignore_ascii_case("content-type") {
                 if let Some(s) = v.as_str() {
-                    return s.trim_start().to_ascii_lowercase().starts_with("multipart/");
+                    return s
+                        .trim_start()
+                        .to_ascii_lowercase()
+                        .starts_with("multipart/");
                 }
             }
         }
@@ -343,9 +353,11 @@ impl HttpNode {
     pub(crate) fn parse_multipart_body(
         body: &Value,
     ) -> Result<Vec<PartSpec>, Box<dyn StdError + Send + Sync>> {
-        let map = body.as_object().ok_or_else(|| -> Box<dyn StdError + Send + Sync> {
-            "MultipartConfigError: body must be a JSON object in multipart mode".into()
-        })?;
+        let map = body
+            .as_object()
+            .ok_or_else(|| -> Box<dyn StdError + Send + Sync> {
+                "MultipartConfigError: body must be a JSON object in multipart mode".into()
+            })?;
 
         let mut parts = Vec::new();
         for (field, value) in map {
@@ -460,10 +472,7 @@ impl HttpNode {
     const DEFAULT_URL_DOWNLOAD_TIMEOUT_SECS: u64 = 30;
 
     fn limit_u64(config: &Value, key: &str, default: u64) -> u64 {
-        config
-            .get(key)
-            .and_then(|v| v.as_u64())
-            .unwrap_or(default)
+        config.get(key).and_then(|v| v.as_u64()).unwrap_or(default)
     }
     fn limit_usize(config: &Value, key: &str, default: usize) -> usize {
         config
@@ -473,10 +482,7 @@ impl HttpNode {
             .unwrap_or(default)
     }
     fn limit_bool(config: &Value, key: &str, default: bool) -> bool {
-        config
-            .get(key)
-            .and_then(|v| v.as_bool())
-            .unwrap_or(default)
+        config.get(key).and_then(|v| v.as_bool()).unwrap_or(default)
     }
 
     async fn execute_multipart(
@@ -508,8 +514,11 @@ impl HttpNode {
             .into());
         }
 
-        let max_file_size_bytes =
-            Self::limit_u64(config, "max_file_size_bytes", Self::DEFAULT_MAX_FILE_SIZE_BYTES);
+        let max_file_size_bytes = Self::limit_u64(
+            config,
+            "max_file_size_bytes",
+            Self::DEFAULT_MAX_FILE_SIZE_BYTES,
+        );
         let timeout_secs = Self::limit_u64(
             config,
             "url_download_timeout_secs",
@@ -1172,7 +1181,12 @@ mod multipart_body_parser_tests {
         let parts = HttpNode::parse_multipart_body(&body).unwrap();
         assert_eq!(parts.len(), 1);
         match &parts[0] {
-            PartSpec::Url { field, url, filename_override, content_type_override } => {
+            PartSpec::Url {
+                field,
+                url,
+                filename_override,
+                content_type_override,
+            } => {
                 assert_eq!(field, "files");
                 assert_eq!(url, "https://example.com/a.pdf");
                 assert!(filename_override.is_none());
@@ -1188,7 +1202,12 @@ mod multipart_body_parser_tests {
         let parts = HttpNode::parse_multipart_body(&body).unwrap();
         assert_eq!(parts.len(), 1);
         match &parts[0] {
-            PartSpec::Attachment { field, storage_key, filename_override, content_type_override } => {
+            PartSpec::Attachment {
+                field,
+                storage_key,
+                filename_override,
+                content_type_override,
+            } => {
                 assert_eq!(field, "files");
                 assert_eq!(storage_key, "abc123");
                 assert!(filename_override.is_none());
@@ -1204,7 +1223,11 @@ mod multipart_body_parser_tests {
         let parts = HttpNode::parse_multipart_body(&body).unwrap();
         assert_eq!(parts.len(), 1);
         match &parts[0] {
-            PartSpec::Text { field, value, content_type_override } => {
+            PartSpec::Text {
+                field,
+                value,
+                content_type_override,
+            } => {
                 assert_eq!(field, "metadata");
                 assert_eq!(value, "uploaded by agent");
                 assert!(content_type_override.is_none());
@@ -1235,7 +1258,12 @@ mod multipart_body_parser_tests {
         let parts = HttpNode::parse_multipart_body(&body).unwrap();
         assert_eq!(parts.len(), 1);
         match &parts[0] {
-            PartSpec::Url { url, filename_override, content_type_override, .. } => {
+            PartSpec::Url {
+                url,
+                filename_override,
+                content_type_override,
+                ..
+            } => {
                 assert_eq!(url, "https://example.com/x");
                 assert_eq!(filename_override.as_deref(), Some("report.pdf"));
                 assert_eq!(content_type_override.as_deref(), Some("application/pdf"));
@@ -1256,7 +1284,12 @@ mod multipart_body_parser_tests {
         let parts = HttpNode::parse_multipart_body(&body).unwrap();
         assert_eq!(parts.len(), 1);
         match &parts[0] {
-            PartSpec::Attachment { storage_key, filename_override, content_type_override, .. } => {
+            PartSpec::Attachment {
+                storage_key,
+                filename_override,
+                content_type_override,
+                ..
+            } => {
                 assert_eq!(storage_key, "key-1");
                 assert_eq!(filename_override.as_deref(), Some("x.png"));
                 assert_eq!(content_type_override.as_deref(), Some("image/png"));
@@ -1272,7 +1305,11 @@ mod multipart_body_parser_tests {
         });
         let parts = HttpNode::parse_multipart_body(&body).unwrap();
         match &parts[0] {
-            PartSpec::Text { value, content_type_override, .. } => {
+            PartSpec::Text {
+                value,
+                content_type_override,
+                ..
+            } => {
                 assert_eq!(value, "hello");
                 assert_eq!(content_type_override.as_deref(), Some("text/csv"));
             }
@@ -1302,7 +1339,10 @@ mod multipart_body_parser_tests {
     fn malformed_object_errors() {
         let body = json!({ "files": [{ "unknown_field": "x" }] });
         let err = HttpNode::parse_multipart_body(&body).unwrap_err();
-        assert!(err.to_string().contains("MultipartConfigError") || err.to_string().contains("unrecognized"));
+        assert!(
+            err.to_string().contains("MultipartConfigError")
+                || err.to_string().contains("unrecognized")
+        );
     }
 
     #[test]
@@ -1376,7 +1416,9 @@ mod multipart_url_resolution_tests {
         let server = MockServer::start().await;
         Mock::given(method("HEAD"))
             .and(path("/file"))
-            .respond_with(ResponseTemplate::new(200).insert_header("Content-Type", "application/pdf"))
+            .respond_with(
+                ResponseTemplate::new(200).insert_header("Content-Type", "application/pdf"),
+            )
             .mount(&server)
             .await;
 
@@ -1502,7 +1544,9 @@ mod multipart_execute_tests {
         // Downstream upload — capture the multipart body and assert basic shape
         Mock::given(method("POST"))
             .and(path("/upload"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .mount(&server)
             .await;
 
@@ -1536,7 +1580,10 @@ mod multipart_execute_tests {
             .to_str()
             .unwrap();
         assert!(ct.starts_with("multipart/form-data"), "got {ct}");
-        assert!(ct.contains("boundary="), "boundary should be present in {ct}");
+        assert!(
+            ct.contains("boundary="),
+            "boundary should be present in {ct}"
+        );
     }
 
     #[tokio::test]
@@ -1544,7 +1591,9 @@ mod multipart_execute_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/upload"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .mount(&server)
             .await;
 
@@ -1613,7 +1662,9 @@ mod multipart_execute_tests {
         Mock::given(method("POST"))
             .and(path("/json"))
             .and(body_json(serde_json::json!({ "hi": "there" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .mount(&server)
             .await;
         let config = serde_json::json!({
