@@ -17,9 +17,12 @@
 //! The default output port is `body`.
 
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
+use bytes::Bytes;
+use futures::Stream;
 use reqwest::{Client, Method, Url};
 use serde_json::{json, Value};
 use std::error::Error as StdError;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -63,6 +66,156 @@ pub(crate) enum PartSpec {
         value: String,
         content_type_override: Option<String>,
     },
+}
+
+/// Resolution result for a single URL part: a streaming reader + the metadata
+/// we'll forward to the downstream multipart form.
+#[allow(dead_code)] // consumed by Task 8 execute_multipart
+pub(crate) struct ResolvedUrlPart {
+    pub stream: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
+    pub size_bytes: u64,
+    pub content_type: String,
+    pub filename: String,
+}
+
+impl std::fmt::Debug for ResolvedUrlPart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedUrlPart")
+            .field("size_bytes", &self.size_bytes)
+            .field("content_type", &self.content_type)
+            .field("filename", &self.filename)
+            .field("stream", &"<stream>")
+            .finish()
+    }
+}
+
+#[allow(dead_code)] // consumed by Task 8 execute_multipart
+pub(crate) struct MultipartUrlResolver {
+    pub max_file_size_bytes: u64,
+    pub timeout_secs: u64,
+    pub allow_http_urls: bool,
+}
+
+impl MultipartUrlResolver {
+    #[allow(dead_code)] // consumed by Task 8 execute_multipart
+    pub(crate) async fn resolve(
+        &self,
+        url: &str,
+    ) -> Result<ResolvedUrlPart, Box<dyn StdError + Send + Sync>> {
+        let parsed = Url::parse(url)
+            .map_err(|e| format!("UrlValidationFailed: cannot parse '{url}': {e}"))?;
+        match parsed.scheme() {
+            "https" => {}
+            "http" if self.allow_http_urls => {}
+            "http" => {
+                return Err(format!(
+                    "UrlValidationFailed: plain http:// URL '{url}' rejected (set allow_http_urls=true to permit)"
+                )
+                .into());
+            }
+            other => {
+                return Err(format!(
+                    "UrlValidationFailed: scheme '{other}' not supported (only http/https)"
+                )
+                .into());
+            }
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(self.timeout_secs))
+            .http1_only()
+            .build()?;
+
+        // HEAD pre-flight
+        let head = client.head(parsed.clone()).send().await.map_err(|e| {
+            format!("UrlValidationFailed: HEAD for '{url}' failed: {e}")
+        })?;
+        if !head.status().is_success() {
+            return Err(format!(
+                "UrlValidationFailed: HEAD for '{url}' returned status {}",
+                head.status()
+            )
+            .into());
+        }
+        let size_bytes = head
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .ok_or_else(|| format!(
+                "UrlValidationFailed: HEAD for '{url}' returned no Content-Length"
+            ))?;
+        if size_bytes > self.max_file_size_bytes {
+            return Err(format!(
+                "FileTooLarge: '{url}' declared {size_bytes} bytes, max is {}",
+                self.max_file_size_bytes
+            )
+            .into());
+        }
+        let content_type = head
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.split(';').next().unwrap_or(s).trim().to_string())
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        let filename = filename_from_disposition(
+            head.headers().get(reqwest::header::CONTENT_DISPOSITION),
+        )
+        .unwrap_or_else(|| filename_from_url_path(&parsed));
+
+        // Streaming GET — the body is not buffered.
+        let resp = client.get(parsed).send().await.map_err(|e| {
+            format!("UrlValidationFailed: GET for '{url}' failed: {e}")
+        })?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "UrlValidationFailed: GET for '{url}' returned status {}",
+                resp.status()
+            )
+            .into());
+        }
+        let stream = resp.bytes_stream();
+
+        Ok(ResolvedUrlPart {
+            stream: Box::pin(stream),
+            size_bytes,
+            content_type,
+            filename,
+        })
+    }
+}
+
+/// Parse `Content-Disposition: attachment; filename="report.pdf"` (or unquoted)
+/// into the bare filename. Returns None for unrecognized shapes or absent
+/// header. RFC 5987 (`filename*=`) is intentionally not handled in v1.
+#[allow(dead_code)] // consumed by Task 8 execute_multipart
+fn filename_from_disposition(header: Option<&reqwest::header::HeaderValue>) -> Option<String> {
+    let v = header?.to_str().ok()?;
+    let after = v.split(';').find_map(|chunk| {
+        let chunk = chunk.trim();
+        let lower = chunk.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("filename=") {
+            let _ = rest;
+            Some(&chunk[("filename=".len())..])
+        } else {
+            None
+        }
+    })?;
+    let unquoted = after.trim().trim_matches('"').to_string();
+    if unquoted.is_empty() {
+        None
+    } else {
+        Some(unquoted)
+    }
+}
+
+/// Last path segment of the URL (after the final `/`), URL-decoded. Falls back
+/// to `"file"` for URLs with no usable path component.
+#[allow(dead_code)] // consumed by Task 8 execute_multipart
+fn filename_from_url_path(url: &Url) -> String {
+    url.path_segments()
+        .and_then(|mut s| s.next_back().filter(|seg| !seg.is_empty()).map(|s| s.to_string()))
+        .unwrap_or_else(|| "file".to_string())
 }
 
 impl HttpNode {
@@ -947,5 +1100,135 @@ mod multipart_body_parser_tests {
         let body = json!("just a string");
         let err = HttpNode::parse_multipart_body(&body).unwrap_err();
         assert!(err.to_string().contains("object"));
+    }
+}
+
+#[cfg(test)]
+mod multipart_url_resolution_tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn happy_path_resolves_size_and_mime_from_head() {
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path("/file"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Length", "4")
+                    .insert_header("Content-Type", "application/pdf"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/file"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1, 2, 3, 4]))
+            .mount(&server)
+            .await;
+
+        let resolver = MultipartUrlResolver {
+            max_file_size_bytes: 100_000,
+            timeout_secs: 5,
+            allow_http_urls: true, // wiremock serves http://
+        };
+        let url = format!("{}/file", server.uri());
+        let resolved = resolver.resolve(&url).await.unwrap();
+        assert_eq!(resolved.size_bytes, 4);
+        assert_eq!(resolved.content_type, "application/pdf");
+        assert_eq!(resolved.filename, "file");
+    }
+
+    #[tokio::test]
+    async fn rejects_http_when_not_allowed() {
+        let resolver = MultipartUrlResolver {
+            max_file_size_bytes: 100_000,
+            timeout_secs: 5,
+            allow_http_urls: false,
+        };
+        let err = resolver.resolve("http://example.com/x").await.unwrap_err();
+        assert!(err.to_string().contains("http://"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_scheme() {
+        let resolver = MultipartUrlResolver {
+            max_file_size_bytes: 100_000,
+            timeout_secs: 5,
+            allow_http_urls: true,
+        };
+        let err = resolver.resolve("ftp://example.com/x").await.unwrap_err();
+        assert!(err.to_string().contains("scheme"));
+    }
+
+    #[tokio::test]
+    async fn rejects_when_content_length_missing() {
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path("/file"))
+            .respond_with(ResponseTemplate::new(200).insert_header("Content-Type", "application/pdf"))
+            .mount(&server)
+            .await;
+
+        let resolver = MultipartUrlResolver {
+            max_file_size_bytes: 100_000,
+            timeout_secs: 5,
+            allow_http_urls: true,
+        };
+        let url = format!("{}/file", server.uri());
+        let err = resolver.resolve(&url).await.unwrap_err();
+        assert!(err.to_string().contains("Content-Length"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn rejects_when_oversized() {
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path("/big"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Length", "999999")
+                    .insert_header("Content-Type", "application/octet-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let resolver = MultipartUrlResolver {
+            max_file_size_bytes: 100,
+            timeout_secs: 5,
+            allow_http_urls: true,
+        };
+        let url = format!("{}/big", server.uri());
+        let err = resolver.resolve(&url).await.unwrap_err();
+        assert!(err.to_string().contains("too large") || err.to_string().contains("FileTooLarge"));
+    }
+
+    #[tokio::test]
+    async fn filename_from_content_disposition_overrides_url_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path("/file"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Length", "10")
+                    .insert_header("Content-Type", "application/pdf")
+                    .insert_header("Content-Disposition", "attachment; filename=\"report.pdf\""),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/file"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0u8; 10]))
+            .mount(&server)
+            .await;
+
+        let resolver = MultipartUrlResolver {
+            max_file_size_bytes: 100_000,
+            timeout_secs: 5,
+            allow_http_urls: true,
+        };
+        let url = format!("{}/file", server.uri());
+        let resolved = resolver.resolve(&url).await.unwrap();
+        assert_eq!(resolved.filename, "report.pdf");
     }
 }
