@@ -2652,6 +2652,9 @@ mod toolkit_runtime_tests {
             source: AttachmentSource::Inline,
             registered_at: Utc::now(),
             refreshed_at: Utc::now(),
+            storage_key: None,
+            origin: None,
+            last_used_at: None,
         };
 
         let executor = DagToolExecutor::new(Arc::new(DummyRegistry), Default::default())

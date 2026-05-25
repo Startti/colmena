@@ -37,6 +37,8 @@ async fn caller_supplied_description_is_preserved() {
         label: None,
         description: Some("caller-supplied".into()),
         source: AttachmentSource::Inline,
+        storage_key: None,
+        origin: None,
     })
     .await
     .unwrap();
@@ -63,6 +65,8 @@ async fn update_description_overwrites_existing() {
         label: None,
         description: None,
         source: AttachmentSource::Inline,
+        storage_key: None,
+        origin: None,
     })
     .await
     .unwrap();

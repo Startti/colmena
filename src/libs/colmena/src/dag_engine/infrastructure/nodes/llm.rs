@@ -556,6 +556,8 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
                         Some(u) => u.to_string(),
                         None => String::new(),
                     }),
+                    storage_key: None,
+                    origin: None,
                 };
                 if let Err(e) = self.registry.upsert(upsert).await {
                     tracing::warn!(
@@ -579,6 +581,9 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
                     source: gen.source,
                     registered_at: gen.registered_at,
                     refreshed_at: chrono::Utc::now(),
+                    storage_key: None,
+                    origin: None,
+                    last_used_at: None,
                 }
             }
         };
@@ -1247,6 +1252,8 @@ impl ExecutableNode for LlmNode {
                     label: label.clone(),
                     description: description.clone(),
                     source: source.clone(),
+                    storage_key: None,
+                    origin: None,
                 };
                 reg.upsert(input)
                     .await
@@ -2754,6 +2761,8 @@ mod resolver_tests {
                 label: None,
                 description: None,
                 source: AttachmentSource::SignedUrl("https://example/url?sig=y".to_string()),
+                storage_key: None,
+                origin: None,
             })
             .await
             .unwrap();
@@ -2825,6 +2834,8 @@ mod resolver_tests {
                 label: None,
                 description: Some("Image generated".to_string()),
                 source: AttachmentSource::SignedUrl("data:image/png;base64,XX".to_string()),
+                storage_key: None,
+                origin: None,
             })
             .await
             .unwrap();

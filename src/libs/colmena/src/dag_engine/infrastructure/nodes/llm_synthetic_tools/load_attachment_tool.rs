@@ -152,6 +152,9 @@ mod tests {
             source: AttachmentSource::SignedUrl("u".to_string()),
             registered_at: Utc::now(),
             refreshed_at: Utc::now(),
+            storage_key: None,
+            origin: None,
+            last_used_at: None,
         }
     }
 

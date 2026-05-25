@@ -16,6 +16,11 @@ pub struct UpsertAttachmentInput {
     pub label: Option<String>,
     pub description: Option<String>,
     pub source: AttachmentSource,
+    /// Plan A: optional reference to `OutputStorageRepository` storage_key.
+    /// Set when the caller persisted the bytes themselves before calling upsert.
+    pub storage_key: Option<String>,
+    /// Plan A: `user_upload` | `generated_by:<tool>`. Defaults handled by caller.
+    pub origin: Option<String>,
 }
 
 #[async_trait]

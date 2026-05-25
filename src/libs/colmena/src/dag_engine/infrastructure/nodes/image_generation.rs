@@ -345,6 +345,8 @@ impl ExecutableNode for ImageGenerationNode {
                     label: None,
                     description: Some(description),
                     source: AttachmentSource::SignedUrl(stored.read_url.clone()),
+                    storage_key: None,
+                    origin: None,
                 };
                 if let Err(e) = reg.upsert(upsert).await {
                     tracing::warn!(
