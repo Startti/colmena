@@ -18,3 +18,9 @@ WHERE origin IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_conv_attachments_session_used
   ON conversation_attachments (agent_session_id, last_used_at);
+
+-- Rollback (SQLite < 3.35 cannot DROP COLUMN — would require table rebuild):
+-- DROP INDEX IF EXISTS idx_conv_attachments_session_used;
+-- ALTER TABLE conversation_attachments DROP COLUMN last_used_at;  -- SQLite >= 3.35
+-- ALTER TABLE conversation_attachments DROP COLUMN origin;        -- SQLite >= 3.35
+-- ALTER TABLE conversation_attachments DROP COLUMN storage_key;   -- SQLite >= 3.35

@@ -85,7 +85,10 @@ fn row_to_attachment(
             .try_get::<DateTime<Utc>, _>("refreshed_at")
             .map_err(|e| AttachmentError::RepositoryFailed(format!("refreshed_at: {}", e)))?,
         // Plan A — optional columns, may be NULL on legacy rows.
-        storage_key: row.try_get::<Option<String>, _>("storage_key").ok().flatten(),
+        storage_key: row
+            .try_get::<Option<String>, _>("storage_key")
+            .ok()
+            .flatten(),
         origin: row.try_get::<Option<String>, _>("origin").ok().flatten(),
         last_used_at: row
             .try_get::<Option<DateTime<Utc>>, _>("last_used_at")
@@ -248,6 +251,9 @@ impl AttachmentRegistry for PostgresAttachmentRegistry {
         Ok(())
     }
 
+    /// Provider is intentionally ignored — returns the most recently refreshed row across all
+    /// providers for the (session, document) pair. Secondary sort by `provider` ASC ensures a
+    /// deterministic winner when multiple rows share the same `refreshed_at`.
     async fn lookup_by_document_id(
         &self,
         agent_session_id: &str,
@@ -260,7 +266,7 @@ impl AttachmentRegistry for PostgresAttachmentRegistry {
                     storage_key, origin, last_used_at
              FROM conversation_attachments
              WHERE agent_session_id = $1 AND document_id = $2
-             ORDER BY refreshed_at DESC
+             ORDER BY refreshed_at DESC, provider ASC
              LIMIT 1",
         )
         .bind(agent_session_id)

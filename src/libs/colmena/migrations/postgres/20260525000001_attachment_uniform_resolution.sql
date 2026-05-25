@@ -17,3 +17,10 @@ WHERE origin IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_conv_attachments_session_used
   ON conversation_attachments (agent_session_id, last_used_at);
+
+-- Rollback:
+-- DROP INDEX IF EXISTS idx_conv_attachments_session_used;
+-- ALTER TABLE conversation_attachments
+--   DROP COLUMN IF EXISTS last_used_at,
+--   DROP COLUMN IF EXISTS origin,
+--   DROP COLUMN IF EXISTS storage_key;

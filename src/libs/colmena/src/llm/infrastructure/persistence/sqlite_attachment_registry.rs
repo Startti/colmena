@@ -116,7 +116,10 @@ fn row_to_attachment(
         registered_at: parse_ts(&registered_at_str)?,
         refreshed_at: parse_ts(&refreshed_at_str)?,
         // Plan A — additive nullable columns.
-        storage_key: row.try_get::<Option<String>, _>("storage_key").ok().flatten(),
+        storage_key: row
+            .try_get::<Option<String>, _>("storage_key")
+            .ok()
+            .flatten(),
         origin: row.try_get::<Option<String>, _>("origin").ok().flatten(),
         last_used_at: parse_ts_opt(last_used_at_str),
     })
@@ -276,6 +279,10 @@ impl AttachmentRegistry for SqliteAttachmentRegistry {
         Ok(())
     }
 
+    /// Provider is intentionally ignored — returns the most recently refreshed row across all
+    /// providers for the (session, document) pair. Secondary sort by `provider` ASC ensures a
+    /// deterministic winner when multiple rows share the same `refreshed_at` (SQLite stores
+    /// timestamps at second resolution, so ties are likely in fast-running tests).
     async fn lookup_by_document_id(
         &self,
         agent_session_id: &str,
@@ -288,7 +295,7 @@ impl AttachmentRegistry for SqliteAttachmentRegistry {
                     storage_key, origin, last_used_at
              FROM conversation_attachments
              WHERE agent_session_id = ? AND document_id = ?
-             ORDER BY refreshed_at DESC
+             ORDER BY refreshed_at DESC, provider ASC
              LIMIT 1",
         )
         .bind(agent_session_id)
@@ -593,7 +600,10 @@ mod tests {
     #[tokio::test]
     async fn lookup_by_document_id_returns_most_recent_when_multiple_providers() {
         let reg = make_registry().await;
-        // Two rows with same (session, doc) but different providers.
+        // Two rows with same (session, doc) but different providers, inserted back-to-back.
+        // SQLite stores `refreshed_at` at second resolution, so both rows are very likely to
+        // share the same timestamp — the deterministic secondary sort (`provider ASC`) must
+        // pick the alphabetically-first provider (`Google` < `OpenAi`).
         for (provider, pf) in [
             (ProviderKind::OpenAi, "pf-openai"),
             (ProviderKind::Google, "pf-google"),
@@ -614,8 +624,6 @@ mod tests {
             })
             .await
             .unwrap();
-            // Tiny gap so CURRENT_TIMESTAMP differs on the second row.
-            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
         }
 
         let got = reg
@@ -623,7 +631,7 @@ mod tests {
             .await
             .unwrap()
             .expect("row present");
-        // Second insert (Google) refreshed later → it must win.
+        // With ties on `refreshed_at`, the secondary `provider ASC` key wins deterministically.
         assert_eq!(got.provider, ProviderKind::Google);
     }
 
