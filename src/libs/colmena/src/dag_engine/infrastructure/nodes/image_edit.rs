@@ -404,13 +404,12 @@ impl ExecutableNode for ImageEditNode {
             }
 
             out_images.push(json!({
-                // Plan A: new canonical handle — the LLM and downstream tools
-                // should prefer this. `attachment_id` (= storage_key) is kept
-                // as a deprecated alias for ADP backwards compatibility until
-                // Plan B retires the legacy contract.
+                // Plan B (D8): attachment_id alias and url field removed.
+                // The storage_key and read_url are still recorded internally
+                // on the auto-registered conversation_attachments row;
+                // downstream consumers (e.g., ADP frontend) resolve URLs by
+                // document_id via a dedicated endpoint.
                 "document_id": document_id,
-                "attachment_id": stored.storage_key,
-                "url": stored.read_url,
                 "mime_type": stored.mime_type,
                 "size_bytes": stored.size_bytes,
                 "description": format!("Image edited with {}: {}", model, prompt_preview),
@@ -447,11 +446,11 @@ impl ExecutableNode for ImageEditNode {
     fn description(&self) -> Option<&str> {
         Some(
             "Edit an existing image given a text prompt. Source image is fetched from a \
-             URL (data: or http(s)). Optional mask marks the edit region. Returns an array \
-             of attachments — each with `document_id` (canonical handle, use this for \
-             $attachment:<id> placeholders), `attachment_id` (deprecated alias = \
-             storage_key), `url` (signed read URL or data: URI), `mime_type`, and \
-             `size_bytes`. Same shape as image_generation so results can be chained.",
+             URL (data: or http(s)). Optional mask marks the edit region. Returns \
+             { images: [{ document_id, mime_type, size_bytes }], provider, model } \
+             — same shape as image_generation so results can be chained. Use \
+             \"$attachment:<document_id>\" in downstream tool args to forward the \
+             image, or call load_attachment(document_id) to read it.",
         )
     }
 
@@ -540,7 +539,20 @@ mod tests {
             .and_then(|v| v.as_array())
             .expect("images array");
         assert_eq!(images.len(), 1);
-        assert_eq!(images[0]["attachment_id"], "k1");
+        // Plan B (D8): attachment_id alias and url field removed; only
+        // document_id remains.
+        assert!(images[0]["document_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("img_"));
+        assert!(
+            images[0].get("attachment_id").is_none(),
+            "Plan B removed the attachment_id legacy alias"
+        );
+        assert!(
+            images[0].get("url").is_none(),
+            "Plan B removed the url field"
+        );
         assert_eq!(out["output"]["provider"], "openai");
     }
 
@@ -788,23 +800,23 @@ mod tests {
             .expect("images array");
         assert_eq!(images.len(), 1);
 
-        // Tool result MUST emit both keys. document_id is the new
-        // human-friendly handle; attachment_id is the legacy storage_key
-        // kept for ADP backwards compat (Plan B retires it).
+        // Plan B (D8): tool result emits only document_id. attachment_id
+        // alias and url field were removed; the storage_key is still
+        // recorded internally on the auto-registered row (asserted below).
         let doc_id = images[0]["document_id"]
             .as_str()
             .expect("document_id present");
-        let attach_id = images[0]["attachment_id"]
-            .as_str()
-            .expect("attachment_id present");
         assert!(
             doc_id.starts_with("img_"),
             "document_id should start with img_, got {doc_id}"
         );
-        assert_eq!(attach_id, "sk-edit-1", "attachment_id is the storage_key");
-        assert_ne!(
-            doc_id, attach_id,
-            "document_id and attachment_id are different namespaces"
+        assert!(
+            images[0].get("attachment_id").is_none(),
+            "Plan B removed the attachment_id legacy alias"
+        );
+        assert!(
+            images[0].get("url").is_none(),
+            "Plan B removed the url field"
         );
 
         // The registry row MUST be reachable by document_id and carry the
@@ -824,10 +836,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_registry_means_no_registration_but_still_emits_both_ids() {
+    async fn no_registry_means_no_registration_but_still_emits_document_id() {
         // Sanity check: when the node is constructed without a registry, the
-        // tool result still carries document_id + attachment_id (so the LLM
-        // contract is unchanged), and we don't crash trying to upsert.
+        // tool result still carries document_id (so the LLM contract is
+        // unchanged), and we don't crash trying to upsert. Plan B (D8)
+        // removed the attachment_id alias and url field.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/images/edits"))
@@ -852,6 +865,10 @@ mod tests {
             .unwrap();
         let img = &out["output"]["images"][0];
         assert!(img["document_id"].is_string());
-        assert_eq!(img["attachment_id"], "sk-2");
+        assert!(
+            img.get("attachment_id").is_none(),
+            "Plan B removed the attachment_id legacy alias"
+        );
+        assert!(img.get("url").is_none(), "Plan B removed the url field");
     }
 }
