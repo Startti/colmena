@@ -4,7 +4,18 @@
 
 **Goal:** Activate the cost-optimization behaviors that Plan A laid the foundation for: (a) the LLM no longer auto-receives doc content in the first turn — only the catalog; (b) `load_attachment` results are ephemeral per turn — the doc bytes leave the conversation history once the turn ends; (c) the tool result schema for `image_generation`/`image_edit`/`tts` drops the legacy `attachment_id` alias and `url` field, leaving only `document_id`.
 
-**Architecture:** Two surgical changes in `llm.rs` and `agent_service.rs` flip the LLM's relationship to documents. The first turn's user message stops carrying files — the catalog block prepended to the system message (shipped in Plan A Task 11) is enough for the model to decide what to load or forward. When the model calls `load_attachment`, the synthetic `user_with_files` message that's injected into the in-memory iteration stream is **not** persisted to `llm_node_history` — a short text marker takes its place. The model retains the analysis it generated from the doc (assistant messages stay intact) but stops paying for the doc content on every subsequent turn. The tool-result cleanup is straightforward field removal in three nodes — purely breaking for ADP frontend consumers of `attachment_id`/`url`.
+**Architecture:** Two surgical changes in `llm.rs` and `agent_service.rs` flip the LLM's relationship to documents. The first turn's user message stops carrying files — the catalog block prepended to the system message (shipped in Plan A Task 11) is enough for the model to decide what to load or forward. When the model calls `load_attachment`, the synthetic `user_with_files` message that's injected into the in-memory iteration stream is **not** persisted to `llm_node_history` — a short text marker takes its place. The model retains the analysis it generated from the doc (assistant messages stay intact) but stops paying for the doc content on every subsequent turn. The tool-result cleanup is straightforward field removal in three nodes.
+
+**ADP-side breakage radius (sweep performed 2026-05-25, post-Plan-A):**
+
+```
+attachment_id / read_url / images.*url consumers in:
+  apps/service/ia/platform/worker/src/   → none (only example strings in skill type defs)
+  apps/service/ia/platform/api/src/      → none
+  apps/service/ia/platform/shared/src/   → none
+```
+
+The Rust services consume colmena's engine API directly and pass tool results through to the frontend as opaque JSON — they do not parse `attachment_id` or `url` themselves. **Plan B's Rust-side blast radius is zero.** The breakage class is purely the ADP **frontend (TypeScript/React)** that renders generated images by reading `url` from the tool result and joins by `attachment_id`. That's where the coordination effort lives.
 
 **Tech Stack:** Rust, no new dependencies. Existing patterns: `LlmMessage`, `ConversationRepository`, `LlmCallNode::execute`, `AgentService::execute`.
 
@@ -16,7 +27,9 @@
 
 **Breaking changes:** Yes, two distinct breakage classes:
 1. **Existing graphs assuming auto-inject** stop seeing doc content in turn 1 unless the model is instructed to call `load_attachment`. Graph authors must update prompts.
-2. **ADP frontend** that parses `attachment_id` and `url` from `image_generation`/`image_edit`/`tts` tool results will break when those fields disappear. Requires coordinated rollout — Plan B Task 9 covers the coordination handoff.
+2. **ADP frontend** (TypeScript/React, NOT the Rust services) that parses `attachment_id` and `url` from `image_generation`/`image_edit`/`tts` tool results will break when those fields disappear. Requires coordinated rollout with the frontend team — Plan B Task 9 covers the handoff.
+
+The Rust side of ADP (`apps/service/ia/platform/{worker,api,shared}/src/`) has been swept and consumes none of the legacy fields. Plan B is safe to land in colmena `develop` from the Rust-services perspective; the next `cargo build` in the worker just recompiles against the new colmena revision without source changes.
 
 ---
 
@@ -36,7 +49,7 @@
 - `src/libs/colmena/tests/plan_b_behavioral_test.rs` — integration test driver covering (a) no-autoinject + catalog-only behavior, (b) load_attachment per-turn ephemeral marker.
 
 **Coordination handoff (no colmena change):**
-- An ADP migration plan referenced from the commit message, telling the ADP team which files to update (`apps/service/ia/platform/{worker,api}/src/`).
+- An ADP migration plan referenced from the commit message, telling the **frontend team** which client code to update. The Rust services (`apps/service/ia/platform/{worker,api,shared}/src/`) need no source changes — only a `cargo build` re-run after colmena develop bumps.
 
 ---
 
@@ -701,6 +714,24 @@ Plan B — Documentation."
 **Files:**
 - Create: `docs/superpowers/specs/2026-05-25-plan-b-adp-migration-notes.md` — handoff document.
 
+### Sweep result (2026-05-25, pre-Task-9 authoring)
+
+Before writing the migration notes, a sweep was performed against the ADP Rust services:
+
+```bash
+rg "attachment_id|read_url|images.*url|\"url\"" \
+   /Users/danielgarcia/startti/adp/apps/service/ia/platform/{worker,api,shared}/src/
+```
+
+**Result:** zero hits in production code. The worker has two example URL strings in `skills/types.rs` documentation defaults, neither of which parse tool result fields. The Rust services treat tool results as opaque JSON that flows through to the frontend.
+
+**Consequence for Plan B sequencing:**
+- Plan B is **safe to merge into colmena `develop`** without an accompanying ADP Rust code change.
+- The ADP worker's next Cloud Build (auto-pull of colmena develop) recompiles successfully.
+- The only ADP-side surface that breaks is the **frontend (TypeScript/React)** — wherever it parses `attachment_id` or reads `url` from `image_generation`/`image_edit`/`tts` tool results. That codebase lives outside `apps/service/ia/platform/` (e.g., `apps/web/`, `packages/ui/` — frontend team owns it).
+
+The migration notes (below) reflect this: the ADP-Rust section is a confirmation checklist, the ADP-frontend section is the actual work.
+
 - [ ] **Step 1: Write the migration notes**
 
 Create the file with content like:
@@ -708,9 +739,14 @@ Create the file with content like:
 ```markdown
 # Plan B — ADP Migration Notes
 
-**Audience:** ADP team (apps/service/ia/platform/{worker,api}/src/, frontend).
+**Audience:** ADP frontend team (TypeScript/React surface that renders agent tool results) + ADP platform team (Rust services that pull colmena develop).
 **Source of truth:** colmena's `workingbranch/upload_documents_with_inline` branch (or its merge into `develop`).
-**Breaking changes:** two distinct surfaces.
+
+## TL;DR
+
+- **ADP Rust services (`apps/service/ia/platform/{worker,api,shared}/src/`):** no source changes needed. Confirmed by sweep — none of these crates parse `attachment_id` or `url` from tool results. Action required: just rebuild against the new colmena revision (Cloud Build does this automatically on the next develop push). One-line `Cargo.toml` change if you want to pin a specific colmena commit instead of the floating `branch = "develop"` ref.
+- **ADP frontend (TypeScript/React):** real work. Tool result JSON consumed by the frontend loses two fields (`attachment_id`, `url`) and gains semantic clarity on `document_id`. Frontend must replace direct `url` rendering with an API-mediated lookup. **This is the only blocking item.**
+- **LLM behavior:** the model no longer auto-receives doc content in turn 1. Affects every graph that assumes autoinject; prompts need a one-line addition instructing the model to call `load_attachment`.
 
 ## 1. Tool result schema for image_generation / image_edit / tts
 
@@ -736,100 +772,134 @@ Create the file with content like:
 }]}
 ```
 
-### What ADP needs to change
+`tts` follows the same pattern with `"audio"` as the outer key and preserves audio-specific fields like `duration_ms`.
 
-- **Frontend rendering** — pages that render generated images today consume `url` directly. Replace with:
-  - A new ADP API endpoint, e.g. `GET /api/attachments/:document_id/url` that:
-    - Authenticates the user against the `agent_session_id` that owns the document.
-    - Queries `conversation_attachments` for the row matching `(agent_session_id, document_id)`.
-    - Returns a signed URL to the storage_key the row references, or proxies the bytes.
-  - Frontend fetches the URL from this endpoint instead of taking it from the tool result.
+### What ADP frontend needs to change
 
-- **Any code that joins by `attachment_id`** — switch to joining by `document_id`. The `conversation_attachments` table has a unique index on `(agent_session_id, document_id, provider)`.
+The frontend currently renders generated artifacts (typically images) by passing the tool result's `url` directly into an `<img src={url}>` or equivalent. After Plan B, no `url` is in the tool result. Replace with:
 
-### Rollout order
+1. **A new ADP API endpoint** — `GET /api/attachments/:document_id/url` (or equivalent name):
+   - Authenticates the user against the `agent_session_id` that owns the document.
+   - Queries `conversation_attachments` (joined by `(agent_session_id, document_id)`) for the row.
+   - Returns a signed URL pointing at the underlying storage backend (or proxies the bytes inline if preferred).
 
-1. ADP frontend ships the new "fetch URL by document_id" path behind a feature flag, reading `document_id` while still falling back to `url` when present.
-2. Colmena Plan B merges to `develop`. ADP worker auto-pulls colmena develop on next Cloud Build.
-3. After ADP's Cloud Build completes, frontend feature flag is flipped on for canary users.
-4. After canary validation, flag rolls out to 100%. Frontend code removes the `url` fallback path.
-5. Future colmena change can drop the `description()`-level mention of the legacy fields.
+2. **Frontend rendering migration:**
+   - Where the code reads `image.url` directly, replace with a fetch to the new endpoint using `image.document_id`.
+   - Where the code reads `image.attachment_id` as a stable identifier for caching / dedup, switch to `image.document_id`.
+
+3. **Suggested frontend implementation sketch** (React):
+
+   ```tsx
+   function AttachmentImage({ documentId, mimeType }: ImageRef) {
+     const { data, error } = useSWR(
+       `/api/attachments/${documentId}/url`,
+       fetcher
+     );
+     if (error) return <Failed />;
+     if (!data) return <Loading />;
+     return <img src={data.url} alt="" />;
+   }
+   ```
+
+### What ADP Rust services need to change
+
+Sweep result (executed 2026-05-25):
+
+```
+attachment_id / read_url / images.*url consumers in:
+  apps/service/ia/platform/worker/src/   → none (only example strings)
+  apps/service/ia/platform/api/src/      → none
+  apps/service/ia/platform/shared/src/   → none
+```
+
+**No code changes required.** When colmena develop bumps to include Plan B:
+
+1. The worker's `Cargo.toml` already points at `colmena = { git = "...", branch = "develop" }` — Cloud Build picks up the new revision automatically.
+2. If you want to pin to a specific Plan B commit instead of `branch = "develop"` for reproducibility, update `Cargo.toml` to `rev = "<post-plan-b-sha>"`. Optional.
+3. Verify with a local `cargo check` from the worker root before pushing to ADP develop.
 
 ## 2. LLM behavior — no-autoinject + ephemeral load_attachment
 
 ### Before (Plan A)
 
-When a graph received `inputs.files[]`, the LLM's first user message included the
-doc bytes via `LlmMessage::user_with_files`. The model could analyze the doc
-immediately on turn 1 without explicit action.
+When a graph received `inputs.files[]`, the LLM's first user message included the doc bytes via `LlmMessage::user_with_files`. The model could analyze the doc immediately on turn 1 without explicit action.
 
 ### After (Plan B)
 
-The model sees only the catalog (in the system message). To read content, the
-model must call `load_attachment(document_id)`. The doc content is then injected
-into that turn's iteration stream — but disappears from history after the turn
-completes (a marker replaces it).
+The model sees only the catalog (in the system message). To read content, the model must call `load_attachment(document_id)`. The doc content is then injected into that turn's iteration stream — but disappears from history after the turn completes (a marker replaces it).
 
 ### What ADP needs to change
 
-- **Graph prompts** — any graph that assumed the model would automatically see
-  attached docs needs its system_prompt updated. The model should be instructed:
-  *"To analyze attached documents, call load_attachment(document_id) — the
-  document IDs are listed in the catalog below."*
+- **Graph prompts** — any graph in `apps/service/ia/platform/worker/src/skills/` (or wherever ADP-owned canvas graphs live) that assumed the model would automatically see attached docs needs its `system_prompt` updated. Recommended one-liner:
 
-- **Frontend UX** — if ADP shows "the agent is processing your document..."
-  during turn 1, that flow may now show an extra round-trip (turn 1: model
-  calls load_attachment; turn 2: model responds). Adjust spinners or add UI
-  states for the multi-turn path.
+  > *"To analyze attached documents, call `load_attachment(document_id)` — the document IDs are listed in the catalog block at the top of this message."*
 
-- **Long-lived session cost monitoring** — Plan B reduces input-token cost on
-  sessions where the same doc is referenced across many turns. ADP's cost
-  dashboards may show a step-down. This is expected.
+  Run a sweep to identify affected graphs:
+
+  ```bash
+  rg -l "files\[\]|attachment|input.*file" \
+     /Users/danielgarcia/startti/adp/apps/service/ia/platform/worker/src/skills/
+  ```
+
+  For each hit, audit the system_prompt and append the load_attachment instruction if the graph routinely receives files.
+
+- **Frontend UX** — if ADP shows "the agent is processing your document..." during turn 1, that flow may now show an extra round-trip (turn 1: model calls load_attachment; turn 2: model responds). Two options:
+  1. **Accept the latency increase** (typical: +1-3s for the extra round-trip). For most users this is invisible inside the existing "thinking..." spinner.
+  2. **Add a UI state** for "loading document" between turns 1 and 2 if the spinner UX would feel stuck.
+
+- **Long-lived session cost monitoring** — Plan B reduces input-token cost on sessions where the same doc is referenced across many turns. ADP's cost dashboards may show a step-down for multi-turn doc-Q&A workloads. This is the intended effect of Plan B.
 
 ## 3. Database migration
 
-Plan A introduced the migration `20260525000001_attachment_uniform_resolution.sql`
-(additive columns on `conversation_attachments`). Plan B adds NO new migration —
-schema unchanged from Plan A.
+Plan A introduced the migration `20260525000001_attachment_uniform_resolution.sql` (additive columns on `conversation_attachments`). **Plan B adds NO new migration — schema unchanged from Plan A.**
 
-Confirm the Plan A migration ran cleanly in ADP's environments before deploying
-Plan B colmena:
+Confirm the Plan A migration ran cleanly in ADP's environments before deploying Plan B colmena:
 
 ```bash
 psql $DATABASE_URL -c "\d conversation_attachments" | grep -E "storage_key|origin|last_used_at"
 ```
 
-All three columns should be present. If not, apply manually:
+All three columns should be present. If they aren't, apply manually before deploying Plan B:
 
 ```bash
 psql $DATABASE_URL < src/libs/colmena/migrations/postgres/20260525000001_attachment_uniform_resolution.sql
 ```
 
-## 4. Validation checklist (ADP team)
+(Or, since ADP uses `prisma migrate deploy` exclusively, hand-author an equivalent Prisma migration with the same DDL and run `pnpm prisma migrate deploy`.)
 
-Before flipping the feature flag in production:
+## 4. Rollout order
 
-- [ ] ADP frontend reads `document_id` from `image_generation`/`image_edit`/`tts`
-      tool results.
-- [ ] ADP API exposes the `GET /api/attachments/:document_id/url` endpoint (or
-      equivalent).
-- [ ] At least one canary graph runs `image_generation` + downstream
-      `http_request` multipart with `$attachment:<document_id>` and confirms
-      the image arrives at the destination intact.
-- [ ] Cost dashboards show no unexpected token-usage spike. (Expected: a small
-      one for catalog tokens in turn 1, offset by savings on subsequent turns.)
-- [ ] Long-running agent sessions (>5 turns with the same doc loaded) show
-      reduced per-turn input token cost.
+Recommended sequencing — frontend leads, colmena follows:
 
-## 5. Rollback plan
+1. **ADP frontend** ships the new `AttachmentImage` component (or equivalent) reading `document_id` and calling the new API endpoint. Behind a feature flag for canary users. **Pre-condition: this must work against Plan A tool results, which still include `url`** — so the new path reads `document_id` and ignores `url` from the start.
 
-If Plan B breaks production:
+2. **ADP API** ships the `GET /api/attachments/:document_id/url` endpoint. Mounted regardless of feature flag state.
 
-1. ADP frontend flips the feature flag off → falls back to reading `url` from
-   the tool result. **This won't work because `url` is gone.** So:
-2. The actual rollback is reverting colmena's `develop` to the pre-Plan-B SHA
-   and force-pushing. ADP Cloud Build re-runs against the older colmena.
-3. Plan A foundation remains intact during rollback — no data loss.
+3. **Canary validation** — flip the feature flag for ~5% of users. Verify generated images render correctly via the new path.
+
+4. **Colmena Plan B merges to develop.** ADP worker's next Cloud Build auto-pulls the new colmena revision. Now tool results no longer include `url` or `attachment_id`.
+
+5. **Frontend feature flag rolls to 100%.** Old code path (reading `url` directly) is removed in a follow-up release.
+
+6. **Graph prompt sweep** — happens in parallel with steps 1-5; ADP team owns the schedule. Each affected graph gets the load_attachment instruction.
+
+## 5. Validation checklist (before promoting Plan B colmena to production)
+
+- [ ] ADP frontend `AttachmentImage` component (or equivalent) reads `document_id` and resolves the URL via the new endpoint. Flagged ON for canary users.
+- [ ] `GET /api/attachments/:document_id/url` endpoint deployed, authenticated, and queryable against `conversation_attachments`.
+- [ ] At least one canary graph runs `image_generation` + downstream `http_request` multipart with `$attachment:<document_id>` and confirms the image arrives at the destination intact.
+- [ ] Cost dashboards: monitored for ~24h after Plan B colmena rolls out. Expected: small bump in turn-1 catalog tokens, offset by savings on multi-turn doc references. Net should be flat or slightly down.
+- [ ] At least 3 affected graphs have their system_prompt updated to instruct the model to call `load_attachment`. If no graphs are affected, confirm explicitly with a sweep.
+- [ ] Worker `cargo check` clean against post-Plan-B colmena (no signature drift).
+
+## 6. Rollback plan
+
+If Plan B breaks production after rollout:
+
+1. **Frontend rollback** alone is insufficient — once Plan B colmena is live, the old `url` field is gone from tool results regardless of frontend state. The frontend feature flag toggles whether the frontend reads `document_id` or `url`; rolling it off makes the frontend look for `url` which no longer exists.
+2. **The real rollback is reverting colmena `develop`** to the pre-Plan-B SHA and force-pushing. ADP Cloud Build re-runs the worker against the older colmena. Frontend feature flag stays in whatever state it was.
+3. **Plan A foundation remains intact** during rollback — no data loss in `conversation_attachments`, no migration to undo. The `storage_key`/`origin`/`last_used_at` columns just become unused by the older colmena code paths.
+4. **Frontend feature flag** can stay ON during a rollback because it reads `document_id`, which is also present in Plan A tool results. The frontend remains functional in both Plan A and Plan B modes.
 ```
 
 - [ ] **Step 2: Commit**
@@ -894,12 +964,14 @@ After the implementation completes, fresh-eyes pass on the diff:
 
 ## Risks
 
-1. **Graph regressions in production.** Any graph relying on the autoinject behavior will return "no veo el archivo"-style responses until its prompt is updated. Mitigation: run a sweep of ADP graphs before push, list the ones that pass files[] and don't have a load_attachment instruction, surface them in the migration notes.
+1. **Graph regressions in production.** Any graph relying on the autoinject behavior will return "no veo el archivo"-style responses until its prompt is updated. Mitigation: run a sweep of ADP graphs in `apps/service/ia/platform/worker/src/skills/` before push, list the ones that pass files[] and don't have a load_attachment instruction, surface them in the migration notes for the ADP team to patch.
 
-2. **ADP frontend break.** Will lose generated-image rendering until the URL-by-document_id endpoint ships. Mitigation: coordinate timing via Plan-B-ADP-migration-notes; feature-flag the frontend change behind a flag the ADP team controls.
+2. **ADP frontend break.** Will lose generated-image rendering until the URL-by-document_id endpoint and the new `AttachmentImage` component ship. Mitigation: the rollout order in Task 9's migration notes puts the frontend first (behind a feature flag) — the frontend can ship the new code path against Plan A tool results (which still include `url`), validate via canary, and only then does colmena Plan B merge. Frontend feature flag stays ON throughout; the colmena change is what flips behavior.
 
 3. **Marker confusion for the model.** If the model is poorly instructed about the ephemeral semantics, it may try to re-reason about the doc content in turn N+1 without realizing the bytes are gone. Mitigation: ATTACHMENTS_SYSTEM_PRELUDE update in Task 2 explicitly warns about this; the marker text itself reminds the model to "Call load_attachment again if you need to re-read."
 
 4. **Cost regressions in cold sessions.** Turns where the model would have used the autoinjected content now pay an extra round-trip. For one-shot Q&A flows ("here's a PDF, summarize it"), turn-1 latency increases by one round-trip. Mitigation: graph authors can mitigate by adding an explicit "first action: call load_attachment for the user's uploaded file" instruction in the system_prompt.
 
-5. **Test regressions outside the touched modules.** Some end-to-end tests in ADP may assume autoinject. Mitigation: the ADP sweep step in Task 9 surfaces these so the ADP team can update.
+5. **ADP Rust-side surprises.** Sweep performed 2026-05-25 found zero consumers of the legacy fields in `worker/src/`, `api/src/`, `shared/src/`. Confirmed by `rg "attachment_id|read_url|images.*url|\"url\"" apps/service/ia/platform/{worker,api,shared}/src/` → no production hits. Risk is therefore **low** for the Rust services — the only path that could surface a regression is if a developer adds new code consuming those fields between the sweep date and the Plan B merge. Mitigation: re-run the sweep immediately before pushing Plan B colmena to `develop`; if any new hits appear, address them in the same coordinated rollout.
+
+6. **Test regressions outside the touched modules.** Some end-to-end tests in ADP may assume autoinject or parse the legacy tool result fields. Mitigation: ask the ADP team to run their integration suite against a Plan B preview build of colmena before the develop merge.
