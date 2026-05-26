@@ -315,11 +315,16 @@
     },
 
     "sql_query": {
-      "summary": "Execute SQL against a PostgreSQL database. Designed primarily as an LLM tool: the connection, permissions, and guardrails are fixed; the LLM supplies only the 'query' string. Supports a rich permission model and optional LLM-critic validation.",
+      "summary": "Execute SQL against a PostgreSQL database. Designed primarily as an LLM tool: the connection, permissions, and guardrails are fixed; the LLM supplies only the 'query' string. Queries are parsed with sqlparser (PostgreSQL dialect) and validated per-statement so multi-statement injections cannot smuggle DDL past a benign first statement. Supports a rich permission model and optional LLM-critic validation.",
       "special_behaviors": [
         "When used as a tool, node_schema should fix 'connection_url' and 'permissions', exposing only 'query' to the LLM.",
         "The 'auto_context' field injects live schema information into the LLM prompt automatically when set.",
         "Permission presets: 'read_only' (SELECT only), 'read_write' (SELECT + INSERT + UPDATE + DELETE), 'full' (all including DDL).",
+        "Allowed statement types: SELECT/WITH, INSERT (single- and multi-row VALUES), UPDATE (WHERE required), DELETE (WHERE required), CREATE TABLE, CREATE FUNCTION (must ship with COMMENT ON in the same script), COMMENT ON.",
+        "Always blocked regardless of preset: DROP, ALTER, TRUNCATE, CREATE SCHEMA, CREATE INDEX, CREATE VIEW, GRANT, REVOKE. Create schemas/indexes/views via migrations, not via the LLM.",
+        "Multi-statement scripts are validated per-statement, so `SELECT 1; DROP TABLE x;` is rejected for the DROP and does not execute.",
+        "Multi-row INSERT (`VALUES (a,b), (c,d), ...`) is fully supported for bulk loads; only `statement_timeout_ms` caps it.",
+        "Unparseable input returns `Failed to parse SQL: …` and refuses to execute — no lenient string-matching fallback.",
         "tenant_user_id + auto_rls enable automatic row-level security without manual WHERE clauses."
       ],
       "examples": {
