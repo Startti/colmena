@@ -47,6 +47,7 @@
 //! {
 //!   "output": {
 //!     "images": [{
+//!       "document_id": "img_image_0",
 //!       "attachment_id": "...",
 //!       "url": "...",
 //!       "mime_type": "image/png",
@@ -58,6 +59,11 @@
 //!   }
 //! }
 //! ```
+//!
+//! `document_id` is the canonical handle used by Plan A's
+//! `$attachment:<document_id>` placeholder (e.g., http_request multipart) and
+//! by the LLM-visible attachment catalog. `attachment_id` (= storage_key) is a
+//! deprecated alias kept for ADP backwards compat; Plan B will retire it.
 
 use std::error::Error as StdError;
 use std::sync::Arc;
@@ -71,7 +77,7 @@ use tokio::sync::Mutex;
 use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
-use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
+use crate::llm::domain::attachments::{origin, AttachmentSource, UpsertAttachmentInput};
 use crate::llm::domain::{AttachmentRegistry, ProviderKind};
 use crate::storage::domain::{OutputStorageRepository, StoreRequest};
 
@@ -325,15 +331,23 @@ impl ExecutableNode for ImageGenerationNode {
                 .await
                 .map_err(|e| -> Box<dyn StdError + Send + Sync> { Box::new(e) })?;
 
+            // Plan A: derive a human-friendly document_id from the filename
+            // so the LLM can reference the artifact by a stable handle that is
+            // not the opaque storage_key UUID.
+            let document_id =
+                build_document_id(&stored.filename, &stored.mime_type, &stored.storage_key);
+
             // Register the generated artifact so `load_attachment` can later
-            // resolve it. Fail-soft: a registry error must not fail generation.
+            // resolve it AND so `$attachment:<document_id>` placeholders work
+            // in downstream nodes (e.g., http_request multipart parts).
+            // Fail-soft: a registry error must not fail generation.
             if let (Some(reg), Some(agent_sid)) =
                 (self.attachment_registry.as_ref(), agent_session_id.as_ref())
             {
                 let description = format!("Image generated with {}: {}", model, prompt_preview);
                 let upsert = UpsertAttachmentInput {
                     agent_session_id: agent_sid.clone(),
-                    document_id: stored.storage_key.clone(),
+                    document_id: document_id.clone(),
                     provider: ProviderKind::Generated,
                     // For `provider: Generated` rows, provider_file_id holds
                     // the canonical storage_key. Cross-provider upload reads
@@ -344,14 +358,17 @@ impl ExecutableNode for ImageGenerationNode {
                     size_bytes: Some(stored.size_bytes),
                     label: None,
                     description: Some(description),
-                    source: AttachmentSource::SignedUrl(stored.read_url.clone()),
-                    storage_key: None,
-                    origin: None,
+                    // Resolver-friendly source: read bytes back through the
+                    // storage port using the storage_key as the path.
+                    source: AttachmentSource::Path(stored.storage_key.clone()),
+                    storage_key: Some(stored.storage_key.clone()),
+                    origin: Some(origin::generated_by("image_generation")),
                 };
                 if let Err(e) = reg.upsert(upsert).await {
                     tracing::warn!(
                         target: "colmena::image_generation",
                         error = %e,
+                        document_id = %document_id,
                         storage_key = %stored.storage_key,
                         "failed to register generated image in attachment registry — \
                          load_attachment will not see this output"
@@ -360,6 +377,11 @@ impl ExecutableNode for ImageGenerationNode {
             }
 
             out_images.push(json!({
+                // Plan A: new canonical handle — the LLM and downstream tools
+                // should prefer this. `attachment_id` (= storage_key) is kept
+                // as a deprecated alias for ADP backwards compatibility until
+                // Plan B retires the legacy contract.
+                "document_id": document_id,
                 "attachment_id": stored.storage_key,
                 "url": stored.read_url,
                 "mime_type": stored.mime_type,
@@ -399,8 +421,10 @@ impl ExecutableNode for ImageGenerationNode {
         Some(
             "Generate one or more images from a text prompt. Supports OpenAI \
              (gpt-image-1, dall-e-3) and Google Vertex AI Imagen 4. Returns an \
-             array of attachments — each with `attachment_id` (stable handle), \
-             `url` (signed read URL or data: URI), `mime_type`, and `size_bytes`.",
+             array of attachments — each with `document_id` (canonical handle, \
+             use this for $attachment:<id> placeholders), `attachment_id` \
+             (deprecated alias = storage_key), `url` (signed read URL or data: \
+             URI), `mime_type`, and `size_bytes`.",
         )
     }
 
@@ -594,6 +618,48 @@ impl ImageGenerationNode {
         });
         Ok(access)
     }
+}
+
+// ---------------------------------------------------------------------------
+// document_id helpers
+// ---------------------------------------------------------------------------
+//
+// Plan A: generated artifacts get an `img_<sanitized_filename_stem>` handle so
+// the LLM and downstream tools have a stable, human-readable ID instead of the
+// opaque storage_key UUID. Kept private to this module for now — when Tasks 5
+// (image_edit) and 6 (tts) land, consider promoting to a shared `util` module.
+
+fn build_document_id(filename: &str, mime_type: &str, storage_key: &str) -> String {
+    let ext_dot = format!(".{}", file_ext(mime_type));
+    let stem = filename.strip_suffix(&ext_dot).unwrap_or(filename);
+    let sanitized = sanitize(stem);
+    if sanitized.is_empty() {
+        format!("img_{}", storage_key)
+    } else {
+        format!("img_{}", sanitized)
+    }
+}
+
+fn file_ext(mime: &str) -> &'static str {
+    match mime {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "bin",
+    }
+}
+
+fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -944,5 +1010,176 @@ mod tests {
         assert_eq!(out["output"]["images"].as_array().unwrap().len(), 1);
 
         std::env::remove_var("__COLMENA_TEST_IMG_GEN_KEY__");
+    }
+
+    // -----------------------------------------------------------------------
+    // Plan A — auto-registration in conversation_attachments
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn image_generation_auto_registers_artifact_in_registry() {
+        use crate::llm::domain::attachments::AttachmentSource;
+        use crate::llm::domain::{AttachmentRegistry, ProviderKind};
+        use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{ "b64_json": "AAAA" }]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_store()
+            .times(1)
+            .returning(|_| Ok(stored_ok("sk-gen-1")));
+
+        let registry: Arc<dyn AttachmentRegistry> = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+
+        let node = ImageGenerationNode::new(Arc::new(storage))
+            .with_openai_base_url(server.uri())
+            .with_attachment_registry(registry.clone());
+
+        let config = json!({
+            "provider": "openai",
+            "model": "gpt-image-1",
+            "api_key": "sk-test",
+            "prompt": "a revenue chart",
+        });
+
+        let mut inputs: NodeInputs = HashMap::new();
+        // Auto-registration only fires when an agent_session_id is engine-injected.
+        inputs.insert(
+            "__colmena_agent_session_id".into(),
+            json!("agent_autoreg_1"),
+        );
+
+        let out = node
+            .execute(&inputs, &config, &mut json!({}), None)
+            .await
+            .expect("execute ok");
+
+        let images = out
+            .pointer("/output/images")
+            .and_then(|v| v.as_array())
+            .expect("images array");
+        assert_eq!(images.len(), 1);
+
+        // Tool result MUST emit both keys. They are intentionally different:
+        // document_id is the new human-friendly handle; attachment_id is the
+        // legacy storage_key kept for ADP backwards compat (Plan B retires it).
+        let doc_id = images[0]["document_id"]
+            .as_str()
+            .expect("document_id present");
+        let attach_id = images[0]["attachment_id"]
+            .as_str()
+            .expect("attachment_id present");
+        assert!(
+            doc_id.starts_with("img_"),
+            "document_id should start with img_, got {doc_id}"
+        );
+        assert_eq!(attach_id, "sk-gen-1", "attachment_id is the storage_key");
+        assert_ne!(
+            doc_id, attach_id,
+            "document_id and attachment_id are different namespaces"
+        );
+
+        // The registry row MUST be reachable by document_id and carry the
+        // generated_by:image_generation origin + storage_key.
+        let entry = registry
+            .lookup_by_document_id("agent_autoreg_1", doc_id)
+            .await
+            .unwrap()
+            .expect("attachment was auto-registered");
+        assert_eq!(entry.storage_key.as_deref(), Some("sk-gen-1"));
+        assert_eq!(
+            entry.origin.as_deref(),
+            Some("generated_by:image_generation")
+        );
+        assert!(matches!(entry.provider, ProviderKind::Generated));
+        match entry.source {
+            AttachmentSource::Path(ref p) => assert_eq!(p, "sk-gen-1"),
+            ref other => panic!("expected AttachmentSource::Path, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_registry_means_no_registration_but_still_emits_both_ids() {
+        // Sanity check: when the node is constructed without a registry, the
+        // tool result still carries document_id + attachment_id (so the LLM
+        // contract is unchanged), and we don't crash trying to upsert.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{ "b64_json": "AAAA" }]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_store()
+            .times(1)
+            .returning(|_| Ok(stored_ok("sk-2")));
+
+        let node = ImageGenerationNode::new(Arc::new(storage)).with_openai_base_url(server.uri());
+
+        let config = json!({
+            "provider": "openai",
+            "model": "gpt-image-1",
+            "api_key": "sk-test",
+            "prompt": "x",
+        });
+        let out = node
+            .execute(&HashMap::new(), &config, &mut json!({}), None)
+            .await
+            .unwrap();
+        let img = &out["output"]["images"][0];
+        assert!(img["document_id"].is_string());
+        assert_eq!(img["attachment_id"], "sk-2");
+    }
+
+    #[test]
+    fn build_document_id_strips_extension_and_sanitizes() {
+        assert_eq!(
+            build_document_id("image_0.png", "image/png", "sk-1"),
+            "img_image_0"
+        );
+        assert_eq!(
+            build_document_id("Revenue Chart!.jpg", "image/jpeg", "sk-1"),
+            "img_Revenue_Chart_"
+        );
+        // Mime/filename mismatch: extension is not stripped, but sanitized.
+        assert_eq!(
+            build_document_id("foo.bar", "image/png", "sk-1"),
+            "img_foo_bar"
+        );
+    }
+
+    #[test]
+    fn build_document_id_falls_back_to_storage_key_when_stem_empty() {
+        // ".png" has empty stem after stripping. Sanitizer yields "". We fall
+        // back to the storage_key so the document_id is never just "img_".
+        assert_eq!(
+            build_document_id(".png", "image/png", "sk-fallback"),
+            "img_sk-fallback"
+        );
+    }
+
+    #[test]
+    fn file_ext_maps_known_mimes() {
+        assert_eq!(file_ext("image/png"), "png");
+        assert_eq!(file_ext("image/jpeg"), "jpg");
+        assert_eq!(file_ext("image/webp"), "webp");
+        assert_eq!(file_ext("image/gif"), "gif");
+        assert_eq!(file_ext("application/octet-stream"), "bin");
     }
 }
