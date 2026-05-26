@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
+use crate::dag_engine::infrastructure::nodes::util::attachment_id::build_document_id;
 use crate::llm::domain::attachments::{origin, AttachmentSource, UpsertAttachmentInput};
 use crate::llm::domain::{AttachmentRegistry, ProviderKind};
 use crate::storage::domain::{OutputStorageRepository, StoreRequest};
@@ -356,8 +357,12 @@ impl ExecutableNode for ImageEditNode {
             // Plan A: derive a human-friendly document_id from the filename
             // so the LLM can reference the artifact by a stable handle that is
             // not the opaque storage_key UUID.
-            let document_id =
-                build_document_id(&stored.filename, &stored.mime_type, &stored.storage_key);
+            let document_id = build_document_id(
+                &stored.filename,
+                &stored.mime_type,
+                &stored.storage_key,
+                "img",
+            );
 
             // Register the edited artifact so `load_attachment` can later
             // resolve it AND so `$attachment:<document_id>` placeholders work
@@ -457,70 +462,6 @@ impl ExecutableNode for ImageEditNode {
     fn default_output(&self) -> Option<&str> {
         Some("output")
     }
-}
-
-// ---------------------------------------------------------------------------
-// document_id helpers
-// ---------------------------------------------------------------------------
-//
-// Plan A: generated artifacts get an `img_<sanitized_filename_stem>` handle so
-// the LLM and downstream tools have a stable, human-readable ID instead of the
-// opaque storage_key UUID. Duplicated from image_generation.rs intentionally;
-// Task 6 will extract these helpers to a shared util once tts.rs joins the
-// pattern.
-
-fn build_document_id(filename: &str, mime_type: &str, storage_key: &str) -> String {
-    let ext_dot = format!(".{}", file_ext(mime_type));
-    let stem = filename.strip_suffix(&ext_dot).unwrap_or(filename);
-    let sanitized = sanitize(stem);
-    if sanitized.is_empty() {
-        format!("img_{}", storage_key)
-    } else {
-        let suffix = storage_key_suffix(storage_key);
-        format!("img_{}_{}", sanitized, suffix)
-    }
-}
-
-fn file_ext(mime: &str) -> &'static str {
-    match mime {
-        "image/png" => "png",
-        "image/jpeg" => "jpg",
-        "image/webp" => "webp",
-        "image/gif" => "gif",
-        _ => "bin",
-    }
-}
-
-fn sanitize(s: &str) -> String {
-    let raw: String = s
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    raw.trim_matches('_').to_string()
-}
-
-/// Last 6 alphanumeric chars of the storage_key, providing collision-resistance
-/// for document_id across same-filename generations within a session. The full
-/// storage_key (often a UUID with dashes) would be too verbose for the catalog.
-fn storage_key_suffix(storage_key: &str) -> String {
-    let alphanumeric: String = storage_key
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .collect();
-    alphanumeric
-        .chars()
-        .rev()
-        .take(6)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect()
 }
 
 #[cfg(test)]
@@ -912,55 +853,5 @@ mod tests {
         let img = &out["output"]["images"][0];
         assert!(img["document_id"].is_string());
         assert_eq!(img["attachment_id"], "sk-2");
-    }
-
-    #[test]
-    fn build_document_id_strips_extension_and_sanitizes() {
-        let a = build_document_id("edit_0.png", "image/png", "sk-abc123");
-        assert!(a.starts_with("img_edit_0_"), "got {a}");
-        assert!(a.len() > "img_edit_0_".len());
-
-        // "Revenue Chart!.jpg" -> trailing '_' from '!' trimmed before suffix.
-        let b = build_document_id("Revenue Chart!.jpg", "image/jpeg", "sk-abc123");
-        assert!(b.starts_with("img_Revenue_Chart_"), "got {b}");
-        assert!(
-            !b.starts_with("img_Revenue_Chart__"),
-            "trailing _ not trimmed: {b}"
-        );
-
-        // Mime/filename mismatch: extension is not stripped, but sanitized.
-        let c = build_document_id("foo.bar", "image/png", "sk-abc123");
-        assert!(c.starts_with("img_foo_bar_"), "got {c}");
-    }
-
-    #[test]
-    fn build_document_id_falls_back_to_storage_key_when_stem_empty() {
-        // ".png" has empty stem after stripping. Sanitizer yields "". We fall
-        // back to the storage_key so the document_id is never just "img_".
-        assert_eq!(
-            build_document_id(".png", "image/png", "sk-fallback"),
-            "img_sk-fallback"
-        );
-    }
-
-    #[test]
-    fn build_document_id_avoids_collision_between_same_filename_different_keys() {
-        let a = build_document_id("edit_0.png", "image/png", "sk-abc123def456");
-        let b = build_document_id("edit_0.png", "image/png", "sk-xyz789ghi012");
-        assert_ne!(
-            a, b,
-            "different storage_keys must yield different document_ids"
-        );
-        assert!(a.starts_with("img_edit_0_"));
-        assert!(b.starts_with("img_edit_0_"));
-    }
-
-    #[test]
-    fn file_ext_maps_known_mimes() {
-        assert_eq!(file_ext("image/png"), "png");
-        assert_eq!(file_ext("image/jpeg"), "jpg");
-        assert_eq!(file_ext("image/webp"), "webp");
-        assert_eq!(file_ext("image/gif"), "gif");
-        assert_eq!(file_ext("application/octet-stream"), "bin");
     }
 }
