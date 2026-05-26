@@ -15,6 +15,10 @@ path = "src/main.rs"
 name = "dag_engine"
 path = "src/dag_engine/main.rs"
 
+[[bin]]
+name = "attachment_gc"
+path = "src/attachment_gc/main.rs"
+
 [[example]]
 name = "gcs_spike"
 path = "examples/gcs_spike.rs"
