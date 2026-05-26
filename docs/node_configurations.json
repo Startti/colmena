@@ -2389,7 +2389,7 @@
 
     "image_generation": {
       "name": "Image Generation",
-      "description": "Generates one or more images from a text prompt using OpenAI (gpt-image-1, dall-e-3) or Google Vertex AI Imagen 4. Persists outputs via the configured OutputStorageRepository — default `LocalCacheStorageAdapter` returns `data:` URIs; when the engine env vars COLMENA_STORAGE_CALLBACK_URL + COLMENA_STORAGE_CALLBACK_SECRET are set, uploads go through an external signed-PUT callback (no GCS credentials inside colmena). Returns small handles (attachment_id, url) — not raw bytes — so the value can be embedded in agent tool outputs without bloating context.",
+      "description": "Generates one or more images from a text prompt using OpenAI (gpt-image-1, dall-e-3) or Google Vertex AI Imagen 4. Persists outputs via the configured OutputStorageRepository — default `LocalCacheStorageAdapter` returns `data:` URIs; when the engine env vars COLMENA_STORAGE_CALLBACK_URL + COLMENA_STORAGE_CALLBACK_SECRET are set, uploads go through an external signed-PUT callback (no GCS credentials inside colmena). Returns a small handle (`document_id`) plus metadata — not raw bytes — so the value can be embedded in agent tool outputs without bloating context. Plan B (2026-05-25) removed the legacy `attachment_id` and `url` fields; consumers needing a renderable URL must resolve `document_id` via a dedicated backend endpoint.",
       "category": "media",
       "config_fields": {
         "provider": {
@@ -2458,8 +2458,7 @@
         "output": {
           "images": [
             {
-              "attachment_id": "string — stable handle (e.g. 'local://<uuid>' or 'chat-attachments/.../generated/<id>.png')",
-              "url": "string — short-lived signed URL or 'data:image/png;base64,...' URI",
+              "document_id": "string — stable handle (e.g. 'img_<slug>_<hex>'). Use it with $attachment:<document_id> or load_attachment(document_id).",
               "mime_type": "string",
               "size_bytes": "integer",
               "description": "string — 'Image generated with <model>: <prompt prefix truncated to 80 chars>'"
@@ -2473,14 +2472,15 @@
         "Only registered when the engine has a storage adapter configured (always true when built via EngineConfig::from_env).",
         "Google Vertex auth: uses Application Default Credentials (ADC). Discovery order: GOOGLE_APPLICATION_CREDENTIALS key file → gcloud user creds at ~/.config/gcloud/ → GCE/Cloud Run metadata server. Token is cached for ~50 min.",
         "BEST PRACTICE for provider=google: omit google_project_id and google_location from the graph JSON — let the worker resolve them from GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION env vars. This makes graphs portable across environments (each worker injects its own project at deploy time).",
-        "Output `attachment_id` is the canonical handle — pass it to a future image_edit node to chain operations.",
+        "Plan B (2026-05-25) removed the legacy `attachment_id` and `url` fields from the tool result. Only `document_id` is exposed to the LLM. Downstream consumers that need a renderable URL must look up by `document_id` via a dedicated backend endpoint (joining against `conversation_attachments`).",
+        "Output `document_id` is the canonical handle — pass it to a future image_edit node, or forward to a downstream tool via `$attachment:<document_id>`.",
         "Use as agent tool: define a tool_configurations entry with node_type='image_generation' and `prompt` exposed via node_schema (LLM-visible) and the rest as fixed. Omit google_project_id/location from node_schema entirely so the env-var fallback kicks in."
       ]
     },
 
     "tts": {
       "name": "Text-to-Speech",
-      "description": "Synthesizes speech from text via OpenAI, ElevenLabs, or Google Gemini TTS. Persists the audio via the configured OutputStorageRepository — default `LocalCacheStorageAdapter` returns `data:` URIs; with `HttpCallbackStorageAdapter` (production) uploads go to GCS via signed PUT. Returns an attachment handle (attachment_id, url, mime_type, size_bytes, duration_ms).",
+      "description": "Synthesizes speech from text via OpenAI, ElevenLabs, or Google Gemini TTS. Persists the audio via the configured OutputStorageRepository — default `LocalCacheStorageAdapter` returns `data:` URIs; with `HttpCallbackStorageAdapter` (production) uploads go to GCS via signed PUT. Returns an attachment handle (`document_id`, mime_type, size_bytes, duration_ms). Plan B (2026-05-25) removed the legacy `attachment_id` and `url` fields.",
       "category": "media",
       "config_fields": {
         "provider": {
@@ -2534,8 +2534,7 @@
       "output_shape": {
         "output": {
           "audio": {
-            "attachment_id": "string — stable handle",
-            "url": "string — signed read URL or data: URI",
+            "document_id": "string — stable handle. Use it with $attachment:<document_id> or load_attachment(document_id).",
             "mime_type": "string — 'audio/mpeg' | 'audio/wav' | 'audio/L16;rate=24000' (Gemini) | ...",
             "size_bytes": "integer",
             "duration_ms": "integer or null (best-effort; providers usually don't return this)",
@@ -2548,6 +2547,7 @@
       "notes": [
         "Only registered when the engine has a storage adapter configured.",
         "ElevenLabs voice IDs are alphanumeric (plus '-' and '_'). The adapter rejects other characters to keep URL building safe without a URL-encoding dep.",
+        "Plan B (2026-05-25) removed the legacy `attachment_id` and `url` fields from the audio object. Only `document_id` is exposed to the LLM. Downstream consumers that need a renderable URL must look up by `document_id` via a dedicated backend endpoint.",
         "Use as agent tool: same pattern as image_generation — `text` LLM-visible via node_schema, the rest fixed."
       ]
     },
@@ -2622,8 +2622,7 @@
         "output": {
           "images": [
             {
-              "attachment_id": "string",
-              "url": "string — data: URI or signed read URL",
+              "document_id": "string — stable handle. Use it with $attachment:<document_id> or load_attachment(document_id).",
               "mime_type": "image/png",
               "size_bytes": "integer",
               "description": "string — 'Image edited with <model>: <prompt prefix>'"
@@ -2636,7 +2635,8 @@
       "notes": [
         "Only registered when the engine has a storage adapter configured.",
         "Fetches `source_url` and `mask_url` at execute-time. For data: URIs decodes locally (no HTTP).",
-        "When the LLM agent chains generate → edit, the agent passes the `url` field of the previous image_generation tool output into this node's `source_url`. The handle (`attachment_id`) is a stable reference but resolving it back to bytes is not implemented yet (planned: read() method on OutputStorageRepository)."
+        "Plan B (2026-05-25) removed the legacy `attachment_id` and `url` fields from the tool result. Only `document_id` is exposed to the LLM. Downstream consumers that need a renderable URL must look up by `document_id` via a dedicated backend endpoint.",
+        "When chaining gen → edit, forward the `document_id` (e.g. via `$attachment:<document_id>` in source_url, or via an edge wired to `gen.output.images.0.document_id`). The legacy pattern of passing the previous `url` field no longer applies."
       ]
     }
   },

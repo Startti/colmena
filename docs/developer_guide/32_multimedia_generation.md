@@ -117,8 +117,8 @@ Si seteás `COLMENA_LOCAL=false` y olvidás el callback URL o secret, el engine 
 | Generar una imagen desde un prompt | Nodo `image_generation` (OpenAI gpt-image-1 o Google Vertex Imagen 4). |
 | Editar una imagen ya generada | Nodo `image_edit` (OpenAI gpt-image-1 multipart). Acepta `source_url` en formato `data:`, `http(s)://` o `local://<key>`. |
 | Hacer text-to-speech | Nodo `tts` (OpenAI, ElevenLabs, o Google Gemini TTS). |
-| Que el LLM "vea" lo que generó | Llamar `load_attachment(document_id=<attachment_id>)` desde el agente — el resolver hace upload cross-provider lazy a la Files API del provider activo y lo inyecta como vision input en el siguiente turn. |
-| Mandar la imagen generada a un webhook | `http_request` con body que contiene `"$attachment:<storage_key>"` — el engine resuelve el placeholder a `data:` URI antes del POST. |
+| Que el LLM "vea" lo que generó | Llamar `load_attachment(document_id=<document_id>)` desde el agente — el resolver hace upload cross-provider lazy a la Files API del provider activo y lo inyecta como vision input en el siguiente turn. |
+| Mandar la imagen generada a un webhook | `http_request` con body que contiene `"$attachment:<document_id>"` — el engine resuelve el placeholder a `data:` URI antes del POST. |
 | Inspeccionar artifacts en dev | `COLMENA_LOCAL=true` activa el adapter de disco + server HTTP local. Files en `/tmp/colmena-out/`, URLs `http://127.0.0.1:8765/files/<key>`. |
 
 ## Architectural invariant
@@ -194,12 +194,11 @@ Esto es lo más importante para entender por qué el flow funciona idéntico en 
 | `storage_key` | Handle canónico — opaco, estable. Forma: `<uuid>.<ext>` en LocalHttp, `chat-attachments/<userId>/<sessionId>/generated/<cuid>-<name>` en HttpCallback. Es lo que va en `$attachment:<storage_key>` placeholders. |
 | `read_url` | URL fetchable — `http://127.0.0.1:8765/files/<key>` en dev (axum local), signed GCS URL en prod. Misma forma HTTP en ambos. |
 
-El agente (LLM) ve **ambos** en el tool output:
+El agente (LLM) ve el tool output con la siguiente forma (Plan B, 2026-05-25):
 ```json
 {
   "images": [{
-    "attachment_id": "abc.png",                          ← lo usa para load_attachment o $attachment
-    "url": "http://127.0.0.1:8765/files/abc.png",        ← lo puede abrir, pasar a image_edit, mostrar al user
+    "document_id": "img_revenue_chart_a1b2c3",           ← úsalo en $attachment:<id> o load_attachment
     "mime_type": "image/png",
     "size_bytes": 1458957,
     "description": "Image generated with gpt-image-1: A puppy with a blue cap"
@@ -209,7 +208,13 @@ El agente (LLM) ve **ambos** en el tool output:
 }
 ```
 
-**El LLM nunca recibe los bytes** — solo el URL fetchable + handle estable + metadata.
+> Plan B (2026-05-25) eliminó los campos legacy `attachment_id` y `url` del tool
+> result. Los consumidores que necesiten una URL renderizable deben hacer lookup
+> por `document_id` vía un endpoint dedicado del backend (joineando contra
+> `conversation_attachments`). Internamente el `storage_key` y la `read_url`
+> siguen registrados — solo dejaron de exponerse al LLM.
+
+**El LLM nunca recibe los bytes** — solo el handle estable (`document_id`) + metadata. Para renderizar al usuario o abrir en una nueva pestaña, el frontend resuelve `document_id` → signed URL vía un endpoint del backend.
 
 ## Nodos disponibles
 
@@ -254,10 +259,10 @@ El agente (LLM) ve **ambos** en el tool output:
 "edges": [
   { "from": "trigger.gen_prompt",      "to": "gen.prompt"      },
   { "from": "trigger.edit_prompt",     "to": "edit.prompt"     },
-  { "from": "gen.output.images.0.url", "to": "edit.source_url" }
+  { "from": "gen.output.images.0.document_id", "to": "edit.source_url" }
 ]
 ```
-La edge resuelve el JSON pointer `/output/images/0/url` del output del nodo `gen` y lo inyecta en `inputs.source_url` del nodo `edit`.
+La edge resuelve el JSON pointer `/output/images/0/document_id` del output del nodo `gen` y lo inyecta en `inputs.source_url` del nodo `edit`. `image_edit` acepta `$attachment:<document_id>` o un `document_id` "pelado" — el fetcher se encarga de resolverlo vía el attachment resolver. Plan B (2026-05-25) eliminó el campo `url` del tool result, así que el patrón legacy de pasar `images.0.url` ya no aplica.
 
 ### `tts`
 
@@ -271,7 +276,7 @@ La edge resuelve el JSON pointer `/output/images/0/url` del output del nodo `gen
 | `format` | opcional | `mp3` (default), `wav`, `opus`, `pcm`. Google ignora — siempre L16. |
 | `speed` | opcional | 0.25-4.0 (openai/google). ElevenLabs ignora. |
 
-**Output**: `{ "output": { "audio": { attachment_id, url, mime_type, size_bytes, duration_ms, description }, provider, model } }`.
+**Output** (Plan B, 2026-05-25): `{ "output": { "audio": { document_id, mime_type, size_bytes, duration_ms, description }, provider, model } }`. Los campos legacy `attachment_id` y `url` fueron eliminados — usá `document_id` con `$attachment:<document_id>` o `load_attachment`.
 
 **Sample graph**: `tests/graphs/media/tts_basic.json`.
 
@@ -284,8 +289,8 @@ Los outputs generados se registran automáticamente en `AttachmentRegistry` con 
 Patrón idéntico al de attachments uploaded por el usuario (ver [`31_load_attachment.md`](31_load_attachment.md)):
 
 ```
-1. agente llama generate_image → tool output con attachment_id
-2. agente llama load_attachment(document_id=<attachment_id>)
+1. agente llama generate_image → tool output con document_id
+2. agente llama load_attachment(document_id=<document_id>)
 3. AgentService intercepta el LOAD_ATTACHMENT sentinel
 4. Resolver hace: lookup(provider=current) → None →
    lookup(provider=Generated) → row found →
@@ -298,28 +303,24 @@ Patrón idéntico al de attachments uploaded por el usuario (ver [`31_load_attac
 
 Esto se llama **cross-provider lazy upload**. Si generaste con OpenAI y después cambias a Anthropic en otro turn, la primera vez que `load_attachment` se llame desde Anthropic, el bytes se uploadea a Anthropic Files API y la fila se persiste para que sucesivas calls hagan fast path.
 
-### 2. Editar usando attachment_id — `image_edit` con storage handle
+### 2. Editar una imagen generada — `image_edit` chaining
 
-```
-gen → output {attachment_id: "abc.png", url: "http://127.0.0.1:8765/files/abc.png"}
-                                              │
-                                              ▼
-LLM tool call: edit_image(source_url="http://127.0.0.1:8765/files/abc.png", prompt="add a moon")
-                                                                        │
-                                              image_edit.fetch_image    ▼
-                                              detecta http(s) → GET → bytes
-```
+Plan B (2026-05-25) eliminó el campo `url` del tool result. Para encadenar
+`image_generation` → `image_edit` ya no se pasa `url`; el patrón ahora es
+forwardear el `document_id` por `$attachment:<document_id>` o pre-resolverlo
+en el grafo. Para el caso del LLM agent, lo usual es que el siguiente nodo
+descargue el contenido vía el resolver, no que el modelo pase una URL directa.
 
-O alternativamente con `local://<key>` directo, sin pasar por HTTP:
-```
-LLM tool call: edit_image(source_url="local://abc.png", prompt="...")
-                                       │
-                                       ▼
-                          image_edit.fetch_image
-                          detecta local:// prefix → storage.read(key) → bytes
-```
+Para el caso clásico de chaining estático en grafos (sin agente intermedio),
+seguís pudiendo cablear con una edge desde `gen.output.images.0` a un nodo
+intermedio que resuelva el doc, o usar `$attachment:<document_id>` en
+`image_edit.source_url` (el placeholder se resuelve a `data:` URI antes de
+fetchear).
 
-Same code path en producción con `chat-attachments/.../abc.png` storage keys.
+`image_edit` sigue aceptando `data:` URIs y http(s) URLs en `source_url`;
+si tu grafo tiene una URL fetchable separada (no la del tool result), eso
+sigue funcionando. Solo el camino "leer `url` del tool result del nodo
+anterior" cambió.
 
 ### 3. Enviar a endpoint externo — `$attachment:<key>` placeholder
 
@@ -340,7 +341,7 @@ Same code path en producción con `chat-attachments/.../abc.png` storage keys.
       "properties": {
         "image": {
           "type": "string", "required": true,
-          "description": "MUST be '$attachment:<attachment_id>' from a previous generate_image"
+          "description": "MUST be '$attachment:<document_id>' from a previous generate_image"
         }
       }
     }
