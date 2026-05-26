@@ -1,0 +1,36 @@
+{
+  "nodes": {
+    "params": {
+      "type": "input",
+      "config": {
+        "data": {
+          "query": "INSERT INTO seb_data_test.productos (sku, peso) VALUES ('A1', 1.81), ('A2', 2.5), ('A3', 3.0), ('A4', 4.2), ('A5', 5.1), ('A6', 6.7), ('A7', 7.3), ('A8', 8.8), ('A9', 9.4), ('A10', 10.0)",
+          "connection_url": "${DATABASE_URL}",
+          "permissions": {
+            "preset": "full",
+            "allowed_schemas": ["seb_data_test"],
+            "sandbox_schema": "seb_data_test"
+          },
+          "runtime_limits": {
+            "statement_timeout_ms": 30000
+          }
+        }
+      }
+    },
+    "insert": {
+      "type": "sql_query",
+      "config": {}
+    },
+    "result": {
+      "type": "output",
+      "config": { "label": "Insert Result" }
+    }
+  },
+  "edges": [
+    { "from": "params.query", "to": "insert.query" },
+    { "from": "params.connection_url", "to": "insert.connection_url" },
+    { "from": "params.permissions", "to": "insert.permissions" },
+    { "from": "params.runtime_limits", "to": "insert.runtime_limits" },
+    { "from": "insert", "to": "result" }
+  ]
+}

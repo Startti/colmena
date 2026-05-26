@@ -1,0 +1,32 @@
+{
+  "nodes": {
+    "params": {
+      "type": "input",
+      "config": {
+        "data": {
+          "query": "CREATE SCHEMA foo_bar_test",
+          "connection_url": "${DATABASE_URL}",
+          "permissions": {
+            "preset": "full",
+            "allowed_schemas": ["seb_data_test"],
+            "sandbox_schema": "seb_data_test"
+          }
+        }
+      }
+    },
+    "ddl": {
+      "type": "sql_query",
+      "config": {}
+    },
+    "result": {
+      "type": "output",
+      "config": { "label": "DDL Result" }
+    }
+  },
+  "edges": [
+    { "from": "params.query", "to": "ddl.query" },
+    { "from": "params.connection_url", "to": "ddl.connection_url" },
+    { "from": "params.permissions", "to": "ddl.permissions" },
+    { "from": "ddl", "to": "result" }
+  ]
+}
