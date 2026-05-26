@@ -32,6 +32,11 @@ pub struct HttpNode {
     /// Optional storage adapter — used to resolve `$attachment:<id>` placeholders
     /// in the body. When None, placeholders pass through unchanged (logged warn).
     storage: Option<Arc<dyn crate::storage::domain::OutputStorageRepository>>,
+    /// Plan A: optional resolver for `$attachment:<document_id>` placeholders.
+    /// When `Some`, multipart attachment parts go through the resolver first
+    /// (document_id → storage_key → StoredStream); when `None`, the legacy
+    /// direct `storage.read_stream(<storage_key>)` path is used.
+    attachment_resolver: Option<Arc<dyn crate::llm::domain::attachments::AttachmentStreamResolver>>,
 }
 
 impl Default for HttpNode {
@@ -217,7 +222,10 @@ fn filename_from_url_path(url: &Url) -> String {
 
 impl HttpNode {
     pub fn new() -> Self {
-        Self { storage: None }
+        Self {
+            storage: None,
+            attachment_resolver: None,
+        }
     }
 
     pub fn with_storage(
@@ -225,6 +233,17 @@ impl HttpNode {
         storage: Arc<dyn crate::storage::domain::OutputStorageRepository>,
     ) -> Self {
         self.storage = Some(storage);
+        self
+    }
+
+    /// Plan A: wire an `AttachmentStreamResolver`. When present, multipart
+    /// `$attachment:<id>` parts route through it (document_id namespace, with
+    /// internal fallback to direct storage_key lookup for legacy flows).
+    pub fn with_attachment_resolver(
+        mut self,
+        resolver: Arc<dyn crate::llm::domain::attachments::AttachmentStreamResolver>,
+    ) -> Self {
+        self.attachment_resolver = Some(resolver);
         self
     }
 
@@ -483,6 +502,7 @@ impl HttpNode {
         merged_headers: &serde_json::Map<String, Value>,
         inputs: &NodeInputs,
         config: &Value,
+        agent_session_id: Option<&str>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
         let body_val = inputs
             .get("body")
@@ -527,7 +547,7 @@ impl HttpNode {
         let mut form = reqwest::multipart::Form::new();
         for spec in parts {
             form = self
-                .add_part_to_form(form, spec, &resolver, max_file_size_bytes)
+                .add_part_to_form(form, spec, &resolver, max_file_size_bytes, agent_session_id)
                 .await?;
         }
 
@@ -583,6 +603,7 @@ impl HttpNode {
         spec: PartSpec,
         resolver: &MultipartUrlResolver,
         max_file_size_bytes: u64,
+        agent_session_id: Option<&str>,
     ) -> Result<reqwest::multipart::Form, Box<dyn StdError + Send + Sync>> {
         use futures::StreamExt;
         match spec {
@@ -621,13 +642,38 @@ impl HttpNode {
                 filename_override,
                 content_type_override,
             } => {
-                let storage = self.storage.as_ref().ok_or_else(|| -> Box<dyn StdError + Send + Sync> {
-                    format!("AttachmentNotFound: body references '$attachment:{storage_key}' but no OutputStorageRepository is wired").into()
-                })?;
-                let stored = storage
-                    .read_stream(&storage_key)
-                    .await
-                    .map_err(|e| -> Box<dyn StdError + Send + Sync> { Box::new(e) })?;
+                // Plan A: prefer the resolver (document_id namespace, with
+                // internal fallback to direct storage_key lookup for legacy
+                // flows). Fall back to direct storage when no resolver is
+                // wired — preserves pre-Plan A behavior.
+                let stored = if let Some(resolver) = self.attachment_resolver.as_ref() {
+                    let sid =
+                        agent_session_id.ok_or_else(|| -> Box<dyn StdError + Send + Sync> {
+                            format!(
+                                "AttachmentResolveError: body references \
+                                 '$attachment:{storage_key}' but no agent_session_id \
+                                 is available (resolver requires one)"
+                            )
+                            .into()
+                        })?;
+                    resolver.resolve(sid, &storage_key).await.map_err(
+                        |e| -> Box<dyn StdError + Send + Sync> {
+                            format!("AttachmentResolveError: {e}").into()
+                        },
+                    )?
+                } else if let Some(storage) = self.storage.as_ref() {
+                    storage
+                        .read_stream(&storage_key)
+                        .await
+                        .map_err(|e| -> Box<dyn StdError + Send + Sync> { Box::new(e) })?
+                } else {
+                    return Err(format!(
+                        "AttachmentNotFound: body references '$attachment:{storage_key}' \
+                         but neither AttachmentStreamResolver nor OutputStorageRepository \
+                         is wired"
+                    )
+                    .into());
+                };
                 if stored.size_bytes > max_file_size_bytes {
                     return Err(format!(
                         "FileTooLarge: attachment '{storage_key}' is {} bytes, max is {max_file_size_bytes}",
@@ -856,8 +902,18 @@ impl ExecutableNode for HttpNode {
         }
 
         if Self::is_multipart_mode(&merged_headers) {
+            let agent_session_id = inputs
+                .get("__colmena_agent_session_id")
+                .and_then(|v| v.as_str());
             return self
-                .execute_multipart(&full_url_str, method_str, &merged_headers, inputs, config)
+                .execute_multipart(
+                    &full_url_str,
+                    method_str,
+                    &merged_headers,
+                    inputs,
+                    config,
+                    agent_session_id,
+                )
                 .await;
         }
 
@@ -1634,6 +1690,123 @@ mod multipart_execute_tests {
             .await
             .expect("execute ok");
         assert_eq!(out["status"], 200);
+    }
+
+    /// Plan A — Hand-rolled stub for `AttachmentStreamResolver`.
+    /// Verifies the resolver is reached with the expected `(agent_session_id,
+    /// document_id)` and returns a known StoredStream.
+    struct StubResolver {
+        expected_agent: String,
+        expected_id: String,
+        bytes: Vec<u8>,
+        mime: String,
+        filename: String,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::domain::attachments::AttachmentStreamResolver for StubResolver {
+        async fn resolve(
+            &self,
+            agent_session_id: &str,
+            document_id: &str,
+        ) -> Result<StoredStream, crate::llm::domain::attachments::AttachmentResolveError> {
+            assert_eq!(
+                agent_session_id, self.expected_agent,
+                "resolver got unexpected agent_session_id"
+            );
+            if document_id != self.expected_id {
+                return Err(
+                    crate::llm::domain::attachments::AttachmentResolveError::NotFound {
+                        document_id: document_id.to_string(),
+                    },
+                );
+            }
+            let payload: Result<Bytes, crate::storage::domain::StorageError> =
+                Ok(Bytes::from(self.bytes.clone()));
+            let size = self.bytes.len() as u64;
+            Ok(StoredStream {
+                stream: Box::pin(stream::once(async move { payload })),
+                size_bytes: size,
+                mime_type: self.mime.clone(),
+                filename: self.filename.clone(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn multipart_uses_resolver_when_present() {
+        use wiremock::matchers::{body_string_contains, header_exists};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/upload"))
+            .and(header_exists("content-type"))
+            // The wiremock body for multipart is the raw form bytes; "hello"
+            // appears verbatim because the resolver yields it as the file payload.
+            .and(body_string_contains("hello"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
+            .mount(&server)
+            .await;
+
+        let resolver = std::sync::Arc::new(StubResolver {
+            expected_agent: "agent_x".to_string(),
+            expected_id: "doc-1".to_string(),
+            bytes: b"hello".to_vec(),
+            mime: "text/plain".to_string(),
+            filename: "hello.txt".to_string(),
+        });
+
+        // Note: no storage — only the resolver. Confirms the resolver path is
+        // taken when wired (and not the legacy storage path).
+        let node = HttpNode::new().with_attachment_resolver(resolver);
+        let body = serde_json::json!({ "file": "$attachment:doc-1" });
+        let config = mk_config(&server.uri(), body);
+
+        let mut inputs: HashMap<String, Value> = HashMap::new();
+        inputs.insert(
+            "__colmena_agent_session_id".to_string(),
+            serde_json::json!("agent_x"),
+        );
+
+        let out = node
+            .execute(&inputs, &config, &mut serde_json::json!({}), None)
+            .await
+            .expect("execute ok");
+        assert_eq!(out["status"], 200);
+    }
+
+    #[tokio::test]
+    async fn multipart_resolver_without_agent_session_id_errors() {
+        let server = MockServer::start().await;
+        // No mocks: the request should fail before any network I/O.
+
+        let resolver = std::sync::Arc::new(StubResolver {
+            expected_agent: "agent_x".to_string(),
+            expected_id: "doc-1".to_string(),
+            bytes: b"hello".to_vec(),
+            mime: "text/plain".to_string(),
+            filename: "hello.txt".to_string(),
+        });
+        let node = HttpNode::new().with_attachment_resolver(resolver);
+        let body = serde_json::json!({ "file": "$attachment:doc-1" });
+        let config = mk_config(&server.uri(), body);
+
+        let err = node
+            .execute(
+                &HashMap::<String, Value>::new(),
+                &config,
+                &mut serde_json::json!({}),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("AttachmentResolveError"),
+            "got {err}"
+        );
+        assert!(err.to_string().contains("agent_session_id"), "got {err}");
     }
 
     #[tokio::test]
