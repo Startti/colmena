@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
-use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
+use crate::llm::domain::attachments::{origin, AttachmentSource, UpsertAttachmentInput};
 use crate::llm::domain::{AttachmentRegistry, ProviderKind};
 use crate::storage::domain::{OutputStorageRepository, StoreRequest};
 
@@ -353,37 +353,57 @@ impl ExecutableNode for ImageEditNode {
                 .await
                 .map_err(|e| -> Box<dyn StdError + Send + Sync> { Box::new(e) })?;
 
-            // Register edited image so the agent can re-open it later.
-            // Fail-soft: registry errors don't fail the edit.
+            // Plan A: derive a human-friendly document_id from the filename
+            // so the LLM can reference the artifact by a stable handle that is
+            // not the opaque storage_key UUID.
+            let document_id =
+                build_document_id(&stored.filename, &stored.mime_type, &stored.storage_key);
+
+            // Register the edited artifact so `load_attachment` can later
+            // resolve it AND so `$attachment:<document_id>` placeholders work
+            // in downstream nodes (e.g., http_request multipart parts).
+            // Fail-soft: registry errors must not fail the edit.
             if let (Some(reg), Some(agent_sid)) =
                 (self.attachment_registry.as_ref(), agent_session_id.as_ref())
             {
                 let description = format!("Image edited with {}: {}", model, prompt_preview);
                 let upsert = UpsertAttachmentInput {
                     agent_session_id: agent_sid.clone(),
-                    document_id: stored.storage_key.clone(),
+                    document_id: document_id.clone(),
                     provider: ProviderKind::Generated,
+                    // For `provider: Generated` rows, provider_file_id holds
+                    // the canonical storage_key. Cross-provider upload reads
+                    // bytes via OutputStorageRepository.read(this).
                     provider_file_id: stored.storage_key.clone(),
                     mime_type: stored.mime_type.clone(),
                     filename: stored.filename.clone(),
                     size_bytes: Some(stored.size_bytes),
                     label: None,
                     description: Some(description),
-                    source: AttachmentSource::SignedUrl(stored.read_url.clone()),
-                    storage_key: None,
-                    origin: None,
+                    // Resolver-friendly source: read bytes back through the
+                    // storage port using the storage_key as the path.
+                    source: AttachmentSource::Path(stored.storage_key.clone()),
+                    storage_key: Some(stored.storage_key.clone()),
+                    origin: Some(origin::generated_by("image_edit")),
                 };
                 if let Err(e) = reg.upsert(upsert).await {
                     tracing::warn!(
                         target: "colmena::image_edit",
                         error = %e,
+                        document_id = %document_id,
                         storage_key = %stored.storage_key,
-                        "failed to register edited image in attachment registry"
+                        "failed to register edited image in attachment registry — \
+                         load_attachment will not see this output"
                     );
                 }
             }
 
             out_images.push(json!({
+                // Plan A: new canonical handle — the LLM and downstream tools
+                // should prefer this. `attachment_id` (= storage_key) is kept
+                // as a deprecated alias for ADP backwards compatibility until
+                // Plan B retires the legacy contract.
+                "document_id": document_id,
                 "attachment_id": stored.storage_key,
                 "url": stored.read_url,
                 "mime_type": stored.mime_type,
@@ -422,8 +442,11 @@ impl ExecutableNode for ImageEditNode {
     fn description(&self) -> Option<&str> {
         Some(
             "Edit an existing image given a text prompt. Source image is fetched from a \
-             URL (data: or http(s)). Optional mask marks the edit region. Returns one or \
-             more attachments — same shape as image_generation so the result can be chained.",
+             URL (data: or http(s)). Optional mask marks the edit region. Returns an array \
+             of attachments — each with `document_id` (canonical handle, use this for \
+             $attachment:<id> placeholders), `attachment_id` (deprecated alias = \
+             storage_key), `url` (signed read URL or data: URI), `mime_type`, and \
+             `size_bytes`. Same shape as image_generation so results can be chained.",
         )
     }
 
@@ -434,6 +457,70 @@ impl ExecutableNode for ImageEditNode {
     fn default_output(&self) -> Option<&str> {
         Some("output")
     }
+}
+
+// ---------------------------------------------------------------------------
+// document_id helpers
+// ---------------------------------------------------------------------------
+//
+// Plan A: generated artifacts get an `img_<sanitized_filename_stem>` handle so
+// the LLM and downstream tools have a stable, human-readable ID instead of the
+// opaque storage_key UUID. Duplicated from image_generation.rs intentionally;
+// Task 6 will extract these helpers to a shared util once tts.rs joins the
+// pattern.
+
+fn build_document_id(filename: &str, mime_type: &str, storage_key: &str) -> String {
+    let ext_dot = format!(".{}", file_ext(mime_type));
+    let stem = filename.strip_suffix(&ext_dot).unwrap_or(filename);
+    let sanitized = sanitize(stem);
+    if sanitized.is_empty() {
+        format!("img_{}", storage_key)
+    } else {
+        let suffix = storage_key_suffix(storage_key);
+        format!("img_{}_{}", sanitized, suffix)
+    }
+}
+
+fn file_ext(mime: &str) -> &'static str {
+    match mime {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "bin",
+    }
+}
+
+fn sanitize(s: &str) -> String {
+    let raw: String = s
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    raw.trim_matches('_').to_string()
+}
+
+/// Last 6 alphanumeric chars of the storage_key, providing collision-resistance
+/// for document_id across same-filename generations within a session. The full
+/// storage_key (often a UUID with dashes) would be too verbose for the catalog.
+fn storage_key_suffix(storage_key: &str) -> String {
+    let alphanumeric: String = storage_key
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect();
+    alphanumeric
+        .chars()
+        .rev()
+        .take(6)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
 }
 
 #[cfg(test)]
@@ -703,5 +790,177 @@ mod tests {
         )
         .await
         .expect("execute ok");
+    }
+
+    // -----------------------------------------------------------------------
+    // Plan A — auto-registration in conversation_attachments
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn image_edit_auto_registers_artifact_in_registry() {
+        use crate::llm::domain::attachments::AttachmentSource;
+        use crate::llm::domain::{AttachmentRegistry, ProviderKind};
+        use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/edits"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{ "b64_json": "AAAA" }]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_store()
+            .times(1)
+            .returning(|_| Ok(stored_ok("sk-edit-1")));
+
+        let registry: Arc<dyn AttachmentRegistry> = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+
+        let node = ImageEditNode::new(Arc::new(storage))
+            .with_openai_base_url(server.uri())
+            .with_attachment_registry(registry.clone());
+
+        let cfg = base_config("data:image/png;base64,iVBORw==");
+
+        let mut inputs: NodeInputs = HashMap::new();
+        // Auto-registration only fires when an agent_session_id is engine-injected.
+        inputs.insert(
+            "__colmena_agent_session_id".into(),
+            json!("agent_autoreg_edit_1"),
+        );
+
+        let out = node
+            .execute(&inputs, &cfg, &mut json!({}), None)
+            .await
+            .expect("execute ok");
+
+        let images = out
+            .pointer("/output/images")
+            .and_then(|v| v.as_array())
+            .expect("images array");
+        assert_eq!(images.len(), 1);
+
+        // Tool result MUST emit both keys. document_id is the new
+        // human-friendly handle; attachment_id is the legacy storage_key
+        // kept for ADP backwards compat (Plan B retires it).
+        let doc_id = images[0]["document_id"]
+            .as_str()
+            .expect("document_id present");
+        let attach_id = images[0]["attachment_id"]
+            .as_str()
+            .expect("attachment_id present");
+        assert!(
+            doc_id.starts_with("img_"),
+            "document_id should start with img_, got {doc_id}"
+        );
+        assert_eq!(attach_id, "sk-edit-1", "attachment_id is the storage_key");
+        assert_ne!(
+            doc_id, attach_id,
+            "document_id and attachment_id are different namespaces"
+        );
+
+        // The registry row MUST be reachable by document_id and carry the
+        // generated_by:image_edit origin + storage_key.
+        let entry = registry
+            .lookup_by_document_id("agent_autoreg_edit_1", doc_id)
+            .await
+            .unwrap()
+            .expect("attachment was auto-registered");
+        assert_eq!(entry.storage_key.as_deref(), Some("sk-edit-1"));
+        assert_eq!(entry.origin.as_deref(), Some("generated_by:image_edit"));
+        assert!(matches!(entry.provider, ProviderKind::Generated));
+        match entry.source {
+            AttachmentSource::Path(ref p) => assert_eq!(p, "sk-edit-1"),
+            ref other => panic!("expected AttachmentSource::Path, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_registry_means_no_registration_but_still_emits_both_ids() {
+        // Sanity check: when the node is constructed without a registry, the
+        // tool result still carries document_id + attachment_id (so the LLM
+        // contract is unchanged), and we don't crash trying to upsert.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/edits"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{ "b64_json": "AAAA" }]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_store()
+            .times(1)
+            .returning(|_| Ok(stored_ok("sk-2")));
+
+        let node = ImageEditNode::new(Arc::new(storage)).with_openai_base_url(server.uri());
+
+        let cfg = base_config("data:image/png;base64,AA==");
+        let out = node
+            .execute(&HashMap::new(), &cfg, &mut json!({}), None)
+            .await
+            .unwrap();
+        let img = &out["output"]["images"][0];
+        assert!(img["document_id"].is_string());
+        assert_eq!(img["attachment_id"], "sk-2");
+    }
+
+    #[test]
+    fn build_document_id_strips_extension_and_sanitizes() {
+        let a = build_document_id("edit_0.png", "image/png", "sk-abc123");
+        assert!(a.starts_with("img_edit_0_"), "got {a}");
+        assert!(a.len() > "img_edit_0_".len());
+
+        // "Revenue Chart!.jpg" -> trailing '_' from '!' trimmed before suffix.
+        let b = build_document_id("Revenue Chart!.jpg", "image/jpeg", "sk-abc123");
+        assert!(b.starts_with("img_Revenue_Chart_"), "got {b}");
+        assert!(
+            !b.starts_with("img_Revenue_Chart__"),
+            "trailing _ not trimmed: {b}"
+        );
+
+        // Mime/filename mismatch: extension is not stripped, but sanitized.
+        let c = build_document_id("foo.bar", "image/png", "sk-abc123");
+        assert!(c.starts_with("img_foo_bar_"), "got {c}");
+    }
+
+    #[test]
+    fn build_document_id_falls_back_to_storage_key_when_stem_empty() {
+        // ".png" has empty stem after stripping. Sanitizer yields "". We fall
+        // back to the storage_key so the document_id is never just "img_".
+        assert_eq!(
+            build_document_id(".png", "image/png", "sk-fallback"),
+            "img_sk-fallback"
+        );
+    }
+
+    #[test]
+    fn build_document_id_avoids_collision_between_same_filename_different_keys() {
+        let a = build_document_id("edit_0.png", "image/png", "sk-abc123def456");
+        let b = build_document_id("edit_0.png", "image/png", "sk-xyz789ghi012");
+        assert_ne!(
+            a, b,
+            "different storage_keys must yield different document_ids"
+        );
+        assert!(a.starts_with("img_edit_0_"));
+        assert!(b.starts_with("img_edit_0_"));
+    }
+
+    #[test]
+    fn file_ext_maps_known_mimes() {
+        assert_eq!(file_ext("image/png"), "png");
+        assert_eq!(file_ext("image/jpeg"), "jpg");
+        assert_eq!(file_ext("image/webp"), "webp");
+        assert_eq!(file_ext("image/gif"), "gif");
+        assert_eq!(file_ext("application/octet-stream"), "bin");
     }
 }
