@@ -23,6 +23,19 @@ pub struct UpsertAttachmentInput {
     pub origin: Option<String>,
 }
 
+/// Input for `AttachmentRegistry::find_stale_attachments`.
+///
+/// A row is "stale" when `COALESCE(last_used_at, registered_at) < cutoff`.
+/// The `cutoff` is computed by the caller (typically `now() - ttl`).
+#[derive(Debug, Clone)]
+pub struct StaleAttachmentQuery {
+    /// Rows with `COALESCE(last_used_at, registered_at) < cutoff` are returned.
+    pub cutoff: chrono::DateTime<chrono::Utc>,
+    /// Maximum number of rows to return in this batch. The binary loops until
+    /// the query returns < `limit` rows.
+    pub limit: u32,
+}
+
 #[async_trait]
 pub trait AttachmentRegistry: Send + Sync {
     /// Insert or update a registry entry. Idempotent on
@@ -83,6 +96,29 @@ pub trait AttachmentRegistry: Send + Sync {
     /// `(agent_session_id, document_id)`. Called by `AttachmentStreamResolver`
     /// on every successful resolve. No-op when no row matches.
     async fn touch_last_used(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+    ) -> Result<(), AttachmentError>;
+
+    /// Plan C: find rows whose `COALESCE(last_used_at, registered_at)` is older
+    /// than `query.cutoff`, returning up to `query.limit`. The binary
+    /// `attachment_gc` loops until this returns fewer than `limit` rows.
+    ///
+    /// Returns rows ordered by `COALESCE(last_used_at, registered_at) ASC`
+    /// (oldest first) so each batch is deterministic.
+    async fn find_stale_attachments(
+        &self,
+        query: StaleAttachmentQuery,
+    ) -> Result<Vec<ConversationAttachment>, AttachmentError>;
+
+    /// Plan C: delete a single attachment row by `(agent_session_id, document_id)`.
+    /// Caller is responsible for deleting the underlying blob from
+    /// `OutputStorageRepository` BEFORE calling this — the registry row is
+    /// the cleanup checkpoint.
+    ///
+    /// Returns `Ok(())` whether or not the row existed (idempotent).
+    async fn delete_attachment(
         &self,
         agent_session_id: &str,
         document_id: &str,

@@ -6,7 +6,7 @@ pub mod stream_resolver;
 pub mod summary_generator;
 
 pub use attachment_error::AttachmentError;
-pub use attachment_registry::{AttachmentRegistry, UpsertAttachmentInput};
+pub use attachment_registry::{AttachmentRegistry, StaleAttachmentQuery, UpsertAttachmentInput};
 pub use auto_id::generate_attachment_id;
 pub use conversation_attachment::{AttachmentSource, ConversationAttachment};
 pub use stream_resolver::{AttachmentResolveError, AttachmentStreamResolver};
