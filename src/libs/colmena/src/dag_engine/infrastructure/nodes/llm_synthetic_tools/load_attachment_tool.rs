@@ -17,8 +17,17 @@ pub const LOAD_ATTACHMENT_TOOL_NAME: &str = "load_attachment";
 /// duplicate these instructions in their own `system_message`.
 pub const ATTACHMENTS_SYSTEM_PRELUDE: &str = "## Conversation Attachments\n\
 This conversation has one or more documents attached to it. They are listed in \
-the description of the `load_attachment` tool, each with a `document_id`, label, \
-mime type, and size.\n\n\
+the catalog below (and in the description of the `load_attachment` tool), each \
+with a `document_id`, label, mime type, and size.\n\n\
+You will NOT see document content automatically — the catalog only advertises \
+which documents exist. To read a document's content, you must call \
+load_attachment(document_id). To forward a document to a downstream tool (for \
+example `http_request` multipart) without reading it yourself, pass the string \
+\"$attachment:<document_id>\" in that tool's args.\n\n\
+load_attachment results are ephemeral: the document content is available only \
+for the turn in which you invoked the tool. Future turns will see a marker \
+confirming the call happened, but not the content itself. Call load_attachment \
+again if you need to re-read the document.\n\n\
 Rules:\n\
 - If the user asks about any uploaded document, call `load_attachment` with the \
 matching `document_id` before answering — never guess at the contents.\n\
@@ -230,5 +239,30 @@ mod tests {
         let call = mk_call(json!({}));
         let err = dispatch_load_attachment(&call, &cat).unwrap_err();
         assert!(matches!(err, LlmError::InvalidToolCall { .. }));
+    }
+}
+
+#[cfg(test)]
+mod prelude_tests {
+    use super::*;
+
+    #[test]
+    fn prelude_explains_no_autoinject_behavior() {
+        assert!(
+            ATTACHMENTS_SYSTEM_PRELUDE.contains("call load_attachment")
+                || ATTACHMENTS_SYSTEM_PRELUDE.contains("load_attachment("),
+            "prelude should instruct the model to call load_attachment"
+        );
+    }
+
+    #[test]
+    fn prelude_explains_ephemeral_load_attachment() {
+        assert!(
+            ATTACHMENTS_SYSTEM_PRELUDE.contains("ephemeral")
+                || ATTACHMENTS_SYSTEM_PRELUDE.contains("only for this turn")
+                || ATTACHMENTS_SYSTEM_PRELUDE.contains("not retained")
+                || ATTACHMENTS_SYSTEM_PRELUDE.contains("turn only"),
+            "prelude should warn that load_attachment results are ephemeral"
+        );
     }
 }
