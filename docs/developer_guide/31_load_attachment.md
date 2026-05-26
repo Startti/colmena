@@ -3,6 +3,34 @@
 > **Estado:** Disponible desde 0.4.0
 > **Spec:** [docs/superpowers/specs/2026-05-13-load-attachment-design.md](../superpowers/specs/2026-05-13-load-attachment-design.md)
 
+## Plan A — Persistent bytes for all attachment sources (2026-05-25)
+
+As of Plan A, every attachment registered in `conversation_attachments` has its
+bytes persisted in `OutputStorageRepository`. This is true regardless of source:
+
+- **Inline (base64 en `files[].data`):** los bytes se streamean al storage en el momento del registro.
+- **Signed URL (`files[].url`):** los bytes se descargan y se streamean al storage.
+- **Generated artifact** (`image_generation` / `image_edit` / `tts`): los bytes ya
+  viven en storage; el artefacto se registra automáticamente en `conversation_attachments`
+  con `origin = generated_by:<tool>` y `source = Path(storage_key)`.
+
+Esto habilita el placeholder `$attachment:<document_id>` para nodos downstream
+(inicialmente `http_request` multipart) sin importar de dónde vino el documento.
+
+El catálogo que ve el LLM en su system message lista cada documento con su
+`document_id` y una pista de uso:
+- `load_attachment(document_id)` para leer el contenido dentro del loop.
+- `"$attachment:<document_id>"` para reenviar los bytes (p. ej. a un endpoint multipart).
+
+Resolución: un `AttachmentStreamResolver` (port en `domain`, impl en
+`infrastructure`) hace `document_id → storage_key → StoredStream`. La impl
+también soporta un fallback de backward-compat que trata al identificador
+como `storage_key` directo para flujos previos a Plan A.
+
+Background y decisiones:
+- Spec: [`docs/superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md`](../superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md)
+- Plan: [`docs/superpowers/plans/2026-05-25-attachment-uniform-resolution-plan-a.md`](../superpowers/plans/2026-05-25-attachment-uniform-resolution-plan-a.md)
+
 ## Por qué existe
 
 `LlmMessage.files` no se persiste en `llm_node_history`. Cuando una conversación con un documento adjunto retoma en un turno posterior, el archivo deja de estar en el contexto del modelo. Re-adjuntarlo en cada turno es caro en tokens.

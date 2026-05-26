@@ -463,7 +463,32 @@ El LLM solo ve `endpoint` y `files`. Todo lo demás (método, auth, content-type
 - All-or-nothing: si una parte falla validación (oversize, HEAD error, scheme no permitido, attachment no encontrado, max_parts excedido), **no se envía nada al downstream**.
 - Stream interrumpido mid-flight: el downstream recibe una request incompleta y la rechaza; el nodo retorna `StreamInterrupted`. Sin reintentos automáticos en v1 — el loop del LLM puede reintentar.
 
+### `$attachment:` resuelve los 3 orígenes (Plan A, 2026-05-25)
+
+A partir de Plan A, el placeholder `$attachment:<id>` en `http_request` se
+ruta por `AttachmentStreamResolver`, que resuelve `<id>` así:
+
+1. **`document_id`** — primario: lookup en `conversation_attachments` por
+   `(agent_session_id, document_id)`; los bytes se streamean desde
+   `OutputStorageRepository::read_stream(storage_key)`. Cubre uploads del
+   usuario (inline + signed URL) y artefactos generados por tools
+   (`image_generation` / `image_edit` / `tts`).
+
+2. **`storage_key` crudo** — fallback: si el lookup de document_id falla,
+   el identificador se trata como `storage_key` directo de
+   `OutputStorageRepository`. Backwards-compat con flujos pre-Plan-A donde
+   `attachment_id` ERA el storage_key.
+
+Los nuevos grafos deberían referenciar `document_id`s expuestos en el
+catálogo del LLM (ver el bloque de catálogo de attachments prepuesto al
+system message). El LLM construye `$attachment:<document_id>` en los args
+de su tool call; el nodo lo resuelve antes de armar la request multipart.
+
+Requiere `agent_session_id` en el contexto de ejecución — el resolver es
+por-sesión.
+
 ### Ver también
 
 - Spec de diseño: [`docs/superpowers/specs/2026-05-24-http-multipart-streaming-design.md`](../superpowers/specs/2026-05-24-http-multipart-streaming-design.md)
+- Spec Plan A (resolución uniforme): [`docs/superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md`](../superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md)
 - Test graph runnable: `tests/graphs/external/multipart_upload.json`
