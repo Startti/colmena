@@ -636,7 +636,8 @@ fn build_document_id(filename: &str, mime_type: &str, storage_key: &str) -> Stri
     if sanitized.is_empty() {
         format!("img_{}", storage_key)
     } else {
-        format!("img_{}", sanitized)
+        let suffix = storage_key_suffix(storage_key);
+        format!("img_{}_{}", sanitized, suffix)
     }
 }
 
@@ -651,7 +652,8 @@ fn file_ext(mime: &str) -> &'static str {
 }
 
 fn sanitize(s: &str) -> String {
-    s.chars()
+    let raw: String = s
+        .chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '_' || c == '-' {
                 c
@@ -659,6 +661,25 @@ fn sanitize(s: &str) -> String {
                 '_'
             }
         })
+        .collect();
+    raw.trim_matches('_').to_string()
+}
+
+/// Last 6 alphanumeric chars of the storage_key, providing collision-resistance
+/// for document_id across same-filename generations within a session. The full
+/// storage_key (often a UUID with dashes) would be too verbose for the catalog.
+fn storage_key_suffix(storage_key: &str) -> String {
+    let alphanumeric: String = storage_key
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect();
+    alphanumeric
+        .chars()
+        .rev()
+        .take(6)
+        .collect::<String>()
+        .chars()
+        .rev()
         .collect()
 }
 
@@ -1149,19 +1170,21 @@ mod tests {
 
     #[test]
     fn build_document_id_strips_extension_and_sanitizes() {
-        assert_eq!(
-            build_document_id("image_0.png", "image/png", "sk-1"),
-            "img_image_0"
+        let a = build_document_id("image_0.png", "image/png", "sk-abc123");
+        assert!(a.starts_with("img_image_0_"), "got {a}");
+        assert!(a.len() > "img_image_0_".len());
+
+        // "Revenue Chart!.jpg" -> trailing '_' from '!' trimmed before suffix.
+        let b = build_document_id("Revenue Chart!.jpg", "image/jpeg", "sk-abc123");
+        assert!(b.starts_with("img_Revenue_Chart_"), "got {b}");
+        assert!(
+            !b.starts_with("img_Revenue_Chart__"),
+            "trailing _ not trimmed: {b}"
         );
-        assert_eq!(
-            build_document_id("Revenue Chart!.jpg", "image/jpeg", "sk-1"),
-            "img_Revenue_Chart_"
-        );
+
         // Mime/filename mismatch: extension is not stripped, but sanitized.
-        assert_eq!(
-            build_document_id("foo.bar", "image/png", "sk-1"),
-            "img_foo_bar"
-        );
+        let c = build_document_id("foo.bar", "image/png", "sk-abc123");
+        assert!(c.starts_with("img_foo_bar_"), "got {c}");
     }
 
     #[test]
@@ -1172,6 +1195,18 @@ mod tests {
             build_document_id(".png", "image/png", "sk-fallback"),
             "img_sk-fallback"
         );
+    }
+
+    #[test]
+    fn build_document_id_avoids_collision_between_same_filename_different_keys() {
+        let a = build_document_id("image_0.png", "image/png", "sk-abc123def456");
+        let b = build_document_id("image_0.png", "image/png", "sk-xyz789ghi012");
+        assert_ne!(
+            a, b,
+            "different storage_keys must yield different document_ids"
+        );
+        assert!(a.starts_with("img_image_0_"));
+        assert!(b.starts_with("img_image_0_"));
     }
 
     #[test]
