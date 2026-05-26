@@ -53,17 +53,25 @@ Tres nodos para generar media + el sistema completo de "artifacts" (storage, reg
               │                                      │      │  (real)      │
               │                                      │      └──────────────┘
               │                                      │
-              │ 5. emits tool output {                │
-              │      attachment_id: storage_key,     │
-              │      url: read_url,                  │
-              │      mime_type, size_bytes           │
+              │ 5. auto-registra fila en             │
+              │    conversation_attachments:         │
+              │      { document_id, storage_key,     │
+              │        origin: "generated_by:…",     │
+              │        mime_type, size_bytes,        │
+              │        source: Path(storage_key) }   │
+              │                                      │
+              │ 6. emits tool output {                │
+              │      document_id,                    │
+              │      mime_type, size_bytes,          │
+              │      description?                    │
               │    }                                  │
               ├─────────────────────────────────────►│
               │                                      │
-              │                                      │  6. persistColmenaResult:
-              │                                      │     detects {attachment_id,url}
-              │                                      │     INSERT AgentAttachment
-              │                                      │     (cascade-delete inherits)
+              │                                      │  7. host app (si necesita)
+              │                                      │     resuelve document_id →
+              │                                      │     join conversation_attachments
+              │                                      │     → recupera storage_key
+              │                                      │     → firma URL para frontend
 ```
 
 Cero credenciales GCS en el worker. host application es la única con creds y la única que firma URLs.
