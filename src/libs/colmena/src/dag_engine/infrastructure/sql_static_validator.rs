@@ -34,10 +34,23 @@ impl SqlValidatorPort for StaticRuleValidator {
         let mut create_function_seen = false;
 
         for stmt in &stmts {
-            // `COMMENT ON ...` is allowed as the accompaniment to CREATE FUNCTION
-            // (and is harmless otherwise — it only attaches documentation). It
-            // doesn't classify into a SqlOperation, so handle it before classify.
+            // COMMENT ON is metadata-only (no data exposure), so we skip classify and
+            // the per-statement checks below, but we still enforce the schema allowlist
+            // so an LLM can't annotate tables in schemas the operator never approved.
             if matches!(stmt, sqlparser::ast::Statement::Comment { .. }) {
+                for schema in sql_ast::referenced_schemas(stmt) {
+                    if !permissions.is_schema_allowed(&schema) {
+                        return ValidationResult {
+                            allowed: false,
+                            block_reason: Some(format!(
+                                "Access to schema '{}' is not allowed. \
+                                 Allowed schemas: check your permissions config.",
+                                schema
+                            )),
+                            warnings: vec![],
+                        };
+                    }
+                }
                 continue;
             }
 
@@ -167,7 +180,6 @@ fn stmt_kind_name(stmt: &sqlparser::ast::Statement) -> &'static str {
         CreateView(_) => "CREATE VIEW",
         Grant(_) => "GRANT",
         Revoke(_) => "REVOKE",
-        Comment { .. } => "Stand-alone COMMENT",
         _ => "This statement type",
     }
 }
@@ -387,5 +399,32 @@ mod tests {
             &full_perms(),
         );
         assert!(r.allowed, "multi-row INSERT must work for bulk loads");
+    }
+
+    #[test]
+    fn test_comment_on_disallowed_schema_blocked() {
+        // COMMENT ON is metadata-only, but it should still respect the schema
+        // allowlist — otherwise an LLM could annotate tables in schemas the
+        // operator never approved.
+        let v = StaticRuleValidator;
+        let r = v.validate(
+            "COMMENT ON TABLE secret.passwords IS 'sensitive'",
+            &read_only_perms(), // allowed_schemas = ["production"]
+        );
+        assert!(!r.allowed, "COMMENT on disallowed schema must be blocked");
+        assert!(
+            r.block_reason.as_deref().unwrap().to_lowercase().contains("schema"),
+            "block reason should mention the schema"
+        );
+    }
+
+    #[test]
+    fn test_comment_on_allowed_schema_passes() {
+        let v = StaticRuleValidator;
+        let r = v.validate(
+            "COMMENT ON TABLE production.users IS 'user accounts'",
+            &read_only_perms(),
+        );
+        assert!(r.allowed, "COMMENT on allowed schema should pass");
     }
 }

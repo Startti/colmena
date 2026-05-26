@@ -282,6 +282,22 @@ pub fn classify(stmt: &Statement) -> Option<SqlOperation> {
 /// arrow operators, and `obj.method` calls are never miscounted as schemas.
 pub fn referenced_schemas(stmt: &Statement) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
+
+    // `visit_relations` only visits relation names that appear in FROM/JOIN
+    // positions. `COMMENT ON TABLE schema.table IS '...'` stores its target in
+    // `object_name`, which the derive-generated visitor does not classify as a
+    // relation.  Handle it explicitly so schema enforcement is consistent.
+    if let Statement::Comment { object_name, .. } = stmt {
+        if object_name.0.len() >= 2 {
+            if let Some(ident) = object_name.0[0].as_ident() {
+                let schema = ident.value.to_lowercase();
+                if !found.contains(&schema) {
+                    found.push(schema);
+                }
+            }
+        }
+    }
+
     let _: ControlFlow<()> = visit_relations(stmt, |name: &ObjectName| {
         // ObjectName.0 is `Vec<ObjectNamePart>` — 2+ parts means
         // `schema.table[.col]`. We only care about Identifier parts.
