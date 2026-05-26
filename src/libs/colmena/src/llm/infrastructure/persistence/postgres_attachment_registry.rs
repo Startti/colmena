@@ -1,7 +1,7 @@
 use crate::dag_engine::infrastructure::pool_registry::PgPoolRegistry;
 use crate::llm::domain::{
     AttachmentError, AttachmentRegistry, AttachmentSource, ConversationAttachment, ProviderKind,
-    UpsertAttachmentInput,
+    StaleAttachmentQuery, UpsertAttachmentInput,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -298,6 +298,46 @@ impl AttachmentRegistry for PostgresAttachmentRegistry {
         .map_err(|e| AttachmentError::RepositoryFailed(format!("touch_last_used: {}", e)))?;
         Ok(())
     }
+
+    async fn find_stale_attachments(
+        &self,
+        query: StaleAttachmentQuery,
+    ) -> Result<Vec<ConversationAttachment>, AttachmentError> {
+        let rows = sqlx::query(
+            "SELECT agent_session_id, document_id, provider, provider_file_id,
+                    mime_type, filename, size_bytes, label, description,
+                    source_kind, source_value, registered_at, refreshed_at,
+                    storage_key, origin, last_used_at
+             FROM conversation_attachments
+             WHERE COALESCE(last_used_at, registered_at) < $1
+             ORDER BY COALESCE(last_used_at, registered_at) ASC
+             LIMIT $2",
+        )
+        .bind(query.cutoff)
+        .bind(query.limit as i64)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| AttachmentError::RepositoryFailed(format!("find_stale: {}", e)))?;
+
+        rows.iter().map(row_to_attachment).collect()
+    }
+
+    async fn delete_attachment(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+    ) -> Result<(), AttachmentError> {
+        sqlx::query(
+            "DELETE FROM conversation_attachments
+              WHERE agent_session_id = $1 AND document_id = $2",
+        )
+        .bind(agent_session_id)
+        .bind(document_id)
+        .execute(&*self.pool)
+        .await
+        .map_err(|e| AttachmentError::RepositoryFailed(format!("delete_attachment: {}", e)))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -525,5 +565,125 @@ mod tests {
         reg.touch_last_used("missing_sess", "missing_doc")
             .await
             .unwrap();
+    }
+
+    // ----- Plan C: find_stale_attachments + delete_attachment -----
+
+    #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+    #[tokio::test]
+    async fn find_stale_attachments_returns_rows_older_than_cutoff() {
+        use crate::llm::domain::StaleAttachmentQuery;
+        let reg = make_registry().await;
+        let sid = format!("test_sess_{}", uuid::Uuid::new_v4());
+
+        // Insert two rows; we'll backdate one to look stale.
+        reg.upsert(UpsertAttachmentInput {
+            agent_session_id: sid.clone(),
+            document_id: "stale-doc".to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf-stale".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "old.pdf".to_string(),
+            size_bytes: Some(100),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+            storage_key: Some("sk-stale".to_string()),
+            origin: Some("user_upload".to_string()),
+        })
+        .await
+        .unwrap();
+
+        reg.upsert(UpsertAttachmentInput {
+            agent_session_id: sid.clone(),
+            document_id: "fresh-doc".to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf-fresh".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "new.pdf".to_string(),
+            size_bytes: Some(100),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+            storage_key: Some("sk-fresh".to_string()),
+            origin: Some("user_upload".to_string()),
+        })
+        .await
+        .unwrap();
+
+        // Force the first row to look stale by backdating registered_at + nulling last_used_at.
+        sqlx::query(
+            "UPDATE conversation_attachments
+                SET registered_at = NOW() - INTERVAL '8 days', last_used_at = NULL
+              WHERE document_id = $1 AND agent_session_id = $2",
+        )
+        .bind("stale-doc")
+        .bind(&sid)
+        .execute(&*reg.pool)
+        .await
+        .unwrap();
+
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+        let stale = reg
+            .find_stale_attachments(StaleAttachmentQuery { cutoff, limit: 100 })
+            .await
+            .unwrap();
+
+        // Filter to our session — other concurrent tests may have stale rows too.
+        let stale_for_us: Vec<&str> = stale
+            .iter()
+            .filter(|r| r.agent_session_id == sid)
+            .map(|r| r.document_id.as_str())
+            .collect();
+        assert!(
+            stale_for_us.contains(&"stale-doc"),
+            "stale-doc should be in stale list, got {:?}",
+            stale_for_us
+        );
+        assert!(
+            !stale_for_us.contains(&"fresh-doc"),
+            "fresh-doc should NOT be in stale list, got {:?}",
+            stale_for_us
+        );
+    }
+
+    #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+    #[tokio::test]
+    async fn delete_attachment_removes_row_and_is_idempotent_pg() {
+        let reg = make_registry().await;
+        let sid = format!("test_sess_{}", uuid::Uuid::new_v4());
+
+        reg.upsert(UpsertAttachmentInput {
+            agent_session_id: sid.clone(),
+            document_id: "to-delete".to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf-del".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "x.pdf".to_string(),
+            size_bytes: Some(100),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+            storage_key: Some("sk-del".to_string()),
+            origin: Some("user_upload".to_string()),
+        })
+        .await
+        .unwrap();
+
+        assert!(reg
+            .lookup_by_document_id(&sid, "to-delete")
+            .await
+            .unwrap()
+            .is_some());
+
+        reg.delete_attachment(&sid, "to-delete").await.unwrap();
+        assert!(reg
+            .lookup_by_document_id(&sid, "to-delete")
+            .await
+            .unwrap()
+            .is_none());
+
+        // Idempotent — deleting again must not error.
+        reg.delete_attachment(&sid, "to-delete").await.unwrap();
     }
 }

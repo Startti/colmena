@@ -1,6 +1,6 @@
 use crate::llm::domain::{
     AttachmentError, AttachmentRegistry, AttachmentSource, ConversationAttachment, ProviderKind,
-    UpsertAttachmentInput,
+    StaleAttachmentQuery, UpsertAttachmentInput,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -325,6 +325,51 @@ impl AttachmentRegistry for SqliteAttachmentRegistry {
         .execute(&*self.pool)
         .await
         .map_err(|e| AttachmentError::RepositoryFailed(format!("touch_last_used: {}", e)))?;
+        Ok(())
+    }
+
+    async fn find_stale_attachments(
+        &self,
+        query: StaleAttachmentQuery,
+    ) -> Result<Vec<ConversationAttachment>, AttachmentError> {
+        // SQLite stores timestamps as TEXT in `YYYY-MM-DD HH:MM:SS` form (UTC).
+        // chrono's `DateTime<Utc>::to_string()` produces an ISO-8601 form which
+        // SQLite's string comparison cannot meaningfully order against the stored
+        // format. Format the cutoff explicitly to match the column format.
+        let cutoff_str = query.cutoff.format("%Y-%m-%d %H:%M:%S").to_string();
+        let rows = sqlx::query(
+            "SELECT agent_session_id, document_id, provider, provider_file_id,
+                    mime_type, filename, size_bytes, label, description,
+                    source_kind, source_value, registered_at, refreshed_at,
+                    storage_key, origin, last_used_at
+             FROM conversation_attachments
+             WHERE COALESCE(last_used_at, registered_at) < ?
+             ORDER BY COALESCE(last_used_at, registered_at) ASC
+             LIMIT ?",
+        )
+        .bind(cutoff_str)
+        .bind(query.limit as i64)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| AttachmentError::RepositoryFailed(format!("find_stale: {}", e)))?;
+
+        rows.iter().map(row_to_attachment).collect()
+    }
+
+    async fn delete_attachment(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+    ) -> Result<(), AttachmentError> {
+        sqlx::query(
+            "DELETE FROM conversation_attachments
+              WHERE agent_session_id = ? AND document_id = ?",
+        )
+        .bind(agent_session_id)
+        .bind(document_id)
+        .execute(&*self.pool)
+        .await
+        .map_err(|e| AttachmentError::RepositoryFailed(format!("delete_attachment: {}", e)))?;
         Ok(())
     }
 }
@@ -677,5 +722,156 @@ mod tests {
         let reg = make_registry().await;
         // No row inserted — must not error.
         reg.touch_last_used("s1", "missing").await.unwrap();
+    }
+
+    // ----- Plan C: find_stale_attachments + delete_attachment -----
+
+    #[tokio::test]
+    async fn find_stale_attachments_returns_rows_older_than_cutoff_sqlite() {
+        use crate::llm::domain::StaleAttachmentQuery;
+        let reg = make_registry().await;
+
+        reg.upsert(UpsertAttachmentInput {
+            agent_session_id: "s1".to_string(),
+            document_id: "stale-doc".to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf-stale".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "old.pdf".to_string(),
+            size_bytes: Some(100),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+            storage_key: Some("sk-stale".to_string()),
+            origin: Some("user_upload".to_string()),
+        })
+        .await
+        .unwrap();
+
+        reg.upsert(UpsertAttachmentInput {
+            agent_session_id: "s1".to_string(),
+            document_id: "fresh-doc".to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf-fresh".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "new.pdf".to_string(),
+            size_bytes: Some(100),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+            storage_key: Some("sk-fresh".to_string()),
+            origin: Some("user_upload".to_string()),
+        })
+        .await
+        .unwrap();
+
+        // Backdate the stale row.
+        sqlx::query(
+            "UPDATE conversation_attachments
+                SET registered_at = datetime('now', '-8 days'), last_used_at = NULL
+              WHERE document_id = ? AND agent_session_id = ?",
+        )
+        .bind("stale-doc")
+        .bind("s1")
+        .execute(&*reg.pool)
+        .await
+        .unwrap();
+
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+        let stale = reg
+            .find_stale_attachments(StaleAttachmentQuery { cutoff, limit: 100 })
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = stale.iter().map(|r| r.document_id.as_str()).collect();
+        assert!(
+            ids.contains(&"stale-doc"),
+            "stale-doc should be in stale list, got {:?}",
+            ids
+        );
+        assert!(
+            !ids.contains(&"fresh-doc"),
+            "fresh-doc should NOT be in stale list, got {:?}",
+            ids
+        );
+    }
+
+    #[tokio::test]
+    async fn find_stale_attachments_respects_limit_sqlite() {
+        use crate::llm::domain::StaleAttachmentQuery;
+        let reg = make_registry().await;
+
+        for i in 0..5 {
+            reg.upsert(UpsertAttachmentInput {
+                agent_session_id: "s1".to_string(),
+                document_id: format!("doc-{}", i),
+                provider: ProviderKind::OpenAi,
+                provider_file_id: format!("pf-{}", i),
+                mime_type: "application/pdf".to_string(),
+                filename: "x.pdf".to_string(),
+                size_bytes: Some(100),
+                label: None,
+                description: None,
+                source: AttachmentSource::Inline,
+                storage_key: Some(format!("sk-{}", i)),
+                origin: Some("user_upload".to_string()),
+            })
+            .await
+            .unwrap();
+        }
+
+        // Backdate them all.
+        sqlx::query(
+            "UPDATE conversation_attachments
+                SET registered_at = datetime('now', '-8 days'), last_used_at = NULL",
+        )
+        .execute(&*reg.pool)
+        .await
+        .unwrap();
+
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+        let batch = reg
+            .find_stale_attachments(StaleAttachmentQuery { cutoff, limit: 2 })
+            .await
+            .unwrap();
+        assert_eq!(batch.len(), 2, "limit must cap returned rows");
+    }
+
+    #[tokio::test]
+    async fn delete_attachment_removes_row_and_is_idempotent_sqlite() {
+        let reg = make_registry().await;
+
+        reg.upsert(UpsertAttachmentInput {
+            agent_session_id: "s1".to_string(),
+            document_id: "to-delete".to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf-del".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "x.pdf".to_string(),
+            size_bytes: Some(100),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+            storage_key: Some("sk-del".to_string()),
+            origin: Some("user_upload".to_string()),
+        })
+        .await
+        .unwrap();
+
+        assert!(reg
+            .lookup_by_document_id("s1", "to-delete")
+            .await
+            .unwrap()
+            .is_some());
+
+        reg.delete_attachment("s1", "to-delete").await.unwrap();
+        assert!(reg
+            .lookup_by_document_id("s1", "to-delete")
+            .await
+            .unwrap()
+            .is_none());
+
+        // Idempotent — second call must not error.
+        reg.delete_attachment("s1", "to-delete").await.unwrap();
     }
 }
