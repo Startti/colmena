@@ -35,36 +35,123 @@ pub fn parse(query: &str) -> Result<Vec<Statement>, ParserError> {
 /// elsewhere are untouched. Nested parens inside the argument list (e.g.
 /// `NUMERIC(10, 2)`) are balanced correctly.
 fn strip_comment_on_function_args(input: &str) -> String {
-    // Case-insensitive search for the keyword sequence. We rebuild the string in
-    // one pass; when we hit the prefix, we copy the function name, then skip the
-    // balanced `(...)` block, then continue.
     let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len());
     let mut i = 0;
 
     while i < bytes.len() {
+        // 1. If we're at the start of a string literal, copy the whole literal
+        //    verbatim and skip ahead. This is what prevents the keyword scan
+        //    from firing inside user data.
+        if let Some(end) = scan_string_literal(input, i) {
+            out.push_str(&input[i..end]);
+            i = end;
+            continue;
+        }
+
+        // 2. Outside any literal: try the COMMENT ON FUNCTION trigger.
         if let Some(after_prefix) = match_comment_on_function(input, i) {
-            // Copy up through the function name (everything between `FUNCTION ` and `(`).
-            // `after_prefix` points at the first non-whitespace, non-name char — either
-            // `(` (parens to strip) or something else (no parens — leave alone).
             let (name_end, has_parens) = scan_function_name_end(input, after_prefix);
             out.push_str(&input[i..name_end]);
             i = name_end;
             if has_parens {
-                // Skip a balanced `(...)` block, then continue copying.
                 if let Some(close) = find_matching_paren(input, i) {
                     i = close + 1;
                 }
             }
-        } else {
-            // Copy one char and advance.
-            // Be careful with multi-byte chars: advance by the char's UTF-8 width.
-            let ch = input[i..].chars().next().unwrap();
-            out.push(ch);
-            i += ch.len_utf8();
+            continue;
         }
+
+        // 3. Otherwise, copy one char (UTF-8-safe).
+        let ch = input[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
     }
     out
+}
+
+/// If `input[pos..]` starts a string literal (single-quoted or dollar-quoted),
+/// return the byte offset just past its closing delimiter. Returns `None` if
+/// `pos` is not at a literal opening.
+fn scan_string_literal(input: &str, pos: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    match bytes.get(pos)? {
+        b'\'' => Some(scan_single_quoted(input, pos)),
+        b'$' => scan_dollar_quoted(input, pos),
+        _ => None,
+    }
+}
+
+/// Walk a single-quoted string starting at `pos` (which points at the opening
+/// `'`). Doubled apostrophes (`''`) are the SQL escape for one apostrophe.
+/// Returns the offset just past the closing `'` (or end-of-input if unterminated).
+fn scan_single_quoted(input: &str, pos: usize) -> usize {
+    let bytes = input.as_bytes();
+    debug_assert_eq!(bytes.get(pos).copied(), Some(b'\''));
+    let mut i = pos + 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            // Doubled-quote escape — consume both and stay inside.
+            if bytes.get(i + 1).copied() == Some(b'\'') {
+                i += 2;
+                continue;
+            }
+            // Real closing quote.
+            return i + 1;
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+/// Walk a dollar-quoted string starting at `pos` (which points at the opening
+/// `$`). Forms: `$$...$$` (empty tag) and `$tag$...$tag$` (tag is a Postgres
+/// identifier — letters, digits, underscore; cannot start with a digit).
+/// Returns the offset just past the closing delimiter, or `None` if `pos` is
+/// not actually at a dollar-quote opening (e.g. a parameter reference like `$1`).
+fn scan_dollar_quoted(input: &str, pos: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    debug_assert_eq!(bytes.get(pos).copied(), Some(b'$'));
+
+    // Find the tag — chars up to the next `$`.
+    let tag_start = pos + 1;
+    let mut tag_end = tag_start;
+    while tag_end < bytes.len() {
+        let b = bytes[tag_end];
+        if b == b'$' {
+            break;
+        }
+        // Postgres identifier rule: first char letter/underscore, rest alnum/_.
+        let is_first = tag_end == tag_start;
+        let valid = if is_first {
+            b.is_ascii_alphabetic() || b == b'_'
+        } else {
+            b.is_ascii_alphanumeric() || b == b'_'
+        };
+        if !valid {
+            // Not a dollar-quote opening — could be `$1`, `$NUMBER`, or `$$$` etc.
+            return None;
+        }
+        tag_end += 1;
+    }
+    // Must end on `$`.
+    if bytes.get(tag_end).copied() != Some(b'$') {
+        return None;
+    }
+    let body_start = tag_end + 1;
+    let tag = &input[tag_start..tag_end]; // may be empty (plain `$$`)
+    let closing = format!("${}$", tag);
+
+    // Find the closing delimiter starting from body_start.
+    let mut search = body_start;
+    while search + closing.len() <= bytes.len() {
+        if input[search..search + closing.len()] == closing {
+            return Some(search + closing.len());
+        }
+        search += 1;
+    }
+    // Unterminated — consume the rest as the body.
+    Some(bytes.len())
 }
 
 /// If `input[pos..]` starts (case-insensitively, modulo whitespace) with
@@ -524,5 +611,60 @@ mod tests {
         assert!(is_query(&stmts[0]));
         let stmts = parse("INSERT INTO s.t (a) VALUES (1)").unwrap();
         assert!(!is_query(&stmts[0]));
+    }
+
+    #[test]
+    fn parse_does_not_corrupt_string_literal_containing_trigger() {
+        // Critical bug: pre-pass must NOT touch the trigger keywords inside a
+        // single-quoted string literal.
+        let q = "SELECT 'COMMENT ON FUNCTION foo(a INT)' AS msg";
+        let stmts = parse(q).unwrap();
+        assert_eq!(stmts.len(), 1);
+        // The literal must round-trip unchanged through the parse → unparse loop.
+        // We can't easily inspect string literal bytes from sqlparser AST cheaply,
+        // so instead assert that the *preprocessed* input still contains the
+        // original literal verbatim.
+        assert!(
+            strip_comment_on_function_args(q).contains("'COMMENT ON FUNCTION foo(a INT)'"),
+            "string literal must not be modified by preprocessing"
+        );
+    }
+
+    #[test]
+    fn parse_does_not_corrupt_doubled_quote_inside_literal() {
+        // `'it''s'` is a single string literal with one apostrophe in it.
+        // The doubled-quote escape must not be misread as "literal ends, new
+        // literal begins".
+        let q = "SELECT 'it''s COMMENT ON FUNCTION x()' AS msg";
+        let processed = strip_comment_on_function_args(q);
+        assert!(
+            processed.contains("'it''s COMMENT ON FUNCTION x()'"),
+            "doubled-quote inside literal must keep the literal continuous; got: {processed}"
+        );
+    }
+
+    #[test]
+    fn parse_does_not_corrupt_dollar_quoted_body() {
+        // Dollar-quoted strings (PL/pgSQL bodies) must also be opaque to the pre-pass.
+        let q = "CREATE FUNCTION sandbox.f() RETURNS void AS \
+                 $$ BEGIN RAISE NOTICE 'COMMENT ON FUNCTION x(y INT)'; END; $$ \
+                 LANGUAGE plpgsql";
+        let processed = strip_comment_on_function_args(q);
+        assert!(
+            processed.contains("COMMENT ON FUNCTION x(y INT)"),
+            "text inside $$...$$ must not be touched; got: {processed}"
+        );
+    }
+
+    #[test]
+    fn parse_does_not_corrupt_tagged_dollar_quoted_body() {
+        let q = "DO $tag$ \
+                 RAISE NOTICE 'COMMENT ON FUNCTION x(z INT)'; \
+                 $tag$";
+        let processed = strip_comment_on_function_args(q);
+        assert!(
+            processed.contains("COMMENT ON FUNCTION x(z INT)"),
+            "text inside $tag$...$tag$ must not be touched; got: {processed}"
+        );
     }
 }
