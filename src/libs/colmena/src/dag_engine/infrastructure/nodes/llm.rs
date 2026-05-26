@@ -1245,9 +1245,8 @@ impl ExecutableNode for LlmNode {
                 // OutputStorageRepository so this attachment is reachable via
                 // `$attachment:<document_id>` downstream, regardless of where
                 // it originated. Inline files reuse `retained_inline_bytes`;
-                // SignedUrl files are re-fetched (acceptable for Plan A; a
-                // future optimisation will share bytes with the provider
-                // upload).
+                // SignedUrl files are re-fetched (acceptable for Plan A).
+                // TODO(plan-a-opt): share bytes with provider upload to avoid re-fetch.
                 let storage_key = if let Some(storage) = self.storage.as_ref() {
                     persist_attachment_bytes(
                         storage.as_ref(),
@@ -1263,7 +1262,7 @@ impl ExecutableNode for LlmNode {
                     None
                 };
 
-                let origin = "user_upload".to_string();
+                let origin = crate::llm::domain::attachments::origin::USER_UPLOAD.to_string();
                 let input = UpsertAttachmentInput {
                     agent_session_id: sid.clone(),
                     document_id: document_id.clone(),
@@ -2583,8 +2582,8 @@ pub(crate) fn parse_file_entries(
 ///   2. Else, if `attachment_source` is `AttachmentSource::SignedUrl(url)` →
 ///      re-fetch the URL via HTTP and persist the bytes. The original
 ///      download has already happened (to upload to the provider's Files
-///      API), but those bytes are not kept around. TODO Plan A optimisation:
-///      share bytes across both uploads to avoid the second fetch.
+///      API), but those bytes are not kept around.
+///      TODO(plan-a-opt): share bytes with provider upload to avoid re-fetch.
 ///   3. Else → return `None` (no storage_key persisted; the attachment is
 ///      still registered, but downstream `$attachment:<id>` consumers will
 ///      not resolve it).
@@ -2609,6 +2608,7 @@ async fn persist_attachment_bytes(
         // Re-fetch the bytes. We intentionally do not share an HTTP client
         // here because this is an out-of-band, best-effort persistence path
         // — perf is dominated by the provider upload that already happened.
+        // TODO(plan-a-opt): share bytes with provider upload to avoid re-fetch.
         match reqwest::get(url.as_str()).await {
             Ok(resp) => match resp.error_for_status() {
                 Ok(ok_resp) => match ok_resp.bytes().await {
@@ -2644,10 +2644,17 @@ async fn persist_attachment_bytes(
             }
         }
     } else {
+        tracing::debug!(
+            target: "colmena::attachment",
+            document_id = %document_id,
+            source_kind = attachment_source.kind_str(),
+            "no path to persist attachment bytes; $attachment:<id> lookup will fail downstream"
+        );
         None
     };
 
     let bytes = bytes_for_storage?;
+    let size = bytes.len();
 
     let req = StoreRequest {
         bytes,
@@ -2664,8 +2671,11 @@ async fn persist_attachment_bytes(
                 target: "colmena::attachment",
                 error = %e,
                 document_id = %document_id,
-                "failed to persist attachment bytes to OutputStorageRepository; \
-                 attachment registered without storage_key"
+                mime = %mime_type,
+                size_bytes = size,
+                agent_session_id = %agent_session_id,
+                filename = %filename,
+                "failed to persist bytes to storage; attachment registered without storage_key"
             );
             None
         }
