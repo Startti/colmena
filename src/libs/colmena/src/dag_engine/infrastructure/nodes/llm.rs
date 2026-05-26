@@ -1313,13 +1313,17 @@ impl ExecutableNode for LlmNode {
         // continued from the persisted history. The pending tool call (whose
         // result was never persisted) is dispatched below with the resume
         // answer threaded in.
+        //
+        // Plan B (D6): the LLM no longer receives file content in the initial
+        // user message. The catalog block prepended to the system message
+        // (Plan A Task 11) tells the model which documents are available; the
+        // model calls load_attachment(document_id) to read content, or
+        // references "$attachment:<document_id>" in tool args to forward
+        // bytes without reading them. `resolved_files` is intentionally still
+        // computed — bytes are persisted to OutputStorageRepository and
+        // registered in the attachment catalog further upstream.
         if resume_answer.is_none() {
-            let user_message = if resolved_files.is_empty() {
-                LlmMessage::user(prompt.to_string())?
-            } else {
-                LlmMessage::user_with_files(prompt.to_string(), resolved_files)?
-            };
-
+            let user_message = build_initial_user_message(prompt, &resolved_files)?;
             messages.push(user_message.clone());
         }
 
@@ -1807,7 +1811,10 @@ impl ExecutableNode for LlmNode {
                 // Plan A: append the per-document catalog block so the LLM
                 // knows which `document_id`s are available in the session
                 // (for `load_attachment(...)` and `$attachment:<id>`
-                // placeholder use). Additive — autoinject behavior unchanged.
+                // placeholder use). Plan B (D6): this catalog is now the
+                // ONLY way the LLM learns about attachments in turn 1 —
+                // file content is no longer autoinjected into the user
+                // message; see `build_initial_user_message`.
                 if let Some(catalog_block) =
                     crate::llm::application::attachment_catalog::render_catalog(&attachment_catalog)
                 {
@@ -2688,6 +2695,71 @@ async fn persist_attachment_bytes(
             );
             None
         }
+    }
+}
+
+/// Build the initial user message that opens a fresh LLM turn.
+///
+/// Plan B (D6): the LLM no longer receives file content in turn 1. The
+/// catalog block prepended to the system message (Plan A Task 11) tells
+/// the model which documents are available; the model calls
+/// `load_attachment(document_id)` to read content, or references
+/// `"$attachment:<document_id>"` in tool args to forward bytes without
+/// reading them. This trades a round-trip for cost savings — see
+/// `docs/developer_guide/31_load_attachment.md`.
+///
+/// `_resolved_files` is intentionally unused HERE — bytes are still
+/// persisted to `OutputStorageRepository` and registered in the
+/// attachment catalog further upstream in `execute()`.
+fn build_initial_user_message(
+    prompt: &str,
+    _resolved_files: &[crate::llm::domain::FileData],
+) -> Result<LlmMessage, crate::llm::domain::LlmError> {
+    LlmMessage::user(prompt.to_string())
+}
+
+#[cfg(test)]
+mod build_initial_user_message_tests {
+    use super::*;
+    use crate::llm::domain::{FileData, FileSource};
+
+    fn inline_file(doc_id: &str) -> FileData {
+        FileData {
+            document_id: Some(doc_id.to_string()),
+            mime_type: "application/pdf".to_string(),
+            filename: "x.pdf".to_string(),
+            size_hint: Some(5),
+            source: FileSource::InlineBytes {
+                bytes: b"hello".to_vec(),
+            },
+            retained_inline_bytes: Some(b"hello".to_vec()),
+        }
+    }
+
+    #[test]
+    fn first_turn_user_message_does_not_carry_files_after_plan_b() {
+        // Plan B (D6): the LLM no longer receives file content in the
+        // initial user message. The catalog block in the system message
+        // tells the model what's available; the model calls
+        // load_attachment to read.
+        let files = vec![inline_file("doc-1"), inline_file("doc-2")];
+        let msg = build_initial_user_message("read the docs", &files).unwrap();
+
+        assert_eq!(msg.role().as_str(), "user");
+        assert_eq!(msg.content(), "read the docs");
+        assert!(
+            msg.files().is_none() || msg.files().map(|f| f.is_empty()).unwrap_or(true),
+            "Plan B: initial user message MUST NOT carry files; got: {:?}",
+            msg.files()
+        );
+    }
+
+    #[test]
+    fn empty_files_slice_still_produces_user_message() {
+        let msg = build_initial_user_message("hi", &[]).unwrap();
+        assert_eq!(msg.role().as_str(), "user");
+        assert_eq!(msg.content(), "hi");
+        assert!(msg.files().is_none() || msg.files().map(|f| f.is_empty()).unwrap_or(true));
     }
 }
 
