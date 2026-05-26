@@ -238,22 +238,38 @@ async fn generated_artifact_can_be_forwarded_via_multipart() {
 
     // Simulate tasks 4/5/6: image_generation produced an image, persisted the
     // bytes, and auto-registered the row with origin=generated_by:image_generation.
+    // Inlined (instead of seed_attachment) so we can mirror production exactly:
+    // generated artifacts use AttachmentSource::Path(storage_key) — see
+    // image_generation.rs / image_edit.rs / tts.rs auto-register paths.
     let bytes: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
-    seed_attachment(
-        &registry,
-        &storage,
-        SeedSpec {
-            document_id: "doc_generated_1",
+    let size = bytes.len() as u64;
+    let stored = storage
+        .store(StoreRequest {
             bytes: bytes.clone(),
-            mime: "image/png",
-            filename: "generated.png",
-            // Generated artifacts have no recoverable source — Inline is the
-            // current placeholder used by image_generation auto-register.
-            source: AttachmentSource::Inline,
-            origin: "generated_by:image_generation",
-        },
-    )
-    .await;
+            mime_type: "image/png".to_string(),
+            filename: "generated.png".to_string(),
+            session_id: Some(AGENT_SESSION_ID.to_string()),
+            agent_session_id: Some(AGENT_SESSION_ID.to_string()),
+        })
+        .await
+        .expect("storage.store ok");
+    registry
+        .upsert(UpsertAttachmentInput {
+            agent_session_id: AGENT_SESSION_ID.to_string(),
+            document_id: "doc_generated_1".to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf-test".to_string(),
+            mime_type: "image/png".to_string(),
+            filename: "generated.png".to_string(),
+            size_bytes: Some(size),
+            label: None,
+            description: None,
+            source: AttachmentSource::Path(stored.storage_key.clone()),
+            storage_key: Some(stored.storage_key),
+            origin: Some("generated_by:image_generation".to_string()),
+        })
+        .await
+        .expect("registry.upsert ok");
 
     run_upload_and_assert(registry, storage, "doc_generated_1", &bytes).await;
 }
