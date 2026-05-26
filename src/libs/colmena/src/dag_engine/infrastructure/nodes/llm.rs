@@ -1241,6 +1241,29 @@ impl ExecutableNode for LlmNode {
                     _ => continue, // Not uploaded yet — skip registration this pass.
                 };
 
+                // Plan A — Foundation: persist bytes uniformly to
+                // OutputStorageRepository so this attachment is reachable via
+                // `$attachment:<document_id>` downstream, regardless of where
+                // it originated. Inline files reuse `retained_inline_bytes`;
+                // SignedUrl files are re-fetched (acceptable for Plan A; a
+                // future optimisation will share bytes with the provider
+                // upload).
+                let storage_key = if let Some(storage) = self.storage.as_ref() {
+                    persist_attachment_bytes(
+                        storage.as_ref(),
+                        file.retained_inline_bytes.as_deref(),
+                        &source,
+                        &file.mime_type,
+                        &file.filename,
+                        sid.as_str(),
+                        &document_id,
+                    )
+                    .await
+                } else {
+                    None
+                };
+
+                let origin = "user_upload".to_string();
                 let input = UpsertAttachmentInput {
                     agent_session_id: sid.clone(),
                     document_id: document_id.clone(),
@@ -1252,8 +1275,8 @@ impl ExecutableNode for LlmNode {
                     label: label.clone(),
                     description: description.clone(),
                     source: source.clone(),
-                    storage_key: None,
-                    origin: None,
+                    storage_key,
+                    origin: Some(origin),
                 };
                 reg.upsert(input)
                     .await
@@ -2546,6 +2569,258 @@ pub(crate) fn parse_file_entries(
     }
 
     Ok(out)
+}
+
+/// Persist the bytes of an inbound attachment (`inputs.files[]`) to the
+/// `OutputStorageRepository` so the file can later be resolved by
+/// `$attachment:<document_id>` references regardless of where it originated.
+///
+/// Resolution strategy (Plan A — Foundation):
+///   1. If `retained_inline_bytes` is `Some(_)` → upload those bytes directly.
+///      This covers both `FileSource::InlineBytes` (data:/path) entries and
+///      `FileSource::Uploaded` entries that retained their inline bytes after
+///      provider upload.
+///   2. Else, if `attachment_source` is `AttachmentSource::SignedUrl(url)` →
+///      re-fetch the URL via HTTP and persist the bytes. The original
+///      download has already happened (to upload to the provider's Files
+///      API), but those bytes are not kept around. TODO Plan A optimisation:
+///      share bytes across both uploads to avoid the second fetch.
+///   3. Else → return `None` (no storage_key persisted; the attachment is
+///      still registered, but downstream `$attachment:<id>` consumers will
+///      not resolve it).
+///
+/// Returns `None` on any failure (logged at warn level); persistence is
+/// best-effort — the LLM call must continue even when storage is offline.
+async fn persist_attachment_bytes(
+    storage: &dyn crate::storage::domain::OutputStorageRepository,
+    retained_inline_bytes: Option<&[u8]>,
+    attachment_source: &crate::llm::domain::attachments::AttachmentSource,
+    mime_type: &str,
+    filename: &str,
+    agent_session_id: &str,
+    document_id: &str,
+) -> Option<String> {
+    use crate::llm::domain::attachments::AttachmentSource;
+    use crate::storage::domain::StoreRequest;
+
+    let bytes_for_storage: Option<Vec<u8>> = if let Some(b) = retained_inline_bytes {
+        Some(b.to_vec())
+    } else if let AttachmentSource::SignedUrl(url) = attachment_source {
+        // Re-fetch the bytes. We intentionally do not share an HTTP client
+        // here because this is an out-of-band, best-effort persistence path
+        // — perf is dominated by the provider upload that already happened.
+        match reqwest::get(url.as_str()).await {
+            Ok(resp) => match resp.error_for_status() {
+                Ok(ok_resp) => match ok_resp.bytes().await {
+                    Ok(b) => Some(b.to_vec()),
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "colmena::attachment",
+                            error = %e,
+                            document_id = %document_id,
+                            "failed to read signed-url bytes for storage persistence"
+                        );
+                        None
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        target: "colmena::attachment",
+                        error = %e,
+                        document_id = %document_id,
+                        "signed-url returned non-success status during storage persistence"
+                    );
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    target: "colmena::attachment",
+                    error = %e,
+                    document_id = %document_id,
+                    "failed to fetch signed-url bytes for storage persistence"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let bytes = bytes_for_storage?;
+
+    let req = StoreRequest {
+        bytes,
+        mime_type: mime_type.to_string(),
+        filename: filename.to_string(),
+        session_id: None,
+        agent_session_id: Some(agent_session_id.to_string()),
+    };
+
+    match storage.store(req).await {
+        Ok(out) => Some(out.storage_key),
+        Err(e) => {
+            tracing::warn!(
+                target: "colmena::attachment",
+                error = %e,
+                document_id = %document_id,
+                "failed to persist attachment bytes to OutputStorageRepository; \
+                 attachment registered without storage_key"
+            );
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod persist_attachment_bytes_tests {
+    use super::*;
+    use crate::llm::domain::attachments::AttachmentSource;
+    use crate::storage::domain::{MockOutputStorageRepository, StoredOutput};
+    use mockall::predicate::*;
+
+    fn stored(key: &str) -> StoredOutput {
+        StoredOutput {
+            storage_key: key.to_string(),
+            read_url: format!("https://example/{}", key),
+            mime_type: "application/pdf".to_string(),
+            filename: "x.pdf".to_string(),
+            size_bytes: 5,
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_bytes_are_persisted_and_storage_key_is_returned() {
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_store()
+            .times(1)
+            .withf(|req| {
+                req.bytes == b"hello"
+                    && req.mime_type == "application/pdf"
+                    && req.filename == "x.pdf"
+                    && req.agent_session_id.as_deref() == Some("agent_1")
+                    && req.session_id.is_none()
+            })
+            .returning(|_| Ok(stored("sk-inline-test")));
+
+        let key = persist_attachment_bytes(
+            &storage,
+            Some(b"hello"),
+            &AttachmentSource::Inline,
+            "application/pdf",
+            "x.pdf",
+            "agent_1",
+            "doc-1",
+        )
+        .await;
+
+        assert_eq!(key.as_deref(), Some("sk-inline-test"));
+    }
+
+    #[tokio::test]
+    async fn inline_path_takes_precedence_over_signed_url() {
+        // If we have retained bytes (e.g. inline file that was uploaded to
+        // provider), we must NOT re-fetch the URL — bytes are already in RAM.
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_store()
+            .times(1)
+            .withf(|req| req.bytes == b"local")
+            .returning(|_| Ok(stored("sk-inline-priority")));
+
+        let key = persist_attachment_bytes(
+            &storage,
+            Some(b"local"),
+            &AttachmentSource::SignedUrl("http://127.0.0.1:1/never-fetched".into()),
+            "application/pdf",
+            "x.pdf",
+            "agent_1",
+            "doc-1",
+        )
+        .await;
+
+        assert_eq!(key.as_deref(), Some("sk-inline-priority"));
+    }
+
+    #[tokio::test]
+    async fn inline_source_without_retained_bytes_returns_none() {
+        // No bytes available, source is Inline (no URL to fetch) → cannot
+        // persist; storage.store must NOT be called.
+        let storage = MockOutputStorageRepository::new();
+        // No expect_store — strict mock will fail if called.
+
+        let key = persist_attachment_bytes(
+            &storage,
+            None,
+            &AttachmentSource::Inline,
+            "application/pdf",
+            "x.pdf",
+            "agent_1",
+            "doc-1",
+        )
+        .await;
+
+        assert!(key.is_none());
+    }
+
+    #[tokio::test]
+    async fn signed_url_with_no_retained_bytes_fetches_and_persists() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/file.pdf"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"remote-bytes".to_vec()))
+            .mount(&server)
+            .await;
+
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_store()
+            .times(1)
+            .withf(|req| req.bytes == b"remote-bytes")
+            .returning(|_| Ok(stored("sk-url-test")));
+
+        let url = format!("{}/file.pdf", server.uri());
+        let key = persist_attachment_bytes(
+            &storage,
+            None,
+            &AttachmentSource::SignedUrl(url),
+            "application/pdf",
+            "x.pdf",
+            "agent_1",
+            "doc-url",
+        )
+        .await;
+
+        assert_eq!(key.as_deref(), Some("sk-url-test"));
+    }
+
+    #[tokio::test]
+    async fn storage_error_returns_none_without_propagating() {
+        use crate::storage::domain::StorageError;
+
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_store()
+            .times(1)
+            .returning(|_| Err(StorageError::BackendUnavailable("nope".into())));
+
+        let key = persist_attachment_bytes(
+            &storage,
+            Some(b"hello"),
+            &AttachmentSource::Inline,
+            "application/pdf",
+            "x.pdf",
+            "agent_1",
+            "doc-1",
+        )
+        .await;
+
+        assert!(key.is_none());
+    }
 }
 
 #[cfg(test)]
