@@ -5,173 +5,141 @@
 
 use crate::dag_engine::domain::sql_permissions::{SqlOperation, SqlPermissions};
 use crate::dag_engine::domain::sql_ports::{SqlValidatorPort, ValidationResult};
+use crate::dag_engine::infrastructure::sql_ast;
 
-/// Stateless validator that checks SQL queries against static rules.
+/// Stateless validator that runs every parsed statement through static rules.
 pub struct StaticRuleValidator;
-
-impl StaticRuleValidator {
-    /// Detect the primary SQL operation from a query string.
-    fn detect_operation(query: &str) -> Option<SqlOperation> {
-        let trimmed = query.trim_start();
-        let upper = trimmed.to_uppercase();
-
-        if upper.starts_with("SELECT") {
-            Some(SqlOperation::Select)
-        } else if upper.starts_with("INSERT") {
-            Some(SqlOperation::Insert)
-        } else if upper.starts_with("UPDATE") {
-            Some(SqlOperation::Update)
-        } else if upper.starts_with("DELETE") {
-            Some(SqlOperation::Delete)
-        } else if upper.starts_with("CREATE TABLE") {
-            Some(SqlOperation::CreateTable)
-        } else if upper.starts_with("CREATE FUNCTION")
-            || upper.starts_with("CREATE OR REPLACE FUNCTION")
-        {
-            Some(SqlOperation::CreateFunction)
-        } else if upper.starts_with("TRUNCATE") {
-            Some(SqlOperation::Truncate)
-        } else if upper.starts_with("DROP") {
-            Some(SqlOperation::Drop)
-        } else if upper.starts_with("ALTER") {
-            Some(SqlOperation::Alter)
-        } else {
-            None
-        }
-    }
-
-    /// Extract schema references from the query (simple heuristic: `schema.table` patterns).
-    fn extract_schemas(query: &str) -> Vec<String> {
-        let re = regex::Regex::new(r"(?i)\b(\w+)\.(\w+)").unwrap();
-        let mut schemas = Vec::new();
-        for cap in re.captures_iter(query) {
-            let schema = cap[1].to_lowercase();
-            schemas.push(schema);
-        }
-        schemas.sort();
-        schemas.dedup();
-        schemas
-    }
-
-    /// Check if query contains a WHERE clause (for DELETE/UPDATE safety).
-    fn has_where_clause(query: &str) -> bool {
-        let upper = query.to_uppercase();
-        upper.contains("WHERE")
-    }
-
-    /// Check if a CREATE statement includes a COMMENT ON statement.
-    fn has_comment(query: &str) -> bool {
-        let upper = query.to_uppercase();
-        upper.contains("COMMENT ON")
-    }
-}
 
 impl SqlValidatorPort for StaticRuleValidator {
     fn validate(&self, query: &str, permissions: &SqlPermissions) -> ValidationResult {
-        let mut warnings: Vec<String> = Vec::new();
-
-        // 1. Detect operation
-        let operation = match Self::detect_operation(query) {
-            Some(op) => op,
-            None => {
+        let stmts = match sql_ast::parse(query) {
+            Ok(s) if !s.is_empty() => s,
+            Ok(_) => {
                 return ValidationResult {
                     allowed: false,
-                    block_reason: Some("Could not determine SQL operation type. Only SELECT, INSERT, UPDATE, DELETE, and CREATE FUNCTION are supported.".to_string()),
+                    block_reason: Some("Empty SQL script.".to_string()),
+                    warnings: vec![],
+                };
+            }
+            Err(e) => {
+                return ValidationResult {
+                    allowed: false,
+                    block_reason: Some(format!("Failed to parse SQL: {}", e)),
                     warnings: vec![],
                 };
             }
         };
 
-        // 2. Check if operation is always blocked
-        match &operation {
-            SqlOperation::Truncate => {
-                return ValidationResult {
-                    allowed: false,
-                    block_reason: Some(
-                        "TRUNCATE is not allowed. Use DELETE with a WHERE clause instead."
-                            .to_string(),
-                    ),
-                    warnings: vec![],
-                };
-            }
-            SqlOperation::Drop => {
-                return ValidationResult {
-                    allowed: false,
-                    block_reason: Some(
-                        "DROP is not allowed. You can only create objects in the sandbox schema."
-                            .to_string(),
-                    ),
-                    warnings: vec![],
-                };
-            }
-            SqlOperation::Alter => {
-                return ValidationResult {
-                    allowed: false,
-                    block_reason: Some("ALTER is not allowed on any schema.".to_string()),
-                    warnings: vec![],
-                };
-            }
-            _ => {}
-        }
+        let mut warnings: Vec<String> = Vec::new();
+        let mut create_function_seen = false;
 
-        // 3. Check permission for this operation
-        if !permissions.is_allowed(&operation) {
-            return ValidationResult {
-                allowed: false,
-                block_reason: Some(format!(
-                    "{:?} is not permitted by the current permission preset. Allowed operations: {}",
-                    operation,
-                    permissions.describe_for_llm()
-                )),
-                warnings: vec![],
+        for stmt in &stmts {
+            // `COMMENT ON ...` is allowed as the accompaniment to CREATE FUNCTION
+            // (and is harmless otherwise — it only attaches documentation). It
+            // doesn't classify into a SqlOperation, so handle it before classify.
+            if matches!(stmt, sqlparser::ast::Statement::Comment { .. }) {
+                continue;
+            }
+
+            // 1. Classify
+            let operation = match sql_ast::classify(stmt) {
+                Some(op) => op,
+                None => {
+                    let kind = stmt_kind_name(stmt);
+                    return ValidationResult {
+                        allowed: false,
+                        block_reason: Some(format!(
+                            "{} is not supported. Only SELECT, INSERT, UPDATE, DELETE, \
+                             CREATE TABLE, and CREATE FUNCTION are allowed. Manage schemas, \
+                             indexes, and views via migrations.",
+                            kind
+                        )),
+                        warnings: vec![],
+                    };
+                }
             };
-        }
 
-        // 4. Check schema access
-        let schemas = Self::extract_schemas(query);
-        for schema in &schemas {
-            if !permissions.is_schema_allowed(schema) {
+            // 2. Always-blocked DDL
+            match &operation {
+                SqlOperation::Truncate => {
+                    return blocked(
+                        "TRUNCATE is not allowed. Use DELETE with a WHERE clause instead.",
+                    );
+                }
+                SqlOperation::Drop => {
+                    return blocked(
+                        "DROP is not allowed. You can only create objects in the sandbox schema.",
+                    );
+                }
+                SqlOperation::Alter => {
+                    return blocked("ALTER is not allowed on any schema.");
+                }
+                _ => {}
+            }
+
+            // 3. Permission preset
+            if !permissions.is_allowed(&operation) {
                 return ValidationResult {
                     allowed: false,
                     block_reason: Some(format!(
-                        "Access to schema '{}' is not allowed. Allowed schemas: check your permissions config.",
-                        schema
+                        "{:?} is not permitted by the current permission preset. \
+                         Allowed operations: {}",
+                        operation,
+                        permissions.describe_for_llm()
                     )),
                     warnings: vec![],
                 };
             }
+
+            // 4. Schema allowlist
+            for schema in sql_ast::referenced_schemas(stmt) {
+                if !permissions.is_schema_allowed(&schema) {
+                    return ValidationResult {
+                        allowed: false,
+                        block_reason: Some(format!(
+                            "Access to schema '{}' is not allowed. \
+                             Allowed schemas: check your permissions config.",
+                            schema
+                        )),
+                        warnings: vec![],
+                    };
+                }
+            }
+
+            // 5. DELETE/UPDATE without WHERE
+            if matches!(operation, SqlOperation::Delete | SqlOperation::Update)
+                && !sql_ast::has_where(stmt)
+            {
+                return ValidationResult {
+                    allowed: false,
+                    block_reason: Some(format!(
+                        "{:?} without a WHERE clause is not allowed. \
+                         Specify which rows to affect.",
+                        operation
+                    )),
+                    warnings: vec![],
+                };
+            }
+
+            if matches!(operation, SqlOperation::CreateFunction) {
+                create_function_seen = true;
+            }
+
+            // 6. SELECT * warning (non-blocking)
+            if sql_ast::select_has_wildcard(stmt) {
+                warnings.push(
+                    "Prefer selecting specific columns instead of SELECT * to reduce \
+                     data transfer and improve clarity."
+                        .to_string(),
+                );
+            }
         }
 
-        // 5. DELETE/UPDATE without WHERE
-        if matches!(operation, SqlOperation::Delete | SqlOperation::Update)
-            && !Self::has_where_clause(query)
-        {
-            return ValidationResult {
-                allowed: false,
-                block_reason: Some(format!(
-                    "{:?} without a WHERE clause is not allowed. Specify which rows to affect.",
-                    operation
-                )),
-                warnings: vec![],
-            };
-        }
-
-        // 6. CREATE without COMMENT
-        if matches!(operation, SqlOperation::CreateFunction) && !Self::has_comment(query) {
-            return ValidationResult {
-                allowed: false,
-                block_reason: Some(
-                    "CREATE FUNCTION requires a COMMENT ON FUNCTION statement describing the function's purpose. Include it in the same query.".to_string()
-                ),
-                warnings: vec![],
-            };
-        }
-
-        // 7. Warnings (non-blocking)
-        let upper = query.to_uppercase();
-        if upper.contains("SELECT *") || upper.contains("SELECT  *") {
-            warnings.push(
-                "Prefer selecting specific columns instead of SELECT * to reduce data transfer and improve clarity.".to_string()
+        // 7. CREATE FUNCTION requires a COMMENT ON somewhere in the script
+        if create_function_seen && !sql_ast::script_has_comment_on(&stmts) {
+            return blocked(
+                "CREATE FUNCTION requires a COMMENT ON FUNCTION statement describing \
+                 the function's purpose. Include it in the same query.",
             );
         }
 
@@ -180,6 +148,27 @@ impl SqlValidatorPort for StaticRuleValidator {
             block_reason: None,
             warnings,
         }
+    }
+}
+
+fn blocked(reason: &str) -> ValidationResult {
+    ValidationResult {
+        allowed: false,
+        block_reason: Some(reason.to_string()),
+        warnings: vec![],
+    }
+}
+
+fn stmt_kind_name(stmt: &sqlparser::ast::Statement) -> &'static str {
+    use sqlparser::ast::Statement::*;
+    match stmt {
+        CreateSchema { .. } => "CREATE SCHEMA",
+        CreateIndex(_) => "CREATE INDEX",
+        CreateView(_) => "CREATE VIEW",
+        Grant(_) => "GRANT",
+        Revoke(_) => "REVOKE",
+        Comment { .. } => "Stand-alone COMMENT",
+        _ => "This statement type",
     }
 }
 
@@ -331,5 +320,72 @@ mod tests {
         let v = StaticRuleValidator;
         let r = v.validate("CREATE TABLE public.todos (id SERIAL)", &read_only_perms());
         assert!(!r.allowed);
+    }
+
+    #[test]
+    fn test_insert_with_decimal_literal_no_false_positive() {
+        // Regression: the old regex matched `1.81` as schema="1", table="81".
+        let v = StaticRuleValidator;
+        let r = v.validate(
+            "INSERT INTO seb_data.productos (sku, peso) VALUES ('A1', 1.81)",
+            &SqlPermissions::from_config(Some(&serde_json::json!({
+                "preset": "full",
+                "allowed_schemas": ["seb_data"],
+                "sandbox_schema": "seb_data"
+            })))
+            .unwrap(),
+        );
+        assert!(r.allowed, "decimal literal must not be misread as schema");
+    }
+
+    #[test]
+    fn test_create_schema_blocked_with_useful_message() {
+        let v = StaticRuleValidator;
+        let r = v.validate("CREATE SCHEMA foo", &full_perms());
+        assert!(!r.allowed);
+        assert!(
+            r.block_reason.as_deref().unwrap().contains("CREATE SCHEMA"),
+            "block reason should name the rejected op"
+        );
+    }
+
+    #[test]
+    fn test_create_index_blocked() {
+        let v = StaticRuleValidator;
+        let r = v.validate(
+            "CREATE INDEX idx ON production.users (email)",
+            &full_perms(),
+        );
+        assert!(!r.allowed);
+    }
+
+    #[test]
+    fn test_unparseable_query_blocked() {
+        let v = StaticRuleValidator;
+        let r = v.validate("this is not sql", &full_perms());
+        assert!(!r.allowed);
+        assert!(r.block_reason.unwrap().to_lowercase().contains("parse"));
+    }
+
+    #[test]
+    fn test_multistatement_validates_each() {
+        // The old validator looked at the first keyword and let DROP slip through.
+        let v = StaticRuleValidator;
+        let r = v.validate(
+            "SELECT * FROM production.users; DROP TABLE production.users",
+            &full_perms(),
+        );
+        assert!(!r.allowed, "DROP in second statement must be blocked");
+        assert!(r.block_reason.unwrap().contains("DROP"));
+    }
+
+    #[test]
+    fn test_multirow_insert_allowed() {
+        let v = StaticRuleValidator;
+        let r = v.validate(
+            "INSERT INTO public.t (a, b) VALUES (1, 'x'), (2, 'y'), (3, 'z')",
+            &full_perms(),
+        );
+        assert!(r.allowed, "multi-row INSERT must work for bulk loads");
     }
 }
