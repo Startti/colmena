@@ -272,8 +272,16 @@ impl SqlConnectionPort for PgPoolAdapter {
         let timeout_ms = self.statement_timeout_ms;
         let work_mem = self.work_mem_mb;
 
-        let trimmed = query.trim_start().to_uppercase();
-        let is_select = trimmed.starts_with("SELECT") || trimmed.starts_with("WITH");
+        let parsed = crate::dag_engine::infrastructure::sql_ast::parse(query).ok();
+        // First statement classifier — execution-path decisions only consider the
+        // outer shape, but the validator (which ran before us) checked every statement.
+        let first_stmt = parsed.as_ref().and_then(|s| s.first());
+        let is_select = first_stmt
+            .map(crate::dag_engine::infrastructure::sql_ast::is_query)
+            .unwrap_or(false);
+        let already_has_limit = first_stmt
+            .map(crate::dag_engine::infrastructure::sql_ast::query_has_limit)
+            .unwrap_or(false);
 
         // All queries now use transactions so we can SET LOCAL tenant context
         let mut tx = pool.begin().await.map_err(|e| {
@@ -303,7 +311,7 @@ impl SqlConnectionPort for PgPoolAdapter {
         }
 
         if is_select {
-            let limited_query = if max_rows > 0 && !trimmed.contains("LIMIT") {
+            let limited_query = if max_rows > 0 && !already_has_limit {
                 format!("{} LIMIT {}", query.trim_end_matches(';'), max_rows + 1)
             } else {
                 query.to_string()
@@ -378,27 +386,19 @@ impl SqlConnectionPort for PgPoolAdapter {
 
             let rows_affected = result.rows_affected();
 
-            if trimmed.starts_with("CREATE FUNCTION")
-                || trimmed.starts_with("CREATE OR REPLACE FUNCTION")
-            {
-                Ok(QueryResult {
-                    output: json!({ "created": true }),
-                    row_count: 0,
-                    truncated: false,
-                })
-            } else if trimmed.starts_with("CREATE TABLE") {
-                Ok(QueryResult {
-                    output: json!({ "created": true, "type": "table" }),
-                    row_count: 0,
-                    truncated: false,
-                })
-            } else {
-                Ok(QueryResult {
-                    output: json!({ "rows_affected": rows_affected }),
-                    row_count: rows_affected,
-                    truncated: false,
-                })
-            }
+            use sqlparser::ast::Statement;
+            let (output, row_count) = match first_stmt {
+                Some(Statement::CreateFunction(_)) => (json!({ "created": true }), 0u64),
+                Some(Statement::CreateTable(_)) => {
+                    (json!({ "created": true, "type": "table" }), 0u64)
+                }
+                _ => (json!({ "rows_affected": rows_affected }), rows_affected),
+            };
+            Ok(QueryResult {
+                output,
+                row_count,
+                truncated: false,
+            })
         }
     }
 
