@@ -136,22 +136,24 @@ impl SqlExecutionService {
                 .await;
         }
 
-        // If CREATE FUNCTION, register in the function registry
-        let trimmed = query.trim_start().to_uppercase();
-        if trimmed.starts_with("CREATE FUNCTION")
-            || trimmed.starts_with("CREATE OR REPLACE FUNCTION")
-        {
-            // Extract function name from query (basic heuristic)
-            if let Some(func_name) = Self::extract_function_name(query) {
-                let comment = Self::extract_comment(query).unwrap_or_default();
-                let info = crate::dag_engine::domain::sql_ports::FunctionInfo {
-                    function_name: func_name,
-                    schema_name: permissions.sandbox_schema().to_string(),
-                    parameters: None, // Could be parsed but keeping simple for v1
-                    return_type: None,
-                    description: comment,
-                };
-                let _ = self.registry.register_function(&info, session_id).await;
+        // If any statement is CREATE FUNCTION, register it.
+        // Parsing here is cheap (same query already parsed during validation) — accept
+        // the duplicate parse for now; can be plumbed through a shared cache later.
+        if let Ok(stmts) = crate::dag_engine::infrastructure::sql_ast::parse(query) {
+            for stmt in &stmts {
+                if let Some(func_name) =
+                    crate::dag_engine::infrastructure::sql_ast::created_function_name(stmt)
+                {
+                    let comment = extract_comment_from_stmts(&stmts).unwrap_or_default();
+                    let info = crate::dag_engine::domain::sql_ports::FunctionInfo {
+                        function_name: func_name,
+                        schema_name: permissions.sandbox_schema().to_string(),
+                        parameters: None,
+                        return_type: None,
+                        description: comment,
+                    };
+                    let _ = self.registry.register_function(&info, session_id).await;
+                }
             }
         }
 
@@ -163,21 +165,33 @@ impl SqlExecutionService {
             optimization_hints,
         })
     }
+}
 
-    /// Extract function name from a CREATE FUNCTION statement (basic heuristic).
-    fn extract_function_name(query: &str) -> Option<String> {
-        let re =
-            regex::Regex::new(r"(?i)CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(\S+)\s*\(").ok()?;
-        re.captures(query)
-            .and_then(|caps| caps.get(1))
-            .map(|m| m.as_str().to_string())
+/// Pull the comment text out of the first `COMMENT ON ... IS '<text>'`
+/// statement in the script. Uses sqlparser's AST instead of a quote-based
+/// regex (which used to break on escaped quotes inside the comment body).
+fn extract_comment_from_stmts(stmts: &[sqlparser::ast::Statement]) -> Option<String> {
+    for stmt in stmts {
+        if let sqlparser::ast::Statement::Comment { comment, .. } = stmt {
+            return comment.clone();
+        }
     }
+    None
+}
 
-    /// Extract COMMENT text from a combined CREATE + COMMENT statement.
-    fn extract_comment(query: &str) -> Option<String> {
-        let re = regex::Regex::new(r"(?i)COMMENT\s+ON\s+FUNCTION\s+\S+\s+IS\s+'([^']*)'").ok()?;
-        re.captures(query)
-            .and_then(|caps| caps.get(1))
-            .map(|m| m.as_str().to_string())
+#[cfg(test)]
+mod ast_extract_tests {
+    use super::*;
+    use crate::dag_engine::infrastructure::sql_ast;
+
+    #[test]
+    fn extract_comment_handles_apostrophe_in_text() {
+        // The old regex `'([^']*)'` truncated at the first apostrophe.
+        let stmts =
+            sql_ast::parse("COMMENT ON FUNCTION s.f() IS 'It''s a great function'").unwrap();
+        assert_eq!(
+            extract_comment_from_stmts(&stmts),
+            Some("It's a great function".to_string())
+        );
     }
 }
