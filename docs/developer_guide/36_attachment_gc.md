@@ -85,6 +85,14 @@ El `HttpCallbackStorageAdapter::delete` postea a `<base>/internal/gcs/delete` co
 3. Devolver 200 si tuvo éxito, 404 si el blob no existía (también OK — el GC lo trata como idempotente).
 4. Devolver 5xx en caso de error transitorio (el GC reintentará en la próxima corrida).
 
+> **Importante:** la host application NO debe borrar la fila de `conversation_attachments` desde este endpoint — esa parte la maneja colmena (vía `AttachmentRegistry::delete_attachment` justo después de que este endpoint devuelve éxito). El endpoint es estrictamente de borrado de blob en GCS.
+
+### Orden de deployment
+
+El binario `attachment_gc` corre `sqlx::migrate!` al startup como defensa contra DBs frescos. Esto es no-op en prod (el `dag_engine` ya las aplicó), pero abre una ventana de riesgo si el GC se despliega ANTES que el dag_engine cuando hay migraciones nuevas: el GC aplicaría una migración que el engine todavía no consume.
+
+**Regla:** desplegar `dag_engine` primero, luego `attachment_gc`. Si esta regla se vuelve inconveniente operacionalmente, dropear las 3 líneas de `sqlx::migrate!` en `main.rs` y dejar que el GC falle ruidosamente contra un schema sin migrar.
+
 ## Monitoring
 
 Logs estructurados con target `colmena::attachment_gc`. Filtros útiles en Cloud Logging:
