@@ -2,7 +2,9 @@
 //! mocked LlmRepository. Verifies that:
 //!   1. The synthetic LOAD_ATTACHMENT sentinel produced by the executor is
 //!      consumed by AgentService.
-//!   2. A synthetic `user` message with `files[]` is appended and persisted.
+//!   2. A synthetic `user` message with `files[]` is appended in-memory and
+//!      a short marker user message (no files) is persisted in its place
+//!      (Plan B D7 — ephemeral attachments).
 //!   3. The next ReAct iteration receives the file in its message slice.
 
 use async_trait::async_trait;
@@ -163,12 +165,22 @@ async fn load_attachment_injects_synthetic_user_message_and_persists_history() {
     let resp = svc.run(params).await.unwrap();
     assert_eq!(resp.content(), "done");
 
+    // Plan B (D7): the synthetic user_with_files is NOT persisted; a marker
+    // user message takes its place so future turns don't pay input-token
+    // cost for the doc bytes.
     let persisted = conv.0.lock().unwrap().clone();
     let has_user_with_files = persisted
         .iter()
         .any(|m| m.role().as_str() == "user" && m.files().map(|f| !f.is_empty()).unwrap_or(false));
     assert!(
-        has_user_with_files,
-        "synthetic user message with files not persisted"
+        !has_user_with_files,
+        "synthetic user_with_files must NOT be persisted (ephemeral)"
+    );
+    let has_marker = persisted
+        .iter()
+        .any(|m| m.role().as_str() == "user" && m.content().contains("[load_attachment("));
+    assert!(
+        has_marker,
+        "expected a load_attachment marker user message in persisted history"
     );
 }
