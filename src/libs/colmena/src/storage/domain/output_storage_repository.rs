@@ -97,4 +97,10 @@ pub trait OutputStorageRepository: Send + Sync {
     /// Returns `StorageError::BackendUnavailable` if the underlying source
     /// cannot be reached.
     async fn read_stream(&self, storage_key: &str) -> Result<StoredStream, StorageError>;
+
+    /// Plan C: delete the blob associated with `storage_key`. Idempotent —
+    /// returns `Ok(())` whether or not the blob existed. Backend failures
+    /// (e.g., GCS unavailable) bubble up as `StorageError::BackendUnavailable`
+    /// so the `attachment_gc` binary can retry on the next scheduled run.
+    async fn delete(&self, storage_key: &str) -> Result<(), StorageError>;
 }

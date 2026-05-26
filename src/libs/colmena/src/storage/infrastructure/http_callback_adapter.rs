@@ -5,12 +5,17 @@
 //!
 //! The remote endpoint contract is:
 //!
-//! - Request: `POST {callback_url}` with header `X-Internal-Token: <secret>`
+//! - Sign / upload: `POST {callback_url}` with header `X-Internal-Token: <secret>`
 //!   and a JSON body of `{ session_id, agent_session_id, mime_type, filename, purpose }`.
-//! - Response (200): `{ put_url, read_url, storage_key }`.
+//!   Response (200): `{ put_url, read_url, storage_key }`.
+//! - Delete (Plan C): `POST {<sibling-of-callback_url>/delete}` with the same
+//!   `X-Internal-Token` header and body `{ storage_key }`. Idempotent — 404
+//!   is treated as success. Used by the `attachment_gc` binary.
 //!
-//! Anything non-2xx is mapped to [`StorageError::CallbackFailed`]; transport
-//! failures map to [`StorageError::BackendUnavailable`].
+//! Sign-step non-2xx is mapped to [`StorageError::CallbackFailed`]; transport
+//! failures map to [`StorageError::BackendUnavailable`]. The delete step maps
+//! any non-success non-404 status to `BackendUnavailable` so the gc binary
+//! retries on the next scheduled run.
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -66,6 +71,28 @@ impl HttpCallbackStorageAdapter {
             callback_url,
             shared_secret,
             meta_cache: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Derive the delete-endpoint URL by sibling-path replacement on
+    /// `callback_url`. The production ADP API exposes `POST /internal/gcs/sign-put`
+    /// for upload and (after Plan C) `POST /internal/gcs/delete` for deletion;
+    /// they share the same `/internal/gcs/` prefix and `X-Internal-Token`
+    /// authentication. Replacing the final path segment lets the adapter
+    /// derive both endpoints from a single `COLMENA_STORAGE_CALLBACK_URL`
+    /// env var without forcing every deployment to add a second variable.
+    ///
+    /// If `callback_url` does not end with `/sign-put`, we fall back to
+    /// appending `/delete` so the call still reaches a sensible default
+    /// path — but production deployments should always use the canonical
+    /// `.../sign-put` URL.
+    fn delete_url(&self) -> String {
+        if let Some(prefix) = self.callback_url.strip_suffix("/sign-put") {
+            format!("{prefix}/delete")
+        } else if let Some(prefix) = self.callback_url.strip_suffix('/') {
+            format!("{prefix}/delete")
+        } else {
+            format!("{}/delete", self.callback_url)
         }
     }
 }
@@ -249,6 +276,38 @@ impl OutputStorageRepository for HttpCallbackStorageAdapter {
             mime_type: meta.mime_type,
             filename: meta.filename,
         })
+    }
+
+    async fn delete(&self, storage_key: &str) -> Result<(), StorageError> {
+        // POST { storage_key } to the sibling /delete endpoint with the same
+        // shared-secret header used by /sign-put. The host application is
+        // responsible for deleting the underlying GCS object.
+        let url = self.delete_url();
+        let resp = self
+            .client
+            .post(&url)
+            .header("X-Internal-Token", &self.shared_secret)
+            .json(&serde_json::json!({ "storage_key": storage_key }))
+            .send()
+            .await
+            .map_err(|e| {
+                StorageError::BackendUnavailable(format!("delete callback transport: {e}"))
+            })?;
+
+        let status = resp.status();
+        if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
+            // Drop the local meta cache entry so a subsequent `read` after
+            // delete fails fast without a doomed network round-trip.
+            self.meta_cache.remove(storage_key);
+            // 404 is treated as success — the blob is already gone, which is
+            // exactly the post-condition we want (idempotent delete).
+            Ok(())
+        } else {
+            let body = resp.text().await.unwrap_or_default();
+            Err(StorageError::BackendUnavailable(format!(
+                "delete callback returned {status}: {body}"
+            )))
+        }
     }
 }
 
@@ -508,6 +567,143 @@ mod tests {
             "s3cr3t".to_string(),
         );
         let err = adapter.read_stream("never-stored").await.unwrap_err();
+        assert!(matches!(err, StorageError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_url_derived_from_sign_put_sibling() {
+        let adapter = HttpCallbackStorageAdapter::new(
+            "https://api.dev.startti.ai/internal/gcs/sign-put".to_string(),
+            "s3cr3t".to_string(),
+        );
+        assert_eq!(
+            adapter.delete_url(),
+            "https://api.dev.startti.ai/internal/gcs/delete"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_url_falls_back_when_callback_url_lacks_sign_put_suffix() {
+        let adapter = HttpCallbackStorageAdapter::new(
+            "https://api.example.com/custom-endpoint".to_string(),
+            "s3cr3t".to_string(),
+        );
+        // No /sign-put suffix and no trailing slash → append /delete.
+        assert_eq!(
+            adapter.delete_url(),
+            "https://api.example.com/custom-endpoint/delete"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_posts_storage_key_to_sibling_endpoint_with_secret_header() {
+        let server = MockServer::start().await;
+
+        // The adapter must POST to the sibling /delete endpoint with the
+        // shared-secret header and a JSON body of { storage_key }.
+        Mock::given(method("POST"))
+            .and(path("/internal/gcs/delete"))
+            .and(header("X-Internal-Token", "s3cr3t"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = HttpCallbackStorageAdapter::new(
+            format!("{}/internal/gcs/sign-put", server.uri()),
+            "s3cr3t".to_string(),
+        );
+
+        adapter.delete("some-key").await.unwrap();
+        // wiremock auto-verifies the expected call count on drop.
+    }
+
+    #[tokio::test]
+    async fn delete_treats_404_as_success() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/internal/gcs/delete"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let adapter = HttpCallbackStorageAdapter::new(
+            format!("{}/internal/gcs/sign-put", server.uri()),
+            "s3cr3t".to_string(),
+        );
+        // 404 means "already gone" — idempotent delete.
+        adapter.delete("missing-key").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_returns_backend_unavailable_on_5xx() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/internal/gcs/delete"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("upstream down"))
+            .mount(&server)
+            .await;
+
+        let adapter = HttpCallbackStorageAdapter::new(
+            format!("{}/internal/gcs/sign-put", server.uri()),
+            "s3cr3t".to_string(),
+        );
+        let err = adapter.delete("any-key").await.unwrap_err();
+        match err {
+            StorageError::BackendUnavailable(msg) => {
+                assert!(msg.contains("503"), "expected 503 in error, got: {msg}");
+            }
+            other => panic!("expected BackendUnavailable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_evicts_meta_cache_so_subsequent_read_fails_fast() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path("/upload"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let put_url = format!("{}/upload", server.uri());
+        let read_url = format!("{}/read", server.uri());
+        let storage_key = "chat-attachments/u/s/generated/abc-out.png";
+
+        Mock::given(method("POST"))
+            .and(path("/internal/gcs/sign-put"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "put_url": put_url,
+                "read_url": read_url,
+                "storage_key": storage_key,
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/internal/gcs/delete"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let adapter = HttpCallbackStorageAdapter::new(
+            format!("{}/internal/gcs/sign-put", server.uri()),
+            "s3cr3t".to_string(),
+        );
+
+        // Store → cache populated.
+        let stored = adapter
+            .store(req(vec![0xDE, 0xAD], "image/png"))
+            .await
+            .unwrap();
+        // Delete → cache evicted.
+        adapter.delete(&stored.storage_key).await.unwrap();
+        // Subsequent read must fail fast (InvalidInput) without a network call,
+        // exactly like read_unknown_key_errors_without_network_call.
+        let err = adapter.read(&stored.storage_key).await.unwrap_err();
         assert!(matches!(err, StorageError::InvalidInput(_)));
     }
 

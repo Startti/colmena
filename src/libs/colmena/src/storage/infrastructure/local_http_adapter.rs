@@ -277,6 +277,28 @@ impl OutputStorageRepository for LocalHttpStorageAdapter {
             filename,
         })
     }
+
+    async fn delete(&self, storage_key: &str) -> Result<(), StorageError> {
+        // Reject path-traversal attempts just like read/read_stream do —
+        // even though the gc binary should only feed us keys it just read
+        // from the registry, defense-in-depth matters here.
+        if storage_key.contains('/') || storage_key.contains("..") || storage_key.is_empty() {
+            return Err(StorageError::InvalidInput(format!(
+                "invalid storage_key '{storage_key}'"
+            )));
+        }
+        let path = self.dir.join(storage_key);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            // Idempotent — missing file is not an error.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(StorageError::BackendUnavailable(format!(
+                "failed to delete {}: {}",
+                path.display(),
+                e
+            ))),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -443,6 +465,63 @@ mod tests {
             .unwrap();
         for bad in ["../etc/passwd", "/tmp/foo", "sub/dir/key"] {
             let err = adapter.read_stream(bad).await.unwrap_err();
+            assert!(
+                matches!(err, StorageError::InvalidInput(_)),
+                "expected InvalidInput for '{bad}', got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_removes_stored_blob_and_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let adapter = LocalHttpStorageAdapter::new(tmp.path().to_path_buf(), 0)
+            .await
+            .unwrap();
+        let stored = adapter
+            .store(req(b"hello".to_vec(), "image/png"))
+            .await
+            .unwrap();
+
+        let on_disk = tmp.path().join(&stored.storage_key);
+        assert!(on_disk.exists(), "file should exist on disk after store");
+
+        // First delete removes it.
+        adapter.delete(&stored.storage_key).await.unwrap();
+        assert!(
+            !on_disk.exists(),
+            "file should be gone from disk after delete"
+        );
+        assert!(
+            matches!(
+                adapter.read(&stored.storage_key).await,
+                Err(StorageError::InvalidInput(_))
+            ),
+            "read after delete should fail"
+        );
+
+        // Second delete is a no-op (idempotent).
+        adapter.delete(&stored.storage_key).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_unknown_key_is_noop() {
+        let tmp = TempDir::new().unwrap();
+        let adapter = LocalHttpStorageAdapter::new(tmp.path().to_path_buf(), 0)
+            .await
+            .unwrap();
+        // Deleting a key that was never stored must succeed.
+        adapter.delete("never-existed.png").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_path_traversal() {
+        let tmp = TempDir::new().unwrap();
+        let adapter = LocalHttpStorageAdapter::new(tmp.path().to_path_buf(), 0)
+            .await
+            .unwrap();
+        for bad in ["../etc/passwd", "/tmp/foo", "sub/dir/key"] {
+            let err = adapter.delete(bad).await.unwrap_err();
             assert!(
                 matches!(err, StorageError::InvalidInput(_)),
                 "expected InvalidInput for '{bad}', got {err:?}"
