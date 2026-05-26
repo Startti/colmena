@@ -1444,7 +1444,12 @@ mod multipart_url_resolution_tests {
         assert_eq!(resolved.size_bytes, 4);
         // Confirm only one request was issued, and it was a GET.
         let received = server.received_requests().await.unwrap();
-        assert_eq!(received.len(), 1, "expected exactly 1 request, got {}", received.len());
+        assert_eq!(
+            received.len(),
+            1,
+            "expected exactly 1 request, got {}",
+            received.len()
+        );
         assert_eq!(received[0].method.as_str(), "GET");
     }
 

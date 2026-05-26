@@ -413,7 +413,11 @@ mod tests {
         );
         assert!(!r.allowed, "COMMENT on disallowed schema must be blocked");
         assert!(
-            r.block_reason.as_deref().unwrap().to_lowercase().contains("schema"),
+            r.block_reason
+                .as_deref()
+                .unwrap()
+                .to_lowercase()
+                .contains("schema"),
             "block reason should mention the schema"
         );
     }

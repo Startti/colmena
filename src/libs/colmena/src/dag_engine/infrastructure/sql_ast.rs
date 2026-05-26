@@ -492,8 +492,7 @@ mod tests {
     #[test]
     fn referenced_schemas_finds_joins() {
         let stmts =
-            parse("SELECT u.id FROM core.users u JOIN audit.events e ON e.user_id = u.id")
-                .unwrap();
+            parse("SELECT u.id FROM core.users u JOIN audit.events e ON e.user_id = u.id").unwrap();
         let mut s = referenced_schemas(&stmts[0]);
         s.sort();
         assert_eq!(s, vec!["audit".to_string(), "core".to_string()]);
@@ -503,8 +502,7 @@ mod tests {
     fn referenced_schemas_handles_json_path() {
         // `data->>'key'` and `obj.field` outside identifier position must not be
         // counted as schema references.
-        let stmts =
-            parse("SELECT data->>'foo' FROM public.t WHERE data->>'bar' = 'x'").unwrap();
+        let stmts = parse("SELECT data->>'foo' FROM public.t WHERE data->>'bar' = 'x'").unwrap();
         let schemas = referenced_schemas(&stmts[0]);
         assert_eq!(schemas, vec!["public".to_string()]);
     }
@@ -519,7 +517,9 @@ mod tests {
 
     #[test]
     fn has_where_for_update_delete() {
-        assert!(has_where(&parse("UPDATE s.t SET a=1 WHERE id=2").unwrap()[0]));
+        assert!(has_where(
+            &parse("UPDATE s.t SET a=1 WHERE id=2").unwrap()[0]
+        ));
         assert!(!has_where(&parse("UPDATE s.t SET a=1").unwrap()[0]));
         assert!(has_where(&parse("DELETE FROM s.t WHERE id=2").unwrap()[0]));
         assert!(!has_where(&parse("DELETE FROM s.t").unwrap()[0]));
@@ -546,7 +546,8 @@ mod tests {
     fn parse_accepts_create_function_plus_comment_with_parens() {
         // The combination that Task 3's existing test `test_create_function_with_comment_allowed`
         // depends on.
-        let query = "CREATE FUNCTION sandbox.my_func() RETURNS void AS $$ BEGIN END; $$ LANGUAGE plpgsql; \
+        let query =
+            "CREATE FUNCTION sandbox.my_func() RETURNS void AS $$ BEGIN END; $$ LANGUAGE plpgsql; \
                      COMMENT ON FUNCTION sandbox.my_func() IS 'Does something'";
         let stmts = parse(query).unwrap();
         assert_eq!(stmts.len(), 2);
@@ -604,10 +605,7 @@ mod tests {
             "CREATE FUNCTION sandbox.my_func() RETURNS VOID AS $$ BEGIN END; $$ LANGUAGE plpgsql",
         )
         .unwrap();
-        assert_eq!(
-            created_function_name(&stmts[0]).unwrap(),
-            "sandbox.my_func"
-        );
+        assert_eq!(created_function_name(&stmts[0]).unwrap(), "sandbox.my_func");
     }
 
     #[test]
