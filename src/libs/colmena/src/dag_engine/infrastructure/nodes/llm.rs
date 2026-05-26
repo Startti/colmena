@@ -1804,6 +1804,15 @@ impl ExecutableNode for LlmNode {
             }
             if !attachment_catalog.is_empty() {
                 sections.push(ATTACHMENTS_SYSTEM_PRELUDE.to_string());
+                // Plan A: append the per-document catalog block so the LLM
+                // knows which `document_id`s are available in the session
+                // (for `load_attachment(...)` and `$attachment:<id>`
+                // placeholder use). Additive — autoinject behavior unchanged.
+                if let Some(catalog_block) =
+                    crate::llm::application::attachment_catalog::render_catalog(&attachment_catalog)
+                {
+                    sections.push(catalog_block);
+                }
             }
             if !tools.is_empty() {
                 // In lazy mode, hide cataloged tool names from the system prompt —
@@ -3141,6 +3150,93 @@ mod resolver_tests {
             err.contains("OutputStorageRepository"),
             "error message should mention storage: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod attachment_catalog_integration_tests {
+    //! Plan A — verify the per-document attachment catalog is rendered from
+    //! the same shape we ship to the LLM. We register an attachment via the
+    //! real `SqliteAttachmentRegistry`, list it for the session, render the
+    //! catalog block with the same helper used in `execute()`, and confirm
+    //! the resulting system-message section contains the document_id, the
+    //! `load_attachment(...)` hint, and the `$attachment:<id>` forwarder.
+    //! This is the right layer below `execute()` — `execute()` itself wires
+    //! provider repos and is heavyweight to exercise in a unit test.
+
+    use crate::llm::application::attachment_catalog::render_catalog;
+    use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
+    use crate::llm::domain::{AttachmentRegistry, ProviderKind};
+    use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn catalog_block_lists_registered_doc_with_usage_hints() {
+        let registry: Arc<dyn AttachmentRegistry> = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        registry
+            .upsert(UpsertAttachmentInput {
+                agent_session_id: "agent_catalog_test".to_string(),
+                document_id: "doc-test".to_string(),
+                provider: ProviderKind::OpenAi,
+                provider_file_id: "pf-test".to_string(),
+                mime_type: "application/pdf".to_string(),
+                filename: "report.pdf".to_string(),
+                size_bytes: Some(2 * 1024 * 1024),
+                label: Some("Q3 report".to_string()),
+                description: Some("Quarterly results".to_string()),
+                source: AttachmentSource::Inline,
+                storage_key: Some("sk-abc".to_string()),
+                origin: Some("user_upload".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let listed = registry
+            .list_for_session("agent_catalog_test")
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+
+        let block = render_catalog(&listed).expect("non-empty list must produce a catalog block");
+
+        // Simulate the section-joining done in `execute()`.
+        let assembled = ["existing system text".to_string(), block].join("\n\n---\n");
+
+        assert!(
+            assembled.contains("Documents available in this session:"),
+            "header missing in assembled system message:\n{assembled}"
+        );
+        assert!(
+            assembled.contains("[doc-test]"),
+            "document_id missing in assembled system message:\n{assembled}"
+        );
+        assert!(
+            assembled.contains("load_attachment(\"doc-test\")"),
+            "load_attachment usage hint missing:\n{assembled}"
+        );
+        assert!(
+            assembled.contains("\"$attachment:doc-test\""),
+            "$attachment placeholder hint missing:\n{assembled}"
+        );
+        assert!(
+            assembled.contains("origin: uploaded by user"),
+            "user_upload origin not humanized:\n{assembled}"
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_block_is_none_when_session_has_no_attachments() {
+        let registry: Arc<dyn AttachmentRegistry> = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        let listed = registry.list_for_session("empty_session").await.unwrap();
+        assert!(render_catalog(&listed).is_none());
     }
 }
 
