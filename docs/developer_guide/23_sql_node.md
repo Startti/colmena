@@ -378,6 +378,32 @@ This means INSERT statements don't need to explicitly include the tenant column 
 
 ---
 
+## Tipos de Statement Soportados
+
+Las consultas se analizan con el dialecto PostgreSQL del crate `sqlparser`.
+Cada statement de un script (los scripts multi-statement se validan
+statement a statement) debe ser uno de:
+
+| Operación | Notas |
+|-----------|-------|
+| `SELECT` / `WITH … SELECT` | Sujeto a `max_rows`; se agrega `LIMIT max_rows + 1` automáticamente solo si no hay LIMIT explícito en la consulta. |
+| `INSERT` | Se admiten VALUES multi-fila e INSERT … SELECT. No hay límite de filas (sujeto a `statement_timeout_ms`). |
+| `UPDATE` | Requiere cláusula `WHERE`. |
+| `DELETE` | Requiere cláusula `WHERE`. |
+| `CREATE TABLE` | Solo dentro de `allowed_schemas`. Si `auto_rls` está activo, se aplica RLS tras la creación. |
+| `CREATE FUNCTION` | Debe ir acompañado de un statement `COMMENT ON FUNCTION` en el mismo script. Se registra en el function registry. |
+| `COMMENT ON` | Permitido cuando el objeto referenciado pertenece a un schema en `allowed_schemas` (solo metadatos, sin exposición de datos). |
+
+**Siempre bloqueados:** `DROP`, `ALTER`, `TRUNCATE`, `CREATE SCHEMA`, `CREATE INDEX`,
+`CREATE VIEW`, `GRANT`, `REVOKE`. Gestiona el ciclo de vida de schemas, índices,
+vistas y permisos mediante tus herramientas de migración, no a través del LLM.
+
+Si `sqlparser` no puede parsear la consulta, el nodo devuelve un error
+`Failed to parse SQL: …` y se niega a ejecutarla — no existe fallback a
+comparación de strings heurística.
+
+---
+
 ## Sandbox Schema and Function Registry
 
 The `sandbox` schema (configurable via `sandbox_schema`) provides an isolated space for agent-created objects:
