@@ -227,26 +227,6 @@ impl SqlNode {
         lines.join("\n")
     }
 
-    /// Extract schema and table name from a CREATE TABLE statement.
-    /// Returns (schema, table). If no schema is specified, defaults to "public".
-    fn extract_create_table_name(query: &str) -> Option<(String, String)> {
-        use std::sync::OnceLock;
-        static RE: OnceLock<regex::Regex> = OnceLock::new();
-        let re = RE.get_or_init(|| {
-            regex::Regex::new(
-                r"(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(\w+)\.)?(\w+)\s*\(",
-            )
-            .expect("valid regex")
-        });
-        let caps = re.captures(query)?;
-        let schema = caps
-            .get(1)
-            .map(|m| m.as_str().to_string())
-            .unwrap_or_else(|| "public".to_string());
-        let table = caps.get(2)?.as_str().to_string();
-        Some((schema, table))
-    }
-
     /// Generate a simple session ID using a timestamp.
     fn new_session_id() -> String {
         let ts = SystemTime::now()
@@ -386,22 +366,31 @@ impl ExecutableNode for SqlNode {
                     result.row_count, result.truncated
                 );
 
-                // Post-CREATE TABLE: apply RLS to the new table
-                let trimmed_upper = query.trim_start().to_uppercase();
-                if trimmed_upper.starts_with("CREATE TABLE") && permissions.auto_rls() {
-                    if let Some((schema, table)) = Self::extract_create_table_name(query) {
-                        println!(
-                            "[SqlNode] CREATE TABLE detected — applying RLS to {}.{}",
-                            schema, table
-                        );
-                        if let Err(e) = adapter
-                            .setup_rls_for_new_table(&schema, &table, permissions.tenant_column())
-                            .await
-                        {
-                            println!(
-                                "[SqlNode] RLS setup warning for new table {}.{}: {}",
-                                schema, table, e
-                            );
+                // Post-CREATE TABLE: apply RLS to any new tables in the query
+                if permissions.auto_rls() {
+                    if let Ok(stmts) = crate::dag_engine::infrastructure::sql_ast::parse(query) {
+                        for stmt in &stmts {
+                            if let Some((schema, table)) =
+                                crate::dag_engine::infrastructure::sql_ast::created_table_name(stmt)
+                            {
+                                println!(
+                                    "[SqlNode] CREATE TABLE detected — applying RLS to {}.{}",
+                                    schema, table
+                                );
+                                if let Err(e) = adapter
+                                    .setup_rls_for_new_table(
+                                        &schema,
+                                        &table,
+                                        permissions.tenant_column(),
+                                    )
+                                    .await
+                                {
+                                    println!(
+                                        "[SqlNode] RLS setup warning for new table {}.{}: {}",
+                                        schema, table, e
+                                    );
+                                }
+                            }
                         }
                     }
                 }
