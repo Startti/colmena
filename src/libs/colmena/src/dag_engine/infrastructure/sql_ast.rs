@@ -20,7 +20,154 @@ pub use sqlparser::ast::Statement;
 /// Parse a SQL script into one or more statements using the PostgreSQL dialect.
 /// Returns the full statement vector so callers can validate / inspect each.
 pub fn parse(query: &str) -> Result<Vec<Statement>, ParserError> {
-    Parser::parse_sql(&PostgreSqlDialect {}, query)
+    let preprocessed = strip_comment_on_function_args(query);
+    Parser::parse_sql(&PostgreSqlDialect {}, &preprocessed)
+}
+
+/// Strip `(arg_types)` from `COMMENT ON FUNCTION name(arg_types) IS '...'`.
+///
+/// sqlparser 0.62 rejects the canonical Postgres syntax with parens. Since the
+/// validator doesn't care about the argument-type list (it only checks that a
+/// `COMMENT ON` statement exists), we drop those parens before parsing.
+///
+/// The pre-pass triggers only on the exact keyword sequence
+/// `COMMENT ON FUNCTION <name>(...)`, so unrelated function calls in SELECT or
+/// elsewhere are untouched. Nested parens inside the argument list (e.g.
+/// `NUMERIC(10, 2)`) are balanced correctly.
+fn strip_comment_on_function_args(input: &str) -> String {
+    // Case-insensitive search for the keyword sequence. We rebuild the string in
+    // one pass; when we hit the prefix, we copy the function name, then skip the
+    // balanced `(...)` block, then continue.
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if let Some(after_prefix) = match_comment_on_function(input, i) {
+            // Copy up through the function name (everything between `FUNCTION ` and `(`).
+            // `after_prefix` points at the first non-whitespace, non-name char — either
+            // `(` (parens to strip) or something else (no parens — leave alone).
+            let (name_end, has_parens) = scan_function_name_end(input, after_prefix);
+            out.push_str(&input[i..name_end]);
+            i = name_end;
+            if has_parens {
+                // Skip a balanced `(...)` block, then continue copying.
+                if let Some(close) = find_matching_paren(input, i) {
+                    i = close + 1;
+                }
+            }
+        } else {
+            // Copy one char and advance.
+            // Be careful with multi-byte chars: advance by the char's UTF-8 width.
+            let ch = input[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// If `input[pos..]` starts (case-insensitively, modulo whitespace) with
+/// `COMMENT ON FUNCTION ` and is a word boundary, return the byte offset
+/// immediately after that prefix (pointing at the function name's first char).
+fn match_comment_on_function(input: &str, pos: usize) -> Option<usize> {
+    // Word-boundary on the left.
+    if pos > 0 {
+        let prev = input.as_bytes()[pos - 1];
+        if prev.is_ascii_alphanumeric() || prev == b'_' {
+            return None;
+        }
+    }
+    const PREFIX: &str = "COMMENT ON FUNCTION";
+    let remaining = input.get(pos..)?;
+    if remaining.len() < PREFIX.len() {
+        return None;
+    }
+    if !remaining
+        .as_bytes()
+        .iter()
+        .zip(PREFIX.as_bytes())
+        .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    {
+        return None;
+    }
+    // Must be followed by whitespace.
+    let after = pos + PREFIX.len();
+    let next = input.as_bytes().get(after).copied()?;
+    if !next.is_ascii_whitespace() {
+        return None;
+    }
+    // Skip whitespace to land on the first name char.
+    let mut j = after;
+    while j < input.len() && input.as_bytes()[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    Some(j)
+}
+
+/// Starting at the first char of a function name, scan to the end of the name
+/// (including dotted qualifiers like `schema.func`). Returns `(end_offset, has_parens)`.
+fn scan_function_name_end(input: &str, start: usize) -> (usize, bool) {
+    let bytes = input.as_bytes();
+    let mut j = start;
+    while j < bytes.len() {
+        let b = bytes[j];
+        if b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'"' {
+            j += 1;
+        } else {
+            break;
+        }
+    }
+    // Skip whitespace between name and `(` or `IS`.
+    let mut k = j;
+    while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+        k += 1;
+    }
+    let has_parens = k < bytes.len() && bytes[k] == b'(';
+    if has_parens {
+        // Caller will skip from the `(` onwards.
+        (k, true)
+    } else {
+        (j, false)
+    }
+}
+
+/// Given an offset pointing at `(`, return the offset of the matching `)`.
+/// Tracks nesting; respects single-quoted strings so apostrophes inside
+/// argument-list expressions don't fool the matcher.
+fn find_matching_paren(input: &str, open: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    debug_assert_eq!(bytes.get(open).copied(), Some(b'('));
+    let mut depth: i32 = 0;
+    let mut in_str = false;
+    let mut i = open;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            if b == b'\'' {
+                // SQL escapes a quote by doubling it.
+                if bytes.get(i + 1).copied() == Some(b'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_str = false;
+            }
+        } else {
+            match b {
+                b'\'' => in_str = true,
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Map a parsed statement to its `SqlOperation`, or `None` for statement kinds
@@ -273,6 +420,51 @@ mod tests {
         assert!(!has_where(&parse("UPDATE s.t SET a=1").unwrap()[0]));
         assert!(has_where(&parse("DELETE FROM s.t WHERE id=2").unwrap()[0]));
         assert!(!has_where(&parse("DELETE FROM s.t").unwrap()[0]));
+    }
+
+    #[test]
+    fn parse_accepts_comment_on_function_with_parens() {
+        // Canonical Postgres syntax: `COMMENT ON FUNCTION name(arg_types) IS '...'`.
+        // sqlparser 0.62 rejects the `()` after the function name, so `parse` must
+        // strip those parens (and their contents) as a pre-pass.
+        let stmts = parse("COMMENT ON FUNCTION s.f() IS 'doc'").unwrap();
+        assert_eq!(stmts.len(), 1);
+        assert!(matches!(stmts[0], Statement::Comment { .. }));
+    }
+
+    #[test]
+    fn parse_accepts_comment_on_function_with_typed_args() {
+        let stmts = parse("COMMENT ON FUNCTION s.f(INT, TEXT) IS 'doc'").unwrap();
+        assert_eq!(stmts.len(), 1);
+        assert!(matches!(stmts[0], Statement::Comment { .. }));
+    }
+
+    #[test]
+    fn parse_accepts_create_function_plus_comment_with_parens() {
+        // The combination that Task 3's existing test `test_create_function_with_comment_allowed`
+        // depends on.
+        let query = "CREATE FUNCTION sandbox.my_func() RETURNS void AS $$ BEGIN END; $$ LANGUAGE plpgsql; \
+                     COMMENT ON FUNCTION sandbox.my_func() IS 'Does something'";
+        let stmts = parse(query).unwrap();
+        assert_eq!(stmts.len(), 2);
+        assert!(script_has_comment_on(&stmts));
+    }
+
+    #[test]
+    fn parse_preprocessing_ignores_unrelated_function_call() {
+        // The pre-pass must ONLY strip `()` when it follows `COMMENT ON FUNCTION <name>`.
+        // A bare `SELECT my_func()` must NOT be touched.
+        let stmts = parse("SELECT my_func()").unwrap();
+        assert_eq!(stmts.len(), 1);
+        // If preprocessing wrongly touched this, it would still parse but as something weird.
+        // Sanity check: it's still a SELECT.
+        assert!(is_query(&stmts[0]));
+    }
+
+    #[test]
+    fn parse_preprocessing_handles_nested_parens_in_args() {
+        let stmts = parse("COMMENT ON FUNCTION s.f(NUMERIC(10, 2)) IS 'doc'").unwrap();
+        assert_eq!(stmts.len(), 1);
     }
 
     #[test]
