@@ -402,9 +402,35 @@ impl AgentService {
                                 .add_message(session_id, tool_message)
                                 .await?;
                             if let Some(user_msg) = synthetic_user {
-                                messages.push(user_msg.clone());
+                                // Plan B (D7): the synthetic user_with_files
+                                // message stays in the in-memory `messages`
+                                // vec so the model has the doc content for
+                                // the rest of this turn's ReAct iterations.
+                                // But we persist a MARKER to llm_node_history
+                                // — not the doc content — so future turns
+                                // don't keep paying input-token cost for it.
+                                // The model can call load_attachment again
+                                // to re-read.
+                                // See docs/developer_guide/31_load_attachment.md.
+                                messages.push(user_msg);
+
+                                // NOTE: marker_text is deliberately a prose
+                                // sentence, NOT a structured JSON/tag block.
+                                // Do not write code that parses it: future UI
+                                // layers should derive load_attachment events
+                                // from tool_call history instead. If the
+                                // wording changes, persisted history from
+                                // before the change keeps the old string —
+                                // that's intentional and not a bug.
+                                let marker_text = format!(
+                                    "[load_attachment(\"{}\") was invoked. Document \
+                                     content was available for this turn only. Call \
+                                     load_attachment again if you need to re-read it.]",
+                                    document_id
+                                );
+                                let marker_msg = LlmMessage::user(marker_text)?;
                                 self.conversation_repository
-                                    .add_message(session_id, user_msg)
+                                    .add_message(session_id, marker_msg)
                                     .await?;
                             }
                             continue;
@@ -1034,14 +1060,191 @@ mod tests {
         let resp = svc.run(params).await.unwrap();
         assert_eq!(resp.content(), "Final answer");
 
-        // The persisted message stream must contain a user message with files attached.
+        // Plan B (D7): the synthetic user_with_files message must NOT be
+        // persisted to the conversation history — only a short marker text
+        // takes its place so future turns don't keep paying input-token cost
+        // for the doc content.
         let msgs = persisted.lock().unwrap().clone();
         let has_user_with_files = msgs.iter().any(|m| {
             m.role().as_str() == "user" && m.files().map(|f| !f.is_empty()).unwrap_or(false)
         });
         assert!(
-            has_user_with_files,
-            "expected a synthetic user message with files"
+            !has_user_with_files,
+            "synthetic user_with_files must NOT be persisted (ephemeral)"
+        );
+
+        // Marker user message should be present, referencing the document_id.
+        let has_marker = msgs.iter().any(|m| {
+            m.role().as_str() == "user"
+                && m.content().contains("[load_attachment(")
+                && m.content().contains("doc-1")
+        });
+        assert!(
+            has_marker,
+            "expected a load_attachment marker user message in persisted history"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_attachment_synthetic_message_is_not_persisted_to_history() {
+        // Companion test to the above with focus on the dual behavior:
+        // - in-memory ReAct stream (observed via the 2nd LLM call's request
+        //   messages) sees the synthetic user_with_files;
+        // - persisted conversation history sees ONLY the marker, never bytes.
+        use crate::llm::domain::{
+            tools::FunctionCall as FC, FileData, FileSource, ProviderFileRef, ProviderKind as PK,
+        };
+        use std::sync::Mutex;
+
+        let mut mock_llm = MockLlmRepo::new();
+        let mut mock_conv = MockConversationRepo::new();
+
+        let call_id = "call_la_eph".to_string();
+
+        // Capture the request messages on the 2nd LLM call so we can confirm
+        // the in-memory stream contains the synthetic user_with_files.
+        let captured_turn2: Arc<Mutex<Vec<LlmMessage>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_mock = captured_turn2.clone();
+
+        // Turn 1: LLM emits a load_attachment tool call.
+        {
+            let llm_call_id = call_id.clone();
+            mock_llm.expect_call().times(1).returning(move |_req| {
+                let tc = ToolCall {
+                    id: llm_call_id.clone(),
+                    call_type: "function".to_string(),
+                    function: FC::new(
+                        "load_attachment".to_string(),
+                        r#"{"document_id":"doc-eph"}"#.to_string(),
+                    ),
+                    response: None,
+                };
+                Ok(LlmResponse::new(
+                    LlmRequestId::from_string("req-eph-1".to_string()).unwrap(),
+                    "".to_string(),
+                    LlmProvider::new(PK::OpenAi, "key".to_string(), Some("gpt-4".to_string()))
+                        .unwrap(),
+                )
+                .unwrap()
+                .with_tool_calls(vec![tc]))
+            });
+        }
+
+        // Turn 2: LLM emits final text — we capture the request messages.
+        mock_llm.expect_call().times(1).returning(move |req| {
+            *captured_for_mock.lock().unwrap() = req.messages().to_vec();
+            Ok(LlmResponse::new(
+                LlmRequestId::from_string("req-eph-2".to_string()).unwrap(),
+                "ok".to_string(),
+                LlmProvider::new(PK::OpenAi, "key".to_string(), Some("gpt-4".to_string())).unwrap(),
+            )
+            .unwrap())
+        });
+
+        mock_conv.expect_get_by_id().returning(|key| {
+            Ok(Conversation {
+                key: key.clone(),
+                messages: vec![],
+            })
+        });
+        let persisted: Arc<Mutex<Vec<LlmMessage>>> = Arc::new(Mutex::new(Vec::new()));
+        let persisted_for_mock = persisted.clone();
+        mock_conv.expect_add_message().returning(move |_k, m| {
+            persisted_for_mock.lock().unwrap().push(m);
+            Ok(())
+        });
+
+        struct SentinelExec;
+        #[async_trait::async_trait]
+        impl ToolExecutor for SentinelExec {
+            async fn execute(&self, tc: &ToolCall) -> Result<ToolResult, LlmError> {
+                Ok(ToolResult {
+                    tool_call_id: tc.id.clone(),
+                    output: r#"{"__colmena_status":"LOAD_ATTACHMENT","document_id":"doc-eph"}"#
+                        .to_string(),
+                    success: true,
+                    error: None,
+                })
+            }
+            async fn available_tools(&self) -> Vec<ToolDefinition> {
+                vec![]
+            }
+        }
+
+        struct FakeResolver;
+        #[async_trait::async_trait]
+        impl LoadAttachmentResolver for FakeResolver {
+            async fn resolve(&self, _sid: &str, doc_id: &str) -> Result<Option<FileData>, String> {
+                if doc_id == "doc-eph" {
+                    Ok(Some(FileData {
+                        document_id: Some(doc_id.to_string()),
+                        mime_type: "application/pdf".to_string(),
+                        filename: "x.pdf".to_string(),
+                        size_hint: Some(10),
+                        source: FileSource::Uploaded(ProviderFileRef {
+                            provider: PK::OpenAi,
+                            provider_file_id: "pf-eph".to_string(),
+                            mime_type: "application/pdf".to_string(),
+                            filename: "x.pdf".to_string(),
+                            expires_at: None,
+                        }),
+                        retained_inline_bytes: None,
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+
+        let svc = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let session = ConversationKey {
+            session_id: SessionId("s_eph".to_string()),
+            agent_session_id: Some(AgentSessionId("agent_eph".to_string())),
+            node_id: NodeIdPath("llm_call".to_string()),
+        };
+        let params = AgentRunParams {
+            session_id: &session,
+            prompt: Some("read".to_string()),
+            messages: None,
+            config: create_config(),
+            tools: vec![],
+            tool_executor: &SentinelExec,
+            max_iterations: Some(5),
+            on_token: None,
+            tools_provider: None,
+            attachment_resolver: Some(Arc::new(FakeResolver)),
+            agent_session_id: Some("agent_eph".to_string()),
+        };
+        let resp = svc.run(params).await.unwrap();
+        assert_eq!(resp.content(), "ok");
+
+        // Persisted history: NO user_with_files; YES marker.
+        let msgs = persisted.lock().unwrap().clone();
+        let persisted_has_files = msgs.iter().any(|m| {
+            m.role().as_str() == "user" && m.files().map(|f| !f.is_empty()).unwrap_or(false)
+        });
+        assert!(
+            !persisted_has_files,
+            "persisted history must NOT contain user_with_files (ephemeral)"
+        );
+        let persisted_has_marker = msgs.iter().any(|m| {
+            m.role().as_str() == "user"
+                && m.content().contains("[load_attachment(")
+                && m.content().contains("doc-eph")
+        });
+        assert!(
+            persisted_has_marker,
+            "persisted history must contain the marker user message"
+        );
+
+        // In-memory ReAct stream (turn 2 request): user_with_files present.
+        let turn2 = captured_turn2.lock().unwrap().clone();
+        let turn2_has_files = turn2.iter().any(|m| {
+            m.role().as_str() == "user" && m.files().map(|f| !f.is_empty()).unwrap_or(false)
+        });
+        assert!(
+            turn2_has_files,
+            "turn-2 in-memory request must include synthetic user_with_files"
         );
     }
 }

@@ -20,7 +20,7 @@ pub mod value_objects;
 
 pub use attachments::{
     AttachmentError, AttachmentRegistry, AttachmentSource, ConversationAttachment,
-    UpsertAttachmentInput,
+    StaleAttachmentQuery, UpsertAttachmentInput,
 };
 pub use file_cache_repository::{CachedFileEntry, FileCacheRepository};
 pub use file_provider_factory_port::FileProviderFactoryPort;

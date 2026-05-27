@@ -3,6 +3,76 @@
 > **Estado:** Disponible desde 0.4.0
 > **Spec:** [docs/superpowers/specs/2026-05-13-load-attachment-design.md](../superpowers/specs/2026-05-13-load-attachment-design.md)
 
+## Plan A — Persistent bytes for all attachment sources (2026-05-25)
+
+As of Plan A, every attachment registered in `conversation_attachments` has its
+bytes persisted in `OutputStorageRepository`. This is true regardless of source:
+
+- **Inline (base64 en `files[].data`):** los bytes se streamean al storage en el momento del registro.
+- **Signed URL (`files[].url`):** los bytes se descargan y se streamean al storage.
+- **Generated artifact** (`image_generation` / `image_edit` / `tts`): los bytes ya
+  viven en storage; el artefacto se registra automáticamente en `conversation_attachments`
+  con `origin = generated_by:<tool>` y `source = Path(storage_key)`.
+
+Esto habilita el placeholder `$attachment:<document_id>` para nodos downstream
+(inicialmente `http_request` multipart) sin importar de dónde vino el documento.
+
+El catálogo que ve el LLM en su system message lista cada documento con su
+`document_id` y una pista de uso:
+- `load_attachment(document_id)` para leer el contenido dentro del loop.
+- `"$attachment:<document_id>"` para reenviar los bytes (p. ej. a un endpoint multipart).
+
+Resolución: un `AttachmentStreamResolver` (port en `domain`, impl en
+`infrastructure`) hace `document_id → storage_key → StoredStream`. La impl
+también soporta un fallback de backward-compat que trata al identificador
+como `storage_key` directo para flujos previos a Plan A.
+
+Background y decisiones:
+- Spec: [`docs/superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md`](../superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md)
+- Plan: [`docs/superpowers/plans/2026-05-25-attachment-uniform-resolution-plan-a.md`](../superpowers/plans/2026-05-25-attachment-uniform-resolution-plan-a.md)
+
+## Plan B — Comportamiento catalog-driven + contenido efímero (2026-05-25)
+
+Plan B activa las dos optimizaciones de costo que Plan A dejó sentadas como
+fundación.
+
+### Sin autoinject en el primer turno
+
+Cuando el usuario adjunta un documento vía `inputs.files[]`, el LLM **ya no**
+recibe los bytes en el primer mensaje user. El bloque de catálogo que Plan A
+(Task 11) prepende al system message le dice al modelo qué documentos están
+disponibles, cada uno con su `document_id`. El modelo decide por turno:
+
+- **Leer el contenido** — llama `load_attachment(document_id)`.
+- **Reenviar el doc a un tool downstream** — usa `"$attachment:<document_id>"`
+  en los argumentos del tool (p. ej. `http_request` multipart).
+- **Ignorar el doc** — no se paga ningún token de input por él.
+
+Trade-off: un round-trip adicional cuando el modelo necesita leer el doc, a
+cambio de ahorro de costo cuando no lo necesita (no input tokens por docs no
+leídos).
+
+### Resultados de `load_attachment` efímeros
+
+Cuando el modelo llama `load_attachment(document_id)`, el contenido del doc se
+inyecta en el **stream in-memory de iteraciones ReAct** por el resto del turno
+actual. El modelo razona sobre el contenido normalmente dentro del turno.
+
+Pero el mensaje sintético que carga el contenido **NO se persiste en
+`llm_node_history`**. En su lugar, se persiste un marcador corto:
+
+```
+user: [load_attachment("Q3_report") was invoked. Document content was available
+       for this turn only. Call load_attachment again if you need to re-read it.]
+```
+
+Los turnos futuros ven el marcador, no el contenido. El modelo retiene los
+análisis que produjo a partir del doc (los mensajes assistant quedan intactos),
+pero deja de pagar tokens de input por el doc en cada turno subsiguiente.
+
+Si el modelo necesita re-leer el doc, vuelve a llamar `load_attachment` — el
+resolver re-streamea el contenido desde `OutputStorageRepository`.
+
 ## Por qué existe
 
 `LlmMessage.files` no se persiste en `llm_node_history`. Cuando una conversación con un documento adjunto retoma en un turno posterior, el archivo deja de estar en el contexto del modelo. Re-adjuntarlo en cada turno es caro en tokens.

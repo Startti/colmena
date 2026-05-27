@@ -556,6 +556,8 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
                         Some(u) => u.to_string(),
                         None => String::new(),
                     }),
+                    storage_key: None,
+                    origin: None,
                 };
                 if let Err(e) = self.registry.upsert(upsert).await {
                     tracing::warn!(
@@ -579,6 +581,9 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
                     source: gen.source,
                     registered_at: gen.registered_at,
                     refreshed_at: chrono::Utc::now(),
+                    storage_key: None,
+                    origin: None,
+                    last_used_at: None,
                 }
             }
         };
@@ -1236,6 +1241,28 @@ impl ExecutableNode for LlmNode {
                     _ => continue, // Not uploaded yet — skip registration this pass.
                 };
 
+                // Plan A — Foundation: persist bytes uniformly to
+                // OutputStorageRepository so this attachment is reachable via
+                // `$attachment:<document_id>` downstream, regardless of where
+                // it originated. Inline files reuse `retained_inline_bytes`;
+                // SignedUrl files are re-fetched (acceptable for Plan A).
+                // TODO(plan-a-opt): share bytes with provider upload to avoid re-fetch.
+                let storage_key = if let Some(storage) = self.storage.as_ref() {
+                    persist_attachment_bytes(
+                        storage.as_ref(),
+                        file.retained_inline_bytes.as_deref(),
+                        &source,
+                        &file.mime_type,
+                        &file.filename,
+                        sid.as_str(),
+                        &document_id,
+                    )
+                    .await
+                } else {
+                    None
+                };
+
+                let origin = crate::llm::domain::attachments::origin::USER_UPLOAD.to_string();
                 let input = UpsertAttachmentInput {
                     agent_session_id: sid.clone(),
                     document_id: document_id.clone(),
@@ -1247,6 +1274,8 @@ impl ExecutableNode for LlmNode {
                     label: label.clone(),
                     description: description.clone(),
                     source: source.clone(),
+                    storage_key,
+                    origin: Some(origin),
                 };
                 reg.upsert(input)
                     .await
@@ -1284,13 +1313,17 @@ impl ExecutableNode for LlmNode {
         // continued from the persisted history. The pending tool call (whose
         // result was never persisted) is dispatched below with the resume
         // answer threaded in.
+        //
+        // Plan B (D6): the LLM no longer receives file content in the initial
+        // user message. The catalog block prepended to the system message
+        // (Plan A Task 11) tells the model which documents are available; the
+        // model calls load_attachment(document_id) to read content, or
+        // references "$attachment:<document_id>" in tool args to forward
+        // bytes without reading them. `resolved_files` is intentionally still
+        // computed — bytes are persisted to OutputStorageRepository and
+        // registered in the attachment catalog further upstream.
         if resume_answer.is_none() {
-            let user_message = if resolved_files.is_empty() {
-                LlmMessage::user(prompt.to_string())?
-            } else {
-                LlmMessage::user_with_files(prompt.to_string(), resolved_files)?
-            };
-
+            let user_message = build_initial_user_message(prompt, &resolved_files)?;
             messages.push(user_message.clone());
         }
 
@@ -1775,6 +1808,18 @@ impl ExecutableNode for LlmNode {
             }
             if !attachment_catalog.is_empty() {
                 sections.push(ATTACHMENTS_SYSTEM_PRELUDE.to_string());
+                // Plan A: append the per-document catalog block so the LLM
+                // knows which `document_id`s are available in the session
+                // (for `load_attachment(...)` and `$attachment:<id>`
+                // placeholder use). Plan B (D6): this catalog is now the
+                // ONLY way the LLM learns about attachments in turn 1 —
+                // file content is no longer autoinjected into the user
+                // message; see `build_initial_user_message`.
+                if let Some(catalog_block) =
+                    crate::llm::application::attachment_catalog::render_catalog(&attachment_catalog)
+                {
+                    sections.push(catalog_block);
+                }
             }
             if !tools.is_empty() {
                 // In lazy mode, hide cataloged tool names from the system prompt —
@@ -2541,6 +2586,342 @@ pub(crate) fn parse_file_entries(
     Ok(out)
 }
 
+/// Persist the bytes of an inbound attachment (`inputs.files[]`) to the
+/// `OutputStorageRepository` so the file can later be resolved by
+/// `$attachment:<document_id>` references regardless of where it originated.
+///
+/// Resolution strategy (Plan A — Foundation):
+///   1. If `retained_inline_bytes` is `Some(_)` → upload those bytes directly.
+///      This covers both `FileSource::InlineBytes` (data:/path) entries and
+///      `FileSource::Uploaded` entries that retained their inline bytes after
+///      provider upload.
+///   2. Else, if `attachment_source` is `AttachmentSource::SignedUrl(url)` →
+///      re-fetch the URL via HTTP and persist the bytes. The original
+///      download has already happened (to upload to the provider's Files
+///      API), but those bytes are not kept around.
+///      TODO(plan-a-opt): share bytes with provider upload to avoid re-fetch.
+///   3. Else → return `None` (no storage_key persisted; the attachment is
+///      still registered, but downstream `$attachment:<id>` consumers will
+///      not resolve it).
+///
+/// Returns `None` on any failure (logged at warn level); persistence is
+/// best-effort — the LLM call must continue even when storage is offline.
+async fn persist_attachment_bytes(
+    storage: &dyn crate::storage::domain::OutputStorageRepository,
+    retained_inline_bytes: Option<&[u8]>,
+    attachment_source: &crate::llm::domain::attachments::AttachmentSource,
+    mime_type: &str,
+    filename: &str,
+    agent_session_id: &str,
+    document_id: &str,
+) -> Option<String> {
+    use crate::llm::domain::attachments::AttachmentSource;
+    use crate::storage::domain::StoreRequest;
+
+    let bytes_for_storage: Option<Vec<u8>> = if let Some(b) = retained_inline_bytes {
+        Some(b.to_vec())
+    } else if let AttachmentSource::SignedUrl(url) = attachment_source {
+        // Re-fetch the bytes. We intentionally do not share an HTTP client
+        // here because this is an out-of-band, best-effort persistence path
+        // — perf is dominated by the provider upload that already happened.
+        // TODO(plan-a-opt): share bytes with provider upload to avoid re-fetch.
+        match reqwest::get(url.as_str()).await {
+            Ok(resp) => match resp.error_for_status() {
+                Ok(ok_resp) => match ok_resp.bytes().await {
+                    Ok(b) => Some(b.to_vec()),
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "colmena::attachment",
+                            error = %e,
+                            document_id = %document_id,
+                            "failed to read signed-url bytes for storage persistence"
+                        );
+                        None
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        target: "colmena::attachment",
+                        error = %e,
+                        document_id = %document_id,
+                        "signed-url returned non-success status during storage persistence"
+                    );
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    target: "colmena::attachment",
+                    error = %e,
+                    document_id = %document_id,
+                    "failed to fetch signed-url bytes for storage persistence"
+                );
+                None
+            }
+        }
+    } else {
+        tracing::debug!(
+            target: "colmena::attachment",
+            document_id = %document_id,
+            source_kind = attachment_source.kind_str(),
+            "no path to persist attachment bytes; $attachment:<id> lookup will fail downstream"
+        );
+        None
+    };
+
+    let bytes = bytes_for_storage?;
+    let size = bytes.len();
+
+    let req = StoreRequest {
+        bytes,
+        mime_type: mime_type.to_string(),
+        filename: filename.to_string(),
+        session_id: None,
+        agent_session_id: Some(agent_session_id.to_string()),
+    };
+
+    match storage.store(req).await {
+        Ok(out) => Some(out.storage_key),
+        Err(e) => {
+            tracing::warn!(
+                target: "colmena::attachment",
+                error = %e,
+                document_id = %document_id,
+                mime = %mime_type,
+                size_bytes = size,
+                agent_session_id = %agent_session_id,
+                filename = %filename,
+                "failed to persist bytes to storage; attachment registered without storage_key"
+            );
+            None
+        }
+    }
+}
+
+/// Build the initial user message that opens a fresh LLM turn.
+///
+/// Plan B (D6): the LLM no longer receives file content in turn 1. The
+/// catalog block prepended to the system message (Plan A Task 11) tells
+/// the model which documents are available; the model calls
+/// `load_attachment(document_id)` to read content, or references
+/// `"$attachment:<document_id>"` in tool args to forward bytes without
+/// reading them. This trades a round-trip for cost savings — see
+/// `docs/developer_guide/31_load_attachment.md`.
+///
+/// `_resolved_files` is intentionally unused HERE — bytes are still
+/// persisted to `OutputStorageRepository` and registered in the
+/// attachment catalog further upstream in `execute()`.
+///
+/// The parameter is kept (instead of being removed) because the
+/// `first_turn_user_message_does_not_carry_files_after_plan_b` regression
+/// test in this module passes a non-empty `files` slice and asserts that
+/// the produced message still has no attached files. Without the
+/// parameter, that test would have to fake a different shape and would no
+/// longer document the Plan B invariant at the call site. If you remove
+/// the param, update the regression test accordingly.
+fn build_initial_user_message(
+    prompt: &str,
+    _resolved_files: &[crate::llm::domain::FileData],
+) -> Result<LlmMessage, crate::llm::domain::LlmError> {
+    LlmMessage::user(prompt.to_string())
+}
+
+#[cfg(test)]
+mod build_initial_user_message_tests {
+    use super::*;
+    use crate::llm::domain::{FileData, FileSource};
+
+    fn inline_file(doc_id: &str) -> FileData {
+        FileData {
+            document_id: Some(doc_id.to_string()),
+            mime_type: "application/pdf".to_string(),
+            filename: "x.pdf".to_string(),
+            size_hint: Some(5),
+            source: FileSource::InlineBytes {
+                bytes: b"hello".to_vec(),
+            },
+            retained_inline_bytes: Some(b"hello".to_vec()),
+        }
+    }
+
+    #[test]
+    fn first_turn_user_message_does_not_carry_files_after_plan_b() {
+        // Plan B (D6): the LLM no longer receives file content in the
+        // initial user message. The catalog block in the system message
+        // tells the model what's available; the model calls
+        // load_attachment to read.
+        let files = vec![inline_file("doc-1"), inline_file("doc-2")];
+        let msg = build_initial_user_message("read the docs", &files).unwrap();
+
+        assert_eq!(msg.role().as_str(), "user");
+        assert_eq!(msg.content(), "read the docs");
+        assert!(
+            msg.files().is_none() || msg.files().map(|f| f.is_empty()).unwrap_or(true),
+            "Plan B: initial user message MUST NOT carry files; got: {:?}",
+            msg.files()
+        );
+    }
+
+    #[test]
+    fn empty_files_slice_still_produces_user_message() {
+        let msg = build_initial_user_message("hi", &[]).unwrap();
+        assert_eq!(msg.role().as_str(), "user");
+        assert_eq!(msg.content(), "hi");
+        assert!(msg.files().is_none() || msg.files().map(|f| f.is_empty()).unwrap_or(true));
+    }
+}
+
+#[cfg(test)]
+mod persist_attachment_bytes_tests {
+    use super::*;
+    use crate::llm::domain::attachments::AttachmentSource;
+    use crate::storage::domain::{MockOutputStorageRepository, StoredOutput};
+    use mockall::predicate::*;
+
+    fn stored(key: &str) -> StoredOutput {
+        StoredOutput {
+            storage_key: key.to_string(),
+            read_url: format!("https://example/{}", key),
+            mime_type: "application/pdf".to_string(),
+            filename: "x.pdf".to_string(),
+            size_bytes: 5,
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_bytes_are_persisted_and_storage_key_is_returned() {
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_store()
+            .times(1)
+            .withf(|req| {
+                req.bytes == b"hello"
+                    && req.mime_type == "application/pdf"
+                    && req.filename == "x.pdf"
+                    && req.agent_session_id.as_deref() == Some("agent_1")
+                    && req.session_id.is_none()
+            })
+            .returning(|_| Ok(stored("sk-inline-test")));
+
+        let key = persist_attachment_bytes(
+            &storage,
+            Some(b"hello"),
+            &AttachmentSource::Inline,
+            "application/pdf",
+            "x.pdf",
+            "agent_1",
+            "doc-1",
+        )
+        .await;
+
+        assert_eq!(key.as_deref(), Some("sk-inline-test"));
+    }
+
+    #[tokio::test]
+    async fn inline_path_takes_precedence_over_signed_url() {
+        // If we have retained bytes (e.g. inline file that was uploaded to
+        // provider), we must NOT re-fetch the URL — bytes are already in RAM.
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_store()
+            .times(1)
+            .withf(|req| req.bytes == b"local")
+            .returning(|_| Ok(stored("sk-inline-priority")));
+
+        let key = persist_attachment_bytes(
+            &storage,
+            Some(b"local"),
+            &AttachmentSource::SignedUrl("http://127.0.0.1:1/never-fetched".into()),
+            "application/pdf",
+            "x.pdf",
+            "agent_1",
+            "doc-1",
+        )
+        .await;
+
+        assert_eq!(key.as_deref(), Some("sk-inline-priority"));
+    }
+
+    #[tokio::test]
+    async fn inline_source_without_retained_bytes_returns_none() {
+        // No bytes available, source is Inline (no URL to fetch) → cannot
+        // persist; storage.store must NOT be called.
+        let storage = MockOutputStorageRepository::new();
+        // No expect_store — strict mock will fail if called.
+
+        let key = persist_attachment_bytes(
+            &storage,
+            None,
+            &AttachmentSource::Inline,
+            "application/pdf",
+            "x.pdf",
+            "agent_1",
+            "doc-1",
+        )
+        .await;
+
+        assert!(key.is_none());
+    }
+
+    #[tokio::test]
+    async fn signed_url_with_no_retained_bytes_fetches_and_persists() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/file.pdf"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"remote-bytes".to_vec()))
+            .mount(&server)
+            .await;
+
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_store()
+            .times(1)
+            .withf(|req| req.bytes == b"remote-bytes")
+            .returning(|_| Ok(stored("sk-url-test")));
+
+        let url = format!("{}/file.pdf", server.uri());
+        let key = persist_attachment_bytes(
+            &storage,
+            None,
+            &AttachmentSource::SignedUrl(url),
+            "application/pdf",
+            "x.pdf",
+            "agent_1",
+            "doc-url",
+        )
+        .await;
+
+        assert_eq!(key.as_deref(), Some("sk-url-test"));
+    }
+
+    #[tokio::test]
+    async fn storage_error_returns_none_without_propagating() {
+        use crate::storage::domain::StorageError;
+
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_store()
+            .times(1)
+            .returning(|_| Err(StorageError::BackendUnavailable("nope".into())));
+
+        let key = persist_attachment_bytes(
+            &storage,
+            Some(b"hello"),
+            &AttachmentSource::Inline,
+            "application/pdf",
+            "x.pdf",
+            "agent_1",
+            "doc-1",
+        )
+        .await;
+
+        assert!(key.is_none());
+    }
+}
+
 #[cfg(test)]
 mod files_parser_tests {
     use super::*;
@@ -2754,6 +3135,8 @@ mod resolver_tests {
                 label: None,
                 description: None,
                 source: AttachmentSource::SignedUrl("https://example/url?sig=y".to_string()),
+                storage_key: None,
+                origin: None,
             })
             .await
             .unwrap();
@@ -2825,6 +3208,8 @@ mod resolver_tests {
                 label: None,
                 description: Some("Image generated".to_string()),
                 source: AttachmentSource::SignedUrl("data:image/png;base64,XX".to_string()),
+                storage_key: None,
+                origin: None,
             })
             .await
             .unwrap();
@@ -2845,6 +3230,93 @@ mod resolver_tests {
             err.contains("OutputStorageRepository"),
             "error message should mention storage: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod attachment_catalog_integration_tests {
+    //! Plan A — verify the per-document attachment catalog is rendered from
+    //! the same shape we ship to the LLM. We register an attachment via the
+    //! real `SqliteAttachmentRegistry`, list it for the session, render the
+    //! catalog block with the same helper used in `execute()`, and confirm
+    //! the resulting system-message section contains the document_id, the
+    //! `load_attachment(...)` hint, and the `$attachment:<id>` forwarder.
+    //! This is the right layer below `execute()` — `execute()` itself wires
+    //! provider repos and is heavyweight to exercise in a unit test.
+
+    use crate::llm::application::attachment_catalog::render_catalog;
+    use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
+    use crate::llm::domain::{AttachmentRegistry, ProviderKind};
+    use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn catalog_block_lists_registered_doc_with_usage_hints() {
+        let registry: Arc<dyn AttachmentRegistry> = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        registry
+            .upsert(UpsertAttachmentInput {
+                agent_session_id: "agent_catalog_test".to_string(),
+                document_id: "doc-test".to_string(),
+                provider: ProviderKind::OpenAi,
+                provider_file_id: "pf-test".to_string(),
+                mime_type: "application/pdf".to_string(),
+                filename: "report.pdf".to_string(),
+                size_bytes: Some(2 * 1024 * 1024),
+                label: Some("Q3 report".to_string()),
+                description: Some("Quarterly results".to_string()),
+                source: AttachmentSource::Inline,
+                storage_key: Some("sk-abc".to_string()),
+                origin: Some("user_upload".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let listed = registry
+            .list_for_session("agent_catalog_test")
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+
+        let block = render_catalog(&listed).expect("non-empty list must produce a catalog block");
+
+        // Simulate the section-joining done in `execute()`.
+        let assembled = ["existing system text".to_string(), block].join("\n\n---\n");
+
+        assert!(
+            assembled.contains("Documents available in this session:"),
+            "header missing in assembled system message:\n{assembled}"
+        );
+        assert!(
+            assembled.contains("[doc-test]"),
+            "document_id missing in assembled system message:\n{assembled}"
+        );
+        assert!(
+            assembled.contains("load_attachment(\"doc-test\")"),
+            "load_attachment usage hint missing:\n{assembled}"
+        );
+        assert!(
+            assembled.contains("\"$attachment:doc-test\""),
+            "$attachment placeholder hint missing:\n{assembled}"
+        );
+        assert!(
+            assembled.contains("origin: uploaded by user"),
+            "user_upload origin not humanized:\n{assembled}"
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_block_is_none_when_session_has_no_attachments() {
+        let registry: Arc<dyn AttachmentRegistry> = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        let listed = registry.list_for_session("empty_session").await.unwrap();
+        assert!(render_catalog(&listed).is_none());
     }
 }
 

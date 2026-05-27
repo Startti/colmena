@@ -1,5 +1,6 @@
 pub mod anthropic_adapter;
 pub mod attachment_summary;
+pub mod attachments;
 pub mod elevenlabs_tts_adapter;
 pub mod files;
 pub mod gemini_adapter;

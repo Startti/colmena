@@ -16,7 +16,8 @@ use serde_json::{json, Value};
 use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
-use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
+use crate::dag_engine::infrastructure::nodes::util::attachment_id::build_document_id;
+use crate::llm::domain::attachments::{origin, AttachmentSource, UpsertAttachmentInput};
 use crate::llm::domain::{AttachmentRegistry, ProviderKind};
 use crate::storage::domain::{OutputStorageRepository, StoreRequest};
 
@@ -353,37 +354,62 @@ impl ExecutableNode for ImageEditNode {
                 .await
                 .map_err(|e| -> Box<dyn StdError + Send + Sync> { Box::new(e) })?;
 
-            // Register edited image so the agent can re-open it later.
-            // Fail-soft: registry errors don't fail the edit.
+            // Plan A: derive a human-friendly document_id from the filename
+            // so the LLM can reference the artifact by a stable handle that is
+            // not the opaque storage_key UUID.
+            let document_id = build_document_id(
+                &stored.filename,
+                &stored.mime_type,
+                &stored.storage_key,
+                "img",
+            );
+
+            // Register the edited artifact so `load_attachment` can later
+            // resolve it AND so `$attachment:<document_id>` placeholders work
+            // in downstream nodes (e.g., http_request multipart parts).
+            // Fail-soft: registry errors must not fail the edit.
             if let (Some(reg), Some(agent_sid)) =
                 (self.attachment_registry.as_ref(), agent_session_id.as_ref())
             {
                 let description = format!("Image edited with {}: {}", model, prompt_preview);
                 let upsert = UpsertAttachmentInput {
                     agent_session_id: agent_sid.clone(),
-                    document_id: stored.storage_key.clone(),
+                    document_id: document_id.clone(),
                     provider: ProviderKind::Generated,
+                    // For `provider: Generated` rows, provider_file_id holds
+                    // the canonical storage_key. Cross-provider upload reads
+                    // bytes via OutputStorageRepository.read(this).
                     provider_file_id: stored.storage_key.clone(),
                     mime_type: stored.mime_type.clone(),
                     filename: stored.filename.clone(),
                     size_bytes: Some(stored.size_bytes),
                     label: None,
                     description: Some(description),
-                    source: AttachmentSource::SignedUrl(stored.read_url.clone()),
+                    // Resolver-friendly source: read bytes back through the
+                    // storage port using the storage_key as the path.
+                    source: AttachmentSource::Path(stored.storage_key.clone()),
+                    storage_key: Some(stored.storage_key.clone()),
+                    origin: Some(origin::generated_by("image_edit")),
                 };
                 if let Err(e) = reg.upsert(upsert).await {
                     tracing::warn!(
                         target: "colmena::image_edit",
                         error = %e,
+                        document_id = %document_id,
                         storage_key = %stored.storage_key,
-                        "failed to register edited image in attachment registry"
+                        "failed to register edited image in attachment registry — \
+                         load_attachment will not see this output"
                     );
                 }
             }
 
             out_images.push(json!({
-                "attachment_id": stored.storage_key,
-                "url": stored.read_url,
+                // Plan B (D8): attachment_id alias and url field removed.
+                // The storage_key and read_url are still recorded internally
+                // on the auto-registered conversation_attachments row;
+                // downstream consumers (e.g., ADP frontend) resolve URLs by
+                // document_id via a dedicated endpoint.
+                "document_id": document_id,
                 "mime_type": stored.mime_type,
                 "size_bytes": stored.size_bytes,
                 "description": format!("Image edited with {}: {}", model, prompt_preview),
@@ -420,8 +446,11 @@ impl ExecutableNode for ImageEditNode {
     fn description(&self) -> Option<&str> {
         Some(
             "Edit an existing image given a text prompt. Source image is fetched from a \
-             URL (data: or http(s)). Optional mask marks the edit region. Returns one or \
-             more attachments — same shape as image_generation so the result can be chained.",
+             URL (data: or http(s)). Optional mask marks the edit region. Returns \
+             { images: [{ document_id, mime_type, size_bytes }], provider, model } \
+             — same shape as image_generation so results can be chained. Use \
+             \"$attachment:<document_id>\" in downstream tool args to forward the \
+             image, or call load_attachment(document_id) to read it.",
         )
     }
 
@@ -510,7 +539,20 @@ mod tests {
             .and_then(|v| v.as_array())
             .expect("images array");
         assert_eq!(images.len(), 1);
-        assert_eq!(images[0]["attachment_id"], "k1");
+        // Plan B (D8): attachment_id alias and url field removed; only
+        // document_id remains.
+        assert!(images[0]["document_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("img_"));
+        assert!(
+            images[0].get("attachment_id").is_none(),
+            "Plan B removed the attachment_id legacy alias"
+        );
+        assert!(
+            images[0].get("url").is_none(),
+            "Plan B removed the url field"
+        );
         assert_eq!(out["output"]["provider"], "openai");
     }
 
@@ -701,5 +743,132 @@ mod tests {
         )
         .await
         .expect("execute ok");
+    }
+
+    // -----------------------------------------------------------------------
+    // Plan A — auto-registration in conversation_attachments
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn image_edit_auto_registers_artifact_in_registry() {
+        use crate::llm::domain::attachments::AttachmentSource;
+        use crate::llm::domain::{AttachmentRegistry, ProviderKind};
+        use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/edits"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{ "b64_json": "AAAA" }]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_store()
+            .times(1)
+            .returning(|_| Ok(stored_ok("sk-edit-1")));
+
+        let registry: Arc<dyn AttachmentRegistry> = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+
+        let node = ImageEditNode::new(Arc::new(storage))
+            .with_openai_base_url(server.uri())
+            .with_attachment_registry(registry.clone());
+
+        let cfg = base_config("data:image/png;base64,iVBORw==");
+
+        let mut inputs: NodeInputs = HashMap::new();
+        // Auto-registration only fires when an agent_session_id is engine-injected.
+        inputs.insert(
+            "__colmena_agent_session_id".into(),
+            json!("agent_autoreg_edit_1"),
+        );
+
+        let out = node
+            .execute(&inputs, &cfg, &mut json!({}), None)
+            .await
+            .expect("execute ok");
+
+        let images = out
+            .pointer("/output/images")
+            .and_then(|v| v.as_array())
+            .expect("images array");
+        assert_eq!(images.len(), 1);
+
+        // Plan B (D8): tool result emits only document_id. attachment_id
+        // alias and url field were removed; the storage_key is still
+        // recorded internally on the auto-registered row (asserted below).
+        let doc_id = images[0]["document_id"]
+            .as_str()
+            .expect("document_id present");
+        assert!(
+            doc_id.starts_with("img_"),
+            "document_id should start with img_, got {doc_id}"
+        );
+        assert!(
+            images[0].get("attachment_id").is_none(),
+            "Plan B removed the attachment_id legacy alias"
+        );
+        assert!(
+            images[0].get("url").is_none(),
+            "Plan B removed the url field"
+        );
+
+        // The registry row MUST be reachable by document_id and carry the
+        // generated_by:image_edit origin + storage_key.
+        let entry = registry
+            .lookup_by_document_id("agent_autoreg_edit_1", doc_id)
+            .await
+            .unwrap()
+            .expect("attachment was auto-registered");
+        assert_eq!(entry.storage_key.as_deref(), Some("sk-edit-1"));
+        assert_eq!(entry.origin.as_deref(), Some("generated_by:image_edit"));
+        assert!(matches!(entry.provider, ProviderKind::Generated));
+        match entry.source {
+            AttachmentSource::Path(ref p) => assert_eq!(p, "sk-edit-1"),
+            ref other => panic!("expected AttachmentSource::Path, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_registry_means_no_registration_but_still_emits_document_id() {
+        // Sanity check: when the node is constructed without a registry, the
+        // tool result still carries document_id (so the LLM contract is
+        // unchanged), and we don't crash trying to upsert. Plan B (D8)
+        // removed the attachment_id alias and url field.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/edits"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{ "b64_json": "AAAA" }]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_store()
+            .times(1)
+            .returning(|_| Ok(stored_ok("sk-2")));
+
+        let node = ImageEditNode::new(Arc::new(storage)).with_openai_base_url(server.uri());
+
+        let cfg = base_config("data:image/png;base64,AA==");
+        let out = node
+            .execute(&HashMap::new(), &cfg, &mut json!({}), None)
+            .await
+            .unwrap();
+        let img = &out["output"]["images"][0];
+        assert!(img["document_id"].is_string());
+        assert!(
+            img.get("attachment_id").is_none(),
+            "Plan B removed the attachment_id legacy alias"
+        );
+        assert!(img.get("url").is_none(), "Plan B removed the url field");
     }
 }

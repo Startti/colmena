@@ -1,0 +1,44 @@
+{
+  "name": "upload_signed_url_to_endpoint",
+  "version": "1.0",
+  "description": "Plan A end-to-end smoke graph. A signed-URL-sourced document is forwarded to a KB endpoint via http_request multipart using $attachment:<document_id>. Used by tests/attachment_uniform_resolution_test.rs.",
+  "nodes": [
+    {
+      "id": "trigger",
+      "node_type": "trigger",
+      "config": {}
+    },
+    {
+      "id": "agent",
+      "node_type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "system_prompt": "You are an upload agent. The user attaches a document via signed URL. Use the http_upload tool to POST it to the configured endpoint as multipart/form-data. The body MUST be {\"file\": \"$attachment:<document_id>\"} where <document_id> comes from the attachment catalog in this message. Do not invent placeholders.",
+        "enabled_tools": ["http_upload"],
+        "tool_configurations": {
+          "http_upload": {
+            "node_type": "http_request",
+            "description": "Upload a file as multipart to the KB endpoint.",
+            "fixed_config": {
+              "url": "https://kb.test/documents",
+              "method": "POST",
+              "headers": { "Content-Type": "multipart/form-data" },
+              "allow_http_urls": true
+            },
+            "node_schema": {
+              "body": {
+                "type": "object",
+                "required": true,
+                "description": "Must be { \"file\": \"$attachment:<document_id>\" } where <document_id> comes from the catalog."
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "edges": [
+    { "from": "trigger", "to": "agent" }
+  ]
+}

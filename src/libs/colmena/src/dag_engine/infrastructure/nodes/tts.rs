@@ -25,8 +25,7 @@
 //! {
 //!   "output": {
 //!     "audio": {
-//!       "attachment_id": "...",
-//!       "url": "...",
+//!       "document_id": "audio_audio_0",
 //!       "mime_type": "audio/mpeg",
 //!       "size_bytes": 12345,
 //!       "duration_ms": null,
@@ -37,6 +36,10 @@
 //!   }
 //! }
 //! ```
+//!
+//! Plan B (D8) removed the legacy `attachment_id` alias and `url` field;
+//! the storage_key and signed read_url are still recorded internally on
+//! the auto-registered conversation_attachments row.
 
 use std::error::Error as StdError;
 use std::str::FromStr;
@@ -48,7 +51,8 @@ use serde_json::{json, Value};
 use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
-use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
+use crate::dag_engine::infrastructure::nodes::util::attachment_id::build_document_id;
+use crate::llm::domain::attachments::{origin, AttachmentSource, UpsertAttachmentInput};
 use crate::llm::domain::tts::{AudioFormat, TtsRequest};
 use crate::llm::domain::{AttachmentRegistry, ProviderKind};
 use crate::llm::infrastructure::build_tts_repository;
@@ -228,6 +232,17 @@ impl ExecutableNode for TtsNode {
 
         let text_preview: String = text.chars().take(80).collect();
 
+        // Plan A: derive a human-friendly document_id from the filename so the
+        // LLM can reference the audio artifact by a stable handle that is not
+        // the opaque storage_key UUID. The `audio` prefix distinguishes TTS
+        // artifacts from image producers (which use `img`).
+        let document_id = build_document_id(
+            &stored.filename,
+            &stored.mime_type,
+            &stored.storage_key,
+            "audio",
+        );
+
         // Register synthesized audio in the attachment registry. Even though
         // LLMs can't "hear" today, registering enables `$attachment:<id>`
         // resolution in http_request (capability 3) — agents can ship the
@@ -238,30 +253,44 @@ impl ExecutableNode for TtsNode {
             let description = format!("TTS synthesized with {}: {}", model, text_preview);
             let upsert = UpsertAttachmentInput {
                 agent_session_id: agent_sid.clone(),
-                document_id: stored.storage_key.clone(),
+                document_id: document_id.clone(),
                 provider: ProviderKind::Generated,
+                // For `provider: Generated` rows, provider_file_id holds the
+                // canonical storage_key. Cross-provider upload reads bytes via
+                // OutputStorageRepository.read(this).
                 provider_file_id: stored.storage_key.clone(),
                 mime_type: stored.mime_type.clone(),
                 filename: stored.filename.clone(),
                 size_bytes: Some(stored.size_bytes),
                 label: None,
                 description: Some(description),
-                source: AttachmentSource::SignedUrl(stored.read_url.clone()),
+                // Resolver-friendly source: read bytes back through the
+                // storage port using the storage_key as the path.
+                source: AttachmentSource::Path(stored.storage_key.clone()),
+                storage_key: Some(stored.storage_key.clone()),
+                origin: Some(origin::generated_by("tts")),
             };
             if let Err(e) = reg.upsert(upsert).await {
                 tracing::warn!(
                     target: "colmena::tts",
                     error = %e,
+                    document_id = %document_id,
                     storage_key = %stored.storage_key,
-                    "failed to register tts output in attachment registry"
+                    "failed to register tts output in attachment registry — \
+                     load_attachment will not see this output"
                 );
             }
         }
         Ok(json!({
             "output": {
                 "audio": {
-                    "attachment_id": stored.storage_key,
-                    "url": stored.read_url,
+                    // Plan B (D8): attachment_id alias and url field removed.
+                    // The storage_key and read_url are still recorded
+                    // internally on the auto-registered
+                    // conversation_attachments row; downstream consumers
+                    // (e.g., ADP frontend) resolve URLs by document_id via
+                    // a dedicated endpoint.
+                    "document_id": document_id,
                     "mime_type": stored.mime_type,
                     "size_bytes": stored.size_bytes,
                     "duration_ms": resp.duration_estimate_ms,
@@ -292,8 +321,9 @@ impl ExecutableNode for TtsNode {
     fn description(&self) -> Option<&str> {
         Some(
             "Synthesize speech from text via OpenAI, ElevenLabs, or Google Gemini TTS. \
-             Returns an attachment handle (attachment_id, url, mime_type, size_bytes, \
-             duration_ms).",
+             Returns { audio: { document_id, mime_type, size_bytes, duration_ms }, \
+             provider, model }. Use \"$attachment:<document_id>\" in downstream tool \
+             args to forward the audio, or call load_attachment(document_id) to read it.",
         )
     }
 
@@ -368,7 +398,14 @@ mod tests {
         assert_eq!(out["output"]["provider"], "openai");
         assert_eq!(out["output"]["model"], "tts-1");
         let audio = &out["output"]["audio"];
-        assert_eq!(audio["attachment_id"], "k");
+        // Plan B (D8): attachment_id alias and url field removed; only
+        // document_id remains (plus tts-specific duration_ms).
+        assert!(audio["document_id"].as_str().unwrap().starts_with("audio_"));
+        assert!(
+            audio.get("attachment_id").is_none(),
+            "Plan B removed the attachment_id legacy alias"
+        );
+        assert!(audio.get("url").is_none(), "Plan B removed the url field");
         assert_eq!(audio["mime_type"], "audio/mpeg");
         assert_eq!(audio["duration_ms"], 500);
     }
@@ -515,6 +552,116 @@ mod tests {
         node.execute(&inputs, &base_config(), &mut json!({}), None)
             .await
             .expect("execute ok");
+    }
+
+    // -----------------------------------------------------------------------
+    // Plan A — auto-registration in conversation_attachments
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn tts_auto_registers_artifact_in_registry() {
+        use crate::llm::domain::attachments::AttachmentSource;
+        use crate::llm::domain::{AttachmentRegistry, ProviderKind};
+        use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+
+        let mut repo = MockTtsRepository::new();
+        repo.expect_synthesize().returning(|_| Ok(audio_resp()));
+        repo.expect_provider_name().returning(|| "openai");
+
+        let mut storage = MockOutputStorageRepository::new();
+        storage.expect_store().times(1).returning(|_| {
+            Ok(StoredOutput {
+                storage_key: "sk-tts-1".into(),
+                read_url: "data:audio/mpeg;base64,XX".into(),
+                mime_type: "audio/mpeg".into(),
+                filename: "speech.mp3".into(),
+                size_bytes: 2,
+            })
+        });
+
+        let registry: Arc<dyn AttachmentRegistry> = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+
+        let node = TtsNode::new(Arc::new(storage))
+            .with_test_repository(Arc::new(repo))
+            .with_attachment_registry(registry.clone());
+
+        let mut inputs: NodeInputs = HashMap::new();
+        // Auto-registration only fires when an agent_session_id is engine-injected.
+        inputs.insert(
+            "__colmena_agent_session_id".into(),
+            json!("agent_autoreg_tts_1"),
+        );
+
+        let out = node
+            .execute(&inputs, &base_config(), &mut json!({}), None)
+            .await
+            .expect("execute ok");
+
+        let audio = &out["output"]["audio"];
+
+        // Plan B (D8): tool result emits only document_id. attachment_id
+        // alias and url field were removed; the storage_key is still
+        // recorded internally on the auto-registered row (asserted below).
+        let doc_id = audio["document_id"].as_str().expect("document_id present");
+        assert!(
+            doc_id.starts_with("audio_"),
+            "document_id should start with audio_, got {doc_id}"
+        );
+        assert!(
+            audio.get("attachment_id").is_none(),
+            "Plan B removed the attachment_id legacy alias"
+        );
+        assert!(audio.get("url").is_none(), "Plan B removed the url field");
+
+        // The registry row MUST be reachable by document_id and carry the
+        // generated_by:tts origin + storage_key.
+        let entry = registry
+            .lookup_by_document_id("agent_autoreg_tts_1", doc_id)
+            .await
+            .unwrap()
+            .expect("attachment was auto-registered");
+        assert_eq!(entry.storage_key.as_deref(), Some("sk-tts-1"));
+        assert_eq!(entry.origin.as_deref(), Some("generated_by:tts"));
+        assert!(matches!(entry.provider, ProviderKind::Generated));
+        match entry.source {
+            AttachmentSource::Path(ref p) => assert_eq!(p, "sk-tts-1"),
+            ref other => panic!("expected AttachmentSource::Path, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_registry_means_no_registration_but_still_emits_document_id() {
+        // Sanity check: when the node is constructed without a registry, the
+        // tool result still carries document_id (so the LLM contract is
+        // unchanged), and we don't crash trying to upsert. Plan B (D8)
+        // removed the attachment_id alias and url field.
+        let mut repo = MockTtsRepository::new();
+        repo.expect_synthesize().returning(|_| Ok(audio_resp()));
+        repo.expect_provider_name().returning(|| "openai");
+
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_store()
+            .times(1)
+            .returning(|_| Ok(stored_ok()));
+
+        let node = TtsNode::new(Arc::new(storage)).with_test_repository(Arc::new(repo));
+
+        let out = node
+            .execute(&HashMap::new(), &base_config(), &mut json!({}), None)
+            .await
+            .unwrap();
+        let audio = &out["output"]["audio"];
+        assert!(audio["document_id"].is_string());
+        assert!(
+            audio.get("attachment_id").is_none(),
+            "Plan B removed the attachment_id legacy alias"
+        );
+        assert!(audio.get("url").is_none(), "Plan B removed the url field");
     }
 
     #[tokio::test]

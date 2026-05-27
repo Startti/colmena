@@ -62,6 +62,25 @@ impl HashMapNodeRegistry {
         Arc::new_cyclic(|weak_self| {
             let mut nodes: HashMap<String, Arc<dyn ExecutableNode>> = HashMap::new();
 
+            // --- Plan A: AttachmentStreamResolver ---
+            // Build a composite resolver from the registry + storage. When
+            // both are present, http_request can resolve `$attachment:<document_id>`
+            // by looking up the registry; on miss it falls back to treating the
+            // identifier as a raw storage_key (backwards compat). When either
+            // dependency is missing, the resolver is not built and http_request
+            // falls back to using `storage.read_stream` directly (legacy).
+            let attachment_resolver: Option<
+                Arc<dyn crate::llm::domain::attachments::AttachmentStreamResolver>,
+            > = match (attachment_registry.as_ref(), storage.as_ref()) {
+                (Some(reg), Some(store)) => Some(Arc::new(
+                    crate::llm::infrastructure::attachments::AttachmentStreamResolverImpl::new(
+                        reg.clone(),
+                        store.clone(),
+                    ),
+                )),
+                _ => None,
+            };
+
             // --- Registrar Nodos de Depuración ---
             nodes.insert("mock_input".to_string(), Arc::new(MockInputNode));
             nodes.insert("log".to_string(), Arc::new(LogNode));
@@ -86,11 +105,17 @@ impl HashMapNodeRegistry {
             // Pass the storage adapter so the HTTP node can resolve
             // `$attachment:<id>` placeholders in the body to bytes read
             // from outputs of image_generation/edit/tts.
-            let http_node = if let Some(st) = storage.clone() {
-                HttpNode::new().with_storage(st)
-            } else {
-                HttpNode::new()
-            };
+            //
+            // Plan A: also pass the AttachmentStreamResolver when available so
+            // multipart parts sourced from `$attachment:<document_id>` look up
+            // the document via the registry (with raw-storage_key fallback).
+            let mut http_node = HttpNode::new();
+            if let Some(st) = storage.clone() {
+                http_node = http_node.with_storage(st);
+            }
+            if let Some(resolver) = attachment_resolver.clone() {
+                http_node = http_node.with_attachment_resolver(resolver);
+            }
             nodes.insert("http_request".to_string(), Arc::new(http_node));
 
             // --- Registrar Nodos Socket.IO ---

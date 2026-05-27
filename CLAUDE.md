@@ -74,6 +74,7 @@ When you need to understand or modify any node (HTTP, LLM, orchestrator, etc.):
 - **TypeScript**: `npm run build` (napi build with `--features node`)
 - **DAG Engine CLI (run)**: `cargo run --bin dag_engine -- run <path/to/graph.json>`
 - **DAG Engine CLI (serve)**: `cargo run --bin dag_engine -- serve <path/to/graph.json>`
+- **Attachment GC (cleanup)**: `cargo run --bin attachment_gc -- --dry-run` (or without --dry-run to actually delete)
 - **Docs**: `cargo doc --no-deps --open`
 
 **IMPORTANT — Python virtual environment:** Always use the project's `.venv` for Python commands:
@@ -273,3 +274,11 @@ For overrides (custom alias, `expose_sub_tools` filtering, `cache_ttl_seconds`, 
 - **Breaking-change discipline**: anything that changes colmena's public API (`EngineConfig`, `ColmenaEngine`, exported trait signatures) must be swept against the ADP worker (`apps/service/ia/platform/{worker,api}/src/` in the adp repo) BEFORE pushing to colmena develop — that worker pulls colmena develop directly via Cargo and a breaking change fails its next Cloud Build.
 - **HTTP multipart streaming shipped 2026-05-24** — `http_request` node now supports `Content-Type: multipart/form-data` with URL-sourced and `$attachment:<key>`-sourced parts, both streamed end-to-end (no in-memory buffering). `OutputStorageRepository` extended with additive `read_stream` method. See [`docs/developer_guide/25_web_nodes.md`](docs/developer_guide/25_web_nodes.md) and the spec at [`docs/superpowers/specs/2026-05-24-http-multipart-streaming-design.md`](docs/superpowers/specs/2026-05-24-http-multipart-streaming-design.md).
 - **SQL node parser hardened 2026-05-26** — all regex/substring heuristics replaced by `sqlparser` AST analysis (`infrastructure/sql_ast.rs`). Fixes a false positive where decimal literals like `1.81` were misread as schema references. Multi-statement queries are now validated per-statement (closes a hole where `SELECT 1; DROP TABLE x;` slipped through). New DDL kinds (`CREATE SCHEMA`/`INDEX`/`VIEW`) are explicitly blocked with clear messages.
+- **Attachment uniform resolution Plan A shipped 2026-05-25** — any document (inline, signed URL, or generated artifact) can be forwarded via `$attachment:<document_id>` in `http_request` multipart. Catalog auto-injected in LLM system message. Bytes persist uniformly to `OutputStorageRepository` at registration, regardless of source. See [`docs/superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md`](docs/superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md).
+- **Attachment uniform resolution Plan B shipped 2026-05-25** — LLM no longer auto-receives attached doc content; catalog-driven via system message. `load_attachment` results are ephemeral (marker in history, not content). `image_generation`/`image_edit`/`tts` tool results dropped legacy `attachment_id` and `url`; only `document_id` remains. BREAKING for ADP frontend (Rust services swept clean). See [`docs/superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md`](docs/superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md) and [`docs/superpowers/specs/2026-05-25-plan-b-adp-migration-notes.md`](docs/superpowers/specs/2026-05-25-plan-b-adp-migration-notes.md).
+- **Attachment uniform resolution Plan C shipped 2026-05-25** — new `attachment_gc`
+  binary deletes `conversation_attachments` rows + their backing blobs when
+  `COALESCE(last_used_at, registered_at) < now() - COLMENA_ATTACHMENT_TTL_DAYS` (default 7).
+  Designed to run as Cloud Scheduler → Cloud Run Job. Requires host application
+  to expose `<base>/internal/gcs/delete` endpoint. See
+  [`docs/developer_guide/36_attachment_gc.md`](docs/developer_guide/36_attachment_gc.md).

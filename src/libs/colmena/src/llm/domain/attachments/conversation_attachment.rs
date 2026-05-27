@@ -50,6 +50,15 @@ pub struct ConversationAttachment {
     pub source: AttachmentSource,
     pub registered_at: DateTime<Utc>,
     pub refreshed_at: DateTime<Utc>,
+    /// Plan A: reference to the bytes stored in `OutputStorageRepository`.
+    /// `None` for rows registered before the migration backfill ran.
+    pub storage_key: Option<String>,
+    /// Plan A: semantic origin (`user_upload` | `generated_by:<tool>`).
+    /// `None` for legacy rows; backfill sets a best-effort value.
+    pub origin: Option<String>,
+    /// Plan A: last time this attachment was resolved via
+    /// `AttachmentStreamResolver` or `load_attachment`. Drives TTL cleanup.
+    pub last_used_at: Option<DateTime<Utc>>,
 }
 
 impl ConversationAttachment {
@@ -112,6 +121,9 @@ mod tests {
             source: AttachmentSource::SignedUrl("https://x".to_string()),
             registered_at: Utc::now(),
             refreshed_at: Utc::now(),
+            storage_key: None,
+            origin: None,
+            last_used_at: None,
         }
     }
 
@@ -159,5 +171,17 @@ mod tests {
     fn unknown_size_renders_as_question_mark() {
         let a = mk(Some("X"), None, None);
         assert!(a.catalog_line().contains("?"));
+    }
+
+    #[test]
+    fn conversation_attachment_holds_storage_key_origin_last_used_at() {
+        let mut a = mk(Some("L"), None, Some(1024));
+        a.storage_key = Some("sk-abc".to_string());
+        a.origin = Some("user_upload".to_string());
+        a.last_used_at = Some(Utc::now());
+
+        assert_eq!(a.storage_key.as_deref(), Some("sk-abc"));
+        assert_eq!(a.origin.as_deref(), Some("user_upload"));
+        assert!(a.last_used_at.is_some());
     }
 }

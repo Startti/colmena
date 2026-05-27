@@ -125,6 +125,12 @@ impl OutputStorageRepository for LocalCacheStorageAdapter {
             filename,
         })
     }
+
+    async fn delete(&self, storage_key: &str) -> Result<(), StorageError> {
+        // Idempotent — removing a missing entry is a no-op.
+        self.cache.remove(storage_key);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -238,5 +244,37 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StorageError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_removes_stored_blob_and_is_idempotent() {
+        let adapter = LocalCacheStorageAdapter::new();
+        let stored = adapter
+            .store(req(b"hello".to_vec(), "text/plain"))
+            .await
+            .unwrap();
+
+        // Confirm it exists before deletion.
+        adapter.read(&stored.storage_key).await.unwrap();
+
+        // First delete removes it.
+        adapter.delete(&stored.storage_key).await.unwrap();
+        assert!(
+            matches!(
+                adapter.read(&stored.storage_key).await,
+                Err(StorageError::InvalidInput(_))
+            ),
+            "blob should be gone after delete"
+        );
+
+        // Second delete is a no-op (idempotent).
+        adapter.delete(&stored.storage_key).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_unknown_key_is_noop() {
+        let adapter = LocalCacheStorageAdapter::new();
+        // Deleting a key that was never stored must succeed.
+        adapter.delete("local://never-existed").await.unwrap();
     }
 }

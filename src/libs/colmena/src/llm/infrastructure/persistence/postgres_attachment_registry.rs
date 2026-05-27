@@ -1,7 +1,7 @@
 use crate::dag_engine::infrastructure::pool_registry::PgPoolRegistry;
 use crate::llm::domain::{
     AttachmentError, AttachmentRegistry, AttachmentSource, ConversationAttachment, ProviderKind,
-    UpsertAttachmentInput,
+    StaleAttachmentQuery, UpsertAttachmentInput,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -84,6 +84,16 @@ fn row_to_attachment(
         refreshed_at: row
             .try_get::<DateTime<Utc>, _>("refreshed_at")
             .map_err(|e| AttachmentError::RepositoryFailed(format!("refreshed_at: {}", e)))?,
+        // Plan A — optional columns, may be NULL on legacy rows.
+        storage_key: row
+            .try_get::<Option<String>, _>("storage_key")
+            .ok()
+            .flatten(),
+        origin: row.try_get::<Option<String>, _>("origin").ok().flatten(),
+        last_used_at: row
+            .try_get::<Option<DateTime<Utc>>, _>("last_used_at")
+            .ok()
+            .flatten(),
     })
 }
 
@@ -99,17 +109,20 @@ impl AttachmentRegistry for PostgresAttachmentRegistry {
             "INSERT INTO conversation_attachments (
                 agent_session_id, document_id, provider, provider_file_id,
                 mime_type, filename, size_bytes, label, description,
-                source_kind, source_value, registered_at, refreshed_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, NOW(), NOW())
+                source_kind, source_value, registered_at, refreshed_at,
+                storage_key, origin
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, NOW(), NOW(), $12, $13)
             ON CONFLICT (agent_session_id, document_id, provider) DO UPDATE
             SET provider_file_id = EXCLUDED.provider_file_id,
                 mime_type        = EXCLUDED.mime_type,
                 filename         = EXCLUDED.filename,
                 size_bytes       = EXCLUDED.size_bytes,
-                label            = EXCLUDED.label,
-                description      = EXCLUDED.description,
+                label            = COALESCE(EXCLUDED.label, conversation_attachments.label),
+                description      = COALESCE(EXCLUDED.description, conversation_attachments.description),
                 source_kind      = EXCLUDED.source_kind,
                 source_value     = EXCLUDED.source_value,
+                storage_key      = COALESCE(EXCLUDED.storage_key, conversation_attachments.storage_key),
+                origin           = COALESCE(EXCLUDED.origin, conversation_attachments.origin),
                 refreshed_at     = NOW()",
         )
         .bind(&input.agent_session_id)
@@ -123,6 +136,8 @@ impl AttachmentRegistry for PostgresAttachmentRegistry {
         .bind(&input.description)
         .bind(&source_kind)
         .bind(&source_value)
+        .bind(&input.storage_key)
+        .bind(&input.origin)
         .execute(&*self.pool)
         .await
         .map_err(|e| AttachmentError::RepositoryFailed(format!("upsert: {}", e)))?;
@@ -139,7 +154,8 @@ impl AttachmentRegistry for PostgresAttachmentRegistry {
         let row = sqlx::query(
             "SELECT agent_session_id, document_id, provider, provider_file_id,
                     mime_type, filename, size_bytes, label, description,
-                    source_kind, source_value, registered_at, refreshed_at
+                    source_kind, source_value, registered_at, refreshed_at,
+                    storage_key, origin, last_used_at
              FROM conversation_attachments
              WHERE agent_session_id = $1 AND document_id = $2 AND provider = $3",
         )
@@ -192,7 +208,8 @@ impl AttachmentRegistry for PostgresAttachmentRegistry {
         let rows = sqlx::query(
             "SELECT agent_session_id, document_id, provider, provider_file_id,
                     mime_type, filename, size_bytes, label, description,
-                    source_kind, source_value, registered_at, refreshed_at
+                    source_kind, source_value, registered_at, refreshed_at,
+                    storage_key, origin, last_used_at
              FROM conversation_attachments
              WHERE agent_session_id = $1
              ORDER BY registered_at ASC",
@@ -233,6 +250,94 @@ impl AttachmentRegistry for PostgresAttachmentRegistry {
         }
         Ok(())
     }
+
+    /// Provider is intentionally ignored — returns the most recently refreshed row across all
+    /// providers for the (session, document) pair. Secondary sort by `provider` ASC ensures a
+    /// deterministic winner when multiple rows share the same `refreshed_at`.
+    async fn lookup_by_document_id(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+    ) -> Result<Option<ConversationAttachment>, AttachmentError> {
+        let row = sqlx::query(
+            "SELECT agent_session_id, document_id, provider, provider_file_id,
+                    mime_type, filename, size_bytes, label, description,
+                    source_kind, source_value, registered_at, refreshed_at,
+                    storage_key, origin, last_used_at
+             FROM conversation_attachments
+             WHERE agent_session_id = $1 AND document_id = $2
+             ORDER BY refreshed_at DESC, provider ASC
+             LIMIT 1",
+        )
+        .bind(agent_session_id)
+        .bind(document_id)
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|e| AttachmentError::RepositoryFailed(format!("lookup_by_doc: {}", e)))?;
+
+        match row {
+            None => Ok(None),
+            Some(r) => Ok(Some(row_to_attachment(&r)?)),
+        }
+    }
+
+    async fn touch_last_used(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+    ) -> Result<(), AttachmentError> {
+        sqlx::query(
+            "UPDATE conversation_attachments
+                SET last_used_at = NOW()
+              WHERE agent_session_id = $1 AND document_id = $2",
+        )
+        .bind(agent_session_id)
+        .bind(document_id)
+        .execute(&*self.pool)
+        .await
+        .map_err(|e| AttachmentError::RepositoryFailed(format!("touch_last_used: {}", e)))?;
+        Ok(())
+    }
+
+    async fn find_stale_attachments(
+        &self,
+        query: StaleAttachmentQuery,
+    ) -> Result<Vec<ConversationAttachment>, AttachmentError> {
+        let rows = sqlx::query(
+            "SELECT agent_session_id, document_id, provider, provider_file_id,
+                    mime_type, filename, size_bytes, label, description,
+                    source_kind, source_value, registered_at, refreshed_at,
+                    storage_key, origin, last_used_at
+             FROM conversation_attachments
+             WHERE COALESCE(last_used_at, registered_at) < $1
+             ORDER BY COALESCE(last_used_at, registered_at) ASC
+             LIMIT $2",
+        )
+        .bind(query.cutoff)
+        .bind(query.limit as i64)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| AttachmentError::RepositoryFailed(format!("find_stale: {}", e)))?;
+
+        rows.iter().map(row_to_attachment).collect()
+    }
+
+    async fn delete_attachment(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+    ) -> Result<(), AttachmentError> {
+        sqlx::query(
+            "DELETE FROM conversation_attachments
+              WHERE agent_session_id = $1 AND document_id = $2",
+        )
+        .bind(agent_session_id)
+        .bind(document_id)
+        .execute(&*self.pool)
+        .await
+        .map_err(|e| AttachmentError::RepositoryFailed(format!("delete_attachment: {}", e)))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -270,6 +375,8 @@ mod tests {
             label: Some("X".to_string()),
             description: None,
             source: AttachmentSource::SignedUrl("https://u".to_string()),
+            storage_key: None,
+            origin: None,
         };
         reg.upsert(input.clone()).await.unwrap();
         let got = reg
@@ -300,6 +407,8 @@ mod tests {
             label: None,
             description: None,
             source: AttachmentSource::Inline,
+            storage_key: None,
+            origin: None,
         };
         reg.upsert(mk("pf-1")).await.unwrap();
         reg.upsert(mk("pf-2")).await.unwrap();
@@ -338,6 +447,8 @@ mod tests {
             label: None,
             description: None,
             source: AttachmentSource::Inline,
+            storage_key: None,
+            origin: None,
         })
         .await
         .unwrap();
@@ -363,5 +474,216 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, AttachmentError::NotFound { .. }));
+    }
+
+    #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+    #[tokio::test]
+    async fn lookup_by_document_id_returns_row_when_present_pg() {
+        let reg = make_registry().await;
+        let sid = format!("test_sess_{}", uuid::Uuid::new_v4());
+        let did = format!("doc_{}", uuid::Uuid::new_v4());
+
+        reg.upsert(UpsertAttachmentInput {
+            agent_session_id: sid.clone(),
+            document_id: did.clone(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf-1".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "a.pdf".to_string(),
+            size_bytes: Some(100),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+            storage_key: Some("sk-1".to_string()),
+            origin: Some("user_upload".to_string()),
+        })
+        .await
+        .unwrap();
+
+        let got = reg.lookup_by_document_id(&sid, &did).await.unwrap();
+        assert!(got.is_some(), "expected row to be returned");
+        let row = got.unwrap();
+        assert_eq!(row.storage_key.as_deref(), Some("sk-1"));
+        assert_eq!(row.origin.as_deref(), Some("user_upload"));
+    }
+
+    #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+    #[tokio::test]
+    async fn lookup_by_document_id_returns_none_when_absent_pg() {
+        let reg = make_registry().await;
+        let sid = format!("test_sess_{}", uuid::Uuid::new_v4());
+        let got = reg.lookup_by_document_id(&sid, "missing").await.unwrap();
+        assert!(got.is_none());
+    }
+
+    #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+    #[tokio::test]
+    async fn touch_last_used_updates_timestamp_pg() {
+        let reg = make_registry().await;
+        let sid = format!("test_sess_{}", uuid::Uuid::new_v4());
+        let did = format!("doc_{}", uuid::Uuid::new_v4());
+
+        reg.upsert(UpsertAttachmentInput {
+            agent_session_id: sid.clone(),
+            document_id: did.clone(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf-1".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "a.pdf".to_string(),
+            size_bytes: Some(100),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+            storage_key: Some("sk-1".to_string()),
+            origin: Some("user_upload".to_string()),
+        })
+        .await
+        .unwrap();
+
+        let before = reg
+            .lookup_by_document_id(&sid, &did)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(before.last_used_at.is_none());
+
+        reg.touch_last_used(&sid, &did).await.unwrap();
+
+        let after = reg
+            .lookup_by_document_id(&sid, &did)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(after.last_used_at.is_some());
+    }
+
+    #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+    #[tokio::test]
+    async fn touch_last_used_is_noop_when_missing_pg() {
+        let reg = make_registry().await;
+        // Should not error even when no row exists.
+        reg.touch_last_used("missing_sess", "missing_doc")
+            .await
+            .unwrap();
+    }
+
+    // ----- Plan C: find_stale_attachments + delete_attachment -----
+
+    #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+    #[tokio::test]
+    async fn find_stale_attachments_returns_rows_older_than_cutoff() {
+        use crate::llm::domain::StaleAttachmentQuery;
+        let reg = make_registry().await;
+        let sid = format!("test_sess_{}", uuid::Uuid::new_v4());
+
+        // Insert two rows; we'll backdate one to look stale.
+        reg.upsert(UpsertAttachmentInput {
+            agent_session_id: sid.clone(),
+            document_id: "stale-doc".to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf-stale".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "old.pdf".to_string(),
+            size_bytes: Some(100),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+            storage_key: Some("sk-stale".to_string()),
+            origin: Some("user_upload".to_string()),
+        })
+        .await
+        .unwrap();
+
+        reg.upsert(UpsertAttachmentInput {
+            agent_session_id: sid.clone(),
+            document_id: "fresh-doc".to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf-fresh".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "new.pdf".to_string(),
+            size_bytes: Some(100),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+            storage_key: Some("sk-fresh".to_string()),
+            origin: Some("user_upload".to_string()),
+        })
+        .await
+        .unwrap();
+
+        // Force the first row to look stale by backdating registered_at + nulling last_used_at.
+        sqlx::query(
+            "UPDATE conversation_attachments
+                SET registered_at = NOW() - INTERVAL '8 days', last_used_at = NULL
+              WHERE document_id = $1 AND agent_session_id = $2",
+        )
+        .bind("stale-doc")
+        .bind(&sid)
+        .execute(&*reg.pool)
+        .await
+        .unwrap();
+
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+        let stale = reg
+            .find_stale_attachments(StaleAttachmentQuery { cutoff, limit: 100 })
+            .await
+            .unwrap();
+
+        // Filter to our session — other concurrent tests may have stale rows too.
+        let stale_for_us: Vec<&str> = stale
+            .iter()
+            .filter(|r| r.agent_session_id == sid)
+            .map(|r| r.document_id.as_str())
+            .collect();
+        assert!(
+            stale_for_us.contains(&"stale-doc"),
+            "stale-doc should be in stale list, got {:?}",
+            stale_for_us
+        );
+        assert!(
+            !stale_for_us.contains(&"fresh-doc"),
+            "fresh-doc should NOT be in stale list, got {:?}",
+            stale_for_us
+        );
+    }
+
+    #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+    #[tokio::test]
+    async fn delete_attachment_removes_row_and_is_idempotent_pg() {
+        let reg = make_registry().await;
+        let sid = format!("test_sess_{}", uuid::Uuid::new_v4());
+
+        reg.upsert(UpsertAttachmentInput {
+            agent_session_id: sid.clone(),
+            document_id: "to-delete".to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf-del".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "x.pdf".to_string(),
+            size_bytes: Some(100),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+            storage_key: Some("sk-del".to_string()),
+            origin: Some("user_upload".to_string()),
+        })
+        .await
+        .unwrap();
+
+        assert!(reg
+            .lookup_by_document_id(&sid, "to-delete")
+            .await
+            .unwrap()
+            .is_some());
+
+        reg.delete_attachment(&sid, "to-delete").await.unwrap();
+        assert!(reg
+            .lookup_by_document_id(&sid, "to-delete")
+            .await
+            .unwrap()
+            .is_none());
+
+        // Idempotent — deleting again must not error.
+        reg.delete_attachment(&sid, "to-delete").await.unwrap();
     }
 }

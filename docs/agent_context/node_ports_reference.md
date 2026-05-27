@@ -68,9 +68,9 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 
 | Node | Purpose | Key Behavior |
 |---|---|---|
-| **image_generation** | Generate images | Calls OpenAI (gpt-image-1, dall-e-3) or Google Vertex Imagen 4; persists output via `OutputStorageRepository`; returns `{ images: [{ attachment_id, url, mime_type, size_bytes, description }], provider, model }`. Only registered when an engine storage adapter is present (default for `EngineConfig::from_env`). |
-| **tts** | Synthesize speech | OpenAI (tts-1, gpt-4o-mini-tts), ElevenLabs (eleven_multilingual_v2, etc.), or Google Gemini TTS. Persists audio bytes via `OutputStorageRepository`; returns `{ audio: { attachment_id, url, mime_type, size_bytes, duration_ms, description }, provider, model }`. |
-| **image_edit** | Edit an existing image | OpenAI gpt-image-1 (only provider today) via `/v1/images/edits`. Fetches `source_url` (data: or http(s)) + optional `mask_url`, posts multipart, persists output via `OutputStorageRepository`. Returns same shape as `image_generation`. |
+| **image_generation** | Generate images | Calls OpenAI (gpt-image-1, dall-e-3) or Google Vertex Imagen 4; persists output via `OutputStorageRepository`; returns `{ images: [{ document_id, mime_type, size_bytes, description }], provider, model }`. Plan B (2026-05-25) removed the legacy `attachment_id`/`url` fields. Only registered when an engine storage adapter is present (default for `EngineConfig::from_env`). |
+| **tts** | Synthesize speech | OpenAI (tts-1, gpt-4o-mini-tts), ElevenLabs (eleven_multilingual_v2, etc.), or Google Gemini TTS. Persists audio bytes via `OutputStorageRepository`; returns `{ audio: { document_id, mime_type, size_bytes, duration_ms, description }, provider, model }`. Plan B (2026-05-25) removed the legacy `attachment_id`/`url` fields. |
+| **image_edit** | Edit an existing image | OpenAI gpt-image-1 (only provider today) via `/v1/images/edits`. Fetches `source_url` (data:, http(s), or `$attachment:<document_id>`) + optional `mask_url`, posts multipart, persists output via `OutputStorageRepository`. Returns same shape as `image_generation`. |
 
 ---
 
@@ -103,9 +103,9 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 | `task_memory_writer` | — | `result` | **Requires explicit fields** for task management |
 | `trigger_webhook` | — | `output` | Webhook trigger — emits payload |
 | `mock_input` | — | — | **Raw output** — emits config as-is, no specific field |
-| `image_generation` | — | `images` | **Requires `provider`, `model`, `prompt` in config**. Output: `{ images: [{attachment_id, url, mime_type, size_bytes, description}], provider, model }` — `images[0].url` is a `data:` URI when running with the default LocalCache storage, a signed read URL when the HTTP callback adapter is active. |
-| `tts` | — | `audio` | **Requires `provider`, `model`, `api_key`, `text`, `voice` in config**. Output: `{ audio: {attachment_id, url, mime_type, size_bytes, duration_ms, description}, provider, model }` — same storage semantics as image_generation. |
-| `image_edit` | — | `images` | **Requires `provider`, `api_key`, `source_url`, `prompt` in config**. Output: same shape as `image_generation`. `source_url` accepts `data:` URIs or http(s). |
+| `image_generation` | — | `images` | **Requires `provider`, `model`, `prompt` in config**. Output (Plan B, 2026-05-25): `{ images: [{document_id, mime_type, size_bytes, description}], provider, model }`. Legacy `attachment_id`/`url` removed; consumers needing a renderable URL must resolve by `document_id` via a backend endpoint. |
+| `tts` | — | `audio` | **Requires `provider`, `model`, `api_key`, `text`, `voice` in config**. Output (Plan B): `{ audio: {document_id, mime_type, size_bytes, duration_ms, description}, provider, model }` — same storage semantics as image_generation. |
+| `image_edit` | — | `images` | **Requires `provider`, `api_key`, `source_url`, `prompt` in config**. Output: same shape as `image_generation` (Plan B `document_id`-only). `source_url` accepts `data:` URIs, http(s), or `$attachment:<document_id>`. |
 
 **Multipart mode** (activado por header `Content-Type: multipart/*`):
 - El campo `body` se interpreta como un map de parts (string URL/`$attachment:`/texto, array, o objeto explícito con `url`/`attachment`/`value` + overrides opcionales `filename`/`content_type`).
