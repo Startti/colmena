@@ -277,6 +277,150 @@ async fn generated_artifact_can_be_forwarded_via_multipart() {
 /// Negative path: resolver fires NotFound when the document_id is unknown,
 /// the downstream endpoint never receives a request, and the http_request
 /// node surfaces the error verbatim.
+/// Cross-tenant isolation: a `document_id` registered under session A must
+/// NOT be resolvable from session B, even if B knows (or guesses) the id.
+///
+/// This is the load-bearing security invariant of Plan A. If the
+/// `AttachmentRegistry::lookup_by_document_id` query ever loses its
+/// `agent_session_id` filter, two tenants would see each other's docs.
+/// This test asserts the contract at the resolver + http_request layer
+/// (the layer the LLM actually invokes).
+#[tokio::test]
+async fn document_id_from_another_session_is_invisible() {
+    const SESSION_A: &str = "tenant_a_session";
+    const SESSION_B: &str = "tenant_b_session";
+
+    let registry = Arc::new(
+        SqliteAttachmentRegistry::new("sqlite::memory:")
+            .await
+            .expect("sqlite registry ok"),
+    );
+    let storage = Arc::new(LocalCacheStorageAdapter::new());
+
+    // Seed a "secret" document under SESSION_A. We register it directly
+    // here (not via `seed_attachment`) because that helper hardcodes the
+    // constant; the explicit form makes the session boundary obvious.
+    let secret_bytes: Vec<u8> = b"TENANT_A_PRIVATE_PAYLOAD_must_not_leak".to_vec();
+    let stored = storage
+        .store(StoreRequest {
+            bytes: secret_bytes.clone(),
+            mime_type: "application/pdf".to_string(),
+            filename: "secret.pdf".to_string(),
+            session_id: Some(SESSION_A.to_string()),
+            agent_session_id: Some(SESSION_A.to_string()),
+        })
+        .await
+        .expect("storage.store ok");
+    registry
+        .upsert(UpsertAttachmentInput {
+            agent_session_id: SESSION_A.to_string(),
+            document_id: "doc_a_secret".to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf-secret".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "secret.pdf".to_string(),
+            size_bytes: Some(secret_bytes.len() as u64),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+            storage_key: Some(stored.storage_key),
+            origin: Some("user_upload".to_string()),
+        })
+        .await
+        .expect("registry.upsert ok");
+
+    // Independently, give SESSION_B a doc of its own so the registry is
+    // not "empty for B" — this rules out the test passing trivially due
+    // to no resolver context.
+    let b_bytes: Vec<u8> = b"tenant_b_innocuous_payload".to_vec();
+    let stored_b = storage
+        .store(StoreRequest {
+            bytes: b_bytes.clone(),
+            mime_type: "application/pdf".to_string(),
+            filename: "b.pdf".to_string(),
+            session_id: Some(SESSION_B.to_string()),
+            agent_session_id: Some(SESSION_B.to_string()),
+        })
+        .await
+        .expect("storage.store ok");
+    registry
+        .upsert(UpsertAttachmentInput {
+            agent_session_id: SESSION_B.to_string(),
+            document_id: "doc_b_own".to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf-b".to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: "b.pdf".to_string(),
+            size_bytes: Some(b_bytes.len() as u64),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+            storage_key: Some(stored_b.storage_key),
+            origin: Some("user_upload".to_string()),
+        })
+        .await
+        .expect("registry.upsert ok");
+
+    // Sanity: from B's POV, the registry confirms only doc_b_own exists.
+    let b_view = registry
+        .lookup_by_document_id(SESSION_B, "doc_a_secret")
+        .await
+        .expect("registry query ok");
+    assert!(
+        b_view.is_none(),
+        "registry leaked tenant A's document into B's view"
+    );
+
+    // Now wire the resolver and try to forward A's secret from B's session.
+    let server = MockServer::start().await;
+    mount_kb_endpoint(&server).await;
+    let resolver: Arc<dyn AttachmentStreamResolver> = Arc::new(AttachmentStreamResolverImpl::new(
+        registry.clone() as Arc<dyn AttachmentRegistry>,
+        storage,
+    ));
+    let node = HttpNode::new().with_attachment_resolver(resolver);
+
+    let body = json!({ "file": "$attachment:doc_a_secret" });
+    let config = mk_config(&server.uri(), body);
+    let mut inputs: HashMap<String, Value> = HashMap::new();
+    inputs.insert(
+        "__colmena_agent_session_id".to_string(),
+        json!(SESSION_B), // <- B's session, A's document_id
+    );
+
+    let err = node
+        .execute(&inputs, &config, &mut json!({}), None)
+        .await
+        .expect_err("cross-tenant resolve must fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not found") || msg.contains("NotFound"),
+        "expected NotFound (not StorageKeyMissing), got: {msg}"
+    );
+
+    // Critical: downstream KB never received anything. If it had, A's
+    // secret bytes would have crossed the tenant boundary.
+    let received = server
+        .received_requests()
+        .await
+        .expect("received_requests ok");
+    assert!(
+        received.iter().all(|r| r.url.path() != "/documents"),
+        "downstream MUST NOT receive a POST when cross-tenant resolution is attempted"
+    );
+
+    // Belt-and-suspenders: the secret bytes never appeared anywhere in
+    // the captured request set.
+    for r in received.iter() {
+        assert!(
+            r.body
+                .windows(secret_bytes.len())
+                .all(|w| w != secret_bytes.as_slice()),
+            "secret bytes leaked into a captured request"
+        );
+    }
+}
+
 #[tokio::test]
 async fn unknown_document_id_errors_before_downstream_post() {
     let registry = Arc::new(
