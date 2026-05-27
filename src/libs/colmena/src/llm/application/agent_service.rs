@@ -414,6 +414,14 @@ impl AgentService {
                                 // See docs/developer_guide/31_load_attachment.md.
                                 messages.push(user_msg);
 
+                                // NOTE: marker_text is deliberately a prose
+                                // sentence, NOT a structured JSON/tag block.
+                                // Do not write code that parses it: future UI
+                                // layers should derive load_attachment events
+                                // from tool_call history instead. If the
+                                // wording changes, persisted history from
+                                // before the change keeps the old string —
+                                // that's intentional and not a bug.
                                 let marker_text = format!(
                                     "[load_attachment(\"{}\") was invoked. Document \
                                      content was available for this turn only. Call \

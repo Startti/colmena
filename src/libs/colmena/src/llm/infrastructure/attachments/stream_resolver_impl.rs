@@ -19,12 +19,24 @@ use crate::llm::domain::attachments::{
 use crate::storage::domain::storage_error::StorageError;
 use crate::storage::domain::{OutputStorageRepository, StoredStream};
 
+/// Production [`AttachmentStreamResolver`] composing an
+/// [`AttachmentRegistry`] (catalog of `(agent_session_id, document_id) →
+/// storage_key`) and an [`OutputStorageRepository`] (`storage_key → bytes`).
+///
+/// Wire one of these into the engine at startup; consumers receive it as
+/// `Arc<dyn AttachmentStreamResolver>` so the registry/storage choice
+/// (Postgres + GCS in prod, SQLite + LocalCache in tests) is invisible.
 pub struct AttachmentStreamResolverImpl {
     registry: Arc<dyn AttachmentRegistry>,
     storage: Arc<dyn OutputStorageRepository>,
 }
 
 impl AttachmentStreamResolverImpl {
+    /// Construct a resolver from already-wired registry + storage adapters.
+    ///
+    /// Both arguments are `Arc<dyn _>` because the resolver is normally
+    /// shared across nodes (LLM, http_request, image_generation, …) and
+    /// across concurrent DAG runs.
     pub fn new(
         registry: Arc<dyn AttachmentRegistry>,
         storage: Arc<dyn OutputStorageRepository>,

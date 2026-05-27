@@ -2711,6 +2711,14 @@ async fn persist_attachment_bytes(
 /// `_resolved_files` is intentionally unused HERE — bytes are still
 /// persisted to `OutputStorageRepository` and registered in the
 /// attachment catalog further upstream in `execute()`.
+///
+/// The parameter is kept (instead of being removed) because the
+/// `first_turn_user_message_does_not_carry_files_after_plan_b` regression
+/// test in this module passes a non-empty `files` slice and asserts that
+/// the produced message still has no attached files. Without the
+/// parameter, that test would have to fake a different shape and would no
+/// longer document the Plan B invariant at the call site. If you remove
+/// the param, update the regression test accordingly.
 fn build_initial_user_message(
     prompt: &str,
     _resolved_files: &[crate::llm::domain::FileData],

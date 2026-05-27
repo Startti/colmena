@@ -95,6 +95,13 @@ pub trait AttachmentRegistry: Send + Sync {
     /// Plan A: update `last_used_at = now()` for all rows matching
     /// `(agent_session_id, document_id)`. Called by `AttachmentStreamResolver`
     /// on every successful resolve. No-op when no row matches.
+    ///
+    /// **Operational note:** `last_used_at` is populated EXCLUSIVELY by this
+    /// method — there is no SQL trigger. Rows that exist but were never
+    /// resolved after Plan A shipped keep `last_used_at IS NULL`. The
+    /// `attachment_gc` binary handles this case via
+    /// `COALESCE(last_used_at, registered_at) < cutoff`, so legacy rows
+    /// without a touch are GC'd based on `registered_at` alone.
     async fn touch_last_used(
         &self,
         agent_session_id: &str,

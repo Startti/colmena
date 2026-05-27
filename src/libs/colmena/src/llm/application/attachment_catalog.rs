@@ -4,6 +4,18 @@
 
 use crate::llm::domain::attachments::ConversationAttachment;
 
+/// Render the per-session attachment catalog block that gets prepended to
+/// the LLM node's system message at turn 0.
+///
+/// Returns `None` if there are no attachments (caller should skip the
+/// prelude entirely). Returns `Some(block)` otherwise; the block lists each
+/// attachment by `document_id` with filename, mime, size, optional
+/// description / origin, registration timestamp, and the canonical usage
+/// hint (`load_attachment(...)` to read · `$attachment:<id>` to forward).
+///
+/// The output format is deliberately prose, not structured. Downstream
+/// readers (the LLM) are expected to parse it heuristically; do not write
+/// code that depends on a specific shape.
 pub fn render_catalog(attachments: &[ConversationAttachment]) -> Option<String> {
     if attachments.is_empty() {
         return None;
