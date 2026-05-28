@@ -286,6 +286,39 @@ El catálogo que sigue al prelude renderiza, por documento:
 
 Como el `system_message` se inyecta **antes** del prelude, una instrucción explícita del graph author (p. ej. "para subir al KB, reenviá; NUNCA leas") **prevalece** sobre la regla genérica del prelude ("call load_attachment if the user asks about a document"). Así la capa de política sobreescribe la baseline cuando hay conflicto.
 
+## Observabilidad SSE de los tools
+
+Todos los tools que ejecuta el nodo `llm_call` emiten eventos SSE de tool para
+que el frontend pueda renderizar su ciclo de vida. Los eventos viajan en dos
+momentos:
+
+- **Input** (`tool-input-start`, `tool-input-delta`, `tool-input-available`) —
+  se emiten **antes** de ejecutar, mientras el LLM streamea el tool call. Son
+  uniformes para TODOS los tools.
+- **Output** (`tool-output-available`) — se emite **después** de ejecutar.
+
+| Tool | input-* | output-available | Evento extra |
+|---|:---:|:---:|---|
+| Node-backed (`http_request`, `sql_query`, `python_script`, `image_generation`, `image_edit`, `tts`, `socketio_request`, …) | ✅ | ✅ | — |
+| Toolkit sub-tools (`api_explorer__*`) | ✅ | ✅ | — |
+| `load_skill` | ✅ | ✅ | `skill-loaded` |
+| `describe_tool` (lazy loading) | ✅ | ✅ | `tool-described` |
+| `document_*` (create, read, apply_patch, get_head, list_versions, rollback, list_my_artifacts) | ✅ | ✅ | — |
+| `load_attachment` | ✅ | ✅ (desde fix `c897bcf`) | — |
+| `suspend` / `secure_suspend` | ✅ | ❌ por diseño | → `finish` con `__colmena_status: SUSPENDED` |
+
+> **`load_attachment` (fix `c897bcf`):** su payload de `tool-output-available`
+> contiene **solo metadata** (`{ "document_id": "...", "status": "loaded" | "error" }`),
+> NO el contenido del documento — el contenido sigue siendo efímero en el
+> contexto del LLM (D7) y no viaja por el SSE. Antes del fix, `load_attachment`
+> emitía los eventos de input pero no el de output (el bloque del sentinel hacía
+> `continue` antes de la emisión), dejando al frontend con un input sin output.
+
+> **`suspend` / `secure_suspend`:** no emiten `tool-output-available` a
+> propósito — no son tools "completados" sino una pausa del loop. Se surface
+> vía el evento `finish` con `__colmena_status: SUSPENDED` (el banner de
+> suspend en la UI).
+
 ## Campos opcionales en `files[]`
 
 ```jsonc
