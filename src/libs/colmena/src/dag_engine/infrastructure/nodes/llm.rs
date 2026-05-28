@@ -588,6 +588,27 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
             }
         };
 
+        // D10: a successful `load_attachment` resolution counts as "using"
+        // the attachment. Touch `last_used_at` so the GC's
+        // `COALESCE(last_used_at, registered_at) < cutoff` staleness check
+        // treats actively-read attachments as fresh — otherwise a doc read
+        // via load_attachment but never forwarded would be reaped TTL days
+        // after registration. Best-effort and non-fatal, mirroring
+        // AttachmentStreamResolverImpl on the Plan A forward path.
+        if let Err(e) = self
+            .registry
+            .touch_last_used(agent_session_id, document_id)
+            .await
+        {
+            tracing::warn!(
+                target: "colmena::attachment",
+                error = %e,
+                agent_session_id = %agent_session_id,
+                document_id = %document_id,
+                "touch_last_used failed in load_attachment (non-fatal)"
+            );
+        }
+
         // Attempt to use the cached provider_file_id as-is. The provider call
         // itself will surface expiry on use; we treat lookup failure on the
         // provider as a recoverable case ONLY when the source is recoverable.
@@ -3229,6 +3250,80 @@ mod resolver_tests {
         assert!(
             err.contains("OutputStorageRepository"),
             "error message should mention storage: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolver_touches_last_used_at_on_successful_load() {
+        // D10: a `load_attachment` invocation counts as "using" the
+        // attachment — resolve() must update `last_used_at` so the GC's
+        // `COALESCE(last_used_at, registered_at) < cutoff` staleness check
+        // treats actively-read attachments as fresh. Without this, a doc
+        // read every day via load_attachment but never forwarded would be
+        // reaped TTL days after registration. Mirrors the touch that
+        // AttachmentStreamResolverImpl performs on the Plan A path.
+        use crate::llm::application::LoadAttachmentResolver;
+        use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
+        use crate::llm::domain::AttachmentRegistry;
+        use crate::llm::domain::ProviderKind;
+        use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+        use std::sync::Arc;
+
+        let registry: Arc<dyn AttachmentRegistry> = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        // Inline source → not recoverable → resolve() takes the fast path
+        // (no provider re-upload), exercising the common success branch.
+        registry
+            .upsert(UpsertAttachmentInput {
+                agent_session_id: "agent_1".to_string(),
+                document_id: "doc-1".to_string(),
+                provider: ProviderKind::OpenAi,
+                provider_file_id: "file-abc".to_string(),
+                mime_type: "application/pdf".to_string(),
+                filename: "doc.pdf".to_string(),
+                size_bytes: Some(100),
+                label: None,
+                description: None,
+                source: AttachmentSource::Inline,
+                storage_key: Some("chat-attachments/agent_1/doc.pdf".to_string()),
+                origin: None,
+            })
+            .await
+            .unwrap();
+
+        // Precondition: last_used_at is NULL right after upsert.
+        let before = registry
+            .lookup("agent_1", "doc-1", ProviderKind::OpenAi)
+            .await
+            .unwrap()
+            .expect("row should exist after upsert");
+        assert!(
+            before.last_used_at.is_none(),
+            "precondition: last_used_at must be NULL right after upsert"
+        );
+
+        let resolver = AttachmentResolverImpl {
+            registry: registry.clone(),
+            provider: ProviderKind::OpenAi,
+            api_key: "dummy".to_string(),
+            storage: None,
+        };
+
+        let res = resolver.resolve("agent_1", "doc-1").await.unwrap();
+        assert!(res.is_some(), "expected a successful resolution");
+
+        // D10 assertion: last_used_at must now be populated.
+        let after = registry
+            .lookup("agent_1", "doc-1", ProviderKind::OpenAi)
+            .await
+            .unwrap()
+            .expect("row should still exist");
+        assert!(
+            after.last_used_at.is_some(),
+            "D10: load_attachment resolve() must touch last_used_at"
         );
     }
 }
