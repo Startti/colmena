@@ -395,6 +395,7 @@ impl AgentService {
                                     None,
                                 ),
                             };
+                            let loaded = synthetic_user.is_some();
                             let tool_message =
                                 LlmMessage::tool(result.tool_call_id.clone(), ack_text)?;
                             messages.push(tool_message.clone());
@@ -432,6 +433,28 @@ impl AgentService {
                                 self.conversation_repository
                                     .add_message(session_id, marker_msg)
                                     .await?;
+                            }
+
+                            // Observability: emit a tool-output-available SSE
+                            // event so the frontend renders load_attachment like
+                            // any other tool (the input events already fire via
+                            // LlmToolCallStart). The payload carries only
+                            // metadata (document_id + status) — NOT the document
+                            // content, which stays ephemeral in the LLM context
+                            // (Plan B / D7). Without this the UI saw an input
+                            // event with no matching output event.
+                            if let Some(callback) = &on_token {
+                                let sse_payload = serde_json::json!({
+                                    "document_id": document_id,
+                                    "status": if loaded { "loaded" } else { "error" },
+                                })
+                                .to_string();
+                                (callback)(LlmStreamPart::LlmToolCallFinish(ToolResult {
+                                    tool_call_id: result.tool_call_id.clone(),
+                                    output: sse_payload,
+                                    success: loaded,
+                                    error: None,
+                                }));
                             }
                             continue;
                         }
@@ -1082,6 +1105,157 @@ mod tests {
         assert!(
             has_marker,
             "expected a load_attachment marker user message in persisted history"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_attachment_emits_tool_output_available_for_sse() {
+        // Observability: load_attachment must emit LlmToolCallFinish (mapped to
+        // the `tool-output-available` SSE event) just like every other tool, so
+        // the frontend can render "load_attachment completed". Before the fix,
+        // the LOAD_ATTACHMENT sentinel path `continue`d before reaching the
+        // LlmToolCallFinish callback, leaving the UI with an input event but no
+        // matching output event. The SSE payload carries only metadata
+        // (document_id + status), NOT the document content — the content stays
+        // ephemeral in the LLM context.
+        use crate::llm::domain::{FileData, FileSource, ProviderFileRef, ProviderKind as PK};
+        use std::sync::Mutex;
+
+        let mut mock_llm = MockLlmRepo::new();
+        let mut mock_conv = MockConversationRepo::new();
+        let call_id = "call_la_sse".to_string();
+
+        // on_token=Some forces the streaming path (should_stream = on_token.is_some()),
+        // so we mock stream() rather than call().
+        // Turn 1: stream yields a load_attachment tool-call chunk.
+        {
+            let llm_call_id = call_id.clone();
+            mock_llm.expect_stream().times(1).returning(move |_req| {
+                let provider =
+                    LlmProvider::new(PK::OpenAi, "key".to_string(), Some("gpt-4".to_string()))
+                        .unwrap();
+                let chunk = LlmStreamChunk::new(
+                    LlmRequestId::new(),
+                    LlmStreamPart::ToolCallChunk(ToolCallChunk {
+                        index: 0,
+                        id: llm_call_id.clone(),
+                        name: "load_attachment".to_string(),
+                        args_chunk: r#"{"document_id":"doc-1"}"#.to_string(),
+                    }),
+                    provider,
+                    true,
+                );
+                let s = futures::stream::iter(vec![Ok(chunk)]);
+                Ok(Box::pin(s) as LlmStream)
+            });
+        }
+        // Turn 2: stream yields a final text chunk.
+        mock_llm.expect_stream().times(1).returning(|_req| {
+            let provider =
+                LlmProvider::new(PK::OpenAi, "key".to_string(), Some("gpt-4".to_string())).unwrap();
+            let chunk = LlmStreamChunk::new(
+                LlmRequestId::new(),
+                LlmStreamPart::Content("Done".to_string()),
+                provider,
+                true,
+            );
+            let s = futures::stream::iter(vec![Ok(chunk)]);
+            Ok(Box::pin(s) as LlmStream)
+        });
+
+        mock_conv.expect_get_by_id().returning(|key| {
+            Ok(Conversation {
+                key: key.clone(),
+                messages: vec![],
+            })
+        });
+        mock_conv.expect_add_message().returning(|_k, _m| Ok(()));
+
+        struct SentinelExec;
+        #[async_trait::async_trait]
+        impl ToolExecutor for SentinelExec {
+            async fn execute(&self, tc: &ToolCall) -> Result<ToolResult, LlmError> {
+                Ok(ToolResult {
+                    tool_call_id: tc.id.clone(),
+                    output: r#"{"__colmena_status":"LOAD_ATTACHMENT","document_id":"doc-1"}"#
+                        .to_string(),
+                    success: true,
+                    error: None,
+                })
+            }
+            async fn available_tools(&self) -> Vec<ToolDefinition> {
+                vec![]
+            }
+        }
+
+        struct FakeResolver;
+        #[async_trait::async_trait]
+        impl LoadAttachmentResolver for FakeResolver {
+            async fn resolve(&self, _sid: &str, doc_id: &str) -> Result<Option<FileData>, String> {
+                Ok(Some(FileData {
+                    document_id: Some(doc_id.to_string()),
+                    mime_type: "application/pdf".to_string(),
+                    filename: "x.pdf".to_string(),
+                    size_hint: Some(10),
+                    source: FileSource::Uploaded(ProviderFileRef {
+                        provider: PK::OpenAi,
+                        provider_file_id: "pf-1".to_string(),
+                        mime_type: "application/pdf".to_string(),
+                        filename: "x.pdf".to_string(),
+                        expires_at: None,
+                    }),
+                    retained_inline_bytes: None,
+                }))
+            }
+        }
+
+        // Capture every emitted stream part.
+        let captured: Arc<Mutex<Vec<LlmStreamPart>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_cb = captured.clone();
+        let on_token: Box<dyn Fn(LlmStreamPart) + Send + Sync> =
+            Box::new(move |part| captured_cb.lock().unwrap().push(part));
+
+        let svc = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let session = ConversationKey {
+            session_id: SessionId("s1".to_string()),
+            agent_session_id: Some(AgentSessionId("agent_1".to_string())),
+            node_id: NodeIdPath("llm_call".to_string()),
+        };
+        let params = AgentRunParams {
+            session_id: &session,
+            prompt: Some("read the doc".to_string()),
+            messages: None,
+            config: create_config(),
+            tools: vec![],
+            tool_executor: &SentinelExec,
+            max_iterations: Some(5),
+            on_token: Some(on_token),
+            tools_provider: None,
+            attachment_resolver: Some(Arc::new(FakeResolver)),
+            agent_session_id: Some("agent_1".to_string()),
+        };
+        svc.run(params).await.unwrap();
+
+        let parts = captured.lock().unwrap();
+        // A LlmToolCallFinish must have been emitted for the load_attachment call.
+        let finish = parts.iter().find_map(|p| match p {
+            LlmStreamPart::LlmToolCallFinish(r) if r.tool_call_id == call_id => Some(r.clone()),
+            _ => None,
+        });
+        let finish = finish.expect(
+            "load_attachment must emit LlmToolCallFinish (tool-output-available) for the SSE stream",
+        );
+        // The SSE payload references the document_id and a status, and must NOT
+        // contain the document content (stays ephemeral).
+        assert!(
+            finish.output.contains("doc-1"),
+            "output event should reference the document_id: {}",
+            finish.output
+        );
+        assert!(
+            finish.output.contains("loaded"),
+            "output event should carry a loaded status: {}",
+            finish.output
         );
     }
 
