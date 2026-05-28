@@ -846,16 +846,16 @@
     },
 
     "media_nodes": {
-      "summary": "Three nodes for multimedia generation — image_generation (OpenAI gpt-image-1, Google Vertex Imagen 4), image_edit (OpenAI multipart), and tts (OpenAI / ElevenLabs / Google Gemini TTS). All outputs are persisted via OutputStorageRepository, returned as { attachment_id, url } handles, and auto-registered in AttachmentRegistry so the agent can re-load them with load_attachment. NEVER passes raw binary bytes to the LLM context — outbound uses short URL handles, inbound uses '$attachment:<storage_key>' placeholders resolved by the engine.",
+      "summary": "Three nodes for multimedia generation — image_generation (OpenAI gpt-image-1, Google Vertex Imagen 4), image_edit (OpenAI multipart), and tts (OpenAI / ElevenLabs / Google Gemini TTS). All outputs are persisted via OutputStorageRepository, returned as a single { document_id, mime_type, size_bytes, description } handle (Plan B, 2026-05-25, dropped the legacy attachment_id and url fields), and auto-registered in AttachmentRegistry so the agent can re-load them with load_attachment. NEVER passes raw binary bytes to the LLM context — outbound uses the document_id handle, inbound uses '$attachment:<document_id>' placeholders resolved by the engine (only in the http_request node).",
       "see_also": "docs/developer_guide/32_multimedia_generation.md — full architectural guide with URL strategy, scrubber, COLMENA_LOCAL setup, and troubleshooting.",
       "node_types": ["image_generation", "image_edit", "tts"],
       "architectural_invariant": "LLM never sees raw binary bytes. Enforced in three directions: (1) tool outputs include short URL/handle, never base64; (2) LLM passes '$attachment:<key>' to http_request, engine resolves to data: URI before send; (3) DagToolExecutor scrubs data:*;base64,* strings from tool results before returning to the LLM (universal binary scrubber).",
       "url_strategy_by_storage_adapter": {
-        "description": "All three media nodes return the same JSON shape regardless of storage mode. Only the 'url' field differs.",
+        "description": "All three media nodes return the same JSON shape (document_id only) regardless of storage mode. The LLM no longer receives a url at all (Plan B). Internally the storage_key/read_url differ per adapter; consumers resolve document_id → renderable URL via a dedicated backend endpoint (join against conversation_attachments).",
         "modes": {
-          "LocalHttpStorageAdapter (COLMENA_LOCAL=true, dev)": "url = http://127.0.0.1:<port>/files/<uuid>.<ext>. Bytes also on disk under COLMENA_LOCAL_STORAGE_DIR. Fetchable by browser, by reqwest, by LLM provider Files API during the run.",
-          "HttpCallbackStorageAdapter (COLMENA_LOCAL=false, prod)": "url = signed GCS read URL (https://storage.googleapis.com/...?X-Goog-Signature=...). Same shape as inbound user-uploaded files.",
-          "LocalCacheStorageAdapter (unset, in-memory CI/tests)": "url = opaque 'local://<uuid>' handle. Bytes only in process RAM. read() works but no HTTP fetch possible."
+          "LocalHttpStorageAdapter (COLMENA_LOCAL=true, dev)": "internal read_url = http://127.0.0.1:<port>/files/<uuid>.<ext>. Bytes also on disk under COLMENA_LOCAL_STORAGE_DIR. Not exposed to the LLM.",
+          "HttpCallbackStorageAdapter (COLMENA_LOCAL=false, prod)": "internal read_url = signed GCS read URL (https://storage.googleapis.com/...?X-Goog-Signature=...). Not exposed to the LLM.",
+          "LocalCacheStorageAdapter (unset, in-memory CI/tests)": "internal handle = 'local://<uuid>'. Bytes only in process RAM. Not exposed to the LLM."
         }
       },
       "examples": {
@@ -865,7 +865,7 @@
             "generate_image": {
               "name": "generate_image",
               "node_type": "image_generation",
-              "description": "Generate a brand-new image from a text prompt using gpt-image-1. Returns { images: [{ attachment_id, url, mime_type, size_bytes, description }], provider, model }. The 'url' is fetchable; the 'attachment_id' is the stable handle — pass it to load_attachment to inspect or to '$attachment:<id>' in http_request body to ship to a webhook.",
+              "description": "Generate a brand-new image from a text prompt using gpt-image-1. Returns { images: [{ document_id, mime_type, size_bytes, description }], provider, model } (Plan B dropped attachment_id and url). The 'document_id' is the stable handle — pass it to load_attachment to inspect, or to '$attachment:<document_id>' in an http_request body to ship to a webhook.",
               "node_schema": {
                 "provider": { "fixed": "openai" },
                 "model":    { "fixed": "gpt-image-1" },
@@ -878,31 +878,31 @@
           }
         },
         "image_edit_tool_chained_via_attachment_id": {
-          "description": "Expose image_edit with explicit instructions on how to chain from a previous generate_image output. The LLM passes the 'url' from the previous tool result as source_url.",
+          "description": "Expose image_edit, intended to chain from a previous generate_image output. KNOWN GAP (Plan B, 2026-05-25): the LLM-driven gen→edit chain is currently BROKEN. Plan B dropped the legacy 'url' field from generate_image/image_edit/tts tool results — they now expose only 'document_id' (an opaque id like 'img_image_0_ge0png'). But image_edit.fetch_image (image_edit.rs) only accepts source_url in the forms 'local://<key>', 'chat-attachments/<key>', 'data:<mime>;base64,...' or 'http(s)://...'. It does NOT resolve a bare document_id nor a '$attachment:<document_id>' placeholder (the $attachment resolver is wired into the http_request node only, not globally in dag_tool_executor). So an LLM that passes the previous tool's document_id as source_url will fail. Deterministic node-edge chaining that used to forward the old 'url'/storage_key also no longer works since 'url' was removed. Until a fix lands (make image_edit resolve '$attachment:<document_id>' via the attachment registry, or resolve $attachment: in all tool args inside the tool executor), only pass source_url that is an independently-fetchable URL (e.g. an http(s) signed URL or a data: URI not coming from a previous tool result).",
           "tool_configurations_entry": {
             "edit_image": {
               "name": "edit_image",
               "node_type": "image_edit",
-              "description": "Edit an existing image given a text prompt. Pass the 'url' field from a previous generate_image (or edit_image) tool output as source_url — the node resolves it via storage when scheme is 'local://' or fetches via HTTP when 'http(s)://'. Returns the same shape as generate_image so you can chain further edits.",
+              "description": "Edit an existing image given a text prompt. NOTE: chaining from a previous generate_image/edit_image tool result is currently a known gap — those results now expose only 'document_id', and image_edit's source_url does NOT resolve a document_id or '$attachment:<document_id>' placeholder. Only pass source_url that is an independently-fetchable 'data:' URI or 'http(s)://' URL. Returns the same shape as generate_image (document_id only).",
               "node_schema": {
                 "provider":   { "fixed": "openai" },
                 "model":      { "fixed": "gpt-image-1" },
                 "api_key":    { "fixed": "${OPENAI_API_KEY}" },
                 "size":       { "fixed": "1024x1024" },
                 "n":          { "fixed": 1 },
-                "source_url": { "type": "string", "required": true, "description": "URL of the image to edit. Use the 'url' field returned by a previous image tool call." },
+                "source_url": { "type": "string", "required": true, "description": "A 'data:' URI or 'http(s)://' URL of the image to edit. A bare document_id or '$attachment:<document_id>' from a previous tool result is NOT supported (known gap, Plan B)." },
                 "prompt":     { "type": "string", "required": true, "description": "Describes the desired edit (e.g. 'add a moon in the top-right corner')." }
               }
             }
           }
         },
         "tts_tool": {
-          "description": "Expose tts as 'synthesize_speech'. Voice and format fixed; LLM only controls the text. Output's audio.url plays in any HTML5 audio player.",
+          "description": "Expose tts as 'synthesize_speech'. Voice and format fixed; LLM only controls the text. The output's document_id resolves (via a backend endpoint) to an audio URL playable in any HTML5 audio player.",
           "tool_configurations_entry": {
             "synthesize_speech": {
               "name": "synthesize_speech",
               "node_type": "tts",
-              "description": "Convert text into spoken audio using OpenAI tts-1 with the 'alloy' voice. Returns { audio: { attachment_id, url, mime_type, size_bytes, duration_ms, description }, provider, model }. Use this when the user explicitly asks for voice or audio output.",
+              "description": "Convert text into spoken audio using OpenAI tts-1 with the 'alloy' voice. Returns { audio: { document_id, mime_type, size_bytes, duration_ms, description }, provider, model } (Plan B dropped attachment_id and url). Use this when the user explicitly asks for voice or audio output.",
               "node_schema": {
                 "provider": { "fixed": "openai" },
                 "model":    { "fixed": "tts-1" },
@@ -915,26 +915,26 @@
           }
         },
         "http_post_image_via_attachment_placeholder": {
-          "description": "Expose http_request as 'http_post_image'. The LLM passes the body with image='$attachment:<storage_key>' and the engine resolves the placeholder to a data: URI before the request goes out — the LLM never sees the bytes.",
+          "description": "Expose http_request as 'http_post_image'. The LLM passes the body with image='$attachment:<document_id>' and the engine resolves the placeholder to a data: URI before the request goes out — the LLM never sees the bytes.",
           "tool_configurations_entry": {
             "http_post_image": {
               "name": "http_post_image",
               "node_type": "http_request",
-              "description": "POST a previously-generated image to a webhook URL. The body's 'image' field MUST be the literal string '$attachment:<attachment_id>' where <attachment_id> is from a previous generate_image call — e.g. '$attachment:abc.png'. The engine reads bytes from storage and replaces the placeholder with 'data:image/png;base64,...' before sending.",
+              "description": "POST a previously-generated image to a webhook URL. The body's 'image' field MUST be the literal string '$attachment:<document_id>' where <document_id> is from a previous generate_image call — e.g. '$attachment:img_image_0_ge0png'. The engine reads bytes from storage and replaces the placeholder with 'data:image/png;base64,...' before sending. NOTE: the destination is built from base_url + endpoint joined at runtime; this node does NOT accept a single 'url' field.",
               "node_schema": {
                 "method":   { "fixed": "POST" },
                 "endpoint": { "fixed": "" },
                 "headers":  { "fixed": { "Content-Type": "application/json" } },
-                "base_url": { "type": "string", "required": true, "description": "Full destination URL (e.g. https://hooks.slack.com/...)." },
+                "base_url": { "type": "string", "required": true, "description": "Full destination URL (e.g. https://hooks.slack.com/...). Joined with 'endpoint' at runtime." },
                 "body": {
                   "type": "object",
                   "required": true,
-                  "description": "Must include {\"image\": \"$attachment:<attachment_id>\"}.",
+                  "description": "Must include {\"image\": \"$attachment:<document_id>\"}.",
                   "properties": {
                     "image": {
                       "type": "string",
                       "required": true,
-                      "description": "The literal string '$attachment:<attachment_id>'. The engine resolves it to a data: URI."
+                      "description": "The literal string '$attachment:<document_id>'. The engine resolves it to a data: URI."
                     }
                   }
                 }
@@ -945,11 +945,11 @@
       },
       "special_behaviors": [
         "All media outputs auto-register in AttachmentRegistry with provider=Generated. load_attachment can retrieve them via cross-provider lazy upload (storage.read + upload_streaming to the current provider's Files API).",
-        "image_edit.fetch_image accepts 3 URL schemes: 'data:' (decode locally), 'http(s)://' (GET via reqwest), 'local://<key>' (storage.read). Means the LLM can pass any url that came from a previous image tool result regardless of storage mode.",
-        "http_request scans body recursively for strings starting with '$attachment:' and resolves them via storage.read before sending. Works at any nesting depth (objects, arrays).",
+        "image_edit.fetch_image accepts source_url in the forms: 'data:' (decode locally), 'http(s)://' (GET via reqwest), 'local://<key>' and 'chat-attachments/<key>' (storage.read). KNOWN GAP (Plan B): it does NOT resolve a bare document_id or a '$attachment:<document_id>' placeholder, so LLM-driven gen→edit chaining is currently broken — generate_image now returns only document_id, which image_edit cannot consume as source_url. The $attachment: resolver is wired into the http_request node only, not globally in dag_tool_executor.",
+        "http_request scans body recursively for strings starting with '$attachment:<document_id>' and resolves them via the attachment registry + storage.read before sending. Works at any nesting depth (objects, arrays). last_used_at is touched on a successful resolve (Plan A).",
         "DagToolExecutor applies a universal binary scrubber to tool results: data:*;base64,* strings → '[binary elided: mime=X, encoded_size=N bytes]'; strings >50KB → '[truncated: original_size=N bytes]'. Cap configurable via llm_call.config.max_tool_result_bytes.",
-        "TTS audio is registered in AttachmentRegistry but the LLM cannot 'hear' it (vision is image-only). Registration is useful for chaining to http_request via $attachment:<key>, not for LLM consumption.",
-        "Vertex Imagen requires GOOGLE_APPLICATION_CREDENTIALS env (service-account JSON path). Token cached ~50min internally."
+        "TTS audio is registered in AttachmentRegistry but the LLM cannot 'hear' it (vision is image-only). Registration is useful for chaining to http_request via $attachment:<document_id>, not for LLM consumption.",
+        "Vertex Imagen uses Application Default Credentials (yup-oauth2): GOOGLE_APPLICATION_CREDENTIALS key file → gcloud ADC → GCE/Cloud Run metadata server (runtime SA, no key file needed). Token cached ~50min internally. google_project_id / google_location fall back to GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION env vars."
       ],
       "reference_graphs": [
         "tests/graphs/media/image_generation_basic.json",

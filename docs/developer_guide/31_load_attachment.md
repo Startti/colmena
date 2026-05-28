@@ -3,6 +3,19 @@
 > **Estado:** Disponible desde 0.4.0
 > **Spec:** [docs/superpowers/specs/2026-05-13-load-attachment-design.md](../superpowers/specs/2026-05-13-load-attachment-design.md)
 
+> ### ✅ Validado en dev (2026-05-28)
+> Confirmado end-to-end contra el worker `colmena-worker-00047` (bucket
+> `adp-reference-develop-startti-dev`, DB `adp_db_develop`):
+> - **Plan A multipart:** el LLM construyó `{"body":{"file":"$attachment:<doc_id>"}}`,
+>   el resolver streameó un PDF de 46 KB a httpbin.org como `multipart/form-data`
+>   real, y `last_used_at` se tocó en el éxito (verificado que el touch ocurre
+>   solo en runs exitosos, NO en runs que fallan).
+> - **Plan B `load_attachment`:** la tool se auto-inyectó desde el catálogo y el
+>   contenido se cargó de forma efímera (D6/D7 confirmados — la ausencia del
+>   `tool_calls`/contenido en el resultado persistido = marcador efímero).
+> - **Fix D10:** tras el redeploy, `load_attachment` ahora toca `last_used_at`
+>   (verificado: la fila pasó de `NULL` → poblado).
+
 ## Plan A — Persistent bytes for all attachment sources (2026-05-25)
 
 As of Plan A, every attachment registered in `conversation_attachments` has its
@@ -30,6 +43,28 @@ como `storage_key` directo para flujos previos a Plan A.
 Background y decisiones:
 - Spec: [`docs/superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md`](../superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md)
 - Plan: [`docs/superpowers/plans/2026-05-25-attachment-uniform-resolution-plan-a.md`](../superpowers/plans/2026-05-25-attachment-uniform-resolution-plan-a.md)
+
+### `last_used_at` se toca en TODA resolución (D10, fix 2026-05-28)
+
+La decisión D10 del spec exige que `last_used_at` se actualice en **ambos**
+caminos de resolución de un attachment, para que el GC (Plan C) no borre docs
+que siguen en uso activo:
+
+1. **`AttachmentStreamResolver::resolve()`** — el camino Plan A
+   (`$attachment:<document_id>` en `http_request` multipart). Toca
+   `last_used_at` al resolver con éxito.
+2. **`load_attachment`** — el camino dentro del loop LLM
+   (`AttachmentResolverImpl::resolve()` en
+   `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`).
+
+> **Bug fixed (commit `e3322ec`, develop):** el camino `load_attachment` **no
+> estaba** tocando `last_used_at` — solo lo hacía el camino Plan A. Se corrigió
+> agregando una llamada best-effort a `touch_last_used` justo después de
+> resolver la fila del attachment. Test agregado:
+> `resolver_touches_last_used_at_on_successful_load`. El touch es best-effort:
+> un fallo al actualizar `last_used_at` NO falla el `load_attachment` (el
+> contenido igual se entrega). El touch ocurre solo en cargas exitosas, no en
+> runs que fallan al resolver.
 
 ## Plan B — Comportamiento catalog-driven + contenido efímero (2026-05-25)
 

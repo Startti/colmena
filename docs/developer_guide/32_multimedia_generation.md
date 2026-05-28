@@ -1,6 +1,20 @@
 # Multimedia Generation — image_generation, image_edit, tts
 
-> **Updated:** 2026-05-21 · **Status:** Shipped end-to-end (in-colmena). Host-side wiring (Phase 7) tracked separately by the consuming application.
+> **Updated:** 2026-05-28 · **Status:** Shipped end-to-end (in-colmena) y **validado en dev**. Host-side wiring (Phase 7) tracked separately by the consuming application.
+
+> ### ✅ Validado en dev (2026-05-28)
+> Confirmado end-to-end contra el worker `colmena-worker-00047` (bucket
+> `adp-reference-develop-startti-dev`, DB `adp_db_develop`):
+> - **`image_generation`** con Vertex Imagen 4 (`imagen-4.0-generate-001`) →
+>   blob en GCS + fila en `conversation_attachments` (origin
+>   `generated_by:image_generation`, `storage_key` poblado).
+> - **`tts`** con Gemini TTS (`gemini-2.5-flash-preview-tts`, voz `Kore`,
+>   formato `wav`) → blob WAV + fila (origin `generated_by:tts`).
+> - **Agente multimedia** (LLM Gemini con tools `generate_image` + `speak_text`)
+>   encadenando 2 tool calls en un mismo turno.
+>
+> **NO** validado / roto: el chaining LLM-driven `image_generation` →
+> `image_edit` (ver "Limitación conocida" más abajo).
 
 Tres nodos para generar media + el sistema completo de "artifacts" (storage, registry, placeholders, scrubber) que permite encadenar generaciones, "ver" lo generado desde el LLM, y enviarlo a endpoints externos — todo **sin que el LLM vea bytes binarios nunca**.
 
@@ -255,22 +269,21 @@ El agente (LLM) ve el tool output con la siguiente forma (Plan B, 2026-05-25):
 | `provider` | sí | `openai` (único soportado hoy) |
 | `model` | opcional | Default `gpt-image-1` |
 | `api_key` | sí | OpenAI key |
-| `source_url` | sí | `data:` URI, `http(s)://` URL, o `local://<key>` storage handle |
+| `source_url` | sí | `data:` URI, `http(s)://` URL, o storage handle `local://<key>` / `chat-attachments/<key>`. **NO** acepta `document_id` pelado ni `$attachment:<document_id>` (ver "Limitación conocida") |
 | `mask_url` | opcional | PNG con transparencia marcando el área a editar |
 | `prompt` | sí | Describe la edición |
 | `size`, `quality`, `n` | opcional | Igual que image_generation |
 
 **Output**: mismo shape que `image_generation` → resultado encadenable.
 
-**Chaining nativo gen→edit** (sample en `tests/graphs/media/image_gen_then_edit.json`):
-```json
-"edges": [
-  { "from": "trigger.gen_prompt",      "to": "gen.prompt"      },
-  { "from": "trigger.edit_prompt",     "to": "edit.prompt"     },
-  { "from": "gen.output.images.0.document_id", "to": "edit.source_url" }
-]
-```
-La edge resuelve el JSON pointer `/output/images/0/document_id` del output del nodo `gen` y lo inyecta en `inputs.source_url` del nodo `edit`. `image_edit` acepta `$attachment:<document_id>` o un `document_id` "pelado" — el fetcher se encarga de resolverlo vía el attachment resolver. Plan B (2026-05-25) eliminó el campo `url` del tool result, así que el patrón legacy de pasar `images.0.url` ya no aplica.
+**Chaining nativo gen→edit** — ⚠️ **actualmente roto bajo Plan B.** Plan B
+(2026-05-25) eliminó el campo `url` del tool result, así que el patrón legacy de
+pasar `images.0.url` ya no aplica. Y cablear `images.0.document_id` →
+`edit.source_url` **tampoco funciona**: `image_edit.source_url` no resuelve un
+`document_id` pelado ni un placeholder `$attachment:<document_id>` (solo
+`data:`, `http(s)://`, `local://<key>`, `chat-attachments/<key>`). Ver
+"Limitación conocida" más abajo. Hasta que haya fix, solo encadenás pasando una
+URL `http(s)://` / `data:` independientemente fetchable a `edit.source_url`.
 
 ### `tts`
 
@@ -313,22 +326,37 @@ Esto se llama **cross-provider lazy upload**. Si generaste con OpenAI y después
 
 ### 2. Editar una imagen generada — `image_edit` chaining
 
-Plan B (2026-05-25) eliminó el campo `url` del tool result. Para encadenar
-`image_generation` → `image_edit` ya no se pasa `url`; el patrón ahora es
-forwardear el `document_id` por `$attachment:<document_id>` o pre-resolverlo
-en el grafo. Para el caso del LLM agent, lo usual es que el siguiente nodo
-descargue el contenido vía el resolver, no que el modelo pase una URL directa.
+`image_edit` acepta en `source_url`: `data:` URIs, `http(s)://` URLs, y
+storage handles `local://<key>` / `chat-attachments/<key>` (resueltos vía
+`storage.read` en `image_edit.rs::fetch_image`). Si tu grafo tiene una URL
+fetchable independiente (no proveniente de un tool result), el chaining
+funciona normalmente.
 
-Para el caso clásico de chaining estático en grafos (sin agente intermedio),
-seguís pudiendo cablear con una edge desde `gen.output.images.0` a un nodo
-intermedio que resuelva el doc, o usar `$attachment:<document_id>` en
-`image_edit.source_url` (el placeholder se resuelve a `data:` URI antes de
-fetchear).
-
-`image_edit` sigue aceptando `data:` URIs y http(s) URLs en `source_url`;
-si tu grafo tiene una URL fetchable separada (no la del tool result), eso
-sigue funcionando. Solo el camino "leer `url` del tool result del nodo
-anterior" cambió.
+> ### ⚠️ Limitación conocida (2026-05-28) — chaining LLM-driven gen→edit roto bajo Plan B
+>
+> **El encadenamiento `image_generation` → `image_edit` manejado por el LLM
+> está actualmente roto.** Razón:
+>
+> - Plan B (2026-05-25) eliminó los campos legacy `attachment_id` y `url` del
+>   tool result de `image_generation`/`image_edit`/`tts`. Ahora exponen **solo
+>   `document_id`** (un id opaco tipo `img_image_0_ge0png`).
+> - Pero `image_edit.source_url` (en `image_edit.rs::fetch_image`) **NO**
+>   resuelve un `document_id` pelado ni un placeholder `$attachment:<document_id>`.
+>   El resolver `$attachment:` está cableado **solo en el nodo `http_request`**,
+>   no globalmente en `dag_tool_executor`.
+>
+> Resultado: un LLM que pase el `document_id` del tool anterior como
+> `source_url` **falla**. El chaining estático por edge que antes pasaba el
+> viejo `url`/storage_key tampoco funciona, porque `url` fue removido.
+>
+> **Workaround hoy:** pasá a `source_url` una URL independientemente fetchable
+> (un signed URL `http(s)://` o un `data:` URI que NO venga de un tool result
+> previo).
+>
+> **Fix futuro** (no implementado): hacer que `image_edit` resuelva
+> `$attachment:<document_id>` vía el attachment registry, o que el tool
+> executor resuelva `$attachment:` en todos los args de tool. Tracked en
+> [`docs/superpowers/specs/2026-05-25-colmena-pending-followups.md`](../superpowers/specs/2026-05-25-colmena-pending-followups.md) §2.E.
 
 ### 3. Enviar a endpoint externo — `$attachment:<key>` placeholder
 

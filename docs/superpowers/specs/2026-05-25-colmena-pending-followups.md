@@ -128,6 +128,25 @@ Estos items NO bloquean merge pero son deuda técnica real. Los listo por priori
 | 16 | Limpiar `_sqlx_migrations` checksum drift en DB de dev | Antes del próximo cargo test --ignored | Un par de implementers se toparon con esto durante Plan A/C. Local issue solamente; CI no se ve afectado. Pero molesta a quien quiera testear localmente. |
 | 17 | Push del branch a `develop` | Cuando ADP haya hecho su trabajo o cuando decidas mergear Plan A solo (es safe) | Ver sección 3 abajo. |
 
+### 2.E — Descubiertos durante testing E2E en dev (2026-05-28)
+
+Estos tres follow-ups salieron del end-to-end testing del subsistema attachment +
+multimedia contra el worker `colmena-worker-00047` (bucket
+`adp-reference-develop-startti-dev`, DB `adp_db_develop`). Ninguno bloqueó la
+validación de Plan A/B/C, pero quedan como deuda.
+
+| # | Item | Prioridad | Ubicación | Fix sugerido (one-line) |
+|---|---|---|---|---|
+| a | **Chaining LLM-driven `image_generation` → `image_edit` roto bajo Plan B.** Plan B dejó `image_generation` devolviendo solo `document_id` (id opaco tipo `img_image_0_ge0png`), pero `image_edit.source_url` solo acepta `local://<key>`, `chat-attachments/<key>`, `data:<mime>;base64,...` o `http(s)://...`. NO resuelve un `document_id` pelado ni `$attachment:<document_id>` (el resolver `$attachment:` está cableado solo en `http_request`, no globalmente en `dag_tool_executor`). Un LLM que pase el `document_id` del tool anterior como `source_url` falla. El chaining estático por edge que pasaba el viejo `url`/storage_key tampoco funciona (se removió `url`). | **Media** — gap funcional real | `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_edit.rs::fetch_image`; resolver en `dag_tool_executor` | Hacer que `image_edit` resuelva `$attachment:<document_id>` vía el attachment registry, O que el tool executor resuelva `$attachment:` en todos los args de tool (no solo en `http_request`). |
+| b | **`size_bytes` queda NULL para filas `user_upload` en `conversation_attachments`.** El path de registro de uploads inline no lo popula. | **Baja** — el GC usa timestamps (`last_used_at`/`registered_at`), no `size_bytes` | path de registro de attachments en `nodes/llm.rs` (registration block) | Poblar `size_bytes` desde el length de los bytes al registrar el upload inline. |
+| c | **Confusión `http_request` `url` vs `base_url`+`endpoint`.** El nodo `http_request` solo acepta `base_url` + `endpoint` (joineados en runtime), NO un único campo `url`. El test graph `tests/graphs/agents/upload_inline_to_endpoint.json` usa `url` y solo funciona porque el harness de integration test lo reescribe; contra un worker vivo hay que usar `base_url`+`endpoint`. | **Baja** — confuso pero no rompe nada en prod | `nodes/http_request.rs`; graph `tests/graphs/agents/upload_inline_to_endpoint.json` | Agregar un alias `url` que auto-splitee en `base_url`+`endpoint`, o al menos documentarlo claramente y corregir el test graph. |
+
+### 2.F — Resueltos durante testing E2E en dev (2026-05-28)
+
+| # | Item | Estado | Commit |
+|---|---|---|---|
+| d | **D10: `load_attachment` no tocaba `last_used_at`.** El spec (D10) exige que `last_used_at` se actualice en AMBOS caminos: `AttachmentStreamResolver::resolve()` (Plan A) y cada invocación de `load_attachment`. El camino `load_attachment` (`AttachmentResolverImpl::resolve()` en `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`) NO lo tocaba — solo el camino Plan A. Sin esto, el GC (Plan C) podía borrar docs que el LLM seguía releyendo activamente vía `load_attachment`. | **RESUELTO** — fix con una llamada best-effort a `touch_last_used` justo después de resolver la fila; test `resolver_touches_last_used_at_on_successful_load`. Verificado en dev (fila pasó de NULL → poblada tras redeploy). | `e3322ec` (develop) |
+
 ---
 
 ## 3. Plan de deployment (push a develop)
