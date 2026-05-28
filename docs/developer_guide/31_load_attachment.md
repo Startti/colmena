@@ -108,6 +108,79 @@ pero deja de pagar tokens de input por el doc en cada turno subsiguiente.
 Si el modelo necesita re-leer el doc, vuelve a llamar `load_attachment` — el
 resolver re-streamea el contenido desde `OutputStorageRepository`.
 
+## Patrón: reenviar sin leer (ahorro de tokens)
+
+Caso de uso canónico: el usuario adjunta un documento **gigante** (p. ej. un PDF
+de 80 MB) y quiere subirlo a un endpoint externo (un Knowledge Base, un bucket,
+un servicio de ingesta) **sin que el LLM lea su contenido** — leerlo
+consumiría todos los tokens del contexto, y no hace falta para reenviarlo.
+
+Esto es exactamente lo que habilita la combinación Plan A + Plan B:
+
+```
+Documento gigante adjuntado (files[])
+   │
+   ├─ Plan B / D6: el LLM NO recibe el contenido. Solo ve el catálogo en el
+   │   system message → ~30 tokens de metadata, NO los 80 MB.
+   │
+   └─ El LLM llama un tool http_request con body {"file": "$attachment:<document_id>"}
+       │
+       └─ AttachmentStreamResolver streamea los bytes DIRECTO
+          desde OutputStorageRepository → endpoint destino.
+          Los bytes NUNCA entran al contexto del LLM. Cero tokens de contenido.
+          El multipart se streamea end-to-end (sin bufferear en RAM).
+```
+
+**Las dos vías son independientes y excluyentes por intención:**
+
+| Vía | Tool | ¿Contenido al contexto? | Tokens de contenido |
+|---|---|---|---|
+| **Leer** | `load_attachment(document_id)` | Sí (efímero, este turno) | Sí (el doc se inyecta) |
+| **Reenviar** | `"$attachment:<document_id>"` en args de `http_request` | No | **Cero** |
+
+Para forzar el reenvío sin lectura, el `system_message` solo necesita la
+**política** — la mecánica ya viene del prelude:
+
+```jsonc
+{
+  "type": "llm_call",
+  "config": {
+    "provider": "google",
+    "model": "gemini-2.5-flash",
+    "api_key": "${GEMINI_API_KEY}",
+    "system_message": "Cuando el usuario pida subir un documento adjunto a un endpoint (KB, bucket, etc.), reenvialo con la tool correspondiente usando el placeholder $attachment. NUNCA leas el contenido — los documentos pueden ser enormes y leerlos desperdicia recursos.",
+    "tool_configurations": {
+      "upload_to_kb": {
+        "name": "upload_to_kb",
+        "node_type": "http_request",
+        "description": "Upload an attached document to the Knowledge Base. body MUST be { \"file\": \"$attachment:<document_id>\" } from the catalog. Streams the file directly — never read its content.",
+        "node_schema": {
+          "base_url": { "fixed": "https://kb.example.com" },
+          "endpoint": { "fixed": "/documents" },
+          "method":   { "fixed": "POST" },
+          "headers":  { "fixed": { "Content-Type": "multipart/form-data" } },
+          "body": {
+            "type": "object",
+            "required": true,
+            "description": "Must be { \"file\": \"$attachment:<document_id>\" } from the catalog."
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+> El `system_message` se inyecta **antes** del prelude, así que su instrucción
+> ("nunca leas, solo reenviá") prevalece sobre la regla baseline del prelude
+> ("call load_attachment if the user asks about a document"). El LLM reenvía.
+
+**Detalles operativos:**
+
+- El multipart de `http_request` streamea end-to-end sin bufferear el archivo en memoria — un doc de decenas de MB no infla la RAM del worker.
+- El placeholder `$attachment:` se resuelve **solo en el nodo `http_request`** (no globalmente en el tool executor). Si necesitás reenviar desde otro tipo de nodo, ese nodo tiene que cablear el `AttachmentStreamResolver` igual que `http_request`.
+- Validado en dev (2026-05-28): un PDF de 46 KB se reenvió a httpbin.org como `multipart/form-data` real sin que el LLM lo leyera; solo se gastaron ~50 tokens (metadata + tool call).
+
 ## Por qué existe
 
 `LlmMessage.files` no se persiste en `llm_node_history`. Cuando una conversación con un documento adjunto retoma en un turno posterior, el archivo deja de estar en el contexto del modelo. Re-adjuntarlo en cada turno es caro en tokens.
@@ -117,9 +190,12 @@ resolver re-streamea el contenido desde `OutputStorageRepository`.
 ## Cómo funciona
 
 1. Adjuntás un archivo al primer `llm_call` mediante `files[]` como siempre.
-2. El motor lo sube al provider y registra metadata (no bytes) en `conversation_attachments`, scoped por `agent_session_id`.
-3. En cualquier turno siguiente — incluyendo `llm_call`s dentro de subgrafos — el LLM ve la tool sintética `load_attachment` con el catálogo de la sesión en su descripción.
-4. Cuando el LLM llama `load_attachment(document_id)`, el motor inyecta un mensaje `user` sintético con el archivo y persiste ese mensaje en la historia. Próximo turno: el archivo ya está en contexto.
+2. El motor sube los bytes al `OutputStorageRepository` (Plan A) y registra metadata en `conversation_attachments`, scoped por `agent_session_id`. **El contenido NO se inyecta al contexto del LLM** (Plan B / D6) — el LLM solo ve el catálogo.
+3. En cualquier turno — incluyendo `llm_call`s dentro de subgrafos — el LLM ve: (a) el catálogo de la sesión en el system message, y (b) la tool sintética `load_attachment` auto-registrada.
+4. El LLM decide por turno qué hacer con cada documento:
+   - **Leer** → `load_attachment(document_id)`: el contenido se inyecta **solo para el turno actual** (efímero, D7). No se persiste en `llm_node_history` — futuros turnos ven un marcador, no el contenido. Ver la sección [Resultados de load_attachment efímeros](#resultados-de-load_attachment-efímeros).
+   - **Reenviar sin leer** → `"$attachment:<document_id>"` en los args de un tool downstream (p. ej. `http_request` multipart). Los bytes se streamean directo desde storage al endpoint, **sin pasar por el contexto del LLM** (cero tokens de contenido). Ver la sección [Patrón: reenviar sin leer](#patrón-reenviar-sin-leer-ahorro-de-tokens).
+   - **Ignorar** → no se paga ningún token por el documento.
 
 ## Flag por nodo
 
@@ -130,17 +206,85 @@ resolver re-streamea el contenido desde `OutputStorageRepository`.
 
 Usá `false` cuando un agente especialista NO debería tener acceso a documentos cargados por otras partes de la sesión.
 
-## Prompt auto-inyectado
+## Prompt auto-inyectado (la mecánica baseline)
 
-Cuando hay al menos un attachment en el catálogo de la sesión Y `attachments_enabled` es `true`, el motor inyecta automáticamente `ATTACHMENTS_SYSTEM_PRELUDE` al final del `system_message`. El prelude le explica al modelo:
+Cuando hay al menos un attachment en el catálogo de la sesión Y `attachments_enabled` es `true`, el motor inyecta **automáticamente** tres cosas, sin que el graph author escriba nada:
 
-- Que hay documentos disponibles (listados en la descripción del tool).
-- Que debe llamar `load_attachment` antes de responder cuando el usuario referencia un documento.
-- Que no debe listar/parafrasear los attachments salvo que se le pida.
-- Que la tool acepta un solo `document_id` por llamada.
-- Que NO debe llamar `load_attachment` preemptivamente cuando la pregunta no depende de un attachment.
+1. **`ATTACHMENTS_SYSTEM_PRELUDE`** — un bloque de prosa en el system message que explica las DOS vías (leer + reenviar) y la semántica efímera.
+2. **El catálogo** (`render_catalog`) — una línea por documento con `document_id`, label, mime, size, **y la pista de uso por doc**.
+3. **La tool sintética `load_attachment`** — auto-registrada (NO requiere `enabled_tools`), con el catálogo repetido en su descripción y los `document_id` válidos como enum.
 
-**El graph author NO necesita repetir estas instrucciones en su propio `system_message`.** El `system_message` del nodo se reserva para la persona/rol del agente.
+### Orden de ensamblado del system message
+
+El motor arma el system message en este orden (`llm.rs::execute`):
+
+```
+[bloque de contexto temporal/geográfico]   ← siempre primero
+[TU system_message]                          ← el rol/persona/política del agente
+[ATTACHMENTS_SYSTEM_PRELUDE]                 ← auto, solo si hay adjuntos
+[catálogo de documentos]                     ← auto, una línea por doc
+[lista de tools disponibles]                 ← auto, si hay tools
+```
+
+El prelude se inyecta **después** de tu `system_message`. El modelo lee primero tu persona/política, luego la mecánica de attachments.
+
+### Texto exacto del prelude
+
+Esto es lo que el modelo ve textualmente (constante `ATTACHMENTS_SYSTEM_PRELUDE` en `llm_synthetic_tools/load_attachment_tool.rs`):
+
+```
+## Conversation Attachments
+This conversation has one or more documents attached to it. They are listed in
+the catalog below (and in the description of the `load_attachment` tool), each
+with a `document_id`, label, mime type, and size.
+
+You will NOT see document content automatically — the catalog only advertises
+which documents exist. To read a document's content, you must call
+load_attachment(document_id). To forward a document to a downstream tool (for
+example `http_request` multipart) without reading it yourself, pass the string
+"$attachment:<document_id>" in that tool's args.
+
+load_attachment results are ephemeral: the document content is available only
+for the turn in which you invoked the tool. Future turns will see a marker
+confirming the call happened, but not the content itself. Call load_attachment
+again if you need to re-read the document.
+
+Rules:
+- If the user asks about any uploaded document, call `load_attachment` with the
+  matching `document_id` before answering — never guess at the contents.
+- Do not list, paraphrase, or summarise the attachments unless the user asks.
+- One `document_id` per call. Call the tool again if you need a second document.
+- If the user's question does not depend on any attachment, answer normally —
+  do NOT call `load_attachment` preemptively.
+```
+
+El catálogo que sigue al prelude renderiza, por documento:
+
+```
+- "<document_id>" — <filename> (<mime>, <size>). <description>
+  usage: load_attachment("<document_id>") to read · "$attachment:<document_id>" to forward
+```
+
+### Separación: mecánica auto (baseline) vs política del graph author (extra)
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ AUTO-INYECTADO por el motor — la MECÁNICA (el "sí o sí")          │
+│  · cómo leer:     load_attachment(document_id)                    │
+│  · cómo reenviar: "$attachment:<document_id>" en args de tools    │
+│  · semántica efímera + reglas baseline                            │
+│  · el catálogo con los document_id reales de la sesión            │
+├──────────────────────────────────────────────────────────────────┤
+│ TU system_message — la POLÍTICA (el comportamiento "extra")       │
+│  · CUÁNDO leer vs reenviar (decisión de negocio)                  │
+│  · a qué endpoint reenviar, con qué tool                          │
+│  · persona, tono, flujo del caso de uso                           │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**El graph author NO necesita repetir la mecánica en su `system_message`.** No hace falta explicar `load_attachment`, ni `$attachment:`, ni dónde están los `document_id` — todo eso ya está en el prelude + catálogo. El `system_message` se reserva para la **política**: cuándo el agente debe leer, cuándo reenviar, a dónde, y el rol del agente.
+
+Como el `system_message` se inyecta **antes** del prelude, una instrucción explícita del graph author (p. ej. "para subir al KB, reenviá; NUNCA leas") **prevalece** sobre la regla genérica del prelude ("call load_attachment if the user asks about a document"). Así la capa de política sobreescribe la baseline cuando hay conflicto.
 
 ## Campos opcionales en `files[]`
 
