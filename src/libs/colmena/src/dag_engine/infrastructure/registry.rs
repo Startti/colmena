@@ -304,6 +304,13 @@ impl HashMapNodeRegistry {
                 if let Some(reg) = attachment_registry.clone() {
                     edit = edit.with_attachment_registry(reg);
                 }
+                // Plan A: let `source_url` resolve `$attachment:<document_id>`
+                // (and bare document_ids) to bytes — same resolver wired into
+                // `http_request` — so the LLM can edit a previously generated
+                // or uploaded image without ever handling a signed URL.
+                if let Some(resolver) = attachment_resolver.clone() {
+                    edit = edit.with_attachment_resolver(resolver);
+                }
                 nodes.insert("image_edit".to_string(), Arc::new(edit));
             }
 
