@@ -1540,8 +1540,18 @@ impl ExecutableNode for LlmNode {
                         crate::llm::domain::ConversationAttachment,
                     > = std::collections::HashMap::new();
                     for a in all.into_iter().filter(|a| {
+                        // Keep: rows for the current provider, synthetic
+                        // `Generated` rows (image/tts artifacts), and ALL user
+                        // uploads regardless of which provider they were first
+                        // registered under. The last clause ensures a document
+                        // uploaded in a turn that used provider X stays visible
+                        // (and injectable via `$attachment`) in a later turn
+                        // that uses provider Y — the catalog must span the whole
+                        // agent_session_id, not just same-provider turns.
                         a.provider == provider_kind
                             || a.provider == crate::llm::domain::ProviderKind::Generated
+                            || a.origin.as_deref()
+                                == Some(crate::llm::domain::attachments::origin::USER_UPLOAD)
                     }) {
                         // Prefer provider-specific row over the synthetic
                         // Generated row when both exist (= cross-provider
