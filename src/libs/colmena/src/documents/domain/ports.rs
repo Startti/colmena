@@ -65,6 +65,8 @@ pub trait IdGenerator: Send + Sync {
     fn new_run_id(&self) -> String;
     fn new_row_id(&self) -> String;
     fn new_list_item_id(&self) -> String;
+    fn new_slide_id(&self) -> String;
+    fn new_asset_id(&self) -> String;
 }
 
 /// Maps `session_id ↔ [artifact_ids]` so an agent can list its own artifacts and
