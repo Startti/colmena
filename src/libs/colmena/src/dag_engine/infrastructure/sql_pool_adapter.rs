@@ -451,7 +451,122 @@ impl SqlConnectionPort for PgPoolAdapter {
         Ok(tables)
     }
 
+    async fn missing_schemas(&self, schemas: &[String]) -> Result<Vec<String>, SqlNodeError> {
+        // Never treat introspection schemas as missing — they always exist and
+        // must never be created.
+        let candidates: Vec<String> = schemas
+            .iter()
+            .filter(|s| !matches!(s.as_str(), "information_schema" | "pg_catalog"))
+            .cloned()
+            .collect();
+
+        if candidates.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let rows = sqlx::query(
+            "SELECT schema_name FROM information_schema.schemata \
+             WHERE schema_name = ANY($1)",
+        )
+        .bind(&candidates)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| {
+            SqlNodeError::ExecutionError(format!("Failed to list existing schemas: {}", e))
+        })?;
+
+        let existing: std::collections::HashSet<String> = rows
+            .iter()
+            .filter_map(|r| r.try_get::<String, _>("schema_name").ok())
+            .collect();
+
+        Ok(candidates
+            .into_iter()
+            .filter(|s| !existing.contains(s))
+            .collect())
+    }
+
+    async fn create_schema(&self, schema: &str) -> Result<(), SqlNodeError> {
+        let sql = format!("CREATE SCHEMA IF NOT EXISTS {}", Self::quote_ident(schema));
+        sqlx::query(&sql).execute(&*self.pool).await.map_err(|e| {
+            SqlNodeError::ExecutionError(format!(
+                "Failed to create schema '{}' (the database role may lack CREATE privilege): {}",
+                schema, e
+            ))
+        })?;
+        Ok(())
+    }
+
     fn is_connected(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    /// Build an adapter against `TEST_DATABASE_URL`, or return `None` to skip.
+    async fn test_adapter() -> Option<PgPoolAdapter> {
+        let url = std::env::var("TEST_DATABASE_URL").ok()?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to TEST_DATABASE_URL");
+        Some(PgPoolAdapter::new(Arc::new(pool), 30_000, 64))
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn missing_then_create_then_present() {
+        let Some(adapter) = test_adapter().await else {
+            eprintln!("skip: TEST_DATABASE_URL not set");
+            return;
+        };
+
+        let schema = format!(
+            "colmena_test_schema_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let listed = vec![schema.clone()];
+
+        // Fresh schema is reported missing.
+        let missing = adapter.missing_schemas(&listed).await.unwrap();
+        assert_eq!(missing, vec![schema.clone()]);
+
+        // Create it, then it is no longer missing.
+        adapter.create_schema(&schema).await.unwrap();
+        let missing_after = adapter.missing_schemas(&listed).await.unwrap();
+        assert!(missing_after.is_empty(), "schema should exist after create");
+
+        // create_schema is idempotent.
+        adapter.create_schema(&schema).await.unwrap();
+
+        // Teardown.
+        sqlx::query(&format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", schema))
+            .execute(&*adapter.pool())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn introspection_schemas_never_reported_missing() {
+        let Some(adapter) = test_adapter().await else {
+            eprintln!("skip: TEST_DATABASE_URL not set");
+            return;
+        };
+
+        let listed = vec!["information_schema".to_string(), "pg_catalog".to_string()];
+        let missing = adapter.missing_schemas(&listed).await.unwrap();
+        assert!(
+            missing.is_empty(),
+            "introspection schemas must never be reported missing"
+        );
     }
 }

@@ -93,6 +93,7 @@ All string config fields support `${VAR_NAME}` environment variable resolution.
 | `tenant_user_id` | string | No | `null` | User ID for RLS isolation. Supports `${ENV_VAR}` |
 | `tenant_column` | string | No | `"user_id"` | Column name for tenant isolation in RLS policies |
 | `auto_rls` | boolean | No | `false` | Auto-create RLS policies during init and after CREATE TABLE |
+| `create_schemas_if_missing` | boolean | No | `true` | At init, create any `allowed_schemas` that don't exist (operator-driven). Hard-fails init if creation fails. Set `false` for legacy validate-only behavior |
 
 #### Permission Presets
 
@@ -301,11 +302,39 @@ The critic uses a low-temperature call (`temperature: 0.0`, `max_tokens: 500`) f
 The SQL node implements `InitializableNode`, which runs once when the node is first loaded (either at DAG startup or on first tool call):
 
 1. **Connect** — Obtains the pool from the shared `PgPoolRegistry` via `SqlPortFactory::get_adapter(url)`. If another node (or the internal state repository) already opened a pool for this URL, it is **reused**; otherwise a new pool is created and cached. TOCTOU-safe via `tokio::sync::OnceCell`.
-2. **Ensure sandbox** — Creates the sandbox schema and registry tables (`function_registry`, `query_feedback`)
-3. **Load metadata** — Queries `information_schema.tables` for table names and `pg_catalog.obj_description` for table comments
-4. **Load functions** — Queries `sandbox.function_registry` for registered functions
-5. **Build description supplement** — Generates a text block listing available tables, functions, permissions, and max_rows
-6. **Auto-RLS** (if enabled) — Sets up RLS policies on all existing tables
+2. **Provision schemas** (if `create_schemas_if_missing`, default `true`) — Checks each schema in `allowed_schemas` and creates the ones that don't exist. See below.
+3. **Ensure sandbox** — Creates the sandbox schema and registry tables (`function_registry`, `query_feedback`)
+4. **Load metadata** — Queries `information_schema.tables` for table names and `pg_catalog.obj_description` for table comments
+5. **Load functions** — Queries `sandbox.function_registry` for registered functions
+6. **Build description supplement** — Generates a text block listing available tables, functions, permissions, and max_rows
+7. **Auto-RLS** (if enabled) — Sets up RLS policies on all existing tables
+
+### Operator-Driven Schema Provisioning
+
+When `permissions.create_schemas_if_missing` is `true` (the default), initialization
+checks each schema listed in `allowed_schemas` **one at a time** and runs
+`CREATE SCHEMA IF NOT EXISTS "<schema>"` (quoted identifier) for the ones that don't
+yet exist. Schemas that already exist are left untouched and never trigger a
+`CREATE`, so a read-only agent pointing at existing schemas needs no `CREATE`
+privilege.
+
+Key properties:
+
+- **Operator-driven, not LLM-driven.** The schema names come from the node's
+  fixed `allowed_schemas` config, authored by the operator. This is a different
+  trust level than a query — **LLM-issued `CREATE SCHEMA` in a query stays blocked**
+  by the static validator regardless of this flag.
+- **Hard-fail on error.** If a missing schema can't be created (e.g. the database
+  role lacks `CREATE` privilege on the database), node initialization fails with
+  `Failed to create schema '<name>': ...` and the node does not start.
+- **Introspection schemas are skipped.** `information_schema` and `pg_catalog`
+  are never treated as missing or created.
+- **No-op when empty.** An empty `allowed_schemas` means "all schemas allowed"
+  (no restriction), so there is nothing to provision.
+
+Set `create_schemas_if_missing: false` to restore the legacy behavior where
+`allowed_schemas` is purely a validation allowlist and missing schemas surface
+as a query-time error instead.
 
 ### Shared-pool behavior
 

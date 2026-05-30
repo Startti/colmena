@@ -63,6 +63,18 @@ pub trait SqlConnectionPort: Send + Sync {
     async fn load_table_metadata(&self, schemas: &[String])
         -> Result<Vec<TableInfo>, SqlNodeError>;
 
+    /// Return the subset of `schemas` that do not yet exist in the database.
+    ///
+    /// Introspection schemas (`information_schema`, `pg_catalog`) are never
+    /// reported as missing — they always exist and must never be created.
+    async fn missing_schemas(&self, schemas: &[String]) -> Result<Vec<String>, SqlNodeError>;
+
+    /// Create a schema if it does not already exist (idempotent).
+    ///
+    /// Operator-driven only: used to provision schemas listed in
+    /// `allowed_schemas`. The identifier is quoted to prevent injection.
+    async fn create_schema(&self, schema: &str) -> Result<(), SqlNodeError>;
+
     /// Check if the pool is connected and ready.
     fn is_connected(&self) -> bool;
 }

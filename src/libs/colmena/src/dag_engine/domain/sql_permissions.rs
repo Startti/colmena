@@ -97,6 +97,7 @@ pub struct SqlPermissions {
     tenant_user_id: Option<String>,
     tenant_column: String,
     auto_rls: bool,
+    create_schemas_if_missing: bool,
 }
 
 /// Schemas that are always accessible for introspection (not configurable).
@@ -116,6 +117,7 @@ impl SqlPermissions {
                     tenant_user_id: None,
                     tenant_column: "user_id".to_string(),
                     auto_rls: false,
+                    create_schemas_if_missing: true,
                 });
             }
         };
@@ -173,6 +175,13 @@ impl SqlPermissions {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        // Default: true (opt-out). Operators provision the listed schemas
+        // declaratively; set to false to restore validate-only behavior.
+        let create_schemas_if_missing = config
+            .get("create_schemas_if_missing")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
         Ok(Self {
             allowed_ops,
             allowed_schemas,
@@ -180,6 +189,7 @@ impl SqlPermissions {
             tenant_user_id,
             tenant_column,
             auto_rls,
+            create_schemas_if_missing,
         })
     }
 
@@ -223,6 +233,18 @@ impl SqlPermissions {
     /// Whether to auto-create RLS policies during initialization.
     pub fn auto_rls(&self) -> bool {
         self.auto_rls
+    }
+
+    /// Whether the node should create any `allowed_schemas` that don't yet exist
+    /// during initialization (operator-driven provisioning). Defaults to `true`.
+    pub fn create_schemas_if_missing(&self) -> bool {
+        self.create_schemas_if_missing
+    }
+
+    /// Iterate over the configured `allowed_schemas`. Empty means "no restriction"
+    /// (all schemas allowed) and therefore nothing to provision.
+    pub fn allowed_schemas_iter(&self) -> impl Iterator<Item = &str> {
+        self.allowed_schemas.iter().map(String::as_str)
     }
 
     /// Return a human-readable summary for LLM context injection.
@@ -392,5 +414,43 @@ mod tests {
         let config = serde_json::json!({ "preset": "read_write" });
         let perms = SqlPermissions::from_config(Some(&config)).unwrap();
         assert!(!perms.is_allowed(&SqlOperation::CreateTable));
+    }
+
+    #[test]
+    fn test_create_schemas_if_missing_defaults_true() {
+        // Absent key with a config object.
+        let config = serde_json::json!({
+            "preset": "read_only",
+            "allowed_schemas": ["public"]
+        });
+        let perms = SqlPermissions::from_config(Some(&config)).unwrap();
+        assert!(perms.create_schemas_if_missing());
+
+        // Absent config entirely.
+        let perms = SqlPermissions::from_config(None).unwrap();
+        assert!(perms.create_schemas_if_missing());
+    }
+
+    #[test]
+    fn test_create_schemas_if_missing_explicit_false() {
+        let config = serde_json::json!({
+            "preset": "read_only",
+            "allowed_schemas": ["public"],
+            "create_schemas_if_missing": false
+        });
+        let perms = SqlPermissions::from_config(Some(&config)).unwrap();
+        assert!(!perms.create_schemas_if_missing());
+    }
+
+    #[test]
+    fn test_allowed_schemas_iter() {
+        let config = serde_json::json!({
+            "preset": "read_only",
+            "allowed_schemas": ["analytics", "public"]
+        });
+        let perms = SqlPermissions::from_config(Some(&config)).unwrap();
+        let mut schemas: Vec<&str> = perms.allowed_schemas_iter().collect();
+        schemas.sort_unstable();
+        assert_eq!(schemas, vec!["analytics", "public"]);
     }
 }

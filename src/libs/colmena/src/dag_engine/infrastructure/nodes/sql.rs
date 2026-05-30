@@ -97,6 +97,31 @@ impl SqlNode {
             .await
             .map_err(|e| format!("Failed to acquire SQL pool: {}", e))?;
 
+        // Operator-driven schema provisioning: ensure every schema listed in
+        // `allowed_schemas` exists, creating the missing ones. This is distinct
+        // from LLM-issued CREATE SCHEMA (which stays blocked) — the names come
+        // from fixed operator config. Hard-fails init if a missing schema can't
+        // be created (e.g. the DB role lacks CREATE privilege).
+        if permissions.create_schemas_if_missing() {
+            let listed: Vec<String> = permissions
+                .allowed_schemas_iter()
+                .map(str::to_string)
+                .collect();
+            if !listed.is_empty() {
+                let conn: &dyn SqlConnectionPort = adapter.as_ref();
+                let missing = conn
+                    .missing_schemas(&listed)
+                    .await
+                    .map_err(|e| format!("Failed to check existing schemas: {}", e))?;
+                for schema in &missing {
+                    println!("[SqlNode] allowed_schema '{}' missing — creating", schema);
+                    conn.create_schema(schema)
+                        .await
+                        .map_err(|e| format!("Failed to create schema '{}': {}", schema, e))?;
+                }
+            }
+        }
+
         // Create registry adapter sharing the same pool
         let sandbox_schema = permissions.sandbox_schema().to_string();
         let registry = PgRegistryAdapter::new(adapter.pool(), sandbox_schema);
