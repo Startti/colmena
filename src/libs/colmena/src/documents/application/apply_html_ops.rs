@@ -33,8 +33,100 @@ impl<'a> HtmlOpApplier<'a> {
             PatchOp::SetSlideNotes { slide_id, notes } => {
                 self.set_slide_notes(ir, slide_id, notes.clone())
             }
+            PatchOp::InsertHtmlBlock {
+                slide_id,
+                before,
+                after,
+                block,
+            } => self.insert_html_block(ir, slide_id, before.as_deref(), after.as_deref(), block),
+            PatchOp::DeleteHtmlBlock { slide_id, block_id } => {
+                self.delete_html_block(ir, slide_id, block_id)
+            }
+            PatchOp::ReplaceHtmlBlock {
+                slide_id,
+                block_id,
+                block,
+            } => self.replace_html_block(ir, slide_id, block_id, block),
+            PatchOp::MoveHtmlBlock {
+                slide_id,
+                block_id,
+                after_block_id,
+            } => self.move_html_block(ir, slide_id, block_id, after_block_id),
+            PatchOp::InsertHtmlTableRow {
+                slide_id,
+                table_block_id,
+                before,
+                after,
+                cells,
+            } => self.insert_html_table_row(
+                ir,
+                slide_id,
+                table_block_id,
+                before.as_deref(),
+                after.as_deref(),
+                cells,
+            ),
+            PatchOp::DeleteHtmlTableRow {
+                slide_id,
+                table_block_id,
+                row_id,
+            } => self.delete_html_table_row(ir, slide_id, table_block_id, row_id),
+            PatchOp::UpdateHtmlTableCell {
+                slide_id,
+                table_block_id,
+                row_id,
+                col_index,
+                cell,
+            } => {
+                self.update_html_table_cell(ir, slide_id, table_block_id, row_id, *col_index, cell)
+            }
+            PatchOp::InsertHtmlListItem {
+                slide_id,
+                list_block_id,
+                at_index,
+                runs,
+            } => self.insert_html_list_item(ir, slide_id, list_block_id, *at_index, runs),
+            PatchOp::DeleteHtmlListItem {
+                slide_id,
+                list_block_id,
+                item_id,
+            } => self.delete_html_list_item(ir, slide_id, list_block_id, item_id),
+            PatchOp::UpdateHtmlListItem {
+                slide_id,
+                list_block_id,
+                item_id,
+                runs,
+            } => self.update_html_list_item(ir, slide_id, list_block_id, item_id, runs),
+            PatchOp::SetTheme { theme } => {
+                ir.theme = *theme;
+                Ok(OpOutcome::default())
+            }
+            PatchOp::SetDocProps {
+                title,
+                author,
+                date,
+                locale,
+            } => {
+                if let Some(t) = title.clone() {
+                    ir.doc_props.title = Some(t);
+                }
+                if let Some(a) = author.clone() {
+                    ir.doc_props.author = Some(a);
+                }
+                if let Some(d) = date.clone() {
+                    ir.doc_props.date = Some(d);
+                }
+                if let Some(l) = locale {
+                    ir.doc_props.locale = *l;
+                }
+                Ok(OpOutcome::default())
+            }
+            PatchOp::SetFooter { footer } => {
+                ir.footer = footer.clone();
+                Ok(OpOutcome::default())
+            }
             _ => Err(DocumentError::InvalidPatchOp {
-                reason: "op not yet implemented in HtmlOpApplier".into(),
+                reason: "op not applicable to HTML kind".into(),
                 op: serde_json::to_value(op).unwrap_or_default(),
             }),
         }
@@ -168,6 +260,463 @@ impl<'a> HtmlOpApplier<'a> {
         let slide = find_slide_mut(ir, slide_id)?;
         slide.notes = notes;
         Ok(OpOutcome::default())
+    }
+
+    fn insert_html_block(
+        &self,
+        ir: &mut HtmlIR,
+        slide_id: &str,
+        before: Option<&str>,
+        after: Option<&str>,
+        block_json: &serde_json::Value,
+    ) -> Result<OpOutcome, DocumentError> {
+        if before.is_some() && after.is_some() {
+            return Err(DocumentError::InvalidPatchOp {
+                reason: "exactly one of before/after must be provided".into(),
+                op: serde_json::json!({}),
+            });
+        }
+        let mut block_json = block_json.clone();
+        let new_id = self.ids.new_block_id();
+        if let Some(obj) = block_json.as_object_mut() {
+            obj.insert("id".into(), serde_json::json!(new_id));
+            self.assign_nested_ids(obj);
+        }
+        let block: Block = serde_json::from_value(block_json).map_err(|e| {
+            DocumentError::IRValidationFailed {
+                path: "/op/insert_html_block/block".into(),
+                reason: e.to_string(),
+            }
+        })?;
+        let slide = find_slide_mut(ir, slide_id)?;
+        let pos = match (before, after) {
+            (Some(b), None) => slide.blocks.iter().position(|x| block_id_of(x) == b),
+            (None, Some(a)) => slide
+                .blocks
+                .iter()
+                .position(|x| block_id_of(x) == a)
+                .map(|i| i + 1),
+            _ => Some(slide.blocks.len()),
+        }
+        .ok_or_else(|| DocumentError::IRValidationFailed {
+            path: format!("/slides/{slide_id}/blocks"),
+            reason: "before/after block_id not found".into(),
+        })?;
+        slide.blocks.insert(pos, block);
+        recompute_assets_referenced(ir);
+        let mut ids = crate::documents::domain::artifact::AssignedIds::default();
+        ids.block = Some(new_id);
+        Ok(OpOutcome { assigned_ids: ids })
+    }
+
+    fn delete_html_block(
+        &self,
+        ir: &mut HtmlIR,
+        slide_id: &str,
+        block_id: &str,
+    ) -> Result<OpOutcome, DocumentError> {
+        let slide = find_slide_mut(ir, slide_id)?;
+        let pos = slide
+            .blocks
+            .iter()
+            .position(|x| block_id_of(x) == block_id)
+            .ok_or_else(|| DocumentError::IRValidationFailed {
+                path: format!("/slides/{slide_id}/blocks/{block_id}"),
+                reason: "block not found".into(),
+            })?;
+        slide.blocks.remove(pos);
+        recompute_assets_referenced(ir);
+        Ok(OpOutcome::default())
+    }
+
+    fn replace_html_block(
+        &self,
+        ir: &mut HtmlIR,
+        slide_id: &str,
+        block_id: &str,
+        block_json: &serde_json::Value,
+    ) -> Result<OpOutcome, DocumentError> {
+        let mut block_json = block_json.clone();
+        if let Some(obj) = block_json.as_object_mut() {
+            obj.insert("id".into(), serde_json::json!(block_id));
+            self.assign_nested_ids(obj);
+        }
+        let new_block: Block = serde_json::from_value(block_json).map_err(|e| {
+            DocumentError::IRValidationFailed {
+                path: "/op/replace_html_block/block".into(),
+                reason: e.to_string(),
+            }
+        })?;
+        let slide = find_slide_mut(ir, slide_id)?;
+        let pos = slide
+            .blocks
+            .iter()
+            .position(|x| block_id_of(x) == block_id)
+            .ok_or_else(|| DocumentError::IRValidationFailed {
+                path: format!("/slides/{slide_id}/blocks/{block_id}"),
+                reason: "block not found".into(),
+            })?;
+        slide.blocks[pos] = new_block;
+        recompute_assets_referenced(ir);
+        Ok(OpOutcome::default())
+    }
+
+    fn move_html_block(
+        &self,
+        ir: &mut HtmlIR,
+        slide_id: &str,
+        block_id: &str,
+        after_block_id: &str,
+    ) -> Result<OpOutcome, DocumentError> {
+        let slide = find_slide_mut(ir, slide_id)?;
+        let from = slide
+            .blocks
+            .iter()
+            .position(|x| block_id_of(x) == block_id)
+            .ok_or_else(|| DocumentError::IRValidationFailed {
+                path: format!("/slides/{slide_id}/blocks/{block_id}"),
+                reason: "block not found".into(),
+            })?;
+        let removed = slide.blocks.remove(from);
+        let after_pos = slide
+            .blocks
+            .iter()
+            .position(|x| block_id_of(x) == after_block_id);
+        let insert_at = match after_pos {
+            Some(i) => i + 1,
+            None => {
+                slide.blocks.insert(from, removed);
+                return Err(DocumentError::IRValidationFailed {
+                    path: format!("/slides/{slide_id}/blocks/{after_block_id}"),
+                    reason: "after_block_id not found".into(),
+                });
+            }
+        };
+        slide.blocks.insert(insert_at, removed);
+        Ok(OpOutcome::default())
+    }
+
+    fn insert_html_table_row(
+        &self,
+        ir: &mut HtmlIR,
+        slide_id: &str,
+        table_block_id: &str,
+        before: Option<&str>,
+        after: Option<&str>,
+        cells: &[serde_json::Value],
+    ) -> Result<OpOutcome, DocumentError> {
+        let row_id = self.ids.new_row_id();
+        let parsed_cells: Vec<_> = cells
+            .iter()
+            .map(|c| serde_json::from_value(c.clone()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DocumentError::IRValidationFailed {
+                path: "/op/insert_html_table_row/cells".into(),
+                reason: e.to_string(),
+            })?;
+        let new_row = crate::documents::domain::ir::html::TableRow {
+            id: row_id.clone(),
+            cells: parsed_cells,
+        };
+        let slide = find_slide_mut(ir, slide_id)?;
+        let block = slide
+            .blocks
+            .iter_mut()
+            .find(|b| block_id_of(b) == table_block_id)
+            .ok_or_else(|| DocumentError::IRValidationFailed {
+                path: format!("/slides/{slide_id}/blocks/{table_block_id}"),
+                reason: "table block not found".into(),
+            })?;
+        if let Block::Table { rows, .. } = block {
+            let pos = match (before, after) {
+                (Some(b), None) => rows.iter().position(|r| r.id == b),
+                (None, Some(a)) => rows.iter().position(|r| r.id == a).map(|i| i + 1),
+                _ => Some(rows.len()),
+            }
+            .ok_or_else(|| DocumentError::IRValidationFailed {
+                path: "/op/insert_html_table_row".into(),
+                reason: "row_id not found".into(),
+            })?;
+            rows.insert(pos, new_row);
+            let mut ids = crate::documents::domain::artifact::AssignedIds::default();
+            ids.rows = vec![row_id];
+            Ok(OpOutcome { assigned_ids: ids })
+        } else {
+            Err(DocumentError::IRValidationFailed {
+                path: format!("/slides/{slide_id}/blocks/{table_block_id}"),
+                reason: "not a table block".into(),
+            })
+        }
+    }
+
+    fn delete_html_table_row(
+        &self,
+        ir: &mut HtmlIR,
+        slide_id: &str,
+        table_block_id: &str,
+        row_id: &str,
+    ) -> Result<OpOutcome, DocumentError> {
+        let slide = find_slide_mut(ir, slide_id)?;
+        let block = slide
+            .blocks
+            .iter_mut()
+            .find(|b| block_id_of(b) == table_block_id)
+            .ok_or_else(|| DocumentError::IRValidationFailed {
+                path: format!("/slides/{slide_id}/blocks/{table_block_id}"),
+                reason: "table block not found".into(),
+            })?;
+        if let Block::Table { rows, .. } = block {
+            let pos = rows.iter().position(|r| r.id == row_id).ok_or_else(|| {
+                DocumentError::IRValidationFailed {
+                    path: format!("/slides/{slide_id}/blocks/{table_block_id}/rows/{row_id}"),
+                    reason: "row not found".into(),
+                }
+            })?;
+            rows.remove(pos);
+            Ok(OpOutcome::default())
+        } else {
+            Err(DocumentError::IRValidationFailed {
+                path: format!("/slides/{slide_id}/blocks/{table_block_id}"),
+                reason: "not a table block".into(),
+            })
+        }
+    }
+
+    fn update_html_table_cell(
+        &self,
+        ir: &mut HtmlIR,
+        slide_id: &str,
+        table_block_id: &str,
+        row_id: &str,
+        col_index: u32,
+        cell_json: &serde_json::Value,
+    ) -> Result<OpOutcome, DocumentError> {
+        let cell: crate::documents::domain::ir::html::TableCell =
+            serde_json::from_value(cell_json.clone()).map_err(|e| {
+                DocumentError::IRValidationFailed {
+                    path: "/op/update_html_table_cell/cell".into(),
+                    reason: e.to_string(),
+                }
+            })?;
+        let slide = find_slide_mut(ir, slide_id)?;
+        let block = slide
+            .blocks
+            .iter_mut()
+            .find(|b| block_id_of(b) == table_block_id)
+            .ok_or_else(|| DocumentError::IRValidationFailed {
+                path: format!("/slides/{slide_id}/blocks/{table_block_id}"),
+                reason: "table block not found".into(),
+            })?;
+        if let Block::Table { rows, .. } = block {
+            let row = rows
+                .iter_mut()
+                .find(|r| r.id == row_id)
+                .ok_or_else(|| DocumentError::IRValidationFailed {
+                    path: format!("/slides/{slide_id}/blocks/{table_block_id}/rows/{row_id}"),
+                    reason: "row not found".into(),
+                })?;
+            let idx = col_index as usize;
+            if idx >= row.cells.len() {
+                return Err(DocumentError::IRValidationFailed {
+                    path: format!("/.../rows/{row_id}/cells/{col_index}"),
+                    reason: format!("col_index out of range (row has {} cells)", row.cells.len()),
+                });
+            }
+            row.cells[idx] = cell;
+            Ok(OpOutcome::default())
+        } else {
+            Err(DocumentError::IRValidationFailed {
+                path: format!("/slides/{slide_id}/blocks/{table_block_id}"),
+                reason: "not a table block".into(),
+            })
+        }
+    }
+
+    fn insert_html_list_item(
+        &self,
+        ir: &mut HtmlIR,
+        slide_id: &str,
+        list_block_id: &str,
+        at_index: u32,
+        runs: &[serde_json::Value],
+    ) -> Result<OpOutcome, DocumentError> {
+        let item_id = self.ids.new_list_item_id();
+        let parsed_runs: Vec<_> = runs
+            .iter()
+            .map(|r| {
+                let mut rv = r.clone();
+                if let Some(o) = rv.as_object_mut() {
+                    o.insert("id".into(), serde_json::json!(self.ids.new_run_id()));
+                }
+                serde_json::from_value::<crate::documents::domain::ir::html::Run>(rv)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DocumentError::IRValidationFailed {
+                path: "/op/insert_html_list_item/runs".into(),
+                reason: e.to_string(),
+            })?;
+        let new_item = crate::documents::domain::ir::html::ListItem {
+            id: item_id.clone(),
+            runs: parsed_runs,
+        };
+        let slide = find_slide_mut(ir, slide_id)?;
+        let block = slide
+            .blocks
+            .iter_mut()
+            .find(|b| block_id_of(b) == list_block_id)
+            .ok_or_else(|| DocumentError::IRValidationFailed {
+                path: format!("/slides/{slide_id}/blocks/{list_block_id}"),
+                reason: "list block not found".into(),
+            })?;
+        if let Block::List { items, .. } = block {
+            let pos = (at_index as usize).min(items.len());
+            items.insert(pos, new_item);
+            let mut ids = crate::documents::domain::artifact::AssignedIds::default();
+            ids.list_items = vec![item_id];
+            Ok(OpOutcome { assigned_ids: ids })
+        } else {
+            Err(DocumentError::IRValidationFailed {
+                path: format!("/slides/{slide_id}/blocks/{list_block_id}"),
+                reason: "not a list block".into(),
+            })
+        }
+    }
+
+    fn delete_html_list_item(
+        &self,
+        ir: &mut HtmlIR,
+        slide_id: &str,
+        list_block_id: &str,
+        item_id: &str,
+    ) -> Result<OpOutcome, DocumentError> {
+        let slide = find_slide_mut(ir, slide_id)?;
+        let block = slide
+            .blocks
+            .iter_mut()
+            .find(|b| block_id_of(b) == list_block_id)
+            .ok_or_else(|| DocumentError::IRValidationFailed {
+                path: format!("/slides/{slide_id}/blocks/{list_block_id}"),
+                reason: "list block not found".into(),
+            })?;
+        if let Block::List { items, .. } = block {
+            let pos = items.iter().position(|i| i.id == item_id).ok_or_else(|| {
+                DocumentError::IRValidationFailed {
+                    path: format!("/.../{list_block_id}/items/{item_id}"),
+                    reason: "item not found".into(),
+                }
+            })?;
+            items.remove(pos);
+            Ok(OpOutcome::default())
+        } else {
+            Err(DocumentError::IRValidationFailed {
+                path: format!("/slides/{slide_id}/blocks/{list_block_id}"),
+                reason: "not a list block".into(),
+            })
+        }
+    }
+
+    fn update_html_list_item(
+        &self,
+        ir: &mut HtmlIR,
+        slide_id: &str,
+        list_block_id: &str,
+        item_id: &str,
+        runs: &[serde_json::Value],
+    ) -> Result<OpOutcome, DocumentError> {
+        let parsed_runs: Vec<_> = runs
+            .iter()
+            .map(|r| {
+                let mut rv = r.clone();
+                if let Some(o) = rv.as_object_mut() {
+                    if !o.contains_key("id") {
+                        o.insert("id".into(), serde_json::json!(self.ids.new_run_id()));
+                    }
+                }
+                serde_json::from_value::<crate::documents::domain::ir::html::Run>(rv)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DocumentError::IRValidationFailed {
+                path: "/op/update_html_list_item/runs".into(),
+                reason: e.to_string(),
+            })?;
+        let slide = find_slide_mut(ir, slide_id)?;
+        let block = slide
+            .blocks
+            .iter_mut()
+            .find(|b| block_id_of(b) == list_block_id)
+            .ok_or_else(|| DocumentError::IRValidationFailed {
+                path: format!("/slides/{slide_id}/blocks/{list_block_id}"),
+                reason: "list block not found".into(),
+            })?;
+        if let Block::List { items, .. } = block {
+            let item = items
+                .iter_mut()
+                .find(|i| i.id == item_id)
+                .ok_or_else(|| DocumentError::IRValidationFailed {
+                    path: format!("/.../{list_block_id}/items/{item_id}"),
+                    reason: "item not found".into(),
+                })?;
+            item.runs = parsed_runs;
+            Ok(OpOutcome::default())
+        } else {
+            Err(DocumentError::IRValidationFailed {
+                path: format!("/slides/{slide_id}/blocks/{list_block_id}"),
+                reason: "not a list block".into(),
+            })
+        }
+    }
+
+    fn assign_nested_ids(&self, obj: &mut serde_json::Map<String, serde_json::Value>) {
+        if let Some(serde_json::Value::Array(runs)) = obj.get_mut("runs") {
+            for r in runs {
+                if let Some(o) = r.as_object_mut() {
+                    if !o.contains_key("id") {
+                        o.insert("id".into(), serde_json::json!(self.ids.new_run_id()));
+                    }
+                }
+            }
+        }
+        if let Some(serde_json::Value::Array(items)) = obj.get_mut("items") {
+            for i in items {
+                if let Some(o) = i.as_object_mut() {
+                    if !o.contains_key("id") {
+                        o.insert("id".into(), serde_json::json!(self.ids.new_list_item_id()));
+                    }
+                    self.assign_nested_ids(o);
+                }
+            }
+        }
+        if let Some(serde_json::Value::Array(rows)) = obj.get_mut("rows") {
+            for r in rows {
+                if let Some(o) = r.as_object_mut() {
+                    if !o.contains_key("id") {
+                        o.insert("id".into(), serde_json::json!(self.ids.new_row_id()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn block_id_of(b: &Block) -> &str {
+    match b {
+        Block::Heading { id, .. }
+        | Block::Paragraph { id, .. }
+        | Block::List { id, .. }
+        | Block::Blockquote { id, .. }
+        | Block::Code { id, .. }
+        | Block::Table { id, .. }
+        | Block::Chart { id, .. }
+        | Block::KpiCard { id, .. }
+        | Block::KpiGrid { id, .. }
+        | Block::Image { id, .. }
+        | Block::TwoColumns { id, .. }
+        | Block::ThreeColumns { id, .. }
+        | Block::Comparison { id, .. }
+        | Block::Callout { id, .. }
+        | Block::Divider { id }
+        | Block::Video { id, .. }
+        | Block::AutoToc { id, .. } => id,
     }
 }
 
@@ -337,5 +886,81 @@ mod tests {
             )
             .unwrap();
         assert_eq!(ir.slides[0].id, "sl_b");
+    }
+
+    #[test]
+    fn insert_html_block_assigns_id_and_appends() {
+        let mut ir = fresh();
+        let ids = CountingIdGenerator::default();
+        let applier = HtmlOpApplier { ids: &ids };
+        let out = applier
+            .apply(
+                &mut ir,
+                &PatchOp::InsertHtmlBlock {
+                    slide_id: "sl_existing".into(),
+                    before: None,
+                    after: None,
+                    block: serde_json::json!({
+                        "kind":"paragraph",
+                        "runs":[{"id":"will_be_overwritten","text":"x","bold":false,"italic":false,"underline":false,"code":false}]
+                    }),
+                },
+            )
+            .unwrap();
+        assert!(out.assigned_ids.block.is_some(), "expected block id");
+        assert_eq!(ir.slides[0].blocks.len(), 1);
+    }
+
+    #[test]
+    fn delete_html_block_removes_by_id() {
+        let mut ir = fresh();
+        ir.slides[0].blocks = vec![Block::Divider { id: "blk_d".into() }];
+        let ids = CountingIdGenerator::default();
+        let applier = HtmlOpApplier { ids: &ids };
+        applier
+            .apply(
+                &mut ir,
+                &PatchOp::DeleteHtmlBlock {
+                    slide_id: "sl_existing".into(),
+                    block_id: "blk_d".into(),
+                },
+            )
+            .unwrap();
+        assert!(ir.slides[0].blocks.is_empty());
+    }
+
+    #[test]
+    fn set_theme_changes_ir_theme() {
+        use crate::documents::domain::ir::html::Theme;
+        let mut ir = fresh();
+        let ids = CountingIdGenerator::default();
+        let applier = HtmlOpApplier { ids: &ids };
+        applier
+            .apply(&mut ir, &PatchOp::SetTheme { theme: Theme::Dark })
+            .unwrap();
+        assert_eq!(ir.theme, Theme::Dark);
+    }
+
+    #[test]
+    fn insert_image_block_with_asset_updates_assets_referenced() {
+        let mut ir = fresh();
+        let ids = CountingIdGenerator::default();
+        let applier = HtmlOpApplier { ids: &ids };
+        applier
+            .apply(
+                &mut ir,
+                &PatchOp::InsertHtmlBlock {
+                    slide_id: "sl_existing".into(),
+                    before: None,
+                    after: None,
+                    block: serde_json::json!({
+                        "kind":"image",
+                        "src":{"kind":"asset","asset_id":"asset_logo"},
+                        "alt":"x","caption":null,"position":"inline"
+                    }),
+                },
+            )
+            .unwrap();
+        assert!(ir.assets_referenced.contains(&"asset_logo".to_string()));
     }
 }
