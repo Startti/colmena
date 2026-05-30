@@ -305,3 +305,215 @@ is referenced in `tool.skills`) and that `sql_query`'s node-type guide
 must be auto-folded (because `query_sales` has `node_type: sql_query`).
 
 - Diseño completo: [docs/superpowers/specs/2026-04-20-llm-skills-design.md](../superpowers/specs/2026-04-20-llm-skills-design.md)
+
+## Visual reference
+
+Cuatro diagramas que muestran el sistema de extremo a extremo. Cada caja
+y flecha corresponde a código real — las anotaciones indican el archivo y
+línea exacta donde se implementa la regla.
+
+---
+
+### Diagrama 1 — Cómo una skill se convierte en una capa
+
+Flujo desde el archivo SKILL.md en disco hasta su rol en runtime.
+
+```
+[SKILL.md en disco  ─── src/libs/colmena/skills/<name>/SKILL.md
+ o include_dir!()]         o filesystem path)
+         |
+         v
+   parse_skill_md(content, path)
+   (frontmatter_parser.rs:38)
+         |
+         v
+   ParsedSkillMd { name, description, references, body, node_type }
+   (frontmatter_parser.rs:24)
+         |
+         v
+   SkillCatalogEntry { name, description, source, node_type }
+   (skill_repository.rs:6)
+         |
+         +----------------------+---------------------+
+         |                      |                     |
+    node_type: Some(X)    node_type: None        node_type: None
+    (frontmatter)          listado en              listado en
+                           tool_configurations     llm_call.skills
+                           .<alias>.skills         (y NO en ningún
+                                                   tool.skills)
+         |                      |                     |
+         v                      v                     v
+      CAPA 1               CAPA 2                CAPA 3
+  guía de node-type     específica de tool    conocimiento general
+  ──────────────────    ─────────────────     ──────────────────
+  Se inyecta en el      Aparece en el         Siempre en el
+  bloque de contexto    catálogo load_skill   catálogo load_skill
+  de toda tool cuyo     SOLO tras el          desde el turno 1
+  node_type coincide    describe_tool del
+  (auto-folded).        tool padre.
+  NUNCA en load_skill.
+```
+
+Reglas de clasificación implementadas en:
+- `load_skill_tool.rs:46-65` (`filter_visible_skills`) — las tres ramas (layer 1 excluida, layer 2 gated, layer 3 libre).
+- `llm.rs:2938-2954` (`augment_builtin_names`) — auto-registro de layer-1 y layer-2 en el pool de builtins.
+- `skill_repository.rs:24-28` (`find_by_node_type`) — lookup de guía layer-1 por node_type.
+
+---
+
+### Diagrama 2 — Qué retorna describe_tool (el bloque que ve el LLM)
+
+El flujo desde la llamada al tool hasta el markdown final.
+
+```
+[LLM llama describe_tool(name="X")]
+         |
+         v
+dispatch_describe_tool(tool_call, lookup, skill_repo, registry)
+(describe_tool.rs:162)
+         |
+         v
+generate_tool_markdown_async(cfg, node, skill_repo)
+(describe_tool.rs:69)
+         |
+         v
+build_tool_context_block(cfg, node, fixed_effective, repo, BlockVariant::Lazy)
+(tool_context.rs:56)
+         |
+         v  secciones en orden:
+         |
+         +-- "# {name}\n\n{description}"
+         |   (tool_context.rs:66-68)          <- SIEMPRE presente
+         |
+         +-- "## Access policy\n{policy}"
+         |   (tool_context.rs:71-75)          <- SOLO si node.tool_description_supplement(fixed)
+         |                                       retorna Some(_)  (node.rs:49)
+         |
+         +-- "## Best practices\n{guide}"
+         |   (tool_context.rs:79-93)          <- SOLO si repo.find_by_node_type(cfg.node_type)
+         |                                       retorna Some(_)  (skill_repository.rs:24)
+         |                                       {{NODE_GUIDE_BODY}} se reemplaza async via
+         |                                       repo.load_skill(entry.name)  (describe_tool.rs:99-108)
+         |
+         +-- "## Parameters\n| tabla |"
+         |   (tool_context.rs:96-118)         <- SOLO en BlockVariant::Lazy
+         |                                       (EagerOrNonLazy lo omite)
+         |
+         +-- "## Related knowledge\n- ..."
+         |   (tool_context.rs:121-140)        <- SOLO si cfg.skills es no-vacío
+         |                                       (lista anuncios de layer-2 con descripción)
+         |
+         v
+build_effective_fixed(cfg)  ← fusiona fixed_config + node_schema[fixed]
+(tool_context.rs:23)        <- usado para resolver la policy
+
+---
+"The tool `X` is now available. Call it directly on your next turn."
+(describe_tool.rs:111-113)                    <- footer añadido por el wrapper, SIEMPRE
+```
+
+Para auditar: las cuatro condiciones (`if let Some(policy)`, `if let Some(guide_entry)`,
+`if variant == BlockVariant::Lazy`, `if !cfg.skills.is_empty()`) están consecutivas
+en `tool_context.rs:71-140`.
+
+---
+
+### Diagrama 3 — Visibilidad de load_skill a lo largo del tiempo (modo lazy)
+
+Timeline turno a turno de qué aparece en el catálogo de `load_skill`
+conforme el modelo descubre tools.
+
+```
+                TURNO 1                    TURNO 2
+                                    (tras describe_tool("X"))
+
+tools[] expuestos:
+         ┌──────────────────┐        ┌──────────────────┐
+         │ describe_tool    │        │ X (schema typed) │ <- X promovida del catálogo
+         │   catálogo:      │        ├──────────────────┤
+         │   X (summary)    │        │ describe_tool    │
+         │   Y (summary)    │        │   catálogo:      │
+         └──────────────────┘        │   Y (summary)    │ <- Y sigue pendiente
+                                     └──────────────────┘
+
+discovered_set:  {}                  {"X"}
+(reconstruida desde historial de mensajes por request)
+(lazy_tools_catalog.rs:30)
+
+Catálogo de load_skill (reconstruido por request vía tools_provider):
+(llm.rs:2072)
+         ┌──────────────────┐        ┌──────────────────┐
+         │                  │        │ skills de X      │ <- layer-2 de X ahora visible
+         │ (vacío — layer-2 │        │ (layer-2 gated)  │    porque "X" in discovered_set
+         │  gated, layer-1  │        ├──────────────────┤
+         │  excluida)       │        │ skills layer-3   │ <- layer-3 siempre presente
+         │                  │        │ (free-standing)  │    (si las hay configuradas)
+         └──────────────────┘        └──────────────────┘
+         Ninguna skill en             El modelo ya puede
+         load_skill todavía           llamar load_skill
+                                      para skills de X
+
+Regla de visibilidad aplicada en cada llamada al tools_provider closure:
+  - Layer 1 (node_type set)  → excluida siempre  (load_skill_tool.rs:47)
+  - Layer 2 (tool.skills)    → solo si tool en discovered_set  (load_skill_tool.rs:58-65)
+  - Layer 3 (free-standing)  → siempre incluida  (load_skill_tool.rs:51-55)
+```
+
+El `tools_provider` closure (definido en `llm.rs:2072`) se invoca fresco
+en cada iteración ReAct: reconstruye `discovered_set` desde el historial de
+mensajes del request actual (`lazy_tools_catalog.rs:30`) y llama a
+`filter_visible_skills` (`load_skill_tool.rs:32`) para producir el catálogo
+actualizado. Si el catálogo filtrado está vacío, `load_skill` no se expone
+(`load_skill_tool.rs:79`).
+
+---
+
+### Diagrama 4 — Árbol de decisión: ¿dónde va mi skill?
+
+Para un autor escribiendo una nueva skill.
+
+```
+          ┌──────────────────────────────────────────┐
+          │ Voy a escribir una nueva SKILL.md.       │
+          │ ¿Dónde la pongo y cómo la conecto?       │
+          └───────────────────┬──────────────────────┘
+                              │
+           ┌──────────────────┴──────────────────────┐
+           |                                          |
+  ¿El contenido es específico               ¿El contenido es
+  de un tipo de nodo?                       dominio / negocio?
+  (ej. "cómo usar bien                      (ej. "cómo consultar
+  sql_query")                               nuestra tabla de ventas")
+           |                                          |
+           v                                          v
+      CAPA 1 (guía)                    ┌─────────────┴────────────────┐
+      ──────────────                   |                               |
+  Frontmatter:                ¿Está ligada a una tool         ¿Es conocimiento
+    node_type: <node>         específica del grafo?           general para todo
+    name, description         (el modelo la necesita          el agente?
+  Ubicación:                  solo cuando usa esa tool)
+    src/libs/colmena/                  |                               |
+    skills/<name>/                     v                               v
+    (built-in)                    CAPA 2 (scoped)               CAPA 3 (general)
+    O cualquier path              ──────────────────            ──────────────────
+    con el frontmatter        Frontmatter:                   Frontmatter:
+  Conexión:                     name, description              name, description
+    AUTOMÁTICA — el motor         (sin node_type)                (sin node_type)
+    la asocia a toda tool       Conexión:                      Conexión:
+    con node_type coincidente     tool_configurations            llm_call.config.skills.
+    (augment_builtin_names,         .<alias>.skills:               builtin: [...]
+    llm.rs:2938)                    ["<nombre>"]                 O skills.paths: [...]
+  Visibilidad:                Visibilidad:                   Visibilidad:
+    Inyectada en el bloque      En catálogo load_skill         Siempre en catálogo
+    de contexto de la tool;     SOLO después del               load_skill desde
+    NUNCA en load_skill         describe_tool del              el turno 1
+    (load_skill_tool.rs:47)     tool padre
+                                (load_skill_tool.rs:58)
+                                                               (load_skill_tool.rs:51)
+```
+
+Para verificar los tres caminos: `filter_visible_skills` en
+`load_skill_tool.rs:32-68` implementa las tres ramas en secuencia (layer 1
+check línea 47, layer 3 check línea 51, layer 2 check línea 57). La
+auto-derivación de layer-1 y layer-2 al construir el pool de builtins está
+en `augment_builtin_names` (`llm.rs:2916-2957`).
