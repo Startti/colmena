@@ -51,23 +51,122 @@ Para agregar una nueva built-in skill: crea el directorio bajo `src/libs/colmena
 
 ## Skills del usuario (paths)
 
-Skills fuera del crate, referenciadas por path relativo al JSON del grafo:
+### Caso 1 — una sola skill
 
-```json
-{
-  "type": "llm_call",
-  "config": {
-    "skills": {
-      "paths": [
-        "./my-skills/customer-context",
-        "./my-skills/internal-apis"
-      ]
-    }
-  }
+Si el path apunta a un directorio que **contiene `SKILL.md` directamente** en su raíz, se interpreta como una skill individual:
+
+```
+my-skill/
+  SKILL.md
+  references/
+    notes.md
+```
+
+```jsonc
+"skills": { "paths": ["./my-skill"] }
+```
+
+### Caso 2 — una carpeta con muchas skills (root mode)
+
+Si el path apunta a un directorio que **NO contiene `SKILL.md` en su raíz**, se interpreta como un **root de skills** y escanea cada subdirectorio inmediato que tenga `SKILL.md`. Hijos sin `SKILL.md` (archivos sueltos, carpetas sin skill, etc.) se ignoran silenciosamente:
+
+```
+my-skills/                       ← le pasás ESTE path
+├── sales-analysis/              ← skill 1 (con references)
+│   ├── SKILL.md
+│   └── references/
+│       ├── kpis.md
+│       └── tables.md
+├── expense-analysis/            ← skill 2 (con references)
+│   ├── SKILL.md
+│   └── references/
+│       └── categories.md
+├── customer-context/            ← skill 3 (sin references — válido)
+│   └── SKILL.md
+└── notes.txt                    ← ignorado silenciosamente
+```
+
+```jsonc
+"skills": { "paths": ["./my-skills"] }
+```
+
+Las 3 skills se cargan automáticamente, con sus referencias listas para `load_skill`.
+
+### Reglas de auto-detección
+
+| Si el path... | El motor lo interpreta como | Carga |
+|---|---|---|
+| Tiene `SKILL.md` directo en su raíz | Skill individual | Solo esa skill |
+| NO tiene `SKILL.md` en su raíz | Root de skills | Cada subdirectorio inmediato que tenga `SKILL.md` (un solo nivel — no busca recursivamente más profundo) |
+
+**Importante**: el escaneo es de **un solo nivel**. Si tenés `my-skills/finance/sales-analysis/SKILL.md`, no se descubre — apuntá `paths` a `./my-skills/finance` (un entry por subgrupo) o aplaná la estructura.
+
+### Resolución de rutas
+
+- **Relativas** (`./my-skills`, `../shared`) → se resuelven contra el **directorio del JSON del grafo**, no contra el CWD del proceso.
+- **Absolutas** (`/opt/colmena/team-skills`) → usadas tal cual.
+
+### Symlinks
+
+Cada path se valida con `canonicalize()`. Symlinks que apuntan **dentro** de los directorios permitidos se siguen. Symlinks que escapan al exterior se **skipean silenciosamente** (no crashea) durante el escaneo de root; si el path raíz mismo escapa, se rechaza con `PathNotAllowed`.
+
+### Combinando con built-in
+
+Se pueden mezclar en el mismo `llm_call`:
+
+```jsonc
+"skills": {
+  "builtin": ["python-expert"],                        // del crate compilado
+  "paths":   ["./domain-skills", "/opt/shared-skills"] // del filesystem
 }
 ```
 
-Se pueden combinar built-in + paths en el mismo `llm_call`.
+Todas terminan en el mismo `SkillRepository` (vía `CompositeSkillRepository`). El catálogo de `load_skill` es la unión menos las layer-1 guides (excluidas) y menos las layer-2 no-descubiertas (gated por `describe_tool`).
+
+### Errores duros al cargar el grafo
+
+El motor valida estas reglas al construir el repo. Cualquier violación aborta la carga del grafo:
+
+| Error | Causa | Mensaje típico |
+|---|---|---|
+| `PathNotAllowed` | Path está fuera del directorio del grafo y no está en `COLMENA_SKILLS_ALLOWED_DIRS` | `"path '<canonical>' is not inside any allowed directory"` |
+| `NotADirectory` | El path resuelve a un archivo, no a un directorio | `"path '<canonical>' is not a directory"` |
+| `EmptyRoot` | Root sin ningún subdirectorio que tenga `SKILL.md` | `"root '<canonical>' contains no skill directories"` |
+| `NameMismatch` | El campo `name:` del frontmatter no coincide con el nombre del directorio | `"skill name 'foo' does not match directory name 'bar' in <path>"` |
+| `ReferenceFileMissing` | El frontmatter declara `references: [{name: kpis}]` pero falta `references/kpis.md` | `"reference file missing for skill '<name>': expected <path>"` |
+| `SkillNameCollision` | Dos skills (de paths distintos o built-in vs path) tienen el mismo `name:` | `"skill '<name>' is declared in multiple locations"` |
+| `FileTooLarge` | `SKILL.md` o una reference supera 64 KB | `"file too large: <path> (<size> bytes, limit 65536)"` |
+| `InvalidFrontmatter` | YAML inválido o falta `name`/`description` | `"invalid frontmatter in <path>: <reason>"` |
+
+Las validaciones ocurren **al cargar el grafo** (antes de ejecutar cualquier nodo) — si una skill está mal escrita, el grafo ni siquiera arranca. Eso evita errores en medio de una conversación con el LLM.
+
+### Cómo se usan las references
+
+Una skill puede dividir su contenido entre un `SKILL.md` corto (overview que sale a la primera) y varios `references/*.md` (cada uno hasta 64 KB, on demand).
+
+```markdown
+---
+name: sales-analysis
+description: How to analyze sales data — KPIs, tables, pitfalls.
+references:
+  - name: kpis
+    description: Detailed KPI formulas (revenue, AOV, conversion).
+  - name: tables
+    description: Schema of orders, order_items, customers tables.
+---
+
+# Sales analysis — overview
+
+Sales data live in `public.orders`. Common KPIs: revenue, AOV, top SKUs.
+For KPI formulas load reference `kpis`; for table schemas load `tables`.
+```
+
+En runtime:
+- `load_skill("sales-analysis")` → devuelve el body del `SKILL.md` (overview).
+- `load_skill("sales-analysis", "kpis")` → devuelve `references/kpis.md` (detalle).
+- `load_skill("sales-analysis", "tables")` → devuelve `references/tables.md`.
+
+El LLM decide qué cargar en función de la sub-tarea. Las references **no aparecen como tools separadas** — son sub-recursos que la propia tool `load_skill` puede pedir.
 
 ## Seguridad: allowed directories
 
