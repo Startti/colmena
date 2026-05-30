@@ -482,4 +482,52 @@ impl ExecutableNode for SqlNode {
     fn default_output(&self) -> Option<&str> {
         Some("output")
     }
+
+    fn tool_description_supplement(&self, fixed_config: &serde_json::Value) -> Option<String> {
+        // Only produce a supplement when an explicit permissions config exists.
+        // This keeps the block silent for graphs that haven't opted into the feature.
+        let perms_val = fixed_config.get("permissions")?;
+        let perms = crate::dag_engine::domain::sql_permissions::SqlPermissions::from_config(Some(perms_val))
+            .ok()?;
+        let max_rows = fixed_config
+            .get("runtime_limits")
+            .and_then(|r| r.get("max_rows"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(100);
+        Some(perms.describe_policy_for_llm(max_rows))
+    }
+}
+
+#[cfg(test)]
+mod tool_supplement_tests {
+    use super::*;
+    use crate::dag_engine::domain::node::ExecutableNode;
+    use std::sync::Arc;
+    use crate::dag_engine::infrastructure::sql_port_factory::SqlPortFactory;
+    use crate::dag_engine::infrastructure::pool_registry::{PgPoolRegistry, PoolConfig};
+
+    #[test]
+    fn supplement_returns_policy_when_permissions_present() {
+        let pool_registry = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+        let factory = Arc::new(SqlPortFactory::new(pool_registry));
+        let node = SqlNode::new(factory);
+        let fixed = serde_json::json!({
+            "permissions": { "preset": "read_write", "allowed_schemas": ["public"] },
+            "runtime_limits": { "max_rows": 25 }
+        });
+        let supp = node.tool_description_supplement(&fixed).expect("Some");
+        assert!(supp.contains("SELECT"));
+        assert!(supp.contains("public"));
+        assert!(supp.contains("25"));
+    }
+
+    #[test]
+    fn supplement_returns_none_when_permissions_missing() {
+        let pool_registry = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+        let factory = Arc::new(SqlPortFactory::new(pool_registry));
+        let node = SqlNode::new(factory);
+        let fixed = serde_json::json!({});
+        // No permissions key → returns None (no permissions configured)
+        assert!(node.tool_description_supplement(&fixed).is_none());
+    }
 }
