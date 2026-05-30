@@ -1,0 +1,166 @@
+{
+  "comment": "E2E roleplay: 3 role-specific sql_query tools + path-based skills with references. Setup done via chained sql_query nodes (one statement each), no external scripts. Log nodes used as sequencing barriers between setup steps.",
+  "metadata": {
+    "category": "agents",
+    "requires_env": ["GEMINI_API_KEY", "DATABASE_URL_GRAPHS"]
+  },
+  "nodes": {
+    "setup_params": {
+      "type": "input",
+      "config": {
+        "data": {
+          "q_create_inventory": "CREATE TABLE IF NOT EXISTS roleplay_t22.inventory (sku TEXT PRIMARY KEY, name TEXT NOT NULL, qty INT NOT NULL DEFAULT 0, reorder_point INT NOT NULL DEFAULT 10)",
+          "q_create_transactions": "CREATE TABLE IF NOT EXISTS roleplay_t22.transactions (id SERIAL PRIMARY KEY, sku TEXT NOT NULL, qty_delta INT NOT NULL, kind TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW())",
+          "q_seed_inventory": "INSERT INTO roleplay_t22.inventory (sku, name, qty, reorder_point) VALUES ('ABC-001', 'Widget Premium', 100, 20), ('ABC-002', 'Widget Standard', 5, 10), ('XYZ-999', 'Gadget Deluxe', 50, 15), ('DEF-100', 'Tool Basic', 8, 25) ON CONFLICT (sku) DO NOTHING",
+          "q_seed_transactions": "INSERT INTO roleplay_t22.transactions (sku, qty_delta, kind) VALUES ('ABC-001', -10, 'sale'), ('ABC-002', -3, 'sale'), ('XYZ-999', -5, 'sale'), ('ABC-001', 20, 'purchase')",
+          "connection_url": "${DATABASE_URL_GRAPHS}",
+          "full_permissions": {
+            "preset": "full",
+            "allowed_schemas": ["roleplay_t22"]
+          },
+          "rw_permissions": {
+            "preset": "read_write",
+            "allowed_schemas": ["roleplay_t22"]
+          }
+        }
+      }
+    },
+    "create_inventory_table": {
+      "type": "sql_query",
+      "config": {}
+    },
+    "after_create_inventory": {
+      "type": "log",
+      "config": {}
+    },
+    "create_transactions_table": {
+      "type": "sql_query",
+      "config": {}
+    },
+    "after_create_transactions": {
+      "type": "log",
+      "config": {}
+    },
+    "seed_inventory": {
+      "type": "sql_query",
+      "config": {}
+    },
+    "after_seed_inventory": {
+      "type": "log",
+      "config": {}
+    },
+    "seed_transactions": {
+      "type": "sql_query",
+      "config": {}
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "lazy_tool_loading": true,
+        "system_message": "You are an inventory operations assistant. You have three tools, each for a different role: cargar_inventario (record stock movements), consultar_ventas (analyze sales data), and monitor_stock (identify items below reorder point). Pick the right tool for the user's request, describe it to see its specific playbook, then act.",
+        "skills": {
+          "paths": ["./tests/graphs/skills/inventory_roleplay"]
+        },
+        "tool_configurations": {
+          "cargar_inventario": {
+            "name": "cargar_inventario",
+            "node_type": "sql_query",
+            "description": "Record inventory movements (purchases, sales, returns, adjustments).",
+            "summary": "Insert into transactions + update inventory.qty for a SKU.",
+            "skills": ["inventory-writer-playbook"],
+            "node_schema": {
+              "connection_url": { "type": "string", "fixed": "${DATABASE_URL_GRAPHS}" },
+              "permissions": {
+                "type": "object",
+                "fixed": { "preset": "read_write", "allowed_schemas": ["roleplay_t22"] }
+              },
+              "runtime_limits": {
+                "type": "object",
+                "fixed": { "max_rows": 50, "statement_timeout_ms": 15000 }
+              },
+              "guardrail_enabled": { "type": "boolean", "fixed": true },
+              "guardrail_llm": { "type": "object", "fixed": { "enabled": false } },
+              "query": { "type": "string", "required": true, "description": "SQL DML statement(s) that record the movement." }
+            }
+          },
+          "consultar_ventas": {
+            "name": "consultar_ventas",
+            "node_type": "sql_query",
+            "description": "Analyze sales and stock movement data (read-only).",
+            "summary": "SELECT queries over transactions and inventory tables.",
+            "skills": ["inventory-analyst-playbook"],
+            "node_schema": {
+              "connection_url": { "type": "string", "fixed": "${DATABASE_URL_GRAPHS}" },
+              "permissions": {
+                "type": "object",
+                "fixed": { "preset": "read_only", "allowed_schemas": ["roleplay_t22"] }
+              },
+              "runtime_limits": {
+                "type": "object",
+                "fixed": { "max_rows": 50, "statement_timeout_ms": 15000 }
+              },
+              "guardrail_enabled": { "type": "boolean", "fixed": true },
+              "guardrail_llm": { "type": "object", "fixed": { "enabled": false } },
+              "query": { "type": "string", "required": true, "description": "SQL SELECT query." }
+            }
+          },
+          "monitor_stock": {
+            "name": "monitor_stock",
+            "node_type": "sql_query",
+            "description": "Identify items below their reorder point (read-only).",
+            "summary": "SELECT items where qty <= reorder_point.",
+            "skills": ["stock-monitor-playbook"],
+            "node_schema": {
+              "connection_url": { "type": "string", "fixed": "${DATABASE_URL_GRAPHS}" },
+              "permissions": {
+                "type": "object",
+                "fixed": { "preset": "read_only", "allowed_schemas": ["roleplay_t22"] }
+              },
+              "runtime_limits": {
+                "type": "object",
+                "fixed": { "max_rows": 50, "statement_timeout_ms": 15000 }
+              },
+              "guardrail_enabled": { "type": "boolean", "fixed": true },
+              "guardrail_llm": { "type": "object", "fixed": { "enabled": false } },
+              "query": { "type": "string", "required": true, "description": "SQL SELECT query." }
+            }
+          }
+        },
+        "prompt": "¿Qué productos están por debajo del punto de reorden? Si hay alguno crítico, registra una compra de 30 unidades para reponerlo."
+      }
+    },
+    "result": { "type": "output", "config": { "label": "out" } }
+  },
+  "edges": [
+    { "from": "setup_params.q_create_inventory", "to": "create_inventory_table.query" },
+    { "from": "setup_params.connection_url", "to": "create_inventory_table.connection_url" },
+    { "from": "setup_params.full_permissions", "to": "create_inventory_table.permissions" },
+
+    { "from": "create_inventory_table", "to": "after_create_inventory" },
+
+    { "from": "after_create_inventory", "to": "create_transactions_table" },
+    { "from": "setup_params.q_create_transactions", "to": "create_transactions_table.query" },
+    { "from": "setup_params.connection_url", "to": "create_transactions_table.connection_url" },
+    { "from": "setup_params.full_permissions", "to": "create_transactions_table.permissions" },
+
+    { "from": "create_transactions_table", "to": "after_create_transactions" },
+
+    { "from": "after_create_transactions", "to": "seed_inventory" },
+    { "from": "setup_params.q_seed_inventory", "to": "seed_inventory.query" },
+    { "from": "setup_params.connection_url", "to": "seed_inventory.connection_url" },
+    { "from": "setup_params.rw_permissions", "to": "seed_inventory.permissions" },
+
+    { "from": "seed_inventory", "to": "after_seed_inventory" },
+
+    { "from": "after_seed_inventory", "to": "seed_transactions" },
+    { "from": "setup_params.q_seed_transactions", "to": "seed_transactions.query" },
+    { "from": "setup_params.connection_url", "to": "seed_transactions.connection_url" },
+    { "from": "setup_params.rw_permissions", "to": "seed_transactions.permissions" },
+
+    { "from": "seed_transactions.output", "to": "agent._setup_done" },
+    { "from": "agent", "to": "result" }
+  ]
+}
