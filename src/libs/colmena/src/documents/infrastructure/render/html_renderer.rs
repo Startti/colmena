@@ -187,7 +187,7 @@ fn render_body(ir: &HtmlIR, assets: &HashMap<String, String>) -> Markup {
     html! {
         div class=(layout_class) {
             @for slide in &ir.slides {
-                (render_slide(slide, assets))
+                (render_slide(slide, assets, ir))
             }
             @if ir.footer.enabled {
                 (render_footer(ir))
@@ -196,7 +196,7 @@ fn render_body(ir: &HtmlIR, assets: &HashMap<String, String>) -> Markup {
     }
 }
 
-fn render_slide(slide: &Slide, assets: &HashMap<String, String>) -> Markup {
+fn render_slide(slide: &Slide, assets: &HashMap<String, String>, ir: &HtmlIR) -> Markup {
     use crate::documents::domain::ir::html::SlideLayout;
     let class = match slide.layout {
         SlideLayout::Title => "slide slide--title",
@@ -211,7 +211,7 @@ fn render_slide(slide: &Slide, assets: &HashMap<String, String>) -> Markup {
                 @if let Some(sub) = &slide.subtitle { p.subtitle { (sub) } }
             }
             @for block in &slide.blocks {
-                (render_block(block, assets))
+                (render_block(block, assets, ir))
             }
         }
     }
@@ -260,7 +260,7 @@ fn render_run(r: &crate::documents::domain::ir::html::Run) -> Markup {
     }
 }
 
-fn render_block(b: &Block, assets: &HashMap<String, String>) -> Markup {
+fn render_block(b: &Block, assets: &HashMap<String, String>, ir: &HtmlIR) -> Markup {
     use crate::documents::domain::ir::html::{
         CalloutVariant, ChartSize, DeltaDirection, Gap, ImagePosition,
     };
@@ -376,8 +376,8 @@ fn render_block(b: &Block, assets: &HashMap<String, String>) -> Markup {
             });
             html! {
                 div class=(format!("block-two-columns {gap_class}")) id=(id) data-ratio=(ratio_str) {
-                    div.col { @for b in left { (render_block(b, assets)) } }
-                    div.col { @for b in right { (render_block(b, assets)) } }
+                    div.col { @for b in left { (render_block(b, assets, ir)) } }
+                    div.col { @for b in right { (render_block(b, assets, ir)) } }
                 }
             }
         }
@@ -387,9 +387,9 @@ fn render_block(b: &Block, assets: &HashMap<String, String>) -> Markup {
             });
             html! {
                 div class=(format!("block-three-columns {gap_class}")) id=(id) {
-                    div.col { @for b in left { (render_block(b, assets)) } }
-                    div.col { @for b in middle { (render_block(b, assets)) } }
-                    div.col { @for b in right { (render_block(b, assets)) } }
+                    div.col { @for b in left { (render_block(b, assets, ir)) } }
+                    div.col { @for b in middle { (render_block(b, assets, ir)) } }
+                    div.col { @for b in right { (render_block(b, assets, ir)) } }
                 }
             }
         }
@@ -431,11 +431,22 @@ fn render_block(b: &Block, assets: &HashMap<String, String>) -> Markup {
                 }
             }
         }
-        Block::AutoToc { id, title, depth } => html! {
-            nav.block-auto-toc id=(id) {
-                @if let Some(t) = title { strong { (t) } }
-                // Resolved fully in Task 9.3 — placeholder until then.
-                ol { li { "(TOC depth " (depth.to_string()) ")" } }
+        Block::AutoToc { id, title, depth } => {
+            use crate::documents::domain::ir::html::SlideLayout;
+            html! {
+                nav.block-auto-toc id=(id) {
+                    @if let Some(t) = title { strong { (t) } }
+                    ol {
+                        @for s in &ir.slides {
+                            @if (*depth == 1 && matches!(s.layout, SlideLayout::SectionDivider))
+                                || (*depth >= 2 && s.title.is_some()) {
+                                @if let Some(t) = &s.title {
+                                    li { a href=(format!("#{}", s.id)) { (t) } }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         },
     }
@@ -450,9 +461,102 @@ fn render_table_cell(c: &crate::documents::domain::ir::html::TableCell) -> Marku
     }
 }
 
-// (render_chart_init_scripts placeholder remains here from Task 9.1 — Task 9.3 replaces it)
-fn render_chart_init_scripts(_ir: &HtmlIR) -> String {
-    String::new()
+fn render_chart_init_scripts(ir: &HtmlIR) -> String {
+    let mut chunks = vec![];
+    for slide in &ir.slides {
+        collect_chart_inits(&slide.blocks, &mut chunks);
+    }
+    if chunks.is_empty() {
+        return String::new();
+    }
+    let body = chunks.join("\n");
+    format!("(function(){{\n{}\n}})();", body)
+}
+
+fn collect_chart_inits(blocks: &[Block], out: &mut Vec<String>) {
+    for b in blocks {
+        match b {
+            Block::Chart { id, chart, .. } => {
+                out.push(chart_init_for(id, chart));
+            }
+            Block::TwoColumns { left, right, .. } => {
+                collect_chart_inits(left, out);
+                collect_chart_inits(right, out);
+            }
+            Block::ThreeColumns {
+                left,
+                middle,
+                right,
+                ..
+            } => {
+                collect_chart_inits(left, out);
+                collect_chart_inits(middle, out);
+                collect_chart_inits(right, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn chart_init_for(block_id: &str, c: &crate::documents::domain::ir::html::ChartSpec) -> String {
+    use crate::documents::domain::ir::html::ChartType;
+    let type_str = match c.chart_type {
+        ChartType::Bar => "bar",
+        ChartType::Line => "line",
+        ChartType::Pie => "pie",
+        ChartType::Doughnut => "doughnut",
+        ChartType::Area => "line", // Chart.js: area = line with fill
+        ChartType::Scatter => "scatter",
+        ChartType::Radar => "radar",
+    };
+    let labels = c
+        .x_axis
+        .as_ref()
+        .and_then(|a| a.categories.as_ref())
+        .map(|cats| {
+            format!(
+                "[{}]",
+                cats.iter()
+                    .map(|s| format!("{:?}", s))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })
+        .unwrap_or_else(|| "[]".to_string());
+
+    let fill = matches!(c.chart_type, ChartType::Area);
+    let datasets = c
+        .series
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            format!(
+                r#"{{label:{name},data:[{data}],backgroundColor:getCss("--chart-palette-{i}"),borderColor:getCss("--chart-palette-{i}"),fill:{fill}}}"#,
+                name = format!("{:?}", s.name),
+                data = s.data
+                    .iter()
+                    .map(|d| d.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
+    format!(
+        r#"
+function getCss(name){{return getComputedStyle(document.documentElement).getPropertyValue(name).trim();}}
+new Chart(document.getElementById("chart_{id}"),{{
+  type: "{ty}",
+  data: {{ labels: {labels}, datasets: [{ds}] }},
+  options: {{ responsive: true, plugins: {{ legend: {{ display: {legend} }} }} }}
+}});"#,
+        id = block_id,
+        ty = type_str,
+        labels = labels,
+        ds = datasets,
+        legend = c.legend,
+    )
 }
 
 #[cfg(test)]
@@ -604,5 +708,40 @@ mod tests {
         }]);
         let html = render_blocking(ir);
         assert!(html.contains("youtube.com/embed/dQw4w9WgXcQ"));
+    }
+
+    #[test]
+    fn chart_block_generates_init_script_with_correct_type() {
+        let mut ir = minimal_ir();
+        ir["slides"][0]["blocks"] = json!([{
+            "kind":"chart","id":"blk_c",
+            "chart": {
+                "chart_type":"bar",
+                "series":[{"name":"A","data":[1,2,3]}],
+                "x_axis":{"categories":["x","y","z"]},
+                "legend":true
+            },
+            "title":"Sales", "size":"medium"
+        }]);
+        let html = render_blocking(ir);
+        assert!(html.contains("new Chart"), "no Chart init: {html}");
+        assert!(html.contains(r#"type: "bar""#), "wrong chart type");
+        assert!(html.contains("chart_blk_c"), "wrong canvas id reference");
+    }
+
+    #[test]
+    fn auto_toc_depth_1_lists_section_dividers_only() {
+        let mut ir = minimal_ir();
+        ir["layout_mode"] = json!("slides");
+        ir["slides"] = json!([
+            {"id":"sl_a","layout":"section_divider","title":"Part I","subtitle":null,"notes":null,"blocks":[]},
+            {"id":"sl_b","layout":"content","title":"Detail","subtitle":null,"notes":null,
+             "blocks":[{"kind":"auto_toc","id":"blk_toc","title":"Agenda","depth":1}]},
+            {"id":"sl_c","layout":"section_divider","title":"Part II","subtitle":null,"notes":null,"blocks":[]}
+        ]);
+        let html = render_blocking(ir);
+        assert!(html.contains("Part I"));
+        assert!(html.contains("Part II"));
+        assert!(html.contains(r##"href="#sl_a""##));
     }
 }
