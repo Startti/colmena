@@ -114,6 +114,16 @@ impl BuiltinSkillRepository {
             })
             .collect()
     }
+
+    /// Names of every SKILL.md compiled into the binary via `include_dir!`.
+    /// Used by callers that want to know which names are available before
+    /// constructing a repo — e.g. to auto-derive the load list from
+    /// `tool_configurations.*.skills`.
+    ///
+    /// Excludes the reserved `_placeholder` entry.
+    pub fn available_builtin_names() -> Vec<String> {
+        Self::all_available_names()
+    }
 }
 
 #[async_trait]
@@ -201,6 +211,35 @@ mod tests {
     fn all_available_names_excludes_placeholder() {
         let names = BuiltinSkillRepository::all_available_names();
         assert!(!names.contains(&"_placeholder".to_string()));
+    }
+
+    #[test]
+    fn available_builtin_names_includes_authored_skills() {
+        let names = BuiltinSkillRepository::available_builtin_names();
+        assert!(
+            names.contains(&"sql_query-guide".to_string()),
+            "expected sql_query-guide in: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"sales-analysis".to_string()),
+            "expected sales-analysis in: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"expense-analysis".to_string()),
+            "expected expense-analysis in: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"python-expert".to_string()),
+            "expected python-expert in: {:?}",
+            names
+        );
+        assert!(
+            !names.contains(&"_placeholder".to_string()),
+            "_placeholder must not appear in available_builtin_names"
+        );
     }
 
     #[tokio::test]
