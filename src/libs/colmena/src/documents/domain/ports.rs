@@ -1,8 +1,9 @@
 use super::artifact::{ArtifactMeta, ArtifactSummary, VersionData};
-use super::error::{DocumentError, IndexError, RenderError, StorageError};
-use super::ids::{ArtifactId, SessionId, VersionId};
+use super::error::{AssetError, DocumentError, IndexError, RenderError, StorageError};
+use super::ids::{ArtifactId, AssetId, SessionId, VersionId};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 
 #[async_trait]
 pub trait ArtifactStore: Send + Sync {
@@ -92,4 +93,62 @@ pub trait SessionArtifactIndex: Send + Sync {
     ) -> Result<(), IndexError>;
 
     async fn unregister(&self, id: &ArtifactId) -> Result<(), IndexError>;
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AssetSummary {
+    pub id: AssetId,
+    pub session_id: SessionId,
+    pub mime: String,
+    pub size_bytes: u64,
+    pub label: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[async_trait]
+pub trait AssetStore: Send + Sync {
+    async fn upload(
+        &self,
+        session: &SessionId,
+        id: &AssetId,
+        bytes: Vec<u8>,
+        mime: &str,
+        label: Option<&str>,
+    ) -> Result<(), AssetError>;
+
+    async fn read(&self, id: &AssetId) -> Result<(Vec<u8>, String), AssetError>;
+
+    async fn list_by_session(
+        &self,
+        session: &SessionId,
+    ) -> Result<Vec<AssetSummary>, AssetError>;
+
+    async fn delete(&self, id: &AssetId) -> Result<(), AssetError>;
+
+    async fn head(&self, id: &AssetId) -> Result<AssetSummary, AssetError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::documents::domain::ids::{AssetId, SessionId};
+
+    #[tokio::test]
+    async fn asset_store_trait_is_dyn_compatible() {
+        // Compile-time check: we can build a trait object.
+        fn _accepts(_: std::sync::Arc<dyn AssetStore>) {}
+    }
+
+    #[test]
+    fn asset_summary_has_required_fields() {
+        let s = AssetSummary {
+            id: AssetId::new("asset_1"),
+            session_id: SessionId::new("sess_1"),
+            mime: "image/png".into(),
+            size_bytes: 1024,
+            label: Some("logo".into()),
+            created_at: chrono::Utc::now(),
+        };
+        assert_eq!(s.mime, "image/png");
+    }
 }
