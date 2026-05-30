@@ -200,11 +200,13 @@ mod tests {
                     name: "python-expert".to_string(),
                     description: "Python stuff".to_string(),
                     source: SkillSource::Builtin,
+                    node_type: None,
                 },
                 SkillCatalogEntry {
                     name: "sql-optimizer".to_string(),
                     description: "SQL stuff".to_string(),
                     source: SkillSource::Builtin,
+                    node_type: None,
                 },
             ]
         }
