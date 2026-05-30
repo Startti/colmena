@@ -1472,6 +1472,23 @@ impl ExecutableNode for LlmNode {
                 .unwrap_or_default()
         };
 
+        // ---- Skill wiring validation --------------------------------------------------
+        // Runs once at the start of node execution (graph-load equivalent for DAG nodes).
+        // Aborts execution on any hard wiring error (duplicate node-type guides, unknown
+        // skill names, node-type guide referenced in tool.skills).
+        if let Some(repo) = &skill_repo {
+            // Collect all skill names explicitly listed in the llm_call-level skills
+            // config block (builtin + any loaded from filesystem paths). The full
+            // catalog from list_available() is the authoritative set of those names.
+            let llm_call_skill_names: Vec<String> = repo
+                .list_available()
+                .into_iter()
+                .map(|e| e.name)
+                .collect();
+            validate_skill_wiring(&tool_configurations, &llm_call_skill_names, repo.as_ref())
+                .map_err(|e| format!("skill wiring error: {}", e))?;
+        }
+
         // ---- Lazy tool loading config -------------------------------------------------
         let lazy_tool_loading: bool = inputs
             .get("lazy_tool_loading")
@@ -2833,6 +2850,84 @@ fn build_initial_user_message(
     LlmMessage::user(prompt.to_string())
 }
 
+/// Validate skill wiring at graph-load time.
+///
+/// Checks performed:
+/// 1. No two skills in the repository claim the same `node_type` (duplicate node-type guides).
+/// 2. Every skill name in `tool_configurations[*].skills` resolves to a known skill.
+/// 3. No skill in `tool_configurations[*].skills` is a node-type guide (those are
+///    layer-1 and are auto-loaded by the engine; putting them in `tool.skills` is an error).
+/// 4. (Warning, not error) Skills in `llm_call_skill_names` that are node-type guides
+///    are quietly ignored — the engine handles them automatically.
+///
+/// Returns `Err(String)` with a human-readable message on the first violation found.
+fn validate_skill_wiring(
+    tool_configurations: &HashMap<String, ToolConfiguration>,
+    llm_call_skill_names: &[String],
+    skill_repo: &dyn crate::skills::domain::SkillRepository,
+) -> Result<(), String> {
+    use std::collections::HashSet;
+
+    let catalog = skill_repo.list_available();
+
+    // ---- 1. Duplicate node_type guides ----------------------------------------
+    let mut seen_node_types: HashMap<String, String> = HashMap::new();
+    for entry in &catalog {
+        if let Some(nt) = entry.node_type.as_deref() {
+            if let Some(prev) = seen_node_types.get(nt) {
+                return Err(format!(
+                    "node_type '{}' is claimed by skills '{}' and '{}'; only one guide per node_type is allowed",
+                    nt, prev, entry.name
+                ));
+            }
+            seen_node_types.insert(nt.to_string(), entry.name.clone());
+        }
+    }
+
+    // ---- Build lookup sets for checks 2 & 3 -----------------------------------
+    let all_names: HashSet<&str> = catalog.iter().map(|e| e.name.as_str()).collect();
+    let guide_names: HashSet<&str> = catalog
+        .iter()
+        .filter(|e| e.node_type.is_some())
+        .map(|e| e.name.as_str())
+        .collect();
+
+    // ---- 2 & 3. Per-tool skills validation ------------------------------------
+    for (tool_name, cfg) in tool_configurations {
+        for skill in &cfg.skills {
+            if !all_names.contains(skill.as_str()) {
+                return Err(format!(
+                    "tool '{}' references unknown skill '{}'",
+                    tool_name, skill
+                ));
+            }
+            if guide_names.contains(skill.as_str()) {
+                let node_type_str = catalog
+                    .iter()
+                    .find(|e| e.name == *skill)
+                    .and_then(|e| e.node_type.clone())
+                    .unwrap_or_default();
+                return Err(format!(
+                    "skill '{}' is a node-type guide (frontmatter node_type: {}); it cannot be referenced in tool.skills — node-type guides are auto-loaded by the engine",
+                    skill, node_type_str
+                ));
+            }
+        }
+    }
+
+    // ---- 4. Warn (don't fail) when llm_call.skills lists a node-type guide ----
+    for name in llm_call_skill_names {
+        if guide_names.contains(name.as_str()) {
+            colmena_log!(
+                "WARN: skill '{}' is a node-type guide; it is ignored in llm_call.skills (node-type guides are auto-loaded for matching tools)",
+                name
+            );
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod build_initial_user_message_tests {
     use super::*;
@@ -3786,5 +3881,158 @@ mod filter_enabled_tools_tests {
         let out = filter_enabled_tools(api_explorer_catalog(), Some(&enabled), &configured);
 
         assert!(out.is_empty(), "expected empty result, got {:?}", out);
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    //! TDD tests for `validate_skill_wiring`.
+    //! Tests written before the function exists — expect compile failure (RED).
+    use super::validate_skill_wiring;
+    use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
+    use crate::skills::domain::{Skill, SkillCatalogEntry, SkillError, SkillReference, SkillRepository, SkillSource};
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+
+    // ------------------------------------------------------------------ helpers
+
+    fn make_tool_cfg(name: &str, skills: Vec<&str>) -> ToolConfiguration {
+        #[allow(deprecated)]
+        ToolConfiguration {
+            name: name.to_string(),
+            description: String::new(),
+            node_type: "noop".to_string(),
+            fixed_config: HashMap::new(),
+            exposed_inputs: None,
+            parameters: None,
+            mergeable_fields: None,
+            field_mapping: None,
+            node_schema: None,
+            node_config: None,
+            expose_sub_tools: None,
+            summary: None,
+            eager: false,
+            skills: skills.into_iter().map(String::from).collect(),
+        }
+    }
+
+    /// A minimal mock skill repository.
+    struct MockSkillRepo {
+        entries: Vec<SkillCatalogEntry>,
+    }
+
+    impl MockSkillRepo {
+        fn with_entries(entries: Vec<SkillCatalogEntry>) -> Self {
+            Self { entries }
+        }
+    }
+
+    #[async_trait]
+    impl SkillRepository for MockSkillRepo {
+        fn list_available(&self) -> Vec<SkillCatalogEntry> {
+            self.entries.clone()
+        }
+
+        async fn load_skill(&self, name: &str) -> Result<Skill, SkillError> {
+            Err(SkillError::SkillNotFound(name.to_string()))
+        }
+
+        async fn load_reference(
+            &self,
+            skill_name: &str,
+            _reference_name: &str,
+        ) -> Result<SkillReference, SkillError> {
+            Err(SkillError::SkillNotFound(skill_name.to_string()))
+        }
+    }
+
+    fn entry(name: &str, node_type: Option<&str>) -> SkillCatalogEntry {
+        SkillCatalogEntry {
+            name: name.to_string(),
+            description: "d".to_string(),
+            source: SkillSource::Builtin,
+            node_type: node_type.map(String::from),
+        }
+    }
+
+    // ------------------------------------------------------------------ tests
+
+    #[test]
+    fn validation_rejects_duplicate_node_type_guides() {
+        // Two skills claiming the same node_type — must error.
+        let repo = MockSkillRepo::with_entries(vec![
+            entry("sql-guide-a", Some("sql_query")),
+            entry("sql-guide-b", Some("sql_query")),
+        ]);
+        let tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
+        let result = validate_skill_wiring(&tool_cfgs, &[], &repo);
+        assert!(result.is_err(), "expected error for duplicate node_type guides");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("sql_query"),
+            "error message should mention the node_type, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn validation_rejects_unknown_skill_in_tool_configuration() {
+        // A tool references "does-not-exist" which is not in the repo.
+        let repo = MockSkillRepo::with_entries(vec![entry("real-skill", None)]);
+        let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
+        tool_cfgs.insert("x".to_string(), make_tool_cfg("x", vec!["does-not-exist"]));
+
+        let result = validate_skill_wiring(&tool_cfgs, &[], &repo);
+        assert!(result.is_err(), "expected error for unknown skill reference");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("does-not-exist"),
+            "error message should mention the unknown skill name, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn validation_rejects_node_type_guide_referenced_as_scoped() {
+        // A skill with node_type set must NOT be in tool.skills.
+        let repo = MockSkillRepo::with_entries(vec![
+            entry("sql_query-guide", Some("sql_query")),
+        ]);
+        let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
+        tool_cfgs.insert(
+            "x".to_string(),
+            make_tool_cfg("x", vec!["sql_query-guide"]),
+        );
+
+        let result = validate_skill_wiring(&tool_cfgs, &[], &repo);
+        assert!(result.is_err(), "expected error when node-type guide used as scoped skill");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("sql_query-guide"),
+            "error message should mention the offending skill name, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("node-type guide"),
+            "error message should say 'node-type guide', got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn validation_passes_for_valid_configuration() {
+        // Happy path: one regular skill scoped to a tool, no duplicates.
+        let repo = MockSkillRepo::with_entries(vec![
+            entry("python-expert", None),
+            entry("sql_query-guide", Some("sql_query")),
+        ]);
+        let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
+        tool_cfgs.insert(
+            "run_python".to_string(),
+            make_tool_cfg("run_python", vec!["python-expert"]),
+        );
+
+        let result = validate_skill_wiring(&tool_cfgs, &[], &repo);
+        assert!(result.is_ok(), "expected Ok for valid config, got: {:?}", result);
     }
 }
