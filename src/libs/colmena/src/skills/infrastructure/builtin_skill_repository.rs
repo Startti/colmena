@@ -247,4 +247,46 @@ mod tests {
         assert_eq!(entry.name, "sql_query-guide");
         assert_eq!(entry.node_type.as_deref(), Some("sql_query"));
     }
+
+    #[tokio::test]
+    async fn sales_analysis_is_layer_2_domain_skill() {
+        let repo = BuiltinSkillRepository::new(&["sales-analysis".to_string()]).unwrap();
+        let entries = repo.list_available();
+        let sales = entries
+            .iter()
+            .find(|e| e.name == "sales-analysis")
+            .expect("sales-analysis loaded");
+        assert!(
+            sales.node_type.is_none(),
+            "sales-analysis must be layer-2 (no node_type)"
+        );
+        assert!(sales.description.contains("sales data"));
+    }
+
+    #[tokio::test]
+    async fn expense_analysis_is_layer_2_domain_skill() {
+        let repo = BuiltinSkillRepository::new(&["expense-analysis".to_string()]).unwrap();
+        let entries = repo.list_available();
+        let expense = entries
+            .iter()
+            .find(|e| e.name == "expense-analysis")
+            .expect("expense-analysis loaded");
+        assert!(
+            expense.node_type.is_none(),
+            "expense-analysis must be layer-2 (no node_type)"
+        );
+        assert!(expense.description.contains("expenses"));
+    }
+
+    #[tokio::test]
+    async fn both_domain_skills_can_coexist() {
+        let repo = BuiltinSkillRepository::new(&[
+            "sales-analysis".to_string(),
+            "expense-analysis".to_string(),
+        ])
+        .unwrap();
+        let listed: Vec<String> = repo.list_available().into_iter().map(|e| e.name).collect();
+        assert!(listed.contains(&"sales-analysis".to_string()));
+        assert!(listed.contains(&"expense-analysis".to_string()));
+    }
 }
