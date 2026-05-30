@@ -13,6 +13,7 @@ Esta guía se ha dividido en varias secciones para facilitar su consulta.
 
 0.  [**Visión General de la Arquitectura**](./developer_guide/00_architecture_overview.md): Mapa maestro del sistema — qué es Colmena, cómo se organizan los módulos, cuáles son los puntos de entrada, ciclo de vida de un grafo, y dónde ir a aprender más. **Empieza aquí.**
 0.5. [**Onboarding — qué leer en qué orden según tu rol**](./ONBOARDING.md): Rutas de lectura por rol (quick start, usuario de librería, autor de grafos, contribuidor al engine) y tabla de búsqueda rápida por feature. Punto de entrada recomendado antes de explorar el resto de guías.
+0.6. [**Codebase Tour — recorrido módulo por módulo del árbol Rust**](./CODEBASE_TOUR.md): Para desarrolladores que quieren contribuir al engine. Recorre cada módulo (`dag_engine/`, `llm/`, `skills/`, `storage/`, `documents/`, `web/`, `shared/`, bindings, GC) con desglose por capa (domain/application/infrastructure), archivos clave verificados contra el código fuente, y patrones de contribución comunes. El puente entre `00_architecture_overview.md` y las guías individuales de cada feature.
 1.  [**Arquitectura del Proyecto**](./developer_guide/01_architecture.md): Principios de diseño, estructura de directorios y flujo de datos.
 2.  [**Configuración del Entorno**](./developer_guide/02_environment_setup.md): Cómo instalar las herramientas y configurar tu editor.
 3.  [**Convenciones de Código**](./developer_guide/03_coding_conventions.md): Estándares de nombrado, documentación y manejo de errores.

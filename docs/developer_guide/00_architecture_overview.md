@@ -211,6 +211,8 @@ Los eventos que el observer puede recibir están enumerados en `dag_engine/domai
 
 ## Sigue tu interés
 
+> **Para un recorrido archivo por archivo del árbol Rust**, ver [`CODEBASE_TOUR.md`](../CODEBASE_TOUR.md) — desglose módulo por módulo (domain/application/infrastructure) con archivos clave verificados y patrones de contribución comunes.
+
 | Quiero... | Lee |
 |-----------|-----|
 | Escribir mi primer grafo JSON | [12_dag_engine_guide.md](./12_dag_engine_guide.md) + [16_data_flow_guide.md](./16_data_flow_guide.md) |
