@@ -72,12 +72,6 @@ pub struct DagToolExecutor {
     /// metadata so the enclosing LlmNode can emit SSE events.
     skill_repository: Option<Arc<dyn crate::skills::domain::SkillRepository>>,
     skill_observer: Option<SkillObserver>,
-    /// Optional skill repository used when building tool definitions. When
-    /// present, `generate_tool_definition` appends the tool context block
-    /// (access policy + node-type guide + scoped skills) to every tool's
-    /// description. Distinct from `skill_repository` (which handles runtime
-    /// `load_skill` calls) so callers can wire them independently.
-    skill_repo: Option<Arc<dyn crate::skills::domain::SkillRepository>>,
     /// Optional documents context. When present, the executor intercepts the
     /// seven `document_*` synthetic tool calls and dispatches them to the
     /// underlying `DocumentRuntime` use cases instead of the normal
@@ -174,7 +168,6 @@ impl DagToolExecutor {
             agent_session_id: None,
             skill_repository: None,
             skill_observer: None,
-            skill_repo: None,
             documents_context: None,
             describe_tool_lookup: None,
             describe_tool_observer: None,
@@ -226,19 +219,6 @@ impl DagToolExecutor {
         repository: Arc<dyn crate::skills::domain::SkillRepository>,
     ) -> Self {
         self.skill_repository = Some(repository);
-        self
-    }
-
-    /// Builder: attach a SkillRepository used when building tool definitions.
-    ///
-    /// When set, `generate_tool_definition` will append the layered tool context
-    /// block (access policy + node-type guide + scoped skills announcement) to
-    /// the description of every generated [`crate::llm::domain::ToolDefinition`].
-    pub fn with_skill_repository(
-        mut self,
-        repo: Option<Arc<dyn crate::skills::domain::SkillRepository>>,
-    ) -> Self {
-        self.skill_repo = repo;
         self
     }
 
@@ -435,7 +415,7 @@ impl DagToolExecutor {
                 &tool_config.description,
                 tool_config,
                 node,
-                self.skill_repo.as_deref(),
+                self.skill_repository.as_deref(),
             )
             .await;
             return ToolDefinition {
@@ -458,7 +438,7 @@ impl DagToolExecutor {
                     &tool_config.description,
                     tool_config,
                     node,
-                    self.skill_repo.as_deref(),
+                    self.skill_repository.as_deref(),
                 )
                 .await;
                 return ToolDefinition {
@@ -508,7 +488,7 @@ impl DagToolExecutor {
                 &base_desc,
                 tool_config,
                 node,
-                self.skill_repo.as_deref(),
+                self.skill_repository.as_deref(),
             )
             .await;
             return ToolDefinition {
@@ -583,7 +563,7 @@ impl DagToolExecutor {
             &base_desc,
             tool_config,
             node,
-            self.skill_repo.as_deref(),
+            self.skill_repository.as_deref(),
         )
         .await;
 
@@ -2512,7 +2492,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_definition_description_includes_policy_for_sql_query() {
+    async fn tool_definition_description_includes_policy_when_supplement_returns_some() {
         use crate::dag_engine::domain::tool_configuration::{NodeSchema, NodeSchemaField};
         use crate::skills::infrastructure::BuiltinSkillRepository;
 
@@ -2576,7 +2556,7 @@ mod tests {
         );
 
         let executor = DagToolExecutor::new(registry, tool_configurations)
-            .with_skill_repository(Some(skill_repo));
+            .with_skills(skill_repo);
 
         let tools = executor.available_tools().await;
         let t = tools.iter().find(|t| t.name == "query_db").unwrap();
