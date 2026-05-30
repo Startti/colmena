@@ -444,34 +444,107 @@ fn describe_op(
             ..
         } => format!("Updated cell in {table_block_id} at row {row_id}, col {col_index}"),
 
-        // ---- HTML — slide level (handled in Phase 11/12) ----
-        AddSlide { .. } => "add_slide placeholder".to_string(),
-        DeleteSlide { .. } => "delete_slide placeholder".to_string(),
-        ReorderSlides { .. } => "reorder_slides placeholder".to_string(),
-        SetSlideLayout { .. } => "set_slide_layout placeholder".to_string(),
-        SetSlideTitle { .. } => "set_slide_title placeholder".to_string(),
-        SetSlideNotes { .. } => "set_slide_notes placeholder".to_string(),
+        // ---- HTML — slide level ----
+        AddSlide { layout, title, .. } => {
+            use crate::documents::domain::ir::html::SlideLayout;
+            match (layout, title.as_deref()) {
+                (SlideLayout::Title, Some(t)) => format!("Added title slide '{t}'"),
+                (SlideLayout::SectionDivider, Some(t)) => {
+                    format!("Added section divider '{t}'")
+                }
+                (l, Some(t)) => format!("Added {:?} slide '{t}'", l),
+                (l, None) => format!("Added {:?} slide", l),
+            }
+        }
+        DeleteSlide { slide_id } => format!("Deleted slide {slide_id}"),
+        ReorderSlides { order } => format!("Reordered slides to [{}]", order.join(", ")),
+        SetSlideLayout { slide_id, layout } => {
+            format!("Set slide {slide_id} layout to {:?}", layout)
+        }
+        SetSlideTitle { slide_id, title, .. } => match title {
+            Some(t) => format!("Set slide {slide_id} title to '{t}'"),
+            None => format!("Cleared slide {slide_id} title"),
+        },
+        SetSlideNotes { slide_id, notes } => match notes {
+            Some(_) => format!("Updated speaker notes on {slide_id}"),
+            None => format!("Cleared speaker notes on {slide_id}"),
+        },
 
-        // ---- HTML — block level (handled in Phase 11/12) ----
-        InsertHtmlBlock { .. } => "insert_html_block placeholder".to_string(),
-        DeleteHtmlBlock { .. } => "delete_html_block placeholder".to_string(),
-        ReplaceHtmlBlock { .. } => "replace_html_block placeholder".to_string(),
-        MoveHtmlBlock { .. } => "move_html_block placeholder".to_string(),
+        // ---- HTML — block level ----
+        InsertHtmlBlock { slide_id, block, .. } => {
+            let kind = block
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("block");
+            let id_part = ids
+                .block
+                .as_ref()
+                .map(|b| format!(" (id: {b})"))
+                .unwrap_or_default();
+            format!("Inserted {kind} block on slide {slide_id}{id_part}")
+        }
+        DeleteHtmlBlock { slide_id, block_id } => {
+            format!("Deleted block {block_id} from slide {slide_id}")
+        }
+        ReplaceHtmlBlock { block_id, .. } => format!("Replaced block {block_id}"),
+        MoveHtmlBlock {
+            block_id,
+            after_block_id,
+            ..
+        } => format!("Moved block {block_id} after {after_block_id}"),
 
-        // ---- HTML — table (handled in Phase 11/12) ----
-        InsertHtmlTableRow { .. } => "insert_html_table_row placeholder".to_string(),
-        DeleteHtmlTableRow { .. } => "delete_html_table_row placeholder".to_string(),
-        UpdateHtmlTableCell { .. } => "update_html_table_cell placeholder".to_string(),
+        // ---- HTML — table ----
+        InsertHtmlTableRow {
+            table_block_id, ..
+        } => format!("Inserted row in table {table_block_id}"),
+        DeleteHtmlTableRow {
+            table_block_id,
+            row_id,
+            ..
+        } => format!("Deleted row {row_id} from table {table_block_id}"),
+        UpdateHtmlTableCell {
+            table_block_id,
+            row_id,
+            col_index,
+            ..
+        } => format!("Updated cell ({row_id}, col {col_index}) of table {table_block_id}"),
 
-        // ---- HTML — list (handled in Phase 11/12) ----
-        InsertHtmlListItem { .. } => "insert_html_list_item placeholder".to_string(),
-        DeleteHtmlListItem { .. } => "delete_html_list_item placeholder".to_string(),
-        UpdateHtmlListItem { .. } => "update_html_list_item placeholder".to_string(),
+        // ---- HTML — list ----
+        InsertHtmlListItem {
+            list_block_id,
+            at_index,
+            ..
+        } => format!("Inserted list item at index {at_index} of {list_block_id}"),
+        DeleteHtmlListItem {
+            list_block_id,
+            item_id,
+            ..
+        } => format!("Deleted list item {item_id} from {list_block_id}"),
+        UpdateHtmlListItem {
+            list_block_id,
+            item_id,
+            ..
+        } => format!("Updated list item {item_id} in {list_block_id}"),
 
         // ---- HTML — document level ----
-        SetTheme { .. } => "set_theme placeholder".to_string(),
-        SetDocProps { .. } => "set_doc_props placeholder".to_string(),
-        SetFooter { .. } => "set_footer placeholder".to_string(),
+        SetTheme { theme } => {
+            format!("Set theme to {}", format!("{:?}", theme).to_lowercase())
+        }
+        SetDocProps { title, .. } => match title {
+            Some(t) => format!("Set document title to '{t}'"),
+            None => "Updated document props".into(),
+        },
+        SetFooter { footer } => {
+            if footer.enabled {
+                format!(
+                    "Enabled footer (page_numbers={}, custom='{}')",
+                    footer.page_numbers,
+                    footer.custom_text.as_deref().unwrap_or("")
+                )
+            } else {
+                "Disabled footer".into()
+            }
+        }
     }
 }
 
@@ -713,5 +786,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.version_id.0, "v2");
+    }
+
+    #[test]
+    fn describe_op_add_slide_includes_layout_and_title() {
+        use crate::documents::domain::artifact::OpOutcome;
+        use crate::documents::domain::ir::html::SlideLayout;
+        let op = PatchOp::AddSlide {
+            layout: SlideLayout::Title,
+            at_index: None,
+            title: Some("Welcome".into()),
+            subtitle: None,
+        };
+        let outcome = OpOutcome::default();
+        let s = describe_op(&op, &outcome);
+        assert!(s.contains("Welcome"));
+        assert!(s.to_lowercase().contains("title"));
+    }
+
+    #[test]
+    fn describe_op_set_theme_mentions_theme() {
+        use crate::documents::domain::artifact::OpOutcome;
+        use crate::documents::domain::ir::html::Theme;
+        let op = PatchOp::SetTheme { theme: Theme::Dark };
+        let s = describe_op(&op, &OpOutcome::default());
+        assert!(s.to_lowercase().contains("theme"));
+        assert!(s.to_lowercase().contains("dark"));
     }
 }
