@@ -162,6 +162,102 @@ Los assets se referencian desde la IR vía `src: { kind: "asset", asset_id: "ass
 
 ---
 
+### 3.5. Cumplimiento de arquitectura hexagonal
+
+Este módulo respeta estrictamente el patrón **Ports & Adapters** (hexagonal). Esto NO es decoración — es la garantía de que (a) el dominio se puede testear sin GCS / sin filesystem / sin Chart.js, (b) cambiar de `LocalFsAssetStore` a `GcsAssetStore` no toca código de aplicación, y (c) el renderer puede swapearse a otra librería en v2 sin tocar el dominio.
+
+#### Regla de oro de dependencias
+
+```
+              ┌──────────────────────────┐
+              │   infrastructure/        │
+              │  (adapters, libs ext.)   │
+              └────────────┬─────────────┘
+                           │ depende de
+                           ▼
+              ┌──────────────────────────┐
+              │     application/         │
+              │     (use cases)          │
+              └────────────┬─────────────┘
+                           │ depende de
+                           ▼
+              ┌──────────────────────────┐
+              │       domain/            │
+              │  (entidades + ports)     │
+              └──────────────────────────┘
+```
+
+**Flechas SOLO apuntan hacia adentro.** El dominio no sabe que existe `infrastructure/`. Aplicación no sabe que `HtmlRenderer` usa `maud` ni que `LocalFsAssetStore` usa `std::fs`.
+
+Composición concreta (qué adapter usar en runtime) ocurre **únicamente** en `application/runtime.rs` (`DocumentRuntime::from_config` / `with_stores`) — el "composition root" del módulo. Es el único lugar donde se importan adapters concretos para construir el `Arc<dyn Port>` que se pasa a use cases y a otros adapters.
+
+#### Catálogo de ports (todos en `domain/ports.rs`)
+
+| Port (trait) | Responsabilidad | Adapters existentes (infra) | Nuevos en esta spec |
+|---|---|---|---|
+| `ArtifactStore` | Persistencia de IR + binarios versionados | `LocalFsStore`, `GcsArtifactStore` | — |
+| `AssetStore` | Persistencia de binarios scoped por sesión | — | `LocalFsAssetStore`, `GcsAssetStore` |
+| `IRRenderer` | IR → bytes (kind-specific) | `ExcelRenderer`, `WordRenderer` | `HtmlRenderer` |
+| `IRValidator` | Schema + business rules de IR | `ExcelValidator`, `WordValidator` | `HtmlValidator` |
+| `IdGenerator` | Genera IDs estables para entidades | `UlidIdGenerator` | (extendido con `new_asset_id`) |
+| `SessionArtifactIndex` | Mapa session→artifacts | impl Postgres existente | (sin cambios) |
+
+**Toda dependencia que un use case o un adapter tiene sobre "el mundo exterior" pasa por un trait en `domain/ports.rs`.** No hay excepciones.
+
+#### Por qué `HtmlValidator` vive en infrastructure y no en domain
+
+Caso de borde: las reglas que el validador chequea (unicidad de IDs, URL allowlist, chart consistency) **son** business rules. ¿Por qué entonces lo ponemos en infra?
+
+Porque la **implementación** usa herramientas de infra: regex (`regex` crate), parsing JSON (`serde_json`), traversal de árboles. La separación es:
+
+- **Domain** define qué se valida — vía el trait `IRValidator` y los tipos de error en `DocumentError`.
+- **Infrastructure** implementa cómo se chequea — con regex y serde.
+
+Si quisiéramos ser más puros, podríamos definir las reglas de validación como funciones puras `&HtmlIR → Result<(), ValidationError>` en domain y dejar al adapter solo el wiring. Para v1 es overkill — el patrón actual del crate (Excel/Word) tiene los validadores en infra y funciona bien.
+
+#### Por qué `HtmlRenderer` puede usar `AssetStore`
+
+El renderer (infra) recibe `Arc<dyn AssetStore>` para resolver `asset_id → bytes` al render. Eso es **un adapter dependiendo de un port** — completamente válido. La composición concreta `HtmlRenderer + LocalFsAssetStore` (o `+ GcsAssetStore`) ocurre en el composition root.
+
+El renderer **no** importa `LocalFsAssetStore` ni `GcsAssetStore`. Solo importa el trait. Si mañana agregamos `S3AssetStore`, el renderer no se entera.
+
+#### Pureza del dominio — checklist
+
+| Componente | Layer | Imports permitidos | Imports prohibidos |
+|---|---|---|---|
+| `HtmlIR`, `Block`, `ChartSpec`, todos los enums (`Theme`, `LayoutMode`, `Locale`, ...) | domain | `std`, `serde`, `schemars`, `chrono` | cualquier cosa de `application/` o `infrastructure/` |
+| `PatchOp` (variantes HTML) | domain | idem | idem |
+| `AssetStore` trait | domain | `std`, `async_trait`, `chrono` | concretos de infra |
+| `AssetError`, `DocumentError` | domain | `std`, `thiserror` | adapters |
+| `IdGenerator` trait | domain | `std` | concretos |
+
+| Componente | Layer | Imports permitidos | Imports prohibidos |
+|---|---|---|---|
+| `HtmlOpApplier` | application | tipos de `domain/`, `IdGenerator` trait | `LocalFs*`, `Gcs*`, `maud`, `regex` |
+| `UploadAssetUseCase`, `ListAssetsUseCase`, `DeleteAssetUseCase` | application | `AssetStore` trait, `IdGenerator` trait, tipos de domain | adapters concretos |
+| `DocumentRuntime` (composition root) | application | Cualquier import permitido — único lugar excepcional | — |
+
+| Componente | Layer | Imports permitidos | Imports prohibidos |
+|---|---|---|---|
+| `HtmlRenderer` | infra | `maud`, tipos de `domain/`, traits de `domain/ports` | otros adapters concretos (solo vía port) |
+| `HtmlValidator` | infra | `regex`, `serde_json`, tipos de domain | otros adapters |
+| `LocalFsAssetStore`, `GcsAssetStore` | infra | `std::fs`, `tokio::fs`, GCS SDK, tipos de domain | otros adapters concretos |
+
+#### Test que blinda la regla
+
+Un test al nivel del crate verifica que `documents::domain::*` no importa de `documents::application::*` ni `documents::infrastructure::*`. Idem `application` no importa `infrastructure`. Se puede implementar con una macro custom o con un grep en CI:
+
+```bash
+# CI test — falla la build si alguien rompe la regla
+! grep -r "use crate::documents::infrastructure" src/libs/colmena/src/documents/domain/
+! grep -r "use crate::documents::application"   src/libs/colmena/src/documents/domain/
+! grep -r "use crate::documents::infrastructure" src/libs/colmena/src/documents/application/
+```
+
+Este check se agrega a CI como parte de la spec.
+
+---
+
 ## 4. Domain — IR y tipos
 
 ### 4.1. `ArtifactKind` extendido
@@ -219,7 +315,7 @@ pub struct HtmlIR {
     pub schema_version: String,    // "1.0.0"
 
     pub doc_props: DocProps,
-    pub theme: String,             // "executive" | "minimal" | "vibrant" | "dark"
+    pub theme: Theme,              // enum cerrado — no String libre
     pub layout_mode: LayoutMode,
     pub footer: FooterConfig,
     pub slides: Vec<Slide>,
@@ -245,6 +341,20 @@ pub enum Locale { En, Es }
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutMode { Report, Slides }
+
+/// Set cerrado de themes válidos. El validator NO chequea contra una lista
+/// de strings — el sistema de tipos lo garantiza al deserializar. Agregar
+/// un theme nuevo (v2+) = sumar variante a este enum + sumar archivo CSS
+/// en infrastructure/render/html_assets/themes/. Es un cambio coordinado
+/// dominio↔infra explícito, no un valor mágico.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    Executive,
+    Minimal,
+    Vibrant,
+    Dark,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FooterConfig {
@@ -668,7 +778,7 @@ UpdateHtmlListItem {
 
 ```rust
 #[serde(rename = "set_theme")]
-SetTheme { theme: String },
+SetTheme { theme: Theme },  // enum — el shape JSON falla en deserialize si el valor no es válido
 
 #[serde(rename = "set_doc_props")]
 SetDocProps {
@@ -747,7 +857,7 @@ Implementa `IRValidator`. Corre antes del renderer en `CreateDocumentUseCase` y 
 4. **Layouts válidos:**
    - `SlideLayout::Title` requiere `slide.title` no-vacío.
    - `SlideLayout::SectionDivider` requiere `slide.title` no-vacío.
-5. **Theme válido:** valor en `{"executive", "minimal", "vibrant", "dark"}`. Otros → error.
+5. **Theme válido:** garantizado por el sistema de tipos al deserializar el enum `Theme` (no requiere chequeo runtime; un valor inválido falla en `serde_json::from_value` antes de llegar al validator). Esta regla está acá listada solo para documentar la garantía.
 6. **Heading level:** `1..=6`.
 7. **Chart consistency:**
    - Para `ChartType::Bar | Line | Area | Radar`: si `x_axis.categories` está presente, `series[i].data.len() == categories.len()` para todo `i`.
@@ -771,7 +881,7 @@ Implementa `IRValidator`. Corre antes del renderer en `CreateDocumentUseCase` y 
 | `chart_mismatch_categories_vs_data` | Error con path al chart |
 | `link_with_javascript_scheme` | Error con mensaje "URL scheme not allowed" |
 | `image_data_url_with_script_payload` | Error (regex rechaza no-image) |
-| `unknown_theme_value` | Error |
+| `unknown_theme_value` | Error en deserialize (no llega al validator) |
 | `heading_level_7` | Error |
 | `pie_chart_two_series` | Error |
 | `nested_grids_4_deep` | Error |
@@ -839,6 +949,17 @@ const THEME_VIBRANT:   &str = include_str!("html_assets/themes/vibrant.css");
 const THEME_DARK:      &str = include_str!("html_assets/themes/dark.css");
 const CHART_JS:        &str = include_str!("html_assets/chart_js.min.js");
 const SLIDES_RUNTIME:  &str = include_str!("html_assets/slides_runtime.js");
+
+fn load_theme(theme: Theme) -> &'static str {
+    // El `match` es exhaustivo — agregar variante a Theme en domain obliga
+    // a sumar arm acá. Esa fricción es deliberada: dominio↔infra coordinados.
+    match theme {
+        Theme::Executive => THEME_EXECUTIVE,
+        Theme::Minimal   => THEME_MINIMAL,
+        Theme::Vibrant   => THEME_VIBRANT,
+        Theme::Dark      => THEME_DARK,
+    }
+}
 ```
 
 Carga condicional: Chart.js (~190KB) solo se inlinea si la IR contiene al menos un `Block::Chart`. `slides_runtime.js` (~3KB) solo si `layout_mode == "slides"`.
@@ -1158,41 +1279,52 @@ Esto alimenta el flujo de narración usuario→agente cuando aplique (Spec 2 exp
 
 ## 13. Estructura de directorios final
 
+Cada archivo se anota con su **layer hexagonal** y su **rol** (entity / value object / port / use case / adapter / composition root).
+
 ```
 src/libs/colmena/src/documents/
-├── domain/
-│   ├── ids.rs              # MOD: + Html, + AssetId
-│   ├── ports.rs            # MOD: + AssetStore, + AssetError
-│   ├── patch.rs            # MOD: + 19 variantes HTML
-│   ├── error.rs            # MOD: + AssetError
+├── domain/                                       ◄── LAYER: dominio (puro, sin deps externas)
+│   ├── ids.rs              # MOD: + ArtifactKind::Html (VO), + AssetId (VO)
+│   ├── ports.rs            # MOD: + AssetStore trait (PORT)
+│   ├── patch.rs            # MOD: + 19 variantes HTML de PatchOp (entity)
+│   ├── error.rs            # MOD: + AssetError (domain error)
 │   └── ir/
-│       ├── mod.rs          # MOD: + html
-│       └── html.rs         # NEW
-├── application/
-│   ├── apply_patch.rs      # MOD: + brazo Html
-│   ├── create_document.rs  # MOD: + brazo Html + empty_ir Html
-│   ├── apply_html_ops.rs   # NEW
-│   ├── upload_asset.rs     # NEW
-│   ├── list_assets.rs      # NEW
-│   ├── delete_asset.rs     # NEW
-│   └── runtime.rs          # MOD: + asset_store + 3 asset use cases
-└── infrastructure/
-    ├── ids.rs              # MOD: + new_asset_id
+│       ├── mod.rs          # MOD: + html re-export
+│       └── html.rs         # NEW: HtmlIR + Block + Run + Theme enum + Locale + ChartSpec (entities + VOs)
+│
+├── application/                                  ◄── LAYER: aplicación (orquesta dominio vía ports)
+│   ├── apply_patch.rs      # MOD: + brazo Html en match kind (use case orchestrator)
+│   ├── create_document.rs  # MOD: + brazo Html + empty_ir Html (use case)
+│   ├── apply_html_ops.rs   # NEW: HtmlOpApplier (puro — usa solo IdGenerator port)
+│   ├── upload_asset.rs     # NEW: UploadAssetUseCase (usa AssetStore + IdGenerator ports)
+│   ├── list_assets.rs      # NEW: ListAssetsUseCase (usa AssetStore port)
+│   ├── delete_asset.rs     # NEW: DeleteAssetUseCase (usa AssetStore + SessionArtifactIndex + ArtifactStore ports)
+│   └── runtime.rs          # MOD: + asset_store + 3 asset use cases (COMPOSITION ROOT — único lugar que importa adapters concretos)
+│
+└── infrastructure/                               ◄── LAYER: infra (adapters que implementan ports)
+    ├── ids.rs              # MOD: + new_asset_id (impl de IdGenerator port)
     ├── render/
     │   ├── mod.rs          # MOD: + html_renderer
-    │   ├── html_renderer.rs           # NEW
-    │   └── html_assets/               # NEW
+    │   ├── html_renderer.rs           # NEW: HtmlRenderer (ADAPTER de IRRenderer port; usa maud + AssetStore port)
+    │   └── html_assets/               # NEW: recursos estáticos del adapter
     │       ├── themes/{executive,minimal,vibrant,dark}.css
     │       ├── chart_js.min.js
     │       └── slides_runtime.js
     ├── validation/
     │   ├── mod.rs          # MOD: + html_validator
-    │   └── html_validator.rs          # NEW
+    │   └── html_validator.rs          # NEW: HtmlValidator (ADAPTER de IRValidator port; usa regex + serde_json)
     └── storage/
         ├── mod.rs          # MOD: + asset stores
-        ├── local_fs_asset_store.rs    # NEW
-        └── gcs_asset_store.rs         # NEW (#[cfg(feature = "gcs")])
+        ├── local_fs_asset_store.rs    # NEW: LocalFsAssetStore (ADAPTER de AssetStore port; usa tokio::fs)
+        └── gcs_asset_store.rs         # NEW: GcsAssetStore (ADAPTER de AssetStore port; usa GCS SDK; #[cfg(feature = "gcs")])
 ```
+
+### Reglas vinculantes sobre imports (verificadas en CI — ver §3.5)
+
+- Archivos en `domain/**` no pueden tener `use crate::documents::application::*` ni `use crate::documents::infrastructure::*`.
+- Archivos en `application/**` (excepto `runtime.rs`) no pueden tener `use crate::documents::infrastructure::*`.
+- `application/runtime.rs` es el composition root: SÍ puede importar adapters concretos. Es el único excepcional.
+- Archivos en `infrastructure/**` no pueden importarse entre sí (un adapter no conoce a otro adapter); solo dependen de `domain/`. Composición ocurre en `runtime.rs`.
 
 ---
 
@@ -1407,6 +1539,17 @@ Si ese test pasa, Spec 1 está completo y se puede empezar Spec 2 (integraciones
 - **SVG inline NO permitido en v1** (data:image/svg+xml rechazado; permitido solo via asset_id, con asunción de que el operador confía en lo que sube).
 - **MoveBlockToSlide queda fuera de v1.**
 - **Sin frontend de edición**: `PatchSource::User` no aplica para HTML hasta Spec 2 o posterior.
+
+### Decisiones explícitas de arquitectura hexagonal
+
+- **`Theme` es un enum en domain**, no un string libre. Esto traslada la regla "qué themes son válidos" del runtime (validator) al sistema de tipos (compile-time). Agregar un theme = sumar variante + sumar archivo CSS, en commit coordinado.
+- **`HtmlValidator` vive en infrastructure** (no domain) porque su implementación usa regex y serde_json (concerns de infra). El contrato (qué se valida, qué errores produce) sigue siendo del dominio vía el trait `IRValidator` y `DocumentError`.
+- **`HtmlRenderer` depende de `Arc<dyn AssetStore>`**, no de `LocalFsAssetStore` ni `GcsAssetStore`. El renderer no sabe ni le importa qué adapter lo implementa.
+- **El único composition root del módulo es `application/runtime.rs`**. Es el único archivo de aplicación que importa adapters concretos. Cualquier otro use case que intente importar `LocalFsAssetStore` o `GcsAssetStore` directamente es un bug arquitectónico.
+- **Adapters no se conocen entre sí.** `HtmlRenderer` no importa `LocalFsAssetStore`. La composición concreta (`HtmlRenderer::new(local_fs_asset_store)`) ocurre en el runtime.
+- **CI bloquea la regresión:** se agregan `grep` checks (§3.5) al pipeline que fallan si alguien importa cross-layer.
+- **`assets_referenced` en `HtmlIR`** es estado de dominio mantenido por `HtmlOpApplier` (aplicación). El validator chequea consistencia (set declarado === set real escaneado) como defensa adicional — pero no es la fuente de verdad operacional.
+- **`ChartSpec` normalizado** mantiene el dominio independiente de Chart.js. El renderer (infra) es el único que sabe cómo traducir `ChartSpec` → config de Chart.js. Swap a ApexCharts/ECharts en v2 = cambiar solo el renderer.
 
 ---
 
