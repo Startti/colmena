@@ -13,9 +13,6 @@
         "api_key": "${GEMINI_API_KEY}",
         "lazy_tool_loading": true,
         "system_message": "You analyze business data on demand using the available tools.",
-        "skills": {
-          "builtin": ["sql_query-guide", "sales-analysis", "expense-analysis"]
-        },
         "tool_configurations": {
           "consultar_ventas": {
             "name": "consultar_ventas",
