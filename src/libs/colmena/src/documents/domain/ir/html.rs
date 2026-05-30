@@ -1,0 +1,141 @@
+//! HTML IR — schema for the `Html` artifact kind.
+//!
+//! Pure domain types. No imports from application/ or infrastructure/.
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    Executive,
+    Minimal,
+    Vibrant,
+    Dark,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Locale {
+    En,
+    Es,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutMode {
+    Report,
+    Slides,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SlideLayout {
+    Title,
+    Content,
+    SectionDivider,
+    Blank,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ImagePosition {
+    Inline,
+    Full,
+    Hero,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ChartSize {
+    Small,
+    Medium,
+    Large,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ColumnRatio {
+    #[serde(rename = "50_50")]
+    FiftyFifty,
+    #[serde(rename = "40_60")]
+    FortySixty,
+    #[serde(rename = "60_40")]
+    SixtyForty,
+    #[serde(rename = "30_70")]
+    ThirtySeventy,
+    #[serde(rename = "70_30")]
+    SeventyThirty,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Gap {
+    Small,
+    Medium,
+    Large,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CalloutVariant {
+    Info,
+    Warning,
+    Success,
+    Danger,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DeltaDirection {
+    Up,
+    Down,
+    Neutral,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_serializes_lowercase() {
+        let s = serde_json::to_string(&Theme::Executive).unwrap();
+        assert_eq!(s, "\"executive\"");
+        let back: Theme = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, Theme::Executive);
+    }
+
+    #[test]
+    fn theme_invalid_value_rejected_at_deserialize() {
+        let r: Result<Theme, _> = serde_json::from_str("\"hot_pink\"");
+        assert!(r.is_err(), "expected rejection of unknown theme");
+    }
+
+    #[test]
+    fn locale_serializes_lowercase() {
+        assert_eq!(serde_json::to_string(&Locale::Es).unwrap(), "\"es\"");
+    }
+
+    #[test]
+    fn layout_mode_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&LayoutMode::Slides).unwrap(),
+            "\"slides\""
+        );
+    }
+
+    #[test]
+    fn slide_layout_section_divider_uses_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&SlideLayout::SectionDivider).unwrap(),
+            "\"section_divider\""
+        );
+    }
+
+    #[test]
+    fn column_ratio_uses_underscore() {
+        assert_eq!(
+            serde_json::to_string(&ColumnRatio::FortySixty).unwrap(),
+            "\"40_60\""
+        );
+    }
+}
