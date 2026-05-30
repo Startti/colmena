@@ -1,5 +1,41 @@
 # Documento de Diseño y Desarrollo (DDS) - Módulo LLM
 
+> **Status:** ⚠️ Partial (audited 2026-05-30). The three-layer architecture
+> (domain/application/infrastructure), the three main providers, PyO3 bindings, and the
+> env-var-based API key resolution are all still accurate at the structural level. The doc
+> is an early design spec that predates many capabilities that have since shipped.
+>
+> For current behavior see:
+> - [docs/developer_guide/14_llm_deep_dive.md](../developer_guide/14_llm_deep_dive.md)
+> - [docs/developer_guide/28_large_files_api.md](../developer_guide/28_large_files_api.md)
+> - [docs/developer_guide/31_load_attachment.md](../developer_guide/31_load_attachment.md)
+>
+> Specific divergences:
+> - **`LlmProvider` enum**: doc shows `{ OpenAi, Gemini, Anthropic }`. Actual `ProviderKind`
+>   enum (in `llm/domain/llm_provider.rs`) is `{ OpenAi, Google, Anthropic, Mock, Generated }`.
+>   Provider is named `"google"` not `"gemini"` in the string representation.
+> - **`LlmConfig` fields**: doc shows `provider`, `api_key`, `model`, `temperature`,
+>   `max_tokens`. Actual struct has many more: `top_p`, `thinking_budget`, `response_format`,
+>   `stop_sequences`, `tool_choice`, `cache_control`, and others.
+> - **`LlmRequest`**: doc shows `{ id, messages, config, stream }`. Actual struct also has
+>   `tools: Option<Vec<ToolDefinition>>`, `tool_choice`, and other fields needed for
+>   tool-calling. See `llm/domain/llm_request.rs`.
+> - **`LlmResponse`**: doc shows `{ id, request_id, content, usage, provider }`. Actual
+>   struct also carries `tool_calls`, `finish_reason`, `model`, `timestamp`, `message`
+>   (full `LlmMessage`), and `SuspendInfo`. See `llm/domain/llm_response.rs`.
+> - **`LlmStreamUseCase`**: exists (`llm/application/llm_stream_use_case.rs`) but in
+>   practice streaming is driven through `AgentService`, not a standalone use case.
+> - **ColmenaLlm Python class**: the `ColmenaLlm` pyclass exists
+>   (`src/libs/colmena/src/python_bindings/mod.rs:81`) but the bindings expose the full
+>   DAG engine, not just LLM calls. The Python API described in §4.2 may not reflect the
+>   current interface.
+> - **`LlmProviderFactory`**: exists in `llm/infrastructure/llm_provider_factory.rs` but
+>   also handles `Mock` and `Generated` variants, and provider adapters now support
+>   multi-modal attachments, Files API streaming, and structured-output extraction.
+> - **Acceptance criteria checkboxes**: all still shown unchecked — features are shipped.
+
+
+
 ## 1. Resumen Ejecutivo
 
 ### 1.1 Propósito

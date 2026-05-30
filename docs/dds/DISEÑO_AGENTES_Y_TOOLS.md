@@ -1,5 +1,36 @@
 # Plan de Diseño: Integración de Memoria y Tools (Agentes) en Colmena
 
+> **Status:** ⚠️ Partial (audited 2026-05-30). Phase 1 (memory) is complete and accurate.
+> The core `AgentService` + `ToolExecutor` trait split described in Phase 3 is also shipped.
+> However, the doc is a planning artifact from before the agent loop was built — it
+> describes what was planned, not what actually shipped, and it predates several major
+> additions: layered tool context, lazy tool loading (`describe_tool`), `tool_configurations`
+> with `node_schema`/`fixed_config`/`$DYNAMIC`, skills, `secure_suspend`, subgraph tools,
+> multimedia tools, and the `tool_description_supplement` hook on `ExecutableNode`.
+>
+> For current behavior see:
+> - [docs/developer_guide/09_tool_calling.md](../developer_guide/09_tool_calling.md)
+> - [docs/developer_guide/22_tool_execution_flow.md](../developer_guide/22_tool_execution_flow.md)
+> - [docs/developer_guide/24_skills.md](../developer_guide/24_skills.md)
+> - [docs/developer_guide/29_lazy_tool_loading.md](../developer_guide/29_lazy_tool_loading.md)
+> - [docs/node_as_tools_reference.json](../node_as_tools_reference.json)
+>
+> Specific divergences:
+> - **`AgentService` exists** (`src/libs/colmena/src/llm/application/agent_service.rs`) but
+>   the interface evolved — it handles streaming, `SUSPENDED` propagation from tools,
+>   structured-output extraction, skills, lazy tool loading, and multimedia tool results.
+> - **"Reutilización Masiva" claim** (any DAG node auto-becomes a tool): accurate — any node
+>   registered in the registry can be exposed via `tool_configurations`. But nodes need an
+>   explicit `tool_configurations` entry; there is no zero-config magic.
+> - **Layered tool context** (skills, `describe_tool`, `tool_description_supplement`,
+>   `tool_configurations.<name>.skills`): not mentioned in this doc at all — shipped
+>   2026-05-29. See `docs/developer_guide/24_skills.md` and the spec at
+>   `docs/superpowers/specs/2026-05-29-layered-tool-context-design.md`.
+> - **Phase 2 & 3 checkboxes**: shown as unchecked (`[ ]`) but these features are
+>   shipped — the checkboxes were never updated after implementation.
+
+
+
 Este documento detalla la estrategia de arquitectura para transformar el `LlmNode` actual (ejecución lineal) en un Agente autónomo capaz de mantener estado (Memoria) y ejecutar acciones (Tools), respetando la Arquitectura Hexagonal y el diseño del DAG Engine existente.
 
 ---

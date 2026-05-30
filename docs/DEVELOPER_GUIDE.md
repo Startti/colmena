@@ -2,6 +2,11 @@
 
 Esta guía está dirigida a desarrolladores que quieren contribuir, extender o entender en profundidad el funcionamiento de Colmena.
 
+> **Design docs (`docs/dds/`)** — Los documentos de diseño originales viven en `docs/dds/`.
+> Cada uno lleva un banner de estado (`✅ Current` / `⚠️ Partial` / `📜 Historical`) al
+> principio — lee el banner primero para saber cuánto confiar en el contenido antes de
+> profundizar.
+
 ## 📋 Tabla de Contenidos
 
 Esta guía se ha dividido en varias secciones para facilitar su consulta.

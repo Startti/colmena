@@ -1,5 +1,27 @@
 # Documento de Diseño y Desarrollo (DDS) - Sistema RAG Avanzado v2.2
 
+> **Status:** 📜 Historical (audited 2026-05-30). This document describes a RAG
+> (Retrieval-Augmented Generation) system that was designed but **never implemented** in
+> the Colmena codebase. A full-text search of `src/libs/colmena/src/` finds no RAG module,
+> no vector store port, no embedding model adapter, no `IngestionPipeline`, no
+> `RagPipeline`, no `DocumentSplitter` trait, and no `VectorStoreRepository` trait. There
+> is no `rag/` directory, no `chroma`, no `pinecone`, and no rayon-based parallel enrichers.
+>
+> The word "RAG" appears only in attachment/document-handling code that has nothing to do
+> with this design.
+>
+> For current behavior see:
+> - [docs/developer_guide/27_documents_library.md](../developer_guide/27_documents_library.md)
+>   (document runtime — the closest thing to structured document handling that is implemented)
+> - [docs/developer_guide/31_load_attachment.md](../developer_guide/31_load_attachment.md)
+>   (how the LLM consumes documents on demand)
+>
+> Kept for historical/context reasons — this was a planned feature that was not built.
+> The hexagonal architecture principles it describes are valid and applicable if RAG is
+> implemented in the future.
+
+
+
 ## Tabla de Contenido
 1.  [Resumen Ejecutivo](#1-resumen-ejecutivo)
 2.  [Principios Arquitectónicos](#2-principios-arquitectónicos)
