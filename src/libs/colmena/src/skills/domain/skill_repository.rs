@@ -7,6 +7,9 @@ pub struct SkillCatalogEntry {
     pub name: String,
     pub description: String,
     pub source: SkillSource,
+    /// When `Some`, this entry is a layer-1 node-type guide and must NOT
+    /// appear in the load_skill catalog.
+    pub node_type: Option<String>,
 }
 
 /// Port for loading skills. Implementations handle built-in vs filesystem,
@@ -39,6 +42,7 @@ mod tests {
             name: "x".to_string(),
             description: "y".to_string(),
             source: SkillSource::Builtin,
+            node_type: None,
         };
         assert!(format!("{:?}", entry).contains("x"));
     }
