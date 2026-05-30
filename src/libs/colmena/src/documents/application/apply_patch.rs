@@ -405,6 +405,11 @@ fn describe_op(
         InsertHtmlListItem { .. } => "insert_html_list_item placeholder".to_string(),
         DeleteHtmlListItem { .. } => "delete_html_list_item placeholder".to_string(),
         UpdateHtmlListItem { .. } => "update_html_list_item placeholder".to_string(),
+
+        // ---- HTML — document level ----
+        SetTheme { .. } => "set_theme placeholder".to_string(),
+        SetDocProps { .. } => "set_doc_props placeholder".to_string(),
+        SetFooter { .. } => "set_footer placeholder".to_string(),
     }
 }
 

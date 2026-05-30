@@ -328,7 +328,10 @@ impl<'a> WordOpApplier<'a> {
             | PatchOp::UpdateHtmlTableCell { .. }
             | PatchOp::InsertHtmlListItem { .. }
             | PatchOp::DeleteHtmlListItem { .. }
-            | PatchOp::UpdateHtmlListItem { .. } => {
+            | PatchOp::UpdateHtmlListItem { .. }
+            | PatchOp::SetTheme { .. }
+            | PatchOp::SetDocProps { .. }
+            | PatchOp::SetFooter { .. } => {
                 return Err(invalid(op, "not a Word op"));
             }
         }

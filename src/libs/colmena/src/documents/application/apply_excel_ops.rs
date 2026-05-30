@@ -318,7 +318,10 @@ impl<'a> ExcelOpApplier<'a> {
             | PatchOp::UpdateHtmlTableCell { .. }
             | PatchOp::InsertHtmlListItem { .. }
             | PatchOp::DeleteHtmlListItem { .. }
-            | PatchOp::UpdateHtmlListItem { .. } => {
+            | PatchOp::UpdateHtmlListItem { .. }
+            | PatchOp::SetTheme { .. }
+            | PatchOp::SetDocProps { .. }
+            | PatchOp::SetFooter { .. } => {
                 return Err(invalid(op, "Word/HTML op not applicable to Excel artifact"));
             }
         }

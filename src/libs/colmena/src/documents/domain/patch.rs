@@ -1,6 +1,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use crate::documents::domain::ir::SlideLayout;
+use crate::documents::domain::ir::{FooterConfig, Locale, SlideLayout, Theme};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Patch {
@@ -405,6 +405,26 @@ pub enum PatchOp {
         item_id: String,
         runs: Vec<serde_json::Value>,
     },
+
+    // -------- HTML — document level --------
+
+    #[serde(rename = "set_theme")]
+    SetTheme { theme: Theme },
+
+    #[serde(rename = "set_doc_props")]
+    SetDocProps {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        date: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locale: Option<Locale>,
+    },
+
+    #[serde(rename = "set_footer")]
+    SetFooter { footer: FooterConfig },
 }
 
 #[cfg(test)]
@@ -526,5 +546,36 @@ mod tests {
         };
         let v = serde_json::to_value(&op).unwrap();
         assert_eq!(v["op"], "update_html_list_item");
+    }
+
+    #[test]
+    fn set_theme_uses_enum() {
+        let op = PatchOp::SetTheme {
+            theme: Theme::Vibrant,
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(v["op"], "set_theme");
+        assert_eq!(v["theme"], "vibrant");
+    }
+
+    #[test]
+    fn set_theme_invalid_string_fails_deserialize() {
+        let bad = serde_json::json!({"op": "set_theme", "theme": "rainbow"});
+        let r: Result<PatchOp, _> = serde_json::from_value(bad);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn set_footer_serializes() {
+        let op = PatchOp::SetFooter {
+            footer: FooterConfig {
+                enabled: true,
+                page_numbers: true,
+                custom_text: Some("Confidential".into()),
+            },
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(v["op"], "set_footer");
+        assert_eq!(v["footer"]["page_numbers"], true);
     }
 }
