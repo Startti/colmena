@@ -4,9 +4,13 @@
 //! traversal. The CONTRACT (what is validated, what errors arise) belongs
 //! to the domain via `IRValidator` and `DocumentError`.
 
-use crate::documents::domain::ir::html::{Block, HtmlIR, ImageSrc, VideoSrc};
+use crate::documents::domain::ir::html::{
+    AxisSpec, Block, ChartSpec, ChartType, HtmlIR, ImageSrc, Run, VideoSrc,
+};
 use crate::documents::domain::ir::SlideLayout;
 use crate::documents::domain::{DocumentError, IRValidator};
+use once_cell::sync::Lazy;
+use regex::Regex;
 use std::collections::HashSet;
 
 pub struct HtmlValidator;
@@ -22,6 +26,7 @@ impl IRValidator for HtmlValidator {
         validate_cardinality(&ir)?;
         validate_unique_ids(&ir)?;
         validate_layouts(&ir)?;
+        validate_security(&ir)?;
         validate_assets_referenced_consistency(&ir)?;
         Ok(())
     }
@@ -160,6 +165,217 @@ fn collect_asset_refs(blocks: &[Block], out: &mut HashSet<String>) {
     }
 }
 
+// ── Security statics ────────────────────────────────────────────────────────
+
+static ALLOWED_LINK_SCHEMES: &[&str] = &["http", "https", "mailto", "tel"];
+static DATA_URL_IMAGE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^data:image/(png|jpeg|jpg|gif|webp);base64,").unwrap()
+});
+static EXTERNAL_HTTP_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^https?://").unwrap());
+static VIDEO_ID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[A-Za-z0-9_-]+$").unwrap());
+
+const MAX_NESTING_DEPTH: u8 = 3;
+
+fn link_scheme_ok(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    ALLOWED_LINK_SCHEMES
+        .iter()
+        .any(|s| lower.starts_with(&format!("{s}:")))
+}
+
+fn validate_security(ir: &HtmlIR) -> Result<(), DocumentError> {
+    for slide in &ir.slides {
+        validate_blocks_security(&slide.blocks, &slide.id, 0)?;
+    }
+    Ok(())
+}
+
+fn validate_blocks_security(
+    blocks: &[Block],
+    slide_id: &str,
+    depth: u8,
+) -> Result<(), DocumentError> {
+    for b in blocks {
+        match b {
+            Block::Heading { runs, .. }
+            | Block::Paragraph { runs, .. }
+            | Block::Blockquote { runs, .. }
+            | Block::Callout { runs, .. } => {
+                check_runs_links(runs, slide_id, &block_id(b))?;
+            }
+            Block::List { items, id, .. } => {
+                for item in items {
+                    check_runs_links(&item.runs, slide_id, id)?;
+                }
+            }
+            Block::Table { rows, id, .. } => {
+                for row in rows {
+                    for cell in &row.cells {
+                        if let crate::documents::domain::ir::html::TableCell::Runs { runs } = cell {
+                            check_runs_links(runs, slide_id, id)?;
+                        }
+                    }
+                }
+            }
+            Block::Image { src, id, .. } => {
+                check_image_src(src, slide_id, id)?;
+            }
+            Block::Video { src, id, .. } => {
+                check_video_src(src, slide_id, id)?;
+            }
+            Block::Chart { chart, id, .. } => {
+                check_chart(chart, slide_id, id)?;
+            }
+            Block::KpiGrid { columns, cards, id } => {
+                if !matches!(columns, 2..=4) {
+                    return Err(DocumentError::IRValidationFailed {
+                        path: format!("/slides/{slide_id}/blocks/{id}"),
+                        reason: "kpi_grid columns must be 2..=4".into(),
+                    });
+                }
+                if cards.len() as u8 != *columns {
+                    return Err(DocumentError::IRValidationFailed {
+                        path: format!("/slides/{slide_id}/blocks/{id}"),
+                        reason: "kpi_grid cards.len() must equal columns".into(),
+                    });
+                }
+            }
+            Block::TwoColumns { left, right, id, .. } => {
+                if depth >= MAX_NESTING_DEPTH {
+                    return Err(nesting_err(slide_id, id));
+                }
+                validate_blocks_security(left, slide_id, depth + 1)?;
+                validate_blocks_security(right, slide_id, depth + 1)?;
+            }
+            Block::ThreeColumns {
+                left,
+                middle,
+                right,
+                id,
+                ..
+            } => {
+                if depth >= MAX_NESTING_DEPTH {
+                    return Err(nesting_err(slide_id, id));
+                }
+                validate_blocks_security(left, slide_id, depth + 1)?;
+                validate_blocks_security(middle, slide_id, depth + 1)?;
+                validate_blocks_security(right, slide_id, depth + 1)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn nesting_err(slide_id: &str, block_id: &str) -> DocumentError {
+    DocumentError::IRValidationFailed {
+        path: format!("/slides/{slide_id}/blocks/{block_id}"),
+        reason: format!("nested layouts exceed max depth {MAX_NESTING_DEPTH}"),
+    }
+}
+
+fn check_runs_links(runs: &[Run], slide_id: &str, block_id: &str) -> Result<(), DocumentError> {
+    for r in runs {
+        if let Some(link) = &r.link {
+            if !link_scheme_ok(link) {
+                return Err(DocumentError::IRValidationFailed {
+                    path: format!("/slides/{slide_id}/blocks/{block_id}/runs/{}", r.id),
+                    reason: format!("URL scheme not allowed in link: {link}"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_image_src(src: &ImageSrc, slide_id: &str, block_id: &str) -> Result<(), DocumentError> {
+    match src {
+        ImageSrc::Asset { .. } => Ok(()),
+        ImageSrc::External { url } => {
+            if !EXTERNAL_HTTP_RE.is_match(url) {
+                return Err(DocumentError::IRValidationFailed {
+                    path: format!("/slides/{slide_id}/blocks/{block_id}/src"),
+                    reason: format!("image external src must be http(s): {url}"),
+                });
+            }
+            Ok(())
+        }
+        ImageSrc::DataUrl { data } => {
+            if !DATA_URL_IMAGE_RE.is_match(data) {
+                return Err(DocumentError::IRValidationFailed {
+                    path: format!("/slides/{slide_id}/blocks/{block_id}/src"),
+                    reason: "image data url must be data:image/(png|jpeg|jpg|gif|webp);base64,..."
+                        .into(),
+                });
+            }
+            Ok(())
+        }
+    }
+}
+
+fn check_video_src(src: &VideoSrc, slide_id: &str, block_id: &str) -> Result<(), DocumentError> {
+    match src {
+        VideoSrc::Youtube { video_id } | VideoSrc::Vimeo { video_id } => {
+            if !VIDEO_ID_RE.is_match(video_id) {
+                return Err(DocumentError::IRValidationFailed {
+                    path: format!("/slides/{slide_id}/blocks/{block_id}/src/video_id"),
+                    reason: "video_id must match [A-Za-z0-9_-]+".into(),
+                });
+            }
+            Ok(())
+        }
+        VideoSrc::Asset { .. } => Ok(()),
+    }
+}
+
+fn check_chart(c: &ChartSpec, slide_id: &str, block_id: &str) -> Result<(), DocumentError> {
+    if c.series.is_empty() {
+        return Err(DocumentError::IRValidationFailed {
+            path: format!("/slides/{slide_id}/blocks/{block_id}/chart/series"),
+            reason: "chart requires at least one series".into(),
+        });
+    }
+    match c.chart_type {
+        ChartType::Pie | ChartType::Doughnut => {
+            if c.series.len() != 1 {
+                return Err(DocumentError::IRValidationFailed {
+                    path: format!("/slides/{slide_id}/blocks/{block_id}/chart"),
+                    reason: format!("{:?} chart requires exactly 1 series", c.chart_type),
+                });
+            }
+        }
+        ChartType::Bar | ChartType::Line | ChartType::Area | ChartType::Radar => {
+            if let Some(AxisSpec {
+                categories: Some(cats),
+                ..
+            }) = &c.x_axis
+            {
+                for s in &c.series {
+                    if s.data.len() != cats.len() {
+                        return Err(DocumentError::IRValidationFailed {
+                            path: format!(
+                                "/slides/{slide_id}/blocks/{block_id}/chart/series/{}",
+                                s.name
+                            ),
+                            reason: format!(
+                                "series '{}' data length {} != categories length {}",
+                                s.name,
+                                s.data.len(),
+                                cats.len()
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +460,95 @@ mod tests {
              "alt":"x","caption":null,"position":"inline"}
         ]);
         // assets_referenced stays empty → mismatch
+        assert!(HtmlValidator.validate(&ir).is_err());
+    }
+
+    #[test]
+    fn link_javascript_scheme_rejected() {
+        let mut ir = minimal_ir();
+        ir["slides"][0]["blocks"] = json!([{
+            "kind": "paragraph", "id": "blk_p",
+            "runs": [{"id":"run_1","text":"click","bold":false,"italic":false,
+                      "underline":false,"code":false,"link":"javascript:alert(1)"}]
+        }]);
+        let err = HtmlValidator.validate(&ir).unwrap_err();
+        assert!(err.to_string().contains("scheme"), "got: {err}");
+    }
+
+    #[test]
+    fn image_external_ftp_rejected() {
+        let mut ir = minimal_ir();
+        ir["slides"][0]["blocks"] = json!([{
+            "kind":"image","id":"blk_i",
+            "src":{"kind":"external","url":"ftp://x.com/y.png"},
+            "alt":"x","caption":null,"position":"inline"
+        }]);
+        assert!(HtmlValidator.validate(&ir).is_err());
+    }
+
+    #[test]
+    fn image_data_url_svg_rejected_v1() {
+        let mut ir = minimal_ir();
+        ir["slides"][0]["blocks"] = json!([{
+            "kind":"image","id":"blk_i",
+            "src":{"kind":"data_url","data":"data:image/svg+xml;base64,PHN2Zz48L3N2Zz4="},
+            "alt":"x","caption":null,"position":"inline"
+        }]);
+        assert!(HtmlValidator.validate(&ir).is_err());
+    }
+
+    #[test]
+    fn chart_bar_mismatched_series_categories_rejected() {
+        let mut ir = minimal_ir();
+        ir["slides"][0]["blocks"] = json!([{
+            "kind":"chart","id":"blk_c",
+            "chart": {
+                "chart_type": "bar",
+                "series": [{"name":"A","data":[1,2,3]}],
+                "x_axis": {"categories":["x","y"]},
+                "legend": true
+            },
+            "title": null,
+            "size": "medium"
+        }]);
+        let err = HtmlValidator.validate(&ir).unwrap_err();
+        assert!(err.to_string().contains("categories"), "got: {err}");
+    }
+
+    #[test]
+    fn chart_pie_two_series_rejected() {
+        let mut ir = minimal_ir();
+        ir["slides"][0]["blocks"] = json!([{
+            "kind":"chart","id":"blk_c",
+            "chart": {
+                "chart_type": "pie",
+                "series": [
+                    {"name":"A","data":[1.0]},
+                    {"name":"B","data":[2.0]}
+                ],
+                "legend": true
+            },
+            "title": null, "size":"small"
+        }]);
+        assert!(HtmlValidator.validate(&ir).is_err());
+    }
+
+    #[test]
+    fn nested_grids_depth_4_rejected() {
+        let mut ir = minimal_ir();
+        fn two_col(id: &str, inner: serde_json::Value) -> serde_json::Value {
+            json!({
+                "kind": "two_columns", "id": id, "ratio": "50_50", "gap": "medium",
+                "left": [inner],
+                "right": []
+            })
+        }
+        let leaf = json!({"kind":"divider","id":"blk_leaf"});
+        let level3 = two_col("blk_3", leaf);
+        let level2 = two_col("blk_2", level3);
+        let level1 = two_col("blk_1", level2);
+        let level0 = two_col("blk_0", level1);
+        ir["slides"][0]["blocks"] = json!([level0]);
         assert!(HtmlValidator.validate(&ir).is_err());
     }
 }
