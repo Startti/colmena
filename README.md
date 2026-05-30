@@ -86,7 +86,9 @@ Expected output (abbreviated):
 
 ```
 data: {"type":"node-end","node_id":"my_webhook","node_type":"trigger_webhook","output":{"message":"Hello from Simulator!"}}
-[LogNode]: { "message": "Hello from Simulator!" }
+[LogNode]: {
+  "message": "Hello from Simulator!"
+}
 data: {"type":"finish","finishReason":"stop",...}
 data: [DONE]
 ```
@@ -129,7 +131,7 @@ For a full system map, execution lifecycle diagram, and module table:
 | Document | What it covers |
 |----------|---------------|
 | [docs/developer_guide/00_architecture_overview.md](docs/developer_guide/00_architecture_overview.md) | System tour: modules, entry points, execution lifecycle, "follow your interest" navigation table |
-| [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) | Master index of all 37 developer guides |
+| [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) | Master index of all 38 developer guides |
 | [docs/node_configurations.json](docs/node_configurations.json) | Canonical config schema for every node type (fields, types, defaults) |
 | [docs/node_as_tools_reference.json](docs/node_as_tools_reference.json) | How to expose nodes as LLM tools (`tool_configurations`, `node_schema`, `fixed_config`) |
 | [docs/agent_context/node_ports_reference.md](docs/agent_context/node_ports_reference.md) | Ports and outputs per node type |

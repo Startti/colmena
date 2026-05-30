@@ -356,7 +356,7 @@ Flujo desde el archivo SKILL.md en disco hasta su rol en runtime.
 
 Reglas de clasificación implementadas en:
 - `load_skill_tool.rs:46-65` (`filter_visible_skills`) — las tres ramas (layer 1 excluida, layer 2 gated, layer 3 libre).
-- `llm.rs:2938-2954` (`augment_builtin_names`) — auto-registro de layer-1 y layer-2 en el pool de builtins.
+- `llm.rs:2916-2957` (`augment_builtin_names`) — auto-registro de layer-1 y layer-2 en el pool de builtins (layer-2 block at 2929-2936, layer-1 block at 2938-2954).
 - `skill_repository.rs:24-28` (`find_by_node_type`) — lookup de guía layer-1 por node_type.
 
 ---
@@ -502,7 +502,7 @@ Para un autor escribiendo una nueva skill.
     la asocia a toda tool       Conexión:                      Conexión:
     con node_type coincidente     tool_configurations            llm_call.config.skills.
     (augment_builtin_names,         .<alias>.skills:               builtin: [...]
-    llm.rs:2938)                    ["<nombre>"]                 O skills.paths: [...]
+    llm.rs:2916-2957)               ["<nombre>"]                 O skills.paths: [...]
   Visibilidad:                Visibilidad:                   Visibilidad:
     Inyectada en el bloque      En catálogo load_skill         Siempre en catálogo
     de contexto de la tool;     SOLO después del               load_skill desde
