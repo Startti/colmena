@@ -276,6 +276,65 @@ impl SqlPermissions {
             }
         )
     }
+
+    /// Human-readable policy block describing what the LLM can and cannot do
+    /// with this tool. Multi-line, intended to be folded into describe_tool /
+    /// tool description. Pure function of config — no I/O.
+    pub fn describe_policy_for_llm(&self, max_rows: u64) -> String {
+        let ops: Vec<&str> = [
+            (SqlOperation::Select, "SELECT"),
+            (SqlOperation::Insert, "INSERT"),
+            (SqlOperation::Update, "UPDATE"),
+            (SqlOperation::Delete, "DELETE"),
+            (SqlOperation::CreateFunction, "CREATE FUNCTION"),
+            (SqlOperation::CreateTable, "CREATE TABLE"),
+        ]
+        .iter()
+        .filter(|(op, _)| self.allowed_ops.contains(op))
+        .map(|(_, name)| *name)
+        .collect();
+
+        let schemas_line = if self.allowed_schemas.is_empty() {
+            "all schemas".to_string()
+        } else {
+            let mut s: Vec<&str> = self.allowed_schemas.iter().map(String::as_str).collect();
+            s.sort_unstable();
+            s.join(", ")
+        };
+
+        // Build safety rules for operations that are allowed
+        let mut safety_rules = Vec::new();
+        let has_update = self.allowed_ops.contains(&SqlOperation::Update);
+        let has_delete = self.allowed_ops.contains(&SqlOperation::Delete);
+
+        if has_update && has_delete {
+            safety_rules.push("UPDATE and DELETE require a WHERE clause".to_string());
+        } else if has_update {
+            safety_rules.push("UPDATE requires a WHERE clause".to_string());
+        } else if has_delete {
+            safety_rules.push("DELETE requires a WHERE clause".to_string());
+        }
+
+        let safety_line = if !safety_rules.is_empty() {
+            format!("\n             - Safety rules: {}", safety_rules.join("; "))
+        } else {
+            String::new()
+        };
+
+        format!(
+            "SQL access policy for this tool (enforced server-side; requests outside it are rejected):\n\
+             - Allowed operations: {ops}\n\
+             - Allowed schemas: {schemas} (other schemas are blocked)\n\
+             - Sandbox schema for CREATE FUNCTION/TABLE: {sandbox}\n\
+             - Always blocked regardless of config: DROP, ALTER, TRUNCATE, CREATE SCHEMA, CREATE INDEX, CREATE VIEW, GRANT, REVOKE\n\
+             - SELECT returns at most {max_rows} rows{safety}",
+            ops = ops.join(", "),
+            schemas = schemas_line,
+            sandbox = self.sandbox_schema,
+            max_rows = max_rows,
+            safety = safety_line,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -452,5 +511,45 @@ mod tests {
         let mut schemas: Vec<&str> = perms.allowed_schemas_iter().collect();
         schemas.sort_unstable();
         assert_eq!(schemas, vec!["analytics", "public"]);
+    }
+
+    #[test]
+    fn policy_text_read_write_includes_ops_schemas_and_blocked_list() {
+        let cfg = serde_json::json!({
+            "preset": "read_write",
+            "allowed_schemas": ["public", "analytics"]
+        });
+        let perms = SqlPermissions::from_config(Some(&cfg)).unwrap();
+        let text = perms.describe_policy_for_llm(50);
+
+        assert!(text.contains("SELECT"));
+        assert!(text.contains("INSERT"));
+        assert!(text.contains("UPDATE"));
+        assert!(!text.contains("DELETE"));
+        assert!(text.contains("public"));
+        assert!(text.contains("analytics"));
+        assert!(text.contains("DROP"));     // always-blocked list mentions it
+        assert!(text.contains("WHERE"));    // safety rule
+        assert!(text.contains("50"));       // max_rows
+    }
+
+    #[test]
+    fn policy_text_empty_schemas_says_all() {
+        let cfg = serde_json::json!({ "preset": "read_only" });
+        let perms = SqlPermissions::from_config(Some(&cfg)).unwrap();
+        let text = perms.describe_policy_for_llm(100);
+        assert!(text.to_lowercase().contains("all schemas"));
+    }
+
+    #[test]
+    fn policy_text_full_preset_lists_create_operations() {
+        let cfg = serde_json::json!({
+            "preset": "full",
+            "allowed_schemas": ["sandbox"]
+        });
+        let perms = SqlPermissions::from_config(Some(&cfg)).unwrap();
+        let text = perms.describe_policy_for_llm(100);
+        assert!(text.contains("CREATE TABLE"));
+        assert!(text.contains("CREATE FUNCTION"));
     }
 }
