@@ -124,6 +124,35 @@ impl BuiltinSkillRepository {
     pub fn available_builtin_names() -> Vec<String> {
         Self::all_available_names()
     }
+
+    /// Map of builtin skill name → frontmatter `node_type` (None if absent).
+    ///
+    /// Available without constructing a fully-loaded repo. Walks the compiled-in
+    /// directory, parses the frontmatter of every `<name>/SKILL.md`, and returns
+    /// the `node_type` field if present. Skills whose frontmatter cannot be parsed
+    /// are silently skipped (their `node_type` cannot be determined).
+    ///
+    /// Used by `augment_builtin_names` to auto-include layer-1 guides whose
+    /// `node_type` matches any configured tool's `node_type` — no operator wiring
+    /// required.
+    pub fn available_builtin_node_types() -> HashMap<String, Option<String>> {
+        use crate::skills::infrastructure::frontmatter_parser::parse_skill_md;
+
+        let mut result = HashMap::new();
+        for name in Self::all_available_names() {
+            let node_type = BUILTIN_SKILLS_DIR
+                .get_dir(name.as_str())
+                .and_then(|dir| dir.get_file(format!("{}/SKILL.md", name)))
+                .and_then(|f| f.contents_utf8())
+                .and_then(|content| {
+                    let path = format!("builtin:{}/SKILL.md", name);
+                    parse_skill_md(content, &path).ok()
+                })
+                .and_then(|parsed| parsed.node_type);
+            result.insert(name, node_type);
+        }
+        result
+    }
 }
 
 #[async_trait]
@@ -285,6 +314,32 @@ mod tests {
         let entry = repo.find_by_node_type("sql_query").expect("sql_query guide present");
         assert_eq!(entry.name, "sql_query-guide");
         assert_eq!(entry.node_type.as_deref(), Some("sql_query"));
+    }
+
+    #[test]
+    fn available_builtin_node_types_includes_sql_query_guide() {
+        let map = BuiltinSkillRepository::available_builtin_node_types();
+        let node_type = map.get("sql_query-guide").expect("sql_query-guide in map");
+        assert_eq!(
+            node_type.as_deref(),
+            Some("sql_query"),
+            "sql_query-guide must report node_type: sql_query"
+        );
+    }
+
+    #[test]
+    fn available_builtin_node_types_layer2_skills_have_none() {
+        let map = BuiltinSkillRepository::available_builtin_node_types();
+        // Layer-2 domain skills have no node_type frontmatter.
+        for name in &["sales-analysis", "expense-analysis", "python-expert"] {
+            let entry = map.get(*name).expect("skill present in map");
+            assert!(
+                entry.is_none(),
+                "{} must have no node_type; got: {:?}",
+                name,
+                entry
+            );
+        }
     }
 
     #[tokio::test]
