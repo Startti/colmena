@@ -2907,16 +2907,37 @@ pub(crate) fn augment_builtin_names(
     explicit: &[String],
     tool_configurations: &HashMap<String, ToolConfiguration>,
 ) -> Vec<String> {
-    let available: std::collections::HashSet<String> =
+    let available_names: std::collections::HashSet<String> =
         BuiltinSkillRepository::available_builtin_names()
             .into_iter()
             .collect();
+    let available_node_types: HashMap<String, Option<String>> =
+        BuiltinSkillRepository::available_builtin_node_types();
 
     let mut result: Vec<String> = explicit.to_vec();
 
+    // Layer-2: include names listed in any tool.skills that exist in builtin pool.
     for cfg in tool_configurations.values() {
         for name in &cfg.skills {
-            if available.contains(name) && !result.iter().any(|n| n == name) {
+            if available_names.contains(name) && !result.iter().any(|n| n == name) {
+                result.push(name.clone());
+            }
+        }
+    }
+
+    // Layer-1: include builtin skills whose frontmatter node_type matches any
+    // configured tool's node_type. Dropping a SKILL.md with `node_type: <X>` into
+    // the pool auto-attaches it to every tool whose node_type is X — no operator
+    // wiring required.
+    let configured_node_types: std::collections::HashSet<&str> = tool_configurations
+        .values()
+        .map(|cfg| cfg.node_type.as_str())
+        .collect();
+    for (name, nt) in &available_node_types {
+        if let Some(node_type) = nt {
+            if configured_node_types.contains(node_type.as_str())
+                && !result.iter().any(|n| n == name)
+            {
                 result.push(name.clone());
             }
         }
@@ -4230,5 +4251,73 @@ mod augment_builtin_names_tests {
         let result = augment_builtin_names(&[], &tool_cfgs);
         let count = result.iter().filter(|n| n.as_str() == "expense-analysis").count();
         assert_eq!(count, 1, "expense-analysis must appear exactly once; got: {:?}", result);
+    }
+
+    #[test]
+    fn augment_includes_layer1_guide_matching_tool_node_type() {
+        // A tool with node_type "sql_query" and no explicit skills should cause
+        // sql_query-guide (which has frontmatter `node_type: sql_query`) to be
+        // auto-included — no operator wiring required.
+        let mut tools: HashMap<String, ToolConfiguration> = HashMap::new();
+        #[allow(deprecated)]
+        tools.insert(
+            "query_db".to_string(),
+            ToolConfiguration {
+                name: "query_db".into(),
+                description: String::new(),
+                node_type: "sql_query".into(),
+                skills: vec![],
+                fixed_config: HashMap::new(),
+                exposed_inputs: None,
+                parameters: None,
+                mergeable_fields: None,
+                field_mapping: None,
+                node_schema: None,
+                node_config: None,
+                expose_sub_tools: None,
+                summary: None,
+                eager: false,
+            },
+        );
+        let augmented = augment_builtin_names(&[], &tools);
+        assert!(
+            augmented.contains(&"sql_query-guide".to_string()),
+            "sql_query-guide (node_type: sql_query) must auto-load for any sql_query tool; got: {:?}",
+            augmented
+        );
+    }
+
+    #[test]
+    fn augment_does_not_include_unrelated_layer1_guides() {
+        // A tool with node_type "http_request" must NOT pull in sql_query-guide
+        // (there is no http_request-guide in the pool today, so the augmented
+        // list stays empty).
+        let mut tools: HashMap<String, ToolConfiguration> = HashMap::new();
+        #[allow(deprecated)]
+        tools.insert(
+            "http".to_string(),
+            ToolConfiguration {
+                name: "http".into(),
+                description: String::new(),
+                node_type: "http_request".into(),
+                skills: vec![],
+                fixed_config: HashMap::new(),
+                exposed_inputs: None,
+                parameters: None,
+                mergeable_fields: None,
+                field_mapping: None,
+                node_schema: None,
+                node_config: None,
+                expose_sub_tools: None,
+                summary: None,
+                eager: false,
+            },
+        );
+        let augmented = augment_builtin_names(&[], &tools);
+        assert!(
+            !augmented.contains(&"sql_query-guide".to_string()),
+            "sql_query-guide must NOT appear for an http_request tool; got: {:?}",
+            augmented
+        );
     }
 }
