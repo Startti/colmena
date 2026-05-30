@@ -11,6 +11,30 @@ use crate::dag_engine::domain::tool_configuration::{NodeSchemaField, ToolConfigu
 use crate::skills::domain::skill_repository::SkillRepository;
 use serde_json::Value;
 
+/// Compose the effective fixed config for a tool: `fixed_config` values merged
+/// with any `node_schema` fields that carry a `fixed` value.
+///
+/// This is the canonical config object passed to
+/// [`ExecutableNode::tool_description_supplement`] so policy generation sees
+/// all operator-set values regardless of which config path was used.
+///
+/// Shared by [`build_tool_context_block`], `generate_tool_definition`, and the
+/// `tool_context_blocks` summary in `llm.rs`.
+pub fn build_effective_fixed(cfg: &ToolConfiguration) -> Value {
+    let mut map = serde_json::Map::new();
+    for (k, v) in &cfg.fixed_config {
+        map.insert(k.clone(), v.clone());
+    }
+    if let Some(schema) = &cfg.node_schema {
+        for (k, field) in schema {
+            if let Some(v) = &field.fixed {
+                map.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    Value::Object(map)
+}
+
 /// Which variant of the block to emit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockVariant {
@@ -136,12 +160,81 @@ fn collect_visible_fields(cfg: &ToolConfiguration) -> Vec<(String, &NodeSchemaFi
     out
 }
 
+/// Build a JSON object summarising which layered context was injected for each
+/// tool. Used by `llm.rs` to populate `extra_info["tool_context_blocks"]`.
+///
+/// Each key is a tool alias. The value object may contain:
+/// - `"node_guide"` — name of the node-type guide skill that was attached (if
+///   the skill repo resolved one for the tool's `node_type`).
+/// - `"policy_lines"` — line count of the policy text emitted by
+///   `tool_description_supplement` (present only when the node returns one).
+/// - `"scoped_skills"` — array of skill names declared in the tool's `skills`
+///   field (present only when non-empty).
+///
+/// Entries with no interesting information are omitted. The outer object is
+/// absent from `extra_info` when no tool has any context to report.
+pub fn build_tool_context_blocks_summary(
+    tool_configurations: &std::collections::HashMap<String, ToolConfiguration>,
+    registry: &dyn crate::dag_engine::application::ports::NodeRegistryPort,
+    skill_repo: Option<&dyn SkillRepository>,
+) -> serde_json::Value {
+    let mut blocks: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+
+    for (alias, cfg) in tool_configurations {
+        let mut entry: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+
+        // node_guide — did the skill repo find a node-type guide?
+        if let Some(repo) = skill_repo {
+            if let Some(guide) = repo.find_by_node_type(&cfg.node_type) {
+                entry.insert(
+                    "node_guide".to_string(),
+                    serde_json::Value::String(guide.name),
+                );
+            }
+        }
+
+        // policy_lines — how many lines did the policy supplement emit?
+        if let Some(node) = registry.get_node(&cfg.node_type) {
+            let fixed = build_effective_fixed(cfg);
+            if let Some(policy) = node.tool_description_supplement(&fixed) {
+                let count = policy.lines().count();
+                entry.insert(
+                    "policy_lines".to_string(),
+                    serde_json::Value::Number(count.into()),
+                );
+            }
+        }
+
+        // scoped_skills — tool-level skill list (layer 2)
+        if !cfg.skills.is_empty() {
+            entry.insert(
+                "scoped_skills".to_string(),
+                serde_json::Value::Array(
+                    cfg.skills
+                        .iter()
+                        .map(|s| serde_json::Value::String(s.clone()))
+                        .collect(),
+                ),
+            );
+        }
+
+        if !entry.is_empty() {
+            blocks.insert(alias.clone(), serde_json::Value::Object(entry));
+        }
+    }
+
+    serde_json::Value::Object(blocks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dag_engine::application::ports::NodeRegistryPort;
     use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
     use crate::dag_engine::domain::observer::ExecutionObserver;
     use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
+    use crate::skills::domain::skill_repository::{SkillCatalogEntry, SkillRepository};
+    use crate::skills::domain::{Skill, SkillError, SkillReference, SkillSource};
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -263,5 +356,156 @@ mod tests {
         );
         assert!(block_lazy.contains("## Parameters"));
         assert!(!block_eager.contains("## Parameters"));
+    }
+
+    // ── Tests for build_tool_context_blocks_summary ──────────────────────────
+
+    /// Minimal registry: always returns the same node for any node_type.
+    struct StubRegistry {
+        node: Arc<dyn ExecutableNode>,
+    }
+
+    impl NodeRegistryPort for StubRegistry {
+        fn get_node(&self, _node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            Some(self.node.clone())
+        }
+
+        fn get_all_nodes(
+            &self,
+        ) -> std::collections::HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    /// Minimal skill repo: returns a single catalog entry keyed by node_type.
+    struct StubSkillRepo {
+        entry: SkillCatalogEntry,
+    }
+
+    #[async_trait::async_trait]
+    impl SkillRepository for StubSkillRepo {
+        fn list_available(&self) -> Vec<SkillCatalogEntry> {
+            vec![self.entry.clone()]
+        }
+
+        async fn load_skill(&self, _name: &str) -> Result<Skill, SkillError> {
+            Err(SkillError::SkillNotFound("stub".into()))
+        }
+
+        async fn load_reference(
+            &self,
+            _skill_name: &str,
+            _reference_name: &str,
+        ) -> Result<SkillReference, SkillError> {
+            Err(SkillError::SkillNotFound("stub".into()))
+        }
+    }
+
+    #[test]
+    fn summary_empty_when_no_tools() {
+        let registry = StubRegistry {
+            node: Arc::new(NoopNode { supp: None }),
+        };
+        let tools: HashMap<String, ToolConfiguration> = HashMap::new();
+        let summary = build_tool_context_blocks_summary(&tools, &registry, None);
+        // Empty tool map → empty object
+        assert_eq!(summary, json!({}));
+    }
+
+    #[test]
+    fn summary_omits_entry_when_no_context() {
+        // A tool with no policy, no guide, no scoped skills produces no entry.
+        let registry = StubRegistry {
+            node: Arc::new(NoopNode { supp: None }),
+        };
+        let mut tools = HashMap::new();
+        tools.insert("plain_tool".to_string(), cfg("plain_tool", "noop", "desc"));
+        let summary = build_tool_context_blocks_summary(&tools, &registry, None);
+        assert_eq!(summary, json!({}));
+    }
+
+    #[test]
+    fn summary_includes_policy_lines_when_supplement_present() {
+        let policy = "line1\nline2\nline3";
+        let registry = StubRegistry {
+            node: Arc::new(NoopNode {
+                supp: Some(policy.to_string()),
+            }),
+        };
+        let mut tools = HashMap::new();
+        tools.insert("query_db".to_string(), cfg("query_db", "sql_query", "SQL"));
+        let summary = build_tool_context_blocks_summary(&tools, &registry, None);
+        let policy_lines = summary["query_db"]["policy_lines"].as_u64().unwrap();
+        assert_eq!(policy_lines, 3);
+    }
+
+    #[test]
+    fn summary_includes_node_guide_name_when_repo_matches() {
+        let registry = StubRegistry {
+            node: Arc::new(NoopNode { supp: None }),
+        };
+        let skill_repo = StubSkillRepo {
+            entry: SkillCatalogEntry {
+                name: "sql_query-guide".to_string(),
+                description: "Guide for sql_query".to_string(),
+                source: SkillSource::Builtin,
+                node_type: Some("sql_query".to_string()),
+            },
+        };
+        let mut tools = HashMap::new();
+        tools.insert("query_db".to_string(), cfg("query_db", "sql_query", "SQL"));
+        let summary =
+            build_tool_context_blocks_summary(&tools, &registry, Some(&skill_repo));
+        let guide = summary["query_db"]["node_guide"].as_str().unwrap();
+        assert_eq!(guide, "sql_query-guide");
+    }
+
+    #[test]
+    fn summary_includes_scoped_skills_array() {
+        let registry = StubRegistry {
+            node: Arc::new(NoopNode { supp: None }),
+        };
+        let mut c = cfg("query_db", "sql_query", "SQL");
+        c.skills = vec!["sales-analysis".to_string(), "expense-analysis".to_string()];
+        let mut tools = HashMap::new();
+        tools.insert("query_db".to_string(), c);
+        let summary = build_tool_context_blocks_summary(&tools, &registry, None);
+        let skills = summary["query_db"]["scoped_skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(skills.contains(&"sales-analysis"));
+        assert!(skills.contains(&"expense-analysis"));
+    }
+
+    #[test]
+    fn summary_all_three_fields_combined() {
+        let policy = "ALLOW SELECT\nDENY DROP";
+        let registry = StubRegistry {
+            node: Arc::new(NoopNode {
+                supp: Some(policy.to_string()),
+            }),
+        };
+        let skill_repo = StubSkillRepo {
+            entry: SkillCatalogEntry {
+                name: "sql_query-guide".to_string(),
+                description: "Best practices".to_string(),
+                source: SkillSource::Builtin,
+                node_type: Some("sql_query".to_string()),
+            },
+        };
+        let mut c = cfg("query_db", "sql_query", "SQL tool");
+        c.skills = vec!["sales-analysis".to_string()];
+        let mut tools = HashMap::new();
+        tools.insert("query_db".to_string(), c);
+        let summary =
+            build_tool_context_blocks_summary(&tools, &registry, Some(&skill_repo));
+        assert_eq!(summary["query_db"]["node_guide"].as_str().unwrap(), "sql_query-guide");
+        assert_eq!(summary["query_db"]["policy_lines"].as_u64().unwrap(), 2);
+        let skills = summary["query_db"]["scoped_skills"].as_array().unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].as_str().unwrap(), "sales-analysis");
     }
 }

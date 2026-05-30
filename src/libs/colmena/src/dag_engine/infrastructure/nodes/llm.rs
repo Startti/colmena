@@ -1618,6 +1618,13 @@ impl ExecutableNode for LlmNode {
                 Vec::new()
             };
 
+        // Snapshot tool_configurations and registry for the extra_info summary
+        // (tool_context_blocks). Both are consumed by DagToolExecutor::new below,
+        // so we keep lightweight copies here. The registry Arc clone is cheap;
+        // the tool_configurations clone is small (≤ dozens of entries).
+        let tool_configurations_snapshot = tool_configurations.clone();
+        let registry_for_summary = registry.clone();
+
         let tool_executor = {
             let mut executor = DagToolExecutor::new(registry, tool_configurations);
             // Per-llm_call override of the tool-result string cap. Inputs win
@@ -2433,6 +2440,22 @@ impl ExecutableNode for LlmNode {
             if !log.is_empty() {
                 extra_info["tools_discovered"] =
                     Value::Array(log.iter().cloned().map(Value::String).collect());
+            }
+        }
+
+        // tool_context_blocks: per-tool observability summary (node_guide, policy_lines,
+        // scoped_skills). Omitted entirely when no tool has any context to report.
+        {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::tool_context::build_tool_context_blocks_summary;
+            let summary = build_tool_context_blocks_summary(
+                &tool_configurations_snapshot,
+                registry_for_summary.as_ref(),
+                skill_repo.as_deref(),
+            );
+            if let Some(obj) = summary.as_object() {
+                if !obj.is_empty() {
+                    extra_info["tool_context_blocks"] = summary;
+                }
             }
         }
 

@@ -1352,18 +1352,7 @@ async fn build_description(
     };
 
     // Compose effective fixed config: fixed_config + node_schema.fixed values.
-    let mut map = serde_json::Map::new();
-    for (k, v) in &tool_config.fixed_config {
-        map.insert(k.clone(), v.clone());
-    }
-    if let Some(schema) = &tool_config.node_schema {
-        for (k, field) in schema {
-            if let Some(v) = &field.fixed {
-                map.insert(k.clone(), v.clone());
-            }
-        }
-    }
-    let fixed = serde_json::Value::Object(map);
+    let fixed = crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::tool_context::build_effective_fixed(tool_config);
 
     // Build the block; this is sync but may emit a {{NODE_GUIDE_BODY}} placeholder.
     let mut block = build_tool_context_block(
