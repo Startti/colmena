@@ -1320,6 +1320,7 @@ fn synthesise_default_toolkit_config(alias: &str) -> ToolConfiguration {
         expose_sub_tools: Some(SubToolFilter::all()),
         summary: None,
         eager: false,
+        skills: Vec::new(),
     }
 }
 
@@ -1471,6 +1472,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                skills: Vec::new()
             },
         );
 
@@ -1515,6 +1517,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                skills: Vec::new()
             },
         );
 
@@ -1560,6 +1563,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                skills: Vec::new()
             },
         );
 
@@ -1609,6 +1613,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                skills: Vec::new()
             },
         );
 
@@ -1664,6 +1669,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                skills: Vec::new()
             },
         );
 
@@ -1716,6 +1722,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                skills: Vec::new()
             },
         );
 
@@ -1765,6 +1772,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                skills: Vec::new()
             },
         );
 
@@ -1823,6 +1831,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                skills: Vec::new()
             },
         );
 
@@ -1893,6 +1902,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                skills: Vec::new()
             },
         );
 
@@ -1951,6 +1961,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                skills: Vec::new()
             },
         );
 
@@ -2017,6 +2028,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                skills: Vec::new()
             },
         );
 
@@ -2111,6 +2123,7 @@ mod tests {
             expose_sub_tools: None,
             summary: None,
             eager: false,
+                skills: Vec::new()
         };
         let executor =
             DagToolExecutor::new(registry, HashMap::new()).with_describe_tool_lookup(vec![cfg]);
@@ -2150,6 +2163,7 @@ mod tests {
             expose_sub_tools: None,
             summary: None,
             eager: false,
+                skills: Vec::new()
         };
 
         let observed: Arc<std::sync::Mutex<Vec<String>>> =
@@ -2207,6 +2221,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                skills: Vec::new()
             },
         );
 
@@ -2395,6 +2410,7 @@ mod toolkit_runtime_tests {
                 expose_sub_tools: Some(SubToolFilter::all()),
                 summary: None,
                 eager: false,
+                skills: Vec::new()
             },
         );
         DagToolExecutor::new(registry, configs)
@@ -2478,6 +2494,7 @@ mod toolkit_runtime_tests {
                 expose_sub_tools: Some(SubToolFilter::List(vec!["echo".to_string()])),
                 summary: None,
                 eager: false,
+                skills: Vec::new()
             },
         );
         let exec = DagToolExecutor::new(registry, configs);

@@ -169,6 +169,7 @@ mod tests {
             expose_sub_tools: None,
             summary: None,
             eager: false,
+            skills: Vec::new(),
         }
     }
 
