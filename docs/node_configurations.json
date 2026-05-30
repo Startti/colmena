@@ -1354,12 +1354,12 @@
             "builtin": {
               "type": "array",
               "items": { "type": "string" },
-              "description": "Names of built-in skills compiled into the crate (e.g. 'python-expert')."
+              "description": "Names of built-in skills compiled into the crate (e.g. 'python-expert'). Optional for layer-2 skills already listed in tool_configurations.<name>.skills — the engine auto-derives those from the tool wiring without needing them repeated here."
             },
             "paths": {
               "type": "array",
               "items": { "type": "string" },
-              "description": "Paths to skill directories; relative paths resolve against the graph JSON directory, subject to the COLMENA_SKILLS_ALLOWED_DIRS whitelist."
+              "description": "Paths to skill directories. Auto-detection: if the directory contains SKILL.md at its root it is treated as a single skill; if it does not, every immediate subdirectory that has SKILL.md is loaded as a separate skill (root-of-skills mode, one level only). Relative paths resolve against the directory of the graph JSON file, not the process CWD. Subject to the COLMENA_SKILLS_ALLOWED_DIRS env-var whitelist (colon-separated). See developer_guide/24_skills.md for the full error matrix and references workflow."
             }
           }
         },
