@@ -91,6 +91,7 @@ pub fn synthetic_secure_suspend_tool(name: &str) -> ToolConfiguration {
         expose_sub_tools: None,
         summary: None,
         eager: false,
+        skills: Vec::new(),
     }
 }
 
