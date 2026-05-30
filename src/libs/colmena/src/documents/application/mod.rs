@@ -7,5 +7,6 @@ pub mod list_versions;
 pub mod read_document;
 pub mod rollback;
 pub mod runtime;
+pub mod upload_asset;
 
 pub use runtime::{DocumentRuntime, DEFAULT_RETENTION, DEFAULT_STORAGE_ROOT};
