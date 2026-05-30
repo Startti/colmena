@@ -263,6 +263,31 @@ Para dev/prod symmetry agregamos `COLMENA_LOCAL=true|false` como guard rail expl
 
 ---
 
+## 9. `sql_query` — auto-creación de `allowed_schemas` faltantes (2026-05-28)
+
+**Qué cambió.** El nodo `sql_query` ahora **provisiona los schemas listados en `permissions.allowed_schemas`** durante la inicialización: revisa uno por uno y crea (`CREATE SCHEMA IF NOT EXISTS`, identificador quoteado) los que no existen. Es **operator-driven** — los nombres vienen de la config fija del nodo, no del LLM —, así que **no relaja el bloqueo de `CREATE SCHEMA` emitido por el LLM** en un query (sigue bloqueado por el static validator). Controlado por el nuevo flag `permissions.create_schemas_if_missing`:
+
+- **Default `true`**: si el flag está ausente en el graph JSON, se asume `true` y se crean los schemas faltantes.
+- **`false`**: comportamiento legacy — `allowed_schemas` es solo allowlist de validación.
+- **Check-then-create**: los schemas que ya existen nunca se re-crean, así un agente read-only apuntando a schemas existentes no requiere privilegio `CREATE`.
+- **Hard-fail en init**: si un schema faltante no se puede crear (p. ej. el rol de BD no tiene `CREATE`), la inicialización del nodo falla con `Failed to create schema '<name>': ...` y el nodo no arranca.
+- `information_schema` y `pg_catalog` nunca se consideran faltantes ni se crean.
+
+**Documentación:**
+- Plan: [docs/superpowers/plans/2026-05-28-sql-node-auto-create-allowed-schemas.md](superpowers/plans/2026-05-28-sql-node-auto-create-allowed-schemas.md)
+- Dev guide: [docs/developer_guide/23_sql_node.md](developer_guide/23_sql_node.md) → tabla "Permissions Object" + subsección "Operator-Driven Schema Provisioning".
+- Schema: [docs/node_configurations.json](node_configurations.json) → `sql_query.permissions.create_schemas_if_missing` (default `true`).
+- Tool reference: [docs/node_as_tools_reference.json](node_as_tools_reference.json) → nota de provisioning en `sql_query`.
+- Test graph: `tests/graphs/agents/sql_provision_schema_tool.json` (LLM tool, schema fresco) + `tests/graphs/external/sql_create_allowed_schema.json` (standalone).
+
+**Archivos tocados:** `domain/sql_permissions.rs` (field + accesores `create_schemas_if_missing()` / `allowed_schemas_iter()`), `domain/sql_ports.rs` (`missing_schemas` + `create_schema` en `SqlConnectionPort`), `infrastructure/sql_pool_adapter.rs` (impl + tests `#[ignore]` con `TEST_DATABASE_URL`), `infrastructure/nodes/sql.rs` (paso de provisioning en `do_initialize_inner`).
+
+**Estado:** ✅ Done. Verificado end-to-end contra Postgres real (dev/GCP): schema inexistente → grafo ejecutado con colmena → schema presente en la BD. Flag ausente y `false` también verificados.
+
+> **Sweep ADP:** agrega dos métodos al trait interno `SqlConnectionPort`. No hay impls externos (el único impl es `PgPoolAdapter`), así que no rompe el worker de ADP. No cambia `EngineConfig`/`ColmenaEngine`.
+
+---
+
 ## Misc
 
 ### `.gitignore` para `.DS_Store` y otros artifacts de OS
@@ -297,6 +322,7 @@ Para dev/prod symmetry agregamos `COLMENA_LOCAL=true|false` como guard rail expl
 | 6. Attachment auto-summary | ✅ | ✅ | ✅ | ✅ (5 fields) | ✅ | OK |
 | 7. path/data registration fix | ✅ (issue) | ✅ | ✅ | (n/a) | ✅ (two-agent) | OK |
 | 8. Multimedia generation + artifacts unification | — | ✅ | ✅ | ✅ (3 nodos + categoría `media`) | ✅ (4 media + 2 agents) | Host application wiring pendiente (downstream private repo). Spec absorbida en el plan. |
+| 9. `sql_query` auto-crea `allowed_schemas` | — | ✅ | ✅ | ✅ (`create_schemas_if_missing`, default `true`) | ✅ (1 tool + 1 standalone) | Verificado e2e contra Postgres real. Plan absorbe la spec. |
 
 **Leyenda:** ✅ presente y completo · ⚠️ parcial · ❌ ausente · — no aplica · (n/a) no requiere
 

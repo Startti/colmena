@@ -1030,6 +1030,12 @@
               "required": false,
               "default": false,
               "description": "When true, auto-creates RLS policies during initialization and after CREATE TABLE. Tables with tenant_column get tenant isolation; tables without get read-only."
+            },
+            "create_schemas_if_missing": {
+              "type": "boolean",
+              "required": false,
+              "default": true,
+              "description": "When true (default), the node checks each schema in allowed_schemas at initialization and creates the ones that don't exist (operator-driven provisioning — the names come from fixed config, not the LLM). Existing schemas are left untouched. If a missing schema cannot be created (e.g. the database role lacks CREATE privilege), node initialization fails. Set to false to keep the legacy validate-only behavior. Note: LLM-issued CREATE SCHEMA in a query stays blocked regardless of this flag."
             }
           }
         },
