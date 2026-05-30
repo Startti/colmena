@@ -165,6 +165,8 @@ impl DocumentRuntime {
             excel_validator,
             word_renderer,
             word_validator,
+            html_renderer: html_renderer.clone(),
+            html_validator: html_validator.clone(),
             ids: ids.clone(),
         });
         let read = Arc::new(ReadDocumentUseCase {

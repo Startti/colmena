@@ -25,6 +25,8 @@ pub struct ApplyPatchUseCase {
     pub excel_validator: Arc<dyn IRValidator>,
     pub word_renderer: Arc<dyn IRRenderer>,
     pub word_validator: Arc<dyn IRValidator>,
+    pub html_renderer: Arc<dyn IRRenderer>,
+    pub html_validator: Arc<dyn IRValidator>,
     pub ids: Arc<dyn IdGenerator>,
 }
 
@@ -171,7 +173,67 @@ impl ApplyPatchUseCase {
                 })
             }
             ArtifactKind::Html => {
-                unimplemented!("Html patch application not yet implemented")
+                use crate::documents::application::apply_html_ops::HtmlOpApplier;
+                use crate::documents::domain::ir::html::HtmlIR;
+
+                let mut ir: HtmlIR =
+                    serde_json::from_value(current_data.ir.clone()).map_err(|e| {
+                        DocumentError::IRValidationFailed {
+                            path: "/".into(),
+                            reason: format!("parse current HTML IR: {e}"),
+                        }
+                    })?;
+                let applier = HtmlOpApplier {
+                    ids: self.ids.as_ref(),
+                };
+                let mut structured = Vec::with_capacity(input.patch.ops.len());
+                let mut natural_language = Vec::with_capacity(input.patch.ops.len());
+                for (i, op) in input.patch.ops.iter().enumerate() {
+                    let outcome = applier.apply(&mut ir, op)?;
+                    natural_language.push(describe_op(op, &outcome));
+                    if !outcome.assigned_ids.is_empty() {
+                        structured.push(op_outcome_entry(i, op, &outcome));
+                    }
+                }
+                let summary = PatchSummary {
+                    natural_language,
+                    structured,
+                };
+                let new_version = current.next();
+                ir.version_id = new_version.0.clone();
+                let ir_value = serde_json::to_value(&ir).unwrap();
+                self.html_validator.validate(&ir_value)?;
+                let rendered = self.html_renderer.render(&ir_value).await?;
+
+                let patch_applied = PatchApplied {
+                    patch: serde_json::to_value(&input.patch).unwrap(),
+                    applied_at: Utc::now(),
+                    resulted_in: new_version.clone(),
+                    summary: summary.clone(),
+                };
+                let version_data = VersionData {
+                    ir: ir_value,
+                    rendered_binary: rendered,
+                    rendered_extension: "html",
+                    patch_applied,
+                    blobs: vec![],
+                };
+                self.store
+                    .write_version(&artifact_id, &new_version, &version_data)
+                    .await?;
+                self.store
+                    .set_head(&artifact_id, Some(&current), &new_version)
+                    .await?;
+
+                let mut new_meta = meta.clone();
+                new_meta.current_version = new_version.clone();
+                new_meta.updated_at = Utc::now();
+                self.store.update_meta(&artifact_id, &new_meta).await?;
+
+                Ok(ApplyPatchOutput {
+                    version_id: new_version,
+                    summary,
+                })
             }
         }
     }
@@ -508,6 +570,8 @@ mod tests {
             excel_validator: Arc::new(ExcelValidator),
             word_renderer: Arc::new(NoopR),
             word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(NoopR),
+            html_validator: Arc::new(NoopV),
             ids: ids.clone(),
         };
         let res = apply
@@ -569,6 +633,8 @@ mod tests {
             excel_validator: Arc::new(ExcelValidator),
             word_renderer: Arc::new(NoopR),
             word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(NoopR),
+            html_validator: Arc::new(NoopV),
             ids: ids.clone(),
         };
         let err = apply
@@ -583,5 +649,69 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, DocumentError::VersionConflict { .. }));
+    }
+
+    #[tokio::test]
+    async fn apply_set_theme_on_html_advances_version() {
+        use crate::documents::domain::ir::html::Theme;
+        use crate::documents::domain::patch::PatchOp;
+        use crate::documents::domain::ports::AssetStore;
+        use crate::documents::infrastructure::render::HtmlRenderer;
+        use crate::documents::infrastructure::storage::LocalFsAssetStore;
+        use crate::documents::infrastructure::validation::HtmlValidator;
+
+        let tmp_a = tempdir().unwrap();
+        let tmp_b = tempdir().unwrap();
+        let store: Arc<dyn ArtifactStore> = Arc::new(LocalFsStore::new(tmp_a.path()));
+        let asset_store: Arc<dyn AssetStore> = Arc::new(LocalFsAssetStore::new(tmp_b.path()));
+        let ids = Arc::new(CountingIdGenerator::default());
+
+        let create = CreateDocumentUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(NoopR),
+            word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(HtmlRenderer::new(asset_store.clone())),
+            html_validator: Arc::new(HtmlValidator),
+            ids: ids.clone(),
+            default_retention: 10,
+        };
+        let out = create
+            .execute(CreateDocumentInput {
+                kind: ArtifactKind::Html,
+                session_id: SessionId::new("s"),
+                label: None,
+                retention_limit: None,
+                initial_ir: None,
+                source: PatchSource::Agent,
+            })
+            .await
+            .unwrap();
+
+        let apply = ApplyPatchUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(NoopR),
+            word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(HtmlRenderer::new(asset_store)),
+            html_validator: Arc::new(HtmlValidator),
+            ids: ids.clone(),
+        };
+        let res = apply
+            .execute(ApplyPatchInput {
+                patch: Patch {
+                    artifact_id: out.artifact_id.0.clone(),
+                    base_version: "v1".into(),
+                    source: PatchSource::Agent,
+                    ops: vec![PatchOp::SetTheme {
+                        theme: Theme::Vibrant,
+                    }],
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.version_id.0, "v2");
     }
 }

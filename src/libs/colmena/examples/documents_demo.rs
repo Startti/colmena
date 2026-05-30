@@ -25,13 +25,40 @@ use colmena::documents::application::rollback::{RollbackInput, RollbackUseCase};
 use colmena::documents::domain::artifact::PatchSummary;
 use colmena::documents::domain::ids::{ArtifactKind, SessionId, VersionId};
 use colmena::documents::domain::patch::{Patch, PatchOp, PatchSource};
-use colmena::documents::domain::ArtifactStore;
+use colmena::documents::domain::{ArtifactStore, IRRenderer, IRValidator, RenderError};
 use colmena::documents::infrastructure::ids::UlidIdGenerator;
 use colmena::documents::infrastructure::render::{ExcelRenderer, WordRenderer};
 use colmena::documents::infrastructure::storage::LocalFsStore;
 use colmena::documents::infrastructure::validation::{ExcelValidator, WordValidator};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+struct NoopR;
+#[async_trait::async_trait]
+impl IRRenderer for NoopR {
+    async fn render(
+        &self,
+        _ir: &serde_json::Value,
+    ) -> Result<Vec<u8>, RenderError> {
+        Ok(vec![])
+    }
+    fn target_extension(&self) -> &'static str {
+        "html"
+    }
+    fn target_mime(&self) -> &'static str {
+        "text/html"
+    }
+}
+
+struct NoopV;
+impl IRValidator for NoopV {
+    fn validate(
+        &self,
+        _ir: &serde_json::Value,
+    ) -> Result<(), colmena::documents::domain::DocumentError> {
+        Ok(())
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -50,6 +77,8 @@ async fn main() {
         excel_validator: Arc::new(ExcelValidator),
         word_renderer: Arc::new(WordRenderer),
         word_validator: Arc::new(WordValidator),
+        html_renderer: Arc::new(NoopR),
+        html_validator: Arc::new(NoopV),
         ids: ids.clone(),
         default_retention: 20,
     };
@@ -59,6 +88,8 @@ async fn main() {
         excel_validator: Arc::new(ExcelValidator),
         word_renderer: Arc::new(WordRenderer),
         word_validator: Arc::new(WordValidator),
+        html_renderer: Arc::new(NoopR),
+        html_validator: Arc::new(NoopV),
         ids: ids.clone(),
     };
     let read = ReadDocumentUseCase {
