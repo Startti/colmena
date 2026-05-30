@@ -1,0 +1,51 @@
+{
+  "comment": "E2E for layered tool context: sql_query tool with policy + sql_query-guide + 2 scoped skills.",
+  "metadata": {
+    "category": "agents",
+    "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"]
+  },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "lazy_tool_loading": true,
+        "system_message": "You analyze business data on demand using the available tools.",
+        "skills": {
+          "builtin": ["sql_query-guide", "sales-analysis", "expense-analysis"]
+        },
+        "tool_configurations": {
+          "consultar_ventas": {
+            "name": "consultar_ventas",
+            "node_type": "sql_query",
+            "description": "Consultar datos de la base.",
+            "summary": "Consulta ventas y gastos contra Postgres.",
+            "skills": ["sales-analysis", "expense-analysis"],
+            "node_schema": {
+              "connection_url": { "type": "string", "fixed": "${DATABASE_URL}" },
+              "permissions": {
+                "type": "object",
+                "fixed": { "preset": "read_only", "allowed_schemas": ["public"] }
+              },
+              "runtime_limits": {
+                "type": "object",
+                "fixed": { "max_rows": 50, "statement_timeout_ms": 15000 }
+              },
+              "guardrail_enabled": { "type": "boolean", "fixed": true },
+              "guardrail_llm": { "type": "object", "fixed": { "enabled": false } },
+              "query": {
+                "type": "string", "required": true,
+                "description": "SQL SELECT query."
+              }
+            }
+          }
+        },
+        "prompt": "¿Cuánta plata vendimos en abril 2026?"
+      }
+    },
+    "result": { "type": "output", "config": { "label": "out" } }
+  },
+  "edges": [{ "from": "agent", "to": "result" }]
+}
