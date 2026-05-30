@@ -2187,7 +2187,7 @@
         "items": { "type": "string" },
         "required": false,
         "default": [],
-        "description": "Layer-2 skill names scoped to this tool. Resolved against the active SkillRepository at graph load (unknown names → error). Appear in the load_skill catalog only after this tool is discovered (lazy describe_tool). In non-lazy mode, visible from turn 1. Skills with node_type frontmatter cannot be referenced here (use the node_type mechanism for layer-1 guides). Known UX wart: names listed here must also appear in llm_call.skills.builtin until the auto-registration follow-up lands."
+        "description": "Layer-2 skill names scoped to this tool. The engine auto-loads them from the builtin pool or from any path declared in llm_call.skills.paths — no need to repeat them in llm_call.skills.builtin. Resolved at graph load (unknown names → error). Appear in the load_skill catalog only after this tool is discovered (lazy describe_tool). In non-lazy mode, visible from turn 1. Skills with node_type frontmatter cannot be referenced here (use the node_type mechanism for layer-1 guides)."
       }
     },
 

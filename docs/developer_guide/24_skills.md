@@ -144,15 +144,65 @@ Validations at graph load:
   hard error.
 - A `llm_call.skills` reference to a node_type guide → warning, ignored.
 
-> **Known UX wart (follow-up cleanup needed):** operators currently need
-> to list layer-2 (tool-scoped) skills in BOTH `tool_configurations.<X>.skills`
-> AND `llm_call.skills.builtin` — the `SkillRepository` is built only
-> from the latter, so a skill referenced only in a tool's `skills` field
-> but absent from `llm_call.skills.builtin` will fail graph-load
-> validation with "unknown skill name". The correct long-term fix is to
-> auto-register skills referenced by any `tool_configurations` entry
-> without requiring a redundant `llm_call.skills.builtin` entry. Until
-> that cleanup lands, always add tool-scoped skill names to
-> `llm_call.skills.builtin` as well.
+## How skills auto-load
+
+The engine derives the complete skill load list automatically — operators
+only need to declare scoped skills in `tool_configurations.<name>.skills`.
+No redundant enumeration in `llm_call.skills.builtin` is required.
+
+**Built-in skills** (compiled into the crate via `include_dir!`):
+
+- Auto-load when listed explicitly in `llm_call.skills.builtin`.
+- Auto-load when referenced in any `tool_configurations.<name>.skills`
+  (layer-2 auto-registration, via `augment_builtin_names`).
+- Auto-load when their frontmatter declares `node_type: X` and any
+  configured tool has `node_type: X` (layer-1 guide, zero config
+  required).
+
+**Path-based skills** (from `llm_call.skills.paths`): every `SKILL.md`
+found under those directories is discovered automatically — no explicit
+enumeration needed.
+
+**Operator's only declarative job:** list scoped layer-2 skill names in
+`tool_configurations.<name>.skills`. Everything else is derived.
+
+### Before (old, required duplication)
+
+```json
+{
+  "type": "llm_call",
+  "config": {
+    "skills": {
+      "builtin": ["sales-analysis"]
+    },
+    "tool_configurations": {
+      "query_sales": {
+        "node_type": "sql_query",
+        "skills": ["sales-analysis"]
+      }
+    }
+  }
+}
+```
+
+### After (current, single declaration)
+
+```json
+{
+  "type": "llm_call",
+  "config": {
+    "tool_configurations": {
+      "query_sales": {
+        "node_type": "sql_query",
+        "skills": ["sales-analysis"]
+      }
+    }
+  }
+}
+```
+
+The engine auto-derives that `sales-analysis` must be loaded (because it
+is referenced in `tool.skills`) and that `sql_query`'s node-type guide
+must be auto-folded (because `query_sales` has `node_type: sql_query`).
 
 - Diseño completo: [docs/superpowers/specs/2026-04-20-llm-skills-design.md](../superpowers/specs/2026-04-20-llm-skills-design.md)
