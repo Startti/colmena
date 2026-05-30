@@ -302,37 +302,18 @@ impl SqlPermissions {
             s.join(", ")
         };
 
-        // Build safety rules for operations that are allowed
-        let mut safety_rules = Vec::new();
-        let has_update = self.allowed_ops.contains(&SqlOperation::Update);
-        let has_delete = self.allowed_ops.contains(&SqlOperation::Delete);
-
-        if has_update && has_delete {
-            safety_rules.push("UPDATE and DELETE require a WHERE clause".to_string());
-        } else if has_update {
-            safety_rules.push("UPDATE requires a WHERE clause".to_string());
-        } else if has_delete {
-            safety_rules.push("DELETE requires a WHERE clause".to_string());
-        }
-
-        let safety_line = if !safety_rules.is_empty() {
-            format!("\n             - Safety rules: {}", safety_rules.join("; "))
-        } else {
-            String::new()
-        };
-
         format!(
             "SQL access policy for this tool (enforced server-side; requests outside it are rejected):\n\
              - Allowed operations: {ops}\n\
              - Allowed schemas: {schemas} (other schemas are blocked)\n\
              - Sandbox schema for CREATE FUNCTION/TABLE: {sandbox}\n\
              - Always blocked regardless of config: DROP, ALTER, TRUNCATE, CREATE SCHEMA, CREATE INDEX, CREATE VIEW, GRANT, REVOKE\n\
-             - SELECT returns at most {max_rows} rows{safety}",
+             - DELETE and UPDATE require a WHERE clause\n\
+             - SELECT returns at most {max_rows} rows",
             ops = ops.join(", "),
             schemas = schemas_line,
             sandbox = self.sandbox_schema,
             max_rows = max_rows,
-            safety = safety_line,
         )
     }
 }
@@ -525,12 +506,16 @@ mod tests {
         assert!(text.contains("SELECT"));
         assert!(text.contains("INSERT"));
         assert!(text.contains("UPDATE"));
-        assert!(!text.contains("DELETE"));
         assert!(text.contains("public"));
         assert!(text.contains("analytics"));
         assert!(text.contains("DROP"));     // always-blocked list mentions it
-        assert!(text.contains("WHERE"));    // safety rule
+        assert!(text.contains("WHERE"));    // fixed WHERE clause in 5th bullet
         assert!(text.contains("50"));       // max_rows
+
+        // Lock line order: WHERE clause must come before max_rows line
+        let where_pos = text.find("WHERE").expect("WHERE present");
+        let max_rows_pos = text.find("at most").expect("max rows present");
+        assert!(where_pos < max_rows_pos, "WHERE line must come before max_rows line");
     }
 
     #[test]
