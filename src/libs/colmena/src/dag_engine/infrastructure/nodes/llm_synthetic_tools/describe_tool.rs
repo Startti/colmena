@@ -155,9 +155,15 @@ fn collect_visible_fields(cfg: &ToolConfiguration) -> Vec<(String, &NodeSchemaFi
 /// Dispatch a `describe_tool` call. `lookup` is the slice of currently-configured
 /// `ToolConfiguration` entries. Returns the curated markdown for the requested
 /// tool, or an "Error: ..." string if the name is not found.
+///
+/// `skill_repo` and `registry` are optional — when present, `dispatch_describe_tool`
+/// can resolve the layer-1 guide body (via `skill_repo`) and call
+/// `ExecutableNode::tool_description_supplement` on the live node (via `registry`).
 pub async fn dispatch_describe_tool(
     tool_call: &ToolCall,
     lookup: &[ToolConfiguration],
+    skill_repo: Option<&dyn SkillRepository>,
+    registry: &dyn crate::dag_engine::application::ports::NodeRegistryPort,
 ) -> Result<DescribeToolDispatchResult, LlmError> {
     let args: serde_json::Value =
         serde_json::from_str(&tool_call.function.arguments).map_err(|e| {
@@ -174,7 +180,10 @@ pub async fn dispatch_describe_tool(
 
     let cfg = lookup.iter().find(|c| c.name == name);
     let output = match cfg {
-        Some(c) => generate_tool_markdown_async(c, None, None).await,
+        Some(c) => {
+            let node = registry.get_node(&c.node_type);
+            generate_tool_markdown_async(c, node.as_deref(), skill_repo).await
+        }
         None => format!("Error: Tool '{}' not found in catalog", name),
     };
     Ok(DescribeToolDispatchResult {
@@ -299,6 +308,8 @@ mod tests {
         assert!(md.contains("path"));
     }
 
+    use crate::dag_engine::application::ports::NodeRegistryPort;
+    use crate::dag_engine::domain::node::ExecutableNode;
     use crate::llm::domain::tools::{FunctionCall, ToolCall};
 
     fn mk_call(args: serde_json::Value) -> ToolCall {
@@ -308,12 +319,27 @@ mod tests {
         )
     }
 
+    /// Minimal registry stub for tests that don't need a live node.
+    struct NullRegistry;
+    impl NodeRegistryPort for NullRegistry {
+        fn get_node(&self, _node_type: &str) -> Option<std::sync::Arc<dyn ExecutableNode>> {
+            None
+        }
+        fn get_all_nodes(
+            &self,
+        ) -> std::collections::HashMap<String, std::sync::Arc<dyn ExecutableNode>> {
+            std::collections::HashMap::new()
+        }
+    }
+
     #[tokio::test]
     async fn dispatch_returns_markdown_for_known_tool() {
         let cfg = cfg_minimal("search_orders", "Search the orders table");
         let lookup = vec![cfg];
         let call = mk_call(json!({ "name": "search_orders" }));
-        let r = dispatch_describe_tool(&call, &lookup).await.unwrap();
+        let r = dispatch_describe_tool(&call, &lookup, None, &NullRegistry)
+            .await
+            .unwrap();
         assert_eq!(r.tool_name, "search_orders");
         assert!(r.output.contains("# search_orders"));
         assert!(r.output.contains("now available"));
@@ -324,7 +350,9 @@ mod tests {
         let cfg = cfg_minimal("search_orders", "Search the orders table");
         let lookup = vec![cfg];
         let call = mk_call(json!({ "name": "deleted_tool" }));
-        let r = dispatch_describe_tool(&call, &lookup).await.unwrap();
+        let r = dispatch_describe_tool(&call, &lookup, None, &NullRegistry)
+            .await
+            .unwrap();
         assert!(r.output.starts_with("Error:"));
         assert!(r.output.contains("not found in catalog"));
     }
@@ -334,7 +362,9 @@ mod tests {
         let cfg = cfg_minimal("search_orders", "Search");
         let lookup = vec![cfg];
         let call = mk_call(json!({}));
-        let err = dispatch_describe_tool(&call, &lookup).await.unwrap_err();
+        let err = dispatch_describe_tool(&call, &lookup, None, &NullRegistry)
+            .await
+            .unwrap_err();
         assert!(matches!(err, LlmError::InvalidToolCall { .. }));
     }
 
@@ -378,5 +408,32 @@ mod tests {
         assert!(md.contains("## Best practices"));
         assert!(md.contains("sql_query — best practices"));
         assert!(!md.contains("{{NODE_GUIDE_BODY}}"));
+    }
+
+    /// Integration test: `dispatch_describe_tool` loads the guide body via `skill_repo`
+    /// when `node_type` is `sql_query` and the builtin skill is in scope.
+    /// Uses `NullRegistry` (no live `SqlNode`) so only the guide-body substitution
+    /// path is exercised (the `tool_description_supplement` supplement is skipped).
+    #[tokio::test]
+    async fn dispatch_loads_node_guide_body_for_sql_query() {
+        use crate::skills::infrastructure::builtin_skill_repository::BuiltinSkillRepository;
+        use std::sync::Arc;
+
+        let repo: Arc<dyn crate::skills::domain::skill_repository::SkillRepository> =
+            Arc::new(BuiltinSkillRepository::new(&["sql_query-guide".to_string()]).unwrap());
+
+        let mut cfg = cfg_minimal("query_db", "Query the database");
+        cfg.node_type = "sql_query".to_string();
+        let lookup = vec![cfg];
+        let call = mk_call(json!({ "name": "query_db" }));
+
+        let r = dispatch_describe_tool(&call, &lookup, Some(repo.as_ref()), &NullRegistry)
+            .await
+            .unwrap();
+
+        assert_eq!(r.tool_name, "query_db");
+        assert!(r.output.contains("## Best practices"));
+        assert!(r.output.contains("sql_query — best practices"));
+        assert!(!r.output.contains("{{NODE_GUIDE_BODY}}"));
     }
 }

@@ -630,7 +630,13 @@ impl DagToolExecutor {
                     .ok_or_else(|| LlmError::ToolNotFound {
                         name: DESCRIBE_TOOL_NAME.to_string(),
                     })?;
-            let result = dispatch_describe_tool(tool_call, lookup).await?;
+            let result = dispatch_describe_tool(
+                tool_call,
+                lookup,
+                self.skill_repository.as_deref(),
+                &*self.registry,
+            )
+            .await?;
             if let Some(obs) = &self.describe_tool_observer {
                 obs(&result);
             }
