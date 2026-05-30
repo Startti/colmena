@@ -223,6 +223,7 @@ impl SkillRepository for FilesystemSkillRepository {
             body: parsed.body,
             references: parsed.references,
             source: SkillSource::Path,
+            node_type: parsed.node_type,
         })
     }
 

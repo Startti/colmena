@@ -2067,6 +2067,7 @@ mod tests {
                     body: "BODY".into(),
                     references: vec![],
                     source: SkillSource::Builtin,
+                    node_type: None,
                 })
             }
             async fn load_reference(&self, _: &str, _: &str) -> Result<SkillReference, SkillError> {

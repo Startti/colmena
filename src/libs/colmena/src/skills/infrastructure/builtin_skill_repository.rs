@@ -138,6 +138,7 @@ impl SkillRepository for BuiltinSkillRepository {
             body: entry.body.clone(),
             references: entry.references.clone(),
             source: SkillSource::Builtin,
+            node_type: None,
         })
     }
 

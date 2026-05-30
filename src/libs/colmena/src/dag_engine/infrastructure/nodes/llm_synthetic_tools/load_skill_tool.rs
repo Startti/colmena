@@ -219,6 +219,7 @@ mod tests {
                         description: "Django + FastAPI".to_string(),
                     }],
                     source: SkillSource::Builtin,
+                    node_type: None,
                 }),
                 _ => Err(SkillError::SkillNotFound(name.to_string())),
             }
