@@ -49,6 +49,13 @@ pub enum SkillError {
     #[error("skill name collision: '{name}' is defined more than once")]
     SkillNameCollision { name: String },
 
+    #[error("duplicate node_type guide: node_type '{node_type}' is claimed by skills '{first}' and '{second}'; only one guide per node_type is allowed")]
+    DuplicateNodeTypeGuide {
+        node_type: String,
+        first: String,
+        second: String,
+    },
+
     #[error("I/O error on {path}: {source}")]
     Io {
         path: String,

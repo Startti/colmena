@@ -19,6 +19,14 @@ pub trait SkillRepository: Send + Sync {
     /// List all available skills with their metadata for the catalog.
     fn list_available(&self) -> Vec<SkillCatalogEntry>;
 
+    /// Resolve the layer-1 node-type guide for a given node_type, if any.
+    /// Returns the catalog entry whose frontmatter `node_type` matches.
+    fn find_by_node_type(&self, node_type: &str) -> Option<SkillCatalogEntry> {
+        self.list_available()
+            .into_iter()
+            .find(|e| e.node_type.as_deref() == Some(node_type))
+    }
+
     /// Load a skill's main SKILL.md content by name.
     async fn load_skill(&self, name: &str) -> Result<Skill, SkillError>;
 
