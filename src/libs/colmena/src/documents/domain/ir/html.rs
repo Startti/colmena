@@ -137,10 +137,52 @@ pub struct Slide {
     pub blocks: Vec<Block>,
 }
 
-// Placeholder — replaced in Task 2.3 with full ChartSpec impl.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ChartSpec {
-    pub _placeholder: bool,
+    pub chart_type: ChartType,
+    pub series: Vec<ChartSeries>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_axis: Option<AxisSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y_axis: Option<AxisSpec>,
+    #[serde(default = "default_true")]
+    pub legend: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub palette: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ChartType {
+    Bar,
+    Line,
+    Pie,
+    Doughnut,
+    Area,
+    Scatter,
+    Radar,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ChartSeries {
+    pub name: String,
+    pub data: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AxisSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub categories: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -498,5 +540,29 @@ mod tests {
         let v = serde_json::to_value(&b).unwrap();
         assert_eq!(v["variant"], "warning");
         let _: Block = serde_json::from_value(v).unwrap();
+    }
+
+    #[test]
+    fn chart_spec_bar_roundtrips() {
+        let c = ChartSpec {
+            chart_type: ChartType::Bar,
+            series: vec![ChartSeries {
+                name: "Sales".into(),
+                data: vec![10.0, 20.0, 30.0],
+            }],
+            x_axis: Some(AxisSpec {
+                title: Some("Quarter".into()),
+                categories: Some(vec!["Q1".into(), "Q2".into(), "Q3".into()]),
+                min: None,
+                max: None,
+            }),
+            y_axis: None,
+            legend: true,
+            palette: None,
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["chart_type"], "bar");
+        let back: ChartSpec = serde_json::from_value(v).unwrap();
+        assert_eq!(back.series.len(), 1);
     }
 }
