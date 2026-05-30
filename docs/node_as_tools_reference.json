@@ -377,6 +377,9 @@
           }
         }
       },
+      "notes": [
+        "When a tool's node has a layer-1 guide skill (SKILL.md with node_type: <this_type>), the engine auto-folds its body into describe_tool output and into the tool description in eager/non-lazy. tool_configurations.<name>.skills lists per-tool layer-2 references gated by describe_tool."
+      ],
       "reference_graphs": [
         "tests/graphs/agents/sql_query_readonly_test.json",
         "tests/graphs/agents/sql_rls_todo_test.json"

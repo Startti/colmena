@@ -125,4 +125,34 @@ Qué sí controla Colmena:
 - Tool expuesto al LLM: `load_skill(name: string, reference?: string)`.
 - La descripción del tool contiene el catálogo completo (nombre + descripción de cada skill).
 - Si no se configura `skills`, todo el sistema de skills queda desactivado (zero overhead).
+## Layered routing
+
+A skill's role is derived from how it's wired, not from where the file
+lives. All skills share the same pool.
+
+| Role | How it's marked | How it reaches the model |
+|---|---|---|
+| Layer 1 — node-type guide | frontmatter `node_type: <name>` | auto-folded into the tool context block of every tool with matching node_type; **never** in the `load_skill` catalog |
+| Layer 2 — tool-scoped specific | referenced in `tool_configurations.<name>.skills` | appears in the `load_skill` catalog **only after** the parent tool is discovered (lazy `discovered_set`); in non-lazy mode, visible from turn 1 |
+| Layer 3 — free-standing general | referenced in `llm_call.skills` and no `node_type` | always in the `load_skill` catalog (today's behavior) |
+
+Validations at graph load:
+- At most one skill per node_type. Two guides claiming the same
+  `node_type` → hard error.
+- A `tool.skills` reference to an unknown name → hard error.
+- A `tool.skills` reference to a skill marked as a node_type guide →
+  hard error.
+- A `llm_call.skills` reference to a node_type guide → warning, ignored.
+
+> **Known UX wart (follow-up cleanup needed):** operators currently need
+> to list layer-2 (tool-scoped) skills in BOTH `tool_configurations.<X>.skills`
+> AND `llm_call.skills.builtin` — the `SkillRepository` is built only
+> from the latter, so a skill referenced only in a tool's `skills` field
+> but absent from `llm_call.skills.builtin` will fail graph-load
+> validation with "unknown skill name". The correct long-term fix is to
+> auto-register skills referenced by any `tool_configurations` entry
+> without requiring a redundant `llm_call.skills.builtin` entry. Until
+> that cleanup lands, always add tool-scoped skill names to
+> `llm_call.skills.builtin` as well.
+
 - Diseño completo: [docs/superpowers/specs/2026-04-20-llm-skills-design.md](../superpowers/specs/2026-04-20-llm-skills-design.md)

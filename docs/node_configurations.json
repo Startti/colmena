@@ -2169,6 +2169,25 @@
         "default": null,
         "description": "Dynamic values injected at runtime into node_schema 'fixed' values or fixed_config strings via '${context.key}' template syntax. Use this to pass values computed by upstream nodes (e.g. auth tokens, user IDs) into a tool without hardcoding them in the graph.",
         "example": { "amadeus_token": "<value_1>", "user_id": "usr_123" }
+      },
+      "summary": {
+        "type": "string",
+        "required": false,
+        "default": null,
+        "description": "Short catalog entry shown to the LLM inside describe_tool when lazy_tool_loading is true. If absent, the engine truncates description to ~120 chars. Maximum 200 chars (longer values are truncated with a warning at graph load). Ignored when lazy_tool_loading is false or when eager is true."
+      },
+      "eager": {
+        "type": "boolean",
+        "required": false,
+        "default": false,
+        "description": "When true, the tool is always included with its full schema in every LLM request and does NOT appear in the lazy catalog. Useful for tools called on almost every turn (e.g. current_time, get_user_id). Ignored when lazy_tool_loading is false."
+      },
+      "skills": {
+        "type": "array",
+        "items": { "type": "string" },
+        "required": false,
+        "default": [],
+        "description": "Layer-2 skill names scoped to this tool. Resolved against the active SkillRepository at graph load (unknown names → error). Appear in the load_skill catalog only after this tool is discovered (lazy describe_tool). In non-lazy mode, visible from turn 1. Skills with node_type frontmatter cannot be referenced here (use the node_type mechanism for layer-1 guides). Known UX wart: names listed here must also appear in llm_call.skills.builtin until the auto-registration follow-up lands."
       }
     },
 

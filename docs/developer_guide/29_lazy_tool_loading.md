@@ -178,4 +178,32 @@ Mismo posture que skills: el engine valida estructura (`summary` length, schema 
 - Tool sintético: `describe_tool(name: string)`.
 - La descripción del tool contiene el catálogo completo (nombre + summary de cada tool no-eager no-descubierta).
 - Si no se configura `lazy_tool_loading`, la feature está completamente deshabilitada (zero overhead).
+## Tool context block
+
+When the engine builds the markdown that `describe_tool` returns (lazy)
+or the description that ships in `tools[]` (eager / non-lazy), it now
+assembles a **layered block** with up to five sections:
+
+1. `# {tool_name}` + the tool's description.
+2. `## Access policy` — if `ExecutableNode::tool_description_supplement`
+   returned `Some`, derived from the tool's fixed config (e.g.
+   `sql_query`'s preset + allowed_schemas + max_rows).
+3. `## Best practices` — body of the `SKILL.md` whose frontmatter has
+   `node_type: <this_node_type>`. One guide per node_type, validated at
+   graph load.
+4. `## Parameters` — present only in the lazy `describe_tool` variant;
+   the eager / non-lazy path omits it because the schema travels typed.
+5. `## Related knowledge` — names + descriptions of every skill listed
+   in this tool's `tool_configurations.<name>.skills` array. The model
+   loads them with `load_skill(name)` based on intent.
+
+Routing follows the existing lazy/eager bifurcation: lazy + non-eager
+goes through `describe_tool` (on demand); eager OR `lazy_tool_loading:
+false` goes via the tool description (always in the prompt).
+
+See [24_skills.md](24_skills.md) ("Layered routing") for the full layer
+classification and validation rules. See
+[docs/superpowers/specs/2026-05-29-layered-tool-context-design.md](../superpowers/specs/2026-05-29-layered-tool-context-design.md)
+for the feature spec.
+
 - Spec completo: [docs/superpowers/specs/2026-05-03-lazy-tool-loading-design.md](../superpowers/specs/2026-05-03-lazy-tool-loading-design.md)

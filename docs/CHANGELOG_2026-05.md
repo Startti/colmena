@@ -288,6 +288,48 @@ Para dev/prod symmetry agregamos `COLMENA_LOCAL=true|false` como guard rail expl
 
 ---
 
+## 10. Layered tool context — policy + node-type guide + tool-scoped skills (2026-05-29)
+
+**Qué cambió.** Cada nodo usado como tool LLM ahora recibe, de forma
+automática, un **bloque de contexto** compuesto por: (1) su description,
+(2) política derivada de su fixed config (vía un hook nuevo en
+`ExecutableNode::tool_description_supplement`), (3) la guía de
+best-practices del node-type (una SKILL.md con `node_type: <name>` en el
+frontmatter — una por node-type), y (4) un anuncio de las "skills
+específicas" scoped a esa tool (`tool_configurations.<name>.skills`),
+que el modelo puede cargar con `load_skill` solo después de hacer
+`describe_tool` (visibility-gating sobre el `discovered_set`). En modo
+eager o sin lazy, todo el bloque va en la `description` desde el turno
+1 y las skills scoped quedan disponibles también desde turno 1.
+
+Reusa la infra de Skills (`include_dir!`, frontmatter, 64 KB) como
+único repositorio de markdown. Una skill con `node_type` nunca entra al
+catálogo de `load_skill` (es auto-folded). El primer nodo con guía es
+`sql_query`: la política sale de `SqlPermissions` y la guía vive en
+`skills/sql_query-guide/SKILL.md`.
+
+**Documentación:**
+- Spec: [docs/superpowers/specs/2026-05-29-layered-tool-context-design.md](superpowers/specs/2026-05-29-layered-tool-context-design.md)
+- Plan: [docs/superpowers/plans/2026-05-29-layered-tool-context.md](superpowers/plans/2026-05-29-layered-tool-context.md)
+- Dev guides: [29_lazy_tool_loading.md](developer_guide/29_lazy_tool_loading.md) ("Tool context block"); [24_skills.md](developer_guide/24_skills.md) ("Layered routing").
+- Schema: [node_configurations.json](node_configurations.json) → `tool_configuration_schema.skills`.
+
+**Estado:** ✅ Done. Verificado E2E contra Gemini Flash + Postgres.
+
+> **Known UX wart (follow-up cleanup):** operators currently need to list
+> tool-scoped (layer-2) skill names in BOTH `tool_configurations.<X>.skills`
+> AND `llm_call.skills.builtin`. The `SkillRepository` is built only from
+> the latter, so a name listed only under `tool_configurations` fails
+> graph-load validation. The correct fix is to auto-register skills
+> referenced by any `tool_configurations` entry — parked in
+> [docs/BACKLOG.md](BACKLOG.md) for a future cleanup pass.
+
+> **Sweep ADP:** añade un método default-None a `ExecutableNode` y un
+> campo opcional a `ToolConfiguration` (con `#[serde(default)]`).
+> Cambios additivos — no rompe el worker de ADP.
+
+---
+
 ## Misc
 
 ### `.gitignore` para `.DS_Store` y otros artifacts de OS
@@ -323,6 +365,7 @@ Para dev/prod symmetry agregamos `COLMENA_LOCAL=true|false` como guard rail expl
 | 7. path/data registration fix | ✅ (issue) | ✅ | ✅ | (n/a) | ✅ (two-agent) | OK |
 | 8. Multimedia generation + artifacts unification | — | ✅ | ✅ | ✅ (3 nodos + categoría `media`) | ✅ (4 media + 2 agents) | Host application wiring pendiente (downstream private repo). Spec absorbida en el plan. |
 | 9. `sql_query` auto-crea `allowed_schemas` | — | ✅ | ✅ | ✅ (`create_schemas_if_missing`, default `true`) | ✅ (1 tool + 1 standalone) | Verificado e2e contra Postgres real. Plan absorbe la spec. |
+| 10. Layered tool context | ✅ | ✅ | ✅ | ✅ (`tool_configuration_schema.skills`) | ✅ (1 E2E) | sql_query es el nodo de referencia. Guías por nodo (http_request, socketio, etc.) quedan como follow-ups. |
 
 **Leyenda:** ✅ presente y completo · ⚠️ parcial · ❌ ausente · — no aplica · (n/a) no requiere
 
