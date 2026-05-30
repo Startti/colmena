@@ -63,6 +63,7 @@ impl CreateDocumentUseCase {
         {
             ArtifactKind::Excel => (&self.excel_validator, &self.excel_renderer),
             ArtifactKind::Word => (&self.word_validator, &self.word_renderer),
+            ArtifactKind::Html => unimplemented!("Html renderer not yet implemented"),
         };
         validator.validate(&ir)?;
         let bytes = renderer.render(&ir).await?;
@@ -85,6 +86,7 @@ impl CreateDocumentUseCase {
             rendered_extension: match input.kind {
                 ArtifactKind::Excel => "xlsx",
                 ArtifactKind::Word => "docx",
+                ArtifactKind::Html => "html",
             },
             patch_applied,
             blobs: vec![],
@@ -112,6 +114,7 @@ fn default_label(kind: ArtifactKind) -> String {
     let k = match kind {
         ArtifactKind::Excel => "Excel",
         ArtifactKind::Word => "Word",
+        ArtifactKind::Html => "Html",
     };
     format!("Untitled {k} {now}")
 }
@@ -131,6 +134,13 @@ fn empty_ir(id: &ArtifactId, kind: ArtifactKind) -> serde_json::Value {
             "version_id": "v1",
             "schema_version": crate::documents::domain::ir::SCHEMA_VERSION,
             "document": { "blocks": [], "named_styles": {} }
+        }),
+        ArtifactKind::Html => serde_json::json!({
+            "kind": "html",
+            "artifact_id": id.0,
+            "version_id": "v1",
+            "schema_version": crate::documents::domain::ir::SCHEMA_VERSION,
+            "document": { "blocks": [] }
         }),
     }
 }

@@ -170,6 +170,9 @@ impl ApplyPatchUseCase {
                     summary,
                 })
             }
+            ArtifactKind::Html => {
+                unimplemented!("Html patch application not yet implemented")
+            }
         }
     }
 }

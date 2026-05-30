@@ -70,6 +70,7 @@ impl fmt::Display for SessionId {
 pub enum ArtifactKind {
     Excel,
     Word,
+    Html,
 }
 
 impl ArtifactKind {
@@ -77,6 +78,7 @@ impl ArtifactKind {
         match self {
             ArtifactKind::Excel => "xlsx",
             ArtifactKind::Word => "docx",
+            ArtifactKind::Html => "html",
         }
     }
     pub fn mime(&self) -> &'static str {
@@ -87,6 +89,7 @@ impl ArtifactKind {
             ArtifactKind::Word => {
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             }
+            ArtifactKind::Html => "text/html; charset=utf-8",
         }
     }
 }
@@ -113,5 +116,20 @@ mod tests {
     fn artifact_kind_extension() {
         assert_eq!(ArtifactKind::Excel.extension(), "xlsx");
         assert_eq!(ArtifactKind::Word.extension(), "docx");
+    }
+
+    #[test]
+    fn artifact_kind_html_extension_and_mime() {
+        assert_eq!(ArtifactKind::Html.extension(), "html");
+        assert_eq!(ArtifactKind::Html.mime(), "text/html; charset=utf-8");
+    }
+
+    #[test]
+    fn artifact_kind_html_serde_roundtrip() {
+        let k = ArtifactKind::Html;
+        let s = serde_json::to_string(&k).unwrap();
+        assert_eq!(s, "\"html\"");
+        let back: ArtifactKind = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, ArtifactKind::Html);
     }
 }
