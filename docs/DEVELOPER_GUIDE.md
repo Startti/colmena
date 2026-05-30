@@ -7,6 +7,7 @@ Esta guía está dirigida a desarrolladores que quieren contribuir, extender o e
 Esta guía se ha dividido en varias secciones para facilitar su consulta.
 
 0.  [**Visión General de la Arquitectura**](./developer_guide/00_architecture_overview.md): Mapa maestro del sistema — qué es Colmena, cómo se organizan los módulos, cuáles son los puntos de entrada, ciclo de vida de un grafo, y dónde ir a aprender más. **Empieza aquí.**
+0.5. [**Onboarding — qué leer en qué orden según tu rol**](./ONBOARDING.md): Rutas de lectura por rol (quick start, usuario de librería, autor de grafos, contribuidor al engine) y tabla de búsqueda rápida por feature. Punto de entrada recomendado antes de explorar el resto de guías.
 1.  [**Arquitectura del Proyecto**](./developer_guide/01_architecture.md): Principios de diseño, estructura de directorios y flujo de datos.
 2.  [**Configuración del Entorno**](./developer_guide/02_environment_setup.md): Cómo instalar las herramientas y configurar tu editor.
 3.  [**Convenciones de Código**](./developer_guide/03_coding_conventions.md): Estándares de nombrado, documentación y manejo de errores.
