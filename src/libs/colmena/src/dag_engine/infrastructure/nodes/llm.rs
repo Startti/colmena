@@ -308,19 +308,33 @@ impl LlmNode {
 
     /// Build a SkillRepository from the parsed config. Returns `None` if no skills are configured.
     /// Returns `Err(String)` on any validation failure — this must abort graph execution.
+    ///
+    /// `tool_configurations` is used to auto-derive the builtin load list: any skill name listed
+    /// in `tool_configurations.<alias>.skills` that exists in the compiled-in builtin pool is
+    /// automatically added to `skills_config.builtin`, so operators no longer need to duplicate
+    /// the name in both `tool_configurations.<X>.skills` AND `llm_call.skills.builtin`.
     fn build_skill_repository_from_config(
         config: &Value,
         inputs: &NodeInputs,
+        tool_configurations: &HashMap<String, ToolConfiguration>,
     ) -> Result<Option<Arc<dyn SkillRepository>>, String> {
         let raw_val = inputs.get("skills").or_else(|| config.get("skills"));
-        let raw_val = match raw_val {
-            Some(v) => v,
-            None => return Ok(None),
+
+        // We need to run auto-derive even when `skills` config is absent, because
+        // the operator may have declared only `tool_configurations.<X>.skills` without
+        // any explicit `skills` block.
+        let skills_config = match raw_val {
+            Some(v) => SkillsConfig::from_value(v)
+                .map_err(|e| format!("invalid 'skills' config: {}", e))?,
+            None => SkillsConfig::default(),
         };
 
-        let skills_config = SkillsConfig::from_value(raw_val)
-            .map_err(|e| format!("invalid 'skills' config: {}", e))?;
-        if !skills_config.has_any() {
+        // Auto-derive: augment the explicit builtin list with any name listed in
+        // tool_configurations.*.skills that exists in the compiled-in pool.
+        let augmented_builtin = augment_builtin_names(&skills_config.builtin, tool_configurations);
+
+        // If there's nothing to load (no builtins, no paths), short-circuit.
+        if augmented_builtin.is_empty() && skills_config.paths.is_empty() {
             return Ok(None);
         }
 
@@ -337,7 +351,7 @@ impl LlmNode {
         let allowed = Self::parse_allowed_dirs_env();
 
         let builtin: Arc<dyn SkillRepository> = Arc::new(
-            BuiltinSkillRepository::new(&skills_config.builtin)
+            BuiltinSkillRepository::new(&augmented_builtin)
                 .map_err(|e| format!("loading builtin skills: {}", e))?,
         );
         let filesystem: Arc<dyn SkillRepository> = Arc::new(
@@ -1434,8 +1448,11 @@ impl ExecutableNode for LlmNode {
             tool_configurations.keys().cloned().collect();
 
         // Build skill repository (if configured).
+        // tool_configurations is passed so that any skill name listed in
+        // tool_configurations.<alias>.skills that exists in the builtin pool is
+        // automatically loaded — no need to duplicate it in skills.builtin.
         let skill_repo: Option<Arc<dyn SkillRepository>> =
-            Self::build_skill_repository_from_config(config, inputs)?;
+            Self::build_skill_repository_from_config(config, inputs, &tool_configurations)?;
 
         // Track skills loaded across the entire node execution (for summary).
         let skills_used_log: Arc<std::sync::Mutex<Vec<SkillLoadedLogEntry>>> =
@@ -2873,6 +2890,41 @@ fn build_initial_user_message(
     LlmMessage::user(prompt.to_string())
 }
 
+/// Augment an explicit builtin skill list with any names declared in
+/// `tool_configurations.*.skills` that exist in the compiled-in builtin pool.
+///
+/// This eliminates the UX wart where operators had to list a scoped skill name in
+/// BOTH `tool_configurations.<X>.skills` (layer-2 scoping) AND
+/// `llm_call.skills.builtin` (load list). With auto-derive, declaring it once
+/// in `tool_configurations.<X>.skills` is sufficient — the engine loads it
+/// from the builtin pool automatically.
+///
+/// Names that do not exist in the builtin pool are left untouched; they are
+/// expected to come from filesystem paths (which already auto-discover all
+/// SKILL.md inside their directories). Any name that resolves to neither will
+/// be caught by `validate_skill_wiring` at graph-load time.
+pub(crate) fn augment_builtin_names(
+    explicit: &[String],
+    tool_configurations: &HashMap<String, ToolConfiguration>,
+) -> Vec<String> {
+    let available: std::collections::HashSet<String> =
+        BuiltinSkillRepository::available_builtin_names()
+            .into_iter()
+            .collect();
+
+    let mut result: Vec<String> = explicit.to_vec();
+
+    for cfg in tool_configurations.values() {
+        for name in &cfg.skills {
+            if available.contains(name) && !result.iter().any(|n| n == name) {
+                result.push(name.clone());
+            }
+        }
+    }
+
+    result
+}
+
 /// Validate skill wiring at graph-load time.
 ///
 /// Checks performed:
@@ -4057,5 +4109,126 @@ mod validation_tests {
 
         let result = validate_skill_wiring(&tool_cfgs, &[], &repo);
         assert!(result.is_ok(), "expected Ok for valid config, got: {:?}", result);
+    }
+}
+
+#[cfg(test)]
+mod augment_builtin_names_tests {
+    //! Tests for the `augment_builtin_names` free function which eliminates the UX
+    //! wart of duplicating skill names in both `tool_configurations.<X>.skills` and
+    //! `llm_call.skills.builtin`.
+    use super::augment_builtin_names;
+    use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
+    use std::collections::HashMap;
+
+    fn make_tool_cfg(skills: Vec<&str>) -> ToolConfiguration {
+        #[allow(deprecated)]
+        ToolConfiguration {
+            name: "x".to_string(),
+            description: String::new(),
+            node_type: "noop".to_string(),
+            fixed_config: HashMap::new(),
+            exposed_inputs: None,
+            parameters: None,
+            mergeable_fields: None,
+            field_mapping: None,
+            node_schema: None,
+            node_config: None,
+            expose_sub_tools: None,
+            summary: None,
+            eager: false,
+            skills: skills.into_iter().map(String::from).collect(),
+        }
+    }
+
+    #[test]
+    fn empty_inputs_returns_empty() {
+        let result = augment_builtin_names(&[], &HashMap::new());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn explicit_list_preserved_when_no_tool_cfgs() {
+        let result = augment_builtin_names(
+            &["sql_query-guide".to_string()],
+            &HashMap::new(),
+        );
+        assert_eq!(result, vec!["sql_query-guide".to_string()]);
+    }
+
+    #[test]
+    fn tool_scoped_builtin_name_is_auto_derived() {
+        // Operator declared only `tool_configurations.<X>.skills: ["sales-analysis"]`
+        // but did NOT list it in skills.builtin. It should be auto-added because
+        // "sales-analysis" exists in the builtin pool.
+        let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
+        tool_cfgs.insert("analyze_sales".to_string(), make_tool_cfg(vec!["sales-analysis"]));
+
+        let result = augment_builtin_names(&[], &tool_cfgs);
+        assert!(
+            result.contains(&"sales-analysis".to_string()),
+            "sales-analysis should be auto-derived; got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn explicit_plus_auto_derived_merge_without_duplicates() {
+        // sql_query-guide in explicit list, sales-analysis only in tool.skills.
+        let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
+        tool_cfgs.insert("analyze_sales".to_string(), make_tool_cfg(vec!["sales-analysis"]));
+
+        let result = augment_builtin_names(
+            &["sql_query-guide".to_string()],
+            &tool_cfgs,
+        );
+        assert!(result.contains(&"sql_query-guide".to_string()));
+        assert!(result.contains(&"sales-analysis".to_string()));
+        // Each name appears exactly once.
+        let count_sql = result.iter().filter(|n| n.as_str() == "sql_query-guide").count();
+        let count_sales = result.iter().filter(|n| n.as_str() == "sales-analysis").count();
+        assert_eq!(count_sql, 1, "sql_query-guide must appear exactly once");
+        assert_eq!(count_sales, 1, "sales-analysis must appear exactly once");
+    }
+
+    #[test]
+    fn already_explicit_name_not_duplicated() {
+        // "sales-analysis" is both in explicit AND tool.skills — must appear only once.
+        let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
+        tool_cfgs.insert("x".to_string(), make_tool_cfg(vec!["sales-analysis"]));
+
+        let result = augment_builtin_names(
+            &["sales-analysis".to_string()],
+            &tool_cfgs,
+        );
+        let count = result.iter().filter(|n| n.as_str() == "sales-analysis").count();
+        assert_eq!(count, 1, "sales-analysis must not be duplicated; got: {:?}", result);
+    }
+
+    #[test]
+    fn non_builtin_name_in_tool_skills_is_not_added() {
+        // A name that does NOT exist in the builtin pool should not be added.
+        // (It might be a filesystem skill — the caller handles that separately.)
+        let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
+        tool_cfgs.insert("x".to_string(), make_tool_cfg(vec!["non-existent-skill"]));
+
+        let result = augment_builtin_names(&[], &tool_cfgs);
+        assert!(
+            !result.contains(&"non-existent-skill".to_string()),
+            "non-existent-skill should not be auto-derived; got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn multiple_tools_with_overlapping_skills_deduped() {
+        // Two tools both reference "expense-analysis" — should appear once.
+        let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
+        tool_cfgs.insert("tool_a".to_string(), make_tool_cfg(vec!["expense-analysis"]));
+        tool_cfgs.insert("tool_b".to_string(), make_tool_cfg(vec!["expense-analysis"]));
+
+        let result = augment_builtin_names(&[], &tool_cfgs);
+        let count = result.iter().filter(|n| n.as_str() == "expense-analysis").count();
+        assert_eq!(count, 1, "expense-analysis must appear exactly once; got: {:?}", result);
     }
 }
