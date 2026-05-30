@@ -308,7 +308,17 @@ impl<'a> ExcelOpApplier<'a> {
             | PatchOp::ReorderSlides { .. }
             | PatchOp::SetSlideLayout { .. }
             | PatchOp::SetSlideTitle { .. }
-            | PatchOp::SetSlideNotes { .. } => {
+            | PatchOp::SetSlideNotes { .. }
+            | PatchOp::InsertHtmlBlock { .. }
+            | PatchOp::DeleteHtmlBlock { .. }
+            | PatchOp::ReplaceHtmlBlock { .. }
+            | PatchOp::MoveHtmlBlock { .. }
+            | PatchOp::InsertHtmlTableRow { .. }
+            | PatchOp::DeleteHtmlTableRow { .. }
+            | PatchOp::UpdateHtmlTableCell { .. }
+            | PatchOp::InsertHtmlListItem { .. }
+            | PatchOp::DeleteHtmlListItem { .. }
+            | PatchOp::UpdateHtmlListItem { .. } => {
                 return Err(invalid(op, "Word/HTML op not applicable to Excel artifact"));
             }
         }

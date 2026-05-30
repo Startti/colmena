@@ -316,6 +316,95 @@ pub enum PatchOp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         notes: Option<String>,
     },
+
+    // -------- HTML — block level --------
+
+    /// Insert a new block on a slide. Provide exactly one of before/after
+    /// (a block_id) or neither (appends). Returns block_id in summary.
+    #[serde(rename = "insert_html_block")]
+    InsertHtmlBlock {
+        slide_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+        /// Block JSON (type-tagged). ID assigned server-side.
+        block: serde_json::Value,
+    },
+
+    /// Delete a block from a slide.
+    #[serde(rename = "delete_html_block")]
+    DeleteHtmlBlock { slide_id: String, block_id: String },
+
+    /// Replace a block's contents preserving its id.
+    #[serde(rename = "replace_html_block")]
+    ReplaceHtmlBlock {
+        slide_id: String,
+        block_id: String,
+        block: serde_json::Value,
+    },
+
+    /// Move a block within the same slide to appear after another block.
+    #[serde(rename = "move_html_block")]
+    MoveHtmlBlock {
+        slide_id: String,
+        block_id: String,
+        after_block_id: String,
+    },
+
+    // -------- HTML — table --------
+
+    #[serde(rename = "insert_html_table_row")]
+    InsertHtmlTableRow {
+        slide_id: String,
+        table_block_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+        cells: Vec<serde_json::Value>,
+    },
+
+    #[serde(rename = "delete_html_table_row")]
+    DeleteHtmlTableRow {
+        slide_id: String,
+        table_block_id: String,
+        row_id: String,
+    },
+
+    #[serde(rename = "update_html_table_cell")]
+    UpdateHtmlTableCell {
+        slide_id: String,
+        table_block_id: String,
+        row_id: String,
+        col_index: u32,
+        cell: serde_json::Value,
+    },
+
+    // -------- HTML — list --------
+
+    #[serde(rename = "insert_html_list_item")]
+    InsertHtmlListItem {
+        slide_id: String,
+        list_block_id: String,
+        at_index: u32,
+        runs: Vec<serde_json::Value>,
+    },
+
+    #[serde(rename = "delete_html_list_item")]
+    DeleteHtmlListItem {
+        slide_id: String,
+        list_block_id: String,
+        item_id: String,
+    },
+
+    #[serde(rename = "update_html_list_item")]
+    UpdateHtmlListItem {
+        slide_id: String,
+        list_block_id: String,
+        item_id: String,
+        runs: Vec<serde_json::Value>,
+    },
 }
 
 #[cfg(test)]
@@ -400,5 +489,42 @@ mod tests {
         };
         let v = serde_json::to_value(&op).unwrap();
         assert_eq!(v["op"], "set_slide_notes");
+    }
+
+    #[test]
+    fn insert_html_block_serializes() {
+        let op = PatchOp::InsertHtmlBlock {
+            slide_id: "sl_1".into(),
+            before: None,
+            after: None,
+            block: serde_json::json!({"kind": "paragraph", "runs": []}),
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(v["op"], "insert_html_block");
+    }
+
+    #[test]
+    fn insert_html_table_row_serializes() {
+        let op = PatchOp::InsertHtmlTableRow {
+            slide_id: "sl_1".into(),
+            table_block_id: "blk_t".into(),
+            before: Some("row_5".into()),
+            after: None,
+            cells: vec![serde_json::json!({"type":"text","value":"A"})],
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(v["op"], "insert_html_table_row");
+    }
+
+    #[test]
+    fn update_html_list_item_serializes() {
+        let op = PatchOp::UpdateHtmlListItem {
+            slide_id: "sl_1".into(),
+            list_block_id: "blk_l".into(),
+            item_id: "li_3".into(),
+            runs: vec![],
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(v["op"], "update_html_list_item");
     }
 }

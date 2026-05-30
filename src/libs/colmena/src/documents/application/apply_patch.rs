@@ -389,6 +389,22 @@ fn describe_op(
         SetSlideLayout { .. } => "set_slide_layout placeholder".to_string(),
         SetSlideTitle { .. } => "set_slide_title placeholder".to_string(),
         SetSlideNotes { .. } => "set_slide_notes placeholder".to_string(),
+
+        // ---- HTML — block level (handled in Phase 11/12) ----
+        InsertHtmlBlock { .. } => "insert_html_block placeholder".to_string(),
+        DeleteHtmlBlock { .. } => "delete_html_block placeholder".to_string(),
+        ReplaceHtmlBlock { .. } => "replace_html_block placeholder".to_string(),
+        MoveHtmlBlock { .. } => "move_html_block placeholder".to_string(),
+
+        // ---- HTML — table (handled in Phase 11/12) ----
+        InsertHtmlTableRow { .. } => "insert_html_table_row placeholder".to_string(),
+        DeleteHtmlTableRow { .. } => "delete_html_table_row placeholder".to_string(),
+        UpdateHtmlTableCell { .. } => "update_html_table_cell placeholder".to_string(),
+
+        // ---- HTML — list (handled in Phase 11/12) ----
+        InsertHtmlListItem { .. } => "insert_html_list_item placeholder".to_string(),
+        DeleteHtmlListItem { .. } => "delete_html_list_item placeholder".to_string(),
+        UpdateHtmlListItem { .. } => "update_html_list_item placeholder".to_string(),
     }
 }
 
