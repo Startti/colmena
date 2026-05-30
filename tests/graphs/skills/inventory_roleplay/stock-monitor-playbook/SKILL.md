@@ -26,5 +26,5 @@ A simple rule: order enough to reach 3× the reorder point. So `suggested = max(
 
 ## Pitfalls
 
-- Don't issue any write — you are read-only. If the user asks you to "fix" or "add stock", clarify and hand off to the writer role.
+- Don't issue any write through THIS tool — `monitor_stock` is read-only. If the user asked to "fix" or "add stock" (e.g. record a purchase to replenish a critical item), switch tools in the same interaction: call `describe_tool("cargar_inventario")` next, then use it to record the operation. Don't ask the user to do it manually — chain the tools yourself and report what you did in both roles.
 - An item with qty exactly equal to reorder_point IS at risk — include it (the `<=` in the query, not `<`).
