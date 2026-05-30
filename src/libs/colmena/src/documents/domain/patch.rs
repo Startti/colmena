@@ -1,5 +1,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use crate::documents::domain::ir::SlideLayout;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Patch {
@@ -268,6 +269,53 @@ pub enum PatchOp {
         col_index: u32,
         runs: Vec<serde_json::Value>,
     },
+
+    // -------- HTML — slide level --------
+
+    /// Create a new slide. Returns generated slide_id in summary.
+    #[serde(rename = "add_slide")]
+    AddSlide {
+        layout: SlideLayout,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_index: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subtitle: Option<String>,
+    },
+
+    /// Delete a slide by id.
+    #[serde(rename = "delete_slide")]
+    DeleteSlide { slide_id: String },
+
+    /// Reorder slides. Pass the FULL list of slide_ids in desired order.
+    #[serde(rename = "reorder_slides")]
+    ReorderSlides { order: Vec<String> },
+
+    /// Change a slide's layout. SectionDivider/Title require non-empty title.
+    #[serde(rename = "set_slide_layout")]
+    SetSlideLayout {
+        slide_id: String,
+        layout: SlideLayout,
+    },
+
+    /// Set/clear a slide's title slot (independent of blocks).
+    #[serde(rename = "set_slide_title")]
+    SetSlideTitle {
+        slide_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subtitle: Option<String>,
+    },
+
+    /// Set/clear speaker notes on a slide.
+    #[serde(rename = "set_slide_notes")]
+    SetSlideNotes {
+        slide_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notes: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -320,5 +368,37 @@ mod tests {
         let j = serde_json::to_string(&p).unwrap();
         let back: Patch = serde_json::from_str(&j).unwrap();
         assert_eq!(back.ops.len(), 1);
+    }
+
+    #[test]
+    fn add_slide_op_serializes() {
+        let op = PatchOp::AddSlide {
+            layout: crate::documents::domain::ir::SlideLayout::Title,
+            at_index: None,
+            title: Some("Q3".into()),
+            subtitle: None,
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(v["op"], "add_slide");
+        assert_eq!(v["layout"], "title");
+    }
+
+    #[test]
+    fn reorder_slides_serializes() {
+        let op = PatchOp::ReorderSlides {
+            order: vec!["sl_1".into(), "sl_2".into()],
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(v["op"], "reorder_slides");
+    }
+
+    #[test]
+    fn set_slide_notes_clearing() {
+        let op = PatchOp::SetSlideNotes {
+            slide_id: "sl_1".into(),
+            notes: None,
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(v["op"], "set_slide_notes");
     }
 }

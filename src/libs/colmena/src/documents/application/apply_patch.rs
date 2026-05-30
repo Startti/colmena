@@ -381,6 +381,14 @@ fn describe_op(
             col_index,
             ..
         } => format!("Updated cell in {table_block_id} at row {row_id}, col {col_index}"),
+
+        // ---- HTML — slide level (handled in Phase 11/12) ----
+        AddSlide { .. } => "add_slide placeholder".to_string(),
+        DeleteSlide { .. } => "delete_slide placeholder".to_string(),
+        ReorderSlides { .. } => "reorder_slides placeholder".to_string(),
+        SetSlideLayout { .. } => "set_slide_layout placeholder".to_string(),
+        SetSlideTitle { .. } => "set_slide_title placeholder".to_string(),
+        SetSlideNotes { .. } => "set_slide_notes placeholder".to_string(),
     }
 }
 
