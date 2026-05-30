@@ -15,9 +15,12 @@ use std::sync::Arc;
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
-    build_all_document_tools, build_describe_tool_definition, build_load_skill_tool_definition,
-    reconstruct_discovered_set, summary_for_catalog, CatalogEntry, DescribeToolDispatchResult,
-    DocumentToolsContext, ATTACHMENTS_SYSTEM_PRELUDE, DOCUMENTS_SYSTEM_PRELUDE,
+    build_all_document_tools, build_describe_tool_definition, reconstruct_discovered_set,
+    summary_for_catalog, CatalogEntry, DescribeToolDispatchResult, DocumentToolsContext,
+    ATTACHMENTS_SYSTEM_PRELUDE, DOCUMENTS_SYSTEM_PRELUDE, LOAD_SKILL_TOOL_NAME,
+};
+use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::load_skill_tool::{
+    build_load_skill_tool_definition_with_catalog, filter_visible_skills,
 };
 use crate::documents::application::DocumentRuntime;
 use crate::documents::domain::ids::SessionId as DocSessionId;
@@ -1438,6 +1441,37 @@ impl ExecutableNode for LlmNode {
         let skills_used_log: Arc<std::sync::Mutex<Vec<SkillLoadedLogEntry>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
 
+        // ---- Layer 1/2/3 skill visibility bookkeeping --------------------------------
+        // `scoped_by_tool` maps each tool alias to the skill names listed in
+        // its `tool_configuration.skills` (layer 2).
+        // `free_standing_names` are skills registered on the llm_call node
+        // directly (layer 3): every skill in the repo catalog whose name does
+        // NOT appear in any tool's `skills` list and has no `node_type`.
+        let scoped_by_tool: std::collections::HashMap<String, Vec<String>> =
+            tool_configurations
+                .iter()
+                .filter(|(_, cfg)| !cfg.skills.is_empty())
+                .map(|(name, cfg)| (name.clone(), cfg.skills.clone()))
+                .collect();
+
+        let free_standing_names: Vec<String> = {
+            let all_scoped: std::collections::HashSet<&str> = scoped_by_tool
+                .values()
+                .flatten()
+                .map(String::as_str)
+                .collect();
+            skill_repo
+                .as_ref()
+                .map(|repo| {
+                    repo.list_available()
+                        .into_iter()
+                        .filter(|e| e.node_type.is_none() && !all_scoped.contains(e.name.as_str()))
+                        .map(|e| e.name)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
         // ---- Lazy tool loading config -------------------------------------------------
         let lazy_tool_loading: bool = inputs
             .get("lazy_tool_loading")
@@ -1785,8 +1819,25 @@ impl ExecutableNode for LlmNode {
         let mut tools: Vec<crate::llm::domain::ToolDefinition> =
             filter_enabled_tools(all_tools, enabled_tools_config, &configured_aliases);
 
-        if let Some(repo) = skill_repo.as_ref() {
-            tools.push(build_load_skill_tool_definition(repo));
+        // Static (non-lazy) load_skill injection: push a layer-filtered definition.
+        // In non-lazy mode all configured tools are visible from turn 1, so we
+        // treat the full `configured_aliases` set as "discovered" for layer-2
+        // visibility. The lazy closure will override this per-request.
+        if !lazy_tool_loading {
+            if let Some(repo) = skill_repo.as_ref() {
+                let full_catalog = repo.list_available();
+                let tool_scoped: Vec<String> = scoped_by_tool.values().flatten().cloned().collect();
+                let filtered = filter_visible_skills(
+                    &full_catalog,
+                    &tool_scoped,
+                    &free_standing_names,
+                    &configured_aliases, // all tools are "discovered" in non-lazy mode
+                    &scoped_by_tool,
+                );
+                if let Some(td) = build_load_skill_tool_definition_with_catalog(&filtered) {
+                    tools.push(td);
+                }
+            }
         }
 
         // ---- Step 4 (tool expose) — catalog already built above executor block ------
@@ -1971,10 +2022,20 @@ impl ExecutableNode for LlmNode {
         // the current message history (rule 1: prior describe_tool calls; rule 2:
         // prior direct calls to a still-cataloged tool), then composes `tools[]`
         // as: [describe_tool if pending] + [non-catalog tools] + [discovered catalog tools].
+        //
+        // Also rebuilds the `load_skill` tool definition per-request, applying
+        // layer 1/2/3 visibility rules against the current discovered_set:
+        //   - Layer 1 (node_type set)  → excluded.
+        //   - Layer 2 (tool.skills)    → only if parent tool is in discovered_set.
+        //   - Layer 3 (llm_call.skills, free-standing) → always included.
         let tools_provider: Option<crate::llm::application::agent_service::ToolsProvider> =
             if lazy_tool_loading && !catalog.is_empty() {
                 let catalog = catalog.clone();
                 let static_snapshot = tools.clone();
+                // Capture skill-visibility state for per-request load_skill rebuild.
+                let closure_skill_repo = skill_repo.clone();
+                let closure_scoped_by_tool = scoped_by_tool.clone();
+                let closure_free_standing_names = free_standing_names.clone();
                 Some(Box::new(
                     move |messages: &[crate::llm::domain::LlmMessage]| {
                         let discovered = reconstruct_discovered_set(messages, &catalog);
@@ -1988,9 +2049,13 @@ impl ExecutableNode for LlmNode {
                         let mut out: Vec<crate::llm::domain::ToolDefinition> = Vec::new();
 
                         // Tools defined OUTSIDE the lazy catalog (eager-flagged ones,
-                        // load_skill, document_*, toolkit subtools) are always present.
+                        // document_*, toolkit subtools) are always present.
+                        // `load_skill` is excluded here because it is rebuilt
+                        // per-request below with the current layer rules.
                         for td in &static_snapshot {
-                            if !catalog_names.contains(td.name.as_str()) {
+                            if !catalog_names.contains(td.name.as_str())
+                                && td.name != LOAD_SKILL_TOOL_NAME
+                            {
                                 out.push(td.clone());
                             }
                         }
@@ -2004,6 +2069,27 @@ impl ExecutableNode for LlmNode {
                                 && discovered.contains(&td.name)
                             {
                                 out.push(td.clone());
+                            }
+                        }
+                        // Per-request load_skill rebuild with layer 1/2/3 rules.
+                        if let Some(repo) = &closure_skill_repo {
+                            let full_catalog = repo.list_available();
+                            let tool_scoped: Vec<String> = closure_scoped_by_tool
+                                .values()
+                                .flatten()
+                                .cloned()
+                                .collect();
+                            let filtered = filter_visible_skills(
+                                &full_catalog,
+                                &tool_scoped,
+                                &closure_free_standing_names,
+                                &discovered,
+                                &closure_scoped_by_tool,
+                            );
+                            if let Some(td) =
+                                build_load_skill_tool_definition_with_catalog(&filtered)
+                            {
+                                out.push(td);
                             }
                         }
                         out
