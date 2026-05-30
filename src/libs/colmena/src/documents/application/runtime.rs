@@ -16,13 +16,14 @@ use crate::documents::application::get_head::GetHeadUseCase;
 use crate::documents::application::list_versions::ListVersionsUseCase;
 use crate::documents::application::read_document::ReadDocumentUseCase;
 use crate::documents::application::rollback::RollbackUseCase;
+use crate::documents::domain::ports::AssetStore;
 use crate::documents::domain::{ArtifactStore, IRRenderer, IRValidator, IdGenerator};
 use crate::documents::infrastructure::ids::UlidIdGenerator;
-use crate::documents::infrastructure::render::{ExcelRenderer, WordRenderer};
+use crate::documents::infrastructure::render::{ExcelRenderer, HtmlRenderer, WordRenderer};
 #[cfg(feature = "gcs")]
 use crate::documents::infrastructure::storage::GcsArtifactStore;
-use crate::documents::infrastructure::storage::LocalFsStore;
-use crate::documents::infrastructure::validation::{ExcelValidator, WordValidator};
+use crate::documents::infrastructure::storage::{LocalFsAssetStore, LocalFsStore};
+use crate::documents::infrastructure::validation::{ExcelValidator, HtmlValidator, WordValidator};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,7 +62,7 @@ impl DocumentRuntime {
             .and_then(|v| v.as_str())
             .unwrap_or("localfs");
 
-        let store: Arc<dyn ArtifactStore> = match backend {
+        let (store, asset_store): (Arc<dyn ArtifactStore>, Arc<dyn AssetStore>) = match backend {
             "localfs" => {
                 let root = config
                     .get("storage_root")
@@ -74,7 +75,18 @@ impl DocumentRuntime {
                 }
                 std::fs::create_dir_all(&root)
                     .map_err(|e| format!("creating storage root {:?}: {e}", root))?;
-                Arc::new(LocalFsStore::new(&root))
+                let asset_root = root.with_file_name(format!(
+                    "{}_assets",
+                    root.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("documents")
+                ));
+                std::fs::create_dir_all(&asset_root)
+                    .map_err(|e| format!("creating asset root {:?}: {e}", asset_root))?;
+                (
+                    Arc::new(LocalFsStore::new(&root)),
+                    Arc::new(LocalFsAssetStore::new(&asset_root)),
+                )
             }
             "gcs" => {
                 #[cfg(feature = "gcs")]
@@ -89,8 +101,14 @@ impl DocumentRuntime {
                         .get("gcs_prefix")
                         .and_then(|v| v.as_str())
                         .unwrap_or("colmena/documents");
+                    let asset_prefix = config
+                        .get("gcs_asset_prefix")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("colmena/assets");
+                    use crate::documents::infrastructure::storage::GcsAssetStore;
                     let gcs = GcsArtifactStore::new(bucket, prefix).await?;
-                    Arc::new(gcs)
+                    let gcs_assets = GcsAssetStore::new(bucket, asset_prefix).await?;
+                    (Arc::new(gcs), Arc::new(gcs_assets))
                 }
                 #[cfg(not(feature = "gcs"))]
                 {
@@ -112,16 +130,22 @@ impl DocumentRuntime {
             .map(|n| n as u32)
             .unwrap_or(DEFAULT_RETENTION);
 
-        Ok(Self::with_store(store, default_retention))
+        Ok(Self::with_store(store, asset_store, default_retention))
     }
 
     /// Build a runtime around an existing store. Useful for tests and for
     /// callers that share a store across multiple feature areas.
-    pub fn with_store(store: Arc<dyn ArtifactStore>, default_retention: u32) -> Arc<Self> {
+    pub fn with_store(
+        store: Arc<dyn ArtifactStore>,
+        asset_store: Arc<dyn AssetStore>,
+        default_retention: u32,
+    ) -> Arc<Self> {
         let excel_renderer: Arc<dyn IRRenderer> = Arc::new(ExcelRenderer);
         let word_renderer: Arc<dyn IRRenderer> = Arc::new(WordRenderer);
+        let html_renderer: Arc<dyn IRRenderer> = Arc::new(HtmlRenderer::new(asset_store));
         let excel_validator: Arc<dyn IRValidator> = Arc::new(ExcelValidator);
         let word_validator: Arc<dyn IRValidator> = Arc::new(WordValidator);
+        let html_validator: Arc<dyn IRValidator> = Arc::new(HtmlValidator);
         let ids: Arc<dyn IdGenerator> = Arc::new(UlidIdGenerator);
 
         let create = Arc::new(CreateDocumentUseCase {
@@ -130,6 +154,8 @@ impl DocumentRuntime {
             excel_validator: excel_validator.clone(),
             word_renderer: word_renderer.clone(),
             word_validator: word_validator.clone(),
+            html_renderer: html_renderer.clone(),
+            html_validator: html_validator.clone(),
             ids: ids.clone(),
             default_retention,
         });

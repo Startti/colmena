@@ -29,6 +29,8 @@ pub struct CreateDocumentUseCase {
     pub excel_validator: Arc<dyn IRValidator>,
     pub word_renderer: Arc<dyn IRRenderer>,
     pub word_validator: Arc<dyn IRValidator>,
+    pub html_renderer: Arc<dyn IRRenderer>,
+    pub html_validator: Arc<dyn IRValidator>,
     pub ids: Arc<dyn IdGenerator>,
     pub default_retention: u32,
 }
@@ -63,7 +65,7 @@ impl CreateDocumentUseCase {
         {
             ArtifactKind::Excel => (&self.excel_validator, &self.excel_renderer),
             ArtifactKind::Word => (&self.word_validator, &self.word_renderer),
-            ArtifactKind::Html => unimplemented!("Html renderer not yet implemented"),
+            ArtifactKind::Html => (&self.html_validator, &self.html_renderer),
         };
         validator.validate(&ir)?;
         let bytes = renderer.render(&ir).await?;
@@ -140,7 +142,19 @@ fn empty_ir(id: &ArtifactId, kind: ArtifactKind) -> serde_json::Value {
             "artifact_id": id.0,
             "version_id": "v1",
             "schema_version": crate::documents::domain::ir::SCHEMA_VERSION,
-            "document": { "blocks": [] }
+            "doc_props": { "title": null, "author": null, "date": null, "locale": "en" },
+            "theme": "executive",
+            "layout_mode": "report",
+            "footer": { "enabled": false, "page_numbers": false, "custom_text": null },
+            "slides": [{
+                "id": "sl_initial",
+                "layout": "blank",
+                "title": null,
+                "subtitle": null,
+                "notes": null,
+                "blocks": []
+            }],
+            "assets_referenced": []
         }),
     }
 }
@@ -187,6 +201,8 @@ mod tests {
             excel_validator: Arc::new(ExcelValidator),
             word_renderer: Arc::new(NoopRenderer),
             word_validator: Arc::new(NoopValidator),
+            html_renderer: Arc::new(NoopRenderer),
+            html_validator: Arc::new(NoopValidator),
             ids: Arc::new(CountingIdGenerator::default()),
             default_retention: 10,
         };
@@ -204,5 +220,43 @@ mod tests {
         assert_eq!(out.artifact_id.0, "art_01");
         assert_eq!(out.version_id, VersionId::initial());
         assert!(out.label.starts_with("Untitled Excel"));
+    }
+
+    #[tokio::test]
+    async fn creates_empty_html_artifact_v1() {
+        use crate::documents::domain::ports::AssetStore;
+        use crate::documents::infrastructure::render::HtmlRenderer;
+        use crate::documents::infrastructure::storage::LocalFsAssetStore;
+        use crate::documents::infrastructure::validation::HtmlValidator;
+
+        let tmp_a = tempdir().unwrap();
+        let tmp_b = tempdir().unwrap();
+        let store: Arc<dyn ArtifactStore> = Arc::new(LocalFsStore::new(tmp_a.path()));
+        let asset_store: Arc<dyn AssetStore> = Arc::new(LocalFsAssetStore::new(tmp_b.path()));
+        let uc = CreateDocumentUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(NoopRenderer),
+            word_validator: Arc::new(NoopValidator),
+            html_renderer: Arc::new(HtmlRenderer::new(asset_store)),
+            html_validator: Arc::new(HtmlValidator),
+            ids: Arc::new(CountingIdGenerator::default()),
+            default_retention: 10,
+        };
+        let out = uc
+            .execute(CreateDocumentInput {
+                kind: ArtifactKind::Html,
+                session_id: SessionId::new("s"),
+                label: None,
+                retention_limit: None,
+                initial_ir: None,
+                source: PatchSource::Agent,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.version_id.0, "v1");
+        let stored = store.read_current(&out.artifact_id).await.unwrap();
+        assert_eq!(stored.rendered_extension, "html");
     }
 }
