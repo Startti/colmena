@@ -55,6 +55,7 @@ mod tests {
                 description: "rd".to_string(),
             }],
             source: SkillSource::Builtin,
+            node_type: None,
         };
     }
 }

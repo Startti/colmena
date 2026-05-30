@@ -144,6 +144,7 @@ mod tests {
                     body: format!("body of {}", e.name),
                     references: vec![],
                     source: e.source,
+                    node_type: None,
                 })
                 .ok_or_else(|| SkillError::SkillNotFound(name.to_string()))
         }

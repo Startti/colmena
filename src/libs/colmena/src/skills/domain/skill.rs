@@ -16,6 +16,11 @@ pub struct Skill {
     pub body: String,
     pub references: Vec<SkillReferenceMeta>,
     pub source: SkillSource,
+    /// When set, this skill is a layer-1 node-type guide auto-folded into the
+    /// tool context block for any tool whose node_type matches. Layer-1 guides
+    /// are excluded from the `load_skill` catalog.
+    #[serde(default)]
+    pub node_type: Option<String>,
 }
 
 /// Where a skill came from. Used for observability (SSE events, summary).
@@ -49,6 +54,7 @@ mod tests {
                 description: "Django and FastAPI".to_string(),
             }],
             source: SkillSource::Builtin,
+            node_type: None,
         };
         let json = serde_json::to_string(&skill).unwrap();
         let back: Skill = serde_json::from_str(&json).unwrap();
