@@ -316,13 +316,18 @@ catálogo de `load_skill` (es auto-folded). El primer nodo con guía es
 
 **Estado:** ✅ Done. Verificado E2E contra Gemini Flash + Postgres.
 
-> **Known UX wart (follow-up cleanup):** operators currently need to list
-> tool-scoped (layer-2) skill names in BOTH `tool_configurations.<X>.skills`
-> AND `llm_call.skills.builtin`. The `SkillRepository` is built only from
-> the latter, so a name listed only under `tool_configurations` fails
-> graph-load validation. The correct fix is to auto-register skills
-> referenced by any `tool_configurations` entry — parked in
-> [docs/BACKLOG.md](BACKLOG.md) for a future cleanup pass.
+> **UX wart resolved (2026-05-29):** the previous requirement to list
+> layer-2 skill names in BOTH `tool_configurations.<X>.skills` AND
+> `llm_call.skills.builtin` has been eliminated. The engine now derives
+> the load list automatically via `augment_builtin_names`: names in
+> `tool.skills` are auto-registered from the builtin pool, node-type
+> guides auto-load when any configured tool matches their `node_type`
+> frontmatter, and path-based skills auto-discover every `SKILL.md`
+> under declared directories. Operators only need to declare scoped
+> skills in `tool_configurations.<name>.skills` — one place, no
+> duplication. See [24_skills.md](developer_guide/24_skills.md)
+> ("How skills auto-load") for the full behavior and a before/after
+> example.
 
 > **Sweep ADP:** añade un método default-None a `ExecutableNode` y un
 > campo opcional a `ToolConfiguration` (con `#[serde(default)]`).

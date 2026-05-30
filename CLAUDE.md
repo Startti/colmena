@@ -284,9 +284,14 @@ For overrides (custom alias, `expose_sub_tools` filtering, `cache_ttl_seconds`, 
   Layer-2 skills are gated by visibility on the lazy `discovered_set`
   (visible after `describe_tool`; from turn 1 in non-lazy). Reuses the
   Skills infra (`include_dir!`, frontmatter, 64 KB). First node with a
-  guide: `sql_query`. See
-  [`docs/superpowers/specs/2026-05-29-layered-tool-context-design.md`](docs/superpowers/specs/2026-05-29-layered-tool-context-design.md)
-  and [`docs/developer_guide/29_lazy_tool_loading.md`](docs/developer_guide/29_lazy_tool_loading.md).
+  guide: `sql_query`. **Skill load list is fully auto-derived** —
+  operators only declare scoped skills in `tool_configurations.<name>.skills`
+  (one place); the engine auto-loads builtin skills referenced there,
+  auto-folds node-type guides when the node_type matches, and
+  auto-discovers all `SKILL.md` files under `llm_call.skills.paths`.
+  See [`docs/superpowers/specs/2026-05-29-layered-tool-context-design.md`](docs/superpowers/specs/2026-05-29-layered-tool-context-design.md)
+  and [`docs/developer_guide/24_skills.md`](docs/developer_guide/24_skills.md)
+  ("How skills auto-load").
 - **Attachment uniform resolution Plan A shipped 2026-05-25** — any document (inline, signed URL, or generated artifact) can be forwarded via `$attachment:<document_id>` in `http_request` multipart. Catalog auto-injected in LLM system message. Bytes persist uniformly to `OutputStorageRepository` at registration, regardless of source. See [`docs/superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md`](docs/superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md).
 - **Attachment uniform resolution Plan B shipped 2026-05-25** — LLM no longer auto-receives attached doc content; catalog-driven via system message. `load_attachment` results are ephemeral (marker in history, not content). `image_generation`/`image_edit`/`tts` tool results dropped legacy `attachment_id` and `url`; only `document_id` remains. BREAKING for ADP frontend (Rust services swept clean). See [`docs/superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md`](docs/superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md) and [`docs/superpowers/specs/2026-05-25-plan-b-adp-migration-notes.md`](docs/superpowers/specs/2026-05-25-plan-b-adp-migration-notes.md).
 - **Attachment uniform resolution Plan C shipped 2026-05-25** — new `attachment_gc`
