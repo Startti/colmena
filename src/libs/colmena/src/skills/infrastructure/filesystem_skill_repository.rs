@@ -23,6 +23,7 @@ struct SkillEntry {
     canonical_dir: PathBuf,
     description: String,
     references: Vec<SkillReferenceMeta>,
+    node_type: Option<String>,
 }
 
 impl FilesystemSkillRepository {
@@ -185,6 +186,7 @@ impl FilesystemSkillRepository {
                 canonical_dir: canonical.to_path_buf(),
                 description: parsed.description,
                 references: parsed.references,
+                node_type: parsed.node_type,
             },
         );
         Ok(())
@@ -200,6 +202,7 @@ impl SkillRepository for FilesystemSkillRepository {
                 name: name.clone(),
                 description: entry.description.clone(),
                 source: SkillSource::Path,
+                node_type: entry.node_type.clone(),
             })
             .collect()
     }

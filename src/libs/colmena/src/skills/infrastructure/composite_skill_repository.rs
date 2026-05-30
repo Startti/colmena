@@ -166,6 +166,7 @@ mod tests {
             name: name.to_string(),
             description: format!("desc of {}", name),
             source,
+            node_type: None,
         }
     }
 
