@@ -1,8 +1,13 @@
 //! The `describe_tool` synthetic tool — dispatches catalog lookups and produces
 //! curated markdown for the LLM.
 
+use crate::dag_engine::domain::node::ExecutableNode;
 use crate::dag_engine::domain::tool_configuration::{NodeSchemaField, ToolConfiguration};
+use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::tool_context::{
+    build_tool_context_block, BlockVariant,
+};
 use crate::llm::domain::{LlmError, ToolCall, ToolResult};
+use crate::skills::domain::skill_repository::SkillRepository;
 
 pub const DESCRIBE_TOOL_NAME: &str = "describe_tool";
 
@@ -58,6 +63,75 @@ pub fn generate_tool_markdown(cfg: &ToolConfiguration) -> String {
     out
 }
 
+/// Async wrapper around `build_tool_context_block`: resolves the
+/// `{{NODE_GUIDE_BODY}}` placeholder by loading the matched skill's full body,
+/// then appends the "now available" footer.
+pub async fn generate_tool_markdown_async(
+    cfg: &ToolConfiguration,
+    node: Option<&dyn ExecutableNode>,
+    skill_repo: Option<&dyn SkillRepository>,
+) -> String {
+    struct NoopNode;
+    #[async_trait::async_trait]
+    impl ExecutableNode for NoopNode {
+        async fn execute(
+            &self,
+            _inputs: &crate::dag_engine::domain::node::NodeInputs,
+            _config: &serde_json::Value,
+            _state: &mut serde_json::Value,
+            _observer: Option<std::sync::Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+        ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(serde_json::json!({}))
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+    }
+
+    let noop = NoopNode;
+    let node_ref: &dyn ExecutableNode = node.unwrap_or(&noop);
+
+    let fixed = effective_fixed_config(cfg);
+
+    let mut block =
+        build_tool_context_block(cfg, node_ref, &fixed, skill_repo, BlockVariant::Lazy);
+
+    if block.contains("{{NODE_GUIDE_BODY}}") {
+        if let Some(repo) = skill_repo {
+            if let Some(entry) = repo.find_by_node_type(&cfg.node_type) {
+                if let Ok(skill) = repo.load_skill(&entry.name).await {
+                    block = block.replace("{{NODE_GUIDE_BODY}}", skill.body.trim());
+                }
+            }
+        }
+        // If still present (load failed or no repo), strip the marker
+        block = block.replace("{{NODE_GUIDE_BODY}}", "(guide unavailable)");
+    }
+
+    block.push_str("---\nThe tool `");
+    block.push_str(&cfg.name);
+    block.push_str("` is now available. Call it directly on your next turn.\n");
+    block
+}
+
+/// Merge `fixed_config` and `node_schema` fixed values into a single object.
+/// This is the effective static configuration the builder uses for policy resolution.
+fn effective_fixed_config(cfg: &ToolConfiguration) -> serde_json::Value {
+    use serde_json::{Map, Value};
+    let mut map = Map::new();
+    for (k, v) in &cfg.fixed_config {
+        map.insert(k.clone(), v.clone());
+    }
+    if let Some(schema) = &cfg.node_schema {
+        for (k, field) in schema {
+            if let Some(v) = &field.fixed {
+                map.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    Value::Object(map)
+}
+
 /// Return only fields that the LLM should see: not `fixed`, and not already
 /// shadowed by a top-level `fixed_config` entry.
 fn collect_visible_fields(cfg: &ToolConfiguration) -> Vec<(String, &NodeSchemaField)> {
@@ -100,7 +174,7 @@ pub async fn dispatch_describe_tool(
 
     let cfg = lookup.iter().find(|c| c.name == name);
     let output = match cfg {
-        Some(c) => generate_tool_markdown(c),
+        Some(c) => generate_tool_markdown_async(c, None, None).await,
         None => format!("Error: Tool '{}' not found in catalog", name),
     };
     Ok(DescribeToolDispatchResult {
@@ -290,5 +364,19 @@ mod tests {
         let md = generate_tool_markdown(&cfg);
         assert!(!md.contains("Base URL"));
         assert!(md.contains("path"));
+    }
+
+    #[tokio::test]
+    async fn markdown_includes_guide_body_when_node_type_matches() {
+        use crate::skills::infrastructure::builtin_skill_repository::BuiltinSkillRepository;
+        use std::sync::Arc;
+        let mut cfg = cfg_minimal("query_db", "Query the database");
+        cfg.node_type = "sql_query".to_string();
+        let repo: Arc<dyn crate::skills::domain::skill_repository::SkillRepository> =
+            Arc::new(BuiltinSkillRepository::new(&["sql_query-guide".to_string()]).unwrap());
+        let md = generate_tool_markdown_async(&cfg, None, Some(repo.as_ref())).await;
+        assert!(md.contains("## Best practices"));
+        assert!(md.contains("sql_query — best practices"));
+        assert!(!md.contains("{{NODE_GUIDE_BODY}}"));
     }
 }
