@@ -8,8 +8,6 @@ struct RawFrontmatter {
     description: String,
     #[serde(default)]
     references: Vec<RawReference>,
-    #[serde(default)]
-    node_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -26,7 +24,6 @@ pub struct ParsedSkillMd {
     pub description: String,
     pub references: Vec<SkillReferenceMeta>,
     pub body: String,
-    pub node_type: Option<String>,
 }
 
 /// Parse a SKILL.md file's content.
@@ -111,7 +108,6 @@ pub fn parse_skill_md(content: &str, path: &str) -> Result<ParsedSkillMd, SkillE
             })
             .collect(),
         body,
-        node_type: raw.node_type,
     })
 }
 
@@ -202,19 +198,5 @@ mod tests {
         let parsed = parse_skill_md(content, "p").unwrap();
         assert_eq!(parsed.name, "x");
         assert_eq!(parsed.description, "y");
-    }
-
-    #[test]
-    fn parses_node_type_when_present() {
-        let content = "---\nname: x\ndescription: y\nnode_type: sql_query\n---\nbody\n";
-        let parsed = parse_skill_md(content, "p").unwrap();
-        assert_eq!(parsed.node_type.as_deref(), Some("sql_query"));
-    }
-
-    #[test]
-    fn node_type_defaults_to_none_when_absent() {
-        let content = "---\nname: x\ndescription: y\n---\nbody\n";
-        let parsed = parse_skill_md(content, "p").unwrap();
-        assert!(parsed.node_type.is_none());
     }
 }

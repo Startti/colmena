@@ -7,9 +7,6 @@ pub struct SkillCatalogEntry {
     pub name: String,
     pub description: String,
     pub source: SkillSource,
-    /// When `Some`, this entry is a layer-1 node-type guide and must NOT
-    /// appear in the load_skill catalog.
-    pub node_type: Option<String>,
 }
 
 /// Port for loading skills. Implementations handle built-in vs filesystem,
@@ -18,14 +15,6 @@ pub struct SkillCatalogEntry {
 pub trait SkillRepository: Send + Sync {
     /// List all available skills with their metadata for the catalog.
     fn list_available(&self) -> Vec<SkillCatalogEntry>;
-
-    /// Resolve the layer-1 node-type guide for a given node_type, if any.
-    /// Returns the catalog entry whose frontmatter `node_type` matches.
-    fn find_by_node_type(&self, node_type: &str) -> Option<SkillCatalogEntry> {
-        self.list_available()
-            .into_iter()
-            .find(|e| e.node_type.as_deref() == Some(node_type))
-    }
 
     /// Load a skill's main SKILL.md content by name.
     async fn load_skill(&self, name: &str) -> Result<Skill, SkillError>;
@@ -50,7 +39,6 @@ mod tests {
             name: "x".to_string(),
             description: "y".to_string(),
             source: SkillSource::Builtin,
-            node_type: None,
         };
         assert!(format!("{:?}", entry).contains("x"));
     }
@@ -67,7 +55,6 @@ mod tests {
                 description: "rd".to_string(),
             }],
             source: SkillSource::Builtin,
-            node_type: None,
         };
     }
 }
