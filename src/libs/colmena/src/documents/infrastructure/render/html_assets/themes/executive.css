@@ -48,11 +48,11 @@ th { background: var(--color-primary); color: white; }
 .block-kpi-grid[data-cols="2"] { grid-template-columns: repeat(2, 1fr); }
 .block-kpi-grid[data-cols="3"] { grid-template-columns: repeat(3, 1fr); }
 .block-kpi-grid[data-cols="4"] { grid-template-columns: repeat(4, 1fr); }
-.chart-container { position: relative; margin: var(--space-md) 0 var(--space-lg) 0; overflow: hidden; }
+.chart-container { position: relative; margin: var(--space-md) 0 var(--space-lg) 0; }
 .chart-container--small  { height: 240px; }
 .chart-container--medium { height: 360px; }
 .chart-container--large  { height: 520px; }
-.chart-container canvas { display: block; max-width: 100% !important; max-height: 100% !important; }
+.chart-container canvas { display: block; }
 .block-two-columns, .block-three-columns { display: grid; align-items: start; }
 .block-two-columns[data-ratio="50_50"] { grid-template-columns: 1fr 1fr; }
 .block-two-columns[data-ratio="40_60"] { grid-template-columns: 2fr 3fr; }
