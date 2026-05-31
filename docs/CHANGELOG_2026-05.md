@@ -426,3 +426,30 @@ grep -E "\"(attachments_enabled|secure_suspend_allowed|summary_(enabled|max_char
 ## Próxima revisión
 
 Cuando se cierre la próxima ventana (2026-05-18 a 2026-05-31), continuar este changelog en `docs/CHANGELOG_2026-05-second-half.md` o consolidar en un `docs/CHANGELOG_2026.md` por mes.
+
+---
+
+## 2026-05-31 — Revert layered-tool-context
+
+**Breaking changes:**
+
+- Skill frontmatter no longer supports `node_type:` (rejected with a migration error at load time pointing to the new model).
+- `tool_configuration.skills` field removed from graph schema (the tools no longer carry their own skill references).
+- `ExecutableNode::tool_description_supplement` trait method removed (auto-injected policy text no longer reaches the LLM; runtime validators still enforce).
+- Built-in skill `sql_query-guide` removed (was layer-1).
+
+**Migration:**
+
+- Skills with `node_type:` → remove the frontmatter field; reference the skill explicitly from `llm_call.skills` instead.
+- `tool_configuration.skills` → move the skill names to `llm_call.skills` on the LLM node.
+- SQL permissions visibility to the LLM → author a skill markdown describing the policy and reference it from `llm_call.skills`. The runtime validator still rejects out-of-policy queries.
+
+**New features:**
+
+- **Recursive references**: `references/<name>.md` files can declare their own `references:` frontmatter. The LLM navigates with `load_reference("skill", "path/to/sub")`. Max depth 5, cycles rejected at load time.
+- **`skills_path` / `skills_paths` on `llm_call`**: load all skills under a directory without enumerating by name. Coexists with the existing `skills: [...]` array (union, dedup).
+
+See:
+- Spec: [docs/superpowers/specs/2026-05-31-revert-layered-tool-context-design.md](superpowers/specs/2026-05-31-revert-layered-tool-context-design.md)
+- Plan: [docs/superpowers/plans/2026-05-31-revert-layered-tool-context.md](superpowers/plans/2026-05-31-revert-layered-tool-context.md)
+- Updated guide: [docs/developer_guide/24_skills.md](developer_guide/24_skills.md)

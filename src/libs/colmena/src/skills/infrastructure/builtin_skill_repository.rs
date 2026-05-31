@@ -22,7 +22,6 @@ struct BuiltinEntry {
     body: String,
     references: Vec<SkillReferenceMeta>,
     reference_bodies: HashMap<String, String>,
-    node_type: Option<String>,
 }
 
 impl BuiltinSkillRepository {
@@ -91,7 +90,6 @@ impl BuiltinSkillRepository {
                     body: parsed.body,
                     references: parsed.references,
                     reference_bodies,
-                    node_type: parsed.node_type,
                 },
             );
         }
@@ -124,35 +122,6 @@ impl BuiltinSkillRepository {
     pub fn available_builtin_names() -> Vec<String> {
         Self::all_available_names()
     }
-
-    /// Map of builtin skill name → frontmatter `node_type` (None if absent).
-    ///
-    /// Available without constructing a fully-loaded repo. Walks the compiled-in
-    /// directory, parses the frontmatter of every `<name>/SKILL.md`, and returns
-    /// the `node_type` field if present. Skills whose frontmatter cannot be parsed
-    /// are silently skipped (their `node_type` cannot be determined).
-    ///
-    /// Used by `augment_builtin_names` to auto-include layer-1 guides whose
-    /// `node_type` matches any configured tool's `node_type` — no operator wiring
-    /// required.
-    pub fn available_builtin_node_types() -> HashMap<String, Option<String>> {
-        use crate::skills::infrastructure::frontmatter_parser::parse_skill_md;
-
-        let mut result = HashMap::new();
-        for name in Self::all_available_names() {
-            let node_type = BUILTIN_SKILLS_DIR
-                .get_dir(name.as_str())
-                .and_then(|dir| dir.get_file(format!("{}/SKILL.md", name)))
-                .and_then(|f| f.contents_utf8())
-                .and_then(|content| {
-                    let path = format!("builtin:{}/SKILL.md", name);
-                    parse_skill_md(content, &path).ok()
-                })
-                .and_then(|parsed| parsed.node_type);
-            result.insert(name, node_type);
-        }
-        result
-    }
 }
 
 #[async_trait]
@@ -164,7 +133,6 @@ impl SkillRepository for BuiltinSkillRepository {
                 name: name.clone(),
                 description: entry.description.clone(),
                 source: SkillSource::Builtin,
-                node_type: entry.node_type.clone(),
             })
             .collect()
     }
@@ -180,7 +148,6 @@ impl SkillRepository for BuiltinSkillRepository {
             body: entry.body.clone(),
             references: entry.references.clone(),
             source: SkillSource::Builtin,
-            node_type: entry.node_type.clone(),
         })
     }
 
@@ -193,7 +160,46 @@ impl SkillRepository for BuiltinSkillRepository {
             .skills
             .get(skill_name)
             .ok_or_else(|| SkillError::SkillNotFound(skill_name.to_string()))?;
-        let body = entry.reference_bodies.get(reference_name).ok_or_else(|| {
+
+        // Split the path into segments (e.g. "fw/django" → ["fw", "django"]).
+        let segments: Vec<&str> = reference_name
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+        if segments.is_empty() {
+            return Err(SkillError::InvalidReferencePath {
+                path: reference_name.to_string(),
+            });
+        }
+
+        // Walk the declared reference tree to validate every segment.
+        // Built-in skills store flat references (no recursive nesting at load time),
+        // so nested paths will correctly fail validation here.
+        let mut current_level: &[SkillReferenceMeta] = &entry.references;
+        for seg in &segments {
+            match current_level.iter().find(|r| r.name == *seg) {
+                Some(meta) => {
+                    current_level = &meta.references;
+                }
+                None => {
+                    let available = entry
+                        .references
+                        .iter()
+                        .map(|r| r.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(SkillError::ReferenceNotDeclared {
+                        skill: skill_name.to_string(),
+                        reference: reference_name.to_string(),
+                        available,
+                    });
+                }
+            }
+        }
+
+        // All segments declared. Look up the LEAF body (final segment) by its name.
+        let leaf = segments.last().unwrap();
+        let body = entry.reference_bodies.get(*leaf).ok_or_else(|| {
             let available = entry
                 .references
                 .iter()
@@ -246,11 +252,6 @@ mod tests {
     fn available_builtin_names_includes_authored_skills() {
         let names = BuiltinSkillRepository::available_builtin_names();
         assert!(
-            names.contains(&"sql_query-guide".to_string()),
-            "expected sql_query-guide in: {:?}",
-            names
-        );
-        assert!(
             names.contains(&"sales-analysis".to_string()),
             "expected sales-analysis in: {:?}",
             names
@@ -298,91 +299,5 @@ mod tests {
         let listed: Vec<String> = repo.list_available().into_iter().map(|e| e.name).collect();
         assert!(listed.contains(&"python-expert".to_string()));
         assert!(listed.contains(&"sql-optimizer".to_string()));
-    }
-
-    #[tokio::test]
-    async fn catalog_entry_carries_node_type_when_present() {
-        let repo = BuiltinSkillRepository::new(&["python-expert".to_string()]).unwrap();
-        let entries = repo.list_available();
-        // At least one existing built-in must be node_type-less:
-        assert!(entries.iter().any(|e| e.node_type.is_none()));
-    }
-
-    #[tokio::test]
-    async fn sql_query_guide_is_indexed_as_node_type_guide() {
-        let repo = BuiltinSkillRepository::new(&["sql_query-guide".to_string()]).unwrap();
-        let entry = repo
-            .find_by_node_type("sql_query")
-            .expect("sql_query guide present");
-        assert_eq!(entry.name, "sql_query-guide");
-        assert_eq!(entry.node_type.as_deref(), Some("sql_query"));
-    }
-
-    #[test]
-    fn available_builtin_node_types_includes_sql_query_guide() {
-        let map = BuiltinSkillRepository::available_builtin_node_types();
-        let node_type = map.get("sql_query-guide").expect("sql_query-guide in map");
-        assert_eq!(
-            node_type.as_deref(),
-            Some("sql_query"),
-            "sql_query-guide must report node_type: sql_query"
-        );
-    }
-
-    #[test]
-    fn available_builtin_node_types_layer2_skills_have_none() {
-        let map = BuiltinSkillRepository::available_builtin_node_types();
-        // Layer-2 domain skills have no node_type frontmatter.
-        for name in &["sales-analysis", "expense-analysis", "python-expert"] {
-            let entry = map.get(*name).expect("skill present in map");
-            assert!(
-                entry.is_none(),
-                "{} must have no node_type; got: {:?}",
-                name,
-                entry
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn sales_analysis_is_layer_2_domain_skill() {
-        let repo = BuiltinSkillRepository::new(&["sales-analysis".to_string()]).unwrap();
-        let entries = repo.list_available();
-        let sales = entries
-            .iter()
-            .find(|e| e.name == "sales-analysis")
-            .expect("sales-analysis loaded");
-        assert!(
-            sales.node_type.is_none(),
-            "sales-analysis must be layer-2 (no node_type)"
-        );
-        assert!(sales.description.contains("sales data"));
-    }
-
-    #[tokio::test]
-    async fn expense_analysis_is_layer_2_domain_skill() {
-        let repo = BuiltinSkillRepository::new(&["expense-analysis".to_string()]).unwrap();
-        let entries = repo.list_available();
-        let expense = entries
-            .iter()
-            .find(|e| e.name == "expense-analysis")
-            .expect("expense-analysis loaded");
-        assert!(
-            expense.node_type.is_none(),
-            "expense-analysis must be layer-2 (no node_type)"
-        );
-        assert!(expense.description.contains("expenses"));
-    }
-
-    #[tokio::test]
-    async fn both_domain_skills_can_coexist() {
-        let repo = BuiltinSkillRepository::new(&[
-            "sales-analysis".to_string(),
-            "expense-analysis".to_string(),
-        ])
-        .unwrap();
-        let listed: Vec<String> = repo.list_available().into_iter().map(|e| e.name).collect();
-        assert!(listed.contains(&"sales-analysis".to_string()));
-        assert!(listed.contains(&"expense-analysis".to_string()));
     }
 }

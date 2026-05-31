@@ -1,5 +1,9 @@
 # Layered Tool Context Implementation Plan
 
+> ⚠️ **SUPERSEDED on 2026-05-31**. See
+> [2026-05-31-revert-layered-tool-context.md](2026-05-31-revert-layered-tool-context.md)
+> for the revert + replacement plan.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** When a node is used as an LLM tool, automatically surface its policy (derived from config), its node-type best-practices guide (authored as a SKILL.md with `node_type` frontmatter), and any tool-scoped domain skills — through `describe_tool` (lazy) or the tool `description` (eager/non-lazy). Tool-scoped skills are gated by visibility on the lazy `discovered_set`.

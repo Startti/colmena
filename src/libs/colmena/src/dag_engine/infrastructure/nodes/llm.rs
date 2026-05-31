@@ -14,13 +14,10 @@ use std::sync::Arc;
 
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
-use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::load_skill_tool::{
-    build_load_skill_tool_definition_with_catalog, filter_visible_skills,
-};
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
-    build_all_document_tools, build_describe_tool_definition, reconstruct_discovered_set,
-    summary_for_catalog, CatalogEntry, DescribeToolDispatchResult, DocumentToolsContext,
-    ATTACHMENTS_SYSTEM_PRELUDE, DOCUMENTS_SYSTEM_PRELUDE, LOAD_SKILL_TOOL_NAME,
+    build_all_document_tools, build_describe_tool_definition, build_load_skill_tool_definition,
+    reconstruct_discovered_set, summary_for_catalog, CatalogEntry, DescribeToolDispatchResult,
+    DocumentToolsContext, ATTACHMENTS_SYSTEM_PRELUDE, DOCUMENTS_SYSTEM_PRELUDE,
 };
 use crate::documents::application::DocumentRuntime;
 use crate::documents::domain::ids::SessionId as DocSessionId;
@@ -306,35 +303,99 @@ impl LlmNode {
             .collect()
     }
 
+    /// Resolve the full list of skill names visible to this LLM call by unioning
+    /// the explicit `skills` array with all SKILL.md directories found under
+    /// `skills_path` / `skills_paths`. Deduped by name.
+    ///
+    /// - `skills: [...]` — plain array of skill names (existing explicit form)
+    /// - `skills_path: "<dir>"` — scan that directory; each immediate subdir
+    ///   containing a `SKILL.md` contributes its directory name as a skill name
+    /// - `skills_paths: [...]` — same semantics for multiple directories
+    ///
+    /// Missing `skills_path` directory → hard error.
+    /// Empty directory (no SKILL.md subdirs) → contributes nothing, no error.
+    pub async fn resolve_skill_names(config: &Value) -> Result<Vec<String>, String> {
+        // Read explicit `skills` array (flat list of names).
+        let explicit: Vec<String> = config
+            .get("skills")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut all = std::collections::BTreeSet::<String>::new();
+        for name in explicit {
+            all.insert(name);
+        }
+
+        // Collect all directory paths from skills_path + skills_paths.
+        let mut paths: Vec<String> = config
+            .get("skills_paths")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(single) = config.get("skills_path").and_then(|v| v.as_str()) {
+            paths.push(single.to_string());
+        }
+
+        for path in paths {
+            let names = list_skills_in_path(&path).await?;
+            for name in names {
+                all.insert(name);
+            }
+        }
+
+        Ok(all.into_iter().collect())
+    }
+
     /// Build a SkillRepository from the parsed config. Returns `None` if no skills are configured.
     /// Returns `Err(String)` on any validation failure — this must abort graph execution.
-    ///
-    /// `tool_configurations` is used to auto-derive the builtin load list: any skill name listed
-    /// in `tool_configurations.<alias>.skills` that exists in the compiled-in builtin pool is
-    /// automatically added to `skills_config.builtin`, so operators no longer need to duplicate
-    /// the name in both `tool_configurations.<X>.skills` AND `llm_call.skills.builtin`.
     fn build_skill_repository_from_config(
         config: &Value,
         inputs: &NodeInputs,
-        tool_configurations: &HashMap<String, ToolConfiguration>,
     ) -> Result<Option<Arc<dyn SkillRepository>>, String> {
         let raw_val = inputs.get("skills").or_else(|| config.get("skills"));
 
-        // We need to run auto-derive even when `skills` config is absent, because
-        // the operator may have declared only `tool_configurations.<X>.skills` without
-        // any explicit `skills` block.
-        let skills_config = match raw_val {
+        let mut skills_config = match raw_val {
             Some(v) => SkillsConfig::from_value(v)
                 .map_err(|e| format!("invalid 'skills' config: {}", e))?,
             None => SkillsConfig::default(),
         };
 
-        // Auto-derive: augment the explicit builtin list with any name listed in
-        // tool_configurations.*.skills that exists in the compiled-in pool.
-        let augmented_builtin = augment_builtin_names(&skills_config.builtin, tool_configurations);
+        // Expand skills_path / skills_paths into individual skill-dir paths.
+        // Each is a parent directory; every immediate subdir containing SKILL.md
+        // becomes an additional entry in skills_config.paths.
+        {
+            let mut extra_roots: Vec<String> = config
+                .get("skills_paths")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(single) = config.get("skills_path").and_then(|v| v.as_str()) {
+                extra_roots.push(single.to_string());
+            }
+            for root in &extra_roots {
+                let skill_dirs = list_skill_dirs_sync(root)
+                    .map_err(|e| format!("skills_path '{}' not readable: {}", root, e))?;
+                for dir in skill_dirs {
+                    skills_config.paths.push(dir);
+                }
+            }
+        }
 
         // If there's nothing to load (no builtins, no paths), short-circuit.
-        if augmented_builtin.is_empty() && skills_config.paths.is_empty() {
+        if skills_config.builtin.is_empty() && skills_config.paths.is_empty() {
             return Ok(None);
         }
 
@@ -351,7 +412,7 @@ impl LlmNode {
         let allowed = Self::parse_allowed_dirs_env();
 
         let builtin: Arc<dyn SkillRepository> = Arc::new(
-            BuiltinSkillRepository::new(&augmented_builtin)
+            BuiltinSkillRepository::new(&skills_config.builtin)
                 .map_err(|e| format!("loading builtin skills: {}", e))?,
         );
         let filesystem: Arc<dyn SkillRepository> = Arc::new(
@@ -1448,59 +1509,12 @@ impl ExecutableNode for LlmNode {
             tool_configurations.keys().cloned().collect();
 
         // Build skill repository (if configured).
-        // tool_configurations is passed so that any skill name listed in
-        // tool_configurations.<alias>.skills that exists in the builtin pool is
-        // automatically loaded — no need to duplicate it in skills.builtin.
         let skill_repo: Option<Arc<dyn SkillRepository>> =
-            Self::build_skill_repository_from_config(config, inputs, &tool_configurations)?;
+            Self::build_skill_repository_from_config(config, inputs)?;
 
         // Track skills loaded across the entire node execution (for summary).
         let skills_used_log: Arc<std::sync::Mutex<Vec<SkillLoadedLogEntry>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
-
-        // ---- Layer 1/2/3 skill visibility bookkeeping --------------------------------
-        // `scoped_by_tool` maps each tool alias to the skill names listed in
-        // its `tool_configuration.skills` (layer 2).
-        // `free_standing_names` are skills registered on the llm_call node
-        // directly (layer 3): every skill in the repo catalog whose name does
-        // NOT appear in any tool's `skills` list and has no `node_type`.
-        let scoped_by_tool: std::collections::HashMap<String, Vec<String>> = tool_configurations
-            .iter()
-            .filter(|(_, cfg)| !cfg.skills.is_empty())
-            .map(|(name, cfg)| (name.clone(), cfg.skills.clone()))
-            .collect();
-
-        let free_standing_names: Vec<String> = {
-            let all_scoped: std::collections::HashSet<&str> = scoped_by_tool
-                .values()
-                .flatten()
-                .map(String::as_str)
-                .collect();
-            skill_repo
-                .as_ref()
-                .map(|repo| {
-                    repo.list_available()
-                        .into_iter()
-                        .filter(|e| e.node_type.is_none() && !all_scoped.contains(e.name.as_str()))
-                        .map(|e| e.name)
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-
-        // ---- Skill wiring validation --------------------------------------------------
-        // Runs once at the start of node execution (graph-load equivalent for DAG nodes).
-        // Aborts execution on any hard wiring error (duplicate node-type guides, unknown
-        // skill names, node-type guide referenced in tool.skills).
-        if let Some(repo) = &skill_repo {
-            // Collect all skill names explicitly listed in the llm_call-level skills
-            // config block (builtin + any loaded from filesystem paths). The full
-            // catalog from list_available() is the authoritative set of those names.
-            let llm_call_skill_names: Vec<String> =
-                repo.list_available().into_iter().map(|e| e.name).collect();
-            validate_skill_wiring(&tool_configurations, &llm_call_skill_names, repo.as_ref())
-                .map_err(|e| format!("skill wiring error: {}", e))?;
-        }
 
         // ---- Lazy tool loading config -------------------------------------------------
         let lazy_tool_loading: bool = inputs
@@ -1640,13 +1654,6 @@ impl ExecutableNode for LlmNode {
             } else {
                 Vec::new()
             };
-
-        // Snapshot tool_configurations and registry for the extra_info summary
-        // (tool_context_blocks). Both are consumed by DagToolExecutor::new below,
-        // so we keep lightweight copies here. The registry Arc clone is cheap;
-        // the tool_configurations clone is small (≤ dozens of entries).
-        let tool_configurations_snapshot = tool_configurations.clone();
-        let registry_for_summary = registry.clone();
 
         let tool_executor = {
             let mut executor = DagToolExecutor::new(registry, tool_configurations);
@@ -1856,25 +1863,8 @@ impl ExecutableNode for LlmNode {
         let mut tools: Vec<crate::llm::domain::ToolDefinition> =
             filter_enabled_tools(all_tools, enabled_tools_config, &configured_aliases);
 
-        // Static (non-lazy) load_skill injection: push a layer-filtered definition.
-        // In non-lazy mode all configured tools are visible from turn 1, so we
-        // treat the full `configured_aliases` set as "discovered" for layer-2
-        // visibility. The lazy closure will override this per-request.
-        if !lazy_tool_loading {
-            if let Some(repo) = skill_repo.as_ref() {
-                let full_catalog = repo.list_available();
-                let tool_scoped: Vec<String> = scoped_by_tool.values().flatten().cloned().collect();
-                let filtered = filter_visible_skills(
-                    &full_catalog,
-                    &tool_scoped,
-                    &free_standing_names,
-                    &configured_aliases, // all tools are "discovered" in non-lazy mode
-                    &scoped_by_tool,
-                );
-                if let Some(td) = build_load_skill_tool_definition_with_catalog(&filtered) {
-                    tools.push(td);
-                }
-            }
+        if let Some(repo) = skill_repo.as_ref() {
+            tools.push(build_load_skill_tool_definition(repo));
         }
 
         // ---- Step 4 (tool expose) — catalog already built above executor block ------
@@ -2059,20 +2049,10 @@ impl ExecutableNode for LlmNode {
         // the current message history (rule 1: prior describe_tool calls; rule 2:
         // prior direct calls to a still-cataloged tool), then composes `tools[]`
         // as: [describe_tool if pending] + [non-catalog tools] + [discovered catalog tools].
-        //
-        // Also rebuilds the `load_skill` tool definition per-request, applying
-        // layer 1/2/3 visibility rules against the current discovered_set:
-        //   - Layer 1 (node_type set)  → excluded.
-        //   - Layer 2 (tool.skills)    → only if parent tool is in discovered_set.
-        //   - Layer 3 (llm_call.skills, free-standing) → always included.
         let tools_provider: Option<crate::llm::application::agent_service::ToolsProvider> =
             if lazy_tool_loading && !catalog.is_empty() {
                 let catalog = catalog.clone();
                 let static_snapshot = tools.clone();
-                // Capture skill-visibility state for per-request load_skill rebuild.
-                let closure_skill_repo = skill_repo.clone();
-                let closure_scoped_by_tool = scoped_by_tool.clone();
-                let closure_free_standing_names = free_standing_names.clone();
                 Some(Box::new(
                     move |messages: &[crate::llm::domain::LlmMessage]| {
                         let discovered = reconstruct_discovered_set(messages, &catalog);
@@ -2086,13 +2066,9 @@ impl ExecutableNode for LlmNode {
                         let mut out: Vec<crate::llm::domain::ToolDefinition> = Vec::new();
 
                         // Tools defined OUTSIDE the lazy catalog (eager-flagged ones,
-                        // document_*, toolkit subtools) are always present.
-                        // `load_skill` is excluded here because it is rebuilt
-                        // per-request below with the current layer rules.
+                        // load_skill, document_*, toolkit subtools) are always present.
                         for td in &static_snapshot {
-                            if !catalog_names.contains(td.name.as_str())
-                                && td.name != LOAD_SKILL_TOOL_NAME
-                            {
+                            if !catalog_names.contains(td.name.as_str()) {
                                 out.push(td.clone());
                             }
                         }
@@ -2106,24 +2082,6 @@ impl ExecutableNode for LlmNode {
                                 && discovered.contains(&td.name)
                             {
                                 out.push(td.clone());
-                            }
-                        }
-                        // Per-request load_skill rebuild with layer 1/2/3 rules.
-                        if let Some(repo) = &closure_skill_repo {
-                            let full_catalog = repo.list_available();
-                            let tool_scoped: Vec<String> =
-                                closure_scoped_by_tool.values().flatten().cloned().collect();
-                            let filtered = filter_visible_skills(
-                                &full_catalog,
-                                &tool_scoped,
-                                &closure_free_standing_names,
-                                &discovered,
-                                &closure_scoped_by_tool,
-                            );
-                            if let Some(td) =
-                                build_load_skill_tool_definition_with_catalog(&filtered)
-                            {
-                                out.push(td);
                             }
                         }
                         out
@@ -2463,22 +2421,6 @@ impl ExecutableNode for LlmNode {
             }
         }
 
-        // tool_context_blocks: per-tool observability summary (node_guide, policy_lines,
-        // scoped_skills). Omitted entirely when no tool has any context to report.
-        {
-            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::tool_context::build_tool_context_blocks_summary;
-            let summary = build_tool_context_blocks_summary(
-                &tool_configurations_snapshot,
-                registry_for_summary.as_ref(),
-                skill_repo.as_deref(),
-            );
-            if let Some(obj) = summary.as_object() {
-                if !obj.is_empty() {
-                    extra_info["tool_context_blocks"] = summary;
-                }
-            }
-        }
-
         // Output format
         let final_output = json!({
             "result": response.content(),
@@ -2538,6 +2480,55 @@ impl ExecutableNode for LlmNode {
             }
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// skills_path / skills_paths helpers
+// ---------------------------------------------------------------------------
+
+/// Scan `path` (a parent directory) and return the names of every immediate
+/// subdirectory that contains a `SKILL.md` file.
+///
+/// - Missing `path` → `Err(String)` (hard error)
+/// - Exists but no skill subdirs → `Ok(vec![])` (no error)
+async fn list_skills_in_path(path: &str) -> Result<Vec<String>, String> {
+    let mut out = vec![];
+    let mut rd = tokio::fs::read_dir(path)
+        .await
+        .map_err(|e| format!("skills_path '{}' not readable: {}", path, e))?;
+    while let Some(entry) = rd
+        .next_entry()
+        .await
+        .map_err(|e| format!("reading entry in '{}': {}", path, e))?
+    {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        if entry.path().join("SKILL.md").exists() {
+            if let Some(name) = entry.file_name().to_str() {
+                out.push(name.to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Synchronous counterpart to [`list_skills_in_path`] — used inside the
+/// (sync) `build_skill_repository_from_config` function to expand a parent
+/// directory into individual skill-dir absolute paths.
+///
+/// Returns the full absolute path to each immediate subdir that contains
+/// `SKILL.md`. Missing `path` → `Err`.
+fn list_skill_dirs_sync(path: &str) -> Result<Vec<String>, std::io::Error> {
+    let mut out = vec![];
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let ep = entry.path();
+        if ep.is_dir() && ep.join("SKILL.md").exists() {
+            out.push(ep.to_string_lossy().into_owned());
+        }
+    }
+    Ok(out)
 }
 
 /// Returns the SQLite `connection_url` if the node config declares one
@@ -2891,140 +2882,6 @@ fn build_initial_user_message(
     _resolved_files: &[crate::llm::domain::FileData],
 ) -> Result<LlmMessage, crate::llm::domain::LlmError> {
     LlmMessage::user(prompt.to_string())
-}
-
-/// Augment an explicit builtin skill list with any names declared in
-/// `tool_configurations.*.skills` that exist in the compiled-in builtin pool.
-///
-/// This eliminates the UX wart where operators had to list a scoped skill name in
-/// BOTH `tool_configurations.<X>.skills` (layer-2 scoping) AND
-/// `llm_call.skills.builtin` (load list). With auto-derive, declaring it once
-/// in `tool_configurations.<X>.skills` is sufficient — the engine loads it
-/// from the builtin pool automatically.
-///
-/// Names that do not exist in the builtin pool are left untouched; they are
-/// expected to come from filesystem paths (which already auto-discover all
-/// SKILL.md inside their directories). Any name that resolves to neither will
-/// be caught by `validate_skill_wiring` at graph-load time.
-pub(crate) fn augment_builtin_names(
-    explicit: &[String],
-    tool_configurations: &HashMap<String, ToolConfiguration>,
-) -> Vec<String> {
-    let available_names: std::collections::HashSet<String> =
-        BuiltinSkillRepository::available_builtin_names()
-            .into_iter()
-            .collect();
-    let available_node_types: HashMap<String, Option<String>> =
-        BuiltinSkillRepository::available_builtin_node_types();
-
-    let mut result: Vec<String> = explicit.to_vec();
-
-    // Layer-2: include names listed in any tool.skills that exist in builtin pool.
-    for cfg in tool_configurations.values() {
-        for name in &cfg.skills {
-            if available_names.contains(name) && !result.iter().any(|n| n == name) {
-                result.push(name.clone());
-            }
-        }
-    }
-
-    // Layer-1: include builtin skills whose frontmatter node_type matches any
-    // configured tool's node_type. Dropping a SKILL.md with `node_type: <X>` into
-    // the pool auto-attaches it to every tool whose node_type is X — no operator
-    // wiring required.
-    let configured_node_types: std::collections::HashSet<&str> = tool_configurations
-        .values()
-        .map(|cfg| cfg.node_type.as_str())
-        .collect();
-    for (name, nt) in &available_node_types {
-        if let Some(node_type) = nt {
-            if configured_node_types.contains(node_type.as_str())
-                && !result.iter().any(|n| n == name)
-            {
-                result.push(name.clone());
-            }
-        }
-    }
-
-    result
-}
-
-/// Validate skill wiring at graph-load time.
-///
-/// Checks performed:
-/// 1. No two skills in the repository claim the same `node_type` (duplicate node-type guides).
-/// 2. Every skill name in `tool_configurations[*].skills` resolves to a known skill.
-/// 3. No skill in `tool_configurations[*].skills` is a node-type guide (those are
-///    layer-1 and are auto-loaded by the engine; putting them in `tool.skills` is an error).
-/// 4. (Warning, not error) Skills in `llm_call_skill_names` that are node-type guides
-///    are quietly ignored — the engine handles them automatically.
-///
-/// Returns `Err(String)` with a human-readable message on the first violation found.
-fn validate_skill_wiring(
-    tool_configurations: &HashMap<String, ToolConfiguration>,
-    llm_call_skill_names: &[String],
-    skill_repo: &dyn crate::skills::domain::SkillRepository,
-) -> Result<(), String> {
-    use std::collections::HashSet;
-
-    let catalog = skill_repo.list_available();
-
-    // ---- 1. Duplicate node_type guides ----------------------------------------
-    let mut seen_node_types: HashMap<String, String> = HashMap::new();
-    for entry in &catalog {
-        if let Some(nt) = entry.node_type.as_deref() {
-            if let Some(prev) = seen_node_types.get(nt) {
-                return Err(format!(
-                    "node_type '{}' is claimed by skills '{}' and '{}'; only one guide per node_type is allowed",
-                    nt, prev, entry.name
-                ));
-            }
-            seen_node_types.insert(nt.to_string(), entry.name.clone());
-        }
-    }
-
-    // ---- Build lookup sets for checks 2 & 3 -----------------------------------
-    let all_names: HashSet<&str> = catalog.iter().map(|e| e.name.as_str()).collect();
-    let guide_names: HashSet<&str> = catalog
-        .iter()
-        .filter(|e| e.node_type.is_some())
-        .map(|e| e.name.as_str())
-        .collect();
-
-    // ---- 2 & 3. Per-tool skills validation ------------------------------------
-    for (tool_name, cfg) in tool_configurations {
-        for skill in &cfg.skills {
-            if !all_names.contains(skill.as_str()) {
-                return Err(format!(
-                    "tool '{}' references unknown skill '{}'",
-                    tool_name, skill
-                ));
-            }
-            if guide_names.contains(skill.as_str()) {
-                let node_type_str = catalog
-                    .iter()
-                    .find(|e| e.name == *skill)
-                    .and_then(|e| e.node_type.clone())
-                    .unwrap_or_default();
-                return Err(format!(
-                    "skill '{}' is a node-type guide (frontmatter node_type: {}); it cannot be referenced in tool.skills — node-type guides are auto-loaded by the engine",
-                    skill, node_type_str
-                ));
-            }
-        }
-    }
-
-    // ---- 4. Warn (don't fail) when llm_call.skills lists a node-type guide ----
-    for name in llm_call_skill_names {
-        if guide_names.contains(name.as_str()) {
-            colmena_log!(
-                "WARN: skill '{}' is a node-type guide; it is ignored in llm_call.skills (node-type guides are auto-loaded for matching tools)",
-                name
-            );
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -3984,376 +3841,140 @@ mod filter_enabled_tools_tests {
 }
 
 #[cfg(test)]
-mod validation_tests {
-    //! TDD tests for `validate_skill_wiring`.
-    //! Tests written before the function exists — expect compile failure (RED).
-    use super::validate_skill_wiring;
-    use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
-    use crate::skills::domain::{
-        Skill, SkillCatalogEntry, SkillError, SkillReference, SkillRepository, SkillSource,
-    };
-    use async_trait::async_trait;
-    use std::collections::HashMap;
+mod skills_path_tests {
+    use super::*;
+    use serde_json::json;
 
-    // ------------------------------------------------------------------ helpers
+    #[tokio::test]
+    async fn resolves_skills_path_single_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("hello")).unwrap();
+        std::fs::write(
+            tmp.path().join("hello/SKILL.md"),
+            "---\nname: hello\ndescription: hi\n---\nbody",
+        )
+        .unwrap();
 
-    fn make_tool_cfg(name: &str, skills: Vec<&str>) -> ToolConfiguration {
-        #[allow(deprecated)]
-        ToolConfiguration {
-            name: name.to_string(),
-            description: String::new(),
-            node_type: "noop".to_string(),
-            fixed_config: HashMap::new(),
-            exposed_inputs: None,
-            parameters: None,
-            mergeable_fields: None,
-            field_mapping: None,
-            node_schema: None,
-            node_config: None,
-            expose_sub_tools: None,
-            summary: None,
-            eager: false,
-            skills: skills.into_iter().map(String::from).collect(),
-        }
+        let cfg = json!({
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "api_key": "test",
+            "skills_path": tmp.path().to_str().unwrap(),
+        });
+        let resolved = LlmNode::resolve_skill_names(&cfg).await.unwrap();
+        assert!(resolved.iter().any(|n| n == "hello"), "got: {:?}", resolved);
     }
 
-    /// A minimal mock skill repository.
-    struct MockSkillRepo {
-        entries: Vec<SkillCatalogEntry>,
-    }
+    #[tokio::test]
+    async fn resolves_skills_paths_plural() {
+        let tmp1 = tempfile::tempdir().unwrap();
+        let tmp2 = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp1.path().join("a")).unwrap();
+        std::fs::write(
+            tmp1.path().join("a/SKILL.md"),
+            "---\nname: a\ndescription: x\n---\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(tmp2.path().join("b")).unwrap();
+        std::fs::write(
+            tmp2.path().join("b/SKILL.md"),
+            "---\nname: b\ndescription: x\n---\n",
+        )
+        .unwrap();
 
-    impl MockSkillRepo {
-        fn with_entries(entries: Vec<SkillCatalogEntry>) -> Self {
-            Self { entries }
-        }
-    }
-
-    #[async_trait]
-    impl SkillRepository for MockSkillRepo {
-        fn list_available(&self) -> Vec<SkillCatalogEntry> {
-            self.entries.clone()
-        }
-
-        async fn load_skill(&self, name: &str) -> Result<Skill, SkillError> {
-            Err(SkillError::SkillNotFound(name.to_string()))
-        }
-
-        async fn load_reference(
-            &self,
-            skill_name: &str,
-            _reference_name: &str,
-        ) -> Result<SkillReference, SkillError> {
-            Err(SkillError::SkillNotFound(skill_name.to_string()))
-        }
-    }
-
-    fn entry(name: &str, node_type: Option<&str>) -> SkillCatalogEntry {
-        SkillCatalogEntry {
-            name: name.to_string(),
-            description: "d".to_string(),
-            source: SkillSource::Builtin,
-            node_type: node_type.map(String::from),
-        }
-    }
-
-    // ------------------------------------------------------------------ tests
-
-    #[test]
-    fn validation_rejects_duplicate_node_type_guides() {
-        // Two skills claiming the same node_type — must error.
-        let repo = MockSkillRepo::with_entries(vec![
-            entry("sql-guide-a", Some("sql_query")),
-            entry("sql-guide-b", Some("sql_query")),
-        ]);
-        let tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
-        let result = validate_skill_wiring(&tool_cfgs, &[], &repo);
+        let cfg = json!({
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "api_key": "test",
+            "skills_paths": [tmp1.path().to_str().unwrap(), tmp2.path().to_str().unwrap()],
+        });
+        let resolved = LlmNode::resolve_skill_names(&cfg).await.unwrap();
         assert!(
-            result.is_err(),
-            "expected error for duplicate node_type guides"
-        );
-        let msg = result.unwrap_err();
-        assert!(
-            msg.contains("sql_query"),
-            "error message should mention the node_type, got: {}",
-            msg
-        );
-    }
-
-    #[test]
-    fn validation_rejects_unknown_skill_in_tool_configuration() {
-        // A tool references "does-not-exist" which is not in the repo.
-        let repo = MockSkillRepo::with_entries(vec![entry("real-skill", None)]);
-        let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
-        tool_cfgs.insert("x".to_string(), make_tool_cfg("x", vec!["does-not-exist"]));
-
-        let result = validate_skill_wiring(&tool_cfgs, &[], &repo);
-        assert!(
-            result.is_err(),
-            "expected error for unknown skill reference"
-        );
-        let msg = result.unwrap_err();
-        assert!(
-            msg.contains("does-not-exist"),
-            "error message should mention the unknown skill name, got: {}",
-            msg
-        );
-    }
-
-    #[test]
-    fn validation_rejects_node_type_guide_referenced_as_scoped() {
-        // A skill with node_type set must NOT be in tool.skills.
-        let repo = MockSkillRepo::with_entries(vec![entry("sql_query-guide", Some("sql_query"))]);
-        let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
-        tool_cfgs.insert("x".to_string(), make_tool_cfg("x", vec!["sql_query-guide"]));
-
-        let result = validate_skill_wiring(&tool_cfgs, &[], &repo);
-        assert!(
-            result.is_err(),
-            "expected error when node-type guide used as scoped skill"
-        );
-        let msg = result.unwrap_err();
-        assert!(
-            msg.contains("sql_query-guide"),
-            "error message should mention the offending skill name, got: {}",
-            msg
+            resolved.iter().any(|n| n == "a"),
+            "missing 'a' in {:?}",
+            resolved
         );
         assert!(
-            msg.contains("node-type guide"),
-            "error message should say 'node-type guide', got: {}",
-            msg
+            resolved.iter().any(|n| n == "b"),
+            "missing 'b' in {:?}",
+            resolved
         );
     }
 
-    #[test]
-    fn validation_passes_for_valid_configuration() {
-        // Happy path: one regular skill scoped to a tool, no duplicates.
-        let repo = MockSkillRepo::with_entries(vec![
-            entry("python-expert", None),
-            entry("sql_query-guide", Some("sql_query")),
-        ]);
-        let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
-        tool_cfgs.insert(
-            "run_python".to_string(),
-            make_tool_cfg("run_python", vec!["python-expert"]),
-        );
+    #[tokio::test]
+    async fn unions_skills_array_with_skills_path_dedup() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("from-path")).unwrap();
+        std::fs::write(
+            tmp.path().join("from-path/SKILL.md"),
+            "---\nname: from-path\ndescription: x\n---\n",
+        )
+        .unwrap();
+        // also create a duplicate that's also in `skills:`
+        std::fs::create_dir_all(tmp.path().join("dup")).unwrap();
+        std::fs::write(
+            tmp.path().join("dup/SKILL.md"),
+            "---\nname: dup\ndescription: x\n---\n",
+        )
+        .unwrap();
 
-        let result = validate_skill_wiring(&tool_cfgs, &[], &repo);
+        let cfg = json!({
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "api_key": "test",
+            "skills": ["builtin-name", "dup"],
+            "skills_path": tmp.path().to_str().unwrap(),
+        });
+        let resolved = LlmNode::resolve_skill_names(&cfg).await.unwrap();
         assert!(
-            result.is_ok(),
-            "expected Ok for valid config, got: {:?}",
-            result
+            resolved.contains(&"builtin-name".to_string()),
+            "missing builtin-name in {:?}",
+            resolved
         );
-    }
-}
-
-#[cfg(test)]
-mod augment_builtin_names_tests {
-    //! Tests for the `augment_builtin_names` free function which eliminates the UX
-    //! wart of duplicating skill names in both `tool_configurations.<X>.skills` and
-    //! `llm_call.skills.builtin`.
-    use super::augment_builtin_names;
-    use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
-    use std::collections::HashMap;
-
-    fn make_tool_cfg(skills: Vec<&str>) -> ToolConfiguration {
-        #[allow(deprecated)]
-        ToolConfiguration {
-            name: "x".to_string(),
-            description: String::new(),
-            node_type: "noop".to_string(),
-            fixed_config: HashMap::new(),
-            exposed_inputs: None,
-            parameters: None,
-            mergeable_fields: None,
-            field_mapping: None,
-            node_schema: None,
-            node_config: None,
-            expose_sub_tools: None,
-            summary: None,
-            eager: false,
-            skills: skills.into_iter().map(String::from).collect(),
-        }
-    }
-
-    #[test]
-    fn empty_inputs_returns_empty() {
-        let result = augment_builtin_names(&[], &HashMap::new());
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn explicit_list_preserved_when_no_tool_cfgs() {
-        let result = augment_builtin_names(&["sql_query-guide".to_string()], &HashMap::new());
-        assert_eq!(result, vec!["sql_query-guide".to_string()]);
-    }
-
-    #[test]
-    fn tool_scoped_builtin_name_is_auto_derived() {
-        // Operator declared only `tool_configurations.<X>.skills: ["sales-analysis"]`
-        // but did NOT list it in skills.builtin. It should be auto-added because
-        // "sales-analysis" exists in the builtin pool.
-        let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
-        tool_cfgs.insert(
-            "analyze_sales".to_string(),
-            make_tool_cfg(vec!["sales-analysis"]),
-        );
-
-        let result = augment_builtin_names(&[], &tool_cfgs);
         assert!(
-            result.contains(&"sales-analysis".to_string()),
-            "sales-analysis should be auto-derived; got: {:?}",
-            result
+            resolved.contains(&"from-path".to_string()),
+            "missing from-path in {:?}",
+            resolved
         );
-    }
-
-    #[test]
-    fn explicit_plus_auto_derived_merge_without_duplicates() {
-        // sql_query-guide in explicit list, sales-analysis only in tool.skills.
-        let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
-        tool_cfgs.insert(
-            "analyze_sales".to_string(),
-            make_tool_cfg(vec!["sales-analysis"]),
-        );
-
-        let result = augment_builtin_names(&["sql_query-guide".to_string()], &tool_cfgs);
-        assert!(result.contains(&"sql_query-guide".to_string()));
-        assert!(result.contains(&"sales-analysis".to_string()));
-        // Each name appears exactly once.
-        let count_sql = result
-            .iter()
-            .filter(|n| n.as_str() == "sql_query-guide")
-            .count();
-        let count_sales = result
-            .iter()
-            .filter(|n| n.as_str() == "sales-analysis")
-            .count();
-        assert_eq!(count_sql, 1, "sql_query-guide must appear exactly once");
-        assert_eq!(count_sales, 1, "sales-analysis must appear exactly once");
-    }
-
-    #[test]
-    fn already_explicit_name_not_duplicated() {
-        // "sales-analysis" is both in explicit AND tool.skills — must appear only once.
-        let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
-        tool_cfgs.insert("x".to_string(), make_tool_cfg(vec!["sales-analysis"]));
-
-        let result = augment_builtin_names(&["sales-analysis".to_string()], &tool_cfgs);
-        let count = result
-            .iter()
-            .filter(|n| n.as_str() == "sales-analysis")
-            .count();
-        assert_eq!(
-            count, 1,
-            "sales-analysis must not be duplicated; got: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn non_builtin_name_in_tool_skills_is_not_added() {
-        // A name that does NOT exist in the builtin pool should not be added.
-        // (It might be a filesystem skill — the caller handles that separately.)
-        let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
-        tool_cfgs.insert("x".to_string(), make_tool_cfg(vec!["non-existent-skill"]));
-
-        let result = augment_builtin_names(&[], &tool_cfgs);
         assert!(
-            !result.contains(&"non-existent-skill".to_string()),
-            "non-existent-skill should not be auto-derived; got: {:?}",
-            result
+            resolved.contains(&"dup".to_string()),
+            "missing dup in {:?}",
+            resolved
         );
+        // dedup: dup should appear exactly once
+        let count = resolved.iter().filter(|n| n.as_str() == "dup").count();
+        assert_eq!(count, 1, "dup should appear once; got: {:?}", resolved);
     }
 
-    #[test]
-    fn multiple_tools_with_overlapping_skills_deduped() {
-        // Two tools both reference "expense-analysis" — should appear once.
-        let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
-        tool_cfgs.insert(
-            "tool_a".to_string(),
-            make_tool_cfg(vec!["expense-analysis"]),
-        );
-        tool_cfgs.insert(
-            "tool_b".to_string(),
-            make_tool_cfg(vec!["expense-analysis"]),
-        );
-
-        let result = augment_builtin_names(&[], &tool_cfgs);
-        let count = result
-            .iter()
-            .filter(|n| n.as_str() == "expense-analysis")
-            .count();
-        assert_eq!(
-            count, 1,
-            "expense-analysis must appear exactly once; got: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn augment_includes_layer1_guide_matching_tool_node_type() {
-        // A tool with node_type "sql_query" and no explicit skills should cause
-        // sql_query-guide (which has frontmatter `node_type: sql_query`) to be
-        // auto-included — no operator wiring required.
-        let mut tools: HashMap<String, ToolConfiguration> = HashMap::new();
-        #[allow(deprecated)]
-        tools.insert(
-            "query_db".to_string(),
-            ToolConfiguration {
-                name: "query_db".into(),
-                description: String::new(),
-                node_type: "sql_query".into(),
-                skills: vec![],
-                fixed_config: HashMap::new(),
-                exposed_inputs: None,
-                parameters: None,
-                mergeable_fields: None,
-                field_mapping: None,
-                node_schema: None,
-                node_config: None,
-                expose_sub_tools: None,
-                summary: None,
-                eager: false,
-            },
-        );
-        let augmented = augment_builtin_names(&[], &tools);
+    #[tokio::test]
+    async fn skills_path_missing_returns_error() {
+        let cfg = json!({
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "api_key": "test",
+            "skills_path": "/nonexistent/path/abc123xyz",
+        });
+        let err = LlmNode::resolve_skill_names(&cfg).await.unwrap_err();
         assert!(
-            augmented.contains(&"sql_query-guide".to_string()),
-            "sql_query-guide (node_type: sql_query) must auto-load for any sql_query tool; got: {:?}",
-            augmented
+            err.contains("not readable") || err.contains("nonexistent") || err.contains("No such"),
+            "got: {err}"
         );
     }
 
-    #[test]
-    fn augment_does_not_include_unrelated_layer1_guides() {
-        // A tool with node_type "http_request" must NOT pull in sql_query-guide
-        // (there is no http_request-guide in the pool today, so the augmented
-        // list stays empty).
-        let mut tools: HashMap<String, ToolConfiguration> = HashMap::new();
-        #[allow(deprecated)]
-        tools.insert(
-            "http".to_string(),
-            ToolConfiguration {
-                name: "http".into(),
-                description: String::new(),
-                node_type: "http_request".into(),
-                skills: vec![],
-                fixed_config: HashMap::new(),
-                exposed_inputs: None,
-                parameters: None,
-                mergeable_fields: None,
-                field_mapping: None,
-                node_schema: None,
-                node_config: None,
-                expose_sub_tools: None,
-                summary: None,
-                eager: false,
-            },
-        );
-        let augmented = augment_builtin_names(&[], &tools);
+    #[tokio::test]
+    async fn skills_path_empty_directory_returns_empty_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = json!({
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "api_key": "test",
+            "skills_path": tmp.path().to_str().unwrap(),
+        });
+        let resolved = LlmNode::resolve_skill_names(&cfg).await.unwrap();
         assert!(
-            !augmented.contains(&"sql_query-guide".to_string()),
-            "sql_query-guide must NOT appear for an http_request tool; got: {:?}",
-            augmented
+            resolved.is_empty(),
+            "expected empty list, got: {:?}",
+            resolved
         );
     }
 }

@@ -385,7 +385,7 @@ impl DagToolExecutor {
 
     /// Generate ToolDefinition from node with partial configuration
     #[allow(deprecated)]
-    async fn generate_tool_definition(
+    fn generate_tool_definition(
         &self,
         tool_name: &str,
         tool_config: &ToolConfiguration,
@@ -410,17 +410,9 @@ impl DagToolExecutor {
                     effective_name, e
                 )
             });
-            let description = build_description(
-                effective_name,
-                &tool_config.description,
-                tool_config,
-                node,
-                self.skill_repository.as_deref(),
-            )
-            .await;
             return ToolDefinition {
                 name: effective_name.to_string(),
-                description,
+                description: tool_config.description.clone(),
                 parameters: ToolParameters {
                     schema_type: "object".to_string(),
                     properties: parsed.llm_properties,
@@ -433,17 +425,9 @@ impl DagToolExecutor {
         // If parameters are explicitly defined in config, use them
         if let Some(params_value) = &tool_config.parameters {
             if let Ok(params) = serde_json::from_value::<ToolParameters>(params_value.clone()) {
-                let description = build_description(
-                    effective_name,
-                    &tool_config.description,
-                    tool_config,
-                    node,
-                    self.skill_repository.as_deref(),
-                )
-                .await;
                 return ToolDefinition {
                     name: effective_name.to_string(),
-                    description,
+                    description: tool_config.description.clone(),
                     parameters: params,
                     input_schema_override: None,
                 };
@@ -465,35 +449,26 @@ impl DagToolExecutor {
             let mut required = Vec::new();
 
             for (param_name, container) in &dynamic_fields {
-                let param_desc = match container {
+                let description = match container {
                     Some(c) => format!("Value for {}.{}", c, param_name),
                     None => format!("Value for {}", param_name),
                 };
                 properties.insert(
                     param_name.clone(),
-                    ParameterProperty::new("string".to_string(), param_desc),
+                    ParameterProperty::new("string".to_string(), description),
                 );
                 required.push(param_name.clone());
             }
 
-            let base_desc = if !tool_config.description.is_empty() {
-                tool_config.description.clone()
-            } else {
-                node.description()
-                    .unwrap_or("No description available")
-                    .to_string()
-            };
-            let description = build_description(
-                effective_name,
-                &base_desc,
-                tool_config,
-                node,
-                self.skill_repository.as_deref(),
-            )
-            .await;
             return ToolDefinition {
                 name: effective_name.to_string(),
-                description,
+                description: if !tool_config.description.is_empty() {
+                    tool_config.description.clone()
+                } else {
+                    node.description()
+                        .unwrap_or("No description available")
+                        .to_string()
+                },
                 parameters: ToolParameters {
                     schema_type: "object".to_string(),
                     properties,
@@ -551,21 +526,13 @@ impl DagToolExecutor {
         }
 
         // Use custom description or fall back to node description
-        let base_desc = if !tool_config.description.is_empty() {
+        let description = if !tool_config.description.is_empty() {
             tool_config.description.clone()
         } else {
             node.description()
                 .unwrap_or("No description available")
                 .to_string()
         };
-        let description = build_description(
-            effective_name,
-            &base_desc,
-            tool_config,
-            node,
-            self.skill_repository.as_deref(),
-        )
-        .await;
 
         ToolDefinition {
             name: effective_name.to_string(),
@@ -630,13 +597,7 @@ impl DagToolExecutor {
                     .ok_or_else(|| LlmError::ToolNotFound {
                         name: DESCRIBE_TOOL_NAME.to_string(),
                     })?;
-            let result = dispatch_describe_tool(
-                tool_call,
-                lookup,
-                self.skill_repository.as_deref(),
-                &*self.registry,
-            )
-            .await?;
+            let result = dispatch_describe_tool(tool_call, lookup).await?;
             if let Some(obs) = &self.describe_tool_observer {
                 obs(&result);
             }
@@ -1212,7 +1173,7 @@ impl ToolExecutor for DagToolExecutor {
                     });
                 }
             } else if let Some(node) = self.registry.get_node(&config.node_type) {
-                tools.push(self.generate_tool_definition(name, config, &node).await);
+                tools.push(self.generate_tool_definition(name, config, &node));
             }
         }
 
@@ -1331,63 +1292,6 @@ impl ToolExecutor for DagToolExecutor {
     }
 }
 
-/// Build the final description string for a [`crate::llm::domain::ToolDefinition`].
-///
-/// Appends the layered tool context block (access policy + node-type guide +
-/// scoped skills announcement) to `base_description`. When `skill_repo` is
-/// `None` or no relevant guide / policy exists, the block is empty and only
-/// `base_description` is returned.
-///
-/// The function is async because resolving the node-type guide body requires a
-/// `SkillRepository::load_skill` call when the guide entry is found.
-async fn build_description(
-    _name: &str,
-    base_description: &str,
-    tool_config: &ToolConfiguration,
-    node: &Arc<dyn ExecutableNode>,
-    skill_repo: Option<&dyn crate::skills::domain::SkillRepository>,
-) -> String {
-    use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::tool_context::{
-        build_tool_context_block, BlockVariant,
-    };
-
-    // Compose effective fixed config: fixed_config + node_schema.fixed values.
-    let fixed = crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::tool_context::build_effective_fixed(tool_config);
-
-    // Build the block; this is sync but may emit a {{NODE_GUIDE_BODY}} placeholder.
-    let mut block = build_tool_context_block(
-        tool_config,
-        node.as_ref(),
-        &fixed,
-        skill_repo,
-        BlockVariant::EagerOrNonLazy,
-    );
-
-    // Resolve the {{NODE_GUIDE_BODY}} placeholder asynchronously.
-    if block.contains("{{NODE_GUIDE_BODY}}") {
-        let mut replaced = false;
-        if let Some(repo) = skill_repo {
-            if let Some(entry) = repo.find_by_node_type(&tool_config.node_type) {
-                if let Ok(skill) = repo.load_skill(&entry.name).await {
-                    block = block.replace("{{NODE_GUIDE_BODY}}", skill.body.trim());
-                    replaced = true;
-                }
-            }
-        }
-        if !replaced {
-            block = block.replace("{{NODE_GUIDE_BODY}}", "(guide unavailable)");
-        }
-    }
-
-    // If base_description is non-empty and not already included in the block,
-    // prepend it before the block.
-    if base_description.is_empty() || block.contains(base_description) {
-        block
-    } else {
-        format!("{}\n\n{}", base_description, block)
-    }
-}
-
 /// Build a default `ToolConfiguration` for a toolkit alias that was advertised
 /// to the LLM via flag-only auto-exposure (no explicit `tool_configurations`
 /// entry). Used by the dispatch fallback in `execute_inner` so
@@ -1416,7 +1320,6 @@ fn synthesise_default_toolkit_config(alias: &str) -> ToolConfiguration {
         expose_sub_tools: Some(SubToolFilter::all()),
         summary: None,
         eager: false,
-        skills: Vec::new(),
     }
 }
 
@@ -1568,7 +1471,6 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new(),
             },
         );
 
@@ -1580,8 +1482,8 @@ mod tests {
             .find(|t| t.name == "configured_tool")
             .expect("configured_tool not found");
 
-        // Check description — now includes the tool context block so use substring match.
-        assert!(configured_tool.description.contains("A configured tool"));
+        // Check description
+        assert_eq!(configured_tool.description, "A configured tool");
 
         // Check parameters: "a" should be hidden because it's in fixed_config
         assert!(!configured_tool.parameters.properties.contains_key("a"));
@@ -1613,7 +1515,6 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new(),
             },
         );
 
@@ -1625,8 +1526,7 @@ mod tests {
             .iter()
             .find(|t| t.name == "list_products")
             .expect("tool named 'list_products' not found — UUID key leaked as name");
-        // Description now includes the tool context block; use substring match.
-        assert!(tool.description.contains("List products from the catalog"));
+        assert_eq!(tool.description, "List products from the catalog");
 
         // UUID should NOT appear as a tool name
         assert!(
@@ -1660,7 +1560,6 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new(),
             },
         );
 
@@ -1710,7 +1609,6 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new(),
             },
         );
 
@@ -1766,7 +1664,6 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new(),
             },
         );
 
@@ -1819,7 +1716,6 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new(),
             },
         );
 
@@ -1869,7 +1765,6 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new(),
             },
         );
 
@@ -1928,7 +1823,6 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new(),
             },
         );
 
@@ -1999,7 +1893,6 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new(),
             },
         );
 
@@ -2058,7 +1951,6 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new(),
             },
         );
 
@@ -2125,7 +2017,6 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new(),
             },
         );
 
@@ -2167,7 +2058,6 @@ mod tests {
                     name: "x".into(),
                     description: "d".into(),
                     source: SkillSource::Builtin,
-                    node_type: None,
                 }]
             }
             async fn load_skill(&self, name: &str) -> Result<Skill, SkillError> {
@@ -2177,7 +2067,6 @@ mod tests {
                     body: "BODY".into(),
                     references: vec![],
                     source: SkillSource::Builtin,
-                    node_type: None,
                 })
             }
             async fn load_reference(&self, _: &str, _: &str) -> Result<SkillReference, SkillError> {
@@ -2220,7 +2109,6 @@ mod tests {
             expose_sub_tools: None,
             summary: None,
             eager: false,
-            skills: Vec::new(),
         };
         let executor =
             DagToolExecutor::new(registry, HashMap::new()).with_describe_tool_lookup(vec![cfg]);
@@ -2260,7 +2148,6 @@ mod tests {
             expose_sub_tools: None,
             summary: None,
             eager: false,
-            skills: Vec::new(),
         };
 
         let observed: Arc<std::sync::Mutex<Vec<String>>> =
@@ -2318,7 +2205,6 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new(),
             },
         );
 
@@ -2439,133 +2325,6 @@ mod tests {
             "execute_inner must not inject __colmena_session_id when session_id is None"
         );
     }
-
-    // ----- Node with tool_description_supplement for T11 test -----
-
-    struct SqlLikeNode;
-
-    #[async_trait]
-    impl ExecutableNode for SqlLikeNode {
-        async fn execute(
-            &self,
-            _inputs: &NodeInputs,
-            _config: &Value,
-            _state: &mut Value,
-            _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
-        ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-            Ok(serde_json::json!({}))
-        }
-
-        fn schema(&self) -> Value {
-            serde_json::json!({ "inputs": {} })
-        }
-
-        fn tool_description_supplement(&self, _fixed_config: &Value) -> Option<String> {
-            Some("SELECT is allowed. Schemas: public. Max rows: 100.".to_string())
-        }
-    }
-
-    struct SqlLikeRegistry;
-
-    impl NodeRegistryPort for SqlLikeRegistry {
-        fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
-            if node_type == "sql_query" {
-                Some(Arc::new(SqlLikeNode))
-            } else {
-                None
-            }
-        }
-
-        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
-            let mut m = HashMap::new();
-            m.insert(
-                "sql_query".to_string(),
-                Arc::new(SqlLikeNode) as Arc<dyn ExecutableNode>,
-            );
-            m
-        }
-    }
-
-    #[tokio::test]
-    async fn tool_definition_description_includes_policy_when_supplement_returns_some() {
-        use crate::dag_engine::domain::tool_configuration::{NodeSchema, NodeSchemaField};
-        use crate::skills::infrastructure::BuiltinSkillRepository;
-
-        let mut schema: NodeSchema = HashMap::new();
-        schema.insert(
-            "permissions".to_string(),
-            NodeSchemaField {
-                field_type: Some("object".to_string()),
-                fixed: Some(serde_json::json!({
-                    "preset": "read_only",
-                    "allowed_schemas": ["public"]
-                })),
-                required: None,
-                description: None,
-                pattern: None,
-                properties: None,
-                items: None,
-            },
-        );
-        schema.insert(
-            "query".to_string(),
-            NodeSchemaField {
-                field_type: Some("string".to_string()),
-                fixed: None,
-                required: Some(true),
-                description: Some("SQL query to run".to_string()),
-                pattern: None,
-                properties: None,
-                items: None,
-            },
-        );
-
-        let cfg = ToolConfiguration {
-            name: "query_db".to_string(),
-            description: "Query the database".to_string(),
-            node_type: "sql_query".to_string(),
-            fixed_config: HashMap::new(),
-            #[allow(deprecated)]
-            exposed_inputs: None,
-            #[allow(deprecated)]
-            parameters: None,
-            #[allow(deprecated)]
-            mergeable_fields: None,
-            #[allow(deprecated)]
-            field_mapping: None,
-            node_schema: Some(schema),
-            node_config: None,
-            expose_sub_tools: None,
-            summary: None,
-            eager: false,
-            skills: Vec::new(),
-        };
-
-        let registry = Arc::new(SqlLikeRegistry);
-        let mut tool_configurations = HashMap::new();
-        tool_configurations.insert("query_db".to_string(), cfg);
-
-        let skill_repo = Arc::new(
-            BuiltinSkillRepository::new(&["sql_query-guide".to_string()])
-                .expect("sql_query-guide must be a known built-in skill"),
-        );
-
-        let executor = DagToolExecutor::new(registry, tool_configurations).with_skills(skill_repo);
-
-        let tools = executor.available_tools().await;
-        let t = tools.iter().find(|t| t.name == "query_db").unwrap();
-
-        assert!(
-            t.description.contains("Access policy"),
-            "description should contain 'Access policy'; got:\n{}",
-            t.description
-        );
-        assert!(
-            t.description.contains("SELECT"),
-            "description should contain 'SELECT'; got:\n{}",
-            t.description
-        );
-    }
 }
 
 #[cfg(test)]
@@ -2634,7 +2393,6 @@ mod toolkit_runtime_tests {
                 expose_sub_tools: Some(SubToolFilter::all()),
                 summary: None,
                 eager: false,
-                skills: Vec::new(),
             },
         );
         DagToolExecutor::new(registry, configs)
@@ -2718,7 +2476,6 @@ mod toolkit_runtime_tests {
                 expose_sub_tools: Some(SubToolFilter::List(vec!["echo".to_string()])),
                 summary: None,
                 eager: false,
-                skills: Vec::new(),
             },
         );
         let exec = DagToolExecutor::new(registry, configs);

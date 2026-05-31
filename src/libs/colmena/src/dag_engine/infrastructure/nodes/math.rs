@@ -159,15 +159,3 @@ impl ExecutableNode for ExponentialNode {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_tool_description_supplement_is_none() {
-        let node = AddNode;
-        let supp = node.tool_description_supplement(&json!({}));
-        assert!(supp.is_none());
-    }
-}

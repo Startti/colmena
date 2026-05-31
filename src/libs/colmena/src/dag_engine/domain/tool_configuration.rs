@@ -186,13 +186,6 @@ pub struct ToolConfiguration {
     /// in the `describe_tool` catalog. No effect when lazy_tool_loading is disabled.
     #[serde(default)]
     pub eager: bool,
-
-    /// Layer-2 specific skills scoped to this tool. Each name must resolve
-    /// against the active SkillRepository at graph load (unknown names → error).
-    /// Appear in the load_skill catalog only after this tool is discovered
-    /// (lazy describe_tool). In non-lazy mode, visible from turn 1.
-    #[serde(default)]
-    pub skills: Vec<String>,
 }
 
 impl ToolConfiguration {
@@ -1019,31 +1012,5 @@ mod tests {
             err.contains("items.type") || err.contains("`items"),
             "error must mention items: {err}"
         );
-    }
-
-    #[test]
-    fn tool_configuration_parses_skills_field() {
-        let json = serde_json::json!({
-            "name": "consultar_ventas",
-            "description": "Consultar ventas",
-            "node_type": "sql_query",
-            "skills": ["sales-analysis", "expense-analysis"]
-        });
-        let cfg: ToolConfiguration = serde_json::from_value(json).unwrap();
-        assert_eq!(
-            cfg.skills,
-            vec!["sales-analysis".to_string(), "expense-analysis".to_string()]
-        );
-    }
-
-    #[test]
-    fn tool_configuration_skills_defaults_to_empty() {
-        let json = serde_json::json!({
-            "name": "t",
-            "description": "d",
-            "node_type": "x"
-        });
-        let cfg: ToolConfiguration = serde_json::from_value(json).unwrap();
-        assert!(cfg.skills.is_empty());
     }
 }

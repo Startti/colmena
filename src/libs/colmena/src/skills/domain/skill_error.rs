@@ -49,19 +49,25 @@ pub enum SkillError {
     #[error("skill name collision: '{name}' is defined more than once")]
     SkillNameCollision { name: String },
 
-    #[error("duplicate node_type guide: node_type '{node_type}' is claimed by skills '{first}' and '{second}'; only one guide per node_type is allowed")]
-    DuplicateNodeTypeGuide {
-        node_type: String,
-        first: String,
-        second: String,
-    },
-
     #[error("I/O error on {path}: {source}")]
     Io {
         path: String,
         #[source]
         source: std::io::Error,
     },
+
+    #[error("reference depth exceeds max {max} in skill '{skill}' (path: {path})")]
+    ReferenceDepthExceeded {
+        skill: String,
+        max: u8,
+        path: String,
+    },
+
+    #[error("reference cycle detected in skill '{skill}': {cycle}")]
+    ReferenceCycle { skill: String, cycle: String },
+
+    #[error("invalid reference path '{path}': path must not be empty")]
+    InvalidReferencePath { path: String },
 }
 
 #[cfg(test)]

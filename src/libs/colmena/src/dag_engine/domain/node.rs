@@ -43,13 +43,6 @@ pub trait ExecutableNode: Send + Sync {
         None
     }
 
-    /// Optional config-derived text appended to the tool context block when
-    /// the node is used as an LLM tool. Pure function of `fixed_config` — no
-    /// I/O. Default: None.
-    fn tool_description_supplement(&self, _fixed_config: &serde_json::Value) -> Option<String> {
-        None
-    }
-
     /// The default input port name for this node.
     /// Used by the engine when an incoming edge specifies no target field.
     /// Return `None` if the node requires explicit field mapping.

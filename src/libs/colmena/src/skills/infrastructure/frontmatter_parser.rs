@@ -8,14 +8,79 @@ struct RawFrontmatter {
     description: String,
     #[serde(default)]
     references: Vec<RawReference>,
-    #[serde(default)]
-    node_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawReference {
     name: String,
     description: String,
+}
+
+/// Frontmatter that may optionally appear in a `references/<name>.md` file.
+/// Only `references:` is significant — name and description come from the parent SKILL.md.
+#[derive(Debug, Deserialize, Default)]
+struct RawReferenceFrontmatter {
+    #[serde(default)]
+    references: Vec<RawReference>,
+}
+
+/// Parse optional YAML frontmatter from a reference file and return the list of
+/// sub-reference declarations. Returns an empty list when the file has no frontmatter.
+///
+/// Unlike `parse_skill_md`, the frontmatter here is optional: if the file does not
+/// start with `---\n` the function silently returns `(vec![], content)`.
+/// Malformed YAML in an existing frontmatter block is propagated as an error.
+pub fn parse_reference_file_refs(
+    content: &str,
+    path: &str,
+) -> Result<Vec<RawReferenceMeta>, SkillError> {
+    if !content.starts_with("---\n") && !content.starts_with("---\r\n") {
+        return Ok(vec![]);
+    }
+
+    let after_first = content
+        .strip_prefix("---\r\n")
+        .unwrap_or_else(|| &content[4..]);
+
+    let mut end_idx: Option<usize> = None;
+    let mut offset = 0usize;
+    for line in after_first.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(&['\r', '\n'][..]);
+        if trimmed == "---" {
+            end_idx = Some(offset);
+            break;
+        }
+        offset += line.len();
+    }
+
+    // No closing delimiter — treat as plain file without frontmatter.
+    let Some(end_idx) = end_idx else {
+        return Ok(vec![]);
+    };
+
+    let yaml_str = &after_first[..end_idx];
+    let raw: RawReferenceFrontmatter =
+        serde_yaml::from_str(yaml_str).map_err(|e| SkillError::InvalidFrontmatter {
+            path: path.to_string(),
+            reason: format!("{}", e),
+        })?;
+
+    Ok(raw
+        .references
+        .into_iter()
+        .map(|r| RawReferenceMeta {
+            name: r.name,
+            description: r.description,
+        })
+        .collect())
+}
+
+/// Flat reference metadata returned from reference file frontmatter parsing.
+/// Callers are responsible for recursing into sub-references.
+#[derive(Debug)]
+pub struct RawReferenceMeta {
+    pub name: String,
+    pub description: String,
 }
 
 /// Result of parsing a SKILL.md file: extracted fields and the body
@@ -26,7 +91,6 @@ pub struct ParsedSkillMd {
     pub description: String,
     pub references: Vec<SkillReferenceMeta>,
     pub body: String,
-    pub node_type: Option<String>,
 }
 
 /// Parse a SKILL.md file's content.
@@ -69,6 +133,24 @@ pub fn parse_skill_md(content: &str, path: &str) -> Result<ParsedSkillMd, SkillE
 
     let yaml_str = &after_first[..end_idx];
 
+    // Migration safeguard: layered-tool-context was reverted. Reject SKILL.md files
+    // that still declare a top-level `node_type:` key — the field was introduced in that
+    // experiment and is now meaningless. Fail loudly so the user gets a clear message
+    // rather than silent data loss.
+    if yaml_str.lines().any(|l| {
+        let t = l.trim_start();
+        t.starts_with("node_type:") || t.starts_with("node_type :")
+    }) {
+        return Err(SkillError::InvalidFrontmatter {
+            path: path.to_string(),
+            reason: "deprecated 'node_type' frontmatter — the layered-tool-context feature \
+                     was reverted. Remove the node_type field from this SKILL.md. Skills are \
+                     now referenced explicitly from llm_call.skills \
+                     (see docs/developer_guide/24_skills.md)."
+                .to_string(),
+        });
+    }
+
     // Body: everything after the closing "---\n".
     let after_end = &after_first[end_idx..];
     // Skip the "---" line itself (plus its newline if present).
@@ -108,10 +190,10 @@ pub fn parse_skill_md(content: &str, path: &str) -> Result<ParsedSkillMd, SkillE
             .map(|r| SkillReferenceMeta {
                 name: r.name,
                 description: r.description,
+                references: vec![],
             })
             .collect(),
         body,
-        node_type: raw.node_type,
     })
 }
 
@@ -205,16 +287,15 @@ mod tests {
     }
 
     #[test]
-    fn parses_node_type_when_present() {
-        let content = "---\nname: x\ndescription: y\nnode_type: sql_query\n---\nbody\n";
-        let parsed = parse_skill_md(content, "p").unwrap();
-        assert_eq!(parsed.node_type.as_deref(), Some("sql_query"));
-    }
-
-    #[test]
-    fn node_type_defaults_to_none_when_absent() {
-        let content = "---\nname: x\ndescription: y\n---\nbody\n";
-        let parsed = parse_skill_md(content, "p").unwrap();
-        assert!(parsed.node_type.is_none());
+    fn legacy_node_type_frontmatter_is_rejected_with_migration_error() {
+        let content = "---\nname: my-skill\ndescription: hi\nnode_type: sql_query\n---\nbody\n";
+        let err = parse_skill_md(content, "/skills/my-skill/SKILL.md")
+            .expect_err("must reject node_type frontmatter");
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("deprecated") && msg.contains("node_type"),
+            "expected migration error mentioning 'deprecated' and 'node_type', got: {}",
+            err
+        );
     }
 }

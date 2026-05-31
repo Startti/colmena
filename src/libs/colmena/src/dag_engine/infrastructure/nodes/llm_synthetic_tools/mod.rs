@@ -5,9 +5,6 @@ pub mod document_tools;
 pub mod lazy_tools_catalog;
 pub mod load_attachment_tool;
 pub mod load_skill_tool;
-pub mod tool_context;
-
-pub use tool_context::{build_tool_context_block, BlockVariant};
 
 pub use describe_tool::{
     dispatch_describe_tool, into_tool_result as describe_tool_into_tool_result,

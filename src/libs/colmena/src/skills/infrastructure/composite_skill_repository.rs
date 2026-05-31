@@ -117,25 +117,6 @@ impl CompositeSkillRepository {
             None
         }
     }
-
-    /// Run cross-repo validations that cannot be enforced by a single child:
-    /// - At most one skill per node_type (across all repos).
-    pub fn validate(&self) -> Result<(), SkillError> {
-        let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        for entry in self.list_available() {
-            if let Some(nt) = entry.node_type.as_deref() {
-                if let Some(prev) = seen.get(nt) {
-                    return Err(SkillError::DuplicateNodeTypeGuide {
-                        node_type: nt.to_string(),
-                        first: prev.clone(),
-                        second: entry.name.clone(),
-                    });
-                }
-                seen.insert(nt.to_string(), entry.name.clone());
-            }
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -163,7 +144,6 @@ mod tests {
                     body: format!("body of {}", e.name),
                     references: vec![],
                     source: e.source,
-                    node_type: None,
                 })
                 .ok_or_else(|| SkillError::SkillNotFound(name.to_string()))
         }
@@ -185,26 +165,6 @@ mod tests {
             name: name.to_string(),
             description: format!("desc of {}", name),
             source,
-            node_type: None,
-        }
-    }
-
-    fn entry_with_node_type(name: &str, source: SkillSource, node_type: &str) -> SkillCatalogEntry {
-        SkillCatalogEntry {
-            name: name.to_string(),
-            description: format!("desc of {}", name),
-            source,
-            node_type: Some(node_type.to_string()),
-        }
-    }
-
-    fn make_test_repo(skill_name: &str, node_type: &str) -> FakeRepo {
-        FakeRepo {
-            entries: vec![entry_with_node_type(
-                skill_name,
-                SkillSource::Builtin,
-                node_type,
-            )],
         }
     }
 
@@ -288,15 +248,5 @@ mod tests {
         assert_eq!(composite.source_of("a"), Some(SkillSource::Builtin));
         assert_eq!(composite.source_of("b"), Some(SkillSource::Path));
         assert_eq!(composite.source_of("missing"), None);
-    }
-
-    #[test]
-    fn validate_returns_error_on_duplicate_node_type() {
-        let a = make_test_repo("guide-a", "sql_query");
-        let b = make_test_repo("guide-b", "sql_query");
-        let composite = CompositeSkillRepository::new(Arc::new(a), Arc::new(b))
-            .expect("construction should succeed");
-        let err = composite.validate().expect_err("should fail on duplicates");
-        assert!(matches!(err, SkillError::DuplicateNodeTypeGuide { .. }));
     }
 }

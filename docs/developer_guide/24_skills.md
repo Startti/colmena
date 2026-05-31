@@ -40,9 +40,7 @@ Skills compiladas en el crate vía `include_dir!`. Viven en `src/libs/colmena/sk
 {
   "type": "llm_call",
   "config": {
-    "skills": {
-      "builtin": ["python-expert", "sql-optimizer"]
-    }
+    "skills": ["python-expert", "sql-optimizer"]
   }
 }
 ```
@@ -63,7 +61,7 @@ my-skill/
 ```
 
 ```jsonc
-"skills": { "paths": ["./my-skill"] }
+"skills_path": "./my-skill"
 ```
 
 ### Caso 2 — una carpeta con muchas skills (root mode)
@@ -87,7 +85,7 @@ my-skills/                       ← le pasás ESTE path
 ```
 
 ```jsonc
-"skills": { "paths": ["./my-skills"] }
+"skills_path": "./my-skills"
 ```
 
 Las 3 skills se cargan automáticamente, con sus referencias listas para `load_skill`.
@@ -110,18 +108,15 @@ Las 3 skills se cargan automáticamente, con sus referencias listas para `load_s
 
 Cada path se valida con `canonicalize()`. Symlinks que apuntan **dentro** de los directorios permitidos se siguen. Symlinks que escapan al exterior se **skipean silenciosamente** (no crashea) durante el escaneo de root; si el path raíz mismo escapa, se rechaza con `PathNotAllowed`.
 
-### Combinando con built-in
+### Combinando skills
 
-Se pueden mezclar en el mismo `llm_call`:
+Se pueden mezclar en el mismo `llm_call` — todas terminan en el mismo `SkillRepository` (vía `CompositeSkillRepository`), con dedup por nombre:
 
 ```jsonc
-"skills": {
-  "builtin": ["python-expert"],                        // del crate compilado
-  "paths":   ["./domain-skills", "/opt/shared-skills"] // del filesystem
-}
+"skills": ["python-expert"],                       // built-in por nombre
+"skills_path": "./domain-skills",                  // un directorio
+"skills_paths": ["/opt/shared-skills", "./extra"]  // varios directorios
 ```
-
-Todas terminan en el mismo `SkillRepository` (vía `CompositeSkillRepository`). El catálogo de `load_skill` es la unión menos las layer-1 guides (excluidas) y menos las layer-2 no-descubiertas (gated por `describe_tool`).
 
 ### Errores duros al cargar el grafo
 
@@ -219,89 +214,57 @@ Qué sí controla Colmena:
 - El contenido markdown nunca se ejecuta como código.
 - El catálogo se fija al cargar el grafo — el LLM no puede añadir skills nuevas en runtime.
 
+## References anidadas (recursivas)
+
+Una skill puede tener references que a su vez tienen sus PROPIAS references. El parser lee el frontmatter de cada `references/*.md` y construye un árbol.
+
+```
+my-skill/
+  SKILL.md                       # references: [{name: "fw", description: "..."}]
+  references/
+    fw.md                        # ¡PROPIO frontmatter!:
+                                 # references: [{name: "django"}, {name: "fastapi"}]
+    django.md                    # hoja (sin frontmatter o references: [])
+    fastapi.md                   # hoja
+```
+
+El LLM navega el árbol con `load_reference("my-skill", "fw/django")` — cada `/` baja un nivel. La validación se hace contra el árbol DECLARADO (no contra archivos sueltos en disco), así que si `fw.md` no declara a `django` como sub-reference, el path `fw/django` falla aunque `django.md` exista.
+
+**Límites:**
+- Profundidad máxima: **5 niveles** desde el root del skill (hard error al cargar el grafo)
+- Ciclos detectados (`A → B → A`): hard error
+- Tamaño por archivo: **64 KB** (igual que los archivos planos)
+
+## Configurando skills en un nodo `llm_call`
+
+Tres opciones, todas opcionales y coexisten (se unionan, sin duplicados):
+
+```json
+{
+  "type": "llm_call",
+  "config": {
+    "skills": ["python-expert", "sales-analysis"],
+    "skills_path": "./my-skills",
+    "skills_paths": ["./more-skills", "./still-more"]
+  }
+}
+```
+
+| Campo | Tipo | Comportamiento |
+|---|---|---|
+| `skills` | `Vec<String>` | Lista explícita de nombres. Cada skill debe estar disponible (built-in o en algún path) |
+| `skills_path` | `String` | Path a un directorio. TODAS las skills bajo ese path se cargan automáticamente |
+| `skills_paths` | `Vec<String>` | Lista de paths. Mismo comportamiento que `skills_path` para cada uno |
+
+**Errores:**
+- `skills_path` apunta a un directorio inexistente → hard error al resolver
+- `skills_path` apunta a un directorio sin subdirectorios con SKILL.md → lista vacía, sin error
+- Mismo skill aparece en `skills: [name]` Y en algún path → deduplicado, una sola entrada
+
 ## Referencia rápida
 
 - Tool expuesto al LLM: `load_skill(name: string, reference?: string)`.
 - La descripción del tool contiene el catálogo completo (nombre + descripción de cada skill).
-- Si no se configura `skills`, todo el sistema de skills queda desactivado (zero overhead).
-## Layered routing
-
-A skill's role is derived from how it's wired, not from where the file
-lives. All skills share the same pool.
-
-| Role | How it's marked | How it reaches the model |
-|---|---|---|
-| Layer 1 — node-type guide | frontmatter `node_type: <name>` | auto-folded into the tool context block of every tool with matching node_type; **never** in the `load_skill` catalog |
-| Layer 2 — tool-scoped specific | referenced in `tool_configurations.<name>.skills` | appears in the `load_skill` catalog **only after** the parent tool is discovered (lazy `discovered_set`); in non-lazy mode, visible from turn 1 |
-| Layer 3 — free-standing general | referenced in `llm_call.skills` and no `node_type` | always in the `load_skill` catalog (today's behavior) |
-
-Validations at graph load:
-- At most one skill per node_type. Two guides claiming the same
-  `node_type` → hard error.
-- A `tool.skills` reference to an unknown name → hard error.
-- A `tool.skills` reference to a skill marked as a node_type guide →
-  hard error.
-- A `llm_call.skills` reference to a node_type guide → warning, ignored.
-
-## How skills auto-load
-
-The engine derives the complete skill load list automatically — operators
-only need to declare scoped skills in `tool_configurations.<name>.skills`.
-No redundant enumeration in `llm_call.skills.builtin` is required.
-
-**Built-in skills** (compiled into the crate via `include_dir!`):
-
-- Auto-load when listed explicitly in `llm_call.skills.builtin`.
-- Auto-load when referenced in any `tool_configurations.<name>.skills`
-  (layer-2 auto-registration, via `augment_builtin_names`).
-- Auto-load when their frontmatter declares `node_type: X` and any
-  configured tool has `node_type: X` (layer-1 guide, zero config
-  required).
-
-**Path-based skills** (from `llm_call.skills.paths`): every `SKILL.md`
-found under those directories is discovered automatically — no explicit
-enumeration needed.
-
-**Operator's only declarative job:** list scoped layer-2 skill names in
-`tool_configurations.<name>.skills`. Everything else is derived.
-
-### Before (old, required duplication)
-
-```json
-{
-  "type": "llm_call",
-  "config": {
-    "skills": {
-      "builtin": ["sales-analysis"]
-    },
-    "tool_configurations": {
-      "query_sales": {
-        "node_type": "sql_query",
-        "skills": ["sales-analysis"]
-      }
-    }
-  }
-}
-```
-
-### After (current, single declaration)
-
-```json
-{
-  "type": "llm_call",
-  "config": {
-    "tool_configurations": {
-      "query_sales": {
-        "node_type": "sql_query",
-        "skills": ["sales-analysis"]
-      }
-    }
-  }
-}
-```
-
-The engine auto-derives that `sales-analysis` must be loaded (because it
-is referenced in `tool.skills`) and that `sql_query`'s node-type guide
-must be auto-folded (because `query_sales` has `node_type: sql_query`).
-
+- Si no se configura ningún campo de skills, todo el sistema de skills queda desactivado (zero overhead).
 - Diseño completo: [docs/superpowers/specs/2026-04-20-llm-skills-design.md](../superpowers/specs/2026-04-20-llm-skills-design.md)
+- Revert layered + features nuevas: [docs/superpowers/specs/2026-05-31-revert-layered-tool-context-design.md](../superpowers/specs/2026-05-31-revert-layered-tool-context-design.md)
