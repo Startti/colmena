@@ -40,7 +40,9 @@ Skills compiladas en el crate vía `include_dir!`. Viven en `src/libs/colmena/sk
 {
   "type": "llm_call",
   "config": {
-    "skills": ["python-expert", "sql-optimizer"]
+    "skills": {
+      "builtin": ["python-expert", "sql-optimizer"]
+    }
   }
 }
 ```
@@ -113,9 +115,12 @@ Cada path se valida con `canonicalize()`. Symlinks que apuntan **dentro** de los
 Se pueden mezclar en el mismo `llm_call` — todas terminan en el mismo `SkillRepository` (vía `CompositeSkillRepository`), con dedup por nombre:
 
 ```jsonc
-"skills": ["python-expert"],                       // built-in por nombre
-"skills_path": "./domain-skills",                  // un directorio
-"skills_paths": ["/opt/shared-skills", "./extra"]  // varios directorios
+"skills": {
+  "builtin": ["python-expert"],                  // built-in por nombre
+  "paths":   ["./team-skill-one"]                // paths a skills INDIVIDUALES (cada path = una skill)
+},
+"skills_path":  "./domain-skills",               // un directorio CONTENEDOR (carga todas las sub-skills)
+"skills_paths": ["/opt/shared-skills", "./extra"] // varios directorios contenedores
 ```
 
 ### Errores duros al cargar el grafo
@@ -237,29 +242,40 @@ El LLM navega el árbol con `load_reference("my-skill", "fw/django")` — cada `
 
 ## Configurando skills en un nodo `llm_call`
 
-Tres opciones, todas opcionales y coexisten (se unionan, sin duplicados):
+Hay 4 campos de config para exponer skills al LLM. Todos son opcionales y coexisten — los nombres resultantes se unionan sin duplicados.
 
 ```json
 {
   "type": "llm_call",
   "config": {
-    "skills": ["python-expert", "sales-analysis"],
-    "skills_path": "./my-skills",
-    "skills_paths": ["./more-skills", "./still-more"]
+    "skills": {
+      "builtin": ["python-expert"],            // built-in del binario, por nombre
+      "paths":   ["./mis-skills/skill-uno"]    // paths a skills INDIVIDUALES
+    },
+    "skills_path":  "./otras-skills",          // un directorio CONTENEDOR
+    "skills_paths": ["./aun-otras", "./mas"]   // varios directorios contenedores
   }
 }
 ```
 
 | Campo | Tipo | Comportamiento |
 |---|---|---|
-| `skills` | `Vec<String>` | Lista explícita de nombres. Cada skill debe estar disponible (built-in o en algún path) |
-| `skills_path` | `String` | Path a un directorio. TODAS las skills bajo ese path se cargan automáticamente |
-| `skills_paths` | `Vec<String>` | Lista de paths. Mismo comportamiento que `skills_path` para cada uno |
+| `skills.builtin` | `Vec<String>` | Nombres de skills compiladas en el binario (`src/libs/colmena/skills/`) |
+| `skills.paths` | `Vec<String>` | Paths a directorios **de una skill individual** (cada path = una skill con su `SKILL.md` en la raíz) |
+| `skills_path` | `String` | Path a un directorio **contenedor** — escanea cada subdirectorio inmediato con `SKILL.md` y carga TODAS las sub-skills |
+| `skills_paths` | `Vec<String>` | Lista de paths contenedores. Mismo comportamiento que `skills_path` para cada uno |
+
+**Diferencia clave entre `skills.paths` y `skills_path*`:**
+- `skills.paths`: cada elemento es UN directorio de UNA skill (ej. `./mis-skills/python-expert`)
+- `skills_path` / `skills_paths`: cada elemento es UN directorio CONTENEDOR que tiene VARIAS sub-skills adentro (ej. `./mis-skills` que contiene `python-expert/`, `sales-analysis/`, etc.)
+
+Ver §"Skills del usuario (paths)" arriba para el detalle de auto-detección (caso 1 vs caso 2).
 
 **Errores:**
-- `skills_path` apunta a un directorio inexistente → hard error al resolver
+- `skills_path` apunta a un directorio inexistente → hard error al cargar el grafo
 - `skills_path` apunta a un directorio sin subdirectorios con SKILL.md → lista vacía, sin error
-- Mismo skill aparece en `skills: [name]` Y en algún path → deduplicado, una sola entrada
+- Mismo nombre de skill aparece en varias fuentes → deduplicado, una sola entrada
+- Nombre de skill en `skills.builtin` que no existe compilada → hard error
 
 ## Referencia rápida
 
