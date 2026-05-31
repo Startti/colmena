@@ -549,7 +549,7 @@ function getCss(name){{return getComputedStyle(document.documentElement).getProp
 new Chart(document.getElementById("chart_{id}"),{{
   type: "{ty}",
   data: {{ labels: {labels}, datasets: [{ds}] }},
-  options: {{ responsive: true, plugins: {{ legend: {{ display: {legend} }} }} }}
+  options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: {legend} }} }} }}
 }});"#,
         id = block_id,
         ty = type_str,
