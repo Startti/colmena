@@ -508,14 +508,17 @@ mod tests {
         assert!(text.contains("UPDATE"));
         assert!(text.contains("public"));
         assert!(text.contains("analytics"));
-        assert!(text.contains("DROP"));     // always-blocked list mentions it
-        assert!(text.contains("WHERE"));    // fixed WHERE clause in 5th bullet
-        assert!(text.contains("50"));       // max_rows
+        assert!(text.contains("DROP")); // always-blocked list mentions it
+        assert!(text.contains("WHERE")); // fixed WHERE clause in 5th bullet
+        assert!(text.contains("50")); // max_rows
 
         // Lock line order: WHERE clause must come before max_rows line
         let where_pos = text.find("WHERE").expect("WHERE present");
         let max_rows_pos = text.find("at most").expect("max rows present");
-        assert!(where_pos < max_rows_pos, "WHERE line must come before max_rows line");
+        assert!(
+            where_pos < max_rows_pos,
+            "WHERE line must come before max_rows line"
+        );
     }
 
     #[test]

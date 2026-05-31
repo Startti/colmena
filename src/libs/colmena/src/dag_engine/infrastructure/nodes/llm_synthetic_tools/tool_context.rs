@@ -111,7 +111,10 @@ pub fn build_tool_context_block(
                     "no"
                 };
                 let desc = field.description.as_deref().unwrap_or("");
-                out.push_str(&format!("| {} | {} | {} | {} |\n", name, ty, required, desc));
+                out.push_str(&format!(
+                    "| {} | {} | {} | {} |\n",
+                    name, ty, required, desc
+                ));
             }
             out.push('\n');
         }
@@ -326,13 +329,8 @@ mod tests {
         let mut c = cfg("consultar_ventas", "sql_query", "Sales tool");
         c.skills = vec!["sales-analysis".to_string()];
         let node = NoopNode { supp: None };
-        let block = build_tool_context_block(
-            &c,
-            &node,
-            &json!({}),
-            None,
-            BlockVariant::EagerOrNonLazy,
-        );
+        let block =
+            build_tool_context_block(&c, &node, &json!({}), None, BlockVariant::EagerOrNonLazy);
         assert!(block.contains("## Related knowledge"));
         assert!(block.contains("sales-analysis"));
     }
@@ -370,9 +368,7 @@ mod tests {
             Some(self.node.clone())
         }
 
-        fn get_all_nodes(
-            &self,
-        ) -> std::collections::HashMap<String, Arc<dyn ExecutableNode>> {
+        fn get_all_nodes(&self) -> std::collections::HashMap<String, Arc<dyn ExecutableNode>> {
             HashMap::new()
         }
     }
@@ -454,8 +450,7 @@ mod tests {
         };
         let mut tools = HashMap::new();
         tools.insert("query_db".to_string(), cfg("query_db", "sql_query", "SQL"));
-        let summary =
-            build_tool_context_blocks_summary(&tools, &registry, Some(&skill_repo));
+        let summary = build_tool_context_blocks_summary(&tools, &registry, Some(&skill_repo));
         let guide = summary["query_db"]["node_guide"].as_str().unwrap();
         assert_eq!(guide, "sql_query-guide");
     }
@@ -500,9 +495,11 @@ mod tests {
         c.skills = vec!["sales-analysis".to_string()];
         let mut tools = HashMap::new();
         tools.insert("query_db".to_string(), c);
-        let summary =
-            build_tool_context_blocks_summary(&tools, &registry, Some(&skill_repo));
-        assert_eq!(summary["query_db"]["node_guide"].as_str().unwrap(), "sql_query-guide");
+        let summary = build_tool_context_blocks_summary(&tools, &registry, Some(&skill_repo));
+        assert_eq!(
+            summary["query_db"]["node_guide"].as_str().unwrap(),
+            "sql_query-guide"
+        );
         assert_eq!(summary["query_db"]["policy_lines"].as_u64().unwrap(), 2);
         let skills = summary["query_db"]["scoped_skills"].as_array().unwrap();
         assert_eq!(skills.len(), 1);

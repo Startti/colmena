@@ -79,7 +79,9 @@ pub async fn generate_tool_markdown_async(
             _inputs: &crate::dag_engine::domain::node::NodeInputs,
             _config: &serde_json::Value,
             _state: &mut serde_json::Value,
-            _observer: Option<std::sync::Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+            _observer: Option<
+                std::sync::Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>,
+            >,
         ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
             Ok(serde_json::json!({}))
         }
@@ -93,8 +95,7 @@ pub async fn generate_tool_markdown_async(
 
     let fixed = effective_fixed_config(cfg);
 
-    let mut block =
-        build_tool_context_block(cfg, node_ref, &fixed, skill_repo, BlockVariant::Lazy);
+    let mut block = build_tool_context_block(cfg, node_ref, &fixed, skill_repo, BlockVariant::Lazy);
 
     if block.contains("{{NODE_GUIDE_BODY}}") {
         if let Some(repo) = skill_repo {

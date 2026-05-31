@@ -1030,7 +1030,10 @@ mod tests {
             "skills": ["sales-analysis", "expense-analysis"]
         });
         let cfg: ToolConfiguration = serde_json::from_value(json).unwrap();
-        assert_eq!(cfg.skills, vec!["sales-analysis".to_string(), "expense-analysis".to_string()]);
+        assert_eq!(
+            cfg.skills,
+            vec!["sales-analysis".to_string(), "expense-analysis".to_string()]
+        );
     }
 
     #[test]
