@@ -81,7 +81,7 @@ pub fn validate_against_inline_schema(value: &Value, inline: &Value) -> Result<(
 
         let field_value = obj.get(field_name);
 
-        if required && field_value.map_or(true, |v| v.is_null()) {
+        if required && field_value.is_none_or(|v| v.is_null()) {
             return Err(format!("required field '{}' is missing or null", field_name));
         }
 
