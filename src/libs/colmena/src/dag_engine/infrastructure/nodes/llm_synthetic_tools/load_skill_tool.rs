@@ -9,83 +9,18 @@ use std::sync::Arc;
 
 pub const LOAD_SKILL_TOOL_NAME: &str = "load_skill";
 
-/// Apply layer 1/2/3 visibility rules to produce the `load_skill` catalog
-/// for a single LLM request.
-///
-/// - Layer 1 (`node_type` set) → excluded (auto-folded via `tool_description_supplement`).
-/// - Layer 2 (name in any `tool_configuration.skills`) → included only
-///   if that parent tool is in `discovered_set`.
-/// - Layer 3 (not in any tool's `skills`, `node_type` is None) → always included
-///   (free-standing skills declared directly on the llm_call node).
-///
-/// # Arguments
-/// - `catalog` — full list from `repo.list_available()`.
-/// - `tool_scoped_names` — flat list of all skill names referenced in any
-///   `tool_configuration.skills` (used for membership check).
-/// - `free_standing_names` — skill names that belong to the llm_call node
-///   directly and are **not** scoped to any tool.
-/// - `discovered_set` — tool names already surfaced to the LLM this request
-///   (via `describe_tool` or direct invocation in message history).
-/// - `scoped_by_tool` — map of `tool_name → Vec<skill_name>` built from
-///   `tool_configurations`; used to check whether a scoped skill's parent
-///   tool has been discovered.
-pub fn filter_visible_skills(
-    catalog: &[crate::skills::domain::skill_repository::SkillCatalogEntry],
-    tool_scoped_names: &[String],
-    free_standing_names: &[String],
-    discovered_set: &std::collections::HashSet<String>,
-    scoped_by_tool: &std::collections::HashMap<String, Vec<String>>,
-) -> Vec<crate::skills::domain::skill_repository::SkillCatalogEntry> {
-    let scoped_set: std::collections::HashSet<&str> =
-        tool_scoped_names.iter().map(String::as_str).collect();
-    let free_set: std::collections::HashSet<&str> =
-        free_standing_names.iter().map(String::as_str).collect();
+/// Build the `ToolDefinition` for `load_skill`. The catalog (skill names +
+/// descriptions) is embedded directly in the tool description and the `name`
+/// parameter's `enum`, keeping the system_message untouched.
+pub fn build_load_skill_tool_definition(repository: &Arc<dyn SkillRepository>) -> ToolDefinition {
+    let catalog = repository.list_available();
 
-    let mut out = Vec::new();
-    for entry in catalog {
-        // Layer 1 — auto-folded into tool descriptions, never exposed via load_skill.
-        if entry.node_type.is_some() {
-            continue;
-        }
-
-        if free_set.contains(entry.name.as_str()) {
-            // Layer 3 — always included.
-            out.push(entry.clone());
-            continue;
-        }
-
-        if scoped_set.contains(entry.name.as_str()) {
-            // Layer 2 — included only if the parent tool has been discovered.
-            let visible_now = scoped_by_tool.iter().any(|(tool, skills)| {
-                discovered_set.contains(tool) && skills.iter().any(|s| s == &entry.name)
-            });
-            if visible_now {
-                out.push(entry.clone());
-            }
-        }
-    }
-    out
-}
-
-/// Build the `ToolDefinition` for `load_skill` from an already-filtered slice
-/// of catalog entries. This is the shared inner builder used by both the
-/// per-request rebuild path (layer-filtered) and the public wrapper.
-///
-/// Returns `None` when `entries` is empty (callers should skip pushing the
-/// tool entirely rather than advertising an empty enum).
-pub fn build_load_skill_tool_definition_with_catalog(
-    entries: &[crate::skills::domain::skill_repository::SkillCatalogEntry],
-) -> Option<ToolDefinition> {
-    if entries.is_empty() {
-        return None;
-    }
-
-    let mut names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
+    let mut names: Vec<String> = catalog.iter().map(|e| e.name.clone()).collect();
     names.sort();
     names.dedup();
 
     let catalog_lines: Vec<String> = {
-        let mut sorted = entries.to_vec();
+        let mut sorted = catalog.clone();
         sorted.sort_by(|a, b| a.name.cmp(&b.name));
         sorted
             .iter()
@@ -122,7 +57,7 @@ skill and seeing it declares this reference."
         ),
     );
 
-    Some(ToolDefinition {
+    ToolDefinition {
         name: LOAD_SKILL_TOOL_NAME.to_string(),
         description,
         parameters: ToolParameters {
@@ -131,41 +66,7 @@ skill and seeing it declares this reference."
             required: vec!["name".to_string()],
         },
         input_schema_override: None,
-    })
-}
-
-/// Build the `ToolDefinition` for `load_skill`. The catalog (skill names +
-/// descriptions) is embedded directly in the tool description and the `name`
-/// parameter's `enum`, keeping the system_message untouched.
-///
-/// This is a thin wrapper around [`build_load_skill_tool_definition_with_catalog`]
-/// that reads the full unfiltered catalog from the repository. Use the
-/// with_catalog variant directly when layer rules should be applied.
-pub fn build_load_skill_tool_definition(repository: &Arc<dyn SkillRepository>) -> ToolDefinition {
-    let catalog = repository.list_available();
-    // Safety: a SkillRepository is never empty at the call site (callers guard
-    // with `if let Some(repo) = skill_repo`). Unwrap is safe here; if the
-    // catalog somehow is empty we fall back to an empty-description definition.
-    build_load_skill_tool_definition_with_catalog(&catalog).unwrap_or_else(|| ToolDefinition {
-        name: LOAD_SKILL_TOOL_NAME.to_string(),
-        description: "Load a specialized knowledge skill on demand.".to_string(),
-        parameters: ToolParameters {
-            schema_type: "object".to_string(),
-            properties: {
-                let mut p = HashMap::new();
-                p.insert(
-                    "name".to_string(),
-                    ParameterProperty::new(
-                        "string".to_string(),
-                        "The name of the skill to load".to_string(),
-                    ),
-                );
-                p
-            },
-            required: vec!["name".to_string()],
-        },
-        input_schema_override: None,
-    })
+    }
 }
 
 /// Dispatch a `load_skill` tool call. Returns the output string to surface to the
@@ -453,99 +354,5 @@ mod tests {
         };
         let tr = into_tool_result("call_1", &r);
         assert!(!tr.success);
-    }
-
-    // ---- filter_visible_skills tests -----------------------------------------------
-
-    #[test]
-    fn build_filtered_definition_excludes_layer1_guides() {
-        use crate::skills::domain::skill_repository::SkillCatalogEntry;
-        let catalog = vec![
-            SkillCatalogEntry {
-                name: "guide".into(),
-                description: "g".into(),
-                source: SkillSource::Builtin,
-                node_type: Some("sql_query".into()),
-            },
-            SkillCatalogEntry {
-                name: "free".into(),
-                description: "f".into(),
-                source: SkillSource::Builtin,
-                node_type: None,
-            },
-        ];
-        let visible = filter_visible_skills(
-            &catalog,
-            /*tool_scoped*/ &[],
-            /*free_standing*/ &["free".to_string()],
-            /*discovered_set*/ &std::collections::HashSet::new(),
-            /*scoped_by_tool*/ &std::collections::HashMap::new(),
-        );
-        let names: Vec<&str> = visible.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, vec!["free"]);
-    }
-
-    #[test]
-    fn build_filtered_definition_includes_scoped_only_after_discovery() {
-        use crate::skills::domain::skill_repository::SkillCatalogEntry;
-        let catalog = vec![SkillCatalogEntry {
-            name: "sales".into(),
-            description: "s".into(),
-            source: SkillSource::Builtin,
-            node_type: None,
-        }];
-        let mut scoped_by_tool = std::collections::HashMap::new();
-        scoped_by_tool.insert("consultar_ventas".to_string(), vec!["sales".to_string()]);
-
-        let pre_discovery = filter_visible_skills(
-            &catalog,
-            &["sales".to_string()],
-            &[],
-            &std::collections::HashSet::new(),
-            &scoped_by_tool,
-        );
-        assert!(pre_discovery.is_empty());
-
-        let mut discovered = std::collections::HashSet::new();
-        discovered.insert("consultar_ventas".to_string());
-        let post_discovery = filter_visible_skills(
-            &catalog,
-            &["sales".to_string()],
-            &[],
-            &discovered,
-            &scoped_by_tool,
-        );
-        assert_eq!(post_discovery.len(), 1);
-        assert_eq!(post_discovery[0].name, "sales");
-    }
-
-    #[test]
-    fn build_load_skill_tool_definition_with_catalog_none_on_empty() {
-        let result = build_load_skill_tool_definition_with_catalog(&[]);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn build_load_skill_tool_definition_with_catalog_builds_correct_enum() {
-        use crate::skills::domain::skill_repository::SkillCatalogEntry;
-        let entries = vec![
-            SkillCatalogEntry {
-                name: "beta".into(),
-                description: "Beta skill".into(),
-                source: SkillSource::Builtin,
-                node_type: None,
-            },
-            SkillCatalogEntry {
-                name: "alpha".into(),
-                description: "Alpha skill".into(),
-                source: SkillSource::Builtin,
-                node_type: None,
-            },
-        ];
-        let td = build_load_skill_tool_definition_with_catalog(&entries).unwrap();
-        let name_prop = td.parameters.properties.get("name").unwrap();
-        let enum_values = name_prop.enum_values.as_ref().unwrap();
-        // sorted
-        assert_eq!(enum_values, &vec!["alpha".to_string(), "beta".to_string()]);
     }
 }
