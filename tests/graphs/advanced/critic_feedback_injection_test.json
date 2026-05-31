@@ -1,14 +1,14 @@
 {
-  "_comment": "Critic Feedback Test 1: Injection — Verifica que '=== INTENTO ANTERIOR — POR QUÉ FALLÓ ===' aparece en el prompt del agente en el segundo intento con el texto de feedback del Critic.",
+  "_comment": "Critic Feedback Test 1: Injection — Verifica que '=== PREVIOUS ATTEMPT — WHY IT FAILED ===' aparece en el prompt del agente en el segundo intento con el texto de feedback del Critic.",
   "_test_instructions": [
     "Ejecutar:",
     "  cargo run --bin dag_engine -- run tests/graphs/advanced/critic_feedback_injection_test.json",
     "",
     "Qué verificar en los logs (verbose: true):",
-    "  1. Primer intento — El prompt del agente NO contiene '=== INTENTO ANTERIOR'.",
+    "  1. Primer intento — El prompt del agente NO contiene '=== PREVIOUS ATTEMPT'.",
     "  2. El Critic rechaza — Log: '[CriticNode] Decision → task_ok=false, has_feedback=true, suspend=false'.",
     "  3. Segundo intento — El prompt del agente contiene:",
-    "       === INTENTO ANTERIOR — POR QUÉ FALLÓ ===",
+    "       === PREVIOUS ATTEMPT — WHY IT FAILED ===",
     "       On your next attempt you MUST include: ...",
     "  4. El Critic aprueba — Log: '[CriticNode] Decision → task_ok=true, has_feedback=false, suspend=false'.",
     "  5. El grafo termina — Log: '__colmena_loop_status: FINISHED'.",

@@ -9,7 +9,7 @@
     "  cargo run --bin dag_engine -- run tests/graphs/advanced/critic_feedback_cleanup_test.json \\",
     "    --session-id <ID> --answer 'accept'",
     "  VERIFICAR: el grafo termina con FINISHED. El feedback_key fue limpiado del state.",
-    "             En los prompts de tareas subsiguientes NO aparece '=== INTENTO ANTERIOR ==='.",
+    "             En los prompts de tareas subsiguientes NO aparece '=== PREVIOUS ATTEMPT — WHY IT FAILED ==='.",
     "",
     "OPCION B — Skip (continuar sin la tarea):",
     "  cargo run --bin dag_engine -- run tests/graphs/advanced/critic_feedback_cleanup_test.json \\",
@@ -27,7 +27,7 @@
     "  cargo run --bin dag_engine -- run tests/graphs/advanced/critic_feedback_cleanup_test.json \\",
     "    --session-id <ID> --answer 'retry Include specific Q1 2024 opening price of $248 and the annual drop of -50%'",
     "  VERIFICAR: El agente recibe '=== USER CLARIFICATION ===' con las instrucciones del usuario.",
-    "             El '=== INTENTO ANTERIOR ===' del critic previo NO aparece (fue limpiado al hacer retry).",
+    "             El '=== PREVIOUS ATTEMPT — WHY IT FAILED ===' del critic previo NO aparece (fue limpiado al hacer retry).",
     "             El contador de reintentos se resetea.",
     "",
     "Usar --include-extra-info para ver el state completo y verificar la limpieza del feedback_key."

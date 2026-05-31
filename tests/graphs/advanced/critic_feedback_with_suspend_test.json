@@ -1,10 +1,10 @@
 {
-  "_comment": "Critic Feedback Test 3: Feedback + Suspend coexistence — Verifica que '=== INTENTO ANTERIOR ===' y '=== USER CLARIFICATION ===' coexisten en el mismo prompt cuando el Critic rechaza primero y luego suspende.",
+  "_comment": "Critic Feedback Test 3: Feedback + Suspend coexistence — Verifica que '=== PREVIOUS ATTEMPT — WHY IT FAILED ===' y '=== USER CLARIFICATION ===' coexisten en el mismo prompt cuando el Critic rechaza primero y luego suspende.",
   "_test_instructions": [
     "PASO 1 — Primera ejecución:",
     "  cargo run --bin dag_engine -- run tests/graphs/advanced/critic_feedback_with_suspend_test.json",
     "  ESPERADO: Critic rechaza (task_ok=false, feedback sobre los 3 elementos faltantes).",
-    "            En el segundo intento el agente recibe '=== INTENTO ANTERIOR ===' con el feedback.",
+    "            En el segundo intento el agente recibe '=== PREVIOUS ATTEMPT — WHY IT FAILED ===' con el feedback.",
     "            Si el agente no mejora suficiente, el Critic suspende con pregunta sobre budget vs luxury.",
     "",
     "PASO 2 — Si suspende con pregunta sobre budget vs luxury:",
@@ -13,14 +13,14 @@
     "    --answer 'Focus on budget travelers, daily budget around 80-100 USD'",
     "  ESPERADO: El siguiente prompt del agente contiene AMBAS secciones:",
     "    - '=== USER CLARIFICATION ===' con la respuesta del usuario",
-    "    - '=== INTENTO ANTERIOR — POR QUÉ FALLÓ ===' con el último feedback del Critic",
+    "    - '=== PREVIOUS ATTEMPT — WHY IT FAILED ===' con el último feedback del Critic",
     "    El Critic aprueba y el grafo termina con FINISHED.",
     "",
     "Flujo esperado:",
     "  1. Intento 1 → Critic rechaza (task_ok=false, feedback sobre los 3 elementos faltantes)",
-    "  2. Intento 2 → agente recibe '=== INTENTO ANTERIOR ===' → puede mejorar o no",
+    "  2. Intento 2 → agente recibe '=== PREVIOUS ATTEMPT — WHY IT FAILED ===' → puede mejorar o no",
     "  3. Si no mejora suficiente → Critic suspende con pregunta al usuario",
-    "  4. Usuario responde → agente recibe '=== USER CLARIFICATION ===' + '=== INTENTO ANTERIOR ==='",
+    "  4. Usuario responde → agente recibe '=== USER CLARIFICATION ===' + '=== PREVIOUS ATTEMPT — WHY IT FAILED ==='",
     "  5. Intento final → Critic aprueba"
   ],
   "nodes": {
