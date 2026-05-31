@@ -269,20 +269,21 @@ El agente (LLM) ve el tool output con la siguiente forma (Plan B, 2026-05-25):
 | `provider` | sí | `openai` (único soportado hoy) |
 | `model` | opcional | Default `gpt-image-1` |
 | `api_key` | sí | OpenAI key |
-| `source_url` | sí | `$attachment:<document_id>` o `document_id` pelado (para editar una imagen generada/subida antes en la conversación), `data:` URI, `http(s)://` URL, o storage handle `local://<key>` / `chat-attachments/<key>`. Ver "Resolución de `source_url`" abajo |
-| `mask_url` | opcional | PNG con transparencia marcando el área a editar. Mismas formas aceptadas que `source_url` |
+| `source_url` | sí | `data:` URI, `http(s)://` URL, o storage handle `local://<key>` / `chat-attachments/<key>`. **NO** acepta `document_id` pelado ni `$attachment:<document_id>` (ver "Limitación conocida") |
+| `mask_url` | opcional | PNG con transparencia marcando el área a editar |
 | `prompt` | sí | Describe la edición |
 | `size`, `quality`, `n` | opcional | Igual que image_generation |
 
 **Output**: mismo shape que `image_generation` → resultado encadenable.
 
-**Chaining nativo gen→edit** — ✅ **funciona (2026-05-29).** El LLM toma el
-`document_id` que devuelve `image_generation` y lo pasa como
-`source_url="$attachment:<document_id>"` (o el `document_id` pelado) a
-`image_edit`. El nodo resuelve ese handle vía el `AttachmentStreamResolver`
-(mismo resolver cableado en `http_request`): registry → `storage_key` → bytes.
-Funciona en el mismo turno (fast path del `meta_cache`) y en turnos previos /
-uploads del usuario (vía sign-get cross-process, ver §"Resolución de `source_url`").
+**Chaining nativo gen→edit** — ⚠️ **actualmente roto bajo Plan B.** Plan B
+(2026-05-25) eliminó el campo `url` del tool result, así que el patrón legacy de
+pasar `images.0.url` ya no aplica. Y cablear `images.0.document_id` →
+`edit.source_url` **tampoco funciona**: `image_edit.source_url` no resuelve un
+`document_id` pelado ni un placeholder `$attachment:<document_id>` (solo
+`data:`, `http(s)://`, `local://<key>`, `chat-attachments/<key>`). Ver
+"Limitación conocida" más abajo. Hasta que haya fix, solo encadenás pasando una
+URL `http(s)://` / `data:` independientemente fetchable a `edit.source_url`.
 
 ### `tts`
 
@@ -325,39 +326,37 @@ Esto se llama **cross-provider lazy upload**. Si generaste con OpenAI y después
 
 ### 2. Editar una imagen generada — `image_edit` chaining
 
-El LLM encadena gen→edit pasando `source_url="$attachment:<document_id>"` (o el
-`document_id` pelado) — el `document_id` que `image_generation` ya devuelve.
+`image_edit` acepta en `source_url`: `data:` URIs, `http(s)://` URLs, y
+storage handles `local://<key>` / `chat-attachments/<key>` (resueltos vía
+`storage.read` en `image_edit.rs::fetch_image`). Si tu grafo tiene una URL
+fetchable independiente (no proveniente de un tool result), el chaining
+funciona normalmente.
 
-#### Resolución de `source_url` (orden, 2026-05-29)
-
-`image_edit` resuelve `source_url` (y `mask_url`) en este orden
-(`image_edit.rs::resolve_source`):
-
-1. **`$attachment:<document_id>`** → resuelve vía `AttachmentStreamResolver`
-   (registry → `storage_key` → bytes). Es lo que `image_generation`/`image_edit`
-   le indican al LLM en sus descripciones.
-2. **Esquema conocido** (`data:`, `http(s)://`, `local://<key>`,
-   `chat-attachments/<key>`) → fetch directo (`fetch_image`).
-3. **Token pelado** (ej. un `document_id` como `img_image_0` sin el prefijo) →
-   se intenta resolver vía el resolver (su fallback a raw-key también cubre un
-   `storage_key` pelado).
-4. Nada matchea → error claro mencionando las formas aceptadas.
-
-> **Cross-process (turnos previos / uploads del usuario).** Cuando el
-> `storage_key` no fue producido por este proceso (imagen de un turno anterior,
-> upload del usuario), el adapter de storage en prod (`HttpCallbackStorageAdapter`)
-> ya no falla con "not found in meta cache": en un `meta_cache` miss llama al
-> endpoint **`POST /internal/gcs/sign-get`** de ADP (header `X-Internal-Token`,
-> body `{ storage_key }` → `{ read_url }`) y hace GET de los bytes. Requiere que
-> el host (ADP) exponga ese endpoint — ver el plan hermano
-> `adp/docs/COLMENA_SIGN_GET_CROSS_PROCESS.md`.
+> ### ⚠️ Limitación conocida (2026-05-28) — chaining LLM-driven gen→edit roto bajo Plan B
 >
-> **Visibilidad cross-turn.** El catálogo de attachments (`render_catalog`,
-> inyectado en el system message de cada `llm_call`) lista **todos** los
-> documentos del `agent_session_id` —generados y subidos por el usuario, de
-> cualquier turno— con la guía `"$attachment:<id>" to forward`. Los uploads del
-> usuario son visibles aunque el modelo del agente cambie entre turnos. Filas
-> legacy sin `storage_key` se marcan `read-only` (no se anuncia `$attachment`).
+> **El encadenamiento `image_generation` → `image_edit` manejado por el LLM
+> está actualmente roto.** Razón:
+>
+> - Plan B (2026-05-25) eliminó los campos legacy `attachment_id` y `url` del
+>   tool result de `image_generation`/`image_edit`/`tts`. Ahora exponen **solo
+>   `document_id`** (un id opaco tipo `img_image_0_ge0png`).
+> - Pero `image_edit.source_url` (en `image_edit.rs::fetch_image`) **NO**
+>   resuelve un `document_id` pelado ni un placeholder `$attachment:<document_id>`.
+>   El resolver `$attachment:` está cableado **solo en el nodo `http_request`**,
+>   no globalmente en `dag_tool_executor`.
+>
+> Resultado: un LLM que pase el `document_id` del tool anterior como
+> `source_url` **falla**. El chaining estático por edge que antes pasaba el
+> viejo `url`/storage_key tampoco funciona, porque `url` fue removido.
+>
+> **Workaround hoy:** pasá a `source_url` una URL independientemente fetchable
+> (un signed URL `http(s)://` o un `data:` URI que NO venga de un tool result
+> previo).
+>
+> **Fix futuro** (no implementado): hacer que `image_edit` resuelva
+> `$attachment:<document_id>` vía el attachment registry, o que el tool
+> executor resuelva `$attachment:` en todos los args de tool. Tracked en
+> [`docs/superpowers/specs/2026-05-25-colmena-pending-followups.md`](../superpowers/specs/2026-05-25-colmena-pending-followups.md) §2.E.
 
 ### 3. Enviar a endpoint externo — `$attachment:<key>` placeholder
 

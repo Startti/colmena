@@ -11,12 +11,6 @@
 //! - Delete (Plan C): `POST {<sibling-of-callback_url>/delete}` with the same
 //!   `X-Internal-Token` header and body `{ storage_key }`. Idempotent — 404
 //!   is treated as success. Used by the `attachment_gc` binary.
-//! - Sign-get (cross-process read): `POST {<sibling-of-callback_url>/sign-get}`
-//!   with the same `X-Internal-Token` header and body `{ storage_key }`.
-//!   Response (200): `{ read_url }`. Called on a `meta_cache` miss so a
-//!   `storage_key` produced by another process (a prior turn's worker, or an
-//!   upload ADP minted directly) can still be read. 404 → `InvalidInput`
-//!   (treated as not-found by `AttachmentStreamResolver`).
 //!
 //! Sign-step non-2xx is mapped to [`StorageError::CallbackFailed`]; transport
 //! failures map to [`StorageError::BackendUnavailable`]. The delete step maps
@@ -32,10 +26,10 @@ use crate::storage::domain::{
     OutputStorageRepository, StorageError, StoreRequest, StoredBytes, StoredOutput,
 };
 
-/// Cached metadata kept in-process as the fast path for `read(storage_key)`.
-/// The first time we store a blob we remember its (mime_type, filename,
-/// read_url) so later reads in the same process fetch bytes via GET without a
-/// sign-get round-trip. On a miss the adapter falls back to sign-get.
+/// Cached metadata kept in-process to satisfy `read(storage_key)` without
+/// requiring the API to maintain a separate sign-get endpoint. The first time
+/// we store a blob we remember its (mime_type, filename, read_url) so that
+/// later reads can fetch the bytes via GET on the read_url.
 #[derive(Debug, Clone)]
 struct CachedMeta {
     read_url: String,
@@ -47,11 +41,10 @@ pub struct HttpCallbackStorageAdapter {
     client: reqwest::Client,
     callback_url: String,
     shared_secret: String,
-    /// In-process fast-path cache from `store()` to satisfy `read()` without a
-    /// network round-trip. Persists for the lifetime of the engine process.
-    /// On a miss, `read()`/`read_stream()` fall back to the cross-process
-    /// sign-get endpoint (see [`HttpCallbackStorageAdapter::sign_get_read_url`]),
-    /// so keys produced by other processes are still readable.
+    /// In-process cache from `store()` to satisfy `read()` without requiring
+    /// a separate sign-get endpoint from the API. Persists for the lifetime
+    /// of the engine process. Acceptable because the read URL is what the
+    /// API would re-sign anyway on demand.
     meta_cache: Arc<DashMap<String, CachedMeta>>,
 }
 
@@ -102,76 +95,6 @@ impl HttpCallbackStorageAdapter {
             format!("{}/delete", self.callback_url)
         }
     }
-
-    /// Derive the sign-get endpoint URL by sibling-path replacement on
-    /// `callback_url` (same pattern as [`Self::delete_url`]). ADP exposes
-    /// `POST /internal/gcs/sign-get` alongside `/sign-put`; it returns a
-    /// freshly-signed read URL for any `storage_key` ADP owns.
-    fn sign_get_url(&self) -> String {
-        if let Some(prefix) = self.callback_url.strip_suffix("/sign-put") {
-            format!("{prefix}/sign-get")
-        } else if let Some(prefix) = self.callback_url.strip_suffix('/') {
-            format!("{prefix}/sign-get")
-        } else {
-            format!("{}/sign-get", self.callback_url)
-        }
-    }
-
-    /// Cross-process fallback: POST `{ storage_key }` to the sign-get endpoint
-    /// and return the freshly-signed read URL. Called when `meta_cache` does
-    /// not have the key (it was stored by a different process). 404 →
-    /// `InvalidInput` (so `AttachmentStreamResolver` treats it as not-found);
-    /// other non-2xx → `CallbackFailed`; transport error → `BackendUnavailable`.
-    async fn sign_get_read_url(&self, storage_key: &str) -> Result<String, StorageError> {
-        let url = self.sign_get_url();
-        let resp = self
-            .client
-            .post(&url)
-            .header("X-Internal-Token", &self.shared_secret)
-            .json(&serde_json::json!({ "storage_key": storage_key }))
-            .send()
-            .await
-            .map_err(|e| StorageError::BackendUnavailable(e.to_string()))?;
-
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Err(StorageError::InvalidInput(format!(
-                "storage_key '{storage_key}' not found via sign-get (404)"
-            )));
-        }
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(StorageError::CallbackFailed { status, body });
-        }
-
-        #[derive(Deserialize)]
-        struct SignGetResponse {
-            read_url: String,
-        }
-        let sg: SignGetResponse = resp
-            .json()
-            .await
-            .map_err(|e| StorageError::CallbackFailed {
-                status: 0,
-                body: format!("invalid sign-get response JSON: {e}"),
-            })?;
-        Ok(sg.read_url)
-    }
-
-    /// Resolve `storage_key` to `(read_url, mime_hint, filename_hint)`.
-    /// Fast path: the in-process `meta_cache`. Miss → cross-process sign-get
-    /// (hints `None`; the caller derives mime from the GET response's
-    /// `Content-Type` and filename from the key).
-    async fn resolve_read_target(
-        &self,
-        storage_key: &str,
-    ) -> Result<(String, Option<String>, Option<String>), StorageError> {
-        if let Some(meta) = self.meta_cache.get(storage_key).map(|e| e.value().clone()) {
-            return Ok((meta.read_url, Some(meta.mime_type), Some(meta.filename)));
-        }
-        let read_url = self.sign_get_read_url(storage_key).await?;
-        Ok((read_url, None, None))
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -179,28 +102,6 @@ struct SignResponse {
     put_url: String,
     read_url: String,
     storage_key: String,
-}
-
-/// Extract a clean MIME type from a response's `Content-Type` header, falling
-/// back to `application/octet-stream`. Used on the cross-process read path
-/// where the original `mime_type` was not cached in this process.
-fn content_type_or_default(resp: &reqwest::Response) -> String {
-    resp.headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.split(';').next().unwrap_or(s).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "application/octet-stream".to_string())
-}
-
-/// Derive a best-effort filename from a `storage_key` (its last path segment).
-fn filename_from_key(storage_key: &str) -> String {
-    storage_key
-        .rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("attachment")
-        .to_string()
 }
 
 #[async_trait]
@@ -286,12 +187,21 @@ impl OutputStorageRepository for HttpCallbackStorageAdapter {
     }
 
     async fn read(&self, storage_key: &str) -> Result<StoredBytes, StorageError> {
-        // Fast path: in-process meta_cache. Miss → cross-process sign-get.
-        let (read_url, mime_hint, filename_hint) = self.resolve_read_target(storage_key).await?;
+        let meta = self
+            .meta_cache
+            .get(storage_key)
+            .map(|e| e.value().clone())
+            .ok_or_else(|| {
+                StorageError::InvalidInput(format!(
+                    "storage_key '{storage_key}' not found in HttpCallback meta cache. \
+                     (Was it stored via this adapter in the current process? Cross-process \
+                     reads require a server-side sign-get endpoint — not implemented yet.)"
+                ))
+            })?;
 
         let resp = self
             .client
-            .get(&read_url)
+            .get(&meta.read_url)
             .send()
             .await
             .map_err(|e| StorageError::BackendUnavailable(e.to_string()))?;
@@ -304,11 +214,6 @@ impl OutputStorageRepository for HttpCallbackStorageAdapter {
             )));
         }
 
-        // On the cross-process path we have no cached mime/filename — derive
-        // them from the response and the key.
-        let mime_type = mime_hint.unwrap_or_else(|| content_type_or_default(&resp));
-        let filename = filename_hint.unwrap_or_else(|| filename_from_key(storage_key));
-
         let bytes = resp
             .bytes()
             .await
@@ -317,8 +222,8 @@ impl OutputStorageRepository for HttpCallbackStorageAdapter {
 
         Ok(StoredBytes {
             bytes,
-            mime_type,
-            filename,
+            mime_type: meta.mime_type,
+            filename: meta.filename,
         })
     }
 
@@ -328,12 +233,21 @@ impl OutputStorageRepository for HttpCallbackStorageAdapter {
     ) -> Result<crate::storage::domain::StoredStream, StorageError> {
         use futures::StreamExt;
 
-        // Fast path: in-process meta_cache. Miss → cross-process sign-get.
-        let (read_url, mime_hint, filename_hint) = self.resolve_read_target(storage_key).await?;
+        let meta = self
+            .meta_cache
+            .get(storage_key)
+            .map(|e| e.value().clone())
+            .ok_or_else(|| {
+                StorageError::InvalidInput(format!(
+                    "storage_key '{storage_key}' not found in HttpCallback meta cache. \
+                     (Was it stored via this adapter in the current process? Cross-process \
+                     reads require a server-side sign-get endpoint — not implemented yet.)"
+                ))
+            })?;
 
         let resp = self
             .client
-            .get(&read_url)
+            .get(&meta.read_url)
             .send()
             .await
             .map_err(|e| StorageError::BackendUnavailable(e.to_string()))?;
@@ -352,9 +266,6 @@ impl OutputStorageRepository for HttpCallbackStorageAdapter {
             ))
         })?;
 
-        let mime_type = mime_hint.unwrap_or_else(|| content_type_or_default(&resp));
-        let filename = filename_hint.unwrap_or_else(|| filename_from_key(storage_key));
-
         let stream = resp
             .bytes_stream()
             .map(|chunk| chunk.map_err(|e| StorageError::BackendUnavailable(e.to_string())));
@@ -362,8 +273,8 @@ impl OutputStorageRepository for HttpCallbackStorageAdapter {
         Ok(crate::storage::domain::StoredStream {
             stream: Box::pin(stream),
             size_bytes,
-            mime_type,
-            filename,
+            mime_type: meta.mime_type,
+            filename: meta.filename,
         })
     }
 
@@ -586,18 +497,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_cache_miss_attempts_sign_get_then_fails_when_unreachable() {
-        // Key was never stored in THIS process → meta_cache miss → adapter
-        // tries the cross-process sign-get endpoint, which is unreachable here.
+    async fn read_unknown_key_errors_without_network_call() {
         let adapter = HttpCallbackStorageAdapter::new(
             "http://does-not-exist.invalid/sign-put".to_string(),
             "s3cr3t".to_string(),
         );
         let err = adapter.read("never-stored").await.unwrap_err();
-        assert!(
-            matches!(err, StorageError::BackendUnavailable(_)),
-            "expected BackendUnavailable from unreachable sign-get, got {err:?}"
-        );
+        assert!(matches!(err, StorageError::InvalidInput(_)));
     }
 
     #[tokio::test]
@@ -655,102 +561,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_stream_cache_miss_attempts_sign_get_then_fails_when_unreachable() {
+    async fn read_stream_unknown_key_errors_without_network_call() {
         let adapter = HttpCallbackStorageAdapter::new(
             "http://does-not-exist.invalid/sign-put".to_string(),
             "s3cr3t".to_string(),
         );
         let err = adapter.read_stream("never-stored").await.unwrap_err();
-        assert!(
-            matches!(err, StorageError::BackendUnavailable(_)),
-            "expected BackendUnavailable from unreachable sign-get, got {err:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn sign_get_url_derived_from_sign_put_sibling() {
-        let adapter = HttpCallbackStorageAdapter::new(
-            "https://api.dev.startti.ai/internal/gcs/sign-put".to_string(),
-            "s3cr3t".to_string(),
-        );
-        assert_eq!(
-            adapter.sign_get_url(),
-            "https://api.dev.startti.ai/internal/gcs/sign-get"
-        );
-    }
-
-    #[tokio::test]
-    async fn read_stream_cross_process_resolves_via_sign_get() {
-        use futures::StreamExt;
-
-        // Fresh adapter — nothing in meta_cache. The key was "produced by
-        // another process", so reading it MUST go through sign-get.
-        let server = MockServer::start().await;
-        let read_url = format!("{}/read", server.uri());
-        let storage_key = "chat-attachments/u/s/uploads/prior-turn.png";
-
-        // sign-get returns a freshly-signed read URL.
-        Mock::given(method("POST"))
-            .and(path("/sign-get"))
-            .and(header("X-Internal-Token", "s3cr3t"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "read_url": read_url,
-            })))
-            .mount(&server)
-            .await;
-
-        // GET returns bytes + a Content-Type the adapter must surface as mime.
-        Mock::given(method("GET"))
-            .and(path("/read"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_bytes(vec![0x89u8, 0x50, 0x4e, 0x47])
-                    .insert_header("content-type", "image/png"),
-            )
-            .mount(&server)
-            .await;
-
-        let adapter = HttpCallbackStorageAdapter::new(
-            format!("{}/sign-put", server.uri()),
-            "s3cr3t".to_string(),
-        );
-
-        let mut s = adapter
-            .read_stream(storage_key)
-            .await
-            .expect("read_stream ok");
-        assert_eq!(s.size_bytes, 4);
-        assert_eq!(s.mime_type, "image/png", "mime derived from Content-Type");
-        assert_eq!(
-            s.filename, "prior-turn.png",
-            "filename derived from storage_key"
-        );
-        let mut collected = Vec::new();
-        while let Some(chunk) = s.stream.next().await {
-            collected.extend_from_slice(&chunk.unwrap());
-        }
-        assert_eq!(collected, vec![0x89, 0x50, 0x4e, 0x47]);
-    }
-
-    #[tokio::test]
-    async fn sign_get_404_maps_to_invalid_input() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/sign-get"))
-            .respond_with(ResponseTemplate::new(404).set_body_string("no such object"))
-            .mount(&server)
-            .await;
-
-        let adapter = HttpCallbackStorageAdapter::new(
-            format!("{}/sign-put", server.uri()),
-            "s3cr3t".to_string(),
-        );
-
-        let err = adapter.read_stream("missing-key").await.unwrap_err();
-        assert!(
-            matches!(err, StorageError::InvalidInput(_)),
-            "sign-get 404 should map to InvalidInput (not-found), got {err:?}"
-        );
+        assert!(matches!(err, StorageError::InvalidInput(_)));
     }
 
     #[tokio::test]
@@ -843,7 +660,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_evicts_meta_cache_so_subsequent_read_falls_back_to_sign_get() {
+    async fn delete_evicts_meta_cache_so_subsequent_read_fails_fast() {
         let server = MockServer::start().await;
 
         Mock::given(method("PUT"))
@@ -872,14 +689,6 @@ mod tests {
             .mount(&server)
             .await;
 
-        // After deletion the blob is gone, so the cross-process sign-get that a
-        // post-eviction read falls back to correctly returns 404.
-        Mock::given(method("POST"))
-            .and(path("/internal/gcs/sign-get"))
-            .respond_with(ResponseTemplate::new(404).set_body_string("object deleted"))
-            .mount(&server)
-            .await;
-
         let adapter = HttpCallbackStorageAdapter::new(
             format!("{}/internal/gcs/sign-put", server.uri()),
             "s3cr3t".to_string(),
@@ -892,8 +701,8 @@ mod tests {
             .unwrap();
         // Delete → cache evicted.
         adapter.delete(&stored.storage_key).await.unwrap();
-        // Subsequent read misses the cache, falls back to sign-get, which 404s
-        // (blob deleted) → InvalidInput (treated as not-found).
+        // Subsequent read must fail fast (InvalidInput) without a network call,
+        // exactly like read_unknown_key_errors_without_network_call.
         let err = adapter.read(&stored.storage_key).await.unwrap_err();
         assert!(matches!(err, StorageError::InvalidInput(_)));
     }

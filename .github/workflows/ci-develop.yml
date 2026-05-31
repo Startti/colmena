@@ -43,6 +43,9 @@ jobs:
       - name: Run Rust tests
         run: cargo test --verbose
 
+      - name: Hexagonal compliance — documents module
+        run: ./scripts/check_hexagonal_documents.sh
+
       - name: Clean target/wheels
         run: rm -rf target/wheels
 

@@ -1,4 +1,4 @@
-use super::ids::{ArtifactId, SessionId, VersionId};
+use super::ids::{ArtifactId, AssetId, SessionId, VersionId};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -88,6 +88,27 @@ impl From<RenderError> for DocumentError {
     fn from(e: RenderError) -> Self {
         DocumentError::RenderFailed(e.to_string())
     }
+}
+
+#[derive(Debug, Error, Serialize)]
+pub enum AssetError {
+    #[error("asset not found: {id}")]
+    NotFound { id: AssetId },
+
+    #[error("mime not allowed: {mime}")]
+    MimeNotAllowed { mime: String },
+
+    #[error("asset too large: {actual} bytes (max {max})")]
+    TooLarge { actual: u64, max: u64 },
+
+    #[error("asset {id} still referenced by {} artifact(s)", by_artifacts.len())]
+    StillReferenced {
+        id: AssetId,
+        by_artifacts: Vec<ArtifactId>,
+    },
+
+    #[error("storage error: {0}")]
+    Storage(String),
 }
 
 #[cfg(test)]

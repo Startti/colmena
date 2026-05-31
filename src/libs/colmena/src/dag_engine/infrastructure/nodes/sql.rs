@@ -487,8 +487,10 @@ impl ExecutableNode for SqlNode {
         // Only produce a supplement when an explicit permissions config exists.
         // This keeps the block silent for graphs that haven't opted into the feature.
         let perms_val = fixed_config.get("permissions")?;
-        let perms = crate::dag_engine::domain::sql_permissions::SqlPermissions::from_config(Some(perms_val))
-            .ok()?;
+        let perms = crate::dag_engine::domain::sql_permissions::SqlPermissions::from_config(Some(
+            perms_val,
+        ))
+        .ok()?;
         let max_rows = fixed_config
             .get("runtime_limits")
             .and_then(|r| r.get("max_rows"))
@@ -502,9 +504,9 @@ impl ExecutableNode for SqlNode {
 mod tool_supplement_tests {
     use super::*;
     use crate::dag_engine::domain::node::ExecutableNode;
-    use std::sync::Arc;
-    use crate::dag_engine::infrastructure::sql_port_factory::SqlPortFactory;
     use crate::dag_engine::infrastructure::pool_registry::{PgPoolRegistry, PoolConfig};
+    use crate::dag_engine::infrastructure::sql_port_factory::SqlPortFactory;
+    use std::sync::Arc;
 
     #[test]
     fn supplement_returns_policy_when_permissions_present() {

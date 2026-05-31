@@ -25,6 +25,8 @@ pub struct ApplyPatchUseCase {
     pub excel_validator: Arc<dyn IRValidator>,
     pub word_renderer: Arc<dyn IRRenderer>,
     pub word_validator: Arc<dyn IRValidator>,
+    pub html_renderer: Arc<dyn IRRenderer>,
+    pub html_validator: Arc<dyn IRValidator>,
     pub ids: Arc<dyn IdGenerator>,
 }
 
@@ -150,6 +152,69 @@ impl ApplyPatchUseCase {
                     ir: ir_value,
                     rendered_binary: rendered,
                     rendered_extension: "docx",
+                    patch_applied,
+                    blobs: vec![],
+                };
+                self.store
+                    .write_version(&artifact_id, &new_version, &version_data)
+                    .await?;
+                self.store
+                    .set_head(&artifact_id, Some(&current), &new_version)
+                    .await?;
+
+                let mut new_meta = meta.clone();
+                new_meta.current_version = new_version.clone();
+                new_meta.updated_at = Utc::now();
+                self.store.update_meta(&artifact_id, &new_meta).await?;
+
+                Ok(ApplyPatchOutput {
+                    version_id: new_version,
+                    summary,
+                })
+            }
+            ArtifactKind::Html => {
+                use crate::documents::application::apply_html_ops::HtmlOpApplier;
+                use crate::documents::domain::ir::html::HtmlIR;
+
+                let mut ir: HtmlIR =
+                    serde_json::from_value(current_data.ir.clone()).map_err(|e| {
+                        DocumentError::IRValidationFailed {
+                            path: "/".into(),
+                            reason: format!("parse current HTML IR: {e}"),
+                        }
+                    })?;
+                let applier = HtmlOpApplier {
+                    ids: self.ids.as_ref(),
+                };
+                let mut structured = Vec::with_capacity(input.patch.ops.len());
+                let mut natural_language = Vec::with_capacity(input.patch.ops.len());
+                for (i, op) in input.patch.ops.iter().enumerate() {
+                    let outcome = applier.apply(&mut ir, op)?;
+                    natural_language.push(describe_op(op, &outcome));
+                    if !outcome.assigned_ids.is_empty() {
+                        structured.push(op_outcome_entry(i, op, &outcome));
+                    }
+                }
+                let summary = PatchSummary {
+                    natural_language,
+                    structured,
+                };
+                let new_version = current.next();
+                ir.version_id = new_version.0.clone();
+                let ir_value = serde_json::to_value(&ir).unwrap();
+                self.html_validator.validate(&ir_value)?;
+                let rendered = self.html_renderer.render(&ir_value).await?;
+
+                let patch_applied = PatchApplied {
+                    patch: serde_json::to_value(&input.patch).unwrap(),
+                    applied_at: Utc::now(),
+                    resulted_in: new_version.clone(),
+                    summary: summary.clone(),
+                };
+                let version_data = VersionData {
+                    ir: ir_value,
+                    rendered_binary: rendered,
+                    rendered_extension: "html",
                     patch_applied,
                     blobs: vec![],
                 };
@@ -378,6 +443,112 @@ fn describe_op(
             col_index,
             ..
         } => format!("Updated cell in {table_block_id} at row {row_id}, col {col_index}"),
+
+        // ---- HTML — slide level ----
+        AddSlide { layout, title, .. } => {
+            use crate::documents::domain::ir::html::SlideLayout;
+            match (layout, title.as_deref()) {
+                (SlideLayout::Title, Some(t)) => format!("Added title slide '{t}'"),
+                (SlideLayout::SectionDivider, Some(t)) => {
+                    format!("Added section divider '{t}'")
+                }
+                (l, Some(t)) => format!("Added {:?} slide '{t}'", l),
+                (l, None) => format!("Added {:?} slide", l),
+            }
+        }
+        DeleteSlide { slide_id } => format!("Deleted slide {slide_id}"),
+        ReorderSlides { order } => format!("Reordered slides to [{}]", order.join(", ")),
+        SetSlideLayout { slide_id, layout } => {
+            format!("Set slide {slide_id} layout to {:?}", layout)
+        }
+        SetSlideTitle {
+            slide_id, title, ..
+        } => match title {
+            Some(t) => format!("Set slide {slide_id} title to '{t}'"),
+            None => format!("Cleared slide {slide_id} title"),
+        },
+        SetSlideNotes { slide_id, notes } => match notes {
+            Some(_) => format!("Updated speaker notes on {slide_id}"),
+            None => format!("Cleared speaker notes on {slide_id}"),
+        },
+
+        // ---- HTML — block level ----
+        InsertHtmlBlock {
+            slide_id, block, ..
+        } => {
+            let kind = block
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("block");
+            let id_part = ids
+                .block
+                .as_ref()
+                .map(|b| format!(" (id: {b})"))
+                .unwrap_or_default();
+            format!("Inserted {kind} block on slide {slide_id}{id_part}")
+        }
+        DeleteHtmlBlock { slide_id, block_id } => {
+            format!("Deleted block {block_id} from slide {slide_id}")
+        }
+        ReplaceHtmlBlock { block_id, .. } => format!("Replaced block {block_id}"),
+        MoveHtmlBlock {
+            block_id,
+            after_block_id,
+            ..
+        } => format!("Moved block {block_id} after {after_block_id}"),
+
+        // ---- HTML — table ----
+        InsertHtmlTableRow { table_block_id, .. } => {
+            format!("Inserted row in table {table_block_id}")
+        }
+        DeleteHtmlTableRow {
+            table_block_id,
+            row_id,
+            ..
+        } => format!("Deleted row {row_id} from table {table_block_id}"),
+        UpdateHtmlTableCell {
+            table_block_id,
+            row_id,
+            col_index,
+            ..
+        } => format!("Updated cell ({row_id}, col {col_index}) of table {table_block_id}"),
+
+        // ---- HTML — list ----
+        InsertHtmlListItem {
+            list_block_id,
+            at_index,
+            ..
+        } => format!("Inserted list item at index {at_index} of {list_block_id}"),
+        DeleteHtmlListItem {
+            list_block_id,
+            item_id,
+            ..
+        } => format!("Deleted list item {item_id} from {list_block_id}"),
+        UpdateHtmlListItem {
+            list_block_id,
+            item_id,
+            ..
+        } => format!("Updated list item {item_id} in {list_block_id}"),
+
+        // ---- HTML — document level ----
+        SetTheme { theme } => {
+            format!("Set theme to {}", format!("{:?}", theme).to_lowercase())
+        }
+        SetDocProps { title, .. } => match title {
+            Some(t) => format!("Set document title to '{t}'"),
+            None => "Updated document props".into(),
+        },
+        SetFooter { footer } => {
+            if footer.enabled {
+                format!(
+                    "Enabled footer (page_numbers={}, custom='{}')",
+                    footer.page_numbers,
+                    footer.custom_text.as_deref().unwrap_or("")
+                )
+            } else {
+                "Disabled footer".into()
+            }
+        }
     }
 }
 
@@ -446,6 +617,8 @@ mod tests {
             excel_validator: Arc::new(ExcelValidator),
             word_renderer: Arc::new(NoopR),
             word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(NoopR),
+            html_validator: Arc::new(NoopV),
             ids: ids.clone(),
             default_retention: 10,
         };
@@ -474,6 +647,8 @@ mod tests {
             excel_validator: Arc::new(ExcelValidator),
             word_renderer: Arc::new(NoopR),
             word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(NoopR),
+            html_validator: Arc::new(NoopV),
             ids: ids.clone(),
         };
         let res = apply
@@ -508,6 +683,8 @@ mod tests {
             excel_validator: Arc::new(ExcelValidator),
             word_renderer: Arc::new(NoopR),
             word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(NoopR),
+            html_validator: Arc::new(NoopV),
             ids: ids.clone(),
             default_retention: 10,
         };
@@ -533,6 +710,8 @@ mod tests {
             excel_validator: Arc::new(ExcelValidator),
             word_renderer: Arc::new(NoopR),
             word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(NoopR),
+            html_validator: Arc::new(NoopV),
             ids: ids.clone(),
         };
         let err = apply
@@ -547,5 +726,95 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, DocumentError::VersionConflict { .. }));
+    }
+
+    #[tokio::test]
+    async fn apply_set_theme_on_html_advances_version() {
+        use crate::documents::domain::ir::html::Theme;
+        use crate::documents::domain::patch::PatchOp;
+        use crate::documents::domain::ports::AssetStore;
+        use crate::documents::infrastructure::render::HtmlRenderer;
+        use crate::documents::infrastructure::storage::LocalFsAssetStore;
+        use crate::documents::infrastructure::validation::HtmlValidator;
+
+        let tmp_a = tempdir().unwrap();
+        let tmp_b = tempdir().unwrap();
+        let store: Arc<dyn ArtifactStore> = Arc::new(LocalFsStore::new(tmp_a.path()));
+        let asset_store: Arc<dyn AssetStore> = Arc::new(LocalFsAssetStore::new(tmp_b.path()));
+        let ids = Arc::new(CountingIdGenerator::default());
+
+        let create = CreateDocumentUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(NoopR),
+            word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(HtmlRenderer::new(asset_store.clone())),
+            html_validator: Arc::new(HtmlValidator),
+            ids: ids.clone(),
+            default_retention: 10,
+        };
+        let out = create
+            .execute(CreateDocumentInput {
+                kind: ArtifactKind::Html,
+                session_id: SessionId::new("s"),
+                label: None,
+                retention_limit: None,
+                initial_ir: None,
+                source: PatchSource::Agent,
+            })
+            .await
+            .unwrap();
+
+        let apply = ApplyPatchUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(NoopR),
+            word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(HtmlRenderer::new(asset_store)),
+            html_validator: Arc::new(HtmlValidator),
+            ids: ids.clone(),
+        };
+        let res = apply
+            .execute(ApplyPatchInput {
+                patch: Patch {
+                    artifact_id: out.artifact_id.0.clone(),
+                    base_version: "v1".into(),
+                    source: PatchSource::Agent,
+                    ops: vec![PatchOp::SetTheme {
+                        theme: Theme::Vibrant,
+                    }],
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.version_id.0, "v2");
+    }
+
+    #[test]
+    fn describe_op_add_slide_includes_layout_and_title() {
+        use crate::documents::domain::artifact::OpOutcome;
+        use crate::documents::domain::ir::html::SlideLayout;
+        let op = PatchOp::AddSlide {
+            layout: SlideLayout::Title,
+            at_index: None,
+            title: Some("Welcome".into()),
+            subtitle: None,
+        };
+        let outcome = OpOutcome::default();
+        let s = describe_op(&op, &outcome);
+        assert!(s.contains("Welcome"));
+        assert!(s.to_lowercase().contains("title"));
+    }
+
+    #[test]
+    fn describe_op_set_theme_mentions_theme() {
+        use crate::documents::domain::artifact::OpOutcome;
+        use crate::documents::domain::ir::html::Theme;
+        let op = PatchOp::SetTheme { theme: Theme::Dark };
+        let s = describe_op(&op, &OpOutcome::default());
+        assert!(s.to_lowercase().contains("theme"));
+        assert!(s.to_lowercase().contains("dark"));
     }
 }

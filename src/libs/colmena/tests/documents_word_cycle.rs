@@ -8,13 +8,37 @@ use colmena::documents::application::create_document::{
 use colmena::documents::application::read_document::{ReadDocumentInput, ReadDocumentUseCase};
 use colmena::documents::domain::ids::{ArtifactKind, SessionId};
 use colmena::documents::domain::patch::{Patch, PatchOp, PatchSource};
-use colmena::documents::domain::ArtifactStore;
+use colmena::documents::domain::{ArtifactStore, IRRenderer, IRValidator, RenderError};
 use colmena::documents::infrastructure::ids::CountingIdGenerator;
 use colmena::documents::infrastructure::render::{ExcelRenderer, WordRenderer};
 use colmena::documents::infrastructure::storage::LocalFsStore;
 use colmena::documents::infrastructure::validation::{ExcelValidator, WordValidator};
 use std::sync::Arc;
 use tempfile::tempdir;
+
+struct NoopR;
+#[async_trait::async_trait]
+impl IRRenderer for NoopR {
+    async fn render(&self, _ir: &serde_json::Value) -> Result<Vec<u8>, RenderError> {
+        Ok(vec![])
+    }
+    fn target_extension(&self) -> &'static str {
+        "html"
+    }
+    fn target_mime(&self) -> &'static str {
+        "text/html"
+    }
+}
+
+struct NoopV;
+impl IRValidator for NoopV {
+    fn validate(
+        &self,
+        _ir: &serde_json::Value,
+    ) -> Result<(), colmena::documents::domain::DocumentError> {
+        Ok(())
+    }
+}
 
 #[tokio::test]
 async fn word_create_replace_run_text() {
@@ -28,6 +52,8 @@ async fn word_create_replace_run_text() {
         excel_validator: Arc::new(ExcelValidator),
         word_renderer: Arc::new(WordRenderer),
         word_validator: Arc::new(WordValidator),
+        html_renderer: Arc::new(NoopR),
+        html_validator: Arc::new(NoopV),
         ids: ids.clone(),
         default_retention: 10,
     };
@@ -37,6 +63,8 @@ async fn word_create_replace_run_text() {
         excel_validator: Arc::new(ExcelValidator),
         word_renderer: Arc::new(WordRenderer),
         word_validator: Arc::new(WordValidator),
+        html_renderer: Arc::new(NoopR),
+        html_validator: Arc::new(NoopV),
         ids: ids.clone(),
     };
     let read = ReadDocumentUseCase {

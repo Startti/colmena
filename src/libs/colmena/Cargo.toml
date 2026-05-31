@@ -108,6 +108,7 @@ rust_xlsxwriter = "0.77"
 docx-rs = "0.4"
 schemars = { version = "0.8", features = ["chrono", "uuid1", "preserve_order"] }
 ulid = "1"
+maud = "0.26"
 
 # Documents feature — GCS backend (optional, gated on `gcs` feature)
 google-cloud-storage = { version = "1", optional = true }

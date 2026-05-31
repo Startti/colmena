@@ -33,17 +33,23 @@ impl IdGenerator for UlidIdGenerator {
     fn new_list_item_id(&self) -> String {
         format!("li_{}", Self::short_ulid())
     }
+    fn new_slide_id(&self) -> String {
+        format!("sl_{}", Self::short_ulid())
+    }
+    fn new_asset_id(&self) -> String {
+        format!("asset_{}", Self::short_ulid())
+    }
 }
 
 /// Deterministic counter-based generator for tests. Each category has its own counter.
 pub struct CountingIdGenerator {
-    counters: Mutex<[u64; 7]>,
+    counters: Mutex<[u64; 9]>,
 }
 
 impl Default for CountingIdGenerator {
     fn default() -> Self {
         Self {
-            counters: Mutex::new([0; 7]),
+            counters: Mutex::new([0; 9]),
         }
     }
 }
@@ -78,6 +84,12 @@ impl IdGenerator for CountingIdGenerator {
     fn new_list_item_id(&self) -> String {
         format!("li_{:02}", self.next(6))
     }
+    fn new_slide_id(&self) -> String {
+        format!("sl_{:02}", self.next(7))
+    }
+    fn new_asset_id(&self) -> String {
+        format!("asset_{:02}", self.next(8))
+    }
 }
 
 #[cfg(test)]
@@ -98,5 +110,21 @@ mod tests {
         assert_eq!(g.new_artifact_id(), "art_01");
         assert_eq!(g.new_artifact_id(), "art_02");
         assert_eq!(g.new_sheet_id(), "sheet_01");
+    }
+
+    #[test]
+    fn ulid_generator_new_slide_and_asset() {
+        let g = UlidIdGenerator;
+        assert!(g.new_slide_id().starts_with("sl_"));
+        assert!(g.new_asset_id().starts_with("asset_"));
+        assert_ne!(g.new_slide_id(), g.new_slide_id());
+    }
+
+    #[test]
+    fn counting_generator_new_slide_and_asset() {
+        let g = CountingIdGenerator::default();
+        assert_eq!(g.new_slide_id(), "sl_01");
+        assert_eq!(g.new_slide_id(), "sl_02");
+        assert_eq!(g.new_asset_id(), "asset_01");
     }
 }
