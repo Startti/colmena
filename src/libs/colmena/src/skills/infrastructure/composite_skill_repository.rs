@@ -189,11 +189,7 @@ mod tests {
         }
     }
 
-    fn entry_with_node_type(
-        name: &str,
-        source: SkillSource,
-        node_type: &str,
-    ) -> SkillCatalogEntry {
+    fn entry_with_node_type(name: &str, source: SkillSource, node_type: &str) -> SkillCatalogEntry {
         SkillCatalogEntry {
             name: name.to_string(),
             description: format!("desc of {}", name),
@@ -204,7 +200,11 @@ mod tests {
 
     fn make_test_repo(skill_name: &str, node_type: &str) -> FakeRepo {
         FakeRepo {
-            entries: vec![entry_with_node_type(skill_name, SkillSource::Builtin, node_type)],
+            entries: vec![entry_with_node_type(
+                skill_name,
+                SkillSource::Builtin,
+                node_type,
+            )],
         }
     }
 

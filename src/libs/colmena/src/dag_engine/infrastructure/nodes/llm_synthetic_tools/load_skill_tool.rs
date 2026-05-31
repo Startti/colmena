@@ -508,8 +508,13 @@ mod tests {
 
         let mut discovered = std::collections::HashSet::new();
         discovered.insert("consultar_ventas".to_string());
-        let post_discovery =
-            filter_visible_skills(&catalog, &["sales".to_string()], &[], &discovered, &scoped_by_tool);
+        let post_discovery = filter_visible_skills(
+            &catalog,
+            &["sales".to_string()],
+            &[],
+            &discovered,
+            &scoped_by_tool,
+        );
         assert_eq!(post_discovery.len(), 1);
         assert_eq!(post_discovery[0].name, "sales");
     }

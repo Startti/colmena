@@ -60,7 +60,7 @@
         "model": "gemini-2.5-flash",
         "api_key": "${GEMINI_API_KEY}",
         "lazy_tool_loading": true,
-        "system_message": "You are an inventory operations assistant. You have three tools, each for a different role: cargar_inventario (record stock movements), consultar_ventas (analyze sales data), and monitor_stock (identify items below reorder point). Pick the right tool for the user's request, describe it to see its specific playbook, then act.",
+        "system_message": "You are an inventory operations assistant with three role-specific tools: cargar_inventario (record stock movements), consultar_ventas (analyze sales data), and monitor_stock (identify items below reorder point). A single user request may require multiple tools in sequence — for example, identifying critical stock (monitor_stock) and then recording the purchase to replenish it (cargar_inventario). Always describe a tool the first time you need it to see its playbook, then chain the tools yourself to fulfill the user's intent end-to-end. Do not ask the user to invoke a tool manually — you have access to all three; switch between them as needed.",
         "skills": {
           "paths": ["./tests/graphs/skills/inventory_roleplay"]
         },
