@@ -159,6 +159,14 @@ impl HashMapNodeRegistry {
                 ),
             );
 
+            // --- Registrar Output Parser ---
+            nodes.insert(
+                "output_parser".to_string(),
+                Arc::new(
+                    crate::dag_engine::infrastructure::nodes::output_parser::OutputParserNode,
+                ),
+            );
+
             // --- Registrar Mock de Suspension ---
             nodes.insert(
                 "suspend".to_string(),
@@ -479,6 +487,15 @@ mod registry_tavily_tests {
         );
         let cat = tk.unwrap().sub_tool_catalog(&serde_json::json!({}));
         assert_eq!(cat.len(), 2);
+    }
+
+    #[test]
+    fn output_parser_registered_as_executable_node() {
+        let reg = build_registry();
+        assert!(
+            reg.get_node("output_parser").is_some(),
+            "output_parser must be registered as an ExecutableNode"
+        );
     }
 }
 

@@ -1,0 +1,45 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/test-output-parser",
+        "method": "POST",
+        "test_payload": {
+          "user_message": "I need help with my billing statement."
+        }
+      }
+    },
+    "llm": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "prompt": "Reply with one sentence describing this user message: {{user_message}}"
+      }
+    },
+    "parser": {
+      "type": "output_parser",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "schema": {
+          "intent":     { "type": "string", "required": true,  "description": "sales | support | billing | unknown" },
+          "confidence": { "type": "number", "required": false, "description": "0..1" },
+          "summary":    { "type": "string", "required": false, "description": "one-line summary" }
+        },
+        "instructions": "If you cannot determine the intent, use 'unknown'."
+      }
+    },
+    "log": { "type": "log", "config": {} },
+    "out": { "type": "output", "config": {} }
+  },
+  "edges": [
+    { "from": "trigger.user_message", "to": "llm.user_message" },
+    { "from": "llm", "to": "parser.input" },
+    { "from": "parser", "to": "log" },
+    { "from": "parser", "to": "out" }
+  ]
+}
