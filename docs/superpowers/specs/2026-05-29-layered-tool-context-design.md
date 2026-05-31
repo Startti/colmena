@@ -1,7 +1,12 @@
 # Spec — Layered tool context for LLM nodes
 
+> ⚠️ **SUPERSEDED on 2026-05-31** by
+> [2026-05-31-revert-layered-tool-context-design.md](2026-05-31-revert-layered-tool-context-design.md).
+> The 3-layer mechanism was reverted; only `llm_call.skills` survives.
+> Recursive references and `skills_path` were added as replacements.
+
 **Date:** 2026-05-29
-**Status:** Design approved, pending implementation plan
+**Status:** SUPERSEDED — see above
 **Supersedes scope of:** the inline "inject SQL policy into prompt" idea from the
 schema-provisioning work — absorbed here as one half of layer 1.
 
