@@ -180,7 +180,7 @@ Si seteás `COLMENA_LOCAL=false` y olvidás el callback URL o secret, el engine 
 
 ## Storage adapter selection
 
-`EngineConfig::from_env` (`src/dag_engine/engine.rs:73`) elige uno de tres adapters según env vars:
+`EngineConfig::from_env` (`src/libs/colmena/src/dag_engine/engine.rs:73`) elige uno de tres adapters según env vars:
 
 | `COLMENA_LOCAL` | Adapter | URL shape | Bytes location |
 |---|---|---|---|
@@ -303,7 +303,7 @@ URL `http(s)://` / `data:` independientemente fetchable a `edit.source_url`.
 
 ## Artifacts unification — el agente como ciudadano de primera
 
-Los outputs generados se registran automáticamente en `AttachmentRegistry` con `provider: ProviderKind::Generated` (variant sintético, ver `src/llm/domain/llm_provider.rs`). Esto desbloquea 3 capacidades:
+Los outputs generados se registran automáticamente en `AttachmentRegistry` con `provider: ProviderKind::Generated` (variant sintético, ver `src/libs/colmena/src/llm/domain/llm_provider.rs`). Esto desbloquea 3 capacidades:
 
 ### 1. "Ver" la propia generación — `load_attachment`
 
@@ -389,7 +389,7 @@ El LLM pasa `body: { image: "$attachment:abc.png" }`. El engine resuelve a `body
 
 ## Universal binary scrubber
 
-`DagToolExecutor.execute()` aplica un scrubber a todo tool result antes de devolverlo al agent loop. Ver `src/dag_engine/infrastructure/dag_tool_executor.rs:1048+`.
+`DagToolExecutor.execute()` aplica un scrubber a todo tool result antes de devolverlo al agent loop. Ver `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs:1048+`.
 
 Reglas:
 1. Strings con prefijo `data:` que contienen `;base64,` → reemplazo por `[binary elided: mime=<mime>, encoded_size=<N> bytes]`.
@@ -433,7 +433,7 @@ Verás:
 | LLM no llama tools y solo escribe texto sobre lo que va a hacer | `tool_configurations` malformado (cae al silent-empty fallback en versiones anteriores), o modelo chico (gpt-4o-mini) con instrucciones débiles | Verificar logs del startup buscando warns sobre `tool_configurations failed to parse`. Subir a gpt-4o + system_message más estricto ("invoke the tool directly, do not describe what you are about to do"). |
 | URL `http://127.0.0.1:8765/files/...` devuelve connection refused | El proceso `cargo run` ya terminó — el server local solo vive durante el run | Usar el path de disco: `open /tmp/colmena-out/<key>` |
 | `COLMENA_LOCAL=false` y error al startup pidiendo callback URL | Estás en modo prod sin haber configurado el callback de la host application | Setear `COLMENA_STORAGE_CALLBACK_URL` + `COLMENA_STORAGE_CALLBACK_SECRET` o cambiar a `COLMENA_LOCAL=true` |
-| Cross-provider lazy upload da error "no OutputStorageRepository wired" | El AttachmentResolver no recibió storage adapter — bug si tenés `EngineConfig::from_env` standard | Verificar que `LlmNode::with_storage()` se llama en el registry init (ver `src/dag_engine/infrastructure/registry.rs`) |
+| Cross-provider lazy upload da error "no OutputStorageRepository wired" | El AttachmentResolver no recibió storage adapter — bug si tenés `EngineConfig::from_env` standard | Verificar que `LlmNode::with_storage()` se llama en el registry init (ver `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`) |
 
 ## Referencias
 
@@ -443,11 +443,11 @@ Verás:
 - **Load attachment base** (input direction, scoping): [`31_load_attachment.md`](31_load_attachment.md).
 - **Tool execution flow** (cómo se ejecutan tool calls): [`22_tool_execution_flow.md`](22_tool_execution_flow.md).
 - **Code entry points**:
-  - `src/storage/` — port + 3 adapters.
-  - `src/dag_engine/infrastructure/nodes/{image_generation,image_edit,tts}.rs` — nodos.
-  - `src/llm/infrastructure/{openai_tts_adapter,elevenlabs_tts_adapter,google_tts_adapter}.rs` — TTS adapters.
-  - `src/dag_engine/infrastructure/dag_tool_executor.rs:1048+` — scrubber.
-  - `src/dag_engine/engine.rs:73+` — `COLMENA_LOCAL` selection logic.
+  - `src/libs/colmena/src/storage/` — port + 3 adapters.
+  - `src/libs/colmena/src/dag_engine/infrastructure/nodes/{image_generation,image_edit,tts}.rs` — nodos.
+  - `src/libs/colmena/src/llm/infrastructure/{openai_tts_adapter,elevenlabs_tts_adapter,google_tts_adapter}.rs` — TTS adapters.
+  - `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs:1048+` — scrubber.
+  - `src/libs/colmena/src/dag_engine/engine.rs:73+` — `COLMENA_LOCAL` selection logic.
 
 ## Host-side integration (out of scope for this repository)
 

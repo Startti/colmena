@@ -93,7 +93,7 @@ def comparar_proveedores():
 
     proveedores = [
         ("openai", "gpt-4", "tu-openai-key"),
-        ("google", "gemini-1.5-flash", "tu-gemini-key"),
+        ("google", "gemini-2.5-flash", "tu-gemini-key"),
         ("anthropic", "claude-3-sonnet-20240229", "tu-anthropic-key")
     ]
 

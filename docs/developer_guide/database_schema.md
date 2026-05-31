@@ -30,6 +30,10 @@ All files live under `src/libs/colmena/migrations/`.
 | `20260428000001_dag_runs_agent_session_id.sql` | Adds `agent_session_id`, `parent_session_id` columns and 3 indices to `dag_runs` |
 | `20260428000002_llm_history_agent_and_node.sql` | Adds `agent_session_id`, `node_id` columns and 2 composite indices to `llm_node_history` |
 | `20260502000001_provider_file_cache.sql` | Creates `provider_file_cache` for the Files API caching feature (large documents via signed URL) |
+| `20260508000001_secure_values_agent_session_id.sql` | Adds `agent_session_id` column + `idx_secure_values_agent_hash` composite index to `secure_value_mappings` |
+| `20260511000001_secure_values_24h_ttl.sql` | Sliding TTL bump: changes `secure_value_mappings.expires_at` default from `NOW() + 1 hour` to `NOW() + 24 hours` |
+| `20260513000001_conversation_attachments.sql` | Creates `conversation_attachments` (per-`agent_session_id` registry of files attached to a conversation; survives across runs) |
+| `20260525000001_attachment_uniform_resolution.sql` | Adds `storage_key`, `origin`, `last_used_at` to `conversation_attachments` + `idx_conv_attachments_session_used` |
 
 ### SQLite (`migrations/sqlite/`)
 
@@ -39,6 +43,8 @@ All files live under `src/libs/colmena/migrations/`.
 | `20260303000000_create_dag_task_memory.sql` | Creates the SQLite mirror of `dag_task_memory` (base columns only) |
 | `20260408000000_add_is_bridge_to_dag_task.sql` | Adds the missing `phase`, `parallel`, `context`, and `is_bridge` columns. SQLite does NOT support `ADD COLUMN IF NOT EXISTS`, so this file must only be applied on fresh schemas |
 | `20260428000001_llm_history_agent_and_node.sql` | Mirrors the Postgres llm-history migration: adds `agent_session_id`, `node_id`, and the two composite indices |
+| `20260513000001_conversation_attachments.sql` | SQLite mirror of the Postgres `conversation_attachments` table (TEXT/INTEGER-typed) |
+| `20260525000001_attachment_uniform_resolution.sql` | Mirrors the Postgres `storage_key`/`origin`/`last_used_at` extension on `conversation_attachments` |
 
 > **SQLite scope**: SQLite is supported only for `llm_node_history` and
 > `dag_task_memory`. The DAG state machine (`dag_runs`, `dag_phase_summaries`,
@@ -202,19 +208,22 @@ produce a consolidated outcome across all phases.
 Stores encrypted secrets (API keys, tokens, passwords) produced by
 `secure_value` nodes. Each secret is encrypted with `pgp_sym_encrypt` (AES-256
 via `pgcrypto`) using the key from the `SECURE_VALUES_KEY` environment
-variable. Rows expire after 1 hour and are deleted at session cleanup or by
-the background expiry sweeper.
+variable. Rows expire after **24 hours** by default (bumped from the original
+1h on 2026-05-11 via `20260511000001_secure_values_24h_ttl.sql` to support
+sliding-window reuse across consecutive runs of the same agent) and are
+deleted at session cleanup or by the background expiry sweeper.
 
 | Column | Type | Nullable | Default | Description |
 |--------|------|----------|---------|-------------|
 | `id` | `UUID` | NO | `gen_random_uuid()` | Unique mapping identifier |
 | `session_id` | `VARCHAR(255)` | NO | — | Session that owns this secret; used for isolation and cleanup |
+| `agent_session_id` | `TEXT` | YES | — | Chat-scoped handle. When set, the agent-first lookup path resolves secrets across multiple runs of the same agent (added by `20260508000001_secure_values_agent_session_id.sql`) |
 | `source_node_id` | `VARCHAR(255)` | NO | — | ID of the `secure_value` node that produced this secret |
 | `hash_key` | `VARCHAR(255)` | NO | — | Deterministic hash of the secret (used as a lookup key without exposing the plaintext) |
 | `encrypted_value` | `BYTEA` | NO | — | AES-256 ciphertext produced by `pgp_sym_encrypt` |
 | `field_name` | `VARCHAR(255)` | YES | — | Name of the field this secret corresponds to (e.g., `api_key`, `Authorization`) |
 | `created_at` | `TIMESTAMPTZ` | YES | `NOW()` | When the secret was stored |
-| `expires_at` | `TIMESTAMPTZ` | YES | `NOW() + INTERVAL '1 hour'` | Absolute expiry time; rows past this timestamp are eligible for deletion |
+| `expires_at` | `TIMESTAMPTZ` | YES | `NOW() + INTERVAL '24 hours'` | Absolute expiry time; rows past this timestamp are eligible for deletion. Pre-existing rows keep whatever TTL they were written with — they are swept naturally by `cleanup_expired_for_run` as their owning runs complete |
 
 **Constraints**
 
@@ -226,6 +235,11 @@ the background expiry sweeper.
 - `idx_secure_session_id` on `(session_id)` — session cleanup
 - `idx_secure_hash_key` on `(session_id, hash_key)` — fast decrypt lookup
 - `idx_secure_expires_at` on `(expires_at)` — expiry sweep
+- `idx_secure_values_agent_hash` on `(agent_session_id, hash_key)` — agent-first decrypt lookup (added 2026-05-08)
+
+> For the full design rationale of the agent-first lookup convention shared
+> with `dag_runs` and `llm_node_history`, see
+> [`30_database_schema.md`](30_database_schema.md#the-shared-pattern-agent_session_id-first-lookup).
 
 **Required PostgreSQL extension**: `pgcrypto`, enabled by migration
 `20260425000002_secure_value_mappings.sql`. The migration is a no-op if the
@@ -293,6 +307,62 @@ transversal to all `llm_call` nodes and runs.
 If `DATABASE_URL` is not set, `PostgresFileCache` is not built and the
 feature degrades gracefully: every `llm_call` re-uploads on every run (no
 cache hits), but other paths keep working.
+
+---
+
+### `conversation_attachments`
+
+Per-`agent_session_id` registry of files attached to a conversation. Where
+`provider_file_cache` is keyed by `(document_id, provider)` and is shared
+across every run that re-uses the same document id, `conversation_attachments`
+is keyed by `(agent_session_id, document_id, provider)` and tracks which files
+have been bound to a specific chat — so that follow-up turns of the same agent
+can find and re-attach them without the caller re-supplying the bytes.
+
+Migrations: `20260513000001_conversation_attachments.sql` creates the table;
+`20260525000001_attachment_uniform_resolution.sql` adds `storage_key`,
+`origin`, `last_used_at`, and the activity index. Available on both
+PostgreSQL and SQLite (SQLite mirror uses TEXT/INTEGER types and stores
+timestamps as ISO-8601 strings).
+
+| Column | Postgres type | SQLite type | Nullable | Default | Description |
+|--------|---------------|-------------|----------|---------|-------------|
+| `agent_session_id` | `TEXT` | `TEXT` | NO | — | Chat handle this attachment belongs to. Part of the composite primary key |
+| `document_id` | `TEXT` | `TEXT` | NO | — | Caller-supplied document id (same convention as `provider_file_cache.document_id`). Part of the PK |
+| `provider` | `TEXT` | `TEXT` | NO | — | Lowercase provider name (`anthropic`, `openai`, `google`, `generated`, …). Part of the PK |
+| `provider_file_id` | `TEXT` | `TEXT` | NO | — | Opaque identifier returned by the provider's Files API |
+| `mime_type` | `TEXT` | `TEXT` | NO | — | MIME type the file was registered with |
+| `filename` | `TEXT` | `TEXT` | NO | — | Display name |
+| `size_bytes` | `BIGINT` | `INTEGER` | YES | — | Size hint from the emitter |
+| `label` | `TEXT` | `TEXT` | YES | — | Optional short label shown to the model / UI |
+| `description` | `TEXT` | `TEXT` | YES | — | Optional long-form description |
+| `source_kind` | `TEXT` | `TEXT` | NO | — | Where the file originated — e.g. `user_upload`, `generated`, `tool_output` |
+| `source_value` | `TEXT` | `TEXT` | YES | — | Free-form pointer back to the source (URL, node id, etc.) |
+| `registered_at` | `TIMESTAMPTZ` | `TEXT` | NO | `NOW()` / `CURRENT_TIMESTAMP` | First time the file was bound to this chat |
+| `refreshed_at` | `TIMESTAMPTZ` | `TEXT` | NO | `NOW()` / `CURRENT_TIMESTAMP` | Updated when the row is re-registered (e.g. provider file rotated) |
+| `storage_key` | `TEXT` | `TEXT` | YES | — | Reference into `OutputStorageRepository` for uniform attachment resolution (added 2026-05-25) |
+| `origin` | `TEXT` | `TEXT` | YES | — | Semantic origin — e.g. `user_upload`, `generated_by:<node_id>`. Backfilled from `provider` for legacy rows (added 2026-05-25) |
+| `last_used_at` | `TIMESTAMPTZ` | `TEXT` | YES | — | Touched on cache hit; used as the TTL clock for attachment eviction (added 2026-05-25) |
+
+**Constraints**
+
+- `PRIMARY KEY (agent_session_id, document_id, provider)` — same document can
+  be attached to multiple agent sessions and live in multiple providers'
+  caches simultaneously, but only once per `(session, provider)`.
+
+**Indexes**
+
+- `idx_conversation_attachments_session` on `(agent_session_id)` — list attachments for a chat
+- `idx_conv_attachments_session_used` on `(agent_session_id, last_used_at)` — TTL / activity sweeps
+
+**Relationship to `provider_file_cache`**: the two tables are complementary.
+`provider_file_cache` is a global, session-agnostic upload cache to avoid
+re-uploading the same bytes. `conversation_attachments` is the per-chat
+binding layer that says "this provider file is currently attached to *this*
+agent's conversation." A single upload may have one row in
+`provider_file_cache` and zero-or-more rows in `conversation_attachments`.
+There are no FK constraints between them — the link is by convention on
+`(document_id, provider)`.
 
 ---
 
@@ -408,6 +478,11 @@ llm_node_history ── standalone
 provider_file_cache ── standalone
                        keyed by (document_id, provider) — caller-supplied id,
                        orthogonal to dag_runs sessions
+
+conversation_attachments ── standalone, per agent_session_id
+                            keyed by (agent_session_id, document_id, provider)
+                            convention-linked to provider_file_cache by
+                            (document_id, provider); no FK
 
 sandbox.function_registry  ── standalone, shared across sessions
 sandbox.query_feedback     ── standalone, scoped by session_id (column, no FK)

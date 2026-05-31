@@ -152,7 +152,7 @@ Cada agente recibe un prompt estructurado con hasta cinco secciones:
 │  Fase 1: [resumen de investigación]                  │
 │  [BRIDGE RESULTS — fase 1]: [análisis de costes]    │
 ├─────────────────────────────────────────────────────┤
-│  === INTENTO ANTERIOR — POR QUÉ FALLÓ ===           │
+│  === PREVIOUS ATTEMPT — WHY IT FAILED ===           │
 │  "Incluye precios en EUR y horarios de apertura"    │
 ├─────────────────────────────────────────────────────┤
 │  === LO QUE TIENES QUE HACER AHORA TÚ ===          │
@@ -334,7 +334,7 @@ flowchart LR
     AGENT[Agente ejecuta tarea] --> CRITIC[Critic evalúa]
     CRITIC -->|task_ok=true| OK[✅ Guardar resultado]
     CRITIC -->|task_ok=false\nfeedback='Faltan precios en EUR'| COUNT[Incrementar\ncontador reintentos]
-    COUNT -->|retries < max| RETRY_PROMPT[Añadir sección\n'INTENTO ANTERIOR — POR QUÉ FALLÓ'\nal prompt del agente]
+    COUNT -->|retries < max| RETRY_PROMPT[Añadir sección\n'PREVIOUS ATTEMPT — WHY IT FAILED'\nal prompt del agente]
     RETRY_PROMPT --> AGENT
     COUNT -->|retries >= max| SUSPEND[SUSPENDER:\npedir decisión al usuario]
 ```
@@ -350,7 +350,7 @@ flowchart LR
 
 **Sección inyectada en el re-intento del agente:**
 ```
-=== INTENTO ANTERIOR — POR QUÉ FALLÓ ===
+=== PREVIOUS ATTEMPT — WHY IT FAILED ===
 El itinerario no incluye precios específicos. Añade costes en EUR para cada actividad.
 ```
 
@@ -391,34 +391,70 @@ erDiagram
 
 ## Configuración JSON del Orchestrator
 
+La config del orchestrator es **anidada**: cada sub-componente (`planner`, `critic`, `phase_reactor`, `final_reactor`) lleva su propio bloque con `provider`, `model`, `api_key` y `system_message`. **No** existen campos planos como `planner_system_message` o `model` en la raíz — `schema()` los rechaza.
+
+Cada agente en `agents` declara una `description` (usada por el Planner para decidir asignaciones) y un grafo hijo, normalmente vía `child_graph_inline` (definición embebida) o `child_graph_path` (ruta a otro JSON).
+
+Ejemplo canónico — derivado de [`tests/graphs/advanced/trip_planner_v2.json`](../../tests/graphs/advanced/trip_planner_v2.json):
+
 ```json
 {
   "type": "orchestrator",
   "config": {
-    "model": "gpt-4o",
+    "verbose": false,
+    "max_phases": 10,
+    "planner": {
+      "provider": "google",
+      "model": "gemini-2.5-flash",
+      "api_key": "${GEMINI_API_KEY}",
+      "system_message": "Read the user's request and break it down into tasks using the agents you have."
+    },
     "agents": {
       "research_agent": {
-        "description": "Investiga información factual y recopila datos relevantes",
-        "child_graph_path": "./agents/research_agent.json"
+        "description": "Investiga información factual y recopila datos relevantes.",
+        "child_graph_inline": {
+          "nodes": {
+            "in":  { "type": "input",  "config": {} },
+            "llm": {
+              "type": "llm_call",
+              "config": {
+                "provider": "google",
+                "model": "gemini-2.5-flash",
+                "api_key": "${GEMINI_API_KEY}",
+                "system_message": "Eres un investigador. Responde con datos verificables."
+              }
+            },
+            "out": { "type": "output", "config": {} }
+          },
+          "edges": [
+            { "from": "in",  "to": "llm" },
+            { "from": "llm", "to": "out" }
+          ]
+        }
       },
       "writer_agent": {
-        "description": "Redacta documentos, itinerarios e informes detallados",
+        "description": "Redacta documentos, itinerarios e informes detallados.",
         "child_graph_path": "./agents/writer_agent.json"
-      },
-      "budget_agent": {
-        "description": "Estima y desglose costes de actividades y servicios",
-        "child_graph_path": "./agents/budget_agent.json"
       }
     },
-    "planner_system_message": "Eres un planificador experto. Descompón la petición del usuario en tareas atómicas y asígnalas a los agentes disponibles.",
-    "critic_system_message": "Eres un evaluador crítico. Verifica que el resultado cumple con los requisitos de la tarea.",
-    "phase_reactor_system_message": "Eres un revisor de fase. Verifica si la fase está completa o si hacen falta tareas adicionales.",
-    "final_reactor_system_message": "Eres el sintetizador final. Combina todos los resultados en una respuesta cohesionada para el usuario.",
-    "max_retries": 3,
-    "allow_suspend": true,
-    "memory_config": {
-      "type": "postgres",
-      "connection_string": "${DATABASE_URL}"
+    "critic": {
+      "provider": "google",
+      "model": "gemini-2.5-flash",
+      "api_key": "${GEMINI_API_KEY}",
+      "system_message": "Eres un evaluador crítico. Si el resultado cumple, devuelve task_ok=true y add_tasks=[].",
+      "max_retries": 3
+    },
+    "phase_reactor": {
+      "provider": "google",
+      "model": "gemini-2.5-flash",
+      "api_key": "${GEMINI_API_KEY}",
+      "system_message": "Resume la fase en una frase. Si faltan datos para la siguiente, propón bridge tasks."
+    },
+    "final_reactor": {
+      "provider": "google",
+      "model": "gemini-2.5-flash",
+      "api_key": "${GEMINI_API_KEY}",
+      "system_message": "Sintetiza todos los summaries en una respuesta cohesionada para el usuario."
     }
   }
 }
@@ -426,17 +462,31 @@ erDiagram
 
 ### Campos de Configuración
 
+Campos raíz:
+
 | Campo | Tipo | Descripción |
 |---|---|---|
-| `model` | string | Modelo LLM para todos los sub-componentes (puede sobreescribirse por agente) |
-| `agents` | object | Mapa de agentes disponibles con descripción y ruta al grafo hijo |
-| `planner_system_message` | string | System prompt del Planner LLM |
-| `critic_system_message` | string | System prompt del Critic LLM |
-| `phase_reactor_system_message` | string | System prompt del Phase Reactor LLM |
-| `final_reactor_system_message` | string | System prompt del Final Reactor LLM |
-| `max_retries` | int | Número máximo de reintentos por tarea antes de escalar al usuario |
-| `allow_suspend` | bool | Si `false`, el orchestrator no puede suspenderse (útil para flujos batch) |
-| `memory_config` | object | Configuración de persistencia para DagTask y summaries |
+| `agents` | object | Mapa `nombre → { description, child_graph_inline | child_graph_path }`. El Planner usa `description` para asignar tareas; solo los agentes listados aquí son válidos. |
+| `planner` | object | Sub-config del Planner LLM (ver más abajo). Si se omite, el orchestrator espera que la DB ya esté sembrada vía `inputs.plan` / `config.plan`. |
+| `critic` | object | Sub-config del Critic LLM. Si se omite, los resultados de los agentes se aceptan sin validación. |
+| `phase_reactor` | object | Sub-config del Phase Reactor. Si se omite, el orchestrator concatena los resultados de la fase (truncado a 4000 chars) como summary y no hay replanning. |
+| `final_reactor` | object | **Obligatorio**. Sub-config del LLM que sintetiza la respuesta final. |
+| `max_phases` | int | Límite duro de fases (default `10`). Si se excede, se fuerza la finalización para evitar loops infinitos. |
+| `verbose` | bool | Si `true`, imprime el estado interno por log al inicio de cada ejecución. |
+
+Sub-config común para `planner`, `critic`, `phase_reactor`, `final_reactor`:
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| `provider` | string | `"openai"`, `"google"` o `"anthropic"`. |
+| `model` | string | ID del modelo (p. ej. `"gemini-2.5-flash"`, `"gpt-4o"`). |
+| `api_key` | string | Clave o referencia a variable de entorno (`"${GEMINI_API_KEY}"`). |
+| `system_message` | string | System prompt del sub-componente. El orchestrator le añade plantillas (schema del reactor, grounding rules, historial de tareas, etc.) según el rol. |
+| `temperature` | float | Opcional. |
+| `thinking_budget` | int | Opcional. Para modelos con extended thinking. |
+| `max_retries` | int | Solo en `critic`: número de reintentos del bucle agente↔critic antes de escalar al usuario. |
+
+> Para HITL — si quieres deshabilitar la suspensión y forzar modo batch — añade `"allow_suspend": false` dentro del sub-bloque correspondiente (`planner`, `critic`, `phase_reactor`).
 
 ---
 

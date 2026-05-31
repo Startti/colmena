@@ -10,7 +10,7 @@ En Colmena, seguimos la estrategia de testing idiomática de Rust:
     *   **Ejemplo**: Testear la lógica de validación de `LlmConfig` sin depender de nada más.
 
     ```rust
-    // src/llm/domain/llm_config.rs
+    // src/libs/colmena/src/llm/domain/llm_config.rs
     #[test]
     fn test_with_temperature_invalid() {
         let provider = create_test_provider();
@@ -33,7 +33,7 @@ En Colmena, seguimos la estrategia de testing idiomática de Rust:
 Para los tests de aplicación, usamos `mockall` para crear mocks de nuestras dependencias (traits).
 
 ```rust
-// src/llm/domain/llm_repository.rs
+// src/libs/colmena/src/llm/domain/llm_repository.rs
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait LlmRepository {

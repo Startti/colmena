@@ -1,5 +1,5 @@
 {
-  "version": "0.3.0",
+  "version": "0.3.2",
   "description": "Complete configuration reference for all Colmena DAG Engine node types. Each node type documents its config fields, input ports, output ports, defaults, valid values, and validation rules.",
 
   "common_node_properties": {

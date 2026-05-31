@@ -80,10 +80,10 @@ postgresql://user:pass@host:5432/db?sslmode=verify-full&sslrootcert=/etc/ssl/ca.
 
 ```bash
 # Ejecutar ejemplo con SQLite
-cargo run --bin dag_engine -- run tests/memory_sqlite_example.json
+cargo run --bin dag_engine -- run tests/graphs/memory/memory_sqlite_example.json
 ```
 
-**Archivo:** `tests/memory_sqlite_example.json`
+**Archivo:** `tests/graphs/memory/memory_sqlite_example.json`
 - Crea dos pasos de conversación
 - Usa SQLite local (`colmena_memory.db`)
 - El segundo paso recuerda lo que se dijo en el primero
@@ -95,29 +95,40 @@ cargo run --bin dag_engine -- run tests/memory_sqlite_example.json
 echo 'DATABASE_URL="postgresql://user:pass@host:5432/db"' >> .env
 
 # Ejecutar ejemplo
-cargo run --bin dag_engine -- run tests/memory_postgres_example.json
+cargo run --bin dag_engine -- run tests/graphs/memory/memory_postgres_example.json
 ```
 
-**Archivo:** `tests/memory_postgres_example.json`
+**Archivo:** `tests/graphs/memory/memory_postgres_example.json`
 - Usa PostgreSQL para producción
 - Soporta múltiples usuarios concurrentes
 - Escalable y robusto
 
-### Ejemplo 3: Memoria Dinámica (Webhook)
+### Ejemplo 3: Chat persistente con `agent_session_id`
+
+Para conversaciones que duran varios runs (cada mensaje del usuario = un run nuevo),
+usá `--agent-session-id` para que el `llm_call` recupere el historial de runs previos.
+El par `agent_chat_say.json` / `agent_chat_ask.json` demuestra el patrón:
 
 ```bash
-# Iniciar servidor
-cargo run --bin dag_engine -- serve tests/dynamic_memory.json
+# Configurar .env con DATABASE_URL apuntando a Postgres
 
-# En otra terminal, hacer peticiones
-curl -X POST http://localhost:3000/chat \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": "alice", "message": "My name is Alice"}'
+# Run 1 — el usuario "dice" algo (color favorito, profesión)
+cargo run --bin dag_engine -- run \
+  tests/graphs/memory/agent_chat_say.json \
+  --agent-session-id chat_alice
 
-curl -X POST http://localhost:3000/chat \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": "alice", "message": "What is my name?"}'
+# Run 2 — el usuario "pregunta" sobre lo que dijo antes
+cargo run --bin dag_engine -- run \
+  tests/graphs/memory/agent_chat_ask.json \
+  --agent-session-id chat_alice
 ```
+
+El segundo run debe responder con el color y la profesión del primero, porque
+ambos runs comparten `agent_session_id = chat_alice` y el `llm_call` indexa su
+historial por `(agent_session_id, node_id)`.
+
+> Para más grafos de memoria, ver el directorio
+> [`tests/graphs/memory/`](../../tests/graphs/memory/).
 
 ## 🔑 Campos Requeridos para Memoria
 

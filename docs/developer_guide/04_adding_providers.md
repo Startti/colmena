@@ -3,7 +3,7 @@
 ### 1. Definir Proveedor en el Dominio
 
 ```rust
-// src/llm/domain/llm_provider.rs
+// src/libs/colmena/src/llm/domain/llm_provider.rs
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProviderKind {
     OpenAi,
@@ -29,7 +29,7 @@ impl ProviderKind {
 
 ### 2. Crear Adapter
 
-Crea un nuevo fichero, por ejemplo `src/llm/infrastructure/mistral_adapter.rs`. Este adaptador debe implementar el trait `LlmRepository`.
+Crea un nuevo fichero, por ejemplo `src/libs/colmena/src/llm/infrastructure/mistral_adapter.rs`. Este adaptador debe implementar el trait `LlmRepository`.
 
 ```rust
 #[async_trait]

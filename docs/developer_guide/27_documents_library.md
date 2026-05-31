@@ -1,8 +1,8 @@
 # 27. Librería de Documentos
 
-La librería de documentos (`DocumentRuntime`) permite a un agente LLM **crear y editar documentos Office de forma incremental** —archivos Excel (`.xlsx`) y Word (`.docx`)— con versionado inmutable, historial completo, almacenamiento *pluggable* (disco local o Google Cloud Storage) y exposición transparente como herramientas del LLM.
+La librería de documentos (`DocumentRuntime`) permite a un agente LLM **crear y editar documentos de forma incremental** —archivos Excel (`.xlsx`), Word (`.docx`) y presentaciones/reportes HTML (`.html`)— con versionado inmutable, historial completo, almacenamiento *pluggable* (disco local o Google Cloud Storage) y exposición transparente como herramientas del LLM. Además, expone un canal aparte para **assets binarios** (imágenes referenciables desde el HTML) vía `AssetStore`.
 
-A diferencia de subir/bajar binarios completos, la librería trabaja sobre una **representación intermedia (IR) en JSON** que es la única fuente de verdad. Cada cambio es un `Patch` con operaciones tipadas y atómicas (`set_cell`, `insert_block`, etc.), y el binario `.xlsx`/`.docx` se renderiza *on-demand* desde la IR.
+A diferencia de subir/bajar binarios completos, la librería trabaja sobre una **representación intermedia (IR) en JSON** que es la única fuente de verdad. Cada cambio es un `Patch` con operaciones tipadas y atómicas (`set_cell`, `insert_block`, `insert_html_block`, etc.), y el binario `.xlsx`/`.docx`/`.html` se renderiza *on-demand* desde la IR.
 
 > Código del módulo: [src/libs/colmena/src/documents/](../../src/libs/colmena/src/documents/)
 > Diseño completo (interno): [docs/superpowers/specs/2026-04-21-documents-feature-design.md](../superpowers/specs/2026-04-21-documents-feature-design.md)
@@ -15,9 +15,9 @@ Hexagonal estricta — domain / application / infrastructure — exactamente com
 
 | Capa | Carpeta | Responsable de |
 |------|---------|----------------|
-| **Domain** | [documents/domain/](../../src/libs/colmena/src/documents/domain/) | IDs, IR, `Patch`/`PatchOp`, errores y *traits* (`ArtifactStore`, `IRRenderer`, `IRValidator`, `IdGenerator`, `SessionArtifactIndex`). |
-| **Application** | [documents/application/](../../src/libs/colmena/src/documents/application/) | 6 use-cases (`Create`, `ApplyPatch`, `Read`, `GetHead`, `ListVersions`, `Rollback`) + el bundler [`DocumentRuntime`](../../src/libs/colmena/src/documents/application/runtime.rs). |
-| **Infrastructure** | [documents/infrastructure/](../../src/libs/colmena/src/documents/infrastructure/) | `LocalFsStore`, `GcsArtifactStore`, `ExcelRenderer` (`rust_xlsxwriter`), `WordRenderer` (`docx-rs`), validadores, `UlidIdGenerator`. |
+| **Domain** | [documents/domain/](../../src/libs/colmena/src/documents/domain/) | IDs (`ArtifactId`, `AssetId`, `SessionId`), IR (excel/word/html), `Patch`/`PatchOp`, errores y *traits* (`ArtifactStore`, `AssetStore`, `IRRenderer`, `IRValidator`, `IdGenerator`, `SessionArtifactIndex`). |
+| **Application** | [documents/application/](../../src/libs/colmena/src/documents/application/) | 9 use-cases — documentos: `CreateDocument`, `ApplyPatch`, `ReadDocument`, `GetHead`, `ListVersions`, `Rollback`; assets: `UploadAsset`, `ListAssets`, `DeleteAsset`. Más el bundler [`DocumentRuntime`](../../src/libs/colmena/src/documents/application/runtime.rs). Los applier por kind (`apply_excel_ops`, `apply_word_ops`, `apply_html_ops`) viven aquí también. |
+| **Infrastructure** | [documents/infrastructure/](../../src/libs/colmena/src/documents/infrastructure/) | Stores de artifacts (`LocalFsStore`, `GcsArtifactStore`) y de assets (`LocalFsAssetStore`, `GcsAssetStore`), `ExcelRenderer` (`rust_xlsxwriter`), `WordRenderer` (`docx-rs`), `HtmlRenderer` (`maud` + temas CSS + `slides_runtime.js` + Chart.js empotrado), validadores (`ExcelValidator`, `WordValidator`, `HtmlValidator`), `UlidIdGenerator`. |
 | **DAG nodes** | [dag_engine/.../document_nodes.rs](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/document_nodes.rs) | Nodos `document_create`, `document_edit`, `document_read`. |
 | **LLM tools** | [dag_engine/.../document_tools.rs](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/document_tools.rs) | 7 *synthetic tools* expuestos al modelo cuando `llm_call.config.documents` está presente. |
 
@@ -45,14 +45,17 @@ LLM ──tool_call("document_apply_patch", {...})──▶ dag_tool_executor
 ## 2. Conceptos centrales
 
 ### Artifact y kind
-Un *artifact* es un documento individual identificado por `ArtifactId` (string opaco con prefijo `art_`, ULID-based). El campo `ArtifactKind` es `Excel` o `Word` y determina la forma de la IR y el binario derivado:
+Un *artifact* es un documento individual identificado por `ArtifactId` (string opaco con prefijo `art_`, ULID-based). El enum `ArtifactKind` tiene tres variantes y determina la forma de la IR y el binario derivado:
 
 | Kind | Extensión | MIME |
 |------|-----------|------|
 | `excel` | `xlsx` | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` |
 | `word` | `docx` | `application/vnd.openxmlformats-officedocument.wordprocessingml.document` |
+| `html` | `html` | `text/html; charset=utf-8` |
 
-Definiciones en [domain/ids.rs](../../src/libs/colmena/src/documents/domain/ids.rs).
+Definiciones en [domain/ids.rs](../../src/libs/colmena/src/documents/domain/ids.rs) (ver `ArtifactKind` en línea 88).
+
+Aparte de los artifacts, existen los **assets** — blobs binarios (típicamente imágenes) referenciables por `AssetId` desde bloques `image` del HTML IR. Se manejan por separado (`AssetStore`, use cases dedicados) porque no participan del versionado/IR.
 
 ### IR (Intermediate Representation)
 JSON estructurado almacenado por versión. Ejemplo mínimo de un Excel vacío:
@@ -73,7 +76,7 @@ JSON estructurado almacenado por versión. Ejemplo mínimo de un Excel vacío:
 }
 ```
 
-Esquema detallado en [domain/ir/excel.rs](../../src/libs/colmena/src/documents/domain/ir/excel.rs) y [domain/ir/word.rs](../../src/libs/colmena/src/documents/domain/ir/word.rs).
+Esquema detallado en [domain/ir/excel.rs](../../src/libs/colmena/src/documents/domain/ir/excel.rs), [domain/ir/word.rs](../../src/libs/colmena/src/documents/domain/ir/word.rs) y [domain/ir/html.rs](../../src/libs/colmena/src/documents/domain/ir/html.rs). El IR HTML modela `slides` (con `layout`, `title`, `subtitle`, `notes`) que contienen `blocks` tipados (paragraph, heading, list, table, image, chart, callout, columns, page_break, etc.), más propiedades de documento (`theme`, `layout_mode`, `doc_props`).
 
 ### Patch y `PatchSource`
 Un `Patch` agrupa una lista ordenada de `PatchOp` que se aplican **atómicamente** sobre `base_version`. Si una falla, ninguna se aplica.
@@ -143,6 +146,27 @@ Cuando el HEAD del servidor es más reciente que `base_version`:
 | `insert_list_item` / `replace_list_item` / `delete_list_item` | Ítems de lista. |
 | `insert_table_row` / `delete_table_row` / `update_table_cell` | Filas y celdas de tablas. |
 
+### HTML (19 ops)
+
+Las ops HTML se agrupan por nivel: slide / block / table / list / documento.
+
+| Op | Propósito |
+|----|-----------|
+| `add_slide` | Crear slide (`layout`: `title` \| `content` \| `section_divider` \| `blank`; opcional `at_index`, `title`, `subtitle`). El server genera el `slide_id`. |
+| `delete_slide` | Eliminar slide por `slide_id`. |
+| `reorder_slides` | Reordenar pasando la lista completa de `slide_ids`. |
+| `set_slide_layout` | Cambiar el layout (`SectionDivider`/`Title` requieren `title` no vacío). |
+| `set_slide_title` | Set/clear título y subtítulo del slide (independiente de blocks). |
+| `set_slide_notes` | Set/clear las speaker notes. |
+| `insert_html_block` | Insertar block en un slide (paragraph/heading/list/table/image/chart/callout/columns/page_break…). Posicionar con `before` / `after`; sin ambos → append. Devuelve `block_id`. |
+| `delete_html_block` / `replace_html_block` / `move_html_block` | Manipular blocks completos por `block_id`. |
+| `insert_html_table_row` / `delete_html_table_row` / `update_html_table_cell` | Filas y celdas de tablas. |
+| `insert_html_list_item` / `delete_html_list_item` / `update_html_list_item` | Ítems de listas. |
+| `set_theme` | Cambiar tema visual (`executive` \| `minimal` \| `vibrant` \| `dark`). |
+| `set_doc_props` | Set parcial de `title` / `author` / `date` / `locale` (`en` \| `es`). |
+
+Bloques `image` referencian assets via `AssetId` (ver §5). El render embebe Chart.js y `slides_runtime.js` (carpeta [`infrastructure/render/html_assets/`](../../src/libs/colmena/src/documents/infrastructure/render/html_assets/)) para tablas/listas/charts/navegación en el `.html` final.
+
 Definiciones canónicas (con docs por campo) en [domain/patch.rs](../../src/libs/colmena/src/documents/domain/patch.rs).
 
 ---
@@ -157,23 +181,29 @@ Configurables vía el campo `storage_backend` (en config de nodo o de `llm_call.
 {
   "storage_backend": "localfs",
   "storage_root": "/tmp/colmena_documents",
+  "asset_storage_root": "/tmp/colmena_documents_assets",
   "default_retention": 20
 }
 ```
 
-- `storage_root` por defecto: `./.colmena/documents` (constante en [runtime.rs:35](../../src/libs/colmena/src/documents/application/runtime.rs#L35)).
-- Layout en disco:
+- `storage_root` por defecto: `./.colmena/documents` (constante `DEFAULT_STORAGE_ROOT` en [runtime.rs](../../src/libs/colmena/src/documents/application/runtime.rs)).
+- `asset_storage_root` por defecto: directorio hermano `<storage_root>_assets` (o `.colmena/documents/assets` si tampoco se setea `storage_root`).
+- Layout en disco (artifacts):
   ```
   {storage_root}/artifacts/{artifact_id}/
     meta.json
     HEAD
     versions/{version_id}/
       ir.json
-      render.{xlsx|docx}
+      render.{xlsx|docx|html}
       patch_applied.json
   ```
+- Layout en disco (assets):
+  ```
+  {asset_storage_root}/{session_id}/{asset_id}.{ext}
+  ```
 - Escrituras atómicas vía archivo temporal + `rename`.
-- Implementación: [storage/local_fs_store.rs](../../src/libs/colmena/src/documents/infrastructure/storage/local_fs_store.rs).
+- Implementaciones: [storage/local_fs_store.rs](../../src/libs/colmena/src/documents/infrastructure/storage/local_fs_store.rs) y [storage/local_fs_asset_store.rs](../../src/libs/colmena/src/documents/infrastructure/storage/local_fs_asset_store.rs).
 
 ### `gcs` (feature flag `gcs`)
 
@@ -181,14 +211,16 @@ Configurables vía el campo `storage_backend` (en config de nodo o de `llm_call.
 {
   "storage_backend": "gcs",
   "gcs_bucket": "mi-bucket",
-  "gcs_prefix": "colmena/documents"
+  "gcs_prefix": "colmena/documents",
+  "asset_gcs_prefix": "colmena/documents/assets"
 }
 ```
 
 - `gcs_prefix` por defecto: `colmena/documents`.
+- `asset_gcs_prefix` por defecto: `colmena/documents/assets` (constante `DEFAULT_ASSET_GCS_PREFIX`). Comparte el mismo bucket (`gcs_bucket`).
 - Compilación condicional: requiere `--features gcs`. Sin el flag, `from_config` devuelve un error claro: *"storage_backend `gcs` requires the `gcs` feature flag — rebuild with `--features gcs`"*.
 - HEAD se escribe con **CAS optimista** (`set_if_generation_match`) para evitar pisadas concurrentes.
-- Implementación: [storage/gcs_store.rs](../../src/libs/colmena/src/documents/infrastructure/storage/gcs_store.rs).
+- Implementaciones: [storage/gcs_store.rs](../../src/libs/colmena/src/documents/infrastructure/storage/gcs_store.rs) y [storage/gcs_asset_store.rs](../../src/libs/colmena/src/documents/infrastructure/storage/gcs_asset_store.rs).
 
 Cualquier otro valor (ej. `"s3"`) se rechaza al construir el runtime — fallo temprano, no en runtime.
 
@@ -198,9 +230,13 @@ Cualquier otro valor (ej. `"s3"`) se rechaza al construir el runtime — fallo t
 |-------|------|---------|----------|
 | `storage_backend` | string | `"localfs"` | siempre |
 | `storage_root` | string (path) | `./.colmena/documents` | localfs |
+| `asset_storage_root` | string (path) | `<storage_root>_assets` (sibling) | localfs |
 | `gcs_bucket` | string | — (obligatorio) | gcs |
 | `gcs_prefix` | string | `"colmena/documents"` | gcs |
+| `asset_gcs_prefix` | string | `"colmena/documents/assets"` | gcs |
 | `default_retention` | u32 | `20` | siempre |
+| `max_asset_size_bytes` | u64 | `10_485_760` (10 MiB) | siempre (assets) |
+| `allowed_asset_mimes` | string[] | `["image/png","image/jpeg","image/gif","image/webp"]` | siempre (assets) |
 
 Campos no reconocidos se ignoran silenciosamente para permitir crecimiento del schema sin romper grafos existentes.
 
@@ -210,12 +246,27 @@ Campos no reconocidos se ignoran silenciosamente para permitir crecimiento del s
 
 | Etapa | Implementación | Archivo |
 |-------|----------------|---------|
-| Validación de IR | `ExcelValidator`, `WordValidator` | [infrastructure/validation/](../../src/libs/colmena/src/documents/infrastructure/validation/) |
+| Validación de IR | `ExcelValidator`, `WordValidator`, `HtmlValidator` | [infrastructure/validation/](../../src/libs/colmena/src/documents/infrastructure/validation/) |
 | Render Excel → `.xlsx` | `rust_xlsxwriter` | [render/excel_renderer.rs](../../src/libs/colmena/src/documents/infrastructure/render/excel_renderer.rs) |
 | Render Word → `.docx` | `docx-rs` | [render/word_renderer.rs](../../src/libs/colmena/src/documents/infrastructure/render/word_renderer.rs) |
+| Render HTML → `.html` | `maud` + temas CSS + `slides_runtime.js` + Chart.js (todo empotrado) | [render/html_renderer.rs](../../src/libs/colmena/src/documents/infrastructure/render/html_renderer.rs) y [render/html_assets/](../../src/libs/colmena/src/documents/infrastructure/render/html_assets/) |
 | Generación de IDs | ULID | [infrastructure/ids.rs](../../src/libs/colmena/src/documents/infrastructure/ids.rs) |
 
-La validación corre **antes** de renderizar y persistir. Verifica: schema (campos requeridos, tipos), unicidad de IDs (sheet_id, block_id, run_id, list_item_id), formato A1 de direcciones, validez de rangos. Si falla → la versión no se escribe y el use-case retorna error.
+La validación corre **antes** de renderizar y persistir. Verifica: schema (campos requeridos, tipos), unicidad de IDs (sheet_id, block_id, run_id, list_item_id, slide_id), formato A1 de direcciones, validez de rangos, integridad de referencias HTML (bloques pertenecen a slides existentes, `image` apunta a `asset_id` válido, layouts compatibles con `title`). Si falla → la versión no se escribe y el use-case retorna error.
+
+### Assets (binarios fuera del IR)
+
+Los blobs binarios (imágenes referenciadas desde el HTML IR) viven en `AssetStore` — un port separado de `ArtifactStore` porque no participan del versionado del IR. Tres use cases dedicados:
+
+| Use case | Archivo | Función |
+|----------|---------|---------|
+| `UploadAssetUseCase` | [application/upload_asset.rs](../../src/libs/colmena/src/documents/application/upload_asset.rs) | Valida tamaño (`max_asset_size_bytes`) y MIME (`allowed_asset_mimes`), genera `AssetId`, persiste vía `AssetStore::upload` y devuelve un `AssetSummary`. Errores tipados (`AssetError::TooLarge`, `AssetError::MimeNotAllowed`). |
+| `ListAssetsUseCase` | [application/list_assets.rs](../../src/libs/colmena/src/documents/application/list_assets.rs) | Lista assets de una sesión. |
+| `DeleteAssetUseCase` | [application/delete_asset.rs](../../src/libs/colmena/src/documents/application/delete_asset.rs) | Elimina un asset (con hook opcional al `SessionArtifactIndex` para no romper referencias activas). |
+
+Implementaciones del port: [`LocalFsAssetStore`](../../src/libs/colmena/src/documents/infrastructure/storage/local_fs_asset_store.rs) (siempre disponible) y [`GcsAssetStore`](../../src/libs/colmena/src/documents/infrastructure/storage/gcs_asset_store.rs) (feature flag `gcs`). Ambos se construyen automáticamente desde `DocumentRuntime::from_config` según el `storage_backend` elegido.
+
+> Limitación actual: los use-cases de assets **no** están expuestos aún como nodos del DAG ni como synthetic tools del LLM — son consumibles solo desde código Rust vía `DocumentRuntime { upload_asset, list_assets, delete_asset, ... }`. La integración con `image` blocks del HTML IR ocurre a nivel del `HtmlRenderer`, que resuelve `asset_id` → bytes vía `AssetStore` al renderizar.
 
 ---
 
@@ -431,12 +482,13 @@ cargo test --lib document_tools
 
 ## 10. Limitaciones conocidas (v1)
 
-- **Sin ingesta de binarios existentes**: no se pueden subir `.xlsx`/`.docx` y editarlos. Solo creación desde IR.
+- **Sin ingesta de binarios existentes**: no se pueden subir `.xlsx`/`.docx`/`.html` y editarlos. Solo creación desde IR. (La excepción son los assets de imagen, que sí se suben como blobs vía `UploadAssetUseCase`.)
 - **Sin colaboración en tiempo real**: el modelo de concurrencia es agente + usuario intercalando ediciones, con detección de conflicto y rebase. No hay CRDT ni edición simultánea fluida.
 - **Excel — features fuera de alcance**: imágenes, charts, pivot tables, celdas merged, formato condicional, validación de datos.
 - **Word — features fuera de alcance**: headers/footers, footnotes, tracked changes, macros, comentarios.
+- **HTML — assets/tools aún no expuestos al DAG/LLM**: `ArtifactKind::Html` ya está soportado en el runtime (create/edit/read funcionan via los 3 nodos y las 7 synthetic tools si se pasa `kind: "html"`), pero los use-cases de assets (`upload_asset`, `list_assets`, `delete_asset`) solo se pueden invocar desde Rust por ahora — sin nodos DAG ni synthetic tools dedicados. El agente puede crear bloques `image` con un `asset_id` previamente subido por código externo.
 - **Sin export PDF**: roadmap v2+.
-- **Sin frontend**: la librería es backend-only. Para una UI editable se espera integrar Univer/Luckysheet (Excel) o Tiptap/OnlyOffice (Word) consumiendo la IR.
+- **Sin frontend**: la librería es backend-only. Para una UI editable se espera integrar Univer/Luckysheet (Excel) o Tiptap/OnlyOffice (Word) consumiendo la IR. El `.html` renderizado ya es un artefacto presentable en cualquier navegador (incluye `slides_runtime.js` para navegación de slides).
 
 ---
 

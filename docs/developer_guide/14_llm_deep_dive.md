@@ -73,7 +73,7 @@ Level 3 (Default): Environment variables o valores por defecto
 - **Descripción:** Nombre específico del modelo a usar
 - **Valores típicos:**
   - OpenAI: `"gpt-4"`, `"gpt-4o"`, `"gpt-4o-mini"`, `"gpt-3.5-turbo"`
-  - Gemini: `"gemini-1.5-pro"`, `"gemini-1.5-flash"`, `"gemini-pro"`
+  - Gemini: `"gemini-2.5-flash"` (recomendado), `"gemini-pro"`
   - Anthropic: `"claude-3-5-sonnet"`, `"claude-3-haiku"`, `"claude-opus"`
 - **Ejemplos:**
   ```json

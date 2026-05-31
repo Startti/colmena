@@ -91,20 +91,34 @@ A continuación se explica el comportamiento de los grafos verificados en la car
     - Se basa en la variable `__colmena_loop_status`. Si es `"NEXT_TURN"`, indica que el nodo desea seguir iterando.
     - Para que este grafo sea útil en producción, se suele ejecutar con el flag `--loop` o dentro de un orquestador que maneje ciclos.
 
-### 10. `http_request.json`
+---
+
+## 3b. Catálogo de Grafos HTTP (`external/`)
+
+Los ejemplos de peticiones HTTP viven en `tests/graphs/external/`, no en `basic/`.
+
+### `external/http_request.json`
 - **Propósito**: Realizar peticiones HTTP salientes.
 - **Flujo**: Consulta una API pública de chistes y muestra el resultado.
 - **Clave**: El nodo `http_request` mapea automáticamente el cuerpo de la respuesta a la llave `body`.
 
-### 11. `dynamic_http.json`
+### `external/dynamic_http.json`
 - **Propósito**: Inyección dinámica de parámetros en peticiones HTTP.
 - **Flujo**: Un webhook envía la ruta del endpoint (ej: `/random_joke`) y el nodo HTTP la concatena a su `base_url`.
 - **Clave**: Demuestra que casi cualquier campo de la `config` de los nodos puede ser sobrescrito por `inputs` dinámicos.
 
-### 12. `http_tool_configured.json`
+### `external/http_tool_configured.json`
 - **Propósito**: Uso de nodos HTTP como "Tools" para un Agente LLM.
 - **Mecánica**: Un nodo `llm_call` tiene configuradas herramientas que, por debajo, ejecutan nodos `http_request` pre-configurados.
 - **Resultado**: El agente decide qué herramienta llamar, el motor ejecuta la petición HTTP, y el resultado vuelve al agente para que genere una respuesta en lenguaje natural.
+
+### `external/http_headers_dynamic.json`
+- **Propósito**: Construcción dinámica de headers HTTP a partir de inputs del grafo.
+
+Otros catálogos relacionados:
+- `tests/graphs/web/`: integraciones con APIs externas vía OpenAPI (`api_explorer_*.json`) y búsqueda web Tavily (`tavily_*.json`).
+- `tests/graphs/security/http_secure_*.json`: peticiones HTTP con `secure_value_mappings` (TTL 24h) para inyectar credenciales sin filtrarlas a logs.
+- `tests/graphs/agents/`: agentes LLM que usan `http_tool` como herramientas (`agent_http_tool_*.json`, `http_tool_node_schema_test.json`).
 
 ---
 
@@ -174,6 +188,28 @@ El motor utiliza un único identificador para toda la vida del grafo:
 
 **Ejemplos Verificados:**
 - `memory/memory_postgres_example.json`: Un grafo de dos pasos donde el segundo paso recuerda datos del primero usando PostgreSQL.
+- Más ejemplos: `tests/graphs/memory/`.
+
+---
+
+## 9. Módulos Documentados por Separado
+
+Estas capacidades del motor están cubiertas en detalle en sus propios documentos. Aquí solo se listan como referencia rápida.
+
+### Skills
+Sistema de "skills" cargables que un agente LLM puede descubrir y leer en tiempo de ejecución.
+- Configuración a nivel motor: `{ "builtin": ["..."], "paths": ["./ruta/al/skill_dir"] }` (parser en `src/libs/colmena/src/skills/domain/skill_config.rs`).
+- También se pueden adjuntar por nodo `llm_call` via `skills_path` (un directorio contenedor con sub-skills) o `skills_paths` (lista de directorios).
+- La única herramienta sintética expuesta es `load_skill({ name, reference? })`. Las `references` declaradas en el frontmatter de un `SKILL.md` son recursivas (límite de profundidad 5, con detección de ciclos).
+- Documento completo: ver [`24_skills.md`](24_skills.md).
+
+### Generación Multimedia
+Nodos nativos para producir/editar imágenes y audio dentro del grafo: `image_generation`, `image_edit`, `tts`.
+- Documento completo: ver [`32_multimedia_generation.md`](32_multimedia_generation.md).
+
+### Biblioteca de Documentos (incluye HTML)
+`ArtifactKind` soporta `Html` además de los formatos previos. Los assets se gestionan via los casos de uso `upload_asset` / `list_assets` / `delete_asset` sobre el puerto `AssetStore` (implementaciones `LocalFsAssetStore` y `GcsAssetStore`).
+- Documento completo: ver [`27_documents_library.md`](27_documents_library.md).
 
 ---
 

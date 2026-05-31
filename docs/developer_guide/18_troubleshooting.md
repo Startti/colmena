@@ -525,7 +525,7 @@ benchmark_call()
    # Modelos más rápidos por proveedor
    fast_models = {
        "openai": "gpt-3.5-turbo",      # Más rápido que gpt-4
-       "google": "gemini-1.5-flash",   # Más rápido que gemini-pro
+       "google": "gemini-2.5-flash",   # Más rápido que gemini-pro
        "anthropic": "claude-3-haiku-20240307"  # Más rápido que sonnet
    }
    ```

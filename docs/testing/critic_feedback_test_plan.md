@@ -5,7 +5,7 @@
 Se implementaron los siguientes cambios al Critic y al Orquestador:
 
 1. **`critic.rs`** — El campo `add_tasks` fue reemplazado por `feedback` (string). Cuando `task_ok=false`, el Critic debe escribir qué falló y qué debe hacer diferente el agente.
-2. **`orchestrator.rs`** — El feedback del Critic se guarda en `_state` como `__orch_critic_feedback_<task_id>`. En el siguiente intento, se inyecta en el prompt del agente como una nueva sección `=== INTENTO ANTERIOR — POR QUÉ FALLÓ ===`, justo antes de `=== LO QUE TIENES QUE HACER AHORA TÚ ===`.
+2. **`orchestrator.rs`** — El feedback del Critic se guarda en `_state` como `__orch_critic_feedback_<task_id>`. En el siguiente intento, se inyecta en el prompt del agente como una nueva sección `=== PREVIOUS ATTEMPT — WHY IT FAILED ===`, justo antes de `=== YOUR CURRENT TASK ===`.
 3. **Limpieza** — El `feedback_key` se elimina de state cuando la tarea es aprobada, aceptada por el usuario (accept), saltada (skip) o cancelada (cancel).
 
 ## Estructura de prompt resultante (en reintentos)
@@ -14,16 +14,16 @@ Se implementaron los siguientes cambios al Critic y al Orquestador:
 === USER CLARIFICATION ===         ← solo si el Critic suspendió y el usuario respondió
 <respuesta del usuario>
 
-=== CONTEXTO DE ESTA TAREA ===
+=== TASK CONTEXT ===
 <contexto del planner>
 
-=== LO QUE HA OCURRIDO HASTA AHORA ===
+=== WHAT HAS HAPPENED SO FAR ===
 Fase 1: <resumen>
 
-=== INTENTO ANTERIOR — POR QUÉ FALLÓ ===   ← NUEVO — solo en reintentos
+=== PREVIOUS ATTEMPT — WHY IT FAILED ===   ← NUEVO — solo en reintentos
 <feedback del Critic: qué faltó, qué hacer diferente>
 
-=== LO QUE TIENES QUE HACER AHORA TÚ ===
+=== YOUR CURRENT TASK ===
 <instrucción de tarea>
 ```
 
@@ -94,7 +94,7 @@ Fase 1: <resumen>
 
 ## Test 1 — `critic_feedback_injection_test.json`
 
-**Objetivo:** Verificar que `=== INTENTO ANTERIOR — POR QUÉ FALLÓ ===` aparece en el prompt del agente en el segundo intento con el texto de feedback del Critic.
+**Objetivo:** Verificar que `=== PREVIOUS ATTEMPT — WHY IT FAILED ===` aparece en el prompt del agente en el segundo intento con el texto de feedback del Critic.
 
 **Ruta:** `tests/graphs/advanced/critic_feedback_injection_test.json`
 
@@ -139,11 +139,11 @@ cargo run --bin dag_engine -- run tests/graphs/advanced/critic_feedback_injectio
 
 **Qué verificar en los logs (`verbose: true`):**
 
-1. **Primer intento** — La línea `📨 [OrchestratorNode] PROMPT → agent 'weather_agent'` NO contiene `=== INTENTO ANTERIOR`.
+1. **Primer intento** — La línea `📨 [OrchestratorNode] PROMPT → agent 'weather_agent'` NO contiene `=== PREVIOUS ATTEMPT`.
 2. **El Critic rechaza** — Log: `🔎 [CriticNode] Decision → task_ok=false, has_feedback=true, suspend=false`.
 3. **Segundo intento** — La línea `📨 [OrchestratorNode] PROMPT → agent 'weather_agent'` contiene:
    ```
-   === INTENTO ANTERIOR — POR QUÉ FALLÓ ===
+   === PREVIOUS ATTEMPT — WHY IT FAILED ===
    On your next attempt you MUST include: ...
    ```
 4. **El Critic aprueba** — Log: `🔎 [CriticNode] Decision → task_ok=true, has_feedback=false, suspend=false`.
@@ -198,8 +198,8 @@ cargo run --bin dag_engine -- run tests/graphs/advanced/critic_feedback_multiret
 ```
 
 **Qué verificar:**
-1. Primer intento: sin sección `=== INTENTO ANTERIOR`.
-2. Cada intento sucesivo: la sección `=== INTENTO ANTERIOR — POR QUÉ FALLÓ ===` contiene solo el feedback del ÚLTIMO critic (no concatenados).
+1. Primer intento: sin sección `=== PREVIOUS ATTEMPT`.
+2. Cada intento sucesivo: la sección `=== PREVIOUS ATTEMPT — WHY IT FAILED ===` contiene solo el feedback del ÚLTIMO critic (no concatenados).
 3. El feedback cambia entre intentos a medida que el agente va corrigiendo cosas.
 4. En algún intento el agente pasa todos los criterios y el Critic aprueba.
 
@@ -207,7 +207,7 @@ cargo run --bin dag_engine -- run tests/graphs/advanced/critic_feedback_multiret
 
 ## Test 3 — `critic_feedback_with_suspend_test.json`
 
-**Objetivo:** Verificar la coexistencia de `=== INTENTO ANTERIOR ===` y `=== USER CLARIFICATION ===` en el mismo prompt cuando el Critic rechaza primero y luego suspende.
+**Objetivo:** Verificar la coexistencia de `=== PREVIOUS ATTEMPT — WHY IT FAILED ===` y `=== USER CLARIFICATION ===` en el mismo prompt cuando el Critic rechaza primero y luego suspende.
 
 **Ruta:** `tests/graphs/advanced/critic_feedback_with_suspend_test.json`
 
@@ -248,9 +248,9 @@ For this test: after the first rejection, if the agent still does not include th
 
 **Flujo esperado:**
 1. Intento 1 → Critic rechaza (task_ok=false, feedback sobre los 3 elementos faltantes)
-2. Intento 2 → agente recibe `=== INTENTO ANTERIOR ===` con el feedback → puede mejorar o no
+2. Intento 2 → agente recibe `=== PREVIOUS ATTEMPT — WHY IT FAILED ===` con el feedback → puede mejorar o no
 3. Si no mejora suficiente → Critic suspende con pregunta al usuario
-4. Usuario responde → agente recibe `=== USER CLARIFICATION ===` + `=== INTENTO ANTERIOR ===`
+4. Usuario responde → agente recibe `=== USER CLARIFICATION ===` + `=== PREVIOUS ATTEMPT — WHY IT FAILED ===`
 5. Intento final → Critic aprueba
 
 **Cómo ejecutar (paso a paso):**
@@ -266,11 +266,11 @@ cargo run --bin dag_engine -- run tests/graphs/advanced/critic_feedback_with_sus
 ```
 
 **Qué verificar en logs:**
-1. Intento 1: prompt sin `=== INTENTO ANTERIOR ===`.
-2. Intento 2: prompt CON `=== INTENTO ANTERIOR — POR QUÉ FALLÓ ===`.
+1. Intento 1: prompt sin `=== PREVIOUS ATTEMPT`.
+2. Intento 2: prompt CON `=== PREVIOUS ATTEMPT — WHY IT FAILED ===`.
 3. Si hay suspend → el usuario responde → intento siguiente tiene AMBAS secciones:
    - `=== USER CLARIFICATION ===`
-   - `=== INTENTO ANTERIOR — POR QUÉ FALLÓ ===`
+   - `=== PREVIOUS ATTEMPT — WHY IT FAILED ===`
 
 ---
 
@@ -305,8 +305,8 @@ cargo run --bin dag_engine -- run tests/graphs/advanced/critic_feedback_cleanup_
 ```
 
 **Qué verificar (con `--include-extra-info`):**
-- En accept/skip/cancel: el grafo termina con `FINISHED` sin `=== INTENTO ANTERIOR ===` en prompts de otras tareas de la misma sesión.
-- En retry: el agente recibe `=== USER CLARIFICATION ===` con las instrucciones del usuario. El `=== INTENTO ANTERIOR ===` del critic previo NO aparece (fue limpiado al hacer `retry` desde max_retries — el retry del usuario reemplaza el feedback).
+- En accept/skip/cancel: el grafo termina con `FINISHED` sin `=== PREVIOUS ATTEMPT — WHY IT FAILED ===` en prompts de otras tareas de la misma sesión.
+- En retry: el agente recibe `=== USER CLARIFICATION ===` con las instrucciones del usuario. El `=== PREVIOUS ATTEMPT — WHY IT FAILED ===` del critic previo NO aparece (fue limpiado al hacer `retry` desde max_retries — el retry del usuario reemplaza el feedback).
 
 ---
 
