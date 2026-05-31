@@ -28,10 +28,7 @@ pub struct UploadAssetUseCase {
 }
 
 impl UploadAssetUseCase {
-    pub async fn execute(
-        &self,
-        input: UploadAssetInput,
-    ) -> Result<UploadAssetOutput, AssetError> {
+    pub async fn execute(&self, input: UploadAssetInput) -> Result<UploadAssetOutput, AssetError> {
         let size = input.bytes.len() as u64;
         if size > self.max_size_bytes {
             return Err(AssetError::TooLarge {

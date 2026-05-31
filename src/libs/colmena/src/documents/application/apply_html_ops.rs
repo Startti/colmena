@@ -282,12 +282,11 @@ impl<'a> HtmlOpApplier<'a> {
             obj.insert("id".into(), serde_json::json!(new_id));
             self.assign_nested_ids(obj);
         }
-        let block: Block = serde_json::from_value(block_json).map_err(|e| {
-            DocumentError::IRValidationFailed {
+        let block: Block =
+            serde_json::from_value(block_json).map_err(|e| DocumentError::IRValidationFailed {
                 path: "/op/insert_html_block/block".into(),
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
         let slide = find_slide_mut(ir, slide_id)?;
         let pos = match (before, after) {
             (Some(b), None) => slide.blocks.iter().position(|x| block_id_of(x) == b),
@@ -341,12 +340,11 @@ impl<'a> HtmlOpApplier<'a> {
             obj.insert("id".into(), serde_json::json!(block_id));
             self.assign_nested_ids(obj);
         }
-        let new_block: Block = serde_json::from_value(block_json).map_err(|e| {
-            DocumentError::IRValidationFailed {
+        let new_block: Block =
+            serde_json::from_value(block_json).map_err(|e| DocumentError::IRValidationFailed {
                 path: "/op/replace_html_block/block".into(),
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
         let slide = find_slide_mut(ir, slide_id)?;
         let pos = slide
             .blocks
@@ -508,13 +506,12 @@ impl<'a> HtmlOpApplier<'a> {
                 reason: "table block not found".into(),
             })?;
         if let Block::Table { rows, .. } = block {
-            let row = rows
-                .iter_mut()
-                .find(|r| r.id == row_id)
-                .ok_or_else(|| DocumentError::IRValidationFailed {
+            let row = rows.iter_mut().find(|r| r.id == row_id).ok_or_else(|| {
+                DocumentError::IRValidationFailed {
                     path: format!("/slides/{slide_id}/blocks/{table_block_id}/rows/{row_id}"),
                     reason: "row not found".into(),
-                })?;
+                }
+            })?;
             let idx = col_index as usize;
             if idx >= row.cells.len() {
                 return Err(DocumentError::IRValidationFailed {
@@ -649,13 +646,12 @@ impl<'a> HtmlOpApplier<'a> {
                 reason: "list block not found".into(),
             })?;
         if let Block::List { items, .. } = block {
-            let item = items
-                .iter_mut()
-                .find(|i| i.id == item_id)
-                .ok_or_else(|| DocumentError::IRValidationFailed {
+            let item = items.iter_mut().find(|i| i.id == item_id).ok_or_else(|| {
+                DocumentError::IRValidationFailed {
                     path: format!("/.../{list_block_id}/items/{item_id}"),
                     reason: "item not found".into(),
-                })?;
+                }
+            })?;
             item.runs = parsed_runs;
             Ok(OpOutcome::default())
         } else {

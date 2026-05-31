@@ -461,7 +461,9 @@ fn describe_op(
         SetSlideLayout { slide_id, layout } => {
             format!("Set slide {slide_id} layout to {:?}", layout)
         }
-        SetSlideTitle { slide_id, title, .. } => match title {
+        SetSlideTitle {
+            slide_id, title, ..
+        } => match title {
             Some(t) => format!("Set slide {slide_id} title to '{t}'"),
             None => format!("Cleared slide {slide_id} title"),
         },
@@ -471,7 +473,9 @@ fn describe_op(
         },
 
         // ---- HTML — block level ----
-        InsertHtmlBlock { slide_id, block, .. } => {
+        InsertHtmlBlock {
+            slide_id, block, ..
+        } => {
             let kind = block
                 .get("kind")
                 .and_then(|v| v.as_str())
@@ -494,9 +498,9 @@ fn describe_op(
         } => format!("Moved block {block_id} after {after_block_id}"),
 
         // ---- HTML — table ----
-        InsertHtmlTableRow {
-            table_block_id, ..
-        } => format!("Inserted row in table {table_block_id}"),
+        InsertHtmlTableRow { table_block_id, .. } => {
+            format!("Inserted row in table {table_block_id}")
+        }
         DeleteHtmlTableRow {
             table_block_id,
             row_id,

@@ -74,9 +74,7 @@ fn assert_or_write_snapshot(name: &str, content: &str) {
         );
     } else {
         fs::write(&path, content).unwrap();
-        panic!(
-            "snapshot {name} created at {path:?}. Re-run the test to assert."
-        );
+        panic!("snapshot {name} created at {path:?}. Re-run the test to assert.");
     }
 }
 

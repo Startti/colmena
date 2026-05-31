@@ -43,7 +43,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     fs::create_dir_all(&out_dir)?;
 
-    for theme in [Theme::Executive, Theme::Minimal, Theme::Vibrant, Theme::Dark] {
+    for theme in [
+        Theme::Executive,
+        Theme::Minimal,
+        Theme::Vibrant,
+        Theme::Dark,
+    ] {
         generate(theme, &out_dir).await?;
     }
 
@@ -371,11 +376,7 @@ async fn generate(theme: Theme, out_dir: &PathBuf) -> Result<(), Box<dyn std::er
     let html = String::from_utf8(data.rendered_binary)?;
     let filename = out_dir.join(format!("report_{}.html", theme_name(theme)));
     fs::write(&filename, &html)?;
-    println!(
-        "  wrote {} ({} KB)",
-        filename.display(),
-        html.len() / 1024
-    );
+    println!("  wrote {} ({} KB)", filename.display(), html.len() / 1024);
     Ok(())
 }
 

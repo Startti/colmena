@@ -325,7 +325,9 @@ impl ArtifactStore for GcsArtifactStore {
 
         let meta = self.read_meta(_id).await?;
         let ext = meta.kind.extension();
-        let render = self.read_bytes(&self.render_key(_id, _version, ext)).await?;
+        let render = self
+            .read_bytes(&self.render_key(_id, _version, ext))
+            .await?;
 
         let pa_bytes = self.read_bytes(&self.patch_key(_id, _version)).await?;
         let patch_applied: PatchApplied = serde_json::from_slice(&pa_bytes)

@@ -120,10 +120,7 @@ pub trait AssetStore: Send + Sync {
 
     async fn read(&self, id: &AssetId) -> Result<(Vec<u8>, String), AssetError>;
 
-    async fn list_by_session(
-        &self,
-        session: &SessionId,
-    ) -> Result<Vec<AssetSummary>, AssetError>;
+    async fn list_by_session(&self, session: &SessionId) -> Result<Vec<AssetSummary>, AssetError>;
 
     async fn delete(&self, id: &AssetId) -> Result<(), AssetError>;
 

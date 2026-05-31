@@ -117,10 +117,7 @@ impl AssetStore for LocalFsAssetStore {
         Ok((bytes, meta.mime))
     }
 
-    async fn list_by_session(
-        &self,
-        session: &SessionId,
-    ) -> Result<Vec<AssetSummary>, AssetError> {
+    async fn list_by_session(&self, session: &SessionId) -> Result<Vec<AssetSummary>, AssetError> {
         let sdir = self.root.join("sessions").join(session.as_str());
         if !fs::try_exists(&sdir).await.unwrap_or(false) {
             return Ok(vec![]);
@@ -213,11 +210,23 @@ mod tests {
         let store = LocalFsAssetStore::new(tmp.path());
         let s = SessionId::new("s1");
         store
-            .upload(&s, &AssetId::new("asset_1"), b"a".to_vec(), "image/png", Some("a"))
+            .upload(
+                &s,
+                &AssetId::new("asset_1"),
+                b"a".to_vec(),
+                "image/png",
+                Some("a"),
+            )
             .await
             .unwrap();
         store
-            .upload(&s, &AssetId::new("asset_2"), b"bb".to_vec(), "image/jpeg", None)
+            .upload(
+                &s,
+                &AssetId::new("asset_2"),
+                b"bb".to_vec(),
+                "image/jpeg",
+                None,
+            )
             .await
             .unwrap();
         let list = store.list_by_session(&s).await.unwrap();
@@ -244,7 +253,10 @@ mod tests {
     async fn list_empty_session_returns_empty_vec() {
         let tmp = tempdir().unwrap();
         let store = LocalFsAssetStore::new(tmp.path());
-        let list = store.list_by_session(&SessionId::new("nobody")).await.unwrap();
+        let list = store
+            .list_by_session(&SessionId::new("nobody"))
+            .await
+            .unwrap();
         assert!(list.is_empty());
     }
 
@@ -254,7 +266,13 @@ mod tests {
         let store = LocalFsAssetStore::new(tmp.path());
         let s = SessionId::new("s1");
         store
-            .upload(&s, &AssetId::new("asset_h"), vec![0u8; 1024], "image/png", None)
+            .upload(
+                &s,
+                &AssetId::new("asset_h"),
+                vec![0u8; 1024],
+                "image/png",
+                None,
+            )
             .await
             .unwrap();
         let head = store.head(&AssetId::new("asset_h")).await.unwrap();

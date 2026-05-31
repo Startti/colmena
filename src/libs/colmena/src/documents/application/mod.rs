@@ -1,9 +1,9 @@
 pub mod apply_excel_ops;
 pub mod apply_html_ops;
-pub mod delete_asset;
 pub mod apply_patch;
 pub mod apply_word_ops;
 pub mod create_document;
+pub mod delete_asset;
 pub mod get_head;
 pub mod list_assets;
 pub mod list_versions;

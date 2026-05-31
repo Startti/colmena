@@ -10,10 +10,7 @@ pub struct ListAssetsUseCase {
 }
 
 impl ListAssetsUseCase {
-    pub async fn execute(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Vec<AssetSummary>, AssetError> {
+    pub async fn execute(&self, session_id: &SessionId) -> Result<Vec<AssetSummary>, AssetError> {
         self.store.list_by_session(session_id).await
     }
 }
@@ -31,7 +28,13 @@ mod tests {
         let store: Arc<dyn AssetStore> = Arc::new(LocalFsAssetStore::new(tmp.path()));
         let s = SessionId::new("s1");
         store
-            .upload(&s, &AssetId::new("asset_1"), b"a".to_vec(), "image/png", None)
+            .upload(
+                &s,
+                &AssetId::new("asset_1"),
+                b"a".to_vec(),
+                "image/png",
+                None,
+            )
             .await
             .unwrap();
         let uc = ListAssetsUseCase { store };

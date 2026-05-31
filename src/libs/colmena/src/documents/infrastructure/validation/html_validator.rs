@@ -168,11 +168,9 @@ fn collect_asset_refs(blocks: &[Block], out: &mut HashSet<String>) {
 // ── Security statics ────────────────────────────────────────────────────────
 
 static ALLOWED_LINK_SCHEMES: &[&str] = &["http", "https", "mailto", "tel"];
-static DATA_URL_IMAGE_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^data:image/(png|jpeg|jpg|gif|webp);base64,").unwrap()
-});
-static EXTERNAL_HTTP_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^https?://").unwrap());
+static DATA_URL_IMAGE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^data:image/(png|jpeg|jpg|gif|webp);base64,").unwrap());
+static EXTERNAL_HTTP_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^https?://").unwrap());
 static VIDEO_ID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[A-Za-z0-9_-]+$").unwrap());
 
 const MAX_NESTING_DEPTH: u8 = 3;
@@ -241,7 +239,9 @@ fn validate_blocks_security(
                     });
                 }
             }
-            Block::TwoColumns { left, right, id, .. } => {
+            Block::TwoColumns {
+                left, right, id, ..
+            } => {
                 if depth >= MAX_NESTING_DEPTH {
                     return Err(nesting_err(slide_id, id));
                 }

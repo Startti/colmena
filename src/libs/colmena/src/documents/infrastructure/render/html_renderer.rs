@@ -289,7 +289,12 @@ fn render_block(b: &Block, assets: &HashMap<String, String>, ir: &HtmlIR) -> Mar
         Block::Code { id, language, text } => html! {
             pre.block-code id=(id) data-lang=[language.as_deref()] { code { (text) } }
         },
-        Block::Table { id, headers, rows, caption } => html! {
+        Block::Table {
+            id,
+            headers,
+            rows,
+            caption,
+        } => html! {
             table.block-table id=(id) {
                 @if let Some(c) = caption { caption { (c) } }
                 thead { tr { @for h in headers { th { (h) } } } }
@@ -304,7 +309,9 @@ fn render_block(b: &Block, assets: &HashMap<String, String>, ir: &HtmlIR) -> Mar
                 }
             }
         },
-        Block::Chart { id, title, size, .. } => {
+        Block::Chart {
+            id, title, size, ..
+        } => {
             let size_class = match size {
                 ChartSize::Small => "chart-container chart-container--small",
                 ChartSize::Medium => "chart-container chart-container--medium",
@@ -317,7 +324,13 @@ fn render_block(b: &Block, assets: &HashMap<String, String>, ir: &HtmlIR) -> Mar
                 }
             }
         }
-        Block::KpiCard { id, label, value, delta, .. } => html! {
+        Block::KpiCard {
+            id,
+            label,
+            value,
+            delta,
+            ..
+        } => html! {
             div.block-kpi-card id=(id) {
                 div.block-kpi-card__label { (label) }
                 div.block-kpi-card__value { (value) }
@@ -349,7 +362,13 @@ fn render_block(b: &Block, assets: &HashMap<String, String>, ir: &HtmlIR) -> Mar
                 }
             }
         },
-        Block::Image { id, src, alt, caption, position } => {
+        Block::Image {
+            id,
+            src,
+            alt,
+            caption,
+            position,
+        } => {
             let pos_class = match position {
                 ImagePosition::Inline => "block-image block-image--inline",
                 ImagePosition::Full => "block-image block-image--full",
@@ -367,13 +386,25 @@ fn render_block(b: &Block, assets: &HashMap<String, String>, ir: &HtmlIR) -> Mar
                 }
             }
         }
-        Block::TwoColumns { id, left, right, ratio, gap } => {
-            let ratio_str = serde_json::to_value(ratio).ok()
+        Block::TwoColumns {
+            id,
+            left,
+            right,
+            ratio,
+            gap,
+        } => {
+            let ratio_str = serde_json::to_value(ratio)
+                .ok()
                 .and_then(|v| v.as_str().map(String::from))
                 .unwrap_or_else(|| "50_50".to_string());
-            let gap_class = format!("gap-{}", match gap {
-                Gap::Small => "small", Gap::Medium => "medium", Gap::Large => "large",
-            });
+            let gap_class = format!(
+                "gap-{}",
+                match gap {
+                    Gap::Small => "small",
+                    Gap::Medium => "medium",
+                    Gap::Large => "large",
+                }
+            );
             html! {
                 div class=(format!("block-two-columns {gap_class}")) id=(id) data-ratio=(ratio_str) {
                     div.col { @for b in left { (render_block(b, assets, ir)) } }
@@ -381,10 +412,21 @@ fn render_block(b: &Block, assets: &HashMap<String, String>, ir: &HtmlIR) -> Mar
                 }
             }
         }
-        Block::ThreeColumns { id, left, middle, right, gap } => {
-            let gap_class = format!("gap-{}", match gap {
-                Gap::Small => "small", Gap::Medium => "medium", Gap::Large => "large",
-            });
+        Block::ThreeColumns {
+            id,
+            left,
+            middle,
+            right,
+            gap,
+        } => {
+            let gap_class = format!(
+                "gap-{}",
+                match gap {
+                    Gap::Small => "small",
+                    Gap::Medium => "medium",
+                    Gap::Large => "large",
+                }
+            );
             html! {
                 div class=(format!("block-three-columns {gap_class}")) id=(id) {
                     div.col { @for b in left { (render_block(b, assets, ir)) } }
@@ -403,13 +445,21 @@ fn render_block(b: &Block, assets: &HashMap<String, String>, ir: &HtmlIR) -> Mar
                 }
             }
         },
-        Block::Callout { id, variant, title, runs } => {
-            let var_class = format!("callout callout--{}", match variant {
-                CalloutVariant::Info => "info",
-                CalloutVariant::Warning => "warning",
-                CalloutVariant::Success => "success",
-                CalloutVariant::Danger => "danger",
-            });
+        Block::Callout {
+            id,
+            variant,
+            title,
+            runs,
+        } => {
+            let var_class = format!(
+                "callout callout--{}",
+                match variant {
+                    CalloutVariant::Info => "info",
+                    CalloutVariant::Warning => "warning",
+                    CalloutVariant::Success => "success",
+                    CalloutVariant::Danger => "danger",
+                }
+            );
             html! {
                 aside class=(var_class) id=(id) {
                     @if let Some(t) = title { strong.callout__title { (t) } }
@@ -420,8 +470,12 @@ fn render_block(b: &Block, assets: &HashMap<String, String>, ir: &HtmlIR) -> Mar
         Block::Divider { id } => html! { hr.divider id=(id); },
         Block::Video { id, src, caption } => {
             let embed_url = match src {
-                VideoSrc::Youtube { video_id } => format!("https://www.youtube.com/embed/{video_id}"),
-                VideoSrc::Vimeo { video_id } => format!("https://player.vimeo.com/video/{video_id}"),
+                VideoSrc::Youtube { video_id } => {
+                    format!("https://www.youtube.com/embed/{video_id}")
+                }
+                VideoSrc::Vimeo { video_id } => {
+                    format!("https://player.vimeo.com/video/{video_id}")
+                }
                 VideoSrc::Asset { asset_id } => assets.get(asset_id).cloned().unwrap_or_default(),
             };
             html! {
@@ -448,7 +502,7 @@ fn render_block(b: &Block, assets: &HashMap<String, String>, ir: &HtmlIR) -> Mar
                     }
                 }
             }
-        },
+        }
     }
 }
 
@@ -571,8 +625,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let tmp = tempdir().unwrap();
-            let store: Arc<dyn AssetStore> =
-                Arc::new(LocalFsAssetStore::new(tmp.path()));
+            let store: Arc<dyn AssetStore> = Arc::new(LocalFsAssetStore::new(tmp.path()));
             let renderer = HtmlRenderer::new(store);
             let bytes = renderer.render(&ir).await.unwrap();
             String::from_utf8(bytes).unwrap()
@@ -614,7 +667,10 @@ mod tests {
         let html = render_blocking(minimal_ir());
         // Check for the slide-counter *div element* — the CSS selector #slide-counter
         // is always present in the embedded theme CSS, so we test the HTML tag.
-        assert!(!html.contains("<div id=\"slide-counter\""), "should not include slide counter div");
+        assert!(
+            !html.contains("<div id=\"slide-counter\""),
+            "should not include slide counter div"
+        );
     }
 
     #[test]
@@ -622,13 +678,19 @@ mod tests {
         let mut ir = minimal_ir();
         ir["layout_mode"] = json!("slides");
         let html = render_blocking(ir);
-        assert!(html.contains("<div id=\"slide-counter\""), "should include slide counter div");
+        assert!(
+            html.contains("<div id=\"slide-counter\""),
+            "should include slide counter div"
+        );
     }
 
     #[test]
     fn no_chart_no_chartjs() {
         let html = render_blocking(minimal_ir());
-        assert!(!html.contains("Chart.register"), "Chart.js leaked when no chart");
+        assert!(
+            !html.contains("Chart.register"),
+            "Chart.js leaked when no chart"
+        );
     }
 
     #[test]
@@ -653,7 +715,10 @@ mod tests {
                      "underline":false,"code":false,"link":"https://example.com"}]
         }]);
         let html = render_blocking(ir);
-        assert!(html.contains(r#"href="https://example.com""#), "missing link: {html}");
+        assert!(
+            html.contains(r#"href="https://example.com""#),
+            "missing link: {html}"
+        );
     }
 
     #[test]

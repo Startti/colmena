@@ -1,6 +1,6 @@
+use crate::documents::domain::ir::{FooterConfig, Locale, SlideLayout, Theme};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use crate::documents::domain::ir::{FooterConfig, Locale, SlideLayout, Theme};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Patch {
@@ -271,7 +271,6 @@ pub enum PatchOp {
     },
 
     // -------- HTML — slide level --------
-
     /// Create a new slide. Returns generated slide_id in summary.
     #[serde(rename = "add_slide")]
     AddSlide {
@@ -318,7 +317,6 @@ pub enum PatchOp {
     },
 
     // -------- HTML — block level --------
-
     /// Insert a new block on a slide. Provide exactly one of before/after
     /// (a block_id) or neither (appends). Returns block_id in summary.
     #[serde(rename = "insert_html_block")]
@@ -353,7 +351,6 @@ pub enum PatchOp {
     },
 
     // -------- HTML — table --------
-
     #[serde(rename = "insert_html_table_row")]
     InsertHtmlTableRow {
         slide_id: String,
@@ -382,7 +379,6 @@ pub enum PatchOp {
     },
 
     // -------- HTML — list --------
-
     #[serde(rename = "insert_html_list_item")]
     InsertHtmlListItem {
         slide_id: String,
@@ -407,7 +403,6 @@ pub enum PatchOp {
     },
 
     // -------- HTML — document level --------
-
     #[serde(rename = "set_theme")]
     SetTheme { theme: Theme },
 

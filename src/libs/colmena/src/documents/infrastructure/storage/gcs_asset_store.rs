@@ -198,9 +198,10 @@ impl GcsAssetStore {
     }
 
     async fn find_session_for(&self, id: &AssetId) -> Result<SessionId, AssetError> {
-        let bytes = self.read_bytes(&self.index_key(id)).await.map_err(|_| {
-            AssetError::NotFound { id: id.clone() }
-        })?;
+        let bytes = self
+            .read_bytes(&self.index_key(id))
+            .await
+            .map_err(|_| AssetError::NotFound { id: id.clone() })?;
         let session_id: String = serde_json::from_slice(&bytes)
             .map_err(|e| AssetError::Storage(format!("parse index: {e}")))?;
         Ok(SessionId::new(session_id))
@@ -241,8 +242,8 @@ impl AssetStore for GcsAssetStore {
             label: label.map(|s| s.to_string()),
             created_at: Utc::now(),
         };
-        let meta_bytes = serde_json::to_vec(&meta)
-            .map_err(|e| AssetError::Storage(format!("ser meta: {e}")))?;
+        let meta_bytes =
+            serde_json::to_vec(&meta).map_err(|e| AssetError::Storage(format!("ser meta: {e}")))?;
         self.write(&self.meta_key(session, id), &meta_bytes, "application/json")
             .await?;
 
@@ -274,10 +275,7 @@ impl AssetStore for GcsAssetStore {
         Ok((bytes, meta.mime))
     }
 
-    async fn list_by_session(
-        &self,
-        session: &SessionId,
-    ) -> Result<Vec<AssetSummary>, AssetError> {
+    async fn list_by_session(&self, session: &SessionId) -> Result<Vec<AssetSummary>, AssetError> {
         let manifest = self.read_manifest(session).await?;
         let mut out = Vec::with_capacity(manifest.asset_ids.len());
         for id_str in manifest.asset_ids {
@@ -323,9 +321,7 @@ impl AssetStore for GcsAssetStore {
 
         // Remove from session manifest.
         let mut manifest = self.read_manifest(&session).await?;
-        manifest
-            .asset_ids
-            .retain(|a| a != id.as_str());
+        manifest.asset_ids.retain(|a| a != id.as_str());
         self.write_manifest(&session, &manifest).await?;
 
         Ok(())

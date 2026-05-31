@@ -119,10 +119,7 @@ mod tests {
                 blobs: vec![],
             })
         }
-        async fn list_versions(
-            &self,
-            _id: &ArtifactId,
-        ) -> Result<Vec<VersionId>, StorageError> {
+        async fn list_versions(&self, _id: &ArtifactId) -> Result<Vec<VersionId>, StorageError> {
             Ok(vec![])
         }
         async fn set_head(
@@ -173,10 +170,7 @@ mod tests {
         ) -> Result<Vec<ArtifactSummary>, IndexError> {
             Ok(self.0.clone())
         }
-        async fn lookup(
-            &self,
-            _id: &ArtifactId,
-        ) -> Result<Option<ArtifactSummary>, IndexError> {
+        async fn lookup(&self, _id: &ArtifactId) -> Result<Option<ArtifactSummary>, IndexError> {
             Ok(None)
         }
         async fn update_head(
@@ -216,8 +210,7 @@ mod tests {
             serde_json::json!({"assets_referenced": ["asset_ref"]}),
             "art_a",
         );
-        let index: Arc<dyn SessionArtifactIndex> =
-            Arc::new(StubIndex(vec![summary("art_a")]));
+        let index: Arc<dyn SessionArtifactIndex> = Arc::new(StubIndex(vec![summary("art_a")]));
         let uc = DeleteAssetUseCase {
             assets,
             artifacts,
@@ -242,12 +235,9 @@ mod tests {
             .upload(&SessionId::new("s1"), &id, b"x".to_vec(), "image/png", None)
             .await
             .unwrap();
-        let artifacts: Arc<dyn ArtifactStore> = StubArtifactStore::with(
-            serde_json::json!({"assets_referenced": []}),
-            "art_a",
-        );
-        let index: Arc<dyn SessionArtifactIndex> =
-            Arc::new(StubIndex(vec![summary("art_a")]));
+        let artifacts: Arc<dyn ArtifactStore> =
+            StubArtifactStore::with(serde_json::json!({"assets_referenced": []}), "art_a");
+        let index: Arc<dyn SessionArtifactIndex> = Arc::new(StubIndex(vec![summary("art_a")]));
         let uc = DeleteAssetUseCase {
             assets,
             artifacts,

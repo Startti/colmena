@@ -19,10 +19,7 @@ use tempfile::tempdir;
 struct NoopR;
 #[async_trait::async_trait]
 impl IRRenderer for NoopR {
-    async fn render(
-        &self,
-        _ir: &serde_json::Value,
-    ) -> Result<Vec<u8>, RenderError> {
+    async fn render(&self, _ir: &serde_json::Value) -> Result<Vec<u8>, RenderError> {
         Ok(vec![])
     }
     fn target_extension(&self) -> &'static str {
