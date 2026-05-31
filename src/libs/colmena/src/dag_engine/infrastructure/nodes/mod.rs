@@ -15,6 +15,7 @@ pub mod llm_synthetic_tools;
 pub mod loop_controller;
 pub mod math;
 pub mod orchestrator;
+pub mod output_parser;
 pub mod output;
 pub mod planner;
 pub mod python_node;
