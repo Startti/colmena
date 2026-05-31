@@ -66,6 +66,24 @@ pub fn parse_skill_md(content: &str, path: &str) -> Result<ParsedSkillMd, SkillE
 
     let yaml_str = &after_first[..end_idx];
 
+    // Migration safeguard: layered-tool-context was reverted. Reject SKILL.md files
+    // that still declare a top-level `node_type:` key — the field was introduced in that
+    // experiment and is now meaningless. Fail loudly so the user gets a clear message
+    // rather than silent data loss.
+    if yaml_str.lines().any(|l| {
+        let t = l.trim_start();
+        t.starts_with("node_type:") || t.starts_with("node_type :")
+    }) {
+        return Err(SkillError::InvalidFrontmatter {
+            path: path.to_string(),
+            reason: "deprecated 'node_type' frontmatter — the layered-tool-context feature \
+                     was reverted. Remove the node_type field from this SKILL.md. Skills are \
+                     now referenced explicitly from llm_call.skills \
+                     (see docs/developer_guide/24_skills.md)."
+                .to_string(),
+        });
+    }
+
     // Body: everything after the closing "---\n".
     let after_end = &after_first[end_idx..];
     // Skip the "---" line itself (plus its newline if present).
@@ -198,5 +216,18 @@ mod tests {
         let parsed = parse_skill_md(content, "p").unwrap();
         assert_eq!(parsed.name, "x");
         assert_eq!(parsed.description, "y");
+    }
+
+    #[test]
+    fn legacy_node_type_frontmatter_is_rejected_with_migration_error() {
+        let content = "---\nname: my-skill\ndescription: hi\nnode_type: sql_query\n---\nbody\n";
+        let err = parse_skill_md(content, "/skills/my-skill/SKILL.md")
+            .expect_err("must reject node_type frontmatter");
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("deprecated") && msg.contains("node_type"),
+            "expected migration error mentioning 'deprecated' and 'node_type', got: {}",
+            err
+        );
     }
 }
