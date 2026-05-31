@@ -5,12 +5,7 @@ use serde_json::{json, Value};
 use std::error::Error;
 use std::sync::Arc;
 
-use crate::llm::application::AgentService;
-use crate::llm::domain::{
-    ConversationKey, LlmConfig, LlmMessage, LlmProvider, NodeIdPath, ProviderKind, SessionId,
-};
-use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
-use crate::llm::infrastructure::LlmProviderFactory;
+use crate::llm::domain::ProviderKind;
 
 /// Default system prompt template for ExtractionNode.
 /// Uses `{user_instructions}` and `{schema}` as placeholders.
@@ -151,98 +146,24 @@ impl ExecutableNode for ExtractionNode {
             colmena_log!("═══════════════════════════════════════\n");
         }
 
-        // --- 4. Call LLM using AgentService ---
-        let provider = LlmProvider::new(provider_kind.clone(), api_key, model)?;
-        let mut llm_config = LlmConfig::new(provider);
-        // Force low temperature for extraction
-        llm_config = llm_config.with_temperature(0.1)?;
-
-        // Setup Ephemeral Environment for LLM
-        let llm_repo = LlmProviderFactory::create(provider_kind);
-        let conversation_repo = Arc::new(InMemoryConversationRepository::new());
-        let agent_service = AgentService::new(llm_repo, conversation_repo);
-
-        let tid_val = uuid::Uuid::new_v4().to_string();
-        let tid = ConversationKey {
-            session_id: SessionId(tid_val.clone()),
-            agent_session_id: None,
-            node_id: NodeIdPath(tid_val),
+        // --- 4 + 5. Call LLM and parse via shared helper ---
+        use crate::dag_engine::infrastructure::nodes::util::extract_with_schema::{
+            extract_with_schema, ExtractInput,
         };
-
-        let messages = vec![
-            LlmMessage::system(system_message)?,
-            LlmMessage::user(formatted_texts)?,
-        ];
-
-        // Define empty tool executor to satisfy AgentService
-        struct EmptyToolExecutor;
-        #[async_trait]
-        impl crate::llm::domain::ToolExecutor for EmptyToolExecutor {
-            async fn execute(
-                &self,
-                _tool_call: &crate::llm::domain::ToolCall,
-            ) -> Result<crate::llm::domain::ToolResult, crate::llm::domain::LlmError> {
-                Err(crate::llm::domain::LlmError::ToolExecutionFailed {
-                    message: "No tools available".into(),
-                })
-            }
-            async fn available_tools(&self) -> Vec<crate::llm::domain::ToolDefinition> {
-                vec![]
-            }
-        }
-        let empty_executor = EmptyToolExecutor;
-
-        let params = crate::llm::application::AgentRunParams {
-            session_id: &tid,
-            prompt: None, // messages already pre-populated
-            messages: Some(messages),
-            config: llm_config,
-            tools: vec![],
-            tool_executor: &empty_executor,
-            max_iterations: Some(1),
-            on_token: None,
-            tools_provider: None,
-            attachment_resolver: None,
-            agent_session_id: None,
-        };
-
-        let response = agent_service.run(params).await?;
-
-        // Notify observer of usage
-        if let Some(obs) = _observer.clone() {
-            if let Some(usage) = response.usage() {
-                use crate::dag_engine::domain::observer::NodeEvent;
-                obs.on_event(NodeEvent::LlmUsage {
-                    prompt_tokens: usage.prompt_tokens,
-                    completion_tokens: usage.completion_tokens,
-                    thinking_tokens: usage.thinking_tokens,
-                    cache_read_tokens: usage.cache_read_tokens,
-                    cache_write_tokens: usage.cache_write_tokens,
-                });
-            }
-        }
-
-        let output_content = response.content();
-
-        // --- 5. Parse and Validate LLM response as JSON ---
-        // Some models still wrap in markdown despite the prompt. Try to strip it.
-        let mut clean_json_str = output_content.trim();
-        if clean_json_str.starts_with("```json") {
-            clean_json_str = clean_json_str.trim_start_matches("```json");
-        } else if clean_json_str.starts_with("```") {
-            clean_json_str = clean_json_str.trim_start_matches("```");
-        }
-        if clean_json_str.ends_with("```") {
-            clean_json_str = clean_json_str.trim_end_matches("```");
-        }
-        clean_json_str = clean_json_str.trim();
-
-        let parsed_json: Value = serde_json::from_str(clean_json_str).map_err(|e| {
-            format!(
-                "Failed to parse LLM response as JSON: {}. Raw response: {}",
-                e, output_content
-            )
-        })?;
+        let empty_schema = json!({});
+        let parsed_json = extract_with_schema(ExtractInput {
+            provider_kind: provider_kind.clone(),
+            api_key: api_key.clone(),
+            model: model.clone(),
+            system_message: system_message.clone(),
+            user_text: formatted_texts.clone(),
+            // ExtractionNode does not validate against an inline schema; pass
+            // an empty schema object so the validator is a no-op.
+            inline_schema: &empty_schema,
+            temperature: Some(0.1),
+            observer: _observer.clone(),
+        })
+        .await?;
 
         if verbose {
             colmena_log!("\n═══════════════════════════════════════");
