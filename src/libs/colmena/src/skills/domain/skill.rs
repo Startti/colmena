@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 pub struct SkillReferenceMeta {
     pub name: String,
     pub description: String,
+    /// Nested sub-references declared in the reference file's own frontmatter.
+    /// Empty when this is a leaf or when the reference file has no frontmatter.
+    #[serde(default)]
+    pub references: Vec<SkillReferenceMeta>,
 }
 
 /// A loaded skill: name, description, body (markdown without frontmatter),
@@ -47,6 +51,7 @@ mod tests {
             references: vec![SkillReferenceMeta {
                 name: "frameworks".to_string(),
                 description: "Django and FastAPI".to_string(),
+                references: vec![],
             }],
             source: SkillSource::Builtin,
         };
@@ -65,5 +70,30 @@ mod tests {
             serde_json::to_string(&SkillSource::Path).unwrap(),
             "\"path\""
         );
+    }
+
+    #[test]
+    fn skill_reference_meta_supports_nested_references() {
+        let meta = SkillReferenceMeta {
+            name: "frameworks".into(),
+            description: "Web frameworks".into(),
+            references: vec![SkillReferenceMeta {
+                name: "django".into(),
+                description: "Django specifics".into(),
+                references: vec![],
+            }],
+        };
+        let s = serde_json::to_string(&meta).unwrap();
+        let back: SkillReferenceMeta = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.references.len(), 1);
+        assert_eq!(back.references[0].name, "django");
+    }
+
+    #[test]
+    fn skill_reference_meta_defaults_empty_references_when_missing() {
+        // Backward-compat: pre-recursion SKILL.md files had references without the nested field.
+        let yaml = r#"{"name":"foo","description":"bar"}"#;
+        let meta: SkillReferenceMeta = serde_json::from_str(yaml).unwrap();
+        assert!(meta.references.is_empty());
     }
 }

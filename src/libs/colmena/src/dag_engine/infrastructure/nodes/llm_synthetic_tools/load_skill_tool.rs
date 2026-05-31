@@ -52,7 +52,8 @@ again with the `reference` parameter to load that additional material.",
         ParameterProperty::new(
             "string".to_string(),
             "Optional name of a reference file within the skill. Only use after loading the \
-skill and seeing it declares this reference."
+skill and seeing it declares this reference. \
+To navigate nested references, separate names with '/'. Example: 'frameworks/django'."
                 .to_string(),
         ),
     );
@@ -217,6 +218,7 @@ mod tests {
                     references: vec![SkillReferenceMeta {
                         name: "frameworks".to_string(),
                         description: "Django + FastAPI".to_string(),
+                        references: vec![],
                     }],
                     source: SkillSource::Builtin,
                 }),

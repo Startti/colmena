@@ -55,6 +55,19 @@ pub enum SkillError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("reference depth exceeds max {max} in skill '{skill}' (path: {path})")]
+    ReferenceDepthExceeded {
+        skill: String,
+        max: u8,
+        path: String,
+    },
+
+    #[error("reference cycle detected in skill '{skill}': {cycle}")]
+    ReferenceCycle { skill: String, cycle: String },
+
+    #[error("invalid reference path '{path}': path must not be empty")]
+    InvalidReferencePath { path: String },
 }
 
 #[cfg(test)]

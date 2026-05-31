@@ -53,6 +53,7 @@ mod tests {
             references: vec![SkillReferenceMeta {
                 name: "r".to_string(),
                 description: "rd".to_string(),
+                references: vec![],
             }],
             source: SkillSource::Builtin,
         };

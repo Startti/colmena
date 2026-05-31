@@ -2,7 +2,9 @@ use crate::skills::domain::{
     Skill, SkillCatalogEntry, SkillError, SkillReference, SkillReferenceMeta, SkillRepository,
     SkillSource,
 };
-use crate::skills::infrastructure::frontmatter_parser::parse_skill_md;
+use crate::skills::infrastructure::frontmatter_parser::{
+    parse_reference_file_refs, parse_skill_md,
+};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,6 +25,94 @@ struct SkillEntry {
     canonical_dir: PathBuf,
     description: String,
     references: Vec<SkillReferenceMeta>,
+}
+
+/// Maximum nesting depth for skill references (inclusive). A chain of exactly
+/// `MAX_REFERENCE_DEPTH` hops from the skill root is allowed; depth + 1 is rejected.
+const MAX_REFERENCE_DEPTH: u8 = 5;
+
+/// Build the fully-nested `SkillReferenceMeta` tree starting from the flat list of
+/// direct references declared in SKILL.md.
+///
+/// Each entry triggers a recursive walk that reads the corresponding
+/// `<skill_dir>/references/<name>.md` file, parses its sub-references, and recurses.
+/// Cycle detection and a maximum depth of [`MAX_REFERENCE_DEPTH`] are enforced.
+fn build_nested_references(
+    skill_dir: &Path,
+    flat: Vec<SkillReferenceMeta>,
+    skill_name: &str,
+) -> Result<Vec<SkillReferenceMeta>, SkillError> {
+    let mut out = Vec::with_capacity(flat.len());
+    for meta in flat {
+        let visited = vec![meta.name.clone()];
+        let m = build_reference_recursive(
+            skill_dir,
+            &meta.name,
+            &meta.description,
+            skill_name,
+            visited,
+            1, // direct sub of skill = depth 1
+        )?;
+        out.push(m);
+    }
+    Ok(out)
+}
+
+fn build_reference_recursive(
+    skill_dir: &Path,
+    name: &str,
+    description: &str,
+    skill_name: &str,
+    visited: Vec<String>,
+    depth: u8,
+) -> Result<SkillReferenceMeta, SkillError> {
+    if depth > MAX_REFERENCE_DEPTH {
+        return Err(SkillError::ReferenceDepthExceeded {
+            skill: skill_name.to_string(),
+            max: MAX_REFERENCE_DEPTH,
+            path: visited.join(" → "),
+        });
+    }
+
+    let ref_path = skill_dir.join("references").join(format!("{name}.md"));
+    if !ref_path.exists() {
+        return Err(SkillError::ReferenceFileMissing {
+            skill: skill_name.to_string(),
+            path: ref_path.display().to_string(),
+        });
+    }
+    let content = std::fs::read_to_string(&ref_path).map_err(|e| SkillError::Io {
+        path: ref_path.display().to_string(),
+        source: e,
+    })?;
+
+    let nested_flat = parse_reference_file_refs(&content, &ref_path.display().to_string())?;
+    let mut nested = Vec::with_capacity(nested_flat.len());
+    for sub in nested_flat {
+        if visited.iter().any(|v| v == &sub.name) {
+            return Err(SkillError::ReferenceCycle {
+                skill: skill_name.to_string(),
+                cycle: format!("{} → {}", visited.join(" → "), sub.name),
+            });
+        }
+        let mut sub_visited = visited.clone();
+        sub_visited.push(sub.name.clone());
+        let sub_meta = build_reference_recursive(
+            skill_dir,
+            &sub.name,
+            &sub.description,
+            skill_name,
+            sub_visited,
+            depth + 1,
+        )?;
+        nested.push(sub_meta);
+    }
+
+    Ok(SkillReferenceMeta {
+        name: name.to_string(),
+        description: description.to_string(),
+        references: nested,
+    })
 }
 
 impl FilesystemSkillRepository {
@@ -179,12 +269,16 @@ impl FilesystemSkillRepository {
             return Err(SkillError::SkillNameCollision { name: parsed.name });
         }
 
+        // Recursively populate nested references from each reference file's frontmatter.
+        let nested_references =
+            build_nested_references(canonical, parsed.references, &parsed.name)?;
+
         skills.insert(
             parsed.name.clone(),
             SkillEntry {
                 canonical_dir: canonical.to_path_buf(),
                 description: parsed.description,
-                references: parsed.references,
+                references: nested_references,
             },
         );
         Ok(())
@@ -221,7 +315,9 @@ impl SkillRepository for FilesystemSkillRepository {
             name: parsed.name,
             description: parsed.description,
             body: parsed.body,
-            references: parsed.references,
+            // Use the already-populated nested reference tree (built at load time from each
+            // reference file's frontmatter) rather than the flat list from SKILL.md alone.
+            references: entry.references.clone(),
             source: SkillSource::Path,
         })
     }
@@ -236,26 +332,47 @@ impl SkillRepository for FilesystemSkillRepository {
             .get(skill_name)
             .ok_or_else(|| SkillError::SkillNotFound(skill_name.to_string()))?;
 
-        // Verify reference is declared.
-        let declared = entry.references.iter().any(|r| r.name == reference_name);
-        if !declared {
-            let available = entry
-                .references
-                .iter()
-                .map(|r| r.name.clone())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(SkillError::ReferenceNotDeclared {
-                skill: skill_name.to_string(),
-                reference: reference_name.to_string(),
-                available,
+        // Split the path into segments (e.g. "fw/django" → ["fw", "django"]).
+        let segments: Vec<&str> = reference_name
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+        if segments.is_empty() {
+            return Err(SkillError::InvalidReferencePath {
+                path: reference_name.to_string(),
             });
         }
 
+        // Walk the declared reference tree to validate every segment.
+        // The tree was built recursively at load time, so we can follow sub-references.
+        let mut current_level: &[SkillReferenceMeta] = &entry.references;
+        for seg in &segments {
+            match current_level.iter().find(|r| r.name == *seg) {
+                Some(meta) => {
+                    current_level = &meta.references;
+                }
+                None => {
+                    let available = entry
+                        .references
+                        .iter()
+                        .map(|r| r.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(SkillError::ReferenceNotDeclared {
+                        skill: skill_name.to_string(),
+                        reference: reference_name.to_string(),
+                        available,
+                    });
+                }
+            }
+        }
+
+        // All segments declared. Open the LEAF file (final segment).
+        let leaf = segments.last().unwrap();
         let ref_path = entry
             .canonical_dir
             .join("references")
-            .join(format!("{}.md", reference_name));
+            .join(format!("{leaf}.md"));
         let body = std::fs::read_to_string(&ref_path).map_err(|e| SkillError::Io {
             path: ref_path.display().to_string(),
             source: e,
@@ -661,5 +778,197 @@ mod tests {
             SkillError::SkillNameCollision { name } => assert_eq!(name, "dup"),
             other => panic!("expected SkillNameCollision, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn reference_file_can_declare_nested_references() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("python-expert");
+        std::fs::create_dir_all(skill_dir.join("references")).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: python-expert\ndescription: Python expertise\nreferences:\n  - name: frameworks\n    description: Web frameworks\n---\nBody.\n",
+        ).unwrap();
+        std::fs::write(
+            skill_dir.join("references/frameworks.md"),
+            "---\nreferences:\n  - name: django\n    description: Django specifics\n  - name: fastapi\n    description: FastAPI specifics\n---\nFrameworks overview.\n",
+        ).unwrap();
+        std::fs::write(skill_dir.join("references/django.md"), "Django body").unwrap();
+        std::fs::write(skill_dir.join("references/fastapi.md"), "FastAPI body").unwrap();
+
+        let repo = FilesystemSkillRepository::from_paths(
+            &[skill_dir.to_string_lossy().into_owned()],
+            tmp.path(),
+            &[],
+        )
+        .unwrap();
+
+        let skill = repo.load_skill("python-expert").await.unwrap();
+        let fw = skill
+            .references
+            .iter()
+            .find(|r| r.name == "frameworks")
+            .expect("frameworks present");
+        assert_eq!(
+            fw.references.len(),
+            2,
+            "frameworks must declare 2 nested refs (django, fastapi); got {:?}",
+            fw.references
+        );
+        let names: Vec<&str> = fw.references.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"django"));
+        assert!(names.contains(&"fastapi"));
+    }
+
+    #[tokio::test]
+    async fn reference_cycle_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("looping");
+        std::fs::create_dir_all(skill_dir.join("references")).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: looping\ndescription: x\nreferences:\n  - name: a\n    description: \"\"\n---\nbody",
+        ).unwrap();
+        std::fs::write(
+            skill_dir.join("references/a.md"),
+            "---\nreferences:\n  - name: b\n    description: \"\"\n---\nbody a",
+        )
+        .unwrap();
+        std::fs::write(
+            skill_dir.join("references/b.md"),
+            "---\nreferences:\n  - name: a\n    description: \"\"\n---\nbody b",
+        )
+        .unwrap();
+        let err = FilesystemSkillRepository::from_paths(
+            &[skill_dir.to_string_lossy().into_owned()],
+            tmp.path(),
+            &[],
+        )
+        .unwrap_err();
+        let msg = err.to_string().to_lowercase();
+        assert!(msg.contains("cycle"), "expected cycle error, got: {}", err);
+    }
+
+    #[tokio::test]
+    async fn reference_depth_over_5_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("deep");
+        std::fs::create_dir_all(skill_dir.join("references")).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: deep\ndescription: x\nreferences:\n  - name: a\n    description: \"\"\n---\nbody",
+        ).unwrap();
+        // chain a → b → c → d → e → f (depth 6 from skill root)
+        for (this, next) in [("a", "b"), ("b", "c"), ("c", "d"), ("d", "e"), ("e", "f")] {
+            std::fs::write(
+                skill_dir.join(format!("references/{this}.md")),
+                format!("---\nreferences:\n  - name: {next}\n    description: \"\"\n---\nbody"),
+            )
+            .unwrap();
+        }
+        std::fs::write(skill_dir.join("references/f.md"), "leaf").unwrap();
+        let err = FilesystemSkillRepository::from_paths(
+            &[skill_dir.to_string_lossy().into_owned()],
+            tmp.path(),
+            &[],
+        )
+        .unwrap_err();
+        let msg = err.to_string().to_lowercase();
+        assert!(msg.contains("depth"), "expected depth error, got: {}", err);
+    }
+
+    #[tokio::test]
+    async fn load_reference_navigates_nested_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("py");
+        std::fs::create_dir_all(skill_dir.join("references")).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: py\ndescription: x\nreferences:\n  - name: fw\n    description: x\n---\nbody",
+        ).unwrap();
+        std::fs::write(
+            skill_dir.join("references/fw.md"),
+            "---\nreferences:\n  - name: django\n    description: x\n---\nFrameworks overview.",
+        )
+        .unwrap();
+        std::fs::write(skill_dir.join("references/django.md"), "Django body").unwrap();
+
+        let repo = FilesystemSkillRepository::from_paths(
+            &[skill_dir.to_string_lossy().into_owned()],
+            tmp.path(),
+            &[],
+        )
+        .unwrap();
+        let r = repo
+            .load_reference("py", "fw/django")
+            .await
+            .expect("should resolve nested");
+        assert!(r.body.contains("Django body"), "got body: {}", r.body);
+        assert_eq!(r.reference_name, "fw/django");
+    }
+
+    #[tokio::test]
+    async fn load_reference_rejects_undeclared_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("py");
+        std::fs::create_dir_all(skill_dir.join("references")).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: py\ndescription: x\nreferences:\n  - name: fw\n    description: x\n---\nbody",
+        ).unwrap();
+        // fw.md has no frontmatter declaring "django" as a sub-reference
+        std::fs::write(skill_dir.join("references/fw.md"), "leaf").unwrap();
+        // django.md exists on disk but is NOT declared by fw.md
+        std::fs::write(skill_dir.join("references/django.md"), "Django body").unwrap();
+
+        let repo = FilesystemSkillRepository::from_paths(
+            &[skill_dir.to_string_lossy().into_owned()],
+            tmp.path(),
+            &[],
+        )
+        .unwrap();
+        let err = repo
+            .load_reference("py", "fw/django")
+            .await
+            .expect_err("must reject undeclared path");
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("not found")
+                || msg.contains("undeclared")
+                || msg.contains("invalid")
+                || msg.contains("declare"),
+            "expected NotFound/Undeclared/Invalid/Declare error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn reference_depth_exactly_5_is_allowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("just-deep-enough");
+        std::fs::create_dir_all(skill_dir.join("references")).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: just-deep-enough\ndescription: x\nreferences:\n  - name: a\n    description: \"\"\n---\nbody",
+        ).unwrap();
+        // chain a → b → c → d → e (depth 5 — boundary, should be OK)
+        for (this, next) in [("a", "b"), ("b", "c"), ("c", "d"), ("d", "e")] {
+            std::fs::write(
+                skill_dir.join(format!("references/{this}.md")),
+                format!("---\nreferences:\n  - name: {next}\n    description: \"\"\n---\nbody"),
+            )
+            .unwrap();
+        }
+        std::fs::write(skill_dir.join("references/e.md"), "leaf").unwrap();
+        let repo = FilesystemSkillRepository::from_paths(
+            &[skill_dir.to_string_lossy().into_owned()],
+            tmp.path(),
+            &[],
+        )
+        .expect("depth 5 is OK");
+        assert!(repo
+            .list_available()
+            .iter()
+            .any(|e| e.name == "just-deep-enough"));
     }
 }

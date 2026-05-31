@@ -160,7 +160,46 @@ impl SkillRepository for BuiltinSkillRepository {
             .skills
             .get(skill_name)
             .ok_or_else(|| SkillError::SkillNotFound(skill_name.to_string()))?;
-        let body = entry.reference_bodies.get(reference_name).ok_or_else(|| {
+
+        // Split the path into segments (e.g. "fw/django" → ["fw", "django"]).
+        let segments: Vec<&str> = reference_name
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+        if segments.is_empty() {
+            return Err(SkillError::InvalidReferencePath {
+                path: reference_name.to_string(),
+            });
+        }
+
+        // Walk the declared reference tree to validate every segment.
+        // Built-in skills store flat references (no recursive nesting at load time),
+        // so nested paths will correctly fail validation here.
+        let mut current_level: &[SkillReferenceMeta] = &entry.references;
+        for seg in &segments {
+            match current_level.iter().find(|r| r.name == *seg) {
+                Some(meta) => {
+                    current_level = &meta.references;
+                }
+                None => {
+                    let available = entry
+                        .references
+                        .iter()
+                        .map(|r| r.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(SkillError::ReferenceNotDeclared {
+                        skill: skill_name.to_string(),
+                        reference: reference_name.to_string(),
+                        available,
+                    });
+                }
+            }
+        }
+
+        // All segments declared. Look up the LEAF body (final segment) by its name.
+        let leaf = segments.last().unwrap();
+        let body = entry.reference_bodies.get(*leaf).ok_or_else(|| {
             let available = entry
                 .references
                 .iter()

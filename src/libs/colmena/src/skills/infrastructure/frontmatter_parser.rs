@@ -16,6 +16,73 @@ struct RawReference {
     description: String,
 }
 
+/// Frontmatter that may optionally appear in a `references/<name>.md` file.
+/// Only `references:` is significant — name and description come from the parent SKILL.md.
+#[derive(Debug, Deserialize, Default)]
+struct RawReferenceFrontmatter {
+    #[serde(default)]
+    references: Vec<RawReference>,
+}
+
+/// Parse optional YAML frontmatter from a reference file and return the list of
+/// sub-reference declarations. Returns an empty list when the file has no frontmatter.
+///
+/// Unlike `parse_skill_md`, the frontmatter here is optional: if the file does not
+/// start with `---\n` the function silently returns `(vec![], content)`.
+/// Malformed YAML in an existing frontmatter block is propagated as an error.
+pub fn parse_reference_file_refs(
+    content: &str,
+    path: &str,
+) -> Result<Vec<RawReferenceMeta>, SkillError> {
+    if !content.starts_with("---\n") && !content.starts_with("---\r\n") {
+        return Ok(vec![]);
+    }
+
+    let after_first = content
+        .strip_prefix("---\r\n")
+        .unwrap_or_else(|| &content[4..]);
+
+    let mut end_idx: Option<usize> = None;
+    let mut offset = 0usize;
+    for line in after_first.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(&['\r', '\n'][..]);
+        if trimmed == "---" {
+            end_idx = Some(offset);
+            break;
+        }
+        offset += line.len();
+    }
+
+    // No closing delimiter — treat as plain file without frontmatter.
+    let Some(end_idx) = end_idx else {
+        return Ok(vec![]);
+    };
+
+    let yaml_str = &after_first[..end_idx];
+    let raw: RawReferenceFrontmatter =
+        serde_yaml::from_str(yaml_str).map_err(|e| SkillError::InvalidFrontmatter {
+            path: path.to_string(),
+            reason: format!("{}", e),
+        })?;
+
+    Ok(raw
+        .references
+        .into_iter()
+        .map(|r| RawReferenceMeta {
+            name: r.name,
+            description: r.description,
+        })
+        .collect())
+}
+
+/// Flat reference metadata returned from reference file frontmatter parsing.
+/// Callers are responsible for recursing into sub-references.
+#[derive(Debug)]
+pub struct RawReferenceMeta {
+    pub name: String,
+    pub description: String,
+}
+
 /// Result of parsing a SKILL.md file: extracted fields and the body
 /// (markdown content after the closing `---`).
 #[derive(Debug, PartialEq, Eq)]
@@ -123,6 +190,7 @@ pub fn parse_skill_md(content: &str, path: &str) -> Result<ParsedSkillMd, SkillE
             .map(|r| SkillReferenceMeta {
                 name: r.name,
                 description: r.description,
+                references: vec![],
             })
             .collect(),
         body,
