@@ -303,6 +303,58 @@ impl LlmNode {
             .collect()
     }
 
+    /// Resolve the full list of skill names visible to this LLM call by unioning
+    /// the explicit `skills` array with all SKILL.md directories found under
+    /// `skills_path` / `skills_paths`. Deduped by name.
+    ///
+    /// - `skills: [...]` — plain array of skill names (existing explicit form)
+    /// - `skills_path: "<dir>"` — scan that directory; each immediate subdir
+    ///   containing a `SKILL.md` contributes its directory name as a skill name
+    /// - `skills_paths: [...]` — same semantics for multiple directories
+    ///
+    /// Missing `skills_path` directory → hard error.
+    /// Empty directory (no SKILL.md subdirs) → contributes nothing, no error.
+    pub async fn resolve_skill_names(config: &Value) -> Result<Vec<String>, String> {
+        // Read explicit `skills` array (flat list of names).
+        let explicit: Vec<String> = config
+            .get("skills")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut all = std::collections::BTreeSet::<String>::new();
+        for name in explicit {
+            all.insert(name);
+        }
+
+        // Collect all directory paths from skills_path + skills_paths.
+        let mut paths: Vec<String> = config
+            .get("skills_paths")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(single) = config.get("skills_path").and_then(|v| v.as_str()) {
+            paths.push(single.to_string());
+        }
+
+        for path in paths {
+            let names = list_skills_in_path(&path).await?;
+            for name in names {
+                all.insert(name);
+            }
+        }
+
+        Ok(all.into_iter().collect())
+    }
+
     /// Build a SkillRepository from the parsed config. Returns `None` if no skills are configured.
     /// Returns `Err(String)` on any validation failure — this must abort graph execution.
     fn build_skill_repository_from_config(
@@ -311,11 +363,36 @@ impl LlmNode {
     ) -> Result<Option<Arc<dyn SkillRepository>>, String> {
         let raw_val = inputs.get("skills").or_else(|| config.get("skills"));
 
-        let skills_config = match raw_val {
+        let mut skills_config = match raw_val {
             Some(v) => SkillsConfig::from_value(v)
                 .map_err(|e| format!("invalid 'skills' config: {}", e))?,
             None => SkillsConfig::default(),
         };
+
+        // Expand skills_path / skills_paths into individual skill-dir paths.
+        // Each is a parent directory; every immediate subdir containing SKILL.md
+        // becomes an additional entry in skills_config.paths.
+        {
+            let mut extra_roots: Vec<String> = config
+                .get("skills_paths")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(single) = config.get("skills_path").and_then(|v| v.as_str()) {
+                extra_roots.push(single.to_string());
+            }
+            for root in &extra_roots {
+                let skill_dirs = list_skill_dirs_sync(root)
+                    .map_err(|e| format!("skills_path '{}' not readable: {}", root, e))?;
+                for dir in skill_dirs {
+                    skills_config.paths.push(dir);
+                }
+            }
+        }
 
         // If there's nothing to load (no builtins, no paths), short-circuit.
         if skills_config.builtin.is_empty() && skills_config.paths.is_empty() {
@@ -2405,6 +2482,55 @@ impl ExecutableNode for LlmNode {
     }
 }
 
+// ---------------------------------------------------------------------------
+// skills_path / skills_paths helpers
+// ---------------------------------------------------------------------------
+
+/// Scan `path` (a parent directory) and return the names of every immediate
+/// subdirectory that contains a `SKILL.md` file.
+///
+/// - Missing `path` → `Err(String)` (hard error)
+/// - Exists but no skill subdirs → `Ok(vec![])` (no error)
+async fn list_skills_in_path(path: &str) -> Result<Vec<String>, String> {
+    let mut out = vec![];
+    let mut rd = tokio::fs::read_dir(path)
+        .await
+        .map_err(|e| format!("skills_path '{}' not readable: {}", path, e))?;
+    while let Some(entry) = rd
+        .next_entry()
+        .await
+        .map_err(|e| format!("reading entry in '{}': {}", path, e))?
+    {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        if entry.path().join("SKILL.md").exists() {
+            if let Some(name) = entry.file_name().to_str() {
+                out.push(name.to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Synchronous counterpart to [`list_skills_in_path`] — used inside the
+/// (sync) `build_skill_repository_from_config` function to expand a parent
+/// directory into individual skill-dir absolute paths.
+///
+/// Returns the full absolute path to each immediate subdir that contains
+/// `SKILL.md`. Missing `path` → `Err`.
+fn list_skill_dirs_sync(path: &str) -> Result<Vec<String>, std::io::Error> {
+    let mut out = vec![];
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let ep = entry.path();
+        if ep.is_dir() && ep.join("SKILL.md").exists() {
+            out.push(ep.to_string_lossy().into_owned());
+        }
+    }
+    Ok(out)
+}
+
 /// Returns the SQLite `connection_url` if the node config declares one
 /// (e.g. `"connection_url": "sqlite:./mem.db"`); otherwise `None`. Used for
 /// the AttachmentRegistry fallback when `DATABASE_URL` is unset. The same
@@ -3711,5 +3837,144 @@ mod filter_enabled_tools_tests {
         let out = filter_enabled_tools(api_explorer_catalog(), Some(&enabled), &configured);
 
         assert!(out.is_empty(), "expected empty result, got {:?}", out);
+    }
+}
+
+#[cfg(test)]
+mod skills_path_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn resolves_skills_path_single_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("hello")).unwrap();
+        std::fs::write(
+            tmp.path().join("hello/SKILL.md"),
+            "---\nname: hello\ndescription: hi\n---\nbody",
+        )
+        .unwrap();
+
+        let cfg = json!({
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "api_key": "test",
+            "skills_path": tmp.path().to_str().unwrap(),
+        });
+        let resolved = LlmNode::resolve_skill_names(&cfg).await.unwrap();
+        assert!(resolved.iter().any(|n| n == "hello"), "got: {:?}", resolved);
+    }
+
+    #[tokio::test]
+    async fn resolves_skills_paths_plural() {
+        let tmp1 = tempfile::tempdir().unwrap();
+        let tmp2 = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp1.path().join("a")).unwrap();
+        std::fs::write(
+            tmp1.path().join("a/SKILL.md"),
+            "---\nname: a\ndescription: x\n---\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(tmp2.path().join("b")).unwrap();
+        std::fs::write(
+            tmp2.path().join("b/SKILL.md"),
+            "---\nname: b\ndescription: x\n---\n",
+        )
+        .unwrap();
+
+        let cfg = json!({
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "api_key": "test",
+            "skills_paths": [tmp1.path().to_str().unwrap(), tmp2.path().to_str().unwrap()],
+        });
+        let resolved = LlmNode::resolve_skill_names(&cfg).await.unwrap();
+        assert!(
+            resolved.iter().any(|n| n == "a"),
+            "missing 'a' in {:?}",
+            resolved
+        );
+        assert!(
+            resolved.iter().any(|n| n == "b"),
+            "missing 'b' in {:?}",
+            resolved
+        );
+    }
+
+    #[tokio::test]
+    async fn unions_skills_array_with_skills_path_dedup() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("from-path")).unwrap();
+        std::fs::write(
+            tmp.path().join("from-path/SKILL.md"),
+            "---\nname: from-path\ndescription: x\n---\n",
+        )
+        .unwrap();
+        // also create a duplicate that's also in `skills:`
+        std::fs::create_dir_all(tmp.path().join("dup")).unwrap();
+        std::fs::write(
+            tmp.path().join("dup/SKILL.md"),
+            "---\nname: dup\ndescription: x\n---\n",
+        )
+        .unwrap();
+
+        let cfg = json!({
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "api_key": "test",
+            "skills": ["builtin-name", "dup"],
+            "skills_path": tmp.path().to_str().unwrap(),
+        });
+        let resolved = LlmNode::resolve_skill_names(&cfg).await.unwrap();
+        assert!(
+            resolved.contains(&"builtin-name".to_string()),
+            "missing builtin-name in {:?}",
+            resolved
+        );
+        assert!(
+            resolved.contains(&"from-path".to_string()),
+            "missing from-path in {:?}",
+            resolved
+        );
+        assert!(
+            resolved.contains(&"dup".to_string()),
+            "missing dup in {:?}",
+            resolved
+        );
+        // dedup: dup should appear exactly once
+        let count = resolved.iter().filter(|n| n.as_str() == "dup").count();
+        assert_eq!(count, 1, "dup should appear once; got: {:?}", resolved);
+    }
+
+    #[tokio::test]
+    async fn skills_path_missing_returns_error() {
+        let cfg = json!({
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "api_key": "test",
+            "skills_path": "/nonexistent/path/abc123xyz",
+        });
+        let err = LlmNode::resolve_skill_names(&cfg).await.unwrap_err();
+        assert!(
+            err.contains("not readable") || err.contains("nonexistent") || err.contains("No such"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn skills_path_empty_directory_returns_empty_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = json!({
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "api_key": "test",
+            "skills_path": tmp.path().to_str().unwrap(),
+        });
+        let resolved = LlmNode::resolve_skill_names(&cfg).await.unwrap();
+        assert!(
+            resolved.is_empty(),
+            "expected empty list, got: {:?}",
+            resolved
+        );
     }
 }
