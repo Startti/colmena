@@ -305,33 +305,20 @@ impl LlmNode {
 
     /// Build a SkillRepository from the parsed config. Returns `None` if no skills are configured.
     /// Returns `Err(String)` on any validation failure — this must abort graph execution.
-    ///
-    /// `tool_configurations` is used to auto-derive the builtin load list: any skill name listed
-    /// in `tool_configurations.<alias>.skills` that exists in the compiled-in builtin pool is
-    /// automatically added to `skills_config.builtin`, so operators no longer need to duplicate
-    /// the name in both `tool_configurations.<X>.skills` AND `llm_call.skills.builtin`.
     fn build_skill_repository_from_config(
         config: &Value,
         inputs: &NodeInputs,
-        tool_configurations: &HashMap<String, ToolConfiguration>,
     ) -> Result<Option<Arc<dyn SkillRepository>>, String> {
         let raw_val = inputs.get("skills").or_else(|| config.get("skills"));
 
-        // We need to run auto-derive even when `skills` config is absent, because
-        // the operator may have declared only `tool_configurations.<X>.skills` without
-        // any explicit `skills` block.
         let skills_config = match raw_val {
             Some(v) => SkillsConfig::from_value(v)
                 .map_err(|e| format!("invalid 'skills' config: {}", e))?,
             None => SkillsConfig::default(),
         };
 
-        // Auto-derive: augment the explicit builtin list with any name listed in
-        // tool_configurations.*.skills that exists in the compiled-in pool.
-        let augmented_builtin = augment_builtin_names(&skills_config.builtin, tool_configurations);
-
         // If there's nothing to load (no builtins, no paths), short-circuit.
-        if augmented_builtin.is_empty() && skills_config.paths.is_empty() {
+        if skills_config.builtin.is_empty() && skills_config.paths.is_empty() {
             return Ok(None);
         }
 
@@ -348,7 +335,7 @@ impl LlmNode {
         let allowed = Self::parse_allowed_dirs_env();
 
         let builtin: Arc<dyn SkillRepository> = Arc::new(
-            BuiltinSkillRepository::new(&augmented_builtin)
+            BuiltinSkillRepository::new(&skills_config.builtin)
                 .map_err(|e| format!("loading builtin skills: {}", e))?,
         );
         let filesystem: Arc<dyn SkillRepository> = Arc::new(
@@ -1445,11 +1432,8 @@ impl ExecutableNode for LlmNode {
             tool_configurations.keys().cloned().collect();
 
         // Build skill repository (if configured).
-        // tool_configurations is passed so that any skill name listed in
-        // tool_configurations.<alias>.skills that exists in the builtin pool is
-        // automatically loaded — no need to duplicate it in skills.builtin.
         let skill_repo: Option<Arc<dyn SkillRepository>> =
-            Self::build_skill_repository_from_config(config, inputs, &tool_configurations)?;
+            Self::build_skill_repository_from_config(config, inputs)?;
 
         // Track skills loaded across the entire node execution (for summary).
         let skills_used_log: Arc<std::sync::Mutex<Vec<SkillLoadedLogEntry>>> =
@@ -3729,3 +3713,4 @@ mod filter_enabled_tools_tests {
         assert!(out.is_empty(), "expected empty result, got {:?}", out);
     }
 }
+
