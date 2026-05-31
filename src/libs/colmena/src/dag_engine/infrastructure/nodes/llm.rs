@@ -3713,4 +3713,3 @@ mod filter_enabled_tools_tests {
         assert!(out.is_empty(), "expected empty result, got {:?}", out);
     }
 }
-

@@ -186,7 +186,6 @@ pub struct ToolConfiguration {
     /// in the `describe_tool` catalog. No effect when lazy_tool_loading is disabled.
     #[serde(default)]
     pub eager: bool,
-
 }
 
 impl ToolConfiguration {
@@ -1014,5 +1013,4 @@ mod tests {
             "error must mention items: {err}"
         );
     }
-
 }

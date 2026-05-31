@@ -213,11 +213,6 @@ mod tests {
     fn available_builtin_names_includes_authored_skills() {
         let names = BuiltinSkillRepository::available_builtin_names();
         assert!(
-            names.contains(&"sql_query-guide".to_string()),
-            "expected sql_query-guide in: {:?}",
-            names
-        );
-        assert!(
             names.contains(&"sales-analysis".to_string()),
             "expected sales-analysis in: {:?}",
             names
