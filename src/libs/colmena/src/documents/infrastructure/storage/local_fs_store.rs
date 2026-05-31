@@ -124,6 +124,7 @@ impl ArtifactStore for LocalFsStore {
             rendered_extension: match meta.kind {
                 crate::documents::domain::ArtifactKind::Excel => "xlsx",
                 crate::documents::domain::ArtifactKind::Word => "docx",
+                crate::documents::domain::ArtifactKind::Html => "html",
             },
             patch_applied,
             blobs: Vec::new(),

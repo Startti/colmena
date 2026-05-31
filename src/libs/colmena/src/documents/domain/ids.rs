@@ -65,11 +65,30 @@ impl fmt::Display for SessionId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AssetId(pub String);
+
+impl AssetId {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for AssetId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ArtifactKind {
     Excel,
     Word,
+    Html,
 }
 
 impl ArtifactKind {
@@ -77,6 +96,7 @@ impl ArtifactKind {
         match self {
             ArtifactKind::Excel => "xlsx",
             ArtifactKind::Word => "docx",
+            ArtifactKind::Html => "html",
         }
     }
     pub fn mime(&self) -> &'static str {
@@ -87,6 +107,7 @@ impl ArtifactKind {
             ArtifactKind::Word => {
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             }
+            ArtifactKind::Html => "text/html; charset=utf-8",
         }
     }
 }
@@ -113,5 +134,35 @@ mod tests {
     fn artifact_kind_extension() {
         assert_eq!(ArtifactKind::Excel.extension(), "xlsx");
         assert_eq!(ArtifactKind::Word.extension(), "docx");
+    }
+
+    #[test]
+    fn artifact_kind_html_extension_and_mime() {
+        assert_eq!(ArtifactKind::Html.extension(), "html");
+        assert_eq!(ArtifactKind::Html.mime(), "text/html; charset=utf-8");
+    }
+
+    #[test]
+    fn artifact_kind_html_serde_roundtrip() {
+        let k = ArtifactKind::Html;
+        let s = serde_json::to_string(&k).unwrap();
+        assert_eq!(s, "\"html\"");
+        let back: ArtifactKind = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, ArtifactKind::Html);
+    }
+
+    #[test]
+    fn asset_id_construction_and_display() {
+        let a = AssetId::new("asset_abc123");
+        assert_eq!(a.as_str(), "asset_abc123");
+        assert_eq!(a.to_string(), "asset_abc123");
+    }
+
+    #[test]
+    fn asset_id_serde_roundtrip() {
+        let a = AssetId::new("asset_xyz");
+        let s = serde_json::to_string(&a).unwrap();
+        let back: AssetId = serde_json::from_str(&s).unwrap();
+        assert_eq!(a, back);
     }
 }

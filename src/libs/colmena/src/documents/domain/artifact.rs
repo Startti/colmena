@@ -80,6 +80,8 @@ pub struct AssignedIds {
     pub table: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sheet: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slide: Option<String>,
 }
 
 impl AssignedIds {
@@ -90,6 +92,7 @@ impl AssignedIds {
             && self.rows.is_empty()
             && self.table.is_none()
             && self.sheet.is_none()
+            && self.slide.is_none()
     }
 }
 

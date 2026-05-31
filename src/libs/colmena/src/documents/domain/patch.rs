@@ -1,3 +1,4 @@
+use crate::documents::domain::ir::{FooterConfig, Locale, SlideLayout, Theme};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -268,6 +269,157 @@ pub enum PatchOp {
         col_index: u32,
         runs: Vec<serde_json::Value>,
     },
+
+    // -------- HTML — slide level --------
+    /// Create a new slide. Returns generated slide_id in summary.
+    #[serde(rename = "add_slide")]
+    AddSlide {
+        layout: SlideLayout,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_index: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subtitle: Option<String>,
+    },
+
+    /// Delete a slide by id.
+    #[serde(rename = "delete_slide")]
+    DeleteSlide { slide_id: String },
+
+    /// Reorder slides. Pass the FULL list of slide_ids in desired order.
+    #[serde(rename = "reorder_slides")]
+    ReorderSlides { order: Vec<String> },
+
+    /// Change a slide's layout. SectionDivider/Title require non-empty title.
+    #[serde(rename = "set_slide_layout")]
+    SetSlideLayout {
+        slide_id: String,
+        layout: SlideLayout,
+    },
+
+    /// Set/clear a slide's title slot (independent of blocks).
+    #[serde(rename = "set_slide_title")]
+    SetSlideTitle {
+        slide_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subtitle: Option<String>,
+    },
+
+    /// Set/clear speaker notes on a slide.
+    #[serde(rename = "set_slide_notes")]
+    SetSlideNotes {
+        slide_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notes: Option<String>,
+    },
+
+    // -------- HTML — block level --------
+    /// Insert a new block on a slide. Provide exactly one of before/after
+    /// (a block_id) or neither (appends). Returns block_id in summary.
+    #[serde(rename = "insert_html_block")]
+    InsertHtmlBlock {
+        slide_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+        /// Block JSON (type-tagged). ID assigned server-side.
+        block: serde_json::Value,
+    },
+
+    /// Delete a block from a slide.
+    #[serde(rename = "delete_html_block")]
+    DeleteHtmlBlock { slide_id: String, block_id: String },
+
+    /// Replace a block's contents preserving its id.
+    #[serde(rename = "replace_html_block")]
+    ReplaceHtmlBlock {
+        slide_id: String,
+        block_id: String,
+        block: serde_json::Value,
+    },
+
+    /// Move a block within the same slide to appear after another block.
+    #[serde(rename = "move_html_block")]
+    MoveHtmlBlock {
+        slide_id: String,
+        block_id: String,
+        after_block_id: String,
+    },
+
+    // -------- HTML — table --------
+    #[serde(rename = "insert_html_table_row")]
+    InsertHtmlTableRow {
+        slide_id: String,
+        table_block_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+        cells: Vec<serde_json::Value>,
+    },
+
+    #[serde(rename = "delete_html_table_row")]
+    DeleteHtmlTableRow {
+        slide_id: String,
+        table_block_id: String,
+        row_id: String,
+    },
+
+    #[serde(rename = "update_html_table_cell")]
+    UpdateHtmlTableCell {
+        slide_id: String,
+        table_block_id: String,
+        row_id: String,
+        col_index: u32,
+        cell: serde_json::Value,
+    },
+
+    // -------- HTML — list --------
+    #[serde(rename = "insert_html_list_item")]
+    InsertHtmlListItem {
+        slide_id: String,
+        list_block_id: String,
+        at_index: u32,
+        runs: Vec<serde_json::Value>,
+    },
+
+    #[serde(rename = "delete_html_list_item")]
+    DeleteHtmlListItem {
+        slide_id: String,
+        list_block_id: String,
+        item_id: String,
+    },
+
+    #[serde(rename = "update_html_list_item")]
+    UpdateHtmlListItem {
+        slide_id: String,
+        list_block_id: String,
+        item_id: String,
+        runs: Vec<serde_json::Value>,
+    },
+
+    // -------- HTML — document level --------
+    #[serde(rename = "set_theme")]
+    SetTheme { theme: Theme },
+
+    #[serde(rename = "set_doc_props")]
+    SetDocProps {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        date: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locale: Option<Locale>,
+    },
+
+    #[serde(rename = "set_footer")]
+    SetFooter { footer: FooterConfig },
 }
 
 #[cfg(test)]
@@ -320,5 +472,105 @@ mod tests {
         let j = serde_json::to_string(&p).unwrap();
         let back: Patch = serde_json::from_str(&j).unwrap();
         assert_eq!(back.ops.len(), 1);
+    }
+
+    #[test]
+    fn add_slide_op_serializes() {
+        let op = PatchOp::AddSlide {
+            layout: crate::documents::domain::ir::SlideLayout::Title,
+            at_index: None,
+            title: Some("Q3".into()),
+            subtitle: None,
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(v["op"], "add_slide");
+        assert_eq!(v["layout"], "title");
+    }
+
+    #[test]
+    fn reorder_slides_serializes() {
+        let op = PatchOp::ReorderSlides {
+            order: vec!["sl_1".into(), "sl_2".into()],
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(v["op"], "reorder_slides");
+    }
+
+    #[test]
+    fn set_slide_notes_clearing() {
+        let op = PatchOp::SetSlideNotes {
+            slide_id: "sl_1".into(),
+            notes: None,
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(v["op"], "set_slide_notes");
+    }
+
+    #[test]
+    fn insert_html_block_serializes() {
+        let op = PatchOp::InsertHtmlBlock {
+            slide_id: "sl_1".into(),
+            before: None,
+            after: None,
+            block: serde_json::json!({"kind": "paragraph", "runs": []}),
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(v["op"], "insert_html_block");
+    }
+
+    #[test]
+    fn insert_html_table_row_serializes() {
+        let op = PatchOp::InsertHtmlTableRow {
+            slide_id: "sl_1".into(),
+            table_block_id: "blk_t".into(),
+            before: Some("row_5".into()),
+            after: None,
+            cells: vec![serde_json::json!({"type":"text","value":"A"})],
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(v["op"], "insert_html_table_row");
+    }
+
+    #[test]
+    fn update_html_list_item_serializes() {
+        let op = PatchOp::UpdateHtmlListItem {
+            slide_id: "sl_1".into(),
+            list_block_id: "blk_l".into(),
+            item_id: "li_3".into(),
+            runs: vec![],
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(v["op"], "update_html_list_item");
+    }
+
+    #[test]
+    fn set_theme_uses_enum() {
+        let op = PatchOp::SetTheme {
+            theme: Theme::Vibrant,
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(v["op"], "set_theme");
+        assert_eq!(v["theme"], "vibrant");
+    }
+
+    #[test]
+    fn set_theme_invalid_string_fails_deserialize() {
+        let bad = serde_json::json!({"op": "set_theme", "theme": "rainbow"});
+        let r: Result<PatchOp, _> = serde_json::from_value(bad);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn set_footer_serializes() {
+        let op = PatchOp::SetFooter {
+            footer: FooterConfig {
+                enabled: true,
+                page_numbers: true,
+                custom_text: Some("Confidential".into()),
+            },
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(v["op"], "set_footer");
+        assert_eq!(v["footer"]["page_numbers"], true);
     }
 }

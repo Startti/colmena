@@ -14,13 +14,13 @@ use std::sync::Arc;
 
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
+use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::load_skill_tool::{
+    build_load_skill_tool_definition_with_catalog, filter_visible_skills,
+};
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
     build_all_document_tools, build_describe_tool_definition, reconstruct_discovered_set,
     summary_for_catalog, CatalogEntry, DescribeToolDispatchResult, DocumentToolsContext,
     ATTACHMENTS_SYSTEM_PRELUDE, DOCUMENTS_SYSTEM_PRELUDE, LOAD_SKILL_TOOL_NAME,
-};
-use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::load_skill_tool::{
-    build_load_skill_tool_definition_with_catalog, filter_visible_skills,
 };
 use crate::documents::application::DocumentRuntime;
 use crate::documents::domain::ids::SessionId as DocSessionId;
@@ -1464,12 +1464,11 @@ impl ExecutableNode for LlmNode {
         // `free_standing_names` are skills registered on the llm_call node
         // directly (layer 3): every skill in the repo catalog whose name does
         // NOT appear in any tool's `skills` list and has no `node_type`.
-        let scoped_by_tool: std::collections::HashMap<String, Vec<String>> =
-            tool_configurations
-                .iter()
-                .filter(|(_, cfg)| !cfg.skills.is_empty())
-                .map(|(name, cfg)| (name.clone(), cfg.skills.clone()))
-                .collect();
+        let scoped_by_tool: std::collections::HashMap<String, Vec<String>> = tool_configurations
+            .iter()
+            .filter(|(_, cfg)| !cfg.skills.is_empty())
+            .map(|(name, cfg)| (name.clone(), cfg.skills.clone()))
+            .collect();
 
         let free_standing_names: Vec<String> = {
             let all_scoped: std::collections::HashSet<&str> = scoped_by_tool
@@ -1497,11 +1496,8 @@ impl ExecutableNode for LlmNode {
             // Collect all skill names explicitly listed in the llm_call-level skills
             // config block (builtin + any loaded from filesystem paths). The full
             // catalog from list_available() is the authoritative set of those names.
-            let llm_call_skill_names: Vec<String> = repo
-                .list_available()
-                .into_iter()
-                .map(|e| e.name)
-                .collect();
+            let llm_call_skill_names: Vec<String> =
+                repo.list_available().into_iter().map(|e| e.name).collect();
             validate_skill_wiring(&tool_configurations, &llm_call_skill_names, repo.as_ref())
                 .map_err(|e| format!("skill wiring error: {}", e))?;
         }
@@ -2115,11 +2111,8 @@ impl ExecutableNode for LlmNode {
                         // Per-request load_skill rebuild with layer 1/2/3 rules.
                         if let Some(repo) = &closure_skill_repo {
                             let full_catalog = repo.list_available();
-                            let tool_scoped: Vec<String> = closure_scoped_by_tool
-                                .values()
-                                .flatten()
-                                .cloned()
-                                .collect();
+                            let tool_scoped: Vec<String> =
+                                closure_scoped_by_tool.values().flatten().cloned().collect();
                             let filtered = filter_visible_skills(
                                 &full_catalog,
                                 &tool_scoped,
@@ -3996,7 +3989,9 @@ mod validation_tests {
     //! Tests written before the function exists — expect compile failure (RED).
     use super::validate_skill_wiring;
     use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
-    use crate::skills::domain::{Skill, SkillCatalogEntry, SkillError, SkillReference, SkillRepository, SkillSource};
+    use crate::skills::domain::{
+        Skill, SkillCatalogEntry, SkillError, SkillReference, SkillRepository, SkillSource,
+    };
     use async_trait::async_trait;
     use std::collections::HashMap;
 
@@ -4072,7 +4067,10 @@ mod validation_tests {
         ]);
         let tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
         let result = validate_skill_wiring(&tool_cfgs, &[], &repo);
-        assert!(result.is_err(), "expected error for duplicate node_type guides");
+        assert!(
+            result.is_err(),
+            "expected error for duplicate node_type guides"
+        );
         let msg = result.unwrap_err();
         assert!(
             msg.contains("sql_query"),
@@ -4089,7 +4087,10 @@ mod validation_tests {
         tool_cfgs.insert("x".to_string(), make_tool_cfg("x", vec!["does-not-exist"]));
 
         let result = validate_skill_wiring(&tool_cfgs, &[], &repo);
-        assert!(result.is_err(), "expected error for unknown skill reference");
+        assert!(
+            result.is_err(),
+            "expected error for unknown skill reference"
+        );
         let msg = result.unwrap_err();
         assert!(
             msg.contains("does-not-exist"),
@@ -4101,17 +4102,15 @@ mod validation_tests {
     #[test]
     fn validation_rejects_node_type_guide_referenced_as_scoped() {
         // A skill with node_type set must NOT be in tool.skills.
-        let repo = MockSkillRepo::with_entries(vec![
-            entry("sql_query-guide", Some("sql_query")),
-        ]);
+        let repo = MockSkillRepo::with_entries(vec![entry("sql_query-guide", Some("sql_query"))]);
         let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
-        tool_cfgs.insert(
-            "x".to_string(),
-            make_tool_cfg("x", vec!["sql_query-guide"]),
-        );
+        tool_cfgs.insert("x".to_string(), make_tool_cfg("x", vec!["sql_query-guide"]));
 
         let result = validate_skill_wiring(&tool_cfgs, &[], &repo);
-        assert!(result.is_err(), "expected error when node-type guide used as scoped skill");
+        assert!(
+            result.is_err(),
+            "expected error when node-type guide used as scoped skill"
+        );
         let msg = result.unwrap_err();
         assert!(
             msg.contains("sql_query-guide"),
@@ -4139,7 +4138,11 @@ mod validation_tests {
         );
 
         let result = validate_skill_wiring(&tool_cfgs, &[], &repo);
-        assert!(result.is_ok(), "expected Ok for valid config, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "expected Ok for valid config, got: {:?}",
+            result
+        );
     }
 }
 
@@ -4180,10 +4183,7 @@ mod augment_builtin_names_tests {
 
     #[test]
     fn explicit_list_preserved_when_no_tool_cfgs() {
-        let result = augment_builtin_names(
-            &["sql_query-guide".to_string()],
-            &HashMap::new(),
-        );
+        let result = augment_builtin_names(&["sql_query-guide".to_string()], &HashMap::new());
         assert_eq!(result, vec!["sql_query-guide".to_string()]);
     }
 
@@ -4193,7 +4193,10 @@ mod augment_builtin_names_tests {
         // but did NOT list it in skills.builtin. It should be auto-added because
         // "sales-analysis" exists in the builtin pool.
         let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
-        tool_cfgs.insert("analyze_sales".to_string(), make_tool_cfg(vec!["sales-analysis"]));
+        tool_cfgs.insert(
+            "analyze_sales".to_string(),
+            make_tool_cfg(vec!["sales-analysis"]),
+        );
 
         let result = augment_builtin_names(&[], &tool_cfgs);
         assert!(
@@ -4207,17 +4210,23 @@ mod augment_builtin_names_tests {
     fn explicit_plus_auto_derived_merge_without_duplicates() {
         // sql_query-guide in explicit list, sales-analysis only in tool.skills.
         let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
-        tool_cfgs.insert("analyze_sales".to_string(), make_tool_cfg(vec!["sales-analysis"]));
-
-        let result = augment_builtin_names(
-            &["sql_query-guide".to_string()],
-            &tool_cfgs,
+        tool_cfgs.insert(
+            "analyze_sales".to_string(),
+            make_tool_cfg(vec!["sales-analysis"]),
         );
+
+        let result = augment_builtin_names(&["sql_query-guide".to_string()], &tool_cfgs);
         assert!(result.contains(&"sql_query-guide".to_string()));
         assert!(result.contains(&"sales-analysis".to_string()));
         // Each name appears exactly once.
-        let count_sql = result.iter().filter(|n| n.as_str() == "sql_query-guide").count();
-        let count_sales = result.iter().filter(|n| n.as_str() == "sales-analysis").count();
+        let count_sql = result
+            .iter()
+            .filter(|n| n.as_str() == "sql_query-guide")
+            .count();
+        let count_sales = result
+            .iter()
+            .filter(|n| n.as_str() == "sales-analysis")
+            .count();
         assert_eq!(count_sql, 1, "sql_query-guide must appear exactly once");
         assert_eq!(count_sales, 1, "sales-analysis must appear exactly once");
     }
@@ -4228,12 +4237,16 @@ mod augment_builtin_names_tests {
         let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
         tool_cfgs.insert("x".to_string(), make_tool_cfg(vec!["sales-analysis"]));
 
-        let result = augment_builtin_names(
-            &["sales-analysis".to_string()],
-            &tool_cfgs,
+        let result = augment_builtin_names(&["sales-analysis".to_string()], &tool_cfgs);
+        let count = result
+            .iter()
+            .filter(|n| n.as_str() == "sales-analysis")
+            .count();
+        assert_eq!(
+            count, 1,
+            "sales-analysis must not be duplicated; got: {:?}",
+            result
         );
-        let count = result.iter().filter(|n| n.as_str() == "sales-analysis").count();
-        assert_eq!(count, 1, "sales-analysis must not be duplicated; got: {:?}", result);
     }
 
     #[test]
@@ -4255,12 +4268,25 @@ mod augment_builtin_names_tests {
     fn multiple_tools_with_overlapping_skills_deduped() {
         // Two tools both reference "expense-analysis" — should appear once.
         let mut tool_cfgs: HashMap<String, ToolConfiguration> = HashMap::new();
-        tool_cfgs.insert("tool_a".to_string(), make_tool_cfg(vec!["expense-analysis"]));
-        tool_cfgs.insert("tool_b".to_string(), make_tool_cfg(vec!["expense-analysis"]));
+        tool_cfgs.insert(
+            "tool_a".to_string(),
+            make_tool_cfg(vec!["expense-analysis"]),
+        );
+        tool_cfgs.insert(
+            "tool_b".to_string(),
+            make_tool_cfg(vec!["expense-analysis"]),
+        );
 
         let result = augment_builtin_names(&[], &tool_cfgs);
-        let count = result.iter().filter(|n| n.as_str() == "expense-analysis").count();
-        assert_eq!(count, 1, "expense-analysis must appear exactly once; got: {:?}", result);
+        let count = result
+            .iter()
+            .filter(|n| n.as_str() == "expense-analysis")
+            .count();
+        assert_eq!(
+            count, 1,
+            "expense-analysis must appear exactly once; got: {:?}",
+            result
+        );
     }
 
     #[test]

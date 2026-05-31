@@ -1568,7 +1568,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new()
+                skills: Vec::new(),
             },
         );
 
@@ -1613,7 +1613,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new()
+                skills: Vec::new(),
             },
         );
 
@@ -1660,7 +1660,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new()
+                skills: Vec::new(),
             },
         );
 
@@ -1710,7 +1710,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new()
+                skills: Vec::new(),
             },
         );
 
@@ -1766,7 +1766,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new()
+                skills: Vec::new(),
             },
         );
 
@@ -1819,7 +1819,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new()
+                skills: Vec::new(),
             },
         );
 
@@ -1869,7 +1869,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new()
+                skills: Vec::new(),
             },
         );
 
@@ -1928,7 +1928,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new()
+                skills: Vec::new(),
             },
         );
 
@@ -1999,7 +1999,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new()
+                skills: Vec::new(),
             },
         );
 
@@ -2058,7 +2058,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new()
+                skills: Vec::new(),
             },
         );
 
@@ -2125,7 +2125,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new()
+                skills: Vec::new(),
             },
         );
 
@@ -2220,7 +2220,7 @@ mod tests {
             expose_sub_tools: None,
             summary: None,
             eager: false,
-                skills: Vec::new()
+            skills: Vec::new(),
         };
         let executor =
             DagToolExecutor::new(registry, HashMap::new()).with_describe_tool_lookup(vec![cfg]);
@@ -2260,7 +2260,7 @@ mod tests {
             expose_sub_tools: None,
             summary: None,
             eager: false,
-                skills: Vec::new()
+            skills: Vec::new(),
         };
 
         let observed: Arc<std::sync::Mutex<Vec<String>>> =
@@ -2318,7 +2318,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
-                skills: Vec::new()
+                skills: Vec::new(),
             },
         );
 
@@ -2460,10 +2460,7 @@ mod tests {
             serde_json::json!({ "inputs": {} })
         }
 
-        fn tool_description_supplement(
-            &self,
-            _fixed_config: &Value,
-        ) -> Option<String> {
+        fn tool_description_supplement(&self, _fixed_config: &Value) -> Option<String> {
             Some("SELECT is allowed. Schemas: public. Max rows: 100.".to_string())
         }
     }
@@ -2481,7 +2478,10 @@ mod tests {
 
         fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
             let mut m = HashMap::new();
-            m.insert("sql_query".to_string(), Arc::new(SqlLikeNode) as Arc<dyn ExecutableNode>);
+            m.insert(
+                "sql_query".to_string(),
+                Arc::new(SqlLikeNode) as Arc<dyn ExecutableNode>,
+            );
             m
         }
     }
@@ -2550,8 +2550,7 @@ mod tests {
                 .expect("sql_query-guide must be a known built-in skill"),
         );
 
-        let executor = DagToolExecutor::new(registry, tool_configurations)
-            .with_skills(skill_repo);
+        let executor = DagToolExecutor::new(registry, tool_configurations).with_skills(skill_repo);
 
         let tools = executor.available_tools().await;
         let t = tools.iter().find(|t| t.name == "query_db").unwrap();
@@ -2635,7 +2634,7 @@ mod toolkit_runtime_tests {
                 expose_sub_tools: Some(SubToolFilter::all()),
                 summary: None,
                 eager: false,
-                skills: Vec::new()
+                skills: Vec::new(),
             },
         );
         DagToolExecutor::new(registry, configs)
@@ -2719,7 +2718,7 @@ mod toolkit_runtime_tests {
                 expose_sub_tools: Some(SubToolFilter::List(vec!["echo".to_string()])),
                 summary: None,
                 eager: false,
-                skills: Vec::new()
+                skills: Vec::new(),
             },
         );
         let exec = DagToolExecutor::new(registry, configs);

@@ -17,33 +17,15 @@ use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use crate::dag_engine::infrastructure::nodes::util::attachment_id::build_document_id;
-use crate::llm::domain::attachments::{
-    origin, AttachmentSource, AttachmentStreamResolver, UpsertAttachmentInput,
-};
+use crate::llm::domain::attachments::{origin, AttachmentSource, UpsertAttachmentInput};
 use crate::llm::domain::{AttachmentRegistry, ProviderKind};
 use crate::storage::domain::{OutputStorageRepository, StoreRequest};
-use futures::StreamExt;
-
-/// Hard cap on bytes drained from a resolved `$attachment` stream into memory
-/// before editing. Mirrors `http_request`'s fetch cap. Overridable via
-/// `COLMENA_FILE_FETCH_MAX_BYTES`; defaults to 100 MB.
-fn max_source_bytes() -> usize {
-    std::env::var("COLMENA_FILE_FETCH_MAX_BYTES")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(100 * 1024 * 1024)
-}
 
 pub struct ImageEditNode {
     storage: Arc<dyn OutputStorageRepository>,
     http: reqwest::Client,
     secure_values: Option<Arc<SecureValueService>>,
     attachment_registry: Option<Arc<dyn AttachmentRegistry>>,
-    /// Plan A: resolves `$attachment:<document_id>` (or a bare `document_id`)
-    /// in `source_url` to bytes via the conversation attachment catalog. Wired
-    /// from the registry alongside `http_request`'s resolver. When absent, only
-    /// `data:` / `http(s)` / storage-handle sources work.
-    attachment_resolver: Option<Arc<dyn AttachmentStreamResolver>>,
     #[cfg(test)]
     test_openai_base_url: Option<String>,
 }
@@ -55,7 +37,6 @@ impl ImageEditNode {
             http: reqwest::Client::new(),
             secure_values: None,
             attachment_registry: None,
-            attachment_resolver: None,
             #[cfg(test)]
             test_openai_base_url: None,
         }
@@ -68,15 +49,6 @@ impl ImageEditNode {
 
     pub fn with_attachment_registry(mut self, reg: Arc<dyn AttachmentRegistry>) -> Self {
         self.attachment_registry = Some(reg);
-        self
-    }
-
-    /// Plan A: wire the resolver that turns `$attachment:<document_id>` (or a
-    /// bare `document_id`) in `source_url` into bytes, so the LLM can edit an
-    /// image generated or uploaded earlier in the conversation without ever
-    /// handling a signed URL.
-    pub fn with_attachment_resolver(mut self, resolver: Arc<dyn AttachmentStreamResolver>) -> Self {
-        self.attachment_resolver = Some(resolver);
         self
     }
 
@@ -102,104 +74,6 @@ impl ImageEditNode {
         } else {
             Ok(value.to_string())
         }
-    }
-
-    /// Resolve a `source_url`/`mask_url` to bytes, in priority order:
-    ///
-    /// 1. `$attachment:<document_id>` → resolve via the attachment catalog
-    ///    (Plan A). This is what `image_generation`/`image_edit` instruct the
-    ///    LLM to use to chain a previously-generated or uploaded image.
-    /// 2. A known scheme (`data:`, `http(s)`, `local://`, `chat-attachments/`)
-    ///    → fetch directly via [`Self::fetch_image`].
-    /// 3. A bare token that is none of the above (e.g. a raw `document_id`
-    ///    like `img_image_0` the LLM passed without the `$attachment:` prefix)
-    ///    → attempt catalog resolution when a resolver is configured.
-    ///
-    /// Returns `(bytes, mime_type)`.
-    async fn resolve_source(
-        &self,
-        url: &str,
-        agent_session_id: Option<&str>,
-    ) -> Result<(Vec<u8>, String), Box<dyn StdError + Send + Sync>> {
-        if let Some(document_id) = url.strip_prefix("$attachment:") {
-            return self
-                .resolve_via_attachment(document_id, agent_session_id)
-                .await;
-        }
-        if url.starts_with("local://")
-            || url.starts_with("chat-attachments/")
-            || url.starts_with("data:")
-            || url.starts_with("http://")
-            || url.starts_with("https://")
-        {
-            return self.fetch_image(url).await;
-        }
-        // Bare token — most likely a `document_id` the LLM forwarded without
-        // the `$attachment:` prefix. Try the catalog resolver (its raw-key
-        // fallback also covers a bare storage_key).
-        if self.attachment_resolver.is_some() {
-            return self.resolve_via_attachment(url, agent_session_id).await;
-        }
-        Err(format!(
-            "image_edit: unsupported source '{url}' (expected $attachment:<document_id>, a \
-             document_id, a data: URI, or an http(s) URL)"
-        )
-        .into())
-    }
-
-    /// Resolve a `document_id` (or raw storage_key, via the resolver's
-    /// fallback) to bytes through the [`AttachmentStreamResolver`], draining
-    /// the stream into memory with a defensive size cap.
-    async fn resolve_via_attachment(
-        &self,
-        document_id: &str,
-        agent_session_id: Option<&str>,
-    ) -> Result<(Vec<u8>, String), Box<dyn StdError + Send + Sync>> {
-        let resolver = self.attachment_resolver.as_ref().ok_or_else(
-            || -> Box<dyn StdError + Send + Sync> {
-                format!(
-                    "image_edit: source references attachment '{document_id}' but no attachment \
-                     resolver is configured on this engine"
-                )
-                .into()
-            },
-        )?;
-        let sid = agent_session_id.ok_or_else(|| -> Box<dyn StdError + Send + Sync> {
-            format!(
-                "image_edit: cannot resolve attachment '{document_id}' without an \
-                 agent_session_id (this conversation has no stable session handle)"
-            )
-            .into()
-        })?;
-
-        let stored = resolver
-            .resolve(sid, document_id)
-            .await
-            .map_err(|e| -> Box<dyn StdError + Send + Sync> { e.to_string().into() })?;
-
-        let mime = stored.mime_type.clone();
-        let cap = max_source_bytes();
-        let mut buf: Vec<u8> = Vec::with_capacity((stored.size_bytes as usize).min(cap));
-        let mut stream = stored.stream;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| -> Box<dyn StdError + Send + Sync> {
-                format!("image_edit: error reading attachment '{document_id}' stream: {e}").into()
-            })?;
-            if buf.len() + chunk.len() > cap {
-                return Err(format!(
-                    "image_edit: attachment '{document_id}' exceeds the {cap}-byte source cap"
-                )
-                .into());
-            }
-            buf.extend_from_slice(&chunk);
-        }
-        if buf.is_empty() {
-            return Err(format!(
-                "image_edit: attachment '{document_id}' resolved to an empty body"
-            )
-            .into());
-        }
-        Ok((buf, mime))
     }
 
     /// Fetch image bytes from a `data:` URI, `http(s)` URL, or `local://<key>`
@@ -385,11 +259,9 @@ impl ExecutableNode for ImageEditNode {
             });
 
         // Fetch source (and optional mask) bytes.
-        let (source_bytes, source_mime) = self
-            .resolve_source(&source_url, agent_session_id.as_deref())
-            .await?;
+        let (source_bytes, source_mime) = self.fetch_image(&source_url).await?;
         let mask = if let Some(m) = &mask_url {
-            Some(self.resolve_source(m, agent_session_id.as_deref()).await?)
+            Some(self.fetch_image(m).await?)
         } else {
             None
         };
@@ -561,8 +433,8 @@ impl ExecutableNode for ImageEditNode {
                 "provider": "string (required) — openai (only supported today)",
                 "model": "string (optional, default gpt-image-1)",
                 "api_key": "string (required) — ${ENV_VAR} or secure-value placeholders supported",
-                "source_url": "string (required) — image to edit. Accepts \"$attachment:<document_id>\" or a bare document_id (to edit an image generated/uploaded earlier in this conversation), a data: URI, or an http(s) URL",
-                "mask_url": "string (optional) — PNG with transparency marking the edit area. Same accepted forms as source_url",
+                "source_url": "string (required) — data: URI or http(s) URL of the image to edit",
+                "mask_url": "string (optional) — PNG with transparency marking the edit area",
                 "prompt": "string (required) — describes the desired edit",
                 "size": "string (optional)",
                 "quality": "string (optional, openai) — low|medium|high|auto",
@@ -573,10 +445,8 @@ impl ExecutableNode for ImageEditNode {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Edit an existing image given a text prompt. The source image (`source_url`) \
-             can be \"$attachment:<document_id>\" or a bare document_id to edit an image \
-             generated or uploaded earlier in this conversation, or a data:/http(s) URL. \
-             Optional mask marks the edit region. Returns \
+            "Edit an existing image given a text prompt. Source image is fetched from a \
+             URL (data: or http(s)). Optional mask marks the edit region. Returns \
              { images: [{ document_id, mime_type, size_bytes }], provider, model } \
              — same shape as image_generation so results can be chained. Use \
              \"$attachment:<document_id>\" in downstream tool args to forward the \
@@ -1000,222 +870,5 @@ mod tests {
             "Plan B removed the attachment_id legacy alias"
         );
         assert!(img.get("url").is_none(), "Plan B removed the url field");
-    }
-
-    // ---- Fase 1: $attachment / document_id source resolution -----------------
-
-    /// Build a single-chunk `StoredStream` for the resolver's mock storage.
-    fn make_stored_stream(body: &'static [u8], mime: &str) -> crate::storage::domain::StoredStream {
-        use crate::storage::domain::{StorageError, StoredStream};
-        use bytes::Bytes;
-        use futures::stream;
-        use std::pin::Pin;
-        let s: Pin<Box<dyn futures::Stream<Item = Result<Bytes, StorageError>> + Send>> =
-            Box::pin(stream::iter(vec![Ok(Bytes::from_static(body))]));
-        StoredStream {
-            stream: s,
-            size_bytes: body.len() as u64,
-            mime_type: mime.to_string(),
-            filename: "src.png".to_string(),
-        }
-    }
-
-    /// Build a resolver backed by a Sqlite registry pre-seeded with one row
-    /// (`document_id` → `storage_key`) and a mock storage that streams `body`
-    /// for that key.
-    async fn resolver_with_source(
-        agent_session_id: &str,
-        document_id: &str,
-        storage_key: &str,
-        body: &'static [u8],
-    ) -> Arc<dyn AttachmentStreamResolver> {
-        use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
-        use crate::llm::infrastructure::attachments::AttachmentStreamResolverImpl;
-        use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
-
-        let reg = SqliteAttachmentRegistry::new("sqlite::memory:")
-            .await
-            .unwrap();
-        reg.upsert(UpsertAttachmentInput {
-            agent_session_id: agent_session_id.to_string(),
-            document_id: document_id.to_string(),
-            provider: ProviderKind::Generated,
-            provider_file_id: storage_key.to_string(),
-            mime_type: "image/png".to_string(),
-            filename: "src.png".to_string(),
-            size_bytes: Some(body.len() as u64),
-            label: None,
-            description: None,
-            source: AttachmentSource::Path(storage_key.to_string()),
-            storage_key: Some(storage_key.to_string()),
-            origin: Some("generated_by:image_generation".to_string()),
-        })
-        .await
-        .unwrap();
-        let reg_arc: Arc<dyn AttachmentRegistry> = Arc::new(reg);
-
-        let key = storage_key.to_string();
-        let mut resolver_storage = MockOutputStorageRepository::new();
-        resolver_storage
-            .expect_read_stream()
-            .withf(move |k| k == key)
-            .times(1)
-            .returning(move |_| Ok(make_stored_stream(body, "image/png")));
-
-        Arc::new(AttachmentStreamResolverImpl::new(
-            reg_arc,
-            Arc::new(resolver_storage),
-        ))
-    }
-
-    /// Mounts a mock OpenAI `/v1/images/edits` returning one image.
-    async fn mount_edits(server: &MockServer) {
-        Mock::given(method("POST"))
-            .and(path("/v1/images/edits"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": [{ "b64_json": "AAAA" }]
-            })))
-            .mount(server)
-            .await;
-    }
-
-    #[tokio::test]
-    async fn source_attachment_placeholder_resolves_and_edits() {
-        let server = MockServer::start().await;
-        mount_edits(&server).await;
-
-        let mut node_storage = MockOutputStorageRepository::new();
-        node_storage
-            .expect_store()
-            .times(1)
-            .returning(|_| Ok(stored_ok("sk-out")));
-
-        let resolver =
-            resolver_with_source("agent_edit_src", "img_src", "sk-src", b"\x89PNG").await;
-
-        let node = ImageEditNode::new(Arc::new(node_storage))
-            .with_openai_base_url(server.uri())
-            .with_attachment_resolver(resolver);
-
-        let mut inputs: NodeInputs = HashMap::new();
-        inputs.insert("__colmena_agent_session_id".into(), json!("agent_edit_src"));
-
-        let out = node
-            .execute(
-                &inputs,
-                &base_config("$attachment:img_src"),
-                &mut json!({}),
-                None,
-            )
-            .await
-            .expect("execute ok with $attachment source");
-
-        let images = out
-            .pointer("/output/images")
-            .and_then(|v| v.as_array())
-            .expect("images array");
-        assert_eq!(images.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn source_bare_document_id_resolves_via_resolver() {
-        let server = MockServer::start().await;
-        mount_edits(&server).await;
-
-        let mut node_storage = MockOutputStorageRepository::new();
-        node_storage
-            .expect_store()
-            .times(1)
-            .returning(|_| Ok(stored_ok("sk-out")));
-
-        // Source passed WITHOUT the `$attachment:` prefix — a bare document_id.
-        let resolver = resolver_with_source("agent_bare", "img_bare", "sk-bare", b"\x89PNG").await;
-
-        let node = ImageEditNode::new(Arc::new(node_storage))
-            .with_openai_base_url(server.uri())
-            .with_attachment_resolver(resolver);
-
-        let mut inputs: NodeInputs = HashMap::new();
-        inputs.insert("__colmena_agent_session_id".into(), json!("agent_bare"));
-
-        let out = node
-            .execute(&inputs, &base_config("img_bare"), &mut json!({}), None)
-            .await
-            .expect("execute ok with bare document_id source");
-        assert_eq!(
-            out.pointer("/output/images")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len()),
-            Some(1)
-        );
-    }
-
-    #[tokio::test]
-    async fn source_attachment_not_found_errors_clearly() {
-        use crate::llm::infrastructure::attachments::AttachmentStreamResolverImpl;
-        use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
-        use crate::storage::domain::StorageError;
-
-        // Empty registry + storage that rejects the fallback raw-key read.
-        let reg = SqliteAttachmentRegistry::new("sqlite::memory:")
-            .await
-            .unwrap();
-        let reg_arc: Arc<dyn AttachmentRegistry> = Arc::new(reg);
-        let mut resolver_storage = MockOutputStorageRepository::new();
-        resolver_storage
-            .expect_read_stream()
-            .returning(|_| Err(StorageError::InvalidInput("unknown key".into())));
-        let resolver: Arc<dyn AttachmentStreamResolver> = Arc::new(
-            AttachmentStreamResolverImpl::new(reg_arc, Arc::new(resolver_storage)),
-        );
-
-        // No OpenAI mock and no store() expectation: resolution must fail first.
-        let node = ImageEditNode::new(Arc::new(MockOutputStorageRepository::new()))
-            .with_attachment_resolver(resolver);
-
-        let mut inputs: NodeInputs = HashMap::new();
-        inputs.insert("__colmena_agent_session_id".into(), json!("agent_nf"));
-
-        let err = node
-            .execute(
-                &inputs,
-                &base_config("$attachment:nope"),
-                &mut json!({}),
-                None,
-            )
-            .await
-            .expect_err("missing attachment should error");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("not found") && msg.contains("nope"),
-            "expected a clear not-found error, got: {msg}"
-        );
-        assert!(
-            !msg.contains("unsupported url scheme"),
-            "should NOT fall through to the legacy scheme error: {msg}"
-        );
-    }
-
-    #[tokio::test]
-    async fn source_attachment_without_resolver_errors() {
-        // No resolver wired → $attachment cannot be resolved.
-        let node = ImageEditNode::new(Arc::new(MockOutputStorageRepository::new()));
-        let mut inputs: NodeInputs = HashMap::new();
-        inputs.insert("__colmena_agent_session_id".into(), json!("agent_x"));
-        let err = node
-            .execute(
-                &inputs,
-                &base_config("$attachment:img_x"),
-                &mut json!({}),
-                None,
-            )
-            .await
-            .expect_err("no resolver configured should error");
-        assert!(
-            err.to_string()
-                .contains("no attachment resolver is configured"),
-            "got: {}",
-            err
-        );
     }
 }

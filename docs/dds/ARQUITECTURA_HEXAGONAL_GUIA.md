@@ -1,21 +1,5 @@
 # Guía Completa de Arquitectura Hexagonal
 
-> **Status:** 📜 Historical (audited 2026-05-30). This document was written as a general
-> tutorial on Hexagonal Architecture using a TypeScript `User` CRUD example, then appended
-> with a Rust translation of that same toy example. It does **not** describe Colmena's
-> actual module structure — the real source tree lives under
-> `src/libs/colmena/src/{llm,dag_engine,python_bindings,node_bindings,shared,skills,storage,…}`.
-> The architectural principles (domain/application/infrastructure layers, ports-and-adapters,
-> `Arc<dyn Trait>` dependency injection) are still the same ones used in Colmena, but the
-> directory layout shown (`src/lib/User/…`) does not exist in the repo.
->
-> For current behavior see:
-> - [docs/developer_guide/01_architecture.md](../developer_guide/01_architecture.md)
-> - [docs/developer_guide/00_architecture_overview.md](../developer_guide/00_architecture_overview.md)
->
-> Kept for historical/context reasons — useful for understanding why decisions were made,
-> not what the code does today.
-
 ## Tabla de Contenido
 1. [Introducción a la Arquitectura Hexagonal](#introducción-a-la-arquitectura-hexagonal)
 2. [Estructura del Proyecto](#estructura-del-proyecto)

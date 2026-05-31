@@ -23,7 +23,6 @@
 - `tests/` — Rust integration tests
 - `tests/graphs/` — JSON DAG test graphs (basic/, agents/, advanced/, memory/, media/)
 - `docs/` — Project documentation (start here before searching the repo)
-  - `ONBOARDING.md` — **Start here if you're new**: role-based reading paths (quick start, library user, graph author, contributor) and jump-to table by feature
   - `DEVELOPER_GUIDE.md` — **Main index** of all developer guides (22 sections)
   - `node_configurations.json` — **Canonical config schema** for every node type (fields, types, defaults)
   - `node_as_tools_reference.json` — **How to use nodes as LLM tools** (tool_configurations schema, node_schema, expose_sub_tools, examples per node type)

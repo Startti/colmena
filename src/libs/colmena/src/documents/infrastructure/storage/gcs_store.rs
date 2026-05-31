@@ -316,18 +316,20 @@ impl ArtifactStore for GcsArtifactStore {
 
     async fn read_version(
         &self,
-        id: &ArtifactId,
-        version: &VersionId,
+        _id: &ArtifactId,
+        _version: &VersionId,
     ) -> Result<VersionData, StorageError> {
-        let ir_bytes = self.read_bytes(&self.ir_key(id, version)).await?;
+        let ir_bytes = self.read_bytes(&self.ir_key(_id, _version)).await?;
         let ir: serde_json::Value = serde_json::from_slice(&ir_bytes)
             .map_err(|e| StorageError::Backend(format!("parse ir: {e}")))?;
 
-        let meta = self.read_meta(id).await?;
+        let meta = self.read_meta(_id).await?;
         let ext = meta.kind.extension();
-        let render = self.read_bytes(&self.render_key(id, version, ext)).await?;
+        let render = self
+            .read_bytes(&self.render_key(_id, _version, ext))
+            .await?;
 
-        let pa_bytes = self.read_bytes(&self.patch_key(id, version)).await?;
+        let pa_bytes = self.read_bytes(&self.patch_key(_id, _version)).await?;
         let patch_applied: PatchApplied = serde_json::from_slice(&pa_bytes)
             .map_err(|e| StorageError::Backend(format!("parse patch: {e}")))?;
 
@@ -337,6 +339,7 @@ impl ArtifactStore for GcsArtifactStore {
             rendered_extension: match meta.kind {
                 crate::documents::domain::ArtifactKind::Excel => "xlsx",
                 crate::documents::domain::ArtifactKind::Word => "docx",
+                crate::documents::domain::ArtifactKind::Html => "html",
             },
             patch_applied,
             blobs: Vec::new(),

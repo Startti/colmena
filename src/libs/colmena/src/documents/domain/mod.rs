@@ -8,7 +8,10 @@ pub mod ports;
 pub use artifact::{
     ArtifactMeta, ArtifactSummary, AssignedIds, OpOutcome, PatchApplied, PatchSummary, VersionData,
 };
-pub use error::{ConflictDetail, DocumentError, IndexError, RenderError, StorageError};
-pub use ids::{ArtifactId, ArtifactKind, SessionId, VersionId};
+pub use error::{AssetError, ConflictDetail, DocumentError, IndexError, RenderError, StorageError};
+pub use ids::{ArtifactId, ArtifactKind, AssetId, SessionId, VersionId};
 pub use patch::{Patch, PatchOp, PatchSource};
-pub use ports::{ArtifactStore, IRRenderer, IRValidator, IdGenerator, SessionArtifactIndex};
+pub use ports::{
+    ArtifactStore, AssetStore, AssetSummary, IRRenderer, IRValidator, IdGenerator,
+    SessionArtifactIndex,
+};

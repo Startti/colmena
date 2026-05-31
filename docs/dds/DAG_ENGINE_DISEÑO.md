@@ -1,35 +1,5 @@
 # DAG Engine - Documento de Diseño
 
-> **Status:** ⚠️ Partial (audited 2026-05-30). The layered architecture, registry pattern,
-> and basic node-execution model are still accurate. However, the doc describes an early
-> version of the engine that has grown substantially — it omits the full node catalogue,
-> streaming execution, suspend/resume, secure values, LLM tool calling, skills, lazy tool
-> loading, multimedia nodes, multipart HTTP, and more. Use the developer guides for current
-> behavior.
->
-> For current behavior see:
-> - [docs/developer_guide/12_dag_engine_guide.md](../developer_guide/12_dag_engine_guide.md)
-> - [docs/developer_guide/22_tool_execution_flow.md](../developer_guide/22_tool_execution_flow.md)
-> - [docs/developer_guide/16_data_flow_guide.md](../developer_guide/16_data_flow_guide.md)
->
-> Specific divergences:
-> - **`ExecutableNode` trait signature**: doc shows `execute(inputs, config, state)` — actual
->   is `execute(inputs, config, state, observer)` with a 4th `Option<Arc<dyn ExecutionObserver>>`
->   argument, plus extra default methods (`description`, `tool_description_supplement`,
->   `default_input`, `default_output`). See
->   `src/libs/colmena/src/dag_engine/domain/node.rs`.
-> - **Node types claimed**: only `http_request` and `llm_call` are described. The actual
->   registry has 30+ node types (skills, lazy tools, orchestrator, planner, critic, subgraph,
->   suspend, secure_suspend, image_generation, image_edit, tts, sql_query, socketio,
->   python_script, document_create/edit/read, etc.).
-> - **`execute()` is deprecated**: `DagRunUseCase::execute()` is now `unimplemented!()` —
->   the engine uses `execute_stream()` returning an async stream.
->   See `src/libs/colmena/src/dag_engine/application/run_use_case.rs:100`.
-> - **Security**: described as future work ("HashiCorp Vault, AWS Secrets Manager") — the
->   AES-256-GCM secure values system (via pgcrypto) shipped and is fully implemented.
-> - **Roadmap**: "conditional nodes", "loop nodes", "sub-graphs", "persistent state" were
->   all aspirational in the doc — all are now implemented.
-
 ## Resumen Ejecutivo
 
 El DAG Engine es un motor de orquestación de workflows basado en grafos acíclicos dirigidos (DAG), implementado en Rust con arquitectura hexagonal. Permite definir workflows complejos mediante archivos JSON y ejecutarlos de forma eficiente y extensible.

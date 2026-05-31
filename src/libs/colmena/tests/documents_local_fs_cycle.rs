@@ -59,6 +59,8 @@ async fn full_cycle_excel() {
         excel_validator: Arc::new(ExcelValidator),
         word_renderer: Arc::new(NoopR),
         word_validator: Arc::new(NoopV),
+        html_renderer: Arc::new(NoopR),
+        html_validator: Arc::new(NoopV),
         ids: ids.clone(),
         default_retention: 10,
     };
@@ -68,6 +70,8 @@ async fn full_cycle_excel() {
         excel_validator: Arc::new(ExcelValidator),
         word_renderer: Arc::new(NoopR),
         word_validator: Arc::new(NoopV),
+        html_renderer: Arc::new(NoopR),
+        html_validator: Arc::new(NoopV),
         ids: ids.clone(),
     };
     let read = ReadDocumentUseCase {

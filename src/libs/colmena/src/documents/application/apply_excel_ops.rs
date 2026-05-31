@@ -287,7 +287,7 @@ impl<'a> ExcelOpApplier<'a> {
                     .map_err(|e| invalid(op, &format!("bad style: {e}")))?;
                 ir.workbook.named_styles.insert(style_ref.clone(), style);
             }
-            // Word-only ops are not valid for Excel artifacts.
+            // Word-only and HTML-only ops are not valid for Excel artifacts.
             PatchOp::InsertBlock { .. }
             | PatchOp::DeleteBlock { .. }
             | PatchOp::ReplaceBlock { .. }
@@ -302,8 +302,27 @@ impl<'a> ExcelOpApplier<'a> {
             | PatchOp::DeleteListItem { .. }
             | PatchOp::InsertTableRow { .. }
             | PatchOp::DeleteTableRow { .. }
-            | PatchOp::UpdateTableCell { .. } => {
-                return Err(invalid(op, "Word op not applicable to Excel artifact"));
+            | PatchOp::UpdateTableCell { .. }
+            | PatchOp::AddSlide { .. }
+            | PatchOp::DeleteSlide { .. }
+            | PatchOp::ReorderSlides { .. }
+            | PatchOp::SetSlideLayout { .. }
+            | PatchOp::SetSlideTitle { .. }
+            | PatchOp::SetSlideNotes { .. }
+            | PatchOp::InsertHtmlBlock { .. }
+            | PatchOp::DeleteHtmlBlock { .. }
+            | PatchOp::ReplaceHtmlBlock { .. }
+            | PatchOp::MoveHtmlBlock { .. }
+            | PatchOp::InsertHtmlTableRow { .. }
+            | PatchOp::DeleteHtmlTableRow { .. }
+            | PatchOp::UpdateHtmlTableCell { .. }
+            | PatchOp::InsertHtmlListItem { .. }
+            | PatchOp::DeleteHtmlListItem { .. }
+            | PatchOp::UpdateHtmlListItem { .. }
+            | PatchOp::SetTheme { .. }
+            | PatchOp::SetDocProps { .. }
+            | PatchOp::SetFooter { .. } => {
+                return Err(invalid(op, "Word/HTML op not applicable to Excel artifact"));
             }
         }
         Ok(OpOutcome {

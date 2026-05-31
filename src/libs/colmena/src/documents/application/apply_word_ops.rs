@@ -296,7 +296,44 @@ impl<'a> WordOpApplier<'a> {
                 cell.runs = new_runs;
             }
 
-            other => return Err(invalid(other, "not a Word op")),
+            // Excel-only and HTML-only ops are not valid for Word artifacts.
+            PatchOp::SetCell { .. }
+            | PatchOp::SetRange { .. }
+            | PatchOp::ClearRange { .. }
+            | PatchOp::InsertRow { .. }
+            | PatchOp::DeleteRow { .. }
+            | PatchOp::InsertColumn { .. }
+            | PatchOp::DeleteColumn { .. }
+            | PatchOp::AddSheet { .. }
+            | PatchOp::RenameSheet { .. }
+            | PatchOp::DeleteSheet { .. }
+            | PatchOp::ReorderSheets { .. }
+            | PatchOp::CreateTable { .. }
+            | PatchOp::ResizeTable { .. }
+            | PatchOp::DeleteTable { .. }
+            | PatchOp::SetColumnWidth { .. }
+            | PatchOp::DefineStyle { .. }
+            | PatchOp::AddSlide { .. }
+            | PatchOp::DeleteSlide { .. }
+            | PatchOp::ReorderSlides { .. }
+            | PatchOp::SetSlideLayout { .. }
+            | PatchOp::SetSlideTitle { .. }
+            | PatchOp::SetSlideNotes { .. }
+            | PatchOp::InsertHtmlBlock { .. }
+            | PatchOp::DeleteHtmlBlock { .. }
+            | PatchOp::ReplaceHtmlBlock { .. }
+            | PatchOp::MoveHtmlBlock { .. }
+            | PatchOp::InsertHtmlTableRow { .. }
+            | PatchOp::DeleteHtmlTableRow { .. }
+            | PatchOp::UpdateHtmlTableCell { .. }
+            | PatchOp::InsertHtmlListItem { .. }
+            | PatchOp::DeleteHtmlListItem { .. }
+            | PatchOp::UpdateHtmlListItem { .. }
+            | PatchOp::SetTheme { .. }
+            | PatchOp::SetDocProps { .. }
+            | PatchOp::SetFooter { .. } => {
+                return Err(invalid(op, "not a Word op"));
+            }
         }
         Ok(OpOutcome {
             assigned_ids: assigned,

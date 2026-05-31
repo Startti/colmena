@@ -1,38 +1,5 @@
 # Variable Resolution Specification
 
-> **Status:** ⚠️ Partial (audited 2026-05-30). The two variable types documented here —
-> `${UPPERCASE_VAR}` for env vars and `${node.field.path}` for node output references —
-> are correctly described and match the current implementation. The case-based
-> disambiguation rule (uppercase = env, lowercase = node ref) and fail-fast vs
-> graceful-miss behaviours are accurate.
->
-> However, the doc is missing two variable forms that were added after it was written:
->
-> For current behavior see:
-> - [docs/developer_guide/16_data_flow_guide.md](../developer_guide/16_data_flow_guide.md)
-> - [docs/developer_guide/22_tool_execution_flow.md](../developer_guide/22_tool_execution_flow.md)
-> - [docs/dds/SECURE_VALUES_DISEÑO.md](SECURE_VALUES_DISEÑO.md) (secure value handles)
->
-> Specific divergences (missing variable types not documented here):
-> - **`$DYNAMIC` placeholder** (`"$DYNAMIC"` string value in `fixed_config`): used in
->   `tool_configurations` to let the LLM supply values for specific fields. The executor
->   (`dag_tool_executor.rs`) scans `fixed_config` for the `DYNAMIC_PLACEHOLDER` sentinel
->   and substitutes LLM-provided values at dispatch time. This is an alternative to the
->   `node_schema` approach; omitted from this doc entirely.
-> - **`$attachment:<document_id>` placeholder**: a string value starting with `$attachment:`
->   in HTTP multipart bodies or `source_url` fields is resolved to the actual artifact
->   bytes at HTTP dispatch time, enabling zero-copy forwarding of generated artifacts
->   (images, audio) to third-party endpoints without the LLM seeing the bytes. Handled in
->   `dag_engine/infrastructure/registry.rs` and `nodes/http.rs`. Omitted from this doc.
-> - **`"$DYNAMIC"` is a literal string constant** (`DYNAMIC_PLACEHOLDER`), not a regex
->   pattern — it must match exactly (case-sensitive). The doc's regex-based pseudocode
->   implementation (§"For Variable Resolution Code") would not handle `$DYNAMIC` — it
->   only covers the two forms this doc knows about.
-> - **`$ref`**: mentioned in CLAUDE.md as a variable form but refers to edge-driven
->   references (not a distinct string syntax). Not a gap in this doc specifically.
-
-
-
 ## Overview
 
 Colmena supports two types of variable resolution in DAG configurations:

@@ -1,44 +1,5 @@
 # Secure Values in HTTP Nodes - Architecture & Design
 
-> **Status:** ⚠️ Partial (audited 2026-05-30). The foundation described here — HTTP output
-> hashing, AES-256 encryption via pgcrypto, LLM nodes seeing handles while non-LLM nodes
-> get real values injected, auto-cleanup at DAG end — is all implemented and accurate.
-> The doc also has an "Updates — 2026-05" section at the bottom that correctly describes
-> four major extensions shipped after the original design.
->
-> However, the original design sections have NOT been updated to reflect the shipped code,
-> so several details are stale:
->
-> For current behavior see:
-> - [docs/developer_guide/13_security_strategy.md](../developer_guide/13_security_strategy.md)
-> - [docs/developer_guide/30_database_schema.md](../developer_guide/30_database_schema.md)
->
-> Specific divergences:
-> - **`SecureValueRepository` trait signature**: doc shows `persist(session_id, source_node_id,
->   hash_key, real_value, field_name)` with 5 args. Actual trait has 6 args — it adds
->   `agent_session_id: Option<&str>` as the second parameter, and `decrypt`/`cleanup_expired`
->   also carry `agent_session_id`. See
->   `src/libs/colmena/src/dag_engine/domain/secure_value_repository.rs`.
-> - **Cleanup on DAG end**: original design does `DELETE WHERE session_id = ?` (hard delete).
->   Actual impl uses `cleanup_expired_for_run` — it only deletes **expired** rows for the
->   run's scope, so that long-lived agent-session values survive to the next conversation
->   turn. Unexpired rows are retained. See `run_use_case.rs:676`.
-> - **`PostgresSecureValueRepository` in Infrastructure section**: the code snippet shown
->   uses `pgp_sym_encrypt` inline with a comment "Placeholder: actual encryption happens
->   in SQL" — the production impl does exactly that, but the snippet also has a dead Rust
->   `encrypt()` method that was never shipped. The real impl
->   (`src/libs/colmena/src/dag_engine/infrastructure/persistence/postgres_secure_value_repository.rs`)
->   also has the `agent_session_id` column and the `exists()` helper.
-> - **DB table schema**: shown without `agent_session_id` column. Actual table has it
->   (added per the 2026-05-08 spec noted in the Updates section at the bottom).
-> - **`node.node_type != "llm"` guard**: described in the DagRunUseCase pseudocode. Actual
->   code injects secrets for all nodes including the LLM node (injection covers both
->   `inputs` and `config`; the LLM guard was relaxed per the 2026-05-07 inject-in-config
->   spec in the Updates section).
-> - **Phase 1 checkboxes**: all still shown unchecked — the feature is fully shipped.
-
-
-
 ## Executive Summary
 
 Implement a **Secure Values** system where HTTP nodes can mark their outputs as sensitive. When `secure: true`:

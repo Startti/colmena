@@ -311,7 +311,9 @@ mod tests {
     #[tokio::test]
     async fn sql_query_guide_is_indexed_as_node_type_guide() {
         let repo = BuiltinSkillRepository::new(&["sql_query-guide".to_string()]).unwrap();
-        let entry = repo.find_by_node_type("sql_query").expect("sql_query guide present");
+        let entry = repo
+            .find_by_node_type("sql_query")
+            .expect("sql_query guide present");
         assert_eq!(entry.name, "sql_query-guide");
         assert_eq!(entry.node_type.as_deref(), Some("sql_query"));
     }
