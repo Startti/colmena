@@ -1,3 +1,7 @@
+> **📦 PROPUESTA NO IMPLEMENTADA** — Diseño RAG (Chroma/Pinecone) que nunca llegó al código. Se conserva como referencia de exploración previa. No representa funcionalidad existente en Colmena.
+
+---
+
 # Documento de Diseño y Desarrollo (DDS) - Sistema RAG Avanzado v2.2
 
 ## Tabla de Contenido

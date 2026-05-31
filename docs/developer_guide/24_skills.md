@@ -233,7 +233,9 @@ my-skill/
     fastapi.md                   # hoja
 ```
 
-El LLM navega el árbol con `load_reference("my-skill", "fw/django")` — cada `/` baja un nivel. La validación se hace contra el árbol DECLARADO (no contra archivos sueltos en disco), así que si `fw.md` no declara a `django` como sub-reference, el path `fw/django` falla aunque `django.md` exista.
+El LLM navega el árbol con `load_skill({name: "my-skill", reference: "fw/django"})` — cada `/` baja un nivel. La validación se hace contra el árbol DECLARADO (no contra archivos sueltos en disco), así que si `fw.md` no declara a `django` como sub-reference, el path `fw/django` falla aunque `django.md` exista.
+
+> No existe un tool separado `load_reference`. La única tool sintética expuesta al LLM es `load_skill(name, reference?)`; las references (incluidas las anidadas) se piden por ese mismo tool pasando el path en el parámetro `reference`.
 
 **Límites:**
 - Profundidad máxima: **5 niveles** desde el root del skill (hard error al cargar el grafo)

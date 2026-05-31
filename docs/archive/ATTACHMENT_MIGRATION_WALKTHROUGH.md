@@ -1,3 +1,7 @@
+> **📦 ARCHIVO HISTÓRICO** — Este documento describe la migración de attachments completada en mayo 2026. Se conserva como referencia histórica. Para el comportamiento actual ver `docs/developer_guide/31_load_attachment.md` y `docs/developer_guide/36_attachment_gc.md`.
+
+---
+
 # Attachment Migration — Walkthrough completo + Diagnósticos
 
 Este doc es la **referencia de entendimiento** del proyecto de migración de attachments. Cubre:

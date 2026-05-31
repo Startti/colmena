@@ -1,5 +1,15 @@
 # Variable Resolution Specification
 
+> ⚠️ **DISEÑO ORIGINAL — La implementación real difiere: ver sección "Estado actual" al final.**
+>
+> Este documento describe la *especificación aspiracional* que se redactó antes
+> de implementar el feature. La realidad enviada en el código actual no usa un
+> resolver central, no distingue mayúsculas/minúsculas para diferenciar
+> "env var" de "node ref", y no implementa la `resolve_variables(template, inputs)`
+> con doble regex que aparece más abajo en la sección *Implementation Notes*.
+> Consulta la sección **"Estado actual"** al final del archivo para ver qué
+> está realmente vigente.
+
 ## Overview
 
 Colmena supports two types of variable resolution in DAG configurations:
@@ -417,7 +427,105 @@ A: Yes: `"Authorization: Bearer ${OAUTH_PREFIX}-${token_node.value}"`
 
 ## Status
 
-**Version**: 1.0  
-**Date**: 2026-04-05  
-**Status**: Final Specification  
-**Implementation**: In Progress
+**Version**: 1.0
+**Date**: 2026-04-05
+**Status**: Final Specification (aspirational — see *Estado actual*)
+**Implementation**: Partially implemented — divergente del diseño
+
+---
+
+## Estado actual (2026-05)
+
+Esta sección describe **lo que realmente está en código** en
+`src/libs/colmena/src/`, y dónde diverge del diseño original arriba.
+
+### Lo que sí se cumple
+
+- La sintaxis externa `${...}` está vigente en todos los nodos.
+- Los nodos resuelven env vars vía `std::env::var(...)` y fallan rápido cuando
+  la variable no existe (mensaje: `"Env var X not found"` o
+  `"Environment variable X not found"`).
+- Las referencias a outputs de otros nodos se resuelven contra el diccionario
+  aplanado `inputs: NodeInputs`, manteniendo el template original cuando la
+  clave no existe (comportamiento graceful descrito en la Regla 2).
+- `SecureValueService` sigue siendo la pieza que hashea outputs marcados con
+  `secure: true` y reinyecta el valor real antes de ejecutar herramientas no-LLM
+  (ver `src/libs/colmena/src/dag_engine/application/secure_value_service.rs`).
+
+### Lo que NO se cumple (gap respecto al diseño)
+
+#### 1. No existe un `resolve_variables` central
+
+El bloque pseudocódigo de *Implementation Notes* sugiere una función única
+con dos regex (`[A-Z_][A-Z0-9_]*` vs `[a-z_][a-z0-9_]*(...)`). En el repo
+no existe esa función. En su lugar **cada nodo trae su propio scanner**:
+
+| Nodo | Función | Archivo |
+|------|---------|---------|
+| http | `resolve_env_vars` / `resolve_env_vars_in_value` | `dag_engine/infrastructure/nodes/http.rs` (≈L296) |
+| llm  | `resolve_env_var`, `resolve_context_vars`, `resolve_context_in_node_schema`, `resolve_template_vars` | `dag_engine/infrastructure/nodes/llm.rs` (≈L285, L368, L406, L427) |
+| sql, socketio, tts, image_generation, image_edit, reactor, critic, planner, orchestrator, tavily_client, extraction, input | `resolve_env_var` / `resolve_env_vars` (variantes copy-paste) | `dag_engine/infrastructure/nodes/*.rs` |
+| dag_tool_executor (fixed_config en tools) | `resolve_template_string` con regex `\$\{(?:context\.)?(\w+)\}` | `dag_engine/infrastructure/dag_tool_executor.rs` (≈L118) |
+
+La mayoría son scanners manuales por byte (`find("${")` + `find('}')`), no regex.
+La única regex real está en `dag_tool_executor.rs` y usa `\w+` —
+**case-insensitive por definición**.
+
+#### 2. La regla "MAYÚSCULAS = env, minúsculas = node-ref" no se aplica
+
+Esta es la divergencia más importante. El diseño dice (Regla 1):
+
+> `${UPPERCASE}` → env var
+> `${lowercase}` → node output reference
+
+En realidad **el case no determina nada**:
+
+- Los nodos que sólo conocen env vars (`http`, `sql`, `socketio`, `image_*`,
+  `tts`, `reactor`, etc.) pasan el contenido entre `${` y `}` directamente a
+  `std::env::var(...)`. Si el nombre está en lowercase, se busca lowercase en
+  el env. No hay rechazo por convención.
+- El nodo `llm` (y `dag_tool_executor` para fixed_config) resuelve contra el
+  diccionario `inputs`. Si la clave existe en `inputs`, se sustituye; si no,
+  el template queda intacto (sin fallback a env var).
+- No hay precedencia ni dos pasadas (env → nodes) como describe la Regla 3.
+  Cada nodo aplica **una sola estrategia** según su tipo:
+  - Nodos no-LLM: env vars only.
+  - Nodo LLM: env var explícita en algunos campos (`api_key`, `connection_url`),
+    e `inputs` lookup en prompts, `system_message`, `node_schema.fixed`, etc.
+
+Consecuencia práctica: el mismo placeholder `${foo}` puede resolverse como env
+var en `http` y como node-ref en `llm`, dependiendo del nodo que lea el
+config. La "fuente" del valor está implícita en *qué nodo* contiene el
+template, no en el case.
+
+#### 3. Sintaxis adicional no documentada en el diseño
+
+`llm.rs::resolve_template_vars` (L427) también acepta `{{var.path}}`
+(doble llave, estilo Mustache/Handlebars) para algunos campos. Esto no
+aparece en la especificación original.
+
+#### 4. `dag_tool_executor` acepta prefijo `context.` opcional
+
+La regex en `dag_tool_executor.rs` (`\$\{(?:context\.)?(\w+)\}`) tolera tanto
+`${context.foo}` como `${foo}`, ambos mirando la misma clave `foo` en inputs.
+El diseño no menciona esta forma corta.
+
+### Implicaciones para autores de grafos
+
+- **No confíes en la convención de case** para predecir el comportamiento.
+  En su lugar, fíjate en qué nodo está leyendo el template.
+- **Env vars siempre fallan rápido** cuando faltan en nodos no-LLM. Las
+  referencias a otros nodos en `llm` quedan como literal si no se resuelven —
+  esto puede esconder typos.
+- **No hay validador estático** de templates: errores de nombre se descubren
+  en ejecución.
+
+### Trabajo pendiente si se quiere converger con el diseño
+
+1. Extraer un único `resolve_variables(template, inputs, env)` en un módulo
+   compartido (por ejemplo `dag_engine/application/variable_resolver.rs`).
+2. Decidir si la regla case-based vale la pena, o sustituirla por un
+   namespace explícito (`${env.FOO}`, `${node.x.y}`, `${trigger.z}`).
+3. Migrar los ~14 scanners por nodo a la implementación común.
+4. Añadir validación estática del grafo que detecte placeholders no
+   resolvibles antes de ejecutar.

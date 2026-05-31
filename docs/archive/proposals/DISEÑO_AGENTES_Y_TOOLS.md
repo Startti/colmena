@@ -1,3 +1,7 @@
+> **📦 PROPUESTA HISTÓRICA** — Diseño pre-implementación. Las features descritas ya fueron shippeadas (los checkboxes TODO están obsoletos). Para el estado actual ver `docs/developer_guide/14_llm_deep_dive.md` y `docs/developer_guide/24_skills.md`.
+
+---
+
 # Plan de Diseño: Integración de Memoria y Tools (Agentes) en Colmena
 
 Este documento detalla la estrategia de arquitectura para transformar el `LlmNode` actual (ejecución lineal) en un Agente autónomo capaz de mantener estado (Memoria) y ejecutar acciones (Tools), respetando la Arquitectura Hexagonal y el diseño del DAG Engine existente.
@@ -20,7 +24,7 @@ El `dag_engine` debe permanecer como un orquestador de ejecución "tonto". La l�
 
 ## Parte 2: Tools (Function Calling & Node Bridging)
 
-### 2.1 Abstracción en Dominio LLM (`src/llm/domain/tools.rs`)
+### 2.1 Abstracción en Dominio LLM (`src/libs/colmena/src/llm/domain/tools.rs`)
 
 Definimos las estructuras para herramientas de forma agnóstica.
 
@@ -36,7 +40,7 @@ El `dag_engine` sigue siendo responsable de *proveer* las herramientas (porque t
 
 ## Parte 3: Lógica de Agente (ReAct) en el Módulo LLM
 
-En lugar de poner el `loop` en el nodo, creamos un caso de uso en `src/llm/application/agent.rs`.
+En lugar de poner el `loop` en el nodo, creamos un caso de uso en `src/libs/colmena/src/llm/application/agent.rs`.
 
 ```rust
 pub struct AgentService {

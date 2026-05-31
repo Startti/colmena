@@ -1,3 +1,7 @@
+> **📦 SUPERSEDED** — Diseño original v1 del módulo LLM. La descripción ya no coincide con el código (provider rename Gemini→Google, agentes/tools/persistencia shippeados). Reemplazado por `docs/developer_guide/14_llm_deep_dive.md`.
+
+---
+
 # Documento de Diseño y Desarrollo (DDS) - Módulo LLM
 
 ## 1. Resumen Ejecutivo
@@ -507,7 +511,7 @@ El módulo LLM se integra con el DAG Engine permitiendo orquestar llamadas a LLM
 El `LlmNode` es un adaptador que implementa `ExecutableNode` y expone el módulo LLM al DAG Engine.
 
 ```rust
-// src/dag_engine/infrastructure/nodes/llm.rs
+// src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs
 pub struct LlmNode;
 
 #[async_trait::async_trait]

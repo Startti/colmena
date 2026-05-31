@@ -1,1107 +1,482 @@
-# Colmena - Ejemplos de Uso
-
-Este documento contiene ejemplos prácticos de cómo usar la librería Colmena para la orquestación de agentes de IA.
-
-## Instalación (Futuro)
-
-```bash
-pip install colmena
-```
-
-## Configuración de API Keys
-
-### Opción 1: Variables de Entorno
-
-```bash
-export OPENAI_API_KEY="tu-api-key-aqui"
-export GEMINI_API_KEY="tu-api-key-aqui"
-export ANTHROPIC_API_KEY="tu-api-key-aqui"
-```
-
-### Opción 2: Archivo .env
-
-```bash
-# .env
-OPENAI_API_KEY=tu-api-key-aqui
-GEMINI_API_KEY=tu-api-key-aqui
-ANTHROPIC_API_KEY=tu-api-key-aqui
-```
-
-## Ejemplos Básicos
-
-### 1. Llamada Simple
-
-```python
-import colmena
-
-# Inicializar la librería
-llm = colmena.ColmenaLlm()
-
-# Llamada básica con OpenAI
-response = llm.call(
-    messages=["¿Cuál es la capital de España?"],
-    provider="openai"
-)
-print(response)  # Madrid
-```
-
-### 2. Especificar API Key y Modelo
-
-```python
-import colmena
-
-llm = colmena.ColmenaLlm()
-
-# Usar API key específica y modelo personalizado
-response = llm.call(
-    messages=["Explica la arquitectura hexagonal"],
-    provider="openai",
-    api_key="tu-api-key-específica",
-    model="gpt-4",
-    temperature=0.7,
-    max_tokens=500
-)
-print(response)
-```
-
-### 3. Llamada con Contexto del Sistema
-
-```python
-import colmena
-
-llm = colmena.ColmenaLlm()
-
-# Llamada con mensaje del sistema
-response = llm.call_with_context(
-    system_message="Eres un experto en arquitectura de software. Responde de manera técnica y precisa.",
-    messages=["¿Qué es Domain-Driven Design?"],
-    provider="anthropic",
-    model="claude-3-sonnet",
-    temperature=0.3
-)
-print(response)
-```
-
-### 4. Conversación Completa
-
-```python
-import colmena
-
-llm = colmena.ColmenaLlm()
-
-# Conversación con historial completo
-conversation = [
-    ("system", "Eres un asistente de programación especializado en Rust."),
-    ("user", "¿Cómo creo un struct en Rust?"),
-    ("assistant", "En Rust, puedes crear un struct usando la palabra clave `struct`..."),
-    ("user", "¿Y cómo implemento métodos para ese struct?")
-]
-
-response = llm.call_conversation(
-    conversation=conversation,
-    provider="google",
-    model="gemini-2.5-flash",
-    temperature=0.5
-)
-print(response)
-```
-
-## Streaming
-
-### 5. Respuesta en Streaming
-
-```python
-import colmena
-
-llm = colmena.ColmenaLlm()
-
-# Streaming básico
-stream = llm.stream(
-    messages=["Cuenta una historia corta sobre un robot"],
-    provider="openai",
-    model="gpt-4",
-    temperature=0.8
-)
-
-print("Respuesta en streaming:")
-for chunk in stream:
-    print(chunk, end="", flush=True)
-print()  # Nueva línea al final
-```
-
-### 6. Streaming con Contexto
-
-```python
-import colmena
-
-llm = colmena.ColmenaLlm()
-
-# Streaming con mensaje del sistema
-stream = llm.stream_with_context(
-    system_message="Escribe en un estilo poético y melancólico.",
-    messages=["Describe un atardecer en la ciudad"],
-    provider="anthropic",
-    model="claude-3-sonnet",
-    temperature=0.9
-)
-
-response_text = ""
-for chunk in stream:
-    print(chunk, end="", flush=True)
-    response_text += chunk
-
-print(f"\n\nRespuesta completa: {len(response_text)} caracteres")
-```
-
-## Uso con Diferentes Proveedores
-
-### 7. Comparar Respuestas de Múltiples Proveedores
-
-```python
-import colmena
-
-llm = colmena.ColmenaLlm()
-
-prompt = "Explica las ventajas de usar Rust para desarrollo de sistemas"
-providers = ["openai", "google", "anthropic"]
-
-print("Comparando respuestas de diferentes proveedores:\n")
-
-for provider in providers:
-    try:
-        response = llm.call(
-            messages=[prompt],
-            provider=provider,
-            temperature=0.7,
-            max_tokens=300
-        )
-        print(f"=== {provider.upper()} ===")
-        print(response)
-        print()
-    except Exception as e:
-        print(f"Error con {provider}: {e}")
-```
-
-### 8. Health Check de Proveedores
-
-```python
-import colmena
-
-llm = colmena.ColmenaLlm()
-
-# Verificar qué proveedores están disponibles
-providers = llm.get_providers()
-print("Proveedores disponibles:", providers)
-
-print("\nEstado de salud de los proveedores:")
-for provider in providers:
-    is_healthy = llm.health_check(provider)
-    status = "✅ Disponible" if is_healthy else "❌ No disponible"
-    print(f"{provider}: {status}")
-```
-
-## Casos de Uso Avanzados
-
-### 9. Generación de Código con Validación
-
-```python
-import colmena
-
-llm = colmena.ColmenaLlm()
-
-def generate_rust_function(description: str) -> str:
-    \"\"\"Genera una función en Rust basada en una descripción.\"\"\"
-
-    system_prompt = \"\"\"Eres un experto programador en Rust.
-    Genera código Rust limpio, idiomático y bien documentado.
-    Incluye comentarios explicativos y manejo de errores cuando sea apropiado.\"\"\"
-
-    user_prompt = f\"\"\"Genera una función en Rust que: {description}
-
-    Requisitos:
-    - Usa tipos apropiados
-    - Incluye documentación con ///
-    - Maneja errores con Result<T, E> si es necesario
-    - Sigue las convenciones de Rust\"\"\"
-
-    response = llm.call_with_context(
-        system_message=system_prompt,
-        messages=[user_prompt],
-        provider="openai",
-        model="gpt-4",
-        temperature=0.3,
-        max_tokens=800
-    )
-
-    return response
-
-# Ejemplo de uso
-rust_code = generate_rust_function(
-    "calcule el factorial de un número entero positivo"
-)
-print("Código generado:")
-print(rust_code)
-```
-
-### 10. Análisis de Sentimiento Multi-Proveedor
-
-```python
-import colmena
-
-def analyze_sentiment_consensus(text: str) -> dict:
-    \"\"\"Analiza el sentimiento usando múltiples proveedores para obtener consenso.\"\"\"
-
-    llm = colmena.ColmenaLlm()
-
-    prompt = f\"\"\"Analiza el sentimiento del siguiente texto y responde solo con una palabra: "positivo", "negativo" o "neutro".
-
-    Texto: "{text}"
-
-    Sentimiento:\"\"\"
-
-    results = {}
-    providers = ["openai", "google", "anthropic"]
-
-    for provider in providers:
-        try:
-            response = llm.call(
-                messages=[prompt],
-                provider=provider,
-                temperature=0.1,  # Baja temperatura para consistencia
-                max_tokens=10
-            )
-            results[provider] = response.strip().lower()
-        except Exception as e:
-            results[provider] = f"error: {e}"
-
-    # Calcular consenso
-    sentiments = [v for v in results.values() if v in ["positivo", "negativo", "neutro"]]
-    consensus = max(set(sentiments), key=sentiments.count) if sentiments else "indeterminado"
-
-    return {
-        "text": text,
-        "individual_results": results,
-        "consensus": consensus,
-        "confidence": sentiments.count(consensus) / len(sentiments) if sentiments else 0
-    }
-
-# Ejemplo de uso
-analysis = analyze_sentiment_consensus(
-    "¡Estoy muy emocionado por este nuevo proyecto! Va a ser increíble."
-)
-print("Análisis de sentimiento:")
-for key, value in analysis.items():
-    print(f"{key}: {value}")
-```
-
-### 11. Generación Asistida con Streaming
-
-```python
-import colmena
-import time
-
-def creative_writing_assistant(topic: str, style: str = "narrativo"):
-    \"\"\"Asistente de escritura creativa con streaming.\"\"\"
-
-    llm = colmena.ColmenaLlm()
-
-    system_prompt = f\"\"\"Eres un escritor creativo experto.
-    Escribe en estilo {style}, usando un lenguaje rico y evocativo.
-    Crea contenido original y atractivo.\"\"\"
-
-    user_prompt = f\"Escribe un texto creativo sobre: {topic}\"
-
-    print(f"🖋️  Generando texto sobre '{topic}' en estilo {style}...\n")
-
-    stream = llm.stream_with_context(
-        system_message=system_prompt,
-        messages=[user_prompt],
-        provider="anthropic",
-        model="claude-3-sonnet",
-        temperature=0.8,
-        max_tokens=600
-    )
-
-    full_text = ""
-    for chunk in stream:
-        print(chunk, end="", flush=True)
-        full_text += chunk
-        time.sleep(0.05)  # Simular efecto de escritura
-
-    print(f"\n\n📊 Estadísticas: {len(full_text)} caracteres, {len(full_text.split())} palabras")
-    return full_text
-
-# Ejemplo de uso
-texto = creative_writing_assistant(
-    topic="un café en una estación de tren durante una tormenta",
-    style="poético"
-)
-```
-
-## Manejo de Errores
-
-### 12. Manejo Robusto de Errores
-
-```python
-import colmena
-
-def safe_llm_call(messages, provider="openai", max_retries=3, **kwargs):
-    \"\"\"Realiza una llamada LLM con manejo robusto de errores.\"\"\"
-
-    llm = colmena.ColmenaLlm()
-
-    for attempt in range(max_retries):
-        try:
-            response = llm.call(
-                messages=messages,
-                provider=provider,
-                **kwargs
-            )
-            return {"success": True, "response": response, "attempts": attempt + 1}
-
-        except colmena.LlmException as e:
-            print(f"Intento {attempt + 1} falló: {e}")
-            if attempt == max_retries - 1:
-                return {"success": False, "error": str(e), "attempts": attempt + 1}
-            time.sleep(2 ** attempt)  # Backoff exponencial
-
-        except Exception as e:
-            return {"success": False, "error": f"Error inesperado: {e}", "attempts": attempt + 1}
-
-# Ejemplo de uso
-result = safe_llm_call(
-    messages=["Explica la computación cuántica"],
-    provider="openai",
-    model="gpt-4",
-    max_tokens=400,
-    max_retries=3
-)
-
-if result["success"]:
-    print("✅ Llamada exitosa:")
-    print(result["response"])
-    print(f"Intentos necesarios: {result['attempts']}")
-else:
-    print("❌ Llamada falló:")
-    print(result["error"])
-    print(f"Intentos realizados: {result['attempts']}")
-```
-
-## Configuración Avanzada
-
-### 13. Factory de Configuraciones
-
-```python
-import colmena
-
-class LlmConfigFactory:
-    \"\"\"Factory para crear configuraciones optimizadas por caso de uso.\"\"\"
-
-    @staticmethod
-    def creative_writing():
-        return {
-            "temperature": 0.9,
-            "max_tokens": 800,
-            "top_p": 0.95,
-            "frequency_penalty": 0.3,
-            "presence_penalty": 0.3
-        }
-
-    @staticmethod
-    def code_generation():
-        return {
-            "temperature": 0.3,
-            "max_tokens": 1000,
-            "top_p": 0.8,
-            "frequency_penalty": 0.0,
-            "presence_penalty": 0.0
-        }
-
-    @staticmethod
-    def factual_qa():
-        return {
-            "temperature": 0.1,
-            "max_tokens": 300,
-            "top_p": 0.7,
-            "frequency_penalty": 0.0,
-            "presence_penalty": 0.0
-        }
-
-# Uso del factory
-llm = colmena.ColmenaLlm()
-
-# Para escritura creativa
-creative_response = llm.call(
-    messages=["Escribe un poema sobre la tecnología"],
-    provider="anthropic",
-    **LlmConfigFactory.creative_writing()
-)
-
-# Para generación de código
-code_response = llm.call(
-    messages=["Crea una función que ordene una lista en Python"],
-    provider="openai",
-    **LlmConfigFactory.code_generation()
-)
-
-# Para respuestas factuales
-factual_response = llm.call(
-    messages=["¿Cuántos planetas hay en el sistema solar?"],
-    provider="google",
-    **LlmConfigFactory.factual_qa()
-)
-```
-
-## Integración con Frameworks
-
-### 14. Wrapper para FastAPI
-
-```python
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import colmena
-
-app = FastAPI(title="Colmena API Gateway")
-llm = colmena.ColmenaLlm()
-
-class ChatRequest(BaseModel):
-    message: str
-    provider: str = "openai"
-    model: str = None
-    temperature: float = 0.7
-    stream: bool = False
-
-class ChatResponse(BaseModel):
-    response: str
-    provider: str
-    model: str
-
-@app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest):
-    try:
-        if request.stream:
-            # Para streaming, necesitarías usar StreamingResponse
-            raise HTTPException(400, "Use /chat/stream for streaming responses")
-
-        response = llm.call(
-            messages=[request.message],
-            provider=request.provider,
-            model=request.model,
-            temperature=request.temperature
-        )
-
-        return ChatResponse(
-            response=response,
-            provider=request.provider,
-            model=request.model or f"default-{request.provider}"
-        )
-
-    except colmena.LlmException as e:
-        raise HTTPException(400, f"LLM Error: {e}")
-    except Exception as e:
-        raise HTTPException(500, f"Internal Error: {e}")
-
-@app.get("/health")
-async def health_check():
-    providers = llm.get_providers()
-    health_status = {}
-
-    for provider in providers:
-        health_status[provider] = llm.health_check(provider)
-
-    return {
-        "status": "ok",
-        "providers": health_status
-    }
-
-# Para ejecutar: uvicorn main:app --reload
-```
-
-## Mejores Prácticas
-
-### 15. Clase Wrapper Reutilizable
-
-```python
-import colmena
-from typing import List, Dict, Optional, Union
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
-
-class ColmenaManager:
-    \"\"\"Wrapper de alto nivel para Colmena con funcionalidades adicionales.\"\"\"
-
-    def __init__(self):
-        self.llm = colmena.ColmenaLlm()
-        self.executor = ThreadPoolExecutor(max_workers=3)
-
-    def quick_ask(self, question: str, provider: str = "openai") -> str:
-        \"\"\"Pregunta rápida con configuración optimizada.\"\"\"
-        return self.llm.call(
-            messages=[question],
-            provider=provider,
-            temperature=0.3,
-            max_tokens=200
-        )
-
-    def creative_generate(self, prompt: str, provider: str = "anthropic") -> str:
-        \"\"\"Generación creativa con parámetros optimizados.\"\"\"
-        return self.llm.call(
-            messages=[prompt],
-            provider=provider,
-            temperature=0.8,
-            max_tokens=600,
-            top_p=0.9,
-            frequency_penalty=0.3,
-            presence_penalty=0.3
-        )
-
-    def code_help(self, request: str, language: str = "python") -> str:
-        \"\"\"Asistente de código especializado.\"\"\"
-        system_msg = f"Eres un experto programador en {language}. Proporciona código limpio, bien documentado y sigue las mejores prácticas."
-
-        return self.llm.call_with_context(
-            system_message=system_msg,
-            messages=[request],
-            provider="openai",
-            model="gpt-4",
-            temperature=0.2,
-            max_tokens=800
-        )
-
-    def parallel_ask(self, questions: List[str], provider: str = "openai") -> List[str]:
-        \"\"\"Realiza múltiples preguntas en paralelo.\"\"\"
-        def ask_single(question):
-            return self.quick_ask(question, provider)
-
-        futures = [self.executor.submit(ask_single, q) for q in questions]
-        return [future.result() for future in futures]
-
-    def get_system_status(self) -> Dict[str, bool]:
-        \"\"\"Obtiene el estado de todos los proveedores.\"\"\"
-        providers = self.llm.get_providers()
-        return {provider: self.llm.health_check(provider) for provider in providers}
-
-# Ejemplo de uso
-manager = ColmenaManager()
-
-# Pregunta rápida
-answer = manager.quick_ask("¿Qué es la arquitectura hexagonal?")
-print("Respuesta rápida:", answer)
-
-# Generación creativa
-story = manager.creative_generate("Una historia sobre un programador que encuentra un bug mágico")
-print("Historia:", story)
-
-# Ayuda con código
-code = manager.code_help("Crea una función que calcule números primos", "rust")
-print("Código:", code)
-
-# Preguntas en paralelo
-questions = [
-    "¿Qué es REST?",
-    "¿Qué es GraphQL?",
-    "¿Qué es gRPC?"
-]
-answers = manager.parallel_ask(questions)
-for q, a in zip(questions, answers):
-    print(f"P: {q}")
-    print(f"R: {a}\n")
-
-# Estado del sistema
-status = manager.get_system_status()
-print("Estado del sistema:", status)
-```
+# Colmena — Catálogo de Ejemplos
+
+Este documento es un índice curado de los grafos de ejemplo que viven bajo
+`tests/graphs/`. Todos los grafos listados aquí están verificados y son
+ejecutables con el binario `dag_engine`.
+
+Si vas a aprender Colmena leyendo código, este es tu punto de partida: cada
+sección apunta a un grafo real y muestra el comando exacto para correrlo.
+
+> **Lenguaje y forma de uso**
+> Colmena es una librería Rust. Los grafos son JSON ejecutados por el motor
+> `dag_engine`. No hay (todavía) un paquete `pip install colmena` ni un SDK
+> Python público; las integraciones se hacen vía el binario, vía la NAPI
+> exportada (`index.js`) o vía la librería Rust.
 
 ---
 
-## Notas Importantes
+## Prerrequisitos
 
-1. **API Keys**: Siempre mantén tus API keys seguras y no las incluyas en el código fuente.
+### Toolchain
 
-2. **Rate Limits**: Cada proveedor tiene límites de velocidad diferentes. Implementa lógica de retry con backoff exponencial.
+- Rust (ver `rust-toolchain.toml`).
+- Para los grafos con `python_script` / `python_sandbox_tool`, compila con la
+  feature `python`.
 
-3. **Costos**: Las llamadas a LLMs tienen costo. Monitorea tu uso, especialmente con modelos grandes como GPT-4.
+### Variables de entorno
 
-4. **Timeouts**: Para aplicaciones de producción, siempre configura timeouts apropiados.
+Cárgalas desde tu `.env` antes de ejecutar:
 
-5. **Logging**: Implementa logging para debugging y monitoreo en producción.
+```sh
+set -a; source .env; set +a
+```
 
-6. **Validación**: Valida las respuestas de los LLMs antes de usarlas en aplicaciones críticas.
+Las API keys más usadas:
+
+- `OPENAI_API_KEY` — proveedor `openai`.
+- `GOOGLE_API_KEY` o `GEMINI_API_KEY` — proveedor `google` (ambos nombres
+  mapean al mismo `ProviderKind::Google`).
+- `ANTHROPIC_API_KEY` — proveedor `anthropic`.
+- `DATABASE_URL` — Postgres, requerido por todos los grafos con memoria,
+  secure values, sesiones o `agent_session_id`. Default recomendado para
+  tests locales en colmena puro: `colmena_llm_memory`. ADP usa
+  `adp_db_develop` (gestionado por Prisma).
+- `TAVILY_API_KEY` — para los grafos en `tests/graphs/web/tavily_*`.
+- `AMADEUS_CLIENT_ID`, `AMADEUS_CLIENT_SECRET` — grafos `amadeus_*`.
+
+> **Modelo Google por defecto**: usa siempre `gemini-2.5-flash`.
+> Los modelos `gemini-1.5-*` están deprecated.
+
+### Comando canónico
+
+```sh
+cargo run --bin dag_engine -- run <ruta/al/grafo.json>
+```
+
+Flags útiles:
+
+```sh
+# Verbose con todos los logs del engine
+COLMENA_VERBOSE=1 cargo run --bin dag_engine -- run <grafo.json>
+
+# Continuar una sesión de agente (memoria persistente)
+cargo run --bin dag_engine -- run <grafo.json> \
+  --agent-session-id agent_demo_001
+
+# Resumir un grafo suspendido pasando la respuesta del usuario
+cargo run --bin dag_engine -- run <grafo.json> \
+  --agent-session-id agent_demo_001 \
+  --answer "París, 3 días"
+
+# Modo servidor (expone los `trigger_webhook` como endpoints HTTP)
+cargo run --bin dag_engine -- serve <grafo.json> --port 3000
+```
+
+Detalles completos en `CLAUDE.md` (sección *DAG Engine CLI*).
 
 ---
 
-# DAG Engine - Ejemplos de Uso
+## 1. Básicos — motor puro, sin red
 
-El DAG Engine permite orquestar workflows complejos usando grafos JSON. Soporta múltiples tipos de nodos incluyendo operaciones matemáticas, llamadas HTTP, integración con LLMs, y más.
+Ideal para entender la mecánica de nodos, edges y triggers.
 
-## Conceptos Básicos
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/basic/trigger.json` | Webhook trigger con `test_payload`. |
+| `tests/graphs/basic/input_example.json` | Pasar input y loggear. |
+| `tests/graphs/basic/power.json` | Operaciones matemáticas (`exponential`). |
+| `tests/graphs/basic/power_webhook.json` | Lo mismo, expuesto por webhook. |
+| `tests/graphs/basic/python_simple_graph.json` | `python_script` inline. Requiere feature `python`. |
+| `tests/graphs/basic/test_cyclic_graph.json` | Grafo con ciclos. |
+| `tests/graphs/basic/test_cyclic_early_stop.json` | Ciclo con parada temprana. |
+| `tests/graphs/basic/test_loop.json` / `test_loop_direct.json` | Loops iterativos. |
+| `tests/graphs/basic/test_suspend_manual.json` | Nodo `suspend` nativo (HITL). |
+| `tests/graphs/basic/suspend_in_subgraph.json` | Suspend dentro de subgrafo. |
+| `tests/graphs/basic/secure_suspend_smoke.json` | Secure values + suspend smoke. |
+| `tests/graphs/basic/secure_value_in_config_smoke.json` | Secure value usado desde `config`. |
 
-### Modos de Ejecución
-
-**Modo Run** (Testing Local):
-```bash
-cargo run --bin dag_engine -- run tests/my_graph.json
+```sh
+cargo run --bin dag_engine -- run tests/graphs/basic/power.json
 ```
 
-**Modo Serve** (Producción):
-```bash
-cargo run --bin dag_engine -- serve tests/my_graph.json --port 3000
+## 2. Edge resolution — cómo se conectan los puertos
+
+Tests pedagógicos del sistema de resolución de edges (extracción inteligente,
+auto-flatten, puertos default, etc.).
+
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/edge_resolution/test_case_1_1_implicit_with_defaults.json` | Edge implícita con puertos default. |
+| `tests/graphs/edge_resolution/test_case_1_4_fully_explicit.json` | Edge totalmente explícita. |
+| `tests/graphs/edge_resolution/test_case_2_2_explicit_required_add.json` | Required fields. |
+| `tests/graphs/edge_resolution/test_case_4_1_smart_extraction.json` | Smart field extraction. |
+| `tests/graphs/edge_resolution/test_case_4_2_no_field_match.json` | Caso sin match. |
+| `tests/graphs/edge_resolution/test_case_5_1_auto_flatten_fallback.json` | Auto-flatten fallback. |
+| `tests/graphs/edge_resolution/default_output_ports_named.json` | Puertos de salida nombrados. |
+| `tests/graphs/edge_resolution/default_ports_chain.json` | Encadenamiento por puertos default. |
+| `tests/graphs/edge_resolution/smart_extraction_complex.json` | Extracción compleja anidada. |
+
+## 3. LLM y agentes
+
+Llamadas LLM, tool calling, streaming, thinking y patrones de extracción.
+
+### Llamada básica y streaming
+
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/agents/llm_call.json` | Llamada simple a OpenAI. |
+| `tests/graphs/agents/llm_local_test.json` | Llamada local con `provider = mock` (sin red). |
+| `tests/graphs/agents/llm_chain_futbol.json` | Cadena LLM → LLM. |
+| `tests/graphs/agents/llm_stream_dag.json` | Streaming chunks via SSE. |
+| `tests/graphs/agents/llm_stream_tool.json` | Streaming con tool calls. |
+| `tests/graphs/agents/llm_gemini_stream_tool.json` | Streaming + tools en Google. |
+| `tests/graphs/agents/llm_usage_all_providers_test.json` | Compara los 3 providers (usage/tokens). |
+| `tests/graphs/agents/llm_temporal_context_test.json` | Inyección de contexto temporal. |
+| `tests/graphs/agents/extraction_example.json` | Extracción estructurada. |
+| `tests/graphs/examples/llm_chain_birthday.json` | Cadena simple (Gemini). |
+
+### Thinking / razonamiento extendido
+
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/agents/llm_thinking_anthropic.json` | Extended thinking en Claude. |
+| `tests/graphs/agents/llm_thinking_gemini.json` | Thinking budget en Gemini. |
+| `tests/graphs/agents/llm_thinking_openai.json` | Reasoning effort en OpenAI. |
+
+### Tools dinámicas
+
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/agents/agent_with_tools.json` | OpenAI + tool HTTP. |
+| `tests/graphs/agents/agent_with_tools_anthropic.json` | Mismo patrón en Anthropic. |
+| `tests/graphs/agents/agent_with_tools_gemini.json` | Mismo patrón en Google. |
+| `tests/graphs/agents/agent_with_tools_stream.json` | Tools + streaming. |
+| `tests/graphs/agents/agent_http_tool_create_post.json` | HTTP tool con POST + body dinámico. |
+| `tests/graphs/agents/agent_http_tool_recall.json` | HTTP tool encadenada con memoria. |
+| `tests/graphs/agents/http_tool_dynamic_placeholder_test.json` | Placeholders `$DYNAMIC` en config. |
+| `tests/graphs/agents/http_tool_node_schema_test.json` | Tool con JSON schema. |
+| `tests/graphs/agents/tools_lazy_basic.json` | Lazy tool loading. |
+| `tests/graphs/agents/forward_generated_artifact.json` | Forwarding de artefactos generados. |
+
+```sh
+cargo run --bin dag_engine -- run tests/graphs/agents/agent_with_tools.json
 ```
 
-## Ejemplos de Grafos
+### Planner
 
-### 1. Workflow Simple con Trigger Local
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/agents/planner_test.json` | Nodo `planner` standalone. |
 
-Usa `test_payload` para testing local sin servidor:
+## 4. Skills
 
-```json
-{
-  "nodes": {
-    "trigger": {
-      "type": "trigger_webhook",
-      "config": {
-        "path": "/process",
-        "method": "POST",
-        "test_payload": {
-          "number": 5
-        }
-      }
-    },
-    "multiply": {
-      "type": "multiply",
-      "config": {}
-    },
-    "log": {
-      "type": "log"
-    }
-  },
-  "edges": [
-    {
-      "from": "trigger.output.number",
-      "to": "multiply.a"
-    },
-    {
-      "from": "trigger.output.number",
-      "to": "multiply.b"
-    },
-    {
-      "from": "multiply.output",
-      "to": "log.input"
-    }
-  ]
-}
+Skills son playbooks Markdown auto-cargables. La forma del config:
+`{ "builtin": ["name"], "paths": ["./dir"] }`. También se pueden cargar
+desde `llm_call` vía `skills_path` (directorio padre) o `skills_paths`
+(lista). El único synthetic tool es `load_skill({ name, reference? })`.
+Las referencias dentro de un `SKILL.md` son recursivas (depth 5, con
+detección de ciclos).
+
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/agents/skills_basic.json` | Skills builtin (`python-expert`, `sql-optimizer`). |
+| `tests/graphs/agents/roleplay_inventory_skills.json` | Skills cargadas por `paths`, con references. |
+| `tests/graphs/skills/inventory_roleplay/` | Tres skills de ejemplo (analyst, writer, monitor) usadas por el grafo anterior. |
+| `tests/graphs/advanced/hubspot/agent.json` + `tests/graphs/advanced/hubspot/skills/` | Skill realista (HubSpot CRM) con tools HTTP. |
+
+## 5. Memoria (sesiones de agente)
+
+Todos los grafos de memoria persisten conversación en `DATABASE_URL` por
+`agent_session_id`. Usa el flag CLI `--agent-session-id` para encadenar
+invocaciones.
+
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/memory/memory_sqlite_example.json` | Persistencia en SQLite (Gemini). |
+| `tests/graphs/memory/memory_postgres_example.json` | Persistencia en Postgres. |
+| `tests/graphs/memory/agent_chat_say.json` | Turno "say" (agente escribe). |
+| `tests/graphs/memory/agent_chat_ask.json` | Turno "ask" (agente espera respuesta). |
+| `tests/graphs/agents/agent_with_tools_postgres.json` | Tools + memoria Postgres (sesión inicial). |
+| `tests/graphs/agents/agent_with_tools_postgres_recall.json` | Recall (continuación de sesión). |
+| `tests/graphs/advanced/llm_tools_memory_test.json` | Memoria + tools combinadas. |
+| `tests/graphs/advanced/llm_tools_memory_continuation.json` | Continuación de la anterior. |
+
+```sh
+# Crear sesión
+cargo run --bin dag_engine -- run \
+  tests/graphs/agents/agent_with_tools_postgres.json \
+  --agent-session-id agent_demo_001
+
+# Continuar la misma sesión
+cargo run --bin dag_engine -- run \
+  tests/graphs/agents/agent_with_tools_postgres_recall.json \
+  --agent-session-id agent_demo_001
 ```
 
-Ejecutar:
-```bash
-cargo run --bin dag_engine -- run examples/simple_math.json
-# Output: [LogNode]: 25
+## 6. Documents (HTML)
+
+Se agregaron en PR #79: variant `ArtifactKind::Html`, use cases
+`upload_asset` / `list_assets` / `delete_asset`, `AssetStore` port con
+implementaciones `LocalFsAssetStore` y `GcsAssetStore`.
+
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/documents/smoke_create_edit_read.json` | Crear → editar → leer un documento HTML. |
+| `tests/graphs/documents/llm_tool_integration.json` | Documento HTML expuesto al LLM como herramienta. |
+
+## 7. Multimedia (image generation / edit / tts)
+
+Nodos: `image_generation`, `image_edit`, `tts`. Para el detalle de modelos
+y parámetros por proveedor, ver el doc canónico de configuración del
+canvas multimedia en ADP.
+
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/media/image_generation_basic.json` | Generación de imagen básica. |
+| `tests/graphs/media/image_gemini.json` | Generación con Google. |
+| `tests/graphs/media/image_anthropic.json` | Generación con Anthropic. |
+| `tests/graphs/media/image_edit_basic.json` | Edición de imagen. |
+| `tests/graphs/media/image_gen_then_edit.json` | Pipeline generate → edit. |
+| `tests/graphs/media/tts_basic.json` | Text-to-speech. |
+| `tests/graphs/agents/multimedia_agent.json` | Agente que decide qué tool multimedia usar. |
+| `tests/graphs/agents/multimedia_agent_with_load.json` | Multimedia + load_attachment. |
+
+### Visión / PDF
+
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/media/image_path.json` | Imagen desde archivo local. |
+| `tests/graphs/media/image_url_openai.json` / `_anthropic` / `_gemini` | Imágenes vía signed URL. |
+| `tests/graphs/media/pdf_path.json` / `pdf_base64.json` | PDF local / base64. |
+| `tests/graphs/media/pdf_url_openai.json` / `_anthropic` / `_gemini` | PDF grande vía signed URL. |
+| `tests/graphs/media/pdf_anthropic.json` / `pdf_gemini.json` | PDF inline por proveedor. |
+
+> Para regenerar las signed URLs de los grafos `*_url_*`, ver
+> `tests/graphs/media/README.md`.
+
+### Adjuntos (load_attachment)
+
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/agents/load_attachment_basic.json` | Carga de adjunto básica. |
+| `tests/graphs/agents/load_attachment_auto_summary.json` | Resumen automático del adjunto. |
+| `tests/graphs/agents/load_attachment_inline_summary.json` | Resumen inline. |
+| `tests/graphs/agents/load_attachment_opt_out.json` | Opt-out del resumen. |
+| `tests/graphs/agents/load_attachment_subgraph.json` | Adjunto dentro de un subgrafo. |
+| `tests/graphs/agents/load_attachment_two_agents_step1_upload.json` | Paso 1: upload (agente A). |
+| `tests/graphs/agents/load_attachment_two_agents_step2_read.json` | Paso 2: read (agente B, mismo session). |
+| `tests/graphs/agents/load_attachment_two_agents_step3_isolated.json` | Paso 3: aislamiento entre sesiones. |
+| `tests/graphs/agents/agent_multipart_upload.json` | Upload multipart desde un agente. |
+| `tests/graphs/agents/upload_inline_to_endpoint.json` | Upload inline a endpoint. |
+| `tests/graphs/agents/upload_signed_url_to_endpoint.json` | Upload vía signed URL. |
+
+## 8. SQL (tool de base de datos)
+
+Tool de SQL con permisos finos sobre Postgres.
+
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/agents/sql_provision_schema_tool.json` | Provisión de schema. |
+| `tests/graphs/agents/sql_create_schema_blocked.json` | Bloqueo de operaciones DDL no permitidas. |
+| `tests/graphs/agents/sql_layered_tool_context.json` | Contexto SQL en capas. |
+| `tests/graphs/agents/sql_query_readonly_test.json` | Query read-only. |
+| `tests/graphs/agents/sql_insert_decimal_regression.json` | Regression test (insert decimal). |
+| `tests/graphs/agents/sql_rls_todo_test.json` | RLS / row-level security. |
+
+## 9. Python (sandbox)
+
+Requieren build con la feature `python`.
+
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/basic/python_simple_graph.json` | `python_script` inline. |
+| `tests/graphs/agents/python_llm_graph.json` | Python + LLM. |
+| `tests/graphs/agents/python_sandbox_tool_test.json` | Tool `python_sandbox` desde un agente. |
+| `tests/graphs/agents/python_sandbox_tool_thinking_test.json` | Sandbox + thinking. |
+
+## 10. HTTP / Web / APIs externas
+
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/external/http_request.json` | GET simple a API pública. |
+| `tests/graphs/external/dynamic_http.json` | Endpoint resuelto en runtime. |
+| `tests/graphs/external/http_headers_dynamic.json` | Headers dinámicos. |
+| `tests/graphs/external/http_tool_configured.json` | HTTP como tool del agente. |
+| `tests/graphs/external/multipart_upload.json` | Upload multipart. |
+| `tests/graphs/external/multipart_gen_chain.json` | Generación + multipart encadenados. |
+
+### Tavily (búsqueda web)
+
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/web/tavily_search_basic.json` | Search básico. |
+| `tests/graphs/web/tavily_direct_search.json` | Search sin LLM. |
+| `tests/graphs/web/tavily_fetch_article.json` | Fetch de artículo completo. |
+| `tests/graphs/web/tavily_llm_openai.json` / `_gemini` / `_anthropic` | Tavily como tool de un LLM. |
+
+### API explorer (OpenAPI)
+
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/web/api_explorer_petstore.json` | Petstore (Swagger 2). |
+| `tests/graphs/web/api_explorer_petstore_flag_only.json` | Mismo, flag-only. |
+| `tests/graphs/web/api_explorer_amadeus_swagger2.json` | Amadeus Swagger 2. |
+| `tests/graphs/web/api_explorer_hubspot_conversation.json` | HubSpot. |
+
+### Amadeus (flight search)
+
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/external/amadeus_flight_search_dynamic.json` | Búsqueda de vuelos. |
+| `tests/graphs/external/debug_amadeus_token_only.json` | Sólo obtener token. |
+| `tests/graphs/external/debug_amadeus_auth_flight.json` | Auth + búsqueda. |
+| `tests/graphs/external/debug_amadeus_flight_no_llm.json` | Búsqueda sin LLM. |
+| `tests/graphs/advanced/travel_agent_amadeus.json` | Agente completo. |
+
+### Otros (ventas, canvas, socketio)
+
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/external/product_sales_assistant.json` | Asistente de ventas. |
+| `tests/graphs/external/product_sales_assistant_cards.json` | Versión con cards. |
+| `tests/graphs/external/product_sales_dummyjson.json` | Sobre dummyjson. |
+| `tests/graphs/external/adp_canvas_load_test.json` | Carga grafo desde ADP. |
+| `tests/graphs/external/canvas_builder_autonomous.json` | Canvas builder autónomo. |
+| `tests/graphs/external/canvas_builder_controlled.json` | Canvas builder controlado. |
+| `tests/graphs/external/socketio_canvas_builder.json` | Vía Socket.IO. |
+| `tests/graphs/external/socketio_canvas_test.json` | Smoke Socket.IO. |
+| `tests/graphs/external/socketio_pre_events.json` | Pre-events Socket.IO. |
+| `tests/graphs/external/socketio_debug_test.json` | Debug Socket.IO. |
+
+## 11. Secure values
+
+Mecanismo para hashear secretos (`<value_1>`, …) que sólo se rehidratan
+durante la inyección a nodos no-LLM. TTL del mapping: **24 h** (cambio
+2026-05-11). Ver `tests/graphs/security/README.md` para el detalle de
+cada test.
+
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/security/http_secure_basic.json` | HTTP node con `secure: true`. |
+| `tests/graphs/security/http_secure_debug.json` | Variante con logs extra. |
+| `tests/graphs/security/http_secure_to_http_inject.json` | Inyección de token entre nodos HTTP. |
+| `tests/graphs/security/http_secure_to_llm_demo.json` | Secure HTTP → LLM (LLM ve hashes). |
+| `tests/graphs/security/http_secure_to_llm_test.json` | Test de la integración anterior. |
+| `tests/graphs/security/amadeus_secure_simple_test.json` | Amadeus + secure. |
+| `tests/graphs/security/amadeus_secure_gemini_test.json` | Amadeus secure + Gemini. |
+| `tests/graphs/security/amadeus_secure_gemini_agent_test.json` | Amadeus secure dentro de agente. |
+| `tests/graphs/advanced/secure_python_echo_masking_e2e.json` | E2E: masking en `python_script`. |
+| `tests/graphs/advanced/secure_suspend_login_direct.json` | Login flow con suspend (directo). |
+| `tests/graphs/advanced/secure_suspend_login_e2e.json` | Login flow E2E. |
+
+## 12. Suspend / HITL / loops
+
+Pausa el grafo, espera input humano, continúa.
+
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/basic/test_suspend_manual.json` | Suspend nativo. |
+| `tests/graphs/basic/suspend_in_subgraph.json` | Suspend dentro de subgrafo. |
+| `tests/graphs/advanced/test_suspend.json` | Variante con LLM. |
+| `tests/graphs/advanced/llm_tool_suspend_smoke.json` | Tool que dispara suspend. |
+| `tests/graphs/advanced/llm_tool_suspend_flag_smoke.json` | Tool suspend gated por flag. |
+| `tests/graphs/advanced/hitl_allow_suspend_false_test.json` | `allow_suspend = false`. |
+| `tests/graphs/advanced/hitl_planner_suspend_test.json` | Planner que suspende. |
+| `tests/graphs/advanced/hitl_critic_answer_rerun_test.json` | Critic + re-run con respuesta. |
+| `tests/graphs/advanced/hitl_critic_max_retries_test.json` | Critic con max retries. |
+| `tests/graphs/basic/test_loop.json` / `test_loop_direct.json` | Loops básicos. |
+
+```sh
+# Lanzar (se suspenderá esperando respuesta)
+cargo run --bin dag_engine -- run \
+  tests/graphs/advanced/llm_tool_suspend_smoke.json \
+  --agent-session-id hitl_demo_001
+
+# Resumir pasando la respuesta del humano
+cargo run --bin dag_engine -- run \
+  tests/graphs/advanced/llm_tool_suspend_smoke.json \
+  --agent-session-id hitl_demo_001 \
+  --answer "OK, procede"
 ```
 
-### 2. Llamada HTTP con Configuración Dinámica
+## 13. Orquestadores (planner / critic / phase reactor)
 
-```json
-{
-  "nodes": {
-    "trigger": {
-      "type": "trigger_webhook",
-      "config": {
-        "path": "/fetch-joke",
-        "method": "POST",
-        "test_payload": {
-          "joke_endpoint": "/random_joke"
-        }
-      }
-    },
-    "fetch_joke": {
-      "type": "http_request",
-      "config": {
-        "base_url": "https://official-joke-api.appspot.com",
-        "method": "GET"
-      }
-    },
-    "log_joke": {
-      "type": "log"
-    }
-  },
-  "edges": [
-    {
-      "from": "trigger.output.joke_endpoint",
-      "to": "fetch_joke.endpoint"
-    },
-    {
-      "from": "fetch_joke.output.body",
-      "to": "log_joke.input"
-    }
-  ]
-}
-```
+El orquestador acepta config **anidada**:
+`{ planner: {...}, critic: {...}, phase_reactor: {...}, final_reactor: {...} }`
+(NO una config plana). Las cabeceras de prompts del critic se emiten en
+inglés (e.g. `=== PREVIOUS ATTEMPT — WHY IT FAILED ===`).
 
-Ejecutar localmente:
-```bash
-cargo run --bin dag_engine -- run examples/http_joke.json
-```
+### Canónico
 
-En producción:
-```bash
-# Terminal 1: Iniciar servidor
-cargo run --bin dag_engine -- serve examples/http_joke.json
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/advanced/trip_planner_v2.json` | **Ejemplo canónico** del orquestador (config anidada completa). |
 
-# Terminal 2: Hacer petición
-curl -X POST http://localhost:3000/fetch-joke \
-  -H "Content-Type: application/json" \
-  -d '{"joke_endpoint": "/random_joke"}'
-```
+### Variantes
 
-### 3. Integración con LLM (OpenAI)
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/advanced/test_orchestrator.json` | Orquestador básico. |
+| `tests/graphs/advanced/trip_planner.json` | Versión inicial del trip planner. |
+| `tests/graphs/advanced/trip_assistant.json` | Asistente con orquestador. |
+| `tests/graphs/advanced/trip_planner_replanning_test.json` | Replanificación. |
+| `tests/graphs/advanced/bridge_tasks_test.json` | Bridge tasks entre fases. |
+| `tests/graphs/advanced/final_reactor_text_delta_test.json` | Final reactor emitiendo deltas. |
 
-```json
-{
-  "nodes": {
-    "trigger": {
-      "type": "trigger_webhook",
-      "config": {
-        "path": "/ask",
-        "method": "POST",
-        "test_payload": {
-          "question": "Explain Rust ownership in simple terms"
-        }
-      }
-    },
-    "llm": {
-      "type": "llm_call",
-      "config": {
-        "provider": "openai",
-        "api_key": "sk-...",
-        "model": "gpt-3.5-turbo",
-        "system_message": "You are a helpful programming tutor.",
-        "max_tokens": 150,
-        "temperature": 0.7
-      }
-    },
-    "log_response": {
-      "type": "log"
-    }
-  },
-  "edges": [
-    {
-      "from": "trigger.output.question",
-      "to": "llm.prompt"
-    },
-    {
-      "from": "llm.output",
-      "to": "log_response.input"
-    }
-  ]
-}
-```
+### Critic feedback
 
-### 4. Soporte de Visión y Documentos (Novedad)
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/advanced/critic_feedback_cleanup_test.json` | Cleanup de feedback. |
+| `tests/graphs/advanced/critic_feedback_injection_test.json` | Inyección de feedback al planner. |
+| `tests/graphs/advanced/critic_feedback_multiretry_test.json` | Multi-retry. |
+| `tests/graphs/advanced/critic_feedback_with_suspend_test.json` | Critic combinado con suspend. |
 
-Envía imágenes o PDFs directamente en el DAG:
+### Orquestadores por proveedor
 
-```json
-{
-  "nodes": {
-    "vision_step": {
-      "type": "llm_call",
-      "config": {
-        "provider": "openai",
-        "api_key": "${OPENAI_API_KEY}",
-        "model": "gpt-4o",
-        "prompt": "Explica el contenido de este documento",
-        "files": [
-          {
-            "mime_type": "application/pdf",
-            "filename": "reporte.pdf",
-            "path": "tests/dags/media/sample.pdf"
-          }
-        ]
-      }
-    }
-  }
-}
-```
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/advanced/travel_orchestrator_openai.json` | Variante OpenAI. |
+| `tests/graphs/advanced/travel_orchestrator_anthropic.json` | Variante Anthropic. |
+| `tests/graphs/advanced/travel_orchestrator_anthropic_suspend_test.json` | Anthropic + suspend. |
+| `tests/graphs/advanced/travel_orchestrator_gemini.json` | Variante Gemini. |
+| `tests/graphs/advanced/travel_orchestrator_gemini_suspend_test.json` | Gemini + suspend. |
+| `tests/graphs/advanced/travel_orchestrator_gemini_pro_suspend_test.json` | Gemini Pro + suspend. |
 
-Output del log incluye:
-```json
-{
-  "content": "Rust ownership is like...",
-  "usage": {
-    "prompt_tokens": 25,
-    "completion_tokens": 120,
-    "total_tokens": 145
-  }
-}
-```
+## 14. Sub-grafos / agentes anidados
 
-### 4. Pipeline HTTP → LLM → Log
+| Grafo | Qué muestra |
+|-------|-------------|
+| `tests/graphs/advanced/nested_orchestrators.json` | Orquestador dentro de orquestador. |
+| `tests/graphs/advanced/nested_orchestrators_suspend.json` | Anidados + suspend. |
+| `tests/graphs/advanced/nested_orchestrators_with_tools.json` | Anidados con tools. |
+| `tests/graphs/advanced/nested_agents/weather_manager.json` | Manager (carga al child). |
+| `tests/graphs/advanced/nested_agents/weather_child_agent.json` | Child invocado. |
 
-Fetch data from API, analyze with LLM, and log results:
+---
 
-```json
-{
-  "nodes": {
-    "trigger": {
-      "type": "trigger_webhook",
-      "config": {
-        "path": "/analyze-joke",
-        "method": "POST",
-        "test_payload": {}
-      }
-    },
-    "get_joke": {
-      "type": "http_request",
-      "config": {
-        "base_url": "https://official-joke-api.appspot.com",
-        "endpoint": "/random_joke",
-        "method": "GET"
-      }
-    },
-    "analyze": {
-      "type": "llm_call",
-      "config": {
-        "provider": "openai",
-        "api_key": "sk-...",
-        "model": "gpt-3.5-turbo",
-        "system_message": "You are a comedy expert. Analyze jokes and explain why they're funny.",
-        "max_tokens": 200
-      }
-    },
-    "log_analysis": {
-      "type": "log"
-    }
-  },
-  "edges": [
-    {
-      "from": "get_joke.output.body.setup",
-      "to": "analyze.prompt"
-    },
-    {
-      "from": "analyze.output",
-      "to": "log_analysis.input"
-    }
-  ]
-}
-```
+## Ejecutar todo / auditoría
 
-### 5. Multi-Provider LLM con Configuración Dinámica
+El archivo `tests/graphs/AUDIT_RESULTS.md` contiene la última auditoría de
+ejecución de todos los grafos del directorio (estado, notas, regresiones).
+Útil cuando un grafo "no corre" — primero revisar si ya está documentado.
 
-```json
-{
-  "nodes": {
-    "trigger": {
-      "type": "trigger_webhook",
-      "config": {
-        "path": "/multi-llm",
-        "method": "POST",
-        "test_payload": {
-          "provider": "google",
-          "question": "What is hexagonal architecture?",
-          "model": "gemini-2.0-flash-001"
-        }
-      }
-    },
-    "llm": {
-      "type": "llm_call",
-      "config": {
-        "api_key": "your-api-key",
-        "system_message": "You are a software architecture expert.",
-        "max_tokens": 150
-      }
-    },
-    "log_result": {
-      "type": "log"
-    }
-  },
-  "edges": [
-    {
-      "from": "trigger.output.provider",
-      "to": "llm.provider"
-    },
-    {
-      "from": "trigger.output.model",
-      "to": "llm.model"
-    },
-    {
-      "from": "trigger.output.question",
-      "to": "llm.prompt"
-    },
-    {
-      "from": "llm.output",
-      "to": "log_result.input"
-    }
-  ]
-}
-```
+## Cómo añadir un nuevo ejemplo
 
-### 6. Workflow de Procesamiento de Datos
+1. Coloca el JSON bajo la subcarpeta de `tests/graphs/` que mejor encaje
+   por categoría (no inventes nuevas categorías sin necesidad).
+2. Verifica que arranca con `cargo run --bin dag_engine -- run <ruta>`.
+3. Si depende de un servicio externo, documenta cualquier setup adicional
+   en un `README.md` local a la carpeta (ver
+   `tests/graphs/media/README.md` y `tests/graphs/security/README.md` como
+   referencia).
+4. Añade una fila en la tabla de este documento, en la sección
+   correspondiente.
 
-Combina operaciones matemáticas con logging:
+## Referencias
 
-```json
-{
-  "nodes": {
-    "input": {
-      "type": "trigger_webhook",
-      "config": {
-        "path": "/calculate",
-        "method": "POST",
-        "test_payload": {
-          "value": 10
-        }
-      }
-    },
-    "square": {
-      "type": "exponential",
-      "config": {
-        "exponent": 2
-      }
-    },
-    "add_ten": {
-      "type": "add",
-      "config": {}
-    },
-    "divide": {
-      "type": "divide",
-      "config": {}
-    },
-    "log_result": {
-      "type": "log"
-    }
-  },
-  "edges": [
-    {
-      "from": "input.output.value",
-      "to": "square.input"
-    },
-    {
-      "from": "square.output",
-      "to": "add_ten.a"
-    },
-    {
-      "from": "input.output.value",
-      "to": "add_ten.b"
-    },
-    {
-      "from": "add_ten.output",
-      "to": "divide.a"
-    },
-    {
-      "from": "input.output.value",
-      "to": "divide.b"
-    },
-    {
-      "from": "divide.output",
-      "to": "log_result.input"
-    }
-  ]
-}
-```
-
-### 7. API Gateway Pattern
-
-```json
-{
-  "nodes": {
-    "webhook": {
-      "type": "trigger_webhook",
-      "config": {
-        "path": "/api/translate",
-        "method": "POST"
-      }
-    },
-    "translate_llm": {
-      "type": "llm_call",
-      "config": {
-        "provider": "openai",
-        "api_key": "sk-...",
-        "model": "gpt-3.5-turbo",
-        "system_message": "You are a translator. Translate to Spanish.",
-        "max_tokens": 100
-      }
-    },
-    "log_translation": {
-      "type": "log"
-    }
-  },
-  "edges": [
-    {
-      "from": "webhook.output.text",
-      "to": "translate_llm.prompt"
-    },
-    {
-      "from": "translate_llm.output.content",
-      "to": "log_translation.input"
-    }
-  ]
-}
-```
-
-Uso en producción:
-```bash
-curl -X POST http://localhost:3000/api/translate \
-  -H "Content-Type: application/json" \
-  -d '{"text": "Hello, how are you?"}'
-```
-
-## Tipos de Nodos Disponibles
-
-### Trigger
-- **trigger_webhook**: Recibe HTTP requests o usa test_payload
-
-### Math
-- **add**: Suma dos números
-- **subtract**: Resta dos números
-- **multiply**: Multiplica dos números
-- **divide**: Divide dos números
-- **exponential**: Eleva a una potencia
-
-### HTTP
-- **http_request**: Realiza peticiones HTTP
-  - Soporta: GET, POST, PUT, DELETE
-  - Configuración dinámica de endpoint, headers, body
-
-### LLM
-- **llm_call**: Integración con LLMs
-  - Proveedores: OpenAI, Gemini, Anthropic
-  - Configuración dinámica completa
-
-### Debug
-- **log**: Imprime valores a consola
-- **mock_input**: Proporciona datos de prueba
-
-## Best Practices
-
-1. **Development Workflow**:
-   - Usa `test_payload` para desarrollo rápido
-   - Verifica con `run` antes de `serve`
-   - Usa `jq` para formatear output: `cargo run ... | jq`
-
-2. **Configuración Dinámica**:
-   - Aprovecha `inputs > config` precedence
-   - Diseña grafos reutilizables
-   - Mantén config estática para valores que no cambian
-
-3. **Security**:
-   - No commitees API keys en grafos
-   - Usa variables de entorno
-   - Implementa rate limiting en producción
-
-4. **Error Handling**:
-   - Los nodos retornan errores descriptivos
-   - Logs muestran el flujo de ejecución
-   - Valida edge connections
-
-5. **Performance**:
-   - El motor ejecuta en orden topológico
-   - Nodos se ejecutan secuencialmente (no paralelo aún)
-   - Usa streaming LLM cuando sea apropiado
-
-## Recursos Adicionales
-
-- [DAG Engine Developer Guide](../developer_guide/12_dag_engine_guide.md)
-- [DAG Engine Design](../dds/DAG_ENGINE_DISEÑO.md)
-- [LLM Module Design](../dds/MODULO_LLM_DISEÑO.md)
-
-Este documento cubre los casos de uso más comunes. Para casos más específicos, consulta la documentación técnica.
+- `CLAUDE.md` — comandos canónicos del binario, flags de CLI.
+- `docs/developer_guide/12_dag_engine_guide.md` — guía del motor.
+- `tests/graphs/AUDIT_RESULTS.md` — última auditoría de ejecución.
+- `src/libs/colmena/src/skills/domain/skill_config.rs` — esquema real del
+  config de skills.

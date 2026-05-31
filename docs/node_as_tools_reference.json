@@ -1,5 +1,5 @@
 {
-  "version": "0.3.0",
+  "version": "0.3.2",
   "description": "Reference for using DAG nodes as LLM-callable tools inside an llm_call's tool_configurations. Complements node_configurations.json (which documents nodes as DAG nodes) by focusing exclusively on the tool-calling perspective: how to declare each node type as a tool, what fields are fixed vs LLM-visible, and complete ready-to-use examples.",
 
   "concepts": {

@@ -476,7 +476,7 @@ Este ejemplo muestra cómo usar diferentes threads por usuario en un servidor.
 
 **Modo Serve:**
 ```bash
-cargo run --bin dag_engine -- serve tests/dynamic_memory.json
+cargo run --bin dag_engine -- serve tests/graphs/memory/memory_postgres_example.json
 ```
 
 **Petición HTTP:**
@@ -634,10 +634,10 @@ impl ExecutableNode for HttpNode {
 
 Segundo, "inyecta" tu nuevo nodo en la aplicación añadiéndolo al registro.
 
-Abre `src/dag_engine/infrastructure/registry.rs` y añade tu nodo en la función `HashMapNodeRegistry::new()`.
+Abre `src/libs/colmena/src/dag_engine/infrastructure/registry.rs` y añade tu nodo en la función `HashMapNodeRegistry::new()`.
 
 ```rust
-// en: src/dag_engine/infrastructure/registry.rs
+// en: src/libs/colmena/src/dag_engine/infrastructure/registry.rs
 
 // ... (otros registros de nodos) ...
 nodes.insert("http_request".to_string(), Arc::new(HttpNode));

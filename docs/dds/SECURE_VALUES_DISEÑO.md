@@ -216,7 +216,7 @@ HTTP Node Execution
 
 ### 1. Domain Trait: `SecureValueRepository`
 
-**File:** `src/dag_engine/domain/secure_value_repository.rs` (NEW)
+**File:** `src/libs/colmena/src/dag_engine/domain/secure_value_repository.rs` (NEW)
 
 ```rust
 use crate::dag_engine::domain::error::DagError;
@@ -263,7 +263,7 @@ pub trait SecureValueRepository: Send + Sync {
 
 ### 2. Domain Service: `SecureValueService`
 
-**File:** `src/dag_engine/application/secure_value_service.rs` (NEW)
+**File:** `src/libs/colmena/src/dag_engine/application/secure_value_service.rs` (NEW)
 
 ```rust
 use crate::dag_engine::domain::{
@@ -414,7 +414,7 @@ impl SecureValueService {
 
 ### 3. Infrastructure Impl: `PostgresSecureValueRepository`
 
-**File:** `src/dag_engine/infrastructure/persistence/postgres_secure_value_repository.rs` (NEW)
+**File:** `src/libs/colmena/src/dag_engine/infrastructure/persistence/postgres_secure_value_repository.rs` (NEW)
 
 ```rust
 use crate::dag_engine::domain::{
@@ -560,7 +560,7 @@ impl SecureValueRepository for PostgresSecureValueRepository {
 
 ### 4. Integration: Modifications to `DagRunUseCase`
 
-**File:** `src/dag_engine/application/run_use_case.rs` (MODIFY)
+**File:** `src/libs/colmena/src/dag_engine/application/run_use_case.rs` (MODIFY)
 
 ```rust
 // In execute_node method:
