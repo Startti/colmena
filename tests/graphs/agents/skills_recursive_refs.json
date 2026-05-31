@@ -1,0 +1,35 @@
+{
+  "_comment": "E2E graph: verifies recursive references + skills_path config (post-revert features). Run with OPENAI_API_KEY set. The agent should: 1) see python-expert in load_skill catalog, 2) load_skill('python-expert') to see top-level refs, 3) load_reference('python-expert', 'frameworks') to see sub-refs (django, fastapi), 4) load_reference('python-expert', 'frameworks/django') for the deep-dive content. The final answer should mention Django ORM concepts like select_related or F expressions.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/test-skills-recursive",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Estoy haciendo una API en Django y necesito que me expliques cómo hacer queries eficientes que eviten el problema N+1, específicamente con relaciones ForeignKey. Usa las skills disponibles para darme una respuesta detallada."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o-mini",
+        "temperature": 0.0,
+        "stream": false,
+        "include_extra_info": true,
+        "system_message": "You are a careful coding assistant. When the user asks about a specific topic (e.g. Django ORM), you MUST use the available skills to look up authoritative details before answering. Use `load_skill` to see overview content, then `load_reference` with paths like 'frameworks/django' to drill down into specific areas. Always cite the concrete concepts (e.g. select_related, F expressions, Q objects) from the loaded skill content in your final answer.",
+        "skills_path": "./tests/fixtures/skills_recursive_demo"
+      }
+    },
+    "log": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}
