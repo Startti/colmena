@@ -101,7 +101,37 @@ Expected visual check:
 
 ## R5.2 — Projection of imported xlsx captures values
 
-After R5.1 succeeds, with the doc loaded:
+> **Note (outbound bridge):** The Univer → Y.Doc outbound bridge is intentionally
+> stubbed in `static/index.html` (see `// Outbound bridge: STUBBED` comment).
+> This means cells imported into Univer's UI do **not** flow into the Y.Doc
+> automatically, so `/projection/r5.json` will return the seed sheet (empty cells)
+> unless you manually drive the bridge in DevTools first.
+>
+> To wire it manually during the test: after importing the xlsx into Univer, open
+> DevTools Console and run:
+> ```js
+> // Patch each visible cell from Univer into the Y.Doc manually:
+> const cells = sheetsArr.get(0).get("cells");
+> ydoc.transact(() => {
+>   Object.entries(univer.getActiveWorkbook().getActiveSheet()
+>     .getCellMatrix().toJSON())
+>     .forEach(([row, cols]) => {
+>       Object.entries(cols).forEach(([col, cell]) => {
+>         const addr = String.fromCharCode(65 + Number(col)) + (Number(row) + 1);
+>         const m = new Y.Map(); m.set("v", cell.v); m.set("t", typeof cell.v === "number" ? "n" : "s");
+>         cells.set(addr, m);
+>       });
+>     });
+> });
+> ```
+> This is a spike-level workaround; the exact Univer API may differ — inspect
+> `window.univer` in DevTools to find the right accessor. Record the actual method
+> used in the results spec.
+>
+> If this wiring fails (Univer doesn't expose getCellMatrix in this form),
+> record R5.2 = NO-GO with the Univer API obstacle noted.
+
+After the bridge is wired and cells are in the Y.Doc:
 
 ```bash
 curl -s http://127.0.0.1:8081/projection/r5.json | jq '.sheets[0].cells | length'

@@ -194,7 +194,7 @@ pub async fn handle_socket(mut socket: WebSocket, doc: Arc<Doc>) -> Result<()> {
     // 1. Send our initial sync_step1 (state vector).
     let sv = doc.transact().state_vector();
     socket
-        .send(Message::Binary(encode_sync_step1(&sv).into()))
+        .send(Message::Binary(encode_sync_step1(&sv)))
         .await
         .map_err(|e| anyhow!("send sync_step1: {e}"))?;
 
@@ -214,7 +214,7 @@ pub async fn handle_socket(mut socket: WebSocket, doc: Arc<Doc>) -> Result<()> {
             outbound = rx.recv() => {
                 match outbound {
                     Some(bytes) => {
-                        if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                        if socket.send(Message::Binary(bytes)).await.is_err() {
                             break;
                         }
                     }
@@ -238,7 +238,7 @@ pub async fn handle_socket(mut socket: WebSocket, doc: Arc<Doc>) -> Result<()> {
                                 .map_err(|e| anyhow!("decode sv: {e:?}"))?;
                             let diff = doc.transact().encode_state_as_update_v1(&sv);
                             if socket
-                                .send(Message::Binary(encode_sync_step2(&diff).into()))
+                                .send(Message::Binary(encode_sync_step2(&diff)))
                                 .await
                                 .is_err()
                             {
