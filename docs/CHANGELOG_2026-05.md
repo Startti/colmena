@@ -453,3 +453,33 @@ See:
 - Spec: [docs/superpowers/specs/2026-05-31-revert-layered-tool-context-design.md](superpowers/specs/2026-05-31-revert-layered-tool-context-design.md)
 - Plan: [docs/superpowers/plans/2026-05-31-revert-layered-tool-context.md](superpowers/plans/2026-05-31-revert-layered-tool-context.md)
 - Updated guide: [docs/developer_guide/24_skills.md](developer_guide/24_skills.md)
+
+
+---
+
+## 2026-05-31 — Router & Output Parser nodes
+
+**Qué cambió.** Dos nodos nuevos shipped en `develop`:
+
+- **`output_parser`** — wrapper liviano de `information_extraction` con UX para encadenar después de un `llm_call` o agente. Single `input` port (default), schema inline-required (`{ field: { type, required, description } }`), hard-error en input vacío (null / `""` / `[]` / `{}`).
+- **`router`** — bifurcación declarativa entre N ramas nombradas. Dos modos:
+  - `llm_direct`: el LLM elige una rama por nombre desde las descripciones.
+  - `extract_and_route`: el LLM extrae JSON contra un schema; DSL `when` declarativo (operadores `equals`, `not_equals`, `in`, `contains`, `gt`/`lt`/`gte`/`lte`, `matches`, `exists`; combinadores `all`/`any`/`not`; dotted paths) elige la rama (primera que matchea gana).
+  - Cada rama puede declarar opcionalmente un `subgraph` inline (path o inline) que se ejecuta antes de emitir.
+  - Sin rama default — fail-fast embebe el `extracted` JSON en el error.
+  - Always-on `__decision` output port con `{ selected_branch, reason?, extracted? }` para audit/logging.
+
+**Reuso interno.** Se extrajeron dos helpers compartidos a `nodes/util/`: `inline_schema.rs` (converter inline→standard JSON Schema + validador) y `extract_with_schema.rs` (LLM call + parse + fence-stripping + schema validation). `extraction.rs` se refactorizó para delegar a `extract_with_schema` sin cambio de comportamiento observable (-79 líneas netas).
+
+**Wiring.** `RouterNode` y `SubGraphNode` comparten el mismo `Arc<OnceLock<SubGraphExecutorPort>>` en el registry, así una sola llamada a `set_subgraph_executor()` los wirea a ambos.
+
+**Documentación:**
+- Spec: [docs/superpowers/specs/2026-05-31-router-and-output-parser-nodes-design.md](superpowers/specs/2026-05-31-router-and-output-parser-nodes-design.md)
+- Plan: [docs/superpowers/plans/2026-05-31-router-and-output-parser-nodes.md](superpowers/plans/2026-05-31-router-and-output-parser-nodes.md)
+- Dev guide: [docs/developer_guide/37_router_and_output_parser.md](developer_guide/37_router_and_output_parser.md)
+- Schema: [docs/node_configurations.json](node_configurations.json) → entries `output_parser` y `router`
+- Tests: 5 graphs en `tests/graphs/control_flow/` (`output_parser_basic.json`, `router_llm_direct.json`, `router_extract_rules.json`, `router_with_subgraph.json`, `router_chained.json`) — gated on `GEMINI_API_KEY`.
+
+**Tests:** ~55 unit tests nuevos (12 `inline_schema` + 6 `extract_with_schema` + 5 `output_parser` + 11 router `config` + 16 router `when_dsl` + 5 router `node`) + 2 registry tests + smoke tests con Gemini real (mode A confirmado: `selected_branch: "sales"` para query de compra).
+
+**Estado:** ✅ Done. Aditivo — sin breaking changes en la API pública de Colmena ni en el worker de ADP.

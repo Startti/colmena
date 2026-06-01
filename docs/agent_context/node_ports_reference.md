@@ -16,6 +16,7 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 |---|---|---|
 | **suspend** | Human-in-the-loop gate | Pauses execution, waits for user `--answer`, resumes with that answer |
 | **loop_controller** | Manages loop state | Controls loop continuation based on `loop_status` input |
+| **router** | Declarative branching | Routes input to one of N named output ports. Mode `llm_direct` lets the LLM pick a branch by name; mode `extract_and_route` extracts JSON then matches `when` rules. Each branch may optionally run a subgraph. Always emits `__decision`. Fails fast on no-match (no default branch). |
 | **input** | Static configuration | Emits `config` as output; useful for providing constants or test data |
 
 ### **I/O & Logging Nodes**
@@ -44,6 +45,7 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 | **planner** | Multi-step planning | LLM generates structured plan from inputs |
 | **critic** | Quality review | LLM reviews outputs; returns pass/fail assessment |
 | **information_extraction** | Schema-based extraction | LLM extracts structured data per schema |
+| **output_parser** | LLM output → structured JSON | Single `input` port (default), inline-required schema, fails fast on empty input. Designed to be chained right after an `llm_call` or agent. Wrapper over the same extraction engine as `information_extraction`. |
 | **reactor** | Summarization & review | LLM summarizes and reviews outputs |
 | **orchestrator** | Multi-agent coordination | Manages teams of sub-agents; full lifecycle control |
 | **subgraph** | Nested Execution | Encapsulates a child DAG into an isolated execution; supports Human-In-The-Loop suspension bubbling |
@@ -85,6 +87,8 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 | `suspend` | `question` | `answer_received` | Suspend/resume — question→answer flow |
 | `secure_suspend` | `secrets` | `handles` | Secret collection — pauses, persists encrypted, returns handles only |
 | `loop_controller` | `loop_status` | `output` | Loop control — manages loop state |
+| `router` | `input` | — | **Multi-port output** — one port per branch (`<branch_name>`, non-null only on selected) + `__decision`. No default output port; downstream nodes read specific branch ports via `from: "router.<branch_name>"`. |
+| `output_parser` | `input` | — | **Raw extracted JSON** — emits the parsed object directly (not wrapped in `{ output: ... }`). Downstream reads schema fields via dotted paths (e.g., `parser.intent`). Hard-errors on empty input. |
 | **add** | — | `output` | **Requires explicit `a`, `b` fields** |
 | **subtract** | — | `output` | **Requires explicit `a`, `b` fields** |
 | **multiply** | — | `output` | **Requires explicit `a`, `b` fields** |

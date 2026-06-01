@@ -9,11 +9,11 @@
       "default": null,
       "description": "The node type identifier that determines which execution logic is used. Must match one of the registered node types in the engine (e.g., 'llm_call', 'http_request', 'input'). This field is required for every node and is used by the DAG engine to look up the correct ExecutableNode implementation at runtime.",
       "valid_values": [
-        "input", "output", "trigger_webhook", "suspend", "loop_controller", "subgraph",
+        "input", "output", "trigger_webhook", "suspend", "loop_controller", "subgraph", "router",
         "log", "mock_input",
         "add", "subtract", "multiply", "divide", "exponential",
         "http_request", "socketio_request", "sql_query", "python_script",
-        "llm_call", "information_extraction", "planner", "critic", "reactor",
+        "llm_call", "information_extraction", "output_parser", "planner", "critic", "reactor",
         "orchestrator", "task_memory_writer",
         "tavily_client", "api_explorer"
       ],
@@ -439,6 +439,98 @@
       "default_output": "result",
       "requires": [],
       "supports_env_vars": false
+    },
+
+    "router": {
+      "name": "Router",
+      "description": "Routes the input to one of N declared branches. Mode 'llm_direct': the LLM reads each branch's description and picks one by name. Mode 'extract_and_route': the LLM first extracts a JSON object against an inline schema, then declarative 'when' rules pick the branch in declaration order (first match wins). Each branch is a named output port; only the selected port emits a non-null payload, all others emit null. Each branch may optionally declare a 'subgraph' (path or inline) that runs internally before emission. Fails fast (no default branch) when no rule matches or the LLM picks an unknown branch — error embeds the extracted JSON for diagnostics. Always emits an additional '__decision' output port with { selected_branch, reason?, extracted? } for logging.",
+      "category": "control_flow",
+      "config_fields": {
+        "mode": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "Routing strategy. 'llm_direct' = LLM picks a branch by name from descriptions. 'extract_and_route' = LLM extracts JSON against 'schema', then 'when' rules per branch decide.",
+          "valid_values": ["llm_direct", "extract_and_route"],
+          "example": "extract_and_route"
+        },
+        "provider": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "LLM provider. See 'llm_shared_fields.provider'.",
+          "valid_values": ["openai", "google", "anthropic"],
+          "example": "google"
+        },
+        "api_key": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "API key. Supports ${ENV_VAR}.",
+          "example": "${GEMINI_API_KEY}"
+        },
+        "model": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Provider-specific model ID.",
+          "example": "gemini-2.5-flash"
+        },
+        "schema": {
+          "type": "object",
+          "required": "mode B only",
+          "default": null,
+          "description": "Inline schema (same format as output_parser.schema). Required when mode = 'extract_and_route'; forbidden in 'llm_direct'.",
+          "example": {
+            "intent":     { "type": "string", "required": true,  "description": "sales | support | billing" },
+            "urgency":    { "type": "string", "required": false, "description": "low | medium | high" }
+          }
+        },
+        "instructions": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Optional extra rules appended to the system message (mode A: routing rules; mode B: extraction rules).",
+          "example": "Be conservative; if unsure, prefer 'support'."
+        },
+        "branches": {
+          "type": "array",
+          "required": true,
+          "default": null,
+          "description": "Non-empty array of branch declarations. Each entry: { name (required, ^[a-z][a-z0-9_]{0,63}$), description? (required in mode A, forbidden in mode B), when? (required in mode B, forbidden in mode A), subgraph? }. Names must be unique. Branches are evaluated in declaration order (first match wins).",
+          "example": [
+            {
+              "name": "urgent_sales",
+              "when": { "all": [
+                { "field": "intent",  "equals": "sales" },
+                { "field": "urgency", "equals": "high"  }
+              ]}
+            },
+            { "name": "sales",   "when": { "field": "intent", "equals": "sales" } },
+            { "name": "support", "when": { "field": "intent", "in": ["support", "technical"] } }
+          ]
+        }
+      },
+      "input_ports": {
+        "input": {
+          "type": "any",
+          "description": "The text or value to route. Non-string values are pretty-printed as JSON. Empty input (null/\"\"/[]/{}) fails the node — there is no silent skip."
+        }
+      },
+      "output_ports": {
+        "<branch_name>": {
+          "type": "object",
+          "description": "One port per declared branch. Emits the payload ({ input, extracted? }) only on the selected branch; emits null on all others. If the selected branch declares a 'subgraph', the subgraph's output is emitted instead of the raw payload. SUSPENDED bubbles up through this port when the subgraph suspends."
+        },
+        "__decision": {
+          "type": "object",
+          "description": "Always emitted on success: { selected_branch, reason?, extracted? }. Use for logging, audit trails, or as a debug output. On routing failure, the extracted JSON is embedded in the node error message (no partial __decision is emitted)."
+        }
+      },
+      "default_input": "input",
+      "default_output": null,
+      "requires": [],
+      "supports_env_vars": true
     },
 
     "log": {
@@ -1565,6 +1657,77 @@
       },
       "default_input": null,
       "default_output": "result",
+      "requires": [],
+      "supports_env_vars": true
+    },
+
+    "output_parser": {
+      "name": "Output Parser",
+      "description": "Parses unstructured text (typically the output of an llm_call or agent) into a structured JSON object matching the provided inline schema. Thin wrapper over the same extraction engine used by information_extraction, with a single 'input' port and inline-required schema declaration. Fails fast on missing input (null, empty string, [], {}) — does NOT silently skip like llm_call does.",
+      "category": "llm",
+      "config_fields": {
+        "provider": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "The LLM provider. See 'llm_shared_fields.provider'.",
+          "valid_values": ["openai", "google", "anthropic"],
+          "example": "google"
+        },
+        "api_key": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "API key. Supports ${ENV_VAR} interpolation.",
+          "example": "${GEMINI_API_KEY}"
+        },
+        "model": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Provider-specific model ID. Falls back to the provider default if absent.",
+          "example": "gemini-2.5-flash"
+        },
+        "schema": {
+          "type": "object",
+          "required": true,
+          "default": null,
+          "description": "Inline-required schema describing the fields to extract. Each property is declared as `{ type, required?, description? }`. Converted internally to standard JSON Schema before being sent to the LLM. Type values: string, number, integer, boolean, array, object.",
+          "example": {
+            "intent":     { "type": "string", "required": true,  "description": "User intent: sales | support | billing" },
+            "confidence": { "type": "number", "required": false, "description": "0.0 to 1.0" },
+            "summary":    { "type": "string", "required": false, "description": "One-line summary" }
+          }
+        },
+        "instructions": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Optional extra guidance appended to the built-in extraction system message. Useful for domain rules or fallback handling (e.g., 'If you cannot determine the intent, use \"unknown\".').",
+          "example": "If you cannot determine the intent, use 'unknown'."
+        },
+        "temperature": {
+          "type": "number",
+          "required": false,
+          "default": 0.1,
+          "description": "LLM temperature. Defaults to 0.1 for extraction consistency. Override only if you need creative reformatting.",
+          "example": 0.1
+        }
+      },
+      "input_ports": {
+        "input": {
+          "type": "any",
+          "description": "The text or value to parse. Non-string values are pretty-printed as JSON before being sent to the LLM."
+        }
+      },
+      "output_ports": {
+        "(extracted JSON)": {
+          "type": "object",
+          "description": "The raw extracted JSON object matching the inline schema. NOT wrapped in { output: ... } — downstream nodes read fields directly via dotted paths (e.g., 'parser.intent')."
+        }
+      },
+      "default_input": "input",
+      "default_output": null,
       "requires": [],
       "supports_env_vars": true
     },
