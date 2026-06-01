@@ -10,6 +10,34 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+enum SpikeAgentMode {
+    /// Connect to ws://.../yjs/<artifact> and apply a set_cell mutation.
+    Ws {
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        sheet: String,
+        #[arg(long)]
+        addr: String,
+        #[arg(long)]
+        value: String,
+    },
+    /// POST to http://.../spike/agent-op (in-proc mutation via HTTP).
+    Inproc {
+        #[arg(long)]
+        base_url: String,
+        #[arg(long)]
+        artifact: String,
+        #[arg(long)]
+        sheet: String,
+        #[arg(long)]
+        addr: String,
+        #[arg(long)]
+        value: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum Commands {
     Run {
         file_path: String,
@@ -44,6 +72,12 @@ enum Commands {
         /// Directory where projection dumps are written.
         #[arg(long, default_value = "/tmp/spike")]
         dump_dir: String,
+    },
+    /// One-shot agent peer for the spike. Mutates an artifact via WS
+    /// (R1 path) or in-proc HTTP POST (sanity-check path).
+    SpikeAgent {
+        #[command(subcommand)]
+        mode: SpikeAgentMode,
     },
 }
 
@@ -168,6 +202,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("🧪 spike-yws listening on http://{addr}  (dumps → {dump_dir})");
             axum::serve(listener, app).await?;
         }
+
+        Commands::SpikeAgent { mode } => match mode {
+            SpikeAgentMode::Ws {
+                url,
+                sheet,
+                addr,
+                value,
+            } => {
+                use colmena::dag_engine::spike::agent_peer::apply_set_cell_via_ws;
+                let json_val = serde_json::Value::String(value);
+                apply_set_cell_via_ws(&url, &sheet, &addr, &json_val).await?;
+                println!("✓ ws mutation applied");
+            }
+            SpikeAgentMode::Inproc {
+                base_url,
+                artifact,
+                sheet,
+                addr,
+                value,
+            } => {
+                let resp = reqwest::Client::new()
+                    .post(format!("{base_url}/spike/agent-op"))
+                    .json(&serde_json::json!({
+                        "artifact": artifact,
+                        "sheet": sheet,
+                        "addr": addr,
+                        "value": value,
+                    }))
+                    .send()
+                    .await?;
+                println!("✓ in-proc mutation applied (status {})", resp.status());
+            }
+        },
     }
 
     Ok(())

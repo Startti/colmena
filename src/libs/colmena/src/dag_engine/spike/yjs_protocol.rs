@@ -50,12 +50,35 @@ fn encode_sync_step1(sv: &StateVector) -> Vec<u8> {
 }
 
 /// Encode a sync_step2 message: `[MSG_SYNC][MSG_SYNC_STEP_2][update_bytes]`.
-fn encode_sync_step2(update: &[u8]) -> Vec<u8> {
+///
+/// Exposed as `pub(super)` so `agent_peer` can build client-side frames
+/// without duplicating the framing logic.
+pub(super) fn encode_sync_step2(update: &[u8]) -> Vec<u8> {
     let mut enc = EncoderV1::new();
     enc.write_var(MSG_SYNC);
     enc.write_var(MSG_SYNC_STEP_2);
     enc.write_buf(update);
     enc.to_vec()
+}
+
+/// Decode the server's sync_step1 message and return the raw state-vector
+/// bytes (already unwrapped from the length-prefix).
+///
+/// Returns `None` if `bytes` is not a well-formed step1 frame.
+/// Exposed as `pub(super)` for use by `agent_peer`.
+pub(super) fn decode_sync_step1_sv(bytes: &[u8]) -> Option<Vec<u8>> {
+    use yrs::encoding::read::{Cursor, Read};
+    let mut cur = Cursor::new(bytes);
+    let outer: u8 = cur.read_var().ok()?;
+    if outer != MSG_SYNC {
+        return None;
+    }
+    let sub: u8 = cur.read_var().ok()?;
+    if sub != MSG_SYNC_STEP_1 {
+        return None;
+    }
+    let sv_bytes = cur.read_buf().ok()?;
+    Some(sv_bytes.to_vec())
 }
 
 /// Encode an update message: `[MSG_SYNC][MSG_SYNC_UPDATE][update_bytes]`.
