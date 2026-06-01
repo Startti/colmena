@@ -170,9 +170,21 @@ impl GeminiAdapter {
                         }
                     }
 
+                    // Gemini's `functionResponse.response` is typed as
+                    // `google.protobuf.Struct` and only accepts JSON objects.
+                    // Wrap non-object values (scalars, arrays, null) in
+                    // `{ "result": <value> }`. Objects pass through unchanged
+                    // so callers that already return dicts keep their keys.
+                    // Non-JSON content (free-form error strings) is wrapped
+                    // as a string under the same key.
+                    //
+                    // See: docs/superpowers/plans/2026-06-01-gemini-scalar-tool-response-fix.md
                     let parsed_content =
-                        serde_json::from_str::<serde_json::Value>(message.content())
-                            .unwrap_or_else(|_| serde_json::json!({ "result": message.content() }));
+                        match serde_json::from_str::<serde_json::Value>(message.content()) {
+                            Ok(v) if v.is_object() => v,
+                            Ok(v) => serde_json::json!({ "result": v }),
+                            Err(_) => serde_json::json!({ "result": message.content() }),
+                        };
 
                     contents.push(GeminiContent {
                         role: "function".to_string(),
@@ -993,7 +1005,10 @@ mod tests {
         let req = build_request_with_tool_response("5040");
         let (_, contents) = GeminiAdapter::new().convert_messages(&req).unwrap();
         let fr = extract_function_response(&contents);
-        assert!(fr["response"].is_object(), "response must be an object, got {fr:?}");
+        assert!(
+            fr["response"].is_object(),
+            "response must be an object, got {fr:?}"
+        );
         assert_eq!(fr["response"]["result"], 5040);
     }
 
@@ -1002,7 +1017,10 @@ mod tests {
         let req = build_request_with_tool_response("[1, 2, 3]");
         let (_, contents) = GeminiAdapter::new().convert_messages(&req).unwrap();
         let fr = extract_function_response(&contents);
-        assert!(fr["response"].is_object(), "response must be an object, got {fr:?}");
+        assert!(
+            fr["response"].is_object(),
+            "response must be an object, got {fr:?}"
+        );
         assert_eq!(fr["response"]["result"], serde_json::json!([1, 2, 3]));
     }
 
@@ -1011,7 +1029,10 @@ mod tests {
         let req = build_request_with_tool_response("null");
         let (_, contents) = GeminiAdapter::new().convert_messages(&req).unwrap();
         let fr = extract_function_response(&contents);
-        assert!(fr["response"].is_object(), "response must be an object, got {fr:?}");
+        assert!(
+            fr["response"].is_object(),
+            "response must be an object, got {fr:?}"
+        );
         assert!(fr["response"]["result"].is_null());
     }
 
@@ -1020,7 +1041,10 @@ mod tests {
         let req = build_request_with_tool_response("\"hello\"");
         let (_, contents) = GeminiAdapter::new().convert_messages(&req).unwrap();
         let fr = extract_function_response(&contents);
-        assert!(fr["response"].is_object(), "response must be an object, got {fr:?}");
+        assert!(
+            fr["response"].is_object(),
+            "response must be an object, got {fr:?}"
+        );
         assert_eq!(fr["response"]["result"], "hello");
     }
 
