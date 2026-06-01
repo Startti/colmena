@@ -19,6 +19,21 @@
     href="https://unpkg.com/@univerjs/sheets-ui@0.2.10/lib/index.css" />
   <link rel="stylesheet"
     href="https://unpkg.com/@univerjs/sheets-formula@0.2.10/lib/index.css" />
+
+  <!-- Import map: tell the browser how to resolve bare specifiers like "yjs".
+       Required because y-websocket@1.5.4 is loaded with ?external=yjs, which
+       makes esm.sh emit `import "yjs"` inside its bundle so y-websocket
+       shares OUR yjs instance (instead of bundling its own copy). Without
+       this map the browser throws:
+         Failed to resolve module specifier "yjs"
+       and the whole module aborts. -->
+  <script type="importmap">
+  {
+    "imports": {
+      "yjs": "https://esm.sh/yjs@13.6.18"
+    }
+  }
+  </script>
 </head>
 <body>
   <div id="toolbar">
@@ -29,7 +44,7 @@
   <div id="univer"></div>
 
   <script type="module">
-    import * as Y from "https://esm.sh/yjs@13.6.18";
+    import * as Y from "yjs";
     import { WebsocketProvider } from "https://esm.sh/y-websocket@1.5.4?external=yjs";
 
     const artifact = new URLSearchParams(location.search).get("artifact")
