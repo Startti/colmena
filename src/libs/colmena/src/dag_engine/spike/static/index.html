@@ -82,24 +82,20 @@
     // The outbound bridge (Univer -> Y.Doc) is intentionally stubbed here
     // pending command-id discovery in DevTools at first live run.
     // -------------------------------------------------------------------------
+    //
+    // NOTE: we do NOT seed the Y.Doc here. Seeding before `provider.sync`
+    // races with the server's state: if the server already has a sheet and
+    // we push a duplicate locally before sync arrives, the merged Y.Array
+    // ends up with two sheets and Univer's initial state becomes
+    // unpredictable (sometimes our sheet, sometimes the server's, sometimes
+    // an inconsistent split). The grid then renders flakily — sometimes OK,
+    // sometimes blank.
+    //
+    // All Y.Doc bootstrap (ensure-sheets-array, seed-empty-sheet, attach
+    // observers) is deferred to the `provider.once("sync", ...)` callback
+    // below, after Univer is mounted with a STATIC empty workbook.
 
     const wb = ydoc.getMap("workbook");
-    if (!wb.has("sheets")) {
-      wb.set("sheets", new Y.Array());
-    }
-
-    // Seed an empty sheet on first connect so Univer always has a structure
-    // to initialise from.
-    const sheetsArr = wb.get("sheets");
-    if (sheetsArr.length === 0) {
-      ydoc.transact(() => {
-        const sheet = new Y.Map();
-        sheet.set("id", "s1");
-        sheet.set("name", "Hoja1");
-        sheet.set("cells", new Y.Map());
-        sheetsArr.push([sheet]);
-      });
-    }
 
     // -------------------------------------------------------------------------
     // Univer bootstrap
@@ -163,66 +159,94 @@
     univer.registerPlugin(UniverSheetsUIPlugin);
     univer.registerPlugin(UniverSheetsFormulaPlugin);
 
-    // Build initial workbook snapshot from current Y.Doc state so the sheet
-    // shows whatever is already in the shared document on first load.
-    const initialState = (() => {
-      const cells = sheetsArr.get(0).get("cells");
-      const cellData = {};
-      for (const [addr, cell] of cells.entries()) {
-        // addr format: "A1", "B3", etc.
-        const colChar = addr.charCodeAt(0) - 65;   // 'A' -> 0
-        const row = parseInt(addr.slice(1), 10) - 1; // "1" -> 0
-        cellData[row] = cellData[row] || {};
-        cellData[row][colChar] = { v: cell.get("v") };
-      }
-      return {
-        id: artifact,
-        sheetOrder: ["s1"],
-        sheets: {
-          s1: {
-            id: "s1",
-            name: "Hoja1",
-            cellData,
-            rowCount: 100,
-            columnCount: 26,
-          },
+    // Bootstrap Univer with a STATIC empty workbook. We deliberately do NOT
+    // read from the Y.Doc here — the Y.Doc is not yet synced with the
+    // server at this point in the script, and reading pre-sync state caused
+    // the flaky-grid bug (race between local seed and server sync).
+    const initialState = {
+      id: artifact,
+      sheetOrder: ["s1"],
+      sheets: {
+        s1: {
+          id: "s1",
+          name: "Hoja1",
+          cellData: {},
+          rowCount: 100,
+          columnCount: 26,
         },
-      };
-    })();
+      },
+    };
 
     // UniverInstanceType.UNIVER_SHEET = 2
     univer.createUnit(2, initialState);
 
     // -------------------------------------------------------------------------
-    // Inbound bridge: Y.Doc -> Univer
+    // Y.Doc bootstrap — DEFERRED until provider sync completes
     //
-    // When the server (or another tab) writes a cell via /spike/agent-op or
-    // a y-websocket update, the cells Y.Map fires an observe event.  We log
-    // it here so the operator can verify R1.2 in DevTools.
+    // Once the WebsocketProvider has finished syncing with the server we
+    // know the Y.Doc reflects the canonical server state. Only then do we:
+    //   1. Ensure the workbook -> sheets Y.Array exists.
+    //   2. Seed an empty sheet ONLY if the server didn't already have one.
+    //   3. Attach the inbound observer.
     //
-    // Production wiring would translate the delta into Univer's
-    // SetRangeValuesMutation command.  The exact command ID and payload shape
-    // must be verified against the installed Univer version via DevTools
-    // (inspect `univer.__commandService` or search for "SetRangeValues" in
-    // the Univer source).  That wiring is intentionally left as a TODO for
-    // the R1 follow-up if the GO verdict is confirmed.
+    // This eliminates the race that caused the flaky-grid bug.
     // -------------------------------------------------------------------------
-    sheetsArr.get(0).get("cells").observe(evt => {
-      // R1.2 smoke: any incoming cell change logs here.  Check DevTools console
-      // after posting to /spike/agent-op to verify the round-trip.
-      console.log("[yjs -> univer] cells changed", {
-        added: [...evt.changes.keys.entries()]
-          .filter(([, c]) => c.action === "add")
-          .map(([k]) => k),
-        updated: [...evt.changes.keys.entries()]
-          .filter(([, c]) => c.action === "update")
-          .map(([k]) => k),
-        deleted: [...evt.changes.keys.entries()]
-          .filter(([, c]) => c.action === "delete")
-          .map(([k]) => k),
+    provider.once("sync", () => {
+      console.log("[provider] sync complete — bootstrapping Y.Doc workbook");
+
+      if (!wb.has("sheets")) {
+        wb.set("sheets", new Y.Array());
+      }
+      const sheetsArr = wb.get("sheets");
+
+      if (sheetsArr.length === 0) {
+        ydoc.transact(() => {
+          const sheet = new Y.Map();
+          sheet.set("id", "s1");
+          sheet.set("name", "Hoja1");
+          sheet.set("cells", new Y.Map());
+          sheetsArr.push([sheet]);
+        });
+        console.log("[provider] seeded empty sheet s1");
+      } else {
+        console.log("[provider] using existing sheets from server",
+          sheetsArr.length);
+      }
+
+      // ---------------------------------------------------------------------
+      // Inbound bridge: Y.Doc -> Univer
+      //
+      // When the server (or another tab) writes a cell via /spike/agent-op
+      // or a y-websocket update, the cells Y.Map fires an observe event.
+      // We log it here so the operator can verify R1.2 in DevTools.
+      //
+      // Production wiring would translate the delta into Univer's
+      // SetRangeValuesMutation command. The exact command ID and payload
+      // shape must be verified against the installed Univer version via
+      // DevTools (inspect `univer.__commandService` or search for
+      // "SetRangeValues" in the Univer source). That wiring is intentionally
+      // left as a TODO for the R1 follow-up if the GO verdict is confirmed.
+      // ---------------------------------------------------------------------
+      sheetsArr.get(0).get("cells").observe(evt => {
+        // R1.2 smoke: any incoming cell change logs here. Check DevTools
+        // console after posting to /spike/agent-op to verify the round-trip.
+        console.log("[yjs -> univer] cells changed", {
+          added: [...evt.changes.keys.entries()]
+            .filter(([, c]) => c.action === "add")
+            .map(([k]) => k),
+          updated: [...evt.changes.keys.entries()]
+            .filter(([, c]) => c.action === "update")
+            .map(([k]) => k),
+          deleted: [...evt.changes.keys.entries()]
+            .filter(([, c]) => c.action === "delete")
+            .map(([k]) => k),
+        });
+        // TODO (post-R1 GO): translate delta into Univer
+        // SetRangeValuesMutation and dispatch via univer.__commandService.
       });
-      // TODO (post-R1 GO): translate delta into Univer SetRangeValuesMutation
-      // and dispatch via univer.__commandService to re-render the grid.
+
+      // Expose sheets array on window for DevTools inspection.
+      window.spikeSheets = sheetsArr;
     });
 
     // -------------------------------------------------------------------------
