@@ -104,7 +104,7 @@ mod tests {
     use yrs::{Array, Map, Transact, WriteTxn};
 
     #[test]
-    fn empty_doc() {
+    fn empty_doc_projects_to_empty_sheets() {
         let doc = Doc::new();
         let v = project(&doc);
         assert_eq!(v, json!({ "sheets": [] }));
