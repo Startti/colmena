@@ -109,7 +109,7 @@
     // Note: In Univer 0.2.x, `createUniver` was removed from @univerjs/core.
     // The correct API is `new Univer({...})` + `univer.registerPlugin(...)`.
     // -------------------------------------------------------------------------
-    import { Univer, LocaleType } from
+    import { Univer, LocaleType, ICommandService, IUniverInstanceService } from
       "https://esm.sh/@univerjs/core@0.2.10";
     import { defaultTheme } from
       "https://esm.sh/@univerjs/design@0.2.10";
@@ -181,16 +181,47 @@
     univer.createUnit(2, initialState);
 
     // -------------------------------------------------------------------------
-    // Y.Doc bootstrap — DEFERRED until provider sync completes
-    //
-    // Once the WebsocketProvider has finished syncing with the server we
-    // know the Y.Doc reflects the canonical server state. Only then do we:
-    //   1. Ensure the workbook -> sheets Y.Array exists.
-    //   2. Seed an empty sheet ONLY if the server didn't already have one.
-    //   3. Attach the inbound observer.
-    //
-    // This eliminates the race that caused the flaky-grid bug.
+    // Y.Doc bootstrap — DEFERRED until provider sync completes.
+    // Command IDs discovered from @univerjs/sheets@0.2.10 CJS bundle
+    // inspection on unpkg.com.
     // -------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Command / mutation IDs — discovered from @univerjs/sheets@0.2.10 CJS
+    // bundle inspection (unpkg.com).  The mutation fires on every state change
+    // (including those triggered by the higher-level command), so it is the
+    // correct level to listen at for the outbound bridge.  We dispatch the
+    // same mutation from the inbound bridge so we don't create undo entries.
+    // -------------------------------------------------------------------------
+    const SET_RANGE_VALUES_MUTATION_ID = "sheet.mutation.set-range-values";
+
+    // -------------------------------------------------------------------------
+    // Helper: zero-based column index → A1-style column letter(s)
+    //   0 → "A", 1 → "B", ..., 25 → "Z", 26 → "AA", ...
+    // -------------------------------------------------------------------------
+    function colNumberToA1(col) {
+      let s = "";
+      let n = col;
+      do {
+        s = String.fromCharCode(65 + (n % 26)) + s;
+        n = Math.floor(n / 26) - 1;
+      } while (n >= 0);
+      return s;
+    }
+
+    // -------------------------------------------------------------------------
+    // Feedback-loop guard
+    //
+    // When the inbound bridge (Y.Doc → Univer) dispatches a mutation, Univer's
+    // command bus fires onCommandExecuted, which would re-trigger the outbound
+    // bridge (Univer → Y.Doc) and create an infinite loop.
+    //
+    // We suppress this by setting `applyingFromYDoc = true` around every
+    // inbound dispatch.  The outbound subscriber is a no-op while this flag is
+    // set.  The flag is synchronously reset in the `finally` block so normal
+    // user edits are never silenced.
+    // -------------------------------------------------------------------------
+    let applyingFromYDoc = false;
+
     provider.once("sync", () => {
       console.log("[provider] sync complete — bootstrapping Y.Doc workbook");
 
@@ -213,56 +244,145 @@
           sheetsArr.length);
       }
 
-      // ---------------------------------------------------------------------
-      // Inbound bridge: Y.Doc -> Univer
+      // Retrieve services from Univer's DI container.
+      // ICommandService  = createIdentifier("anywhere.command-service")
+      // IUniverInstanceService = createIdentifier("univer.current")
+      // Both are exported as value + type from @univerjs/core and work as DI
+      // keys when passed to injector.get().
+      const injector = univer.__getInjector();
+      const commandService = injector.get(ICommandService);
+      const instanceService = injector.get(IUniverInstanceService);
+
+      // -----------------------------------------------------------------
+      // Inbound bridge: Y.Doc → Univer
       //
-      // When the server (or another tab) writes a cell via /spike/agent-op
-      // or a y-websocket update, the cells Y.Map fires an observe event.
-      // We log it here so the operator can verify R1.2 in DevTools.
+      // observeDeep on the first sheet's cells Y.Map.  When remote peers
+      // (agent-op POST, another tab, spike-agent ws) write cells, we
+      // translate the delta into a SetRangeValuesMutation payload and
+      // dispatch it synchronously so Univer re-renders the affected cells.
       //
-      // Production wiring would translate the delta into Univer's
-      // SetRangeValuesMutation command. The exact command ID and payload
-      // shape must be verified against the installed Univer version via
-      // DevTools (inspect `univer.__commandService` or search for
-      // "SetRangeValues" in the Univer source). That wiring is intentionally
-      // left as a TODO for the R1 follow-up if the GO verdict is confirmed.
-      // ---------------------------------------------------------------------
-      sheetsArr.get(0).get("cells").observe(evt => {
-        // R1.2 smoke: any incoming cell change logs here. Check DevTools
-        // console after posting to /spike/agent-op to verify the round-trip.
-        console.log("[yjs -> univer] cells changed", {
-          added: [...evt.changes.keys.entries()]
-            .filter(([, c]) => c.action === "add")
-            .map(([k]) => k),
-          updated: [...evt.changes.keys.entries()]
-            .filter(([, c]) => c.action === "update")
-            .map(([k]) => k),
-          deleted: [...evt.changes.keys.entries()]
-            .filter(([, c]) => c.action === "delete")
-            .map(([k]) => k),
-        });
-        // TODO (post-R1 GO): translate delta into Univer
-        // SetRangeValuesMutation and dispatch via univer.__commandService.
+      // We use observeDeep (vs observe) so nested Y.Map mutations (e.g.
+      // setting the "v" key on an existing cellMap) also fire here.
+      // -----------------------------------------------------------------
+      const cellsMap = sheetsArr.get(0).get("cells");
+
+      cellsMap.observeDeep(events => {
+        const cellValue = {};
+        for (const ev of events) {
+          // We only care about key-level changes on Y.Map nodes.
+          if (!(ev instanceof Y.YMapEvent)) continue;
+          for (const [key, change] of ev.changes.keys.entries()) {
+            if (change.action === "delete") continue;
+
+            // Determine the cell address.  Two cases:
+            //   1. A new cellMap was set on the top-level cells Y.Map
+            //      (ev.target === cellsMap, key = "A1" etc.).
+            //   2. A value was set inside an existing cellMap
+            //      (ev.target is a child Y.Map, key = "v" / "t").
+            let addr;
+            if (ev.target === cellsMap) {
+              // Case 1: the key IS the address.
+              addr = key;
+            } else {
+              // Case 2: find which address this child Y.Map lives under.
+              addr = null;
+              for (const [a, m] of cellsMap.entries()) {
+                if (m === ev.target) { addr = a; break; }
+              }
+            }
+            if (!addr) continue;
+
+            const cellMap = cellsMap.get(addr);
+            if (!cellMap) continue;
+
+            // Parse addr "A1" → { row: 0, col: 0 }
+            // Column letters may be multi-char (AA, AB …).
+            const match = addr.match(/^([A-Z]+)(\d+)$/);
+            if (!match) continue;
+            const colLetters = match[1];
+            const rowIdx = parseInt(match[2], 10) - 1;
+            let colIdx = 0;
+            for (let i = 0; i < colLetters.length; i++) {
+              colIdx = colIdx * 26 + (colLetters.charCodeAt(i) - 64);
+            }
+            colIdx -= 1; // convert to 0-based
+
+            cellValue[rowIdx] = cellValue[rowIdx] || {};
+            cellValue[rowIdx][colIdx] = { v: cellMap.get("v") };
+          }
+        }
+        if (Object.keys(cellValue).length === 0) return;
+
+        // Get active unit + sheet ids.
+        // UniverInstanceType.UNIVER_SHEET = 2 (confirmed from bundle).
+        const workbook = instanceService.getCurrentUnitForType(2);
+        if (!workbook) {
+          console.warn("[yjs -> univer] no active workbook; skipping");
+          return;
+        }
+        const unitId = workbook.getUnitId();
+        const subUnitId = workbook.getActiveSheet().getSheetId();
+
+        console.log("[yjs -> univer] applying to canvas", { cellValue, unitId, subUnitId });
+
+        applyingFromYDoc = true;
+        try {
+          // Dispatch the mutation directly (not the command) so we bypass
+          // the undo stack.  syncExecuteCommand keeps us on the same tick.
+          commandService.syncExecuteCommand(SET_RANGE_VALUES_MUTATION_ID, {
+            unitId,
+            subUnitId,
+            cellValue,
+          });
+        } finally {
+          applyingFromYDoc = false;
+        }
       });
 
-      // Expose sheets array on window for DevTools inspection.
+      // -----------------------------------------------------------------
+      // Outbound bridge: Univer → Y.Doc
+      //
+      // Subscribe to the command bus.  Every time a SetRangeValues mutation
+      // fires (from ANY source — keyboard, paste, formula evaluation, etc.)
+      // we translate the changed cells into Y.Doc writes.
+      //
+      // The feedback-loop guard `applyingFromYDoc` ensures that mutations
+      // dispatched by our own inbound bridge are silently ignored here.
+      // -----------------------------------------------------------------
+      commandService.onCommandExecuted((cmd) => {
+        if (applyingFromYDoc) return;
+        if (cmd.id !== SET_RANGE_VALUES_MUTATION_ID) return;
+
+        const params = cmd.params;
+        if (!params || !params.cellValue) return;
+
+        ydoc.transact(() => {
+          for (const [rowStr, cols] of Object.entries(params.cellValue)) {
+            const row = Number(rowStr);
+            for (const [colStr, cellPayload] of Object.entries(cols)) {
+              const col = Number(colStr);
+              const addr = colNumberToA1(col) + String(row + 1);
+              const v = cellPayload?.v ?? null;
+
+              let cellMap = cellsMap.get(addr);
+              if (!cellMap) {
+                cellMap = new Y.Map();
+                cellsMap.set(addr, cellMap);
+              }
+              cellMap.set("v", v);
+              cellMap.set("t", typeof v === "number" ? "n"
+                          : typeof v === "boolean" ? "b" : "s");
+            }
+          }
+        });
+
+        console.log("[univer -> yjs] cells written", { cellValue: params.cellValue });
+      });
+
+      // Expose for DevTools inspection.
       window.spikeSheets = sheetsArr;
     });
 
-    // -------------------------------------------------------------------------
-    // Outbound bridge: Univer -> Y.Doc  (STUBBED — pending command-id discovery)
-    //
-    // To wire the outbound bridge in a live browser session:
-    //   1. Open DevTools and inspect `window.univer.__commandService`.
-    //   2. Find the command fired on a cell-edit (look for "SetRangeValues"
-    //      or similar).
-    //   3. Subscribe: univer.__commandService.onCommandExecuted(cmd => { ... })
-    //   4. On the correct command, extract the changed cell(s) and write to
-    //      the Y.Doc cells map via ydoc.transact(() => { ... }).
-    //
-    // This is NOT required for R1.2 (inbound round-trip suffices), but it IS
-    // required for full two-way sync (R1.3+).
-    // -------------------------------------------------------------------------
     window.univer = univer; // Expose for DevTools inspection
   </script>
 </body>
