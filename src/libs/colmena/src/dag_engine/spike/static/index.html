@@ -405,6 +405,12 @@
         const params = cmd.params;
         if (!params || !params.cellValue) return;
 
+        // DIAGNOSTIC: log exact cellValue Univer is firing so we can see
+        // whether it includes only the changed cell or also clears for the
+        // rest of the range.
+        console.log("[univer -> yjs] outbound cellValue:",
+          JSON.stringify(params.cellValue));
+
         ydoc.transact(() => {
           for (const [rowStr, cols] of Object.entries(params.cellValue)) {
             const row = Number(rowStr);
