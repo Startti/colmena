@@ -40,6 +40,7 @@
     Artifact: <code id="artifact">spike-doc</code>
     | WS: <code id="ws-status">connecting&hellip;</code>
     | Tab id: <code id="tab"></code>
+    | <button id="import-xlsx" type="button" disabled>Import /spike.xlsx</button>
   </div>
   <div id="univer"></div>
 
@@ -340,6 +341,54 @@
       });
 
       // -----------------------------------------------------------------
+      // Initial render replay (R1.1 — mid-session tab join)
+      //
+      // observeDeep only fires on NEW changes after the observer attaches.
+      // When a tab joins an artifact that already has cells (written by
+      // earlier tabs or the agent), the canvas stays empty for those existing
+      // cells — only updates that arrive after the join are rendered.
+      //
+      // Fix: walk the current cells Y.Map once and dispatch a single
+      // SetRangeValues mutation so the canvas catches up to the current
+      // Y.Doc state.  Uses the same applyingFromYDoc guard as the observer.
+      // -----------------------------------------------------------------
+      if (cellsMap.size > 0) {
+        const replayCellValue = {};
+        for (const [addr, cellMap] of cellsMap.entries()) {
+          if (!(cellMap instanceof Y.Map)) continue;
+          const match = addr.match(/^([A-Z]+)(\d+)$/);
+          if (!match) continue;
+          const colLetters = match[1];
+          const rowIdx = parseInt(match[2], 10) - 1;
+          let colIdx = 0;
+          for (let i = 0; i < colLetters.length; i++) {
+            colIdx = colIdx * 26 + (colLetters.charCodeAt(i) - 64);
+          }
+          colIdx -= 1; // convert to 0-based
+          replayCellValue[rowIdx] = replayCellValue[rowIdx] || {};
+          replayCellValue[rowIdx][colIdx] = { v: cellMap.get("v") };
+        }
+        if (Object.keys(replayCellValue).length > 0) {
+          const workbook = instanceService.getCurrentUnitForType(2);
+          if (workbook) {
+            const unitId = workbook.getUnitId();
+            const subUnitId = workbook.getActiveSheet().getSheetId();
+            applyingFromYDoc = true;
+            try {
+              commandService.syncExecuteCommand(SET_RANGE_VALUES_MUTATION_ID, {
+                unitId,
+                subUnitId,
+                cellValue: replayCellValue,
+              });
+            } finally {
+              applyingFromYDoc = false;
+            }
+            console.log("[initial render] replayed", Object.keys(replayCellValue).length, "rows of existing cells");
+          }
+        }
+      }
+
+      // -----------------------------------------------------------------
       // Outbound bridge: Univer → Y.Doc
       //
       // Subscribe to the command bus.  Every time a SetRangeValues mutation
@@ -377,6 +426,64 @@
         });
 
         console.log("[univer -> yjs] cells written", { cellValue: params.cellValue });
+      });
+
+      // -----------------------------------------------------------------
+      // xlsx import button (R5.1 + R5.2)
+      //
+      // Enabled after sync so sheetsArr is valid.  On click: fetch
+      // /spike.xlsx, parse with SheetJS, write each non-empty cell into
+      // the Y.Doc cells Y.Map inside a single ydoc.transact.  The writes
+      // propagate via WS to all peers AND the server's Y.Doc.  The local
+      // inbound observer fires and dispatches SetRangeValues → canvas
+      // updates.  Other tabs' observers also fire → convergence.
+      // -----------------------------------------------------------------
+      const importBtn = document.getElementById("import-xlsx");
+      importBtn.disabled = false;
+      importBtn.addEventListener("click", async () => {
+        importBtn.disabled = true;
+        importBtn.textContent = "Importing…";
+        try {
+          const XLSX = await import("https://esm.sh/xlsx@0.18.5");
+          const resp = await fetch("/spike.xlsx");
+          if (!resp.ok) throw new Error("fetch /spike.xlsx: HTTP " + resp.status);
+          const buf = await resp.arrayBuffer();
+          const wb = XLSX.read(buf, { type: "array" });
+          const firstSheetName = wb.SheetNames[0];
+          const ws = wb.Sheets[firstSheetName];
+
+          // Walk the sheet's !ref range and write each non-empty cell to Y.Doc.
+          const range = XLSX.utils.decode_range(ws["!ref"] || "A1:A1");
+          let count = 0;
+          ydoc.transact(() => {
+            for (let R = range.s.r; R <= range.e.r; ++R) {
+              for (let C = range.s.c; C <= range.e.c; ++C) {
+                const addr = XLSX.utils.encode_cell({ r: R, c: C });
+                const cell = ws[addr];
+                if (!cell) continue;
+                // Use the cached calculated value (cell.v); skip if absent.
+                const v = cell.v;
+                if (v === undefined || v === null) continue;
+                let cellMap = cellsMap.get(addr);
+                if (!cellMap) {
+                  cellMap = new Y.Map();
+                  cellsMap.set(addr, cellMap);
+                }
+                cellMap.set("v", v);
+                cellMap.set("t",
+                  typeof v === "number" ? "n" :
+                  typeof v === "boolean" ? "b" : "s");
+                count++;
+              }
+            }
+          });
+          importBtn.textContent = `Imported ${count} cells ✓`;
+          console.log("[xlsx import]", count, "cells written to Y.Doc");
+        } catch (e) {
+          importBtn.textContent = "Import failed";
+          console.error("[xlsx import] failed:", e);
+          importBtn.disabled = false;
+        }
       });
 
       // Expose for DevTools inspection.
