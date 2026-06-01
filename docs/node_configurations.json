@@ -530,7 +530,23 @@
       "default_input": "input",
       "default_output": null,
       "requires": [],
-      "supports_env_vars": true
+      "supports_env_vars": true,
+      "examples": [
+        {
+          "title": "Mode A — LLM picks branch by description",
+          "graph": {
+            "router": { "type": "router", "config": { "mode": "llm_direct", "provider": "google", "model": "gemini-2.5-flash", "api_key": "${GEMINI_API_KEY}", "branches": [ { "name": "answerable", "description": "User asks a question that can be answered with general knowledge." }, { "name": "escalate", "description": "User asks something that requires human follow-up." } ] } },
+            "edges":  [ { "from": "trigger.user_message", "to": "router.input" }, { "from": "router.answerable", "to": "responder" }, { "from": "router.escalate", "to": "human_queue" }, { "from": "router.__decision", "to": "audit" } ]
+          }
+        },
+        {
+          "title": "Mode B — LLM extracts JSON + when rules decide",
+          "graph": {
+            "router": { "type": "router", "config": { "mode": "extract_and_route", "provider": "google", "model": "gemini-2.5-flash", "api_key": "${GEMINI_API_KEY}", "schema": { "sentiment": { "type": "string", "required": true, "description": "positive | negative" } }, "branches": [ { "name": "thank",    "when": { "field": "sentiment", "equals": "positive" } }, { "name": "escalate", "when": { "field": "sentiment", "equals": "negative" } } ] } },
+            "edges":  [ { "from": "trigger.feedback", "to": "router.input" }, { "from": "router.thank", "to": "log_thank" }, { "from": "router.escalate", "to": "log_escalate" } ]
+          }
+        }
+      ]
     },
 
     "log": {
@@ -1721,15 +1737,25 @@
         }
       },
       "output_ports": {
-        "(extracted JSON)": {
+        "<schema_fields>": {
           "type": "object",
-          "description": "The raw extracted JSON object matching the inline schema. NOT wrapped in { output: ... } — downstream nodes read fields directly via dotted paths (e.g., 'parser.intent')."
+          "description": "The raw extracted JSON object matching the inline schema. NOT wrapped in { output: ... } — downstream nodes read individual fields via dotted paths (e.g., from: 'parser.intent'), or read the whole object by referencing the node id alone (e.g., from: 'parser')."
         }
       },
       "default_input": "input",
       "default_output": null,
       "requires": [],
-      "supports_env_vars": true
+      "supports_env_vars": true,
+      "examples": [
+        {
+          "title": "Chain after llm_call",
+          "graph": {
+            "llm":    { "type": "llm_call",      "config": { "provider": "google", "model": "gemini-2.5-flash", "api_key": "${GEMINI_API_KEY}", "prompt": "Summarize this review: {{review}}" } },
+            "parser": { "type": "output_parser", "config": { "provider": "google", "model": "gemini-2.5-flash", "api_key": "${GEMINI_API_KEY}", "schema": { "rating": { "type": "integer", "required": true }, "would_recommend": { "type": "boolean", "required": true } } } },
+            "edges":  [ { "from": "llm", "to": "parser.input" }, { "from": "parser.rating", "to": "alert.score" } ]
+          }
+        }
+      ]
     },
 
     "planner": {

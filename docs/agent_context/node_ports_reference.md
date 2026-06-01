@@ -321,11 +321,11 @@ After user approves with `--answer "Q[approval]: Approve?\nA[approval]: yes"`, e
 ```json
 {
   "edges": [
-    { "from": "approval.answer_received", "to": "router.decision" }
+    { "from": "approval.answer_received", "to": "router.input" }
   ]
 }
 ```
-The downstream `router` node receives the exact answer and can decide what to do next. Example: if answer is "approve", go to `process_step`; if "reject", go to `log_rejection`.
+The downstream `router` node (see [developer_guide/37](../developer_guide/37_router_and_output_parser.md)) receives the exact answer and decides what to do next. Example: declare two branches with `when` rules in mode `extract_and_route` — if the extracted intent is "approve" route to `process_step`, if "reject" route to `log_rejection`. The router's input port is named `input` (not `decision`).
 
 **Pattern 3: Multiple Suspensions (Multi-Stage Approval)**
 ```json

@@ -1,0 +1,90 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/sentiment-router",
+        "method": "POST",
+        "test_payload": {
+          "feedback": "PLACEHOLDER — se sobreescribe en cada corrida"
+        }
+      }
+    },
+    "router": {
+      "type": "router",
+      "config": {
+        "mode": "extract_and_route",
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "schema": {
+          "sentiment": {
+            "type": "string",
+            "required": true,
+            "description": "positive | negative | neutral"
+          },
+          "score": {
+            "type": "number",
+            "required": false,
+            "description": "Confidence 0.0 to 1.0"
+          },
+          "topic": {
+            "type": "string",
+            "required": false,
+            "description": "Short topic of the feedback"
+          }
+        },
+        "branches": [
+          {
+            "name": "escalate_unhappy",
+            "when": {
+              "field": "sentiment",
+              "equals": "negative"
+            }
+          },
+          {
+            "name": "thank_happy",
+            "when": {
+              "field": "sentiment",
+              "equals": "positive"
+            }
+          }
+        ]
+      }
+    },
+    "log_escalate": {
+      "type": "log",
+      "config": {
+        "prefix": "ESCALATE:"
+      }
+    },
+    "log_thank": {
+      "type": "log",
+      "config": {
+        "prefix": "THANK:"
+      }
+    },
+    "out": {
+      "type": "output",
+      "config": {}
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger.feedback",
+      "to": "router.input"
+    },
+    {
+      "from": "router.escalate_unhappy",
+      "to": "log_escalate"
+    },
+    {
+      "from": "router.thank_happy",
+      "to": "log_thank"
+    },
+    {
+      "from": "router.__decision",
+      "to": "out"
+    }
+  ]
+}

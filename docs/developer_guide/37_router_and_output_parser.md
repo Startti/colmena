@@ -168,6 +168,66 @@ Cualquier rama (en cualquier modo) puede declarar un `subgraph` opcional. Cuando
 - Si el subgraph **suspende**, el SUSPENDED bubblea hacia arriba a través del port de la rama (mismo comportamiento que un `SubGraphNode` standalone).
 - Si el subgraph **falla**, el error se propaga con prefix `router branch '<name>': <upstream error>`.
 
+### Qué recibe el subgrafo como input
+
+El subgrafo arranca con su **global state** poblado con estas claves:
+
+| Clave | Tipo | Cuándo aparece |
+|---|---|---|
+| `input` | mismo que el del router | Siempre. Es el texto/valor original que entró al router. |
+| `extracted` | objeto JSON | Solo en Mode B. Contiene el `{ field: value }` que el LLM extrajo. |
+| `__colmena_session_id` / `__colmena_agent_session_id` / `__colmena_node_id_path` / `__colmena_resume_answer` | strings | Reenviados si vinieron al router (memoria/suspend propagation). |
+
+Dentro del subgrafo, accedés a estas claves con la sintaxis normal de Colmena. Por ejemplo, un `llm_call` puede referenciar `{{input}}` en su `prompt`, o consumir `extracted.intent` con un edge `from: "$.extracted.intent"`.
+
+---
+
+## Edges / wiring — cómo conectar estos nodos
+
+### Edges del `output_parser`
+
+El parser emite el **JSON crudo** (no envuelto en `{ output: ... }`). Hay dos formas de consumirlo desde aguas abajo:
+
+```jsonc
+"edges": [
+  // Encadenar el output completo: el nodo destino recibe el objeto entero como su default input
+  { "from": "llm",    "to": "parser.input" },
+  { "from": "parser", "to": "log" },          // log recibe { intent: ..., confidence: ..., summary: ... }
+
+  // Tomar un campo específico con dotted path
+  { "from": "parser.intent",        "to": "next_node.category" },
+  { "from": "parser.confidence",    "to": "next_node.score" }
+]
+```
+
+### Edges del `router`
+
+El router emite **múltiples puertos**, uno por rama declarada + `__decision`. Solo el puerto de la rama ganadora trae payload no-null.
+
+```jsonc
+"edges": [
+  // 1. Wire el input
+  { "from": "trigger.user_message", "to": "router.input" },
+
+  // 2. Wire cada rama a su nodo aguas abajo
+  //    El puerto se llama EXACTAMENTE igual que `branches[i].name`
+  { "from": "router.sales",   "to": "sales_agent" },
+  { "from": "router.support", "to": "support_agent" },
+  { "from": "router.billing", "to": "billing_agent" },
+
+  // 3. Opcional: tomar el __decision para audit/logging
+  { "from": "router.__decision", "to": "audit_log" },
+
+  // 4. Acceder a campos del extracted desde otro nodo (solo Mode B)
+  { "from": "router.sales.extracted.urgency", "to": "priority_router.input" }
+]
+```
+
+**Recordá:**
+- Los puertos no elegidos emiten `null` → los nodos downstream que reciban null típicamente se skipean (depende del nodo destino).
+- En Mode B, dentro de cada puerto de rama tenés `{ input, extracted }` → podés re-leer la extracción sin re-llamar al LLM.
+- En Mode A, dentro de cada puerto tenés `{ input }` solamente (no hay extracción).
+
 ---
 
 ## Output: el port `__decision`
@@ -200,14 +260,16 @@ Además de los ports por rama, el router siempre emite `__decision`:
 
 ## Tests de integración
 
-Cinco grafos en [`tests/graphs/control_flow/`](../../tests/graphs/control_flow/):
+Siete grafos en [`tests/graphs/control_flow/`](../../tests/graphs/control_flow/):
 
 ```
-output_parser_basic.json       # llm_call → output_parser → log
-router_llm_direct.json         # mode A con 3 ramas
-router_extract_rules.json      # mode B con schema + when rules (incluye 'all')
-router_with_subgraph.json      # branch con subgraph inline ejecutando un mini-LLM
-router_chained.json            # dos routers en cascada (intent → lang)
+output_parser_basic.json           # llm_call → output_parser → log
+output_parser_review.json          # parser standalone para reviews (rating/topic/recommend/summary)
+router_llm_direct.json             # mode A con 3 ramas (sales/support/billing)
+router_extract_rules.json          # mode B con schema + when rules (incluye combinador 'all')
+router_mode_b_sentiment.json       # mode B routing por sentiment (positive/negative)
+router_with_subgraph.json          # rama con subgraph inline (LLM agent embebido)
+router_chained.json                # dos routers en cascada (intent → idioma)
 ```
 
 Todos requieren `GEMINI_API_KEY`. Corré uno con:

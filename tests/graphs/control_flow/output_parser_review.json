@@ -1,0 +1,69 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/parse-review",
+        "method": "POST",
+        "test_payload": {
+          "review": "PLACEHOLDER — se sobreescribe en cada corrida"
+        }
+      }
+    },
+    "parser": {
+      "type": "output_parser",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "schema": {
+          "rating": {
+            "type": "integer",
+            "required": true,
+            "description": "Estrellas estimadas, 1 a 5"
+          },
+          "topic": {
+            "type": "string",
+            "required": true,
+            "description": "Tema principal de la review, en 2-4 palabras"
+          },
+          "would_recommend": {
+            "type": "boolean",
+            "required": true,
+            "description": "Si el cliente recomendaría el producto"
+          },
+          "summary": {
+            "type": "string",
+            "required": false,
+            "description": "Resumen de una línea"
+          }
+        },
+        "instructions": "Devolvé exclusivamente JSON válido matching el schema. El campo rating debe ser un entero del 1 al 5."
+      }
+    },
+    "log": {
+      "type": "log",
+      "config": {
+        "prefix": "PARSED:"
+      }
+    },
+    "out": {
+      "type": "output",
+      "config": {}
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger.review",
+      "to": "parser.input"
+    },
+    {
+      "from": "parser",
+      "to": "log"
+    },
+    {
+      "from": "parser",
+      "to": "out"
+    }
+  ]
+}
