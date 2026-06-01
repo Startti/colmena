@@ -322,6 +322,19 @@ impl HashMapNodeRegistry {
                 sub_node.clone() as Arc<dyn ExecutableNode>,
             );
 
+            // --- Registrar Router ---
+            // Share the same SubGraphExecutorPort OnceLock so a single
+            // set_subgraph_executor() call below wires both nodes.
+            let router_node = Arc::new(
+                crate::dag_engine::infrastructure::nodes::router::RouterNode {
+                    executor: sub_node.executor.clone(),
+                },
+            );
+            nodes.insert(
+                "router".to_string(),
+                router_node.clone() as Arc<dyn ExecutableNode>,
+            );
+
             let mut toolkit_nodes: HashMap<String, Arc<dyn ToolkitNode>> = HashMap::new();
             toolkit_nodes.insert(
                 "tavily_client".to_string(),
@@ -495,6 +508,15 @@ mod registry_tavily_tests {
         assert!(
             reg.get_node("output_parser").is_some(),
             "output_parser must be registered as an ExecutableNode"
+        );
+    }
+
+    #[test]
+    fn router_registered_as_executable_node() {
+        let reg = build_registry();
+        assert!(
+            reg.get_node("router").is_some(),
+            "router must be registered as an ExecutableNode"
         );
     }
 }
