@@ -60,8 +60,8 @@ impl ExecutableNode for RouterNode {
         observer: Option<Arc<dyn ExecutionObserver>>,
     ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         // 1. Parse + validate config (re-runs every execute; cheap).
-        let cfg = parse_and_validate(config)
-            .map_err(|e| -> Box<dyn Error + Send + Sync> { e.into() })?;
+        let cfg =
+            parse_and_validate(config).map_err(|e| -> Box<dyn Error + Send + Sync> { e.into() })?;
 
         // 2. Read input.
         let input_raw = inputs.get("input").cloned().unwrap_or(Value::Null);
@@ -175,7 +175,11 @@ impl ExecutableNode for RouterNode {
         for (i, b) in cfg.branches.iter().enumerate() {
             out.insert(
                 b.name.clone(),
-                if i == idx { payload.clone() } else { Value::Null },
+                if i == idx {
+                    payload.clone()
+                } else {
+                    Value::Null
+                },
             );
         }
 

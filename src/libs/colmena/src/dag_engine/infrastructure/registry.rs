@@ -162,9 +162,7 @@ impl HashMapNodeRegistry {
             // --- Registrar Output Parser ---
             nodes.insert(
                 "output_parser".to_string(),
-                Arc::new(
-                    crate::dag_engine::infrastructure::nodes::output_parser::OutputParserNode,
-                ),
+                Arc::new(crate::dag_engine::infrastructure::nodes::output_parser::OutputParserNode),
             );
 
             // --- Registrar Mock de Suspension ---

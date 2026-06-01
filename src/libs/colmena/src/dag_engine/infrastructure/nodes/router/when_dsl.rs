@@ -66,10 +66,16 @@ impl WhenRule {
         }
 
         if let Some(v) = obj.get("equals") {
-            return Ok(WhenRule::Equals { field, value: v.clone() });
+            return Ok(WhenRule::Equals {
+                field,
+                value: v.clone(),
+            });
         }
         if let Some(v) = obj.get("not_equals") {
-            return Ok(WhenRule::NotEquals { field, value: v.clone() });
+            return Ok(WhenRule::NotEquals {
+                field,
+                value: v.clone(),
+            });
         }
         if let Some(v) = obj.get("in") {
             let values = v
@@ -79,22 +85,33 @@ impl WhenRule {
             return Ok(WhenRule::In { field, values });
         }
         if let Some(v) = obj.get("contains") {
-            return Ok(WhenRule::Contains { field, value: v.clone() });
+            return Ok(WhenRule::Contains {
+                field,
+                value: v.clone(),
+            });
         }
         if let Some(v) = obj.get("gt") {
-            let n = v.as_f64().ok_or_else(|| "'gt' must be a number".to_string())?;
+            let n = v
+                .as_f64()
+                .ok_or_else(|| "'gt' must be a number".to_string())?;
             return Ok(WhenRule::Gt { field, value: n });
         }
         if let Some(v) = obj.get("lt") {
-            let n = v.as_f64().ok_or_else(|| "'lt' must be a number".to_string())?;
+            let n = v
+                .as_f64()
+                .ok_or_else(|| "'lt' must be a number".to_string())?;
             return Ok(WhenRule::Lt { field, value: n });
         }
         if let Some(v) = obj.get("gte") {
-            let n = v.as_f64().ok_or_else(|| "'gte' must be a number".to_string())?;
+            let n = v
+                .as_f64()
+                .ok_or_else(|| "'gte' must be a number".to_string())?;
             return Ok(WhenRule::Gte { field, value: n });
         }
         if let Some(v) = obj.get("lte") {
-            let n = v.as_f64().ok_or_else(|| "'lte' must be a number".to_string())?;
+            let n = v
+                .as_f64()
+                .ok_or_else(|| "'lte' must be a number".to_string())?;
             return Ok(WhenRule::Lte { field, value: n });
         }
         if let Some(v) = obj.get("matches") {
@@ -109,7 +126,10 @@ impl WhenRule {
                 .as_bool()
                 .ok_or_else(|| "'exists' must be a boolean".to_string())?;
             if !b {
-                return Err("'exists: false' is not supported — use 'not: { ..., exists: true }'".to_string());
+                return Err(
+                    "'exists: false' is not supported — use 'not: { ..., exists: true }'"
+                        .to_string(),
+                );
             }
             return Ok(WhenRule::Exists { field });
         }
@@ -155,9 +175,7 @@ impl WhenRule {
             WhenRule::Matches { field, regex } => resolve(field, extracted)
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .is_some_and(|s| regex.is_match(&s)),
-            WhenRule::Exists { field } => {
-                resolve(field, extracted).is_some_and(|v| !v.is_null())
-            }
+            WhenRule::Exists { field } => resolve(field, extracted).is_some_and(|v| !v.is_null()),
         }
     }
 }
@@ -293,11 +311,8 @@ mod tests {
     #[test]
     fn dotted_field_path() {
         let schema = json!({ "user": { "type": "object" } });
-        let r = WhenRule::parse(
-            &json!({ "field": "user.tier", "equals": "gold" }),
-            &schema,
-        )
-        .unwrap();
+        let r =
+            WhenRule::parse(&json!({ "field": "user.tier", "equals": "gold" }), &schema).unwrap();
         assert!(r.evaluate(&json!({ "user": { "tier": "gold" } })));
         assert!(!r.evaluate(&json!({ "user": { "tier": "silver" } })));
         assert!(!r.evaluate(&json!({})));
@@ -305,31 +320,21 @@ mod tests {
 
     #[test]
     fn rejects_unknown_field_at_parse_time() {
-        let err = WhenRule::parse(
-            &json!({ "field": "unknown", "equals": "x" }),
-            &schema(),
-        )
-        .unwrap_err();
+        let err =
+            WhenRule::parse(&json!({ "field": "unknown", "equals": "x" }), &schema()).unwrap_err();
         assert!(err.contains("unknown field 'unknown'"));
     }
 
     #[test]
     fn rejects_when_with_no_operator() {
-        let err = WhenRule::parse(
-            &json!({ "field": "intent" }),
-            &schema(),
-        )
-        .unwrap_err();
+        let err = WhenRule::parse(&json!({ "field": "intent" }), &schema()).unwrap_err();
         assert!(err.contains("no operator"));
     }
 
     #[test]
     fn rejects_invalid_regex() {
-        let err = WhenRule::parse(
-            &json!({ "field": "intent", "matches": "[" }),
-            &schema(),
-        )
-        .unwrap_err();
+        let err =
+            WhenRule::parse(&json!({ "field": "intent", "matches": "[" }), &schema()).unwrap_err();
         assert!(err.contains("invalid regex"));
     }
 

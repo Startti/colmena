@@ -1,7 +1,7 @@
 use crate::dag_engine::domain::observer::{ExecutionObserver, NodeEvent};
 use crate::llm::application::{AgentRunParams, AgentService};
 use crate::llm::domain::{
-    ConversationKey, LlmConfig, LlmMessage, LlmProvider, LlmError, NodeIdPath, ProviderKind,
+    ConversationKey, LlmConfig, LlmError, LlmMessage, LlmProvider, NodeIdPath, ProviderKind,
     SessionId, ToolCall, ToolDefinition, ToolExecutor, ToolResult,
 };
 use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
@@ -116,13 +116,9 @@ pub fn parse_and_validate(
         s = stripped;
     }
     let s = s.trim();
-    let parsed: Value = serde_json::from_str(s).map_err(|e| {
-        format!("failed to parse LLM response as JSON: {}. raw: {}", e, raw)
-    })?;
-    if !inline_schema
-        .as_object()
-        .is_some_and(|o| o.is_empty())
-    {
+    let parsed: Value = serde_json::from_str(s)
+        .map_err(|e| format!("failed to parse LLM response as JSON: {}. raw: {}", e, raw))?;
+    if !inline_schema.as_object().is_some_and(|o| o.is_empty()) {
         validate_against_inline_schema(&parsed, inline_schema)
             .map_err(|e| format!("schema validation failed: {}", e))?;
     }

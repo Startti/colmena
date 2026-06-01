@@ -82,7 +82,10 @@ pub fn validate_against_inline_schema(value: &Value, inline: &Value) -> Result<(
         let field_value = obj.get(field_name);
 
         if required && field_value.is_none_or(|v| v.is_null()) {
-            return Err(format!("required field '{}' is missing or null", field_name));
+            return Err(format!(
+                "required field '{}' is missing or null",
+                field_name
+            ));
         }
 
         if let Some(v) = field_value {
@@ -205,8 +208,7 @@ mod tests {
     #[test]
     fn validator_rejects_null_required_field() {
         let schema = json!({ "intent": { "type": "string", "required": true } });
-        let err =
-            validate_against_inline_schema(&json!({ "intent": null }), &schema).unwrap_err();
+        let err = validate_against_inline_schema(&json!({ "intent": null }), &schema).unwrap_err();
         assert!(err.contains("required field 'intent'"));
     }
 

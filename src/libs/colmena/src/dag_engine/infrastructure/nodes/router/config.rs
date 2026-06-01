@@ -53,9 +53,7 @@ pub fn parse_and_validate(config: &Value) -> Result<RouterConfig, String> {
         RouterMode::ExtractAndRoute => {
             let s = config
                 .get("schema")
-                .ok_or_else(|| {
-                    "RouterConfigError: extract_and_route requires schema".to_string()
-                })?
+                .ok_or_else(|| "RouterConfigError: extract_and_route requires schema".to_string())?
                 .clone();
             super::super::util::inline_schema::inline_to_json_schema(&s)
                 .map_err(|e| format!("RouterConfigError: schema invalid — {}", e))?;
@@ -70,10 +68,7 @@ pub fn parse_and_validate(config: &Value) -> Result<RouterConfig, String> {
             .ok_or_else(|| format!("RouterConfigError: branch #{} missing 'name'", idx))?
             .to_string();
         if !name_re.is_match(&name) {
-            return Err(format!(
-                "RouterConfigError: invalid branch name '{}'",
-                name
-            ));
+            return Err(format!("RouterConfigError: invalid branch name '{}'", name));
         }
         if !seen_names.insert(name.clone()) {
             return Err(format!(
