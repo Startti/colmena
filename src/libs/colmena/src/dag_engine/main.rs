@@ -35,6 +35,16 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         verbose: bool,
     },
+    /// Run the documents CRDT spike server (Phase 0).
+    SpikeYws {
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+        /// Directory where projection dumps are written.
+        #[arg(long, default_value = "/tmp/spike")]
+        dump_dir: String,
+    },
 }
 
 #[tokio::main]
@@ -142,6 +152,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             colmena::dag_engine::verbose::set_verbose(verbose || verbose_env);
             println!("🌐 Modo Serve: Iniciando...");
             api::serve_dag(file_path, host, port).await?;
+        }
+
+        Commands::SpikeYws { host, port, dump_dir } => {
+            use colmena::dag_engine::spike::{server::{router, SpikeState}, DocRegistry};
+            use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+
+            let state = SpikeState {
+                registry: Arc::new(DocRegistry::new()),
+                dump_dir: PathBuf::from(&dump_dir),
+            };
+            let app = router(state);
+            let addr: SocketAddr = format!("{host}:{port}").parse()?;
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            println!("🧪 spike-yws listening on http://{addr}  (dumps → {dump_dir})");
+            axum::serve(listener, app).await?;
         }
     }
 
