@@ -1,19 +1,34 @@
 //! Router node — declarative branching with LLM-direct and extract+rules modes.
 
+use crate::dag_engine::application::ports::SubGraphExecutorPort;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use crate::llm::domain::ProviderKind;
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 use std::error::Error;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use super::config::{parse_and_validate, RouterMode};
 use super::llm_direct::pick_branch as pick_llm_direct;
 
-pub struct RouterNode;
+pub struct RouterNode {
+    pub executor: Arc<OnceLock<Arc<dyn SubGraphExecutorPort>>>,
+}
+
+impl Default for RouterNode {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl RouterNode {
+    pub fn new() -> Self {
+        Self {
+            executor: Arc::new(OnceLock::new()),
+        }
+    }
+
     fn resolve_env_var(value: &str) -> Result<String, String> {
         if value.starts_with("${") && value.ends_with('}') {
             let var_name = &value[2..value.len() - 1];
@@ -109,9 +124,42 @@ impl ExecutableNode for RouterNode {
         };
 
         let selected = &cfg.branches[idx];
-        let payload = match &extracted {
-            Some(e) => json!({ "input": input_raw, "extracted": e }),
-            None => json!({ "input": input_raw }),
+
+        // If the selected branch declares a subgraph, run it and use its
+        // output as the payload. Otherwise the payload is the raw {input, extracted?}.
+        let payload = match &selected.subgraph {
+            Some(sg_config) => {
+                use crate::dag_engine::infrastructure::nodes::subgraph::SubGraphNode;
+                let sg_node = SubGraphNode {
+                    executor: self.executor.clone(),
+                };
+                let mut sg_inputs = NodeInputs::new();
+                sg_inputs.insert("input".to_string(), input_raw.clone());
+                if let Some(e) = &extracted {
+                    sg_inputs.insert("extracted".to_string(), e.clone());
+                }
+                // Forward standard subgraph wiring keys from the router's inputs.
+                for k in [
+                    "__colmena_session_id",
+                    "__colmena_agent_session_id",
+                    "__colmena_node_id_path",
+                    "__colmena_resume_answer",
+                ] {
+                    if let Some(v) = inputs.get(k) {
+                        sg_inputs.insert(k.to_string(), v.clone());
+                    }
+                }
+                sg_node
+                    .execute(&sg_inputs, sg_config, _state, observer.clone())
+                    .await
+                    .map_err(|e| -> Box<dyn Error + Send + Sync> {
+                        format!("router branch '{}': {}", selected.name, e).into()
+                    })?
+            }
+            None => match &extracted {
+                Some(e) => json!({ "input": input_raw, "extracted": e }),
+                None => json!({ "input": input_raw }),
+            },
         };
 
         // 5. Emit __decision + one payload per port (null for non-selected).
@@ -191,7 +239,7 @@ mod tests {
 
     #[tokio::test]
     async fn fails_when_input_is_null() {
-        let node = RouterNode;
+        let node = RouterNode::new();
         let mut state = json!({});
         let err = node
             .execute(&inputs(Value::Null), &cfg(), &mut state, None)
@@ -203,7 +251,7 @@ mod tests {
 
     #[tokio::test]
     async fn fails_when_input_is_empty_string() {
-        let node = RouterNode;
+        let node = RouterNode::new();
         let mut state = json!({});
         let err = node
             .execute(&inputs(json!("  ")), &cfg(), &mut state, None)
@@ -215,7 +263,7 @@ mod tests {
 
     #[tokio::test]
     async fn fails_on_invalid_config_at_runtime() {
-        let node = RouterNode;
+        let node = RouterNode::new();
         let mut state = json!({});
         let err = node
             .execute(
@@ -232,7 +280,7 @@ mod tests {
 
     #[tokio::test]
     async fn extract_and_route_requires_schema_at_runtime() {
-        let node = RouterNode;
+        let node = RouterNode::new();
         let mut state = json!({});
         let cfg = json!({
             "mode": "extract_and_route",
@@ -246,5 +294,28 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("requires schema"));
+    }
+
+    #[tokio::test]
+    async fn rejects_subgraph_with_both_path_and_inline() {
+        // Validation runs inside parse_and_validate; the router surfaces it at runtime.
+        let node = RouterNode::new();
+        let cfg = json!({
+            "mode": "llm_direct",
+            "provider": "google",
+            "api_key": "fake",
+            "branches": [ {
+                "name": "a",
+                "description": "x",
+                "subgraph": { "child_graph_path": "p.json", "child_graph_inline": {} }
+            } ]
+        });
+        let mut state = json!({});
+        let err = node
+            .execute(&inputs(json!("anything")), &cfg, &mut state, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pick one"));
     }
 }
