@@ -21,13 +21,15 @@ impl DocRegistry {
     }
 
     /// Returns the doc for `artifact_id`, creating an empty one if absent.
+    ///
+    /// Uses atomic `DashMap.entry()` semantics to ensure concurrent calls with
+    /// the same id always return the same Arc — preventing TOCTOU races where
+    /// two threads could each create a Doc and leave divergent Arcs.
     pub fn get_or_create(&self, artifact_id: &str) -> Arc<Doc> {
-        if let Some(existing) = self.docs.get(artifact_id) {
-            return existing.clone();
-        }
-        let doc = Arc::new(Doc::new());
-        self.docs.insert(artifact_id.to_string(), doc.clone());
-        doc
+        self.docs
+            .entry(artifact_id.to_string())
+            .or_insert_with(|| Arc::new(Doc::new()))
+            .clone()
     }
 
     pub fn get(&self, artifact_id: &str) -> Option<Arc<Doc>> {
@@ -36,6 +38,10 @@ impl DocRegistry {
 
     pub fn len(&self) -> usize {
         self.docs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.docs.is_empty()
     }
 }
 
@@ -65,5 +71,16 @@ mod tests {
     fn get_returns_none_for_missing_id() {
         let reg = DocRegistry::new();
         assert!(reg.get("missing").is_none());
+    }
+
+    #[test]
+    fn get_or_create_is_idempotent_across_many_calls() {
+        let reg = DocRegistry::new();
+        let first = reg.get_or_create("art1");
+        for _ in 0..100 {
+            let again = reg.get_or_create("art1");
+            assert!(Arc::ptr_eq(&first, &again));
+        }
+        assert_eq!(reg.len(), 1);
     }
 }
