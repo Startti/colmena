@@ -170,9 +170,21 @@ impl GeminiAdapter {
                         }
                     }
 
+                    // Gemini's `functionResponse.response` is typed as
+                    // `google.protobuf.Struct` and only accepts JSON objects.
+                    // Wrap non-object values (scalars, arrays, null) in
+                    // `{ "result": <value> }`. Objects pass through unchanged
+                    // so callers that already return dicts keep their keys.
+                    // Non-JSON content (free-form error strings) is wrapped
+                    // as a string under the same key.
+                    //
+                    // See: docs/superpowers/plans/2026-06-01-gemini-scalar-tool-response-fix.md
                     let parsed_content =
-                        serde_json::from_str::<serde_json::Value>(message.content())
-                            .unwrap_or_else(|_| serde_json::json!({ "result": message.content() }));
+                        match serde_json::from_str::<serde_json::Value>(message.content()) {
+                            Ok(v) if v.is_object() => v,
+                            Ok(v) => serde_json::json!({ "result": v }),
+                            Err(_) => serde_json::json!({ "result": message.content() }),
+                        };
 
                     contents.push(GeminiContent {
                         role: "function".to_string(),
@@ -946,5 +958,114 @@ mod tests {
             .unwrap();
         assert_eq!(file_part["inlineData"]["mimeType"], "application/pdf");
         assert!(file_part["inlineData"]["data"].is_string());
+    }
+
+    // ----------------------------------------------------------------------
+    // Regression tests for the "scalar tool response" bug.
+    //
+    // Gemini's `Content.parts[].functionResponse.response` field is typed as
+    // `google.protobuf.Struct` and ONLY accepts JSON objects. Scalars, arrays,
+    // booleans, and null are rejected with HTTP 400 INVALID_ARGUMENT.
+    //
+    // `LlmMessage::Tool` content is an arbitrary JSON-encoded string. The
+    // adapter must wrap any non-object value in `{ "result": <value> }` so
+    // Gemini accepts the round-trip. Objects must pass through unchanged so
+    // callers that already return dicts keep their keys.
+    //
+    // See: docs/superpowers/plans/2026-06-01-gemini-scalar-tool-response-fix.md
+    // ----------------------------------------------------------------------
+
+    fn build_request_with_tool_response(content: &str) -> crate::llm::domain::LlmRequest {
+        use crate::llm::domain::{
+            FunctionCall, LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind, ToolCall,
+        };
+        let provider =
+            LlmProvider::new(ProviderKind::Google, "test_key".to_string(), None).unwrap();
+        let config = LlmConfig::new(provider);
+        let tool_call = ToolCall::new(
+            "call_1".to_string(),
+            FunctionCall::new("runCode".to_string(), "{}".to_string()),
+        );
+        let messages = vec![
+            LlmMessage::user("compute 7!".to_string()).unwrap(),
+            LlmMessage::assistant_with_tool_calls("".to_string(), vec![tool_call]).unwrap(),
+            LlmMessage::tool("call_1".to_string(), content.to_string()).unwrap(),
+        ];
+        LlmRequest::new(messages, config, false).unwrap()
+    }
+
+    fn extract_function_response(contents: &[GeminiContent]) -> serde_json::Value {
+        let function_msg = contents.iter().find(|c| c.role == "function").unwrap();
+        let part = function_msg.parts.as_ref().unwrap().first().unwrap();
+        part.function_response.clone().unwrap()
+    }
+
+    #[test]
+    fn tool_response_scalar_number_is_wrapped() {
+        let req = build_request_with_tool_response("5040");
+        let (_, contents) = GeminiAdapter::new().convert_messages(&req).unwrap();
+        let fr = extract_function_response(&contents);
+        assert!(
+            fr["response"].is_object(),
+            "response must be an object, got {fr:?}"
+        );
+        assert_eq!(fr["response"]["result"], 5040);
+    }
+
+    #[test]
+    fn tool_response_array_is_wrapped() {
+        let req = build_request_with_tool_response("[1, 2, 3]");
+        let (_, contents) = GeminiAdapter::new().convert_messages(&req).unwrap();
+        let fr = extract_function_response(&contents);
+        assert!(
+            fr["response"].is_object(),
+            "response must be an object, got {fr:?}"
+        );
+        assert_eq!(fr["response"]["result"], serde_json::json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn tool_response_null_is_wrapped() {
+        let req = build_request_with_tool_response("null");
+        let (_, contents) = GeminiAdapter::new().convert_messages(&req).unwrap();
+        let fr = extract_function_response(&contents);
+        assert!(
+            fr["response"].is_object(),
+            "response must be an object, got {fr:?}"
+        );
+        assert!(fr["response"]["result"].is_null());
+    }
+
+    #[test]
+    fn tool_response_string_is_wrapped() {
+        let req = build_request_with_tool_response("\"hello\"");
+        let (_, contents) = GeminiAdapter::new().convert_messages(&req).unwrap();
+        let fr = extract_function_response(&contents);
+        assert!(
+            fr["response"].is_object(),
+            "response must be an object, got {fr:?}"
+        );
+        assert_eq!(fr["response"]["result"], "hello");
+    }
+
+    #[test]
+    fn tool_response_object_passes_through_unchanged() {
+        let req = build_request_with_tool_response("{\"answer\": 42, \"unit\": \"jiffies\"}");
+        let (_, contents) = GeminiAdapter::new().convert_messages(&req).unwrap();
+        let fr = extract_function_response(&contents);
+        assert_eq!(fr["response"]["answer"], 42);
+        assert_eq!(fr["response"]["unit"], "jiffies");
+        assert!(
+            fr["response"].get("result").is_none(),
+            "object must NOT be double-wrapped, got {fr:?}"
+        );
+    }
+
+    #[test]
+    fn tool_response_non_json_content_is_wrapped_as_string() {
+        let req = build_request_with_tool_response("plain error text");
+        let (_, contents) = GeminiAdapter::new().convert_messages(&req).unwrap();
+        let fr = extract_function_response(&contents);
+        assert_eq!(fr["response"]["result"], "plain error text");
     }
 }
