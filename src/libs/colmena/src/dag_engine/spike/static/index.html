@@ -30,7 +30,7 @@
 
   <script type="module">
     import * as Y from "https://esm.sh/yjs@13.6.18";
-    import { WebsocketProvider } from "https://esm.sh/y-websocket@1.5.4";
+    import { WebsocketProvider } from "https://esm.sh/y-websocket@1.5.4?external=yjs";
 
     const artifact = new URLSearchParams(location.search).get("artifact")
       || "spike-doc";
@@ -102,6 +102,24 @@
       "https://esm.sh/@univerjs/core@0.2.10";
     import { defaultTheme } from
       "https://esm.sh/@univerjs/design@0.2.10";
+
+    // Locale dictionaries — required by LocaleService in Univer 0.2.x.
+    // Each plugin ships its own locale keys; we merge them into one dict.
+    import enUS_sheetsUI from
+      "https://esm.sh/@univerjs/sheets-ui@0.2.10/lib/locale/en-US.json" assert { type: "json" };
+    import enUS_uiPlugin from
+      "https://esm.sh/@univerjs/ui@0.2.10/lib/locale/en-US.json" assert { type: "json" };
+    import enUS_docsUI from
+      "https://esm.sh/@univerjs/docs-ui@0.2.10/lib/locale/en-US.json" assert { type: "json" };
+    import enUS_sheetsFormula from
+      "https://esm.sh/@univerjs/sheets-formula@0.2.10/lib/locale/en-US.json" assert { type: "json" };
+
+    const enUSLocale = {
+      ...enUS_sheetsUI,
+      ...enUS_uiPlugin,
+      ...enUS_docsUI,
+      ...enUS_sheetsFormula,
+    };
     import { UniverDocsPlugin } from
       "https://esm.sh/@univerjs/docs@0.2.10";
     import { UniverDocsUIPlugin } from
@@ -122,6 +140,9 @@
     const univer = new Univer({
       theme: defaultTheme,
       locale: LocaleType.EN_US,
+      locales: {
+        [LocaleType.EN_US]: enUSLocale,
+      },
     });
     univer.registerPlugin(UniverRenderEnginePlugin);
     univer.registerPlugin(UniverFormulaEnginePlugin);
