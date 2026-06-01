@@ -1,0 +1,39 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/test-router-llm-direct",
+        "method": "POST",
+        "test_payload": {
+          "user_message": "Hola, me interesa comprar tres licencias del producto Premium. ¿Tienen descuento por volumen?"
+        }
+      }
+    },
+    "router": {
+      "type": "router",
+      "config": {
+        "mode": "llm_direct",
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "branches": [
+          { "name": "sales",   "description": "User wants to buy, asks for pricing, quotes, or available products." },
+          { "name": "support", "description": "User has a technical issue or asks how to use something." },
+          { "name": "billing", "description": "Invoices, payments, subscriptions, refunds." }
+        ]
+      }
+    },
+    "log_sales":   { "type": "log", "config": { "prefix": "SALES:" } },
+    "log_support": { "type": "log", "config": { "prefix": "SUPPORT:" } },
+    "log_billing": { "type": "log", "config": { "prefix": "BILLING:" } },
+    "out": { "type": "output", "config": {} }
+  },
+  "edges": [
+    { "from": "trigger.user_message", "to": "router.input" },
+    { "from": "router.sales",   "to": "log_sales" },
+    { "from": "router.support", "to": "log_support" },
+    { "from": "router.billing", "to": "log_billing" },
+    { "from": "router.__decision", "to": "out" }
+  ]
+}

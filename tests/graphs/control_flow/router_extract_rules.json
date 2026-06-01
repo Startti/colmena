@@ -1,0 +1,53 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/test-router-extract-rules",
+        "method": "POST",
+        "test_payload": {
+          "user_message": "URGENTE: necesito una cotización para 50 licencias antes del fin de semana."
+        }
+      }
+    },
+    "router": {
+      "type": "router",
+      "config": {
+        "mode": "extract_and_route",
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "schema": {
+          "intent":     { "type": "string", "required": true,  "description": "sales | support | billing" },
+          "urgency":    { "type": "string", "required": false, "description": "low | medium | high" },
+          "confidence": { "type": "number", "required": false, "description": "0..1" }
+        },
+        "branches": [
+          {
+            "name": "urgent_sales",
+            "when": { "all": [
+              { "field": "intent",  "equals": "sales" },
+              { "field": "urgency", "equals": "high"  }
+            ]}
+          },
+          { "name": "sales",   "when": { "field": "intent", "equals": "sales" } },
+          { "name": "support", "when": { "field": "intent", "in": ["support", "technical"] } },
+          { "name": "billing", "when": { "field": "intent", "equals": "billing" } }
+        ]
+      }
+    },
+    "log_urgent":  { "type": "log", "config": { "prefix": "URGENT_SALES:" } },
+    "log_sales":   { "type": "log", "config": { "prefix": "SALES:" } },
+    "log_support": { "type": "log", "config": { "prefix": "SUPPORT:" } },
+    "log_billing": { "type": "log", "config": { "prefix": "BILLING:" } },
+    "out": { "type": "output", "config": {} }
+  },
+  "edges": [
+    { "from": "trigger.user_message",  "to": "router.input" },
+    { "from": "router.urgent_sales",   "to": "log_urgent" },
+    { "from": "router.sales",          "to": "log_sales" },
+    { "from": "router.support",        "to": "log_support" },
+    { "from": "router.billing",        "to": "log_billing" },
+    { "from": "router.__decision",     "to": "out" }
+  ]
+}

@@ -1,0 +1,58 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/test-router-chained",
+        "method": "POST",
+        "test_payload": {
+          "user_message": "What time does the office open tomorrow?"
+        }
+      }
+    },
+    "intent_router": {
+      "type": "router",
+      "config": {
+        "mode": "llm_direct",
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "branches": [
+          { "name": "question",   "description": "User asks a question." },
+          { "name": "command",    "description": "User issues a command (e.g., 'create', 'delete', 'update')." }
+        ]
+      }
+    },
+    "question_lang_router": {
+      "type": "router",
+      "config": {
+        "mode": "extract_and_route",
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "schema": {
+          "lang": { "type": "string", "required": true, "description": "ISO 639-1 code like 'es' or 'en'" }
+        },
+        "branches": [
+          { "name": "es",    "when": { "field": "lang", "equals": "es" } },
+          { "name": "en",    "when": { "field": "lang", "equals": "en" } },
+          { "name": "other", "when": { "field": "lang", "exists": true } }
+        ]
+      }
+    },
+    "log_command": { "type": "log", "config": { "prefix": "COMMAND:" } },
+    "log_es":      { "type": "log", "config": { "prefix": "ES:" } },
+    "log_en":      { "type": "log", "config": { "prefix": "EN:" } },
+    "log_other":   { "type": "log", "config": { "prefix": "OTHER:" } },
+    "out":         { "type": "output", "config": {} }
+  },
+  "edges": [
+    { "from": "trigger.user_message",              "to": "intent_router.input" },
+    { "from": "intent_router.command",             "to": "log_command" },
+    { "from": "intent_router.question.input",      "to": "question_lang_router.input" },
+    { "from": "question_lang_router.es",           "to": "log_es" },
+    { "from": "question_lang_router.en",           "to": "log_en" },
+    { "from": "question_lang_router.other",        "to": "log_other" },
+    { "from": "question_lang_router.__decision",   "to": "out" }
+  ]
+}

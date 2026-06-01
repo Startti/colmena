@@ -1,0 +1,59 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/test-router-with-subgraph",
+        "method": "POST",
+        "test_payload": {
+          "user_message": "¿Cuál es la capital de Australia?"
+        }
+      }
+    },
+    "router": {
+      "type": "router",
+      "config": {
+        "mode": "llm_direct",
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "branches": [
+          {
+            "name": "answerable",
+            "description": "User asks a question that can be answered with general knowledge.",
+            "subgraph": {
+              "child_graph_inline": {
+                "nodes": {
+                  "sg_llm": {
+                    "type": "llm_call",
+                    "config": {
+                      "provider": "google",
+                      "model": "gemini-2.5-flash",
+                      "api_key": "${GEMINI_API_KEY}",
+                      "prompt": "Answer concisely: {{input}}"
+                    }
+                  },
+                  "sg_out": { "type": "output", "config": {} }
+                },
+                "edges": [
+                  { "from": "sg_llm", "to": "sg_out" }
+                ]
+              }
+            }
+          },
+          {
+            "name": "escalate",
+            "description": "User asks something that requires human follow-up."
+          }
+        ]
+      }
+    },
+    "log_escalate": { "type": "log", "config": { "prefix": "ESCALATE:" } },
+    "out": { "type": "output", "config": {} }
+  },
+  "edges": [
+    { "from": "trigger.user_message", "to": "router.input" },
+    { "from": "router.answerable",    "to": "out" },
+    { "from": "router.escalate",      "to": "log_escalate" }
+  ]
+}
