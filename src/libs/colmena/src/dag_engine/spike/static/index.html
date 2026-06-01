@@ -1,2 +1,213 @@
 <!doctype html>
-<html><body><h1>spike-yws — placeholder, filled in Task 8</h1></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Documents CRDT Spike</title>
+  <style>
+    html, body { margin: 0; height: 100%; font-family: sans-serif; }
+    #toolbar { padding: 8px; background: #f0f0f0; border-bottom: 1px solid #ddd; }
+    #univer { width: 100%; height: calc(100% - 50px); }
+    code { background: #fff; padding: 2px 4px; }
+  </style>
+  <link rel="stylesheet"
+    href="https://unpkg.com/@univerjs/design@0.2.10/lib/index.css" />
+  <link rel="stylesheet"
+    href="https://unpkg.com/@univerjs/ui@0.2.10/lib/index.css" />
+  <link rel="stylesheet"
+    href="https://unpkg.com/@univerjs/docs-ui@0.2.10/lib/index.css" />
+  <link rel="stylesheet"
+    href="https://unpkg.com/@univerjs/sheets-ui@0.2.10/lib/index.css" />
+  <link rel="stylesheet"
+    href="https://unpkg.com/@univerjs/sheets-formula@0.2.10/lib/index.css" />
+</head>
+<body>
+  <div id="toolbar">
+    Artifact: <code id="artifact">spike-doc</code>
+    | WS: <code id="ws-status">connecting&hellip;</code>
+    | Tab id: <code id="tab"></code>
+  </div>
+  <div id="univer"></div>
+
+  <script type="module">
+    import * as Y from "https://esm.sh/yjs@13.6.18";
+    import { WebsocketProvider } from "https://esm.sh/y-websocket@1.5.4";
+
+    const artifact = new URLSearchParams(location.search).get("artifact")
+      || "spike-doc";
+    document.getElementById("artifact").textContent = artifact;
+    document.getElementById("tab").textContent =
+      Math.random().toString(36).slice(2, 8);
+
+    const wsBase = location.host;
+    const ydoc = new Y.Doc();
+    const provider = new WebsocketProvider(
+      `ws://${wsBase}/yjs`, artifact, ydoc, { params: {} });
+    provider.on("status", e => {
+      document.getElementById("ws-status").textContent = e.status;
+    });
+
+    // -------------------------------------------------------------------------
+    // Y.Doc workbook structure
+    //
+    //   ydoc.getMap("workbook")
+    //     .get("sheets")       -> Y.Array of Y.Map entries
+    //       [0].get("id")      -> string
+    //       [0].get("name")    -> string
+    //       [0].get("cells")   -> Y.Map<addr, Y.Map<"v", value>>
+    //
+    // Bridge Univer <-> Y.Doc:
+    //   Outbound: on Univer cell-mutation commands, write changed cells into
+    //             ydoc.getMap("workbook").get("sheets")[i].get("cells").
+    //   Inbound:  on Y.Doc cell-map observe events, apply back to Univer via
+    //             the command bus.
+    //
+    // For R1.2 measurement we need at minimum: a POST to /spike/agent-op
+    // shows up as a cell change in the inbound observer (logged to DevTools
+    // console), proving the WS round-trip works without a Univer collab backend.
+    // The outbound bridge (Univer -> Y.Doc) is intentionally stubbed here
+    // pending command-id discovery in DevTools at first live run.
+    // -------------------------------------------------------------------------
+
+    const wb = ydoc.getMap("workbook");
+    if (!wb.has("sheets")) {
+      wb.set("sheets", new Y.Array());
+    }
+
+    // Seed an empty sheet on first connect so Univer always has a structure
+    // to initialise from.
+    const sheetsArr = wb.get("sheets");
+    if (sheetsArr.length === 0) {
+      ydoc.transact(() => {
+        const sheet = new Y.Map();
+        sheet.set("id", "s1");
+        sheet.set("name", "Hoja1");
+        sheet.set("cells", new Y.Map());
+        sheetsArr.push([sheet]);
+      });
+    }
+
+    // -------------------------------------------------------------------------
+    // Univer bootstrap
+    //
+    // R1.2 test: Univer loaded WITHOUT @univerjs/collaboration-client.
+    // The collaboration-client normally negotiates a Univer-specific handshake
+    // with a Univer backend.  We deliberately omit it and wire only plain
+    // y-websocket.  If Univer pulls the collab client transitively and tries
+    // that handshake anyway, the operator records R1.2 = NO-GO.
+    // -------------------------------------------------------------------------
+    import { createUniver, LocaleType } from
+      "https://esm.sh/@univerjs/core@0.2.10";
+    import { defaultTheme } from
+      "https://esm.sh/@univerjs/design@0.2.10";
+    import { UniverDocsPlugin } from
+      "https://esm.sh/@univerjs/docs@0.2.10";
+    import { UniverDocsUIPlugin } from
+      "https://esm.sh/@univerjs/docs-ui@0.2.10";
+    import { UniverFormulaEnginePlugin } from
+      "https://esm.sh/@univerjs/engine-formula@0.2.10";
+    import { UniverRenderEnginePlugin } from
+      "https://esm.sh/@univerjs/engine-render@0.2.10";
+    import { UniverSheetsPlugin } from
+      "https://esm.sh/@univerjs/sheets@0.2.10";
+    import { UniverSheetsFormulaPlugin } from
+      "https://esm.sh/@univerjs/sheets-formula@0.2.10";
+    import { UniverSheetsUIPlugin } from
+      "https://esm.sh/@univerjs/sheets-ui@0.2.10";
+    import { UniverUIPlugin } from
+      "https://esm.sh/@univerjs/ui@0.2.10";
+
+    const univer = createUniver({
+      theme: defaultTheme,
+      locale: LocaleType.EN_US,
+      plugins: [
+        [UniverRenderEnginePlugin],
+        [UniverFormulaEnginePlugin],
+        [UniverUIPlugin, { container: "univer" }],
+        [UniverDocsPlugin],
+        [UniverDocsUIPlugin],
+        [UniverSheetsPlugin],
+        [UniverSheetsUIPlugin],
+        [UniverSheetsFormulaPlugin],
+      ],
+    });
+
+    // Build initial workbook snapshot from current Y.Doc state so the sheet
+    // shows whatever is already in the shared document on first load.
+    const initialState = (() => {
+      const cells = sheetsArr.get(0).get("cells");
+      const cellData = {};
+      for (const [addr, cell] of cells.entries()) {
+        // addr format: "A1", "B3", etc.
+        const colChar = addr.charCodeAt(0) - 65;   // 'A' -> 0
+        const row = parseInt(addr.slice(1), 10) - 1; // "1" -> 0
+        cellData[row] = cellData[row] || {};
+        cellData[row][colChar] = { v: cell.get("v") };
+      }
+      return {
+        id: artifact,
+        sheetOrder: ["s1"],
+        sheets: {
+          s1: {
+            id: "s1",
+            name: "Hoja1",
+            cellData,
+            rowCount: 100,
+            columnCount: 26,
+          },
+        },
+      };
+    })();
+
+    // UniverInstanceType.UNIVER_SHEET = 2
+    univer.createUnit(2, initialState);
+
+    // -------------------------------------------------------------------------
+    // Inbound bridge: Y.Doc -> Univer
+    //
+    // When the server (or another tab) writes a cell via /spike/agent-op or
+    // a y-websocket update, the cells Y.Map fires an observe event.  We log
+    // it here so the operator can verify R1.2 in DevTools.
+    //
+    // Production wiring would translate the delta into Univer's
+    // SetRangeValuesMutation command.  The exact command ID and payload shape
+    // must be verified against the installed Univer version via DevTools
+    // (inspect `univer.__commandService` or search for "SetRangeValues" in
+    // the Univer source).  That wiring is intentionally left as a TODO for
+    // the R1 follow-up if the GO verdict is confirmed.
+    // -------------------------------------------------------------------------
+    sheetsArr.get(0).get("cells").observe(evt => {
+      // R1.2 smoke: any incoming cell change logs here.  Check DevTools console
+      // after posting to /spike/agent-op to verify the round-trip.
+      console.log("[yjs -> univer] cells changed", {
+        added: [...evt.changes.keys.entries()]
+          .filter(([, c]) => c.action === "add")
+          .map(([k]) => k),
+        updated: [...evt.changes.keys.entries()]
+          .filter(([, c]) => c.action === "update")
+          .map(([k]) => k),
+        deleted: [...evt.changes.keys.entries()]
+          .filter(([, c]) => c.action === "delete")
+          .map(([k]) => k),
+      });
+      // TODO (post-R1 GO): translate delta into Univer SetRangeValuesMutation
+      // and dispatch via univer.__commandService to re-render the grid.
+    });
+
+    // -------------------------------------------------------------------------
+    // Outbound bridge: Univer -> Y.Doc  (STUBBED — pending command-id discovery)
+    //
+    // To wire the outbound bridge in a live browser session:
+    //   1. Open DevTools and inspect `window.univer.__commandService`.
+    //   2. Find the command fired on a cell-edit (look for "SetRangeValues"
+    //      or similar).
+    //   3. Subscribe: univer.__commandService.onCommandExecuted(cmd => { ... })
+    //   4. On the correct command, extract the changed cell(s) and write to
+    //      the Y.Doc cells map via ydoc.transact(() => { ... }).
+    //
+    // This is NOT required for R1.2 (inbound round-trip suffices), but it IS
+    // required for full two-way sync (R1.3+).
+    // -------------------------------------------------------------------------
+    window.univer = univer; // Expose for DevTools inspection
+  </script>
+</body>
+</html>
