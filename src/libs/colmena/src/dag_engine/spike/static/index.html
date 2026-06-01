@@ -94,8 +94,11 @@
     // with a Univer backend.  We deliberately omit it and wire only plain
     // y-websocket.  If Univer pulls the collab client transitively and tries
     // that handshake anyway, the operator records R1.2 = NO-GO.
+    //
+    // Note: In Univer 0.2.x, `createUniver` was removed from @univerjs/core.
+    // The correct API is `new Univer({...})` + `univer.registerPlugin(...)`.
     // -------------------------------------------------------------------------
-    import { createUniver, LocaleType } from
+    import { Univer, LocaleType } from
       "https://esm.sh/@univerjs/core@0.2.10";
     import { defaultTheme } from
       "https://esm.sh/@univerjs/design@0.2.10";
@@ -116,20 +119,18 @@
     import { UniverUIPlugin } from
       "https://esm.sh/@univerjs/ui@0.2.10";
 
-    const univer = createUniver({
+    const univer = new Univer({
       theme: defaultTheme,
       locale: LocaleType.EN_US,
-      plugins: [
-        [UniverRenderEnginePlugin],
-        [UniverFormulaEnginePlugin],
-        [UniverUIPlugin, { container: "univer" }],
-        [UniverDocsPlugin],
-        [UniverDocsUIPlugin],
-        [UniverSheetsPlugin],
-        [UniverSheetsUIPlugin],
-        [UniverSheetsFormulaPlugin],
-      ],
     });
+    univer.registerPlugin(UniverRenderEnginePlugin);
+    univer.registerPlugin(UniverFormulaEnginePlugin);
+    univer.registerPlugin(UniverUIPlugin, { container: "univer" });
+    univer.registerPlugin(UniverDocsPlugin);
+    univer.registerPlugin(UniverDocsUIPlugin);
+    univer.registerPlugin(UniverSheetsPlugin);
+    univer.registerPlugin(UniverSheetsUIPlugin);
+    univer.registerPlugin(UniverSheetsFormulaPlugin);
 
     // Build initial workbook snapshot from current Y.Doc state so the sheet
     // shows whatever is already in the shared document on first load.
