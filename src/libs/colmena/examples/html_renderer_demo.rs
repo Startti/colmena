@@ -19,7 +19,7 @@ use colmena::documents::domain::ir::html::{FooterConfig, Locale, SlideLayout, Th
 use colmena::documents::domain::patch::{Patch, PatchOp, PatchSource};
 use serde_json::json;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 // Minimal 1×1 transparent PNG (68 bytes)
@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn generate(theme: Theme, out_dir: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+async fn generate(theme: Theme, out_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let tmp = tempdir()?;
     let cfg = json!({
         "storage_root":       tmp.path().join("artifacts").to_str().unwrap(),
