@@ -1,5 +1,6 @@
 //! axum router for the spike. Endpoints:
 //!   GET  /                         — static HTML (Univer + y-websocket loader)
+//!   GET  /minimal                  — diagnostic page (yjs + y-websocket only, no Univer)
 //!   GET  /spike.xlsx               — fixture .xlsx (Task 11)
 //!   WS   /yjs/:artifact_id         — Yjs sync protocol
 //!   GET  /projection/:id.json      — current Yrs → IR projection
@@ -27,10 +28,12 @@ pub struct SpikeState {
 }
 
 const INDEX_HTML: &str = include_str!("static/index.html");
+const MINIMAL_HTML: &str = include_str!("static/minimal.html");
 
 pub fn router(state: SpikeState) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/minimal", get(minimal))
         .route("/spike.xlsx", get(fixture_xlsx))
         .route("/yjs/:artifact_id", get(ws_handler))
         .route("/projection/:artifact_id.json", get(projection_handler))
@@ -40,6 +43,10 @@ pub fn router(state: SpikeState) -> Router {
 
 async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+
+async fn minimal() -> Html<&'static str> {
+    Html(MINIMAL_HTML)
 }
 
 async fn fixture_xlsx() -> Response {
