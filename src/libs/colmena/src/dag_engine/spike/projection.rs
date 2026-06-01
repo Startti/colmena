@@ -95,6 +95,30 @@ mod test_helpers {
             cell.insert(&mut txn, "t", Any::String("s".into()));
         }
     }
+
+    /// Seeds a sheet with `n` cells alternating string and number values.
+    pub fn seed_n_cells(doc: &Doc, n: usize) {
+        let mut txn = doc.transact_mut();
+        let workbook = txn.get_or_insert_map("workbook");
+        let sheets_arr = workbook.insert(&mut txn, "sheets", ArrayPrelim::default());
+        let sheet = sheets_arr.push_back(&mut txn, MapPrelim::default());
+        sheet.insert(&mut txn, "id", "s1");
+        sheet.insert(&mut txn, "name", "Hoja1");
+        let cells_map = sheet.insert(&mut txn, "cells", MapPrelim::default());
+        for i in 0..n {
+            let row = (i / 26) + 1;
+            let col = (b'A' + (i % 26) as u8) as char;
+            let addr = format!("{}{}", col, row);
+            let cell = cells_map.insert(&mut txn, addr.as_str(), MapPrelim::default());
+            if i % 2 == 0 {
+                cell.insert(&mut txn, "v", Any::String(format!("val_{i}").into()));
+                cell.insert(&mut txn, "t", Any::String("s".into()));
+            } else {
+                cell.insert(&mut txn, "v", Any::Number(i as f64));
+                cell.insert(&mut txn, "t", Any::String("n".into()));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -142,5 +166,34 @@ mod tests {
         }
         let v = project(&doc);
         assert_eq!(v["sheets"][0]["cells"], json!({}));
+    }
+
+    #[test]
+    #[ignore = "R2.1 benchmark — run with `cargo test -- --ignored --nocapture`"]
+    fn r2_1_benchmark_1000_cells_p50_under_50ms() {
+        use std::time::Instant;
+        let doc = Doc::new();
+        test_helpers::seed_n_cells(&doc, 1000);
+
+        let mut samples: Vec<u128> = Vec::with_capacity(100);
+        for _ in 0..100 {
+            let start = Instant::now();
+            let _ = project(&doc);
+            samples.push(start.elapsed().as_micros());
+        }
+        samples.sort_unstable();
+        let p50_us = samples[50];
+        let p95_us = samples[95];
+        println!(
+            "projection p50 = {:.2}ms, p95 = {:.2}ms (1000 cells, 100 runs)",
+            p50_us as f64 / 1000.0,
+            p95_us as f64 / 1000.0
+        );
+        // R2.1 GO threshold: p50 < 50ms.
+        assert!(
+            p50_us < 50_000,
+            "p50 was {}us, want < 50000us (50ms)",
+            p50_us
+        );
     }
 }
