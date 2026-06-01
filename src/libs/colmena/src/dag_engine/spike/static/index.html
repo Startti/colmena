@@ -105,21 +105,16 @@
 
     // Locale dictionaries — required by LocaleService in Univer 0.2.x.
     // Each plugin ships its own locale keys; we merge them into one dict.
-    import enUS_sheetsUI from
-      "https://esm.sh/@univerjs/sheets-ui@0.2.10/lib/locale/en-US.json" assert { type: "json" };
-    import enUS_uiPlugin from
-      "https://esm.sh/@univerjs/ui@0.2.10/lib/locale/en-US.json" assert { type: "json" };
-    import enUS_docsUI from
-      "https://esm.sh/@univerjs/docs-ui@0.2.10/lib/locale/en-US.json" assert { type: "json" };
-    import enUS_sheetsFormula from
-      "https://esm.sh/@univerjs/sheets-formula@0.2.10/lib/locale/en-US.json" assert { type: "json" };
-
-    const enUSLocale = {
-      ...enUS_sheetsUI,
-      ...enUS_uiPlugin,
-      ...enUS_docsUI,
-      ...enUS_sheetsFormula,
-    };
+    // Loaded via fetch() instead of import-assert (deprecated syntax, not supported in all browsers).
+    const enUSLocale = await (async () => {
+      const [sheetsUI, ui, docsUI, sheetsFormula] = await Promise.all([
+        fetch("https://esm.sh/@univerjs/sheets-ui@0.2.10/lib/locale/en-US.json").then(r => r.json()),
+        fetch("https://esm.sh/@univerjs/ui@0.2.10/lib/locale/en-US.json").then(r => r.json()),
+        fetch("https://esm.sh/@univerjs/docs-ui@0.2.10/lib/locale/en-US.json").then(r => r.json()),
+        fetch("https://esm.sh/@univerjs/sheets-formula@0.2.10/lib/locale/en-US.json").then(r => r.json()),
+      ]);
+      return { ...sheetsUI, ...ui, ...docsUI, ...sheetsFormula };
+    })();
     import { UniverDocsPlugin } from
       "https://esm.sh/@univerjs/docs@0.2.10";
     import { UniverDocsUIPlugin } from
