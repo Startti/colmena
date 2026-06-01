@@ -95,9 +95,16 @@ impl ExecutableNode for RouterNode {
                 (i, r, None)
             }
             RouterMode::ExtractAndRoute => {
-                return Err(
-                    "RouterRuntimeError: extract_and_route mode not yet implemented".into(),
-                );
+                let (i, ex) = super::extract_and_route::pick_branch(
+                    &cfg,
+                    provider_kind,
+                    api_key,
+                    model,
+                    user_text,
+                    observer.clone(),
+                )
+                .await?;
+                (i, String::new(), Some(ex))
             }
         };
 
@@ -221,5 +228,23 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("invalid mode"));
+    }
+
+    #[tokio::test]
+    async fn extract_and_route_requires_schema_at_runtime() {
+        let node = RouterNode;
+        let mut state = json!({});
+        let cfg = json!({
+            "mode": "extract_and_route",
+            "provider": "google",
+            "api_key": "fake",
+            "branches": [ { "name": "a", "when": { "field": "x", "equals": "y" } } ]
+        });
+        let err = node
+            .execute(&inputs(json!("anything")), &cfg, &mut state, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("requires schema"));
     }
 }
