@@ -30,6 +30,14 @@ use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
 use yrs::{Doc, ReadTxn, StateVector, Transact, Update};
 
+// Non-sync outer message tag constants (y-sync doesn't re-export these).
+// MSG_AWARENESS is caught by the `_` arm in parse_msgs but kept here to
+// document the protocol numbering alongside MSG_AUTH and MSG_QUERY_AWARENESS.
+#[allow(dead_code)]
+const MSG_AWARENESS: u8 = 1;
+const MSG_AUTH: u8 = 2;
+const MSG_QUERY_AWARENESS: u8 = 3;
+
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 /// Encode a sync_step1 message: `[MSG_SYNC][MSG_SYNC_STEP_1][sv_bytes]`.
@@ -62,7 +70,7 @@ fn encode_update(update: &[u8]) -> Vec<u8> {
 // ─── message parser ──────────────────────────────────────────────────────────
 
 /// All Yjs sync-v1 message variants we care about.
-enum SyncMsg {
+pub(super) enum SyncMsg {
     /// Client's state vector; we reply with step2 (missing updates).
     Step1 { sv_bytes: Vec<u8> },
     /// Client's missing-updates payload; we apply it.
@@ -73,16 +81,39 @@ enum SyncMsg {
 ///
 /// Ignores non-sync messages (awareness, auth, etc.) silently — the spike
 /// doesn't need them.
-fn parse_msgs(bytes: &[u8]) -> Result<Vec<SyncMsg>> {
+pub(super) fn parse_msgs(bytes: &[u8]) -> Result<Vec<SyncMsg>> {
     let mut cur = Cursor::new(bytes);
     let mut out = Vec::new();
-    while !cur.buf.is_empty() {
+    while cur.has_content() {
         let outer_tag: u8 = cur
             .read_var()
             .map_err(|e| anyhow!("outer tag: {e:?}"))?;
         if outer_tag != MSG_SYNC {
-            // Skip non-sync messages: read and discard the payload buffer.
-            let _ = cur.read_buf().map_err(|e| anyhow!("skip non-sync buf: {e:?}"))?;
+            match outer_tag {
+                MSG_QUERY_AWARENESS => {
+                    // tag=3: no payload bytes — nothing to consume.
+                }
+                MSG_AUTH => {
+                    // tag=2: a varint permission code (0=denied, 1=granted),
+                    // optionally followed by a varint-length-prefixed reason
+                    // string when permission is denied.
+                    let perm: u64 = cur
+                        .read_var()
+                        .map_err(|e| anyhow!("skip auth perm: {e:?}"))?;
+                    if perm == 0 && !cur.buf.is_empty() {
+                        let _ = cur
+                            .read_buf()
+                            .map_err(|e| anyhow!("skip auth reason: {e:?}"))?;
+                    }
+                }
+                _ => {
+                    // MSG_AWARENESS (1) and any unknown tag with a
+                    // varint-length-prefixed buffer payload.
+                    let _ = cur
+                        .read_buf()
+                        .map_err(|e| anyhow!("skip non-sync buf: {e:?}"))?;
+                }
+            }
             continue;
         }
         let sub_tag: u8 = cur
@@ -222,5 +253,59 @@ mod tests {
             Out::Any(Any::String(s)) => assert_eq!(s.as_ref(), "from-A"),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    /// Regression for the R1.1 blocker: y-websocket sends MSG_QUERY_AWARENESS
+    /// with no payload as part of its handshake. The parser must skip it
+    /// silently and continue processing subsequent messages in the same frame.
+    #[test]
+    fn parses_query_awareness_with_no_payload() {
+        use super::{MSG_QUERY_AWARENESS, MSG_SYNC};
+        use y_sync::sync::MSG_SYNC_STEP_1;
+        use yrs::encoding::write::Write;
+        use yrs::updates::encoder::{Encoder, EncoderV1};
+
+        let mut enc = EncoderV1::new();
+        // outer tag 3 (query_awareness) — no payload
+        enc.write_var(MSG_QUERY_AWARENESS as u64);
+        // then MSG_SYNC + sub-tag 0 (sync_step1) + empty state vector buffer
+        enc.write_var(MSG_SYNC as u64);
+        enc.write_var(MSG_SYNC_STEP_1 as u64);
+        enc.write_buf(&[]);
+        let bytes = enc.to_vec();
+
+        let msgs = super::parse_msgs(&bytes).expect("parse must succeed");
+        assert_eq!(msgs.len(), 1, "should yield exactly one sync_step1");
+        assert!(
+            matches!(msgs[0], super::SyncMsg::Step1 { .. }),
+            "expected Step1"
+        );
+    }
+
+    /// MSG_AWARENESS (tag=1) has a varint-length-prefixed payload.
+    /// Parser must consume it cleanly and still yield the following sync message.
+    #[test]
+    fn parses_awareness_with_payload_then_sync() {
+        use super::MSG_SYNC;
+        use y_sync::sync::MSG_SYNC_STEP_1;
+        use yrs::encoding::write::Write;
+        use yrs::updates::encoder::{Encoder, EncoderV1};
+
+        let mut enc = EncoderV1::new();
+        // MSG_AWARENESS = 1 with a 4-byte payload
+        enc.write_var(1u64);
+        enc.write_buf(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        // then a normal sync_step1 with an empty SV
+        enc.write_var(MSG_SYNC as u64);
+        enc.write_var(MSG_SYNC_STEP_1 as u64);
+        enc.write_buf(&[]);
+        let bytes = enc.to_vec();
+
+        let msgs = super::parse_msgs(&bytes).expect("parse must succeed");
+        assert_eq!(msgs.len(), 1, "should yield exactly one sync_step1");
+        assert!(
+            matches!(msgs[0], super::SyncMsg::Step1 { .. }),
+            "expected Step1"
+        );
     }
 }
