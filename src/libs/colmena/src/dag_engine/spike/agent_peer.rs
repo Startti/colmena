@@ -58,18 +58,28 @@ pub fn apply_set_cell_in_proc(doc: &Doc, sheet_id: &str, addr: &str, value: &Val
 /// value)` to a local `Doc`, and ships the resulting update diff back to the
 /// server so all peers converge.
 ///
-/// Protocol (Yjs sync v1):
-///   1. Server → client: `[MSG_SYNC][STEP_1][state_vector]`
-///   2. Client applies its mutation locally.
-///   3. Client → server: `[MSG_SYNC][STEP_2][diff_against_server_sv]`
-///   4. Client closes after a brief flush pause.
+/// Full Yjs sync v1 protocol (both sides exchange step1+step2 for proper merge):
+///   1. Server → client: `[MSG_SYNC][STEP_1][server_sv]`
+///   2. Client → server: `[MSG_SYNC][STEP_1][client_empty_sv]`
+///   3. Server → client: `[MSG_SYNC][STEP_2][server_state_for_client]`
+///   4. Client imports server state, then applies its mutation.
+///   5. Client → server: `[MSG_SYNC][STEP_2][diff_against_server_sv]`
+///   6. Client closes after a brief flush pause.
+///
+/// Steps 2–4 are critical: without importing the server's current CRDT state
+/// first, the client's fresh `Doc` creates new conflicting CRDT object IDs for
+/// the same top-level structure (workbook, sheets, cells maps). The CRDT merge
+/// then resolves the key conflict by last-write-wins, silently discarding the
+/// other agent's data.
 pub async fn apply_set_cell_via_ws(
     url: &str,
     sheet_id: &str,
     addr: &str,
     value: &Value,
 ) -> Result<()> {
-    use crate::dag_engine::spike::yjs_protocol::{decode_sync_step1_sv, encode_sync_step2};
+    use crate::dag_engine::spike::yjs_protocol::{
+        decode_sync_step1_sv, decode_sync_step2_update, encode_sync_step1, encode_sync_step2,
+    };
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message as TMsg;
     use yrs::updates::decoder::Decode;
@@ -81,7 +91,7 @@ pub async fn apply_set_cell_via_ws(
 
     let local = Doc::new();
 
-    // Wait for the server's sync_step1 message and extract the state vector.
+    // Step 1: Wait for the server's sync_step1 and capture the server SV.
     let server_sv: StateVector = loop {
         match ws.next().await {
             Some(Ok(TMsg::Binary(bytes))) => {
@@ -98,13 +108,46 @@ pub async fn apply_set_cell_via_ws(
         }
     };
 
-    // Apply the mutation to our local doc.
+    // Step 2: Send our own sync_step1 so the server knows our (empty) state and
+    // sends us its full state via sync_step2.
+    let our_sv = local.transact().state_vector();
+    ws.send(TMsg::Binary(encode_sync_step1(&our_sv).into()))
+        .await
+        .map_err(|e| anyhow!("send step1: {e}"))?;
+
+    // Step 3: Wait for the server's sync_step2 (the server's current state).
+    // We may receive other frames (awareness, update broadcasts) — skip them.
+    // When the server's doc is empty, it will send an empty update; we still
+    // need to receive it to complete the handshake.
+    let server_state_bytes: Vec<u8> = loop {
+        match ws.next().await {
+            Some(Ok(TMsg::Binary(ref bytes))) => {
+                if let Some(state) = decode_sync_step2_update(bytes) {
+                    break state;
+                }
+                continue;
+            }
+            Some(Ok(_)) => continue,
+            Some(Err(e)) => return Err(anyhow!("ws recv step2: {e}")),
+            None => return Err(anyhow!("ws closed before sync_step2")),
+        }
+    };
+
+    // Step 4: Import the server's state into our local doc, then apply mutation.
+    // This ensures our doc shares the same CRDT object IDs as the server.
+    {
+        let update = yrs::Update::decode_v1(&server_state_bytes)
+            .map_err(|e| anyhow!("decode server state: {e:?}"))?;
+        local
+            .transact_mut()
+            .apply_update(update)
+            .map_err(|e| anyhow!("apply server state: {e:?}"))?;
+    }
     apply_set_cell_in_proc(&local, sheet_id, addr, value);
 
-    // Compute the diff between our state and the server's known state.
+    // Step 5: Compute diff of our new mutation against the server's known SV,
+    // then send it.
     let diff = local.transact().encode_diff_v1(&server_sv);
-
-    // Send sync_step2 carrying that diff.
     let frame = encode_sync_step2(&diff);
     ws.send(TMsg::Binary(frame.into()))
         .await

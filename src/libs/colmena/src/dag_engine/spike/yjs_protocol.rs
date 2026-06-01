@@ -41,7 +41,10 @@ const MSG_QUERY_AWARENESS: u8 = 3;
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 /// Encode a sync_step1 message: `[MSG_SYNC][MSG_SYNC_STEP_1][sv_bytes]`.
-fn encode_sync_step1(sv: &StateVector) -> Vec<u8> {
+///
+/// Exposed as `pub(super)` so `agent_peer` can send client-side step1 frames
+/// during the full sync handshake.
+pub(super) fn encode_sync_step1(sv: &StateVector) -> Vec<u8> {
     let mut enc = EncoderV1::new();
     enc.write_var(MSG_SYNC);
     enc.write_var(MSG_SYNC_STEP_1);
@@ -79,6 +82,26 @@ pub(super) fn decode_sync_step1_sv(bytes: &[u8]) -> Option<Vec<u8>> {
     }
     let sv_bytes = cur.read_buf().ok()?;
     Some(sv_bytes.to_vec())
+}
+
+/// Decode a sync_step2 (or update) message and return the raw update bytes.
+///
+/// Matches both `MSG_SYNC_STEP_2` and `MSG_SYNC_UPDATE` sub-tags, since both
+/// carry an update payload. Returns `None` for non-matching frames.
+/// Exposed as `pub(super)` so `agent_peer` can wait for the server's step2
+/// during the full sync handshake.
+pub(super) fn decode_sync_step2_update(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(bytes);
+    let outer: u8 = cur.read_var().ok()?;
+    if outer != MSG_SYNC {
+        return None;
+    }
+    let sub: u8 = cur.read_var().ok()?;
+    if sub != MSG_SYNC_STEP_2 && sub != MSG_SYNC_UPDATE {
+        return None;
+    }
+    let update_bytes = cur.read_buf().ok()?;
+    Some(update_bytes.to_vec())
 }
 
 /// Encode an update message: `[MSG_SYNC][MSG_SYNC_UPDATE][update_bytes]`.
