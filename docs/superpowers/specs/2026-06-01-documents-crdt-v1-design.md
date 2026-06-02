@@ -95,7 +95,7 @@ v1 transforma el spike — que vive 100% en memoria y solo cubre Excel single-sh
 | Formula evaluation server-side | Univer ya las evalúa en browser; IR captura calculated values | v1.1 si LLM/Python necesitan |
 | Multi-cursor presence visual | Nice-to-have, no bloquea flujo canónico | v2 |
 | Versioning + rollback nombrado | Snapshots ya hay; named versions ≠ MVP | v1.1 |
-| Charts, pivot tables, formato condicional, merges | Univer los soporta visualmente, IR no los captura todavía | v1.1 → v2 |
+| Charts, pivot tables, formato condicional, merges | Univer los soporta visualmente, IR no los captura todavía | v1.1 — plan concreto en [BACKLOG.md → "CRDT Documents v1.1 — formato visual en xlsx"](../../BACKLOG.md) |
 | Send-safe channel para WS Subscription | Thread-spawn funciona para <100 conexiones | v1.1 si escalamos |
 | Word, HTML, Google Sheets | Excel fue el flujo canónico priorizado | v2 |
 | LLM streaming de cambios live (vs solo en get_recent_changes) | Patrón "pull" es suficiente para MVP | v1.1 |
