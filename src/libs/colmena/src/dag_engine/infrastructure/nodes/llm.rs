@@ -1620,17 +1620,33 @@ impl ExecutableNode for LlmNode {
                 let artifact_id: ArtifactId = artifact_id_str.parse().map_err(|_| -> Box<dyn Error + Send + Sync> {
                     "crdt_documents config has invalid `artifact_id` (expected art_<26-char-ULID>)".into()
                 })?;
-                match CrdtDocumentsRuntime::from_config(&crdt_cfg).await {
-                    Ok(rt) => Some(Arc::new(CrdtDocsContext {
-                        runtime: Arc::new(rt),
-                        artifact_id,
-                    })),
-                    Err(e) => {
-                        return Err(
-                            format!("invalid `crdt_documents` config on llm node: {e}").into(),
-                        );
-                    }
-                }
+                // Prefer the process-wide singleton if installed (e.g.
+                // by the `crdt-yws-graph` subcommand or ADP's worker).
+                // This is how the WS server and the LLM tool dispatcher
+                // share the SAME in-memory Y.Doc, so mutations from the
+                // agent show up live in any browser connected to the
+                // server. Falls back to `from_config` if no singleton —
+                // that path always created a fresh runtime per node, used
+                // by plain `dag_engine run` invocations that don't share
+                // state with a server.
+                let runtime_arc =
+                    if let Some(shared) = crate::crdt_documents::process_runtime::get_global() {
+                        shared
+                    } else {
+                        match CrdtDocumentsRuntime::from_config(&crdt_cfg).await {
+                            Ok(rt) => Arc::new(rt),
+                            Err(e) => {
+                                return Err(format!(
+                                    "invalid `crdt_documents` config on llm node: {e}"
+                                )
+                                .into());
+                            }
+                        }
+                    };
+                Some(Arc::new(CrdtDocsContext {
+                    runtime: runtime_arc,
+                    artifact_id,
+                }))
             }
             None => None,
         };
@@ -2484,8 +2500,19 @@ impl ExecutableNode for LlmNode {
         // tool dispatchers between the last 5s tick and now are lost.
         // `shutdown` sends an explicit shutdown signal AND awaits the
         // writer's final flush per artifact. Idempotent.
+        //
+        // Skip when the runtime is the process-wide singleton (installed
+        // by `crdt-yws-graph` / ADP worker bootstrap) — the singleton is
+        // owned by the host process, not by this graph execution, and
+        // must outlive the call so other nodes (and the WS server) can
+        // keep reading/writing it. Identity comparison via Arc::ptr_eq.
         if let Some(ctx) = crdt_docs_context.as_ref() {
-            ctx.runtime.shutdown().await;
+            let is_shared = crate::crdt_documents::process_runtime::get_global()
+                .as_ref()
+                .is_some_and(|shared| Arc::ptr_eq(shared, &ctx.runtime));
+            if !is_shared {
+                ctx.runtime.shutdown().await;
+            }
         }
 
         Ok(final_output)

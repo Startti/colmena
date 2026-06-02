@@ -73,6 +73,38 @@ enum Commands {
         #[arg(long, default_value = ".colmena/crdt_documents")]
         dump_dir: String,
     },
+    /// One-process E2E: WS server + execute a graph against a SHARED
+    /// `CrdtDocumentsRuntime` singleton. The graph's `llm_call` nodes
+    /// that have `crdt_documents` config reuse the same runtime as the
+    /// server, so any tool-driven mutation is visible LIVE in browser
+    /// peers connected via WS (no restart, no disk round-trip).
+    ///
+    /// After the graph completes, the server stays up so the operator
+    /// can keep poking the browser. Ctrl+C exits.
+    CrdtYwsGraph {
+        /// Path to the graph .json to execute.
+        file_path: String,
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 8090)]
+        port: u16,
+        #[arg(long, default_value = ".colmena/crdt_documents")]
+        dump_dir: String,
+        #[arg(long)]
+        agent_session_id: Option<String>,
+        #[arg(long, default_value_t = false)]
+        include_extra_info: bool,
+        /// Pre-create an artifact with this id before running the graph.
+        /// Useful for smoke tests: the operator opens the browser on
+        /// `?artifact=<id>`, the agent (graph) mutates the same id.
+        #[arg(long)]
+        seed_artifact_id: Option<String>,
+        /// Pause this many seconds after starting the server, BEFORE
+        /// running the graph. Gives the operator time to open the
+        /// browser so they observe the agent's edits live. Default 0.
+        #[arg(long, default_value_t = 0)]
+        wait_before_graph: u64,
+    },
     /// One-shot agent peer for the CRDT server. Mutates an artifact via WS
     /// (R1 path) or in-proc HTTP POST (sanity-check path).
     CrdtAgent {
@@ -208,6 +240,141 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "🧪 crdt-yws listening on http://{addr}  (storage → {dump_dir})"
             );
             axum::serve(listener, app).await?;
+        }
+
+        Commands::CrdtYwsGraph {
+            file_path,
+            host,
+            port,
+            dump_dir,
+            agent_session_id,
+            include_extra_info,
+            seed_artifact_id,
+            wait_before_graph,
+        } => {
+            use colmena::crdt_documents::{process_runtime, ArtifactId, CrdtDocumentsRuntime};
+            use colmena::dag_engine::sse_mapper::SseMapper;
+            use futures::StreamExt;
+            use std::{net::SocketAddr, sync::Arc};
+
+            // 1. Build the runtime ONCE and install it as the process-wide
+            //    singleton. Both the WS server and the llm_call dispatcher
+            //    will share it.
+            let cfg = serde_json::json!({
+                "storage_backend": "localfs",
+                "storage_root": dump_dir,
+            });
+            let runtime = Arc::new(
+                CrdtDocumentsRuntime::from_config(&cfg)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?,
+            );
+            process_runtime::set_global(runtime.clone())
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            // 1b. Optionally pre-create an artifact so the graph (which
+            //     references it by id) finds it on first tool call.
+            if let Some(id_str) = seed_artifact_id.as_ref() {
+                let aid: ArtifactId = id_str.parse().map_err(|_| {
+                    anyhow::anyhow!(
+                        "--seed-artifact-id must be a valid ArtifactId (art_<26-char-ULID>): {id_str}"
+                    )
+                })?;
+                let _entry = runtime.registry.get_or_create(&aid, "seed");
+                println!("🌱 Seeded artifact {aid}");
+            }
+
+            // 2. Start the WS server in the background.
+            let app = colmena::crdt_documents::server::router(runtime.clone());
+            let addr: SocketAddr = format!("{host}:{port}").parse()?;
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            println!(
+                "🧪 crdt-yws-graph listening on http://{addr}  (storage → {dump_dir})"
+            );
+            let server_handle = tokio::spawn(async move {
+                if let Err(e) = axum::serve(listener, app).await {
+                    eprintln!("server error: {e}");
+                }
+            });
+
+            // 2b. Optional pause so the operator can open the browser
+            //     before the graph (and its tool calls) start firing.
+            if wait_before_graph > 0 {
+                println!(
+                    "⏳ Waiting {wait_before_graph}s before starting graph — open the browser now."
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(wait_before_graph)).await;
+            }
+
+            // 3. Build the engine + run the graph against the shared runtime.
+            println!("🚀 Ejecutando grafo: {file_path}");
+            let engine_config = colmena::dag_engine::engine::EngineConfig::from_env()
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            let engine = colmena::dag_engine::engine::ColmenaEngine::new(engine_config)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            let graph_result: Result<(), anyhow::Error> = async {
+                let file_content = tokio::fs::read_to_string(&file_path).await?;
+                let graph: colmena::dag_engine::domain::graph::Graph =
+                    serde_json::from_str(&file_content)?;
+                graph
+                    .validate()
+                    .map_err(|e| anyhow::anyhow!("Invalid graph: {}", e))?;
+
+                let mut mapper = SseMapper::new();
+                let s = engine.execute_stream(
+                    graph,
+                    None,
+                    None,
+                    include_extra_info,
+                    None,
+                    agent_session_id,
+                );
+                let stream = Box::pin(s);
+                tokio::pin!(stream);
+
+                while let Some(result) = stream.next().await {
+                    let event = match result {
+                        Ok(ev) => ev,
+                        Err(e) => {
+                            println!(
+                                "data: {}\n",
+                                serde_json::json!({
+                                    "type": "error",
+                                    "errorText": e.to_string(),
+                                })
+                            );
+                            continue;
+                        }
+                    };
+                    for part in mapper.map(&event) {
+                        println!("data: {}\n", part);
+                    }
+                }
+                println!("data: [DONE]\n");
+                Ok(())
+            }
+            .await;
+
+            engine.shutdown().await;
+            if let Err(e) = graph_result {
+                eprintln!("graph execution failed: {e}");
+            }
+
+            // 4. Keep the server alive until Ctrl+C so the operator can
+            //    inspect the browser. The shared runtime is owned by this
+            //    closure scope; on Ctrl+C we shutdown gracefully so the
+            //    last snapshot writer flushes land on disk.
+            println!(
+                "✅ Graph done. Server still up on http://{addr} — Ctrl+C to exit."
+            );
+            tokio::signal::ctrl_c().await?;
+            println!("\n⏸  Shutting down server and draining writers…");
+            server_handle.abort();
+            runtime.shutdown().await;
+            println!("✓ Done.");
         }
 
         Commands::CrdtAgent { mode } => match mode {

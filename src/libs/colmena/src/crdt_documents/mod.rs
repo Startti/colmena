@@ -9,6 +9,7 @@ pub mod narration;
 pub mod tool_executor;
 pub mod artifact_id;
 pub mod doc_registry;
+pub mod process_runtime;
 pub mod projection;
 pub mod runtime;
 pub mod server;
