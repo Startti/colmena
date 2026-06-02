@@ -33,6 +33,15 @@ pub fn router(runtime: Arc<CrdtDocumentsRuntime>) -> Router {
         .route("/minimal", get(minimal))
         .route("/spike.xlsx", get(fixture_xlsx))
         .route("/documents/:id/yjs", get(ws_handler))
+        // Alias: y-websocket's WebsocketProvider constructs URLs as
+        // `${serverUrl}/${encodeURIComponent(roomname)}`. With the canonical
+        // `/documents/:id/yjs` path, the demo HTMLs would either need to
+        // hard-code an artifact-bearing URL with an empty roomname (causes
+        // trailing-slash mismatch on axum) or use URL-encoded slashes (which
+        // axum's matchit router rejects). The simpler escape is to expose a
+        // y-websocket-friendly `/yjs/:id` alias that demos can keep using
+        // without rewiring the JS. ADP integration uses the canonical path.
+        .route("/yjs/:id", get(ws_handler))
         .route("/documents/:id/projection.json", get(projection_handler))
         .route("/documents", post(create_handler).get(list_handler))
         .route("/documents/:id", delete(delete_handler))
