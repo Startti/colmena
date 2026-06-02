@@ -160,32 +160,13 @@
     univer.registerPlugin(UniverSheetsUIPlugin);
     univer.registerPlugin(UniverSheetsFormulaPlugin);
 
-    // Bootstrap Univer with a STATIC empty workbook. We deliberately do NOT
-    // read from the Y.Doc here — the Y.Doc is not yet synced with the
-    // server at this point in the script, and reading pre-sync state caused
-    // the flaky-grid bug (race between local seed and server sync).
-    const initialState = {
-      id: artifact,
-      sheetOrder: ["s1"],
-      sheets: {
-        s1: {
-          id: "s1",
-          name: "Hoja1",
-          cellData: {},
-          rowCount: 100,
-          columnCount: 26,
-        },
-      },
-    };
+    // NOTE (v1 multi-sheet): we no longer createUnit BEFORE sync. The canvas
+    // stays empty until provider.once("sync") fires, at which point we build
+    // the initialState from the live Y.Doc sheets list and call createUnit
+    // exactly once with the real sheet IDs. This unblocks workbooks imported
+    // via POST /documents/:id/import that contain multiple sheets with
+    // server-generated `sh_<ulid>` ids.
 
-    // UniverInstanceType.UNIVER_SHEET = 2
-    univer.createUnit(2, initialState);
-
-    // -------------------------------------------------------------------------
-    // Y.Doc bootstrap — DEFERRED until provider sync completes.
-    // Command IDs discovered from @univerjs/sheets@0.2.10 CJS bundle
-    // inspection on unpkg.com.
-    // -------------------------------------------------------------------------
     // -------------------------------------------------------------------------
     // Command / mutation IDs — discovered from @univerjs/sheets@0.2.10 CJS
     // bundle inspection (unpkg.com).  The mutation fires on every state change
@@ -223,6 +204,18 @@
     // -------------------------------------------------------------------------
     let applyingFromYDoc = false;
 
+    // Parser used by every observer below: "A1" -> { row: 0, col: 0 } (multi-char OK).
+    function parseAddr(addr) {
+      const match = addr.match(/^([A-Z]+)(\d+)$/);
+      if (!match) return null;
+      const rowIdx = parseInt(match[2], 10) - 1;
+      let colIdx = 0;
+      for (let i = 0; i < match[1].length; i++) {
+        colIdx = colIdx * 26 + (match[1].charCodeAt(i) - 64);
+      }
+      return { row: rowIdx, col: colIdx - 1 };
+    }
+
     provider.once("sync", () => {
       console.log("[provider] sync complete — bootstrapping Y.Doc workbook");
 
@@ -245,165 +238,161 @@
           sheetsArr.length);
       }
 
+      // -----------------------------------------------------------------
+      // Enumerate ALL sheets from the Y.Doc (v1 multi-sheet).
+      // -----------------------------------------------------------------
+      const allSheets = [];
+      for (let i = 0; i < sheetsArr.length; i++) {
+        const s = sheetsArr.get(i);
+        allSheets.push({
+          id: s.get("id"),
+          name: s.get("name"),
+          cellsMap: s.get("cells"),
+        });
+      }
+
+      // -----------------------------------------------------------------
+      // Mount Univer with real sheet ids/names from the Y.Doc.
+      // -----------------------------------------------------------------
+      const sheetData = {};
+      const sheetOrder = [];
+      for (const s of allSheets) {
+        sheetOrder.push(s.id);
+        sheetData[s.id] = {
+          id: s.id,
+          name: s.name,
+          cellData: {},
+          rowCount: 100,
+          columnCount: 26,
+        };
+      }
+      univer.createUnit(2, {
+        id: artifact,
+        sheetOrder,
+        sheets: sheetData,
+      });
+      console.log("[provider] mounted", allSheets.length, "sheet(s):",
+        allSheets.map((s) => s.name).join(", "));
+
       // Retrieve services from Univer's DI container.
       // ICommandService  = createIdentifier("anywhere.command-service")
       // IUniverInstanceService = createIdentifier("univer.current")
-      // Both are exported as value + type from @univerjs/core and work as DI
-      // keys when passed to injector.get().
       const injector = univer.__getInjector();
       const commandService = injector.get(ICommandService);
       const instanceService = injector.get(IUniverInstanceService);
 
       // -----------------------------------------------------------------
-      // Inbound bridge: Y.Doc → Univer
-      //
-      // observeDeep on the first sheet's cells Y.Map.  When remote peers
-      // (agent-op POST, another tab, spike-agent ws) write cells, we
-      // translate the delta into a SetRangeValuesMutation payload and
-      // dispatch it synchronously so Univer re-renders the affected cells.
-      //
-      // We use observeDeep (vs observe) so nested Y.Map mutations (e.g.
-      // setting the "v" key on an existing cellMap) also fire here.
+      // Inbound bridge: Y.Doc → Univer (one observer per sheet, routed by
+      // subUnitId == sheet's stable id).
       // -----------------------------------------------------------------
-      const cellsMap = sheetsArr.get(0).get("cells");
+      for (const sheetEntry of allSheets) {
+        const sheetId = sheetEntry.id;
+        const cellsMap = sheetEntry.cellsMap;
+        cellsMap.observeDeep((events) => {
+          if (applyingFromYDoc) return;
+          const cellValue = {};
+          for (const ev of events) {
+            if (!(ev instanceof Y.YMapEvent)) continue;
+            for (const [key, change] of ev.changes.keys.entries()) {
+              if (change.action === "delete") continue;
 
-      cellsMap.observeDeep(events => {
-        const cellValue = {};
-        for (const ev of events) {
-          // We only care about key-level changes on Y.Map nodes.
-          if (!(ev instanceof Y.YMapEvent)) continue;
-          for (const [key, change] of ev.changes.keys.entries()) {
-            if (change.action === "delete") continue;
-
-            // Determine the cell address.  Two cases:
-            //   1. A new cellMap was set on the top-level cells Y.Map
-            //      (ev.target === cellsMap, key = "A1" etc.).
-            //   2. A value was set inside an existing cellMap
-            //      (ev.target is a child Y.Map, key = "v" / "t").
-            let addr;
-            if (ev.target === cellsMap) {
-              // Case 1: the key IS the address.
-              addr = key;
-            } else {
-              // Case 2: find which address this child Y.Map lives under.
-              addr = null;
-              for (const [a, m] of cellsMap.entries()) {
-                if (m === ev.target) { addr = a; break; }
+              // Resolve address: top-level set vs nested set on child Y.Map.
+              let addr;
+              if (ev.target === cellsMap) {
+                addr = key;
+              } else {
+                addr = null;
+                for (const [a, m] of cellsMap.entries()) {
+                  if (m === ev.target) { addr = a; break; }
+                }
               }
+              if (!addr) continue;
+
+              const cellMap = cellsMap.get(addr);
+              if (!cellMap) continue;
+              const parsed = parseAddr(addr);
+              if (!parsed) continue;
+
+              cellValue[parsed.row] = cellValue[parsed.row] || {};
+              cellValue[parsed.row][parsed.col] = { v: cellMap.get("v") };
             }
-            if (!addr) continue;
-
-            const cellMap = cellsMap.get(addr);
-            if (!cellMap) continue;
-
-            // Parse addr "A1" → { row: 0, col: 0 }
-            // Column letters may be multi-char (AA, AB …).
-            const match = addr.match(/^([A-Z]+)(\d+)$/);
-            if (!match) continue;
-            const colLetters = match[1];
-            const rowIdx = parseInt(match[2], 10) - 1;
-            let colIdx = 0;
-            for (let i = 0; i < colLetters.length; i++) {
-              colIdx = colIdx * 26 + (colLetters.charCodeAt(i) - 64);
-            }
-            colIdx -= 1; // convert to 0-based
-
-            cellValue[rowIdx] = cellValue[rowIdx] || {};
-            cellValue[rowIdx][colIdx] = { v: cellMap.get("v") };
           }
-        }
-        if (Object.keys(cellValue).length === 0) return;
+          if (Object.keys(cellValue).length === 0) return;
 
-        // Get active unit + sheet ids.
-        // UniverInstanceType.UNIVER_SHEET = 2 (confirmed from bundle).
+          const workbook = instanceService.getCurrentUnitForType(2);
+          if (!workbook) {
+            console.warn("[yjs -> univer] no active workbook; skipping");
+            return;
+          }
+          const unitId = workbook.getUnitId();
+
+          console.log("[yjs -> univer] applying to canvas",
+            { sheet: sheetEntry.name, cellValue });
+
+          applyingFromYDoc = true;
+          try {
+            commandService.syncExecuteCommand(SET_RANGE_VALUES_MUTATION_ID, {
+              unitId,
+              subUnitId: sheetId,
+              cellValue,
+            });
+          } finally {
+            applyingFromYDoc = false;
+          }
+        });
+      }
+
+      // -----------------------------------------------------------------
+      // Initial render replay per sheet (R1.1 — mid-session tab join).
+      // -----------------------------------------------------------------
+      for (const sheetEntry of allSheets) {
+        const cellsMap = sheetEntry.cellsMap;
+        if (cellsMap.size === 0) continue;
+        const replayCellValue = {};
+        for (const [addr, cellMap] of cellsMap.entries()) {
+          if (!(cellMap instanceof Y.Map)) continue;
+          const parsed = parseAddr(addr);
+          if (!parsed) continue;
+          replayCellValue[parsed.row] = replayCellValue[parsed.row] || {};
+          replayCellValue[parsed.row][parsed.col] = { v: cellMap.get("v") };
+        }
+        if (Object.keys(replayCellValue).length === 0) continue;
         const workbook = instanceService.getCurrentUnitForType(2);
-        if (!workbook) {
-          console.warn("[yjs -> univer] no active workbook; skipping");
-          return;
-        }
+        if (!workbook) continue;
         const unitId = workbook.getUnitId();
-        const subUnitId = workbook.getActiveSheet().getSheetId();
-
-        console.log("[yjs -> univer] applying to canvas", { cellValue, unitId, subUnitId });
-
         applyingFromYDoc = true;
         try {
-          // Dispatch the mutation directly (not the command) so we bypass
-          // the undo stack.  syncExecuteCommand keeps us on the same tick.
           commandService.syncExecuteCommand(SET_RANGE_VALUES_MUTATION_ID, {
             unitId,
-            subUnitId,
-            cellValue,
+            subUnitId: sheetEntry.id,
+            cellValue: replayCellValue,
           });
         } finally {
           applyingFromYDoc = false;
         }
-      });
-
-      // -----------------------------------------------------------------
-      // Initial render replay (R1.1 — mid-session tab join)
-      //
-      // observeDeep only fires on NEW changes after the observer attaches.
-      // When a tab joins an artifact that already has cells (written by
-      // earlier tabs or the agent), the canvas stays empty for those existing
-      // cells — only updates that arrive after the join are rendered.
-      //
-      // Fix: walk the current cells Y.Map once and dispatch a single
-      // SetRangeValues mutation so the canvas catches up to the current
-      // Y.Doc state.  Uses the same applyingFromYDoc guard as the observer.
-      // -----------------------------------------------------------------
-      if (cellsMap.size > 0) {
-        const replayCellValue = {};
-        for (const [addr, cellMap] of cellsMap.entries()) {
-          if (!(cellMap instanceof Y.Map)) continue;
-          const match = addr.match(/^([A-Z]+)(\d+)$/);
-          if (!match) continue;
-          const colLetters = match[1];
-          const rowIdx = parseInt(match[2], 10) - 1;
-          let colIdx = 0;
-          for (let i = 0; i < colLetters.length; i++) {
-            colIdx = colIdx * 26 + (colLetters.charCodeAt(i) - 64);
-          }
-          colIdx -= 1; // convert to 0-based
-          replayCellValue[rowIdx] = replayCellValue[rowIdx] || {};
-          replayCellValue[rowIdx][colIdx] = { v: cellMap.get("v") };
-        }
-        if (Object.keys(replayCellValue).length > 0) {
-          const workbook = instanceService.getCurrentUnitForType(2);
-          if (workbook) {
-            const unitId = workbook.getUnitId();
-            const subUnitId = workbook.getActiveSheet().getSheetId();
-            applyingFromYDoc = true;
-            try {
-              commandService.syncExecuteCommand(SET_RANGE_VALUES_MUTATION_ID, {
-                unitId,
-                subUnitId,
-                cellValue: replayCellValue,
-              });
-            } finally {
-              applyingFromYDoc = false;
-            }
-            console.log("[initial render] replayed", Object.keys(replayCellValue).length, "rows of existing cells");
-          }
-        }
+        console.log("[initial render] replayed",
+          Object.keys(replayCellValue).length, "rows on sheet", sheetEntry.name);
       }
 
       // -----------------------------------------------------------------
-      // Outbound bridge: Univer → Y.Doc
-      //
-      // Subscribe to the command bus.  Every time a SetRangeValues mutation
-      // fires (from ANY source — keyboard, paste, formula evaluation, etc.)
-      // we translate the changed cells into Y.Doc writes.
-      //
-      // The feedback-loop guard `applyingFromYDoc` ensures that mutations
-      // dispatched by our own inbound bridge are silently ignored here.
+      // Outbound bridge: Univer → Y.Doc, routed by cmd.params.subUnitId.
+      // One subscription handles every sheet because cmd.params.subUnitId
+      // tells us which sheet was edited.
       // -----------------------------------------------------------------
       commandService.onCommandExecuted((cmd) => {
         if (applyingFromYDoc) return;
         if (cmd.id !== SET_RANGE_VALUES_MUTATION_ID) return;
 
         const params = cmd.params;
-        if (!params || !params.cellValue) return;
+        if (!params || !params.cellValue || !params.subUnitId) return;
+
+        const targetSheet = allSheets.find((s) => s.id === params.subUnitId);
+        if (!targetSheet) {
+          console.warn("[univer -> yjs] no matching sheet for subUnitId",
+            params.subUnitId);
+          return;
+        }
+        const cellsMap = targetSheet.cellsMap;
 
         ydoc.transact(() => {
           for (const [rowStr, cols] of Object.entries(params.cellValue)) {
@@ -425,7 +414,8 @@
           }
         });
 
-        console.log("[univer -> yjs] cells written", { cellValue: params.cellValue });
+        console.log("[univer -> yjs] cells written on", targetSheet.name,
+          params.cellValue);
       });
 
       // -----------------------------------------------------------------
@@ -452,7 +442,11 @@
           const firstSheetName = wb.SheetNames[0];
           const ws = wb.Sheets[firstSheetName];
 
-          // Walk the sheet's !ref range and write each non-empty cell to Y.Doc.
+          // v1: import writes to the FIRST sheet of the current Y.Doc.
+          // Multi-sheet xlsx import (one Y.Doc sheet per workbook sheet) is
+          // handled server-side via POST /documents/:id/import; this button
+          // is the in-browser shortcut for the demo fixture.
+          const firstCellsMap = allSheets[0].cellsMap;
           const range = XLSX.utils.decode_range(ws["!ref"] || "A1:A1");
           let count = 0;
           ydoc.transact(() => {
@@ -461,13 +455,12 @@
                 const addr = XLSX.utils.encode_cell({ r: R, c: C });
                 const cell = ws[addr];
                 if (!cell) continue;
-                // Use the cached calculated value (cell.v); skip if absent.
                 const v = cell.v;
                 if (v === undefined || v === null) continue;
-                let cellMap = cellsMap.get(addr);
+                let cellMap = firstCellsMap.get(addr);
                 if (!cellMap) {
                   cellMap = new Y.Map();
-                  cellsMap.set(addr, cellMap);
+                  firstCellsMap.set(addr, cellMap);
                 }
                 cellMap.set("v", v);
                 cellMap.set("t",
@@ -488,6 +481,7 @@
 
       // Expose for DevTools inspection.
       window.spikeSheets = sheetsArr;
+      window.allSheets = allSheets;
     });
 
     window.univer = univer; // Expose for DevTools inspection
