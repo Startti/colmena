@@ -47,8 +47,9 @@ impl ArtifactStorage for LocalFsStorage {
             let meta_p = path.join("meta.json");
             if meta_p.exists() {
                 let bytes = fs::read(&meta_p).await?;
-                if let Ok(meta) = serde_json::from_slice::<ArtifactMeta>(&bytes) {
-                    out.push(meta);
+                match serde_json::from_slice::<ArtifactMeta>(&bytes) {
+                    Ok(meta) => out.push(meta),
+                    Err(e) => tracing::warn!("skipping malformed meta.json at {:?}: {}", meta_p, e),
                 }
             }
         }
@@ -56,26 +57,25 @@ impl ArtifactStorage for LocalFsStorage {
     }
 
     async fn load_state(&self, id: &ArtifactId) -> Result<Option<Vec<u8>>, StorageError> {
-        let path = self.state_path(id);
-        if !path.exists() {
-            return Ok(None);
+        match fs::read(&self.state_path(id)).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(StorageError::Io(e)),
         }
-        Ok(Some(fs::read(&path).await?))
     }
 
     async fn load_meta(&self, id: &ArtifactId) -> Result<Option<ArtifactMeta>, StorageError> {
-        let path = self.meta_path(id);
-        if !path.exists() {
-            return Ok(None);
+        match fs::read(&self.meta_path(id)).await {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(StorageError::Io(e)),
         }
-        let bytes = fs::read(&path).await?;
-        Ok(Some(serde_json::from_slice(&bytes)?))
     }
 
     async fn save_state(&self, id: &ArtifactId, bytes: &[u8]) -> Result<(), StorageError> {
         fs::create_dir_all(self.artifact_dir(id)).await?;
         let final_path = self.state_path(id);
-        let tmp = final_path.with_extension("yjs.tmp");
+        let tmp = final_path.with_extension(format!("yjs.{}.tmp", ulid::Ulid::new()));
         fs::write(&tmp, bytes).await?;
         fs::rename(&tmp, &final_path).await?;
         Ok(())
@@ -84,7 +84,7 @@ impl ArtifactStorage for LocalFsStorage {
     async fn save_meta(&self, meta: &ArtifactMeta) -> Result<(), StorageError> {
         fs::create_dir_all(self.artifact_dir(&meta.artifact_id)).await?;
         let final_path = self.meta_path(&meta.artifact_id);
-        let tmp = final_path.with_extension("json.tmp");
+        let tmp = final_path.with_extension(format!("json.{}.tmp", ulid::Ulid::new()));
         let bytes = serde_json::to_vec_pretty(meta)?;
         fs::write(&tmp, &bytes).await?;
         fs::rename(&tmp, &final_path).await?;
