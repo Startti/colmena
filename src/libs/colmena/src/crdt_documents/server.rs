@@ -1,20 +1,24 @@
 //! axum router for the CRDT documents server.
 //!
 //! Routes (v1):
-//!   GET  /                                       — static HTML (Univer)
-//!   GET  /minimal                                — diagnostic page (no Univer)
-//!   GET  /spike.xlsx                             — fixture .xlsx (legacy from spike; kept for diagnostic page)
-//!   WS   /documents/:id/yjs                      — Yjs sync v1 protocol
-//!   GET  /documents/:id/projection.json          — current Yrs → IR projection
+//!   GET    /                                       — static HTML (Univer)
+//!   GET    /minimal                                — diagnostic page (no Univer)
+//!   GET    /spike.xlsx                             — fixture .xlsx (legacy from spike; kept for diagnostic page)
+//!   WS     /documents/:id/yjs                      — Yjs sync v1 protocol
+//!   GET    /documents/:id/projection.json          — current Yrs → IR projection
+//!   POST   /documents                              — create a new artifact
+//!   GET    /documents                              — list all in-memory artifacts
+//!   DELETE /documents/:id                          — delete an artifact (stop writer + remove storage)
 
 use crate::crdt_documents::{
     projection, yjs_protocol, ArtifactId, CrdtDocumentsRuntime,
 };
 use axum::{
     extract::{ws::WebSocketUpgrade, Path, State},
+    extract::Json as JsonExtract,
     http::{header, StatusCode},
     response::{Html, IntoResponse, Json, Response},
-    routing::get,
+    routing::{delete, get, post},
     Router,
 };
 use std::str::FromStr;
@@ -29,7 +33,64 @@ pub fn router(runtime: Arc<CrdtDocumentsRuntime>) -> Router {
         .route("/spike.xlsx", get(fixture_xlsx))
         .route("/documents/:id/yjs", get(ws_handler))
         .route("/documents/:id/projection.json", get(projection_handler))
+        .route("/documents", post(create_handler).get(list_handler))
+        .route("/documents/:id", delete(delete_handler))
         .with_state(runtime)
+}
+
+// ── REST CRUD handlers ────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct CreateRequest {
+    name: String,
+}
+
+#[derive(serde::Serialize)]
+struct CreateResponse {
+    artifact_id: ArtifactId,
+    created_at: i64,
+}
+
+async fn create_handler(
+    State(runtime): State<Arc<CrdtDocumentsRuntime>>,
+    JsonExtract(req): JsonExtract<CreateRequest>,
+) -> impl IntoResponse {
+    let id = ArtifactId::new();
+    let entry = runtime.registry.get_or_create(&id, &req.name);
+    (
+        StatusCode::CREATED,
+        Json(CreateResponse {
+            artifact_id: id,
+            created_at: entry.meta.created_at,
+        }),
+    )
+}
+
+#[derive(serde::Serialize)]
+struct ListResponse {
+    artifacts: Vec<crate::crdt_documents::ArtifactMeta>,
+}
+
+async fn list_handler(
+    State(runtime): State<Arc<CrdtDocumentsRuntime>>,
+) -> impl IntoResponse {
+    Json(ListResponse {
+        artifacts: runtime.registry.list(),
+    })
+}
+
+async fn delete_handler(
+    Path(id_str): Path<String>,
+    State(runtime): State<Arc<CrdtDocumentsRuntime>>,
+) -> Response {
+    let id = match ArtifactId::from_str(&id_str) {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid artifact id").into_response(),
+    };
+    match runtime.registry.delete(&id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 const INDEX_HTML: &str = include_str!("static/index.html");
