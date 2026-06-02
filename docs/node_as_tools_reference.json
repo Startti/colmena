@@ -1,5 +1,5 @@
 {
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Reference for using DAG nodes as LLM-callable tools inside an llm_call's tool_configurations. Complements node_configurations.json (which documents nodes as DAG nodes) by focusing exclusively on the tool-calling perspective: how to declare each node type as a tool, what fields are fixed vs LLM-visible, and complete ready-to-use examples.",
 
   "concepts": {
@@ -961,6 +961,215 @@
         "tests/graphs/media/image_gen_then_edit.json",
         "tests/graphs/agents/multimedia_agent.json",
         "tests/graphs/agents/multimedia_agent_with_load.json"
+      ]
+    },
+
+    "crdt_documents": {
+      "summary": "Six synthetic LLM tools for real-time collaborative xlsx workbooks (v1 CRDT documents feature). Exposed when an llm_call's config includes the crdt_documents block with an artifact_id. All mutations are in-process against a Yrs-backed document; persisted snapshots are stored locally or in GCS. No tool_configurations needed — the engine auto-creates them when crdt_documents is present.",
+      "synthetic_tools": ["crdt_doc_list_sheets", "crdt_doc_read", "crdt_doc_set_cell", "crdt_doc_set_range", "crdt_doc_add_sheet", "crdt_doc_get_recent_changes"],
+      "how_exposed": "Automatically registered when llm_call.config.crdt_documents is present (with artifact_id, storage_backend, etc.). The LLM never sees the artifact_id or storage config — those are internal routing parameters managed by the engine.",
+      "lifecycle": "All mutations modify the in-process Yrs document. The ChangeTracker records operations for narration (get_recent_changes). Snapshots are persisted after each DAG run via ArtifactStorage (localfs or gcs).",
+      "examples": {
+        "llm_call_with_crdt_documents": {
+          "description": "llm_call node configured to expose the 6 CRDT tools. No tool_configurations entries are needed — the engine auto-creates them.",
+          "config_block": {
+            "type": "llm_call",
+            "config": {
+              "provider": "google",
+              "model": "gemini-2.5-flash",
+              "api_key": "${GEMINI_API_KEY}",
+              "prompt": "Edit the spreadsheet: add a column for Q3 revenue, set cells A1:C5 with sample data, then list all sheets.",
+              "crdt_documents": {
+                "artifact_id": "art_abc123def456ghi789jkl012mn",
+                "storage_backend": "localfs",
+                "storage_root": ".colmena/crdt_documents"
+              }
+            }
+          }
+        }
+      },
+      "tool_descriptions": {
+        "crdt_doc_list_sheets": {
+          "name": "crdt_doc_list_sheets",
+          "description": "List all sheets in the artifact document. Returns metadata (sheet_id, name) for each sheet. Use this to discover available sheets before read/write operations.",
+          "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          },
+          "output_schema": {
+            "type": "object",
+            "description": "List of sheet metadata.",
+            "properties": {
+              "sheets": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "sheet_id": { "type": "string", "description": "Unique identifier for the sheet." },
+                    "name": { "type": "string", "description": "Human-readable sheet name (e.g. 'Sheet1', 'Q3 Data')." }
+                  }
+                },
+                "description": "Array of sheet records, each with sheet_id and name."
+              }
+            }
+          }
+        },
+        "crdt_doc_read": {
+          "name": "crdt_doc_read",
+          "description": "Read cell values from a sheet. Optionally specify a range (A1-style notation) to fetch only a region; otherwise returns all non-empty cells.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "sheet_id": {
+                "type": "string",
+                "required": true,
+                "description": "The sheet_id to read from (obtained via crdt_doc_list_sheets)."
+              },
+              "range": {
+                "type": "string",
+                "required": false,
+                "description": "Optional range in A1 notation (e.g. 'A1:D10', 'B2:B20'). If omitted, returns all non-empty cells."
+              }
+            },
+            "required": ["sheet_id"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "sheet_id": { "type": "string", "description": "The sheet_id that was read." },
+              "cells": {
+                "type": "object",
+                "description": "Map of cell addresses to values (e.g. {'A1': 'Revenue', 'A2': 1000, 'B1': 'Expenses'}).",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "crdt_doc_set_cell": {
+          "name": "crdt_doc_set_cell",
+          "description": "Set a single cell to a value. Address in A1 notation.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "sheet_id": {
+                "type": "string",
+                "required": true,
+                "description": "The sheet_id to write to."
+              },
+              "addr": {
+                "type": "string",
+                "required": true,
+                "description": "Cell address in A1 notation (e.g. 'A1', 'B5', 'Z100')."
+              },
+              "value": {
+                "type": ["string", "number", "boolean", "null"],
+                "required": true,
+                "description": "The value to set. Can be a string, number, boolean, or null (to clear the cell)."
+              }
+            },
+            "required": ["sheet_id", "addr", "value"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "ok": { "type": "boolean", "description": "True if the set succeeded." }
+            }
+          }
+        },
+        "crdt_doc_set_range": {
+          "name": "crdt_doc_set_range",
+          "description": "Bulk set a rectangular range of cells. Supply a 2D row-major array of values.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "sheet_id": {
+                "type": "string",
+                "required": true,
+                "description": "The sheet_id to write to."
+              },
+              "start_addr": {
+                "type": "string",
+                "required": true,
+                "description": "Top-left cell address in A1 notation (e.g. 'A1', 'B3'). Defines the starting corner of the range to fill."
+              },
+              "values_2d": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": ["string", "number", "boolean", "null"]
+                  }
+                },
+                "required": true,
+                "description": "Row-major 2D array of values. Each inner array is one row. All rows should have the same length for a rectangular range."
+              }
+            },
+            "required": ["sheet_id", "start_addr", "values_2d"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "ok": { "type": "boolean", "description": "True if the write succeeded." },
+              "cells_written": { "type": "integer", "description": "Number of cells successfully set." }
+            }
+          }
+        },
+        "crdt_doc_add_sheet": {
+          "name": "crdt_doc_add_sheet",
+          "description": "Append a new sheet to the document with the given name. Returns the new sheet_id.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "required": true,
+                "description": "Human-readable name for the new sheet (e.g. 'Q4 Data', 'Archive'). Whitespace is allowed."
+              }
+            },
+            "required": ["name"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "sheet_id": { "type": "string", "description": "The newly created sheet_id." }
+            }
+          }
+        },
+        "crdt_doc_get_recent_changes": {
+          "name": "crdt_doc_get_recent_changes",
+          "description": "Retrieve a human-readable narration of recent peer changes. Useful for multi-agent or multi-user scenarios to see what other editors did. Optionally specify since_event_id to get only changes after a certain point.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "since_event_id": {
+                "type": "integer",
+                "required": false,
+                "description": "Optional u64 event ID. If provided, only changes after this event are returned. If omitted, returns all recorded changes."
+              }
+            },
+            "required": []
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "current_event_id": { "type": "integer", "description": "The latest event ID in the document's change history." },
+              "narration": { "type": "string", "description": "Human-readable text summarizing recent changes (e.g., 'Peer A set cell B2 to 150. Peer B added sheet Q4Data.')." }
+            }
+          }
+        }
+      },
+      "special_behaviors": [
+        "artifact_id is never exposed to the LLM — the engine uses it internally to route mutations to the correct in-process document.",
+        "All 6 tools are auto-registered when crdt_documents is present; you do NOT need to manually add them to tool_configurations.",
+        "Mutations modify the live Yrs document in-process with immediate effect (no latency). Snapshots are written after the DAG run completes.",
+        "ChangeTracker auto-records mutations for narration; peers can call get_recent_changes to see a human-readable summary of edits.",
+        "Storage backend (localfs vs gcs) is transparent to the LLM — all tools work identically regardless of where snapshots are persisted.",
+        "If artifact_id points to a previously-saved document, the snapshot is loaded at initialization; edits then accumulate on top."
+      ],
+      "reference_graphs": [
+        "tests/graphs/agents/crdt_documents_basic.json",
+        "tests/graphs/agents/crdt_documents_multiagent.json"
       ]
     },
 

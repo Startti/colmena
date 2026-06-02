@@ -1,5 +1,5 @@
 {
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Complete configuration reference for all Colmena DAG Engine node types. Each node type documents its config fields, input ports, output ports, defaults, valid values, and validation rules.",
 
   "common_node_properties": {
@@ -1549,6 +1549,46 @@
           "default": null,
           "description": "The UUID of the task to update in the task memory database. Required when 'write_to_memory' is true. Supports '{{variable}}' template syntax to resolve the task ID dynamically from inputs (e.g., '{{task_id}}'). The node writes its LLM response as the task's result in the database.",
           "example": "{{task_id}}"
+        },
+        "crdt_documents": {
+          "type": "object",
+          "required": false,
+          "default": null,
+          "description": "Optional. When present, the LLM gets 6 v1 synthetic tools for the CRDT documents feature (real-time collaborative xlsx workbooks). The artifact_id is required and the LLM never sees it — mutations target the registered Doc in-proc. The storage backend determines where changes are persisted (localfs for development, gcs for production).",
+          "properties": {
+            "artifact_id": {
+              "type": "string",
+              "required": true,
+              "description": "Required. The artifact this llm_call mutates. Format: art_<26-char-ULID>. Static or $DYNAMIC. This is the stable handle to the collaborative document and is used internally to route mutations — the LLM never sees it."
+            },
+            "storage_backend": {
+              "type": "string",
+              "enum": ["localfs", "gcs"],
+              "default": "localfs",
+              "description": "Storage backend for persisting document snapshots and changes. 'localfs' stores under storage_root on the local filesystem (development), 'gcs' uploads to a Google Cloud Storage bucket (production)."
+            },
+            "storage_root": {
+              "type": "string",
+              "default": ".colmena/crdt_documents",
+              "description": "Filesystem root for localfs backend. Ignored when storage_backend='gcs'. Relative paths resolve against the process CWD."
+            },
+            "gcs_bucket": {
+              "type": "string",
+              "required": false,
+              "description": "Required if storage_backend='gcs'. The GCS bucket name where document snapshots are uploaded (e.g. 'my-colmena-docs')."
+            },
+            "gcs_prefix": {
+              "type": "string",
+              "default": "colmena/crdt_documents",
+              "description": "Object key prefix in GCS. Ignored when storage_backend='localfs'. Document snapshots are stored at gs://{gcs_bucket}/{gcs_prefix}/{artifact_id}.xlsx."
+            }
+          },
+          "required": ["artifact_id"],
+          "example": {
+            "artifact_id": "art_abc123def456ghi789jkl012mn",
+            "storage_backend": "localfs",
+            "storage_root": ".colmena/crdt_documents"
+          }
         }
       },
       "input_ports": {
