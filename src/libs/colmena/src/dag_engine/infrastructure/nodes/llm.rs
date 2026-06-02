@@ -2476,6 +2476,18 @@ impl ExecutableNode for LlmNode {
             "extra_info": extra_info
         });
 
+        // Drain the CRDT runtime's snapshot writers before returning.
+        // The writers run as detached `tokio::spawn` tasks; if the host
+        // tokio runtime is torn down before they get scheduled to flush
+        // (e.g. `cargo run --bin dag_engine -- run <graph.json>` exits as
+        // soon as this node returns), any mutations issued by the LLM
+        // tool dispatchers between the last 5s tick and now are lost.
+        // `shutdown` sends an explicit shutdown signal AND awaits the
+        // writer's final flush per artifact. Idempotent.
+        if let Some(ctx) = crdt_docs_context.as_ref() {
+            ctx.runtime.shutdown().await;
+        }
+
         Ok(final_output)
     }
 

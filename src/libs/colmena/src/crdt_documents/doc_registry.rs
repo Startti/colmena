@@ -117,6 +117,27 @@ impl DocRegistry {
         self.docs.iter().map(|r| r.value().meta.clone()).collect()
     }
 
+    /// Drain every artifact's snapshot writer: signal shutdown AND await
+    /// its final flush. Call this before dropping the registry (or the
+    /// tokio runtime) to guarantee pending mutations land on disk.
+    ///
+    /// Without this, the writer tasks are detached `tokio::spawn`s and die
+    /// when the tokio runtime is torn down — losing any work between the
+    /// last 5-second tick and process exit. This is exactly what happens
+    /// when a CLI `dag_engine run` finishes a graph that mutated a CRDT
+    /// artifact: the last mutations never reach the snapshot file.
+    ///
+    /// Idempotent: re-calling shutdown on a writer that already drained is
+    /// a no-op (see `SnapshotHandle::shutdown`).
+    pub async fn shutdown_all(&self) {
+        let entries: Vec<Arc<RegisteredArtifact>> =
+            self.docs.iter().map(|r| r.value().clone()).collect();
+        for entry in entries {
+            let mut guard = entry.snapshot.lock().await;
+            guard.shutdown().await;
+        }
+    }
+
     pub async fn delete(&self, id: &ArtifactId) -> Result<(), StorageError> {
         if let Some((_, entry)) = self.docs.remove(&id.to_string()) {
             let mut guard = entry.snapshot.lock().await;
