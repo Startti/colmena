@@ -1,9 +1,9 @@
 # Documents CRDT v1 — Design
 
-**Date:** 2026-06-01
+**Date:** 2026-06-01 → completado 2026-06-02
 **Author:** daniel@startti.co (con asistencia AI)
-**Estado:** Diseño aprobado — listo para writing-plans
-**Duración objetivo:** 4-6 semanas
+**Estado:** ✅ **Implementado** — 27 tareas del [plan](../plans/2026-06-01-documents-crdt-v1.md) shippeadas en `feature/docs`. Test suite verde. Pendiente merge a develop cuando se cierre v2 (Word/HTML/Sheets) o si surge una razón para shipear v1 antes.
+**Duración real:** ~36 horas de trabajo continuo (vs. 4-6 semanas planeadas — gran parte porque el spike ya había validado las decisiones arquitectónicas más costosas).
 **Predecesor:** Spike Fase 0 cerrado con verdict GO ([results](2026-05-31-documents-crdt-spike-results.md))
 **Working branch:** `feature/docs` (continúa desde el spike, sin merge intermedio a develop)
 
