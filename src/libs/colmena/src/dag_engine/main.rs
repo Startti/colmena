@@ -69,8 +69,8 @@ enum Commands {
         host: String,
         #[arg(long, default_value_t = 8080)]
         port: u16,
-        /// Directory where projection dumps are written.
-        #[arg(long, default_value = "/tmp/crdt")]
+        /// Root directory for CRDT document storage.
+        #[arg(long, default_value = ".colmena/crdt_documents")]
         dump_dir: String,
     },
     /// One-shot agent peer for the CRDT server. Mutates an artifact via WS
@@ -189,19 +189,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Commands::CrdtYws { host, port, dump_dir } => {
-            use colmena::crdt_documents::{server::{router, SpikeState}, DocRegistry, StorageConfig};
-            use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+            use colmena::crdt_documents::CrdtDocumentsRuntime;
+            use std::{net::SocketAddr, sync::Arc};
 
-            let storage_root = PathBuf::from(&dump_dir).join("state");
-            let storage = StorageConfig::LocalFs { root: storage_root }.build()?;
-            let state = SpikeState {
-                registry: Arc::new(DocRegistry::new(storage)),
-                dump_dir: PathBuf::from(&dump_dir),
-            };
-            let app = router(state);
+            let cfg = serde_json::json!({
+                "storage_backend": "localfs",
+                "storage_root": dump_dir,
+            });
+            let runtime = Arc::new(
+                CrdtDocumentsRuntime::from_config(&cfg)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?,
+            );
+            let app = colmena::crdt_documents::server::router(runtime);
             let addr: SocketAddr = format!("{host}:{port}").parse()?;
             let listener = tokio::net::TcpListener::bind(addr).await?;
-            println!("🗂️ crdt-yws listening on http://{addr}  (dumps → {dump_dir})");
+            println!(
+                "🧪 crdt-yws listening on http://{addr}  (storage → {dump_dir})"
+            );
             axum::serve(listener, app).await?;
         }
 

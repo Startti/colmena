@@ -1,41 +1,32 @@
-//! R1.1 — two WS clients (no browser) hitting the spike server must
-//! converge on the same `yrs::Doc` state.
+//! R1.1 — two WS clients (no browser) hitting the server must converge on
+//! the same `yrs::Doc` state.
 
 use colmena::crdt_documents::{
     tool_executor::{apply_set_cell_in_proc, apply_set_cell_via_ws},
-    doc_registry::DocRegistry,
-    server::{router, SpikeState},
-    ArtifactId, StorageConfig,
+    ArtifactId, CrdtDocumentsRuntime,
 };
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 #[tokio::test]
 async fn two_ws_agents_and_one_inproc_converge() {
     // Build ephemeral storage for this test.
-    let dir = std::env::temp_dir().join(format!(
-        "crdt_converge_{}",
-        ulid::Ulid::new()
-    ));
-    let storage = StorageConfig::LocalFs { root: dir.clone() }.build().unwrap();
+    let dir = std::env::temp_dir().join(format!("crdt_converge_{}", ulid::Ulid::new()));
+    let cfg = serde_json::json!({ "storage_root": dir.to_str().unwrap() });
+    let runtime = Arc::new(CrdtDocumentsRuntime::from_config(&cfg).await.unwrap());
+
+    // Pre-register an artifact so the WS handler finds it on first connect.
+    let id = ArtifactId::new();
+    let entry = runtime.registry.get_or_create(&id, "test");
 
     // Start the server on a random port.
-    let state = SpikeState {
-        registry: Arc::new(DocRegistry::new(storage)),
-        dump_dir: PathBuf::from(std::env::temp_dir().join("spike_it_dump")),
-    };
-    let app = router(state.clone());
+    let app = colmena::crdt_documents::server::router(runtime.clone());
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-    // Create a valid artifact ID and use its string representation for the WS path.
-    // This allows both the WS handler (which uses from_raw) and in-proc code to
-    // reference the same artifact.
-    let id = ArtifactId::new();
-    let artifact_str = id.to_string();
-    let ws_url = format!("ws://{addr}/yjs/{artifact_str}");
+    let ws_url = format!("ws://{addr}/documents/{}/yjs", id);
 
     // Agent A via WS.
     apply_set_cell_via_ws(
@@ -58,7 +49,6 @@ async fn two_ws_agents_and_one_inproc_converge() {
     .expect("agent B");
 
     // Agent C: in-proc directly mutates the registered doc.
-    let entry = state.registry.get_or_create(&id, &artifact_str);
     apply_set_cell_in_proc(&entry.doc, "s1", "C1", &serde_json::Value::Bool(true));
 
     // Let the WS round-trips settle.

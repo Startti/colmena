@@ -1,45 +1,39 @@
-//! axum router for the spike. Endpoints:
-//!   GET  /                         — static HTML (Univer + y-websocket loader)
-//!   GET  /minimal                  — diagnostic page (yjs + y-websocket only, no Univer)
-//!   GET  /spike.xlsx               — fixture .xlsx (Task 11)
-//!   WS   /yjs/:artifact_id         — Yjs sync protocol
-//!   GET  /projection/:id.json      — current Yrs → IR projection
-//!   POST /spike/agent-op           — in-proc mutation (sanity-check route)
+//! axum router for the CRDT documents server.
+//!
+//! Routes (v1):
+//!   GET  /                                       — static HTML (Univer)
+//!   GET  /minimal                                — diagnostic page (no Univer)
+//!   GET  /spike.xlsx                             — fixture .xlsx (legacy from spike; kept for diagnostic page)
+//!   WS   /documents/:id/yjs                      — Yjs sync v1 protocol
+//!   GET  /documents/:id/projection.json          — current Yrs → IR projection
 
-use crate::crdt_documents::{doc_registry::DocRegistry, projection, yjs_protocol, ArtifactId};
+use crate::crdt_documents::{
+    projection, yjs_protocol, ArtifactId, CrdtDocumentsRuntime,
+};
 use axum::{
     extract::{ws::WebSocketUpgrade, Path, State},
     http::{header, StatusCode},
-    response::{Html, IntoResponse, Response},
-    routing::{get, post},
-    Json, Router,
+    response::{Html, IntoResponse, Json, Response},
+    routing::get,
+    Router,
 };
-use serde::Deserialize;
-use serde_json::Value;
-use std::{path::PathBuf, sync::Arc};
+use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::fs;
 
-/// Shared server state.
-#[derive(Clone)]
-pub struct SpikeState {
-    pub registry: Arc<DocRegistry>,
-    /// Directory for projection dumps. Defaults to `/tmp/spike`.
-    pub dump_dir: PathBuf,
-}
-
-const INDEX_HTML: &str = include_str!("static/index.html");
-const MINIMAL_HTML: &str = include_str!("static/minimal.html");
-
-pub fn router(state: SpikeState) -> Router {
+pub fn router(runtime: Arc<CrdtDocumentsRuntime>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/minimal", get(minimal))
         .route("/spike.xlsx", get(fixture_xlsx))
-        .route("/yjs/:artifact_id", get(ws_handler))
-        .route("/projection/:artifact_id.json", get(projection_handler))
-        .route("/spike/agent-op", post(agent_op_handler))
-        .with_state(state)
+        .route("/documents/:id/yjs", get(ws_handler))
+        .route("/documents/:id/projection.json", get(projection_handler))
+        .with_state(runtime)
 }
+
+const INDEX_HTML: &str = include_str!("static/index.html");
+const MINIMAL_HTML: &str = include_str!("static/minimal.html");
 
 async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
@@ -71,19 +65,21 @@ async fn fixture_xlsx() -> Response {
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
-    Path(artifact_id): Path<String>,
-    State(state): State<SpikeState>,
+    Path(id_str): Path<String>,
+    State(runtime): State<Arc<CrdtDocumentsRuntime>>,
 ) -> Response {
-    let id = ArtifactId::from_raw(&artifact_id);
-    let entry = state.registry.get_or_create(&id, &artifact_id);
+    let id = match ArtifactId::from_str(&id_str) {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid artifact id").into_response(),
+    };
+    let entry = runtime.registry.get_or_create(&id, "(untitled)");
     let doc = entry.doc.clone();
-    let dump_dir = state.dump_dir.clone();
-    // yrs::Subscription (returned by observe_update_v1) holds Arc<dyn Drop>
-    // which is !Send.  We work around this by driving the socket on a
-    // dedicated thread with its own single-threaded tokio runtime.  This is
-    // intentional spike code — production would keep a shared multi-threaded
-    // runtime and a Send-safe observer channel.
+    let dirty = entry.dirty.clone();
+    let notify = entry.notify.clone();
     ws.on_upgrade(move |socket| async move {
+        // yrs::Subscription (Arc<dyn Drop>) is !Send. Drive the socket on a
+        // dedicated thread with its own single-threaded tokio runtime so we
+        // don't require Send on the future.
         let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -91,63 +87,38 @@ async fn ws_handler(
                 .build()
                 .expect("ws thread rt");
             rt.block_on(async move {
-                if let Err(e) = yjs_protocol::handle_socket(socket, doc.clone()).await {
+                let post_update = move |_update_bytes: &[u8]| {
+                    dirty.store(true, Ordering::Release);
+                    notify.notify_one();
+                };
+                if let Err(e) =
+                    yjs_protocol::handle_socket(socket, doc, Some(post_update)).await
+                {
                     tracing::warn!("ws handler ended with error: {e}");
                 }
-                dump_projection(&dump_dir, &artifact_id, &doc);
                 let _ = done_tx.send(());
             });
         });
-        // Await the thread's completion so the tokio task stays alive.
+        // Keep the tokio task alive until the thread finishes.
         let _ = done_rx.await;
     })
 }
 
 async fn projection_handler(
-    Path(artifact_id): Path<String>,
-    State(state): State<SpikeState>,
-) -> impl IntoResponse {
-    // Strip the .json extension from the route param (axum 0.7 captures the
-    // entire segment including any dot-suffix, so /projection/abc.json yields
-    // artifact_id = "abc.json").
-    let raw = artifact_id
+    Path(id_with_suffix): Path<String>,
+    State(runtime): State<Arc<CrdtDocumentsRuntime>>,
+) -> Response {
+    // axum 0.7 captures `:id.json` as the full segment; strip the suffix.
+    let id_str = id_with_suffix
         .strip_suffix(".json")
-        .unwrap_or(&artifact_id)
-        .to_string();
-    let id = ArtifactId::from_raw(&raw);
-    let entry = state.registry.get_or_create(&id, &raw);
-    Json(projection::project(&entry.doc))
-}
-
-#[derive(Deserialize)]
-struct AgentOp {
-    artifact: String,
-    sheet: String,
-    addr: String,
-    value: Value,
-}
-
-async fn agent_op_handler(
-    State(state): State<SpikeState>,
-    Json(op): Json<AgentOp>,
-) -> impl IntoResponse {
-    let id = ArtifactId::from_raw(&op.artifact);
-    let entry = state.registry.get_or_create(&id, &op.artifact);
-    crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
-        &entry.doc, &op.sheet, &op.addr, &op.value,
-    );
-    dump_projection(&state.dump_dir, &op.artifact, &entry.doc);
-    StatusCode::NO_CONTENT
-}
-
-fn dump_projection(dump_dir: &PathBuf, artifact_id: &str, doc: &Arc<yrs::Doc>) {
-    if std::fs::create_dir_all(dump_dir).is_err() {
-        return;
-    }
-    let path = dump_dir.join(format!("{artifact_id}.json"));
-    let v = projection::project(doc);
-    if let Ok(bytes) = serde_json::to_vec_pretty(&v) {
-        let _ = std::fs::write(path, bytes);
+        .unwrap_or(&id_with_suffix);
+    let id = match ArtifactId::from_str(id_str) {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid artifact id").into_response(),
+    };
+    match runtime.registry.get(&id) {
+        Some(entry) => Json(projection::project(&entry.doc)).into_response(),
+        None => (StatusCode::NOT_FOUND, "artifact not found").into_response(),
     }
 }
 
@@ -156,71 +127,70 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use axum::http::Request;
-    use crate::crdt_documents::StorageConfig;
+    use serde_json::json;
     use tower::ServiceExt;
 
-    fn fresh_state() -> SpikeState {
-        let dir = std::env::temp_dir().join(format!("spike_test_{}", ulid::Ulid::new()));
-        let storage = StorageConfig::LocalFs { root: dir }.build().unwrap();
-        SpikeState {
-            registry: Arc::new(DocRegistry::new(storage)),
-            dump_dir: std::env::temp_dir().join("spike_test_dump"),
-        }
+    async fn fresh_runtime() -> (Arc<CrdtDocumentsRuntime>, std::path::PathBuf) {
+        let tmp = std::env::temp_dir().join(format!("srv_test_{}", ulid::Ulid::new()));
+        let cfg = json!({ "storage_root": tmp.to_str().unwrap() });
+        let rt = Arc::new(CrdtDocumentsRuntime::from_config(&cfg).await.unwrap());
+        (rt, tmp)
     }
 
     #[tokio::test]
-    async fn projection_endpoint_returns_empty_workbook_for_new_artifact() {
-        let app = router(fresh_state());
+    async fn projection_returns_404_for_unknown_artifact() {
+        let (rt, tmp) = fresh_runtime().await;
+        let app = router(rt);
+        let id = ArtifactId::new();
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/projection/abc.json")
+                    .uri(format!("/documents/{}/projection.json", id))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), 200);
-        let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
-        let v: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v, serde_json::json!({ "sheets": [] }));
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[tokio::test]
-    async fn agent_op_then_projection_reflects_cell() {
-        let state = fresh_state();
-        let app = router(state.clone());
-        let body = serde_json::json!({
-            "artifact": "abc", "sheet": "s1", "addr": "A1", "value": "Hola"
-        });
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/spike/agent-op")
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 204);
-
+    async fn projection_returns_empty_for_registered_artifact() {
+        let (rt, tmp) = fresh_runtime().await;
+        let id = ArtifactId::new();
+        let _ = rt.registry.get_or_create(&id, "test");
+        let app = router(rt);
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/projection/abc.json")
+                    .uri(format!("/documents/{}/projection.json", id))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
-        let v: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            v["sheets"][0]["cells"]["A1"],
-            serde_json::Value::String("Hola".into())
-        );
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v, json!({ "sheets": [] }));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn projection_rejects_invalid_id() {
+        let (rt, tmp) = fresh_runtime().await;
+        let app = router(rt);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/documents/not-an-id/projection.json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

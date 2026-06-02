@@ -190,7 +190,18 @@ pub(super) fn parse_msgs(bytes: &[u8]) -> Result<Vec<SyncMsg>> {
 ///   2. Each side responds with sync_step2 (the missing update) or
 ///      additional `update` messages.
 ///   3. Future incremental updates fan out via an `update_v1` observer.
-pub async fn handle_socket(mut socket: WebSocket, doc: Arc<Doc>) -> Result<()> {
+///
+/// `post_update` is an optional callback invoked with the raw update bytes
+/// after each successful `apply_update`. Use it to mark a snapshot dirty
+/// or feed a `ChangeTracker`.
+pub async fn handle_socket<F>(
+    mut socket: WebSocket,
+    doc: Arc<Doc>,
+    post_update: Option<F>,
+) -> Result<()>
+where
+    F: Fn(&[u8]) + Send + Sync + 'static,
+{
     // 1. Send our initial sync_step1 (state vector).
     let sv = doc.transact().state_vector();
     socket
@@ -251,6 +262,9 @@ pub async fn handle_socket(mut socket: WebSocket, doc: Arc<Doc>) -> Result<()> {
                             doc.transact_mut()
                                 .apply_update(update)
                                 .map_err(|e| anyhow!("apply update: {e:?}"))?;
+                            if let Some(cb) = &post_update {
+                                cb(&update_bytes);
+                            }
                         }
                     }
                 }
