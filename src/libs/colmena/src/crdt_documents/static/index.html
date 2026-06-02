@@ -176,6 +176,14 @@
     // -------------------------------------------------------------------------
     const SET_RANGE_VALUES_MUTATION_ID = "sheet.mutation.set-range-values";
 
+    // Sheet-structure mutation IDs (Univer 0.2.10 defaults).
+    // If any of these is wrong, the universal `sheet.mutation.*` diagnostic
+    // log below will surface the actual id in DevTools so we can adjust.
+    const INSERT_SHEET_MUTATION_ID = "sheet.mutation.insert-sheet";
+    const REMOVE_SHEET_MUTATION_ID = "sheet.mutation.remove-sheet";
+    const SET_WORKSHEET_NAME_MUTATION_ID =
+      "sheet.mutation.set-worksheet-name-mutation";
+
     // -------------------------------------------------------------------------
     // Helper: zero-based column index → A1-style column letter(s)
     //   0 → "A", 1 → "B", ..., 25 → "Z", 26 → "AA", ...
@@ -248,6 +256,7 @@
           id: s.get("id"),
           name: s.get("name"),
           cellsMap: s.get("cells"),
+          sheetMap: s,
         });
       }
 
@@ -282,12 +291,19 @@
       const instanceService = injector.get(IUniverInstanceService);
 
       // -----------------------------------------------------------------
-      // Inbound bridge: Y.Doc → Univer (one observer per sheet, routed by
-      // subUnitId == sheet's stable id).
+      // Helpers — defined here because they close over `applyingFromYDoc`
+      // and the Univer services we just resolved from DI.
+      //
+      // mountSheetObserver: wires Y.Doc cell mutations + parent name
+      // changes for a single sheet → Univer commands.
+      // replayCells:        on initial join (or after inbound insert),
+      // dispatch every existing cell value to the canvas in one mutation.
       // -----------------------------------------------------------------
-      for (const sheetEntry of allSheets) {
+      function mountSheetObserver(sheetEntry) {
         const sheetId = sheetEntry.id;
         const cellsMap = sheetEntry.cellsMap;
+        const sheetMap = sheetEntry.sheetMap;
+
         cellsMap.observeDeep((events) => {
           if (applyingFromYDoc) return;
           const cellValue = {};
@@ -340,14 +356,37 @@
             applyingFromYDoc = false;
           }
         });
+
+        // Inbound rename: another peer renamed this sheet via Y.Map.set("name").
+        if (sheetMap) {
+          sheetMap.observe((ev) => {
+            if (applyingFromYDoc) return;
+            if (!ev.changes.keys.has("name")) return;
+            const newName = sheetMap.get("name");
+            if (sheetEntry.name === newName) return;
+            sheetEntry.name = newName;
+            const workbook = instanceService.getCurrentUnitForType(2);
+            if (!workbook) return;
+            const unitId = workbook.getUnitId();
+            applyingFromYDoc = true;
+            try {
+              commandService.syncExecuteCommand(
+                SET_WORKSHEET_NAME_MUTATION_ID,
+                { unitId, subUnitId: sheetId, name: newName });
+              console.log("[yjs -> univer] sheet renamed",
+                { id: sheetId, name: newName });
+            } catch (e) {
+              console.error("[yjs -> univer] rename dispatch failed", e);
+            } finally {
+              applyingFromYDoc = false;
+            }
+          });
+        }
       }
 
-      // -----------------------------------------------------------------
-      // Initial render replay per sheet (R1.1 — mid-session tab join).
-      // -----------------------------------------------------------------
-      for (const sheetEntry of allSheets) {
+      function replayCells(sheetEntry) {
         const cellsMap = sheetEntry.cellsMap;
-        if (cellsMap.size === 0) continue;
+        if (cellsMap.size === 0) return;
         const replayCellValue = {};
         for (const [addr, cellMap] of cellsMap.entries()) {
           if (!(cellMap instanceof Y.Map)) continue;
@@ -356,9 +395,9 @@
           replayCellValue[parsed.row] = replayCellValue[parsed.row] || {};
           replayCellValue[parsed.row][parsed.col] = { v: cellMap.get("v") };
         }
-        if (Object.keys(replayCellValue).length === 0) continue;
+        if (Object.keys(replayCellValue).length === 0) return;
         const workbook = instanceService.getCurrentUnitForType(2);
-        if (!workbook) continue;
+        if (!workbook) return;
         const unitId = workbook.getUnitId();
         applyingFromYDoc = true;
         try {
@@ -371,8 +410,85 @@
           applyingFromYDoc = false;
         }
         console.log("[initial render] replayed",
-          Object.keys(replayCellValue).length, "rows on sheet", sheetEntry.name);
+          Object.keys(replayCellValue).length, "rows on sheet",
+          sheetEntry.name);
       }
+
+      // Initial: wire every sheet already in Y.Doc and replay its cells.
+      for (const sheetEntry of allSheets) {
+        mountSheetObserver(sheetEntry);
+        replayCells(sheetEntry);
+      }
+
+      // -----------------------------------------------------------------
+      // Sheet-structure inbound bridge: Y.Doc sheets[] → Univer.
+      //
+      // Fires when another peer (or the agent via crdt_doc_add_sheet)
+      // pushes a new sheet Y.Map into the array. We register the cell
+      // observer, then dispatch Univer's insert-sheet-mutation so the
+      // tab appears in the UI.
+      //
+      // Idempotency: if `allSheets` already has this id we skip — that
+      // means we just inserted it ourselves via the outbound handler
+      // and this event is our own echo.
+      //
+      // Deletes: not implemented in v1 (Univer's "delete sheet" UI flow
+      // can be added later — see BACKLOG entry).
+      // -----------------------------------------------------------------
+      sheetsArr.observe((event) => {
+        if (applyingFromYDoc) return;
+        let cursor = 0;
+        for (const delta of event.changes.delta) {
+          if (delta.retain !== undefined) {
+            cursor += delta.retain;
+          } else if (delta.insert !== undefined) {
+            for (const item of delta.insert) {
+              if (!(item instanceof Y.Map)) { cursor++; continue; }
+              const id = item.get("id");
+              const name = item.get("name") || "Sheet";
+              const cellsMap = item.get("cells");
+              if (!id || !cellsMap) { cursor++; continue; }
+              if (allSheets.find((s) => s.id === id)) {
+                cursor++;
+                continue;
+              }
+              const entry = { id, name, cellsMap, sheetMap: item };
+              allSheets.push(entry);
+              mountSheetObserver(entry);
+              const workbook = instanceService.getCurrentUnitForType(2);
+              if (workbook) {
+                const unitId = workbook.getUnitId();
+                applyingFromYDoc = true;
+                try {
+                  commandService.syncExecuteCommand(
+                    INSERT_SHEET_MUTATION_ID, {
+                      unitId,
+                      index: cursor,
+                      sheet: {
+                        id,
+                        name,
+                        cellData: {},
+                        rowCount: 100,
+                        columnCount: 26,
+                      },
+                    });
+                  console.log("[yjs -> univer] sheet inserted",
+                    { id, name, index: cursor });
+                } catch (e) {
+                  console.error("[yjs -> univer] insert-sheet failed", e);
+                } finally {
+                  applyingFromYDoc = false;
+                }
+              }
+              replayCells(entry);
+              cursor++;
+            }
+          } else if (delta.delete !== undefined) {
+            console.warn("[yjs -> univer] sheet delete at cursor", cursor,
+              "delta:", delta.delete, "(not implemented in v1)");
+          }
+        }
+      });
 
       // -----------------------------------------------------------------
       // Outbound bridge: Univer → Y.Doc, routed by cmd.params.subUnitId.
@@ -416,6 +532,109 @@
 
         console.log("[univer -> yjs] cells written on", targetSheet.name,
           params.cellValue);
+      });
+
+      // -----------------------------------------------------------------
+      // Sheet-structure outbound bridge: Univer → Y.Doc.
+      //
+      // Listens for Univer sheet lifecycle mutations and mirrors them
+      // onto the Y.Doc sheets array. Mutation IDs are best-guess for
+      // Univer 0.2.10 — the universal `sheet.mutation.*` diagnostic log
+      // below surfaces any unknown id in DevTools so we can correct.
+      //
+      // The feedback loop (outbound → echo via sheetsArr.observe →
+      // inbound dispatch) is broken at the inbound side: it checks
+      // `allSheets.find((s) => s.id === id)` and skips if we've already
+      // registered the sheet locally, which we do synchronously here.
+      // -----------------------------------------------------------------
+      commandService.onCommandExecuted((cmd) => {
+        if (applyingFromYDoc) return;
+        if (cmd.id === SET_RANGE_VALUES_MUTATION_ID) return; // handled above
+
+        // Diagnostic: log every sheet-level mutation we observe so
+        // unknown ids show up in DevTools while we validate against
+        // Univer's actual 0.2.10 mutation registry.
+        if (typeof cmd.id === "string" &&
+            cmd.id.startsWith("sheet.mutation.")) {
+          console.log("[univer cmd]", cmd.id, cmd.params);
+        }
+
+        if (cmd.id === INSERT_SHEET_MUTATION_ID) {
+          const p = cmd.params;
+          if (!p || !p.sheet) {
+            console.warn("[univer -> yjs] insert-sheet missing params.sheet",
+              p);
+            return;
+          }
+          const id = p.sheet.id;
+          const name = p.sheet.name || "Sheet";
+          if (!id) {
+            console.warn("[univer -> yjs] insert-sheet missing sheet.id", p);
+            return;
+          }
+          if (allSheets.find((s) => s.id === id)) {
+            // Echo of an inbound dispatch — skip.
+            return;
+          }
+          const index = (typeof p.index === "number")
+            ? p.index : sheetsArr.length;
+          let newCellsMap;
+          let newSheetMap;
+          ydoc.transact(() => {
+            newSheetMap = new Y.Map();
+            newSheetMap.set("id", id);
+            newSheetMap.set("name", name);
+            newCellsMap = new Y.Map();
+            newSheetMap.set("cells", newCellsMap);
+            sheetsArr.insert(index, [newSheetMap]);
+          });
+          const entry = {
+            id, name,
+            cellsMap: newCellsMap,
+            sheetMap: newSheetMap,
+          };
+          allSheets.push(entry);
+          mountSheetObserver(entry);
+          console.log("[univer -> yjs] sheet inserted",
+            { id, name, index });
+          return;
+        }
+
+        if (cmd.id === REMOVE_SHEET_MUTATION_ID) {
+          const subUnitId = cmd.params && cmd.params.subUnitId;
+          if (!subUnitId) return;
+          let yIdx = -1;
+          for (let i = 0; i < sheetsArr.length; i++) {
+            if (sheetsArr.get(i).get("id") === subUnitId) {
+              yIdx = i; break;
+            }
+          }
+          if (yIdx < 0) return;
+          ydoc.transact(() => { sheetsArr.delete(yIdx, 1); });
+          const aIdx = allSheets.findIndex((s) => s.id === subUnitId);
+          if (aIdx >= 0) allSheets.splice(aIdx, 1);
+          console.log("[univer -> yjs] sheet removed", subUnitId);
+          return;
+        }
+
+        if (cmd.id === SET_WORKSHEET_NAME_MUTATION_ID) {
+          const p = cmd.params || {};
+          const subUnitId = p.subUnitId;
+          const name = p.name;
+          if (!subUnitId || typeof name !== "string") return;
+          for (let i = 0; i < sheetsArr.length; i++) {
+            const s = sheetsArr.get(i);
+            if (s.get("id") === subUnitId) {
+              ydoc.transact(() => { s.set("name", name); });
+              const target = allSheets.find((e) => e.id === subUnitId);
+              if (target) target.name = name;
+              console.log("[univer -> yjs] sheet renamed",
+                { subUnitId, name });
+              return;
+            }
+          }
+          return;
+        }
       });
 
       // -----------------------------------------------------------------
