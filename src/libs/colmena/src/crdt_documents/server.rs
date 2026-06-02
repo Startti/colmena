@@ -6,7 +6,7 @@
 //!   GET  /projection/:id.json      — current Yrs → IR projection
 //!   POST /spike/agent-op           — in-proc mutation (sanity-check route)
 
-use crate::crdt_documents::{doc_registry::DocRegistry, projection, yjs_protocol};
+use crate::crdt_documents::{doc_registry::DocRegistry, projection, yjs_protocol, ArtifactId};
 use axum::{
     extract::{ws::WebSocketUpgrade, Path, State},
     http::{header, StatusCode},
@@ -74,7 +74,9 @@ async fn ws_handler(
     Path(artifact_id): Path<String>,
     State(state): State<SpikeState>,
 ) -> Response {
-    let doc = state.registry.get_or_create(&artifact_id);
+    let id = ArtifactId::from_raw(&artifact_id);
+    let entry = state.registry.get_or_create(&id, &artifact_id);
+    let doc = entry.doc.clone();
     let dump_dir = state.dump_dir.clone();
     // yrs::Subscription (returned by observe_update_v1) holds Arc<dyn Drop>
     // which is !Send.  We work around this by driving the socket on a
@@ -108,12 +110,13 @@ async fn projection_handler(
     // Strip the .json extension from the route param (axum 0.7 captures the
     // entire segment including any dot-suffix, so /projection/abc.json yields
     // artifact_id = "abc.json").
-    let id = artifact_id
+    let raw = artifact_id
         .strip_suffix(".json")
         .unwrap_or(&artifact_id)
         .to_string();
-    let doc = state.registry.get_or_create(&id);
-    Json(projection::project(&doc))
+    let id = ArtifactId::from_raw(&raw);
+    let entry = state.registry.get_or_create(&id, &raw);
+    Json(projection::project(&entry.doc))
 }
 
 #[derive(Deserialize)]
@@ -128,11 +131,12 @@ async fn agent_op_handler(
     State(state): State<SpikeState>,
     Json(op): Json<AgentOp>,
 ) -> impl IntoResponse {
-    let doc = state.registry.get_or_create(&op.artifact);
+    let id = ArtifactId::from_raw(&op.artifact);
+    let entry = state.registry.get_or_create(&id, &op.artifact);
     crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
-        &doc, &op.sheet, &op.addr, &op.value,
+        &entry.doc, &op.sheet, &op.addr, &op.value,
     );
-    dump_projection(&state.dump_dir, &op.artifact, &doc);
+    dump_projection(&state.dump_dir, &op.artifact, &entry.doc);
     StatusCode::NO_CONTENT
 }
 
@@ -152,11 +156,14 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use axum::http::Request;
+    use crate::crdt_documents::StorageConfig;
     use tower::ServiceExt;
 
     fn fresh_state() -> SpikeState {
+        let dir = std::env::temp_dir().join(format!("spike_test_{}", ulid::Ulid::new()));
+        let storage = StorageConfig::LocalFs { root: dir }.build().unwrap();
         SpikeState {
-            registry: Arc::new(DocRegistry::new()),
+            registry: Arc::new(DocRegistry::new(storage)),
             dump_dir: std::env::temp_dir().join("spike_test_dump"),
         }
     }

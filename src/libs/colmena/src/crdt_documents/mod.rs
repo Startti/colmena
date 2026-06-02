@@ -9,9 +9,11 @@ pub mod artifact_id;
 pub mod doc_registry;
 pub mod projection;
 pub mod server;
+pub mod snapshot_writer;
 pub mod storage;
 pub mod yjs_protocol;
 
 pub use artifact_id::ArtifactId;
-pub use doc_registry::DocRegistry;
+pub use doc_registry::{DocRegistry, RegisteredArtifact};
+pub use snapshot_writer::{spawn_writer, SnapshotHandle};
 pub use storage::{ArtifactMeta, ArtifactStorage, LocalFsStorage, StorageConfig, StorageError};

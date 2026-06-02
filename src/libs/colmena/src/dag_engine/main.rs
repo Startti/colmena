@@ -189,11 +189,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Commands::CrdtYws { host, port, dump_dir } => {
-            use colmena::crdt_documents::{server::{router, SpikeState}, DocRegistry};
+            use colmena::crdt_documents::{server::{router, SpikeState}, DocRegistry, StorageConfig};
             use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
+            let storage_root = PathBuf::from(&dump_dir).join("state");
+            let storage = StorageConfig::LocalFs { root: storage_root }.build()?;
             let state = SpikeState {
-                registry: Arc::new(DocRegistry::new()),
+                registry: Arc::new(DocRegistry::new(storage)),
                 dump_dir: PathBuf::from(&dump_dir),
             };
             let app = router(state);

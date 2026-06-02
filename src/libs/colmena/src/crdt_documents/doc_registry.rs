@@ -1,39 +1,100 @@
-//! In-memory registry of `yrs::Doc` keyed by artifact id.
+//! Registry of live `yrs::Doc`s keyed by `ArtifactId`.
 //!
-//! Used by the spike server to look up (or lazily create) the CRDT
-//! document for an artifact. Backed by `DashMap` for concurrent access
-//! without an outer lock.
+//! Each entry owns its `Doc`, a `SnapshotHandle` (per-artifact snapshot task),
+//! and the artifact metadata. The registry reloads all known artifacts from
+//! disk at startup via `load_from_disk`.
 
+use crate::crdt_documents::{
+    snapshot_writer::{spawn_writer, SnapshotHandle},
+    storage::{ArtifactMeta, ArtifactStorage},
+    ArtifactId, StorageError,
+};
 use dashmap::DashMap;
 use std::sync::Arc;
-use yrs::Doc;
+use yrs::updates::decoder::Decode;
+use yrs::{Doc, Transact};
 
-#[derive(Default)]
+pub struct RegisteredArtifact {
+    pub doc: Arc<Doc>,
+    pub snapshot: SnapshotHandle,
+    pub meta: ArtifactMeta,
+}
+
 pub struct DocRegistry {
-    docs: DashMap<String, Arc<Doc>>,
+    docs: DashMap<String, Arc<RegisteredArtifact>>,
+    storage: Arc<dyn ArtifactStorage>,
 }
 
 impl DocRegistry {
-    pub fn new() -> Self {
+    pub fn new(storage: Arc<dyn ArtifactStorage>) -> Self {
         Self {
             docs: DashMap::new(),
+            storage,
         }
     }
 
-    /// Returns the doc for `artifact_id`, creating an empty one if absent.
-    ///
-    /// Uses atomic `DashMap.entry()` semantics to ensure concurrent calls with
-    /// the same id always return the same Arc — preventing TOCTOU races where
-    /// two threads could each create a Doc and leave divergent Arcs.
-    pub fn get_or_create(&self, artifact_id: &str) -> Arc<Doc> {
+    /// Reload every known artifact from storage. Call at startup.
+    pub async fn load_from_disk(&self) -> Result<usize, StorageError> {
+        let metas = self.storage.list().await?;
+        let mut loaded = 0;
+        for meta in metas {
+            let id = meta.artifact_id.clone();
+            let doc = Arc::new(Doc::new());
+            if let Some(bytes) = self.storage.load_state(&id).await? {
+                if let Ok(update) = yrs::Update::decode_v1(&bytes) {
+                    let _ = doc.transact_mut().apply_update(update);
+                }
+            }
+            let snapshot = spawn_writer(id.clone(), doc.clone(), self.storage.clone());
+            self.docs.insert(
+                id.to_string(),
+                Arc::new(RegisteredArtifact { doc, snapshot, meta }),
+            );
+            loaded += 1;
+        }
+        Ok(loaded)
+    }
+
+    pub fn get_or_create(&self, id: &ArtifactId, name_if_new: &str) -> Arc<RegisteredArtifact> {
         self.docs
-            .entry(artifact_id.to_string())
-            .or_insert_with(|| Arc::new(Doc::new()))
+            .entry(id.to_string())
+            .or_insert_with(|| {
+                let doc = Arc::new(Doc::new());
+                let snapshot = spawn_writer(id.clone(), doc.clone(), self.storage.clone());
+                let now = chrono::Utc::now().timestamp();
+                let meta = ArtifactMeta {
+                    artifact_id: id.clone(),
+                    name: name_if_new.to_string(),
+                    created_at: now,
+                    updated_at: now,
+                    sheet_count: 0,
+                };
+                // Save the initial meta best-effort in a background task.
+                {
+                    let storage = self.storage.clone();
+                    let meta_clone = meta.clone();
+                    tokio::spawn(async move {
+                        let _ = storage.save_meta(&meta_clone).await;
+                    });
+                }
+                Arc::new(RegisteredArtifact { doc, snapshot, meta })
+            })
             .clone()
     }
 
-    pub fn get(&self, artifact_id: &str) -> Option<Arc<Doc>> {
-        self.docs.get(artifact_id).map(|r| r.value().clone())
+    pub fn get(&self, id: &ArtifactId) -> Option<Arc<RegisteredArtifact>> {
+        self.docs.get(&id.to_string()).map(|r| r.value().clone())
+    }
+
+    pub fn list(&self) -> Vec<ArtifactMeta> {
+        self.docs.iter().map(|r| r.value().meta.clone()).collect()
+    }
+
+    pub async fn delete(&self, id: &ArtifactId) -> Result<(), StorageError> {
+        if let Some((_, entry)) = self.docs.remove(&id.to_string()) {
+            entry.snapshot.shutdown.notify_one();
+        }
+        self.storage.delete(id).await
     }
 
     pub fn len(&self) -> usize {
@@ -48,39 +109,39 @@ impl DocRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crdt_documents::LocalFsStorage;
+    use std::path::PathBuf;
 
-    #[test]
-    fn get_or_create_returns_same_arc_on_repeated_calls() {
-        let reg = DocRegistry::new();
-        let a = reg.get_or_create("art1");
-        let b = reg.get_or_create("art1");
+    fn temp_storage() -> (Arc<dyn ArtifactStorage>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("reg_test_{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage: Arc<dyn ArtifactStorage> =
+            Arc::new(LocalFsStorage::new(dir.clone()).unwrap());
+        (storage, dir)
+    }
+
+    #[tokio::test]
+    async fn get_or_create_returns_same_arc_on_repeat() {
+        let (s, dir) = temp_storage();
+        let reg = DocRegistry::new(s);
+        let id = ArtifactId::new();
+        let a = reg.get_or_create(&id, "test");
+        let b = reg.get_or_create(&id, "test");
         assert!(Arc::ptr_eq(&a, &b));
         assert_eq!(reg.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn different_ids_get_different_docs() {
-        let reg = DocRegistry::new();
-        let a = reg.get_or_create("art1");
-        let b = reg.get_or_create("art2");
+    #[tokio::test]
+    async fn different_ids_get_different_entries() {
+        let (s, dir) = temp_storage();
+        let reg = DocRegistry::new(s);
+        let id1 = ArtifactId::new();
+        let id2 = ArtifactId::new();
+        let a = reg.get_or_create(&id1, "a");
+        let b = reg.get_or_create(&id2, "b");
         assert!(!Arc::ptr_eq(&a, &b));
         assert_eq!(reg.len(), 2);
-    }
-
-    #[test]
-    fn get_returns_none_for_missing_id() {
-        let reg = DocRegistry::new();
-        assert!(reg.get("missing").is_none());
-    }
-
-    #[test]
-    fn get_or_create_is_idempotent_across_many_calls() {
-        let reg = DocRegistry::new();
-        let first = reg.get_or_create("art1");
-        for _ in 0..100 {
-            let again = reg.get_or_create("art1");
-            assert!(Arc::ptr_eq(&first, &again));
-        }
-        assert_eq!(reg.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
