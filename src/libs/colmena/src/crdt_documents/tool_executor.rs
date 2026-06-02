@@ -287,6 +287,13 @@ pub fn apply_reorder_sheets(doc: &Doc, new_order: &[String]) -> bool {
     }
 
     // Phase 2: clear and re-insert in new order (write txn).
+    // NOTE: this function uses two separate transactions (read then write).
+    // Between them, a concurrent peer could apply an update via the server's
+    // WS handler — that peer's changes to the sheets array would be silently
+    // lost when the write phase clears+restores. Acceptable for v1 because
+    // tools 3-14 are invoked from a single DAG agent at a time. When multi-peer
+    // concurrent reorder becomes a requirement (Task 15+), wrap both phases in
+    // a per-document Mutex or fold the validation into a single transact_mut.
     let mut txn = doc.transact_mut();
     let wb = txn.get_or_insert_map("workbook");
     let sheets = match wb.get(&txn, "sheets") {
@@ -342,6 +349,13 @@ fn find_sheet_index_in_txn<T: yrs::ReadTxn>(txn: &T, sheet_id: &str) -> Option<u
 }
 
 /// Inline snapshot of a single sheet map into JSON (used by `apply_reorder_sheets`).
+///
+/// Local inline projection of a single sheet. Duplicates the logic that
+/// Task 4 will add as canonical `projection::project_sheet`. Once that
+/// helper lands, replace calls to this with `projection::project_sheet`
+/// and delete this function.
+///
+/// TODO(Task 4): replace with `crate::crdt_documents::projection::project_sheet`.
 fn snapshot_sheet_inline<T: yrs::ReadTxn>(txn: &T, sheet_map: &yrs::MapRef) -> serde_json::Value {
     let id = sheet_map
         .get(txn, "id")
