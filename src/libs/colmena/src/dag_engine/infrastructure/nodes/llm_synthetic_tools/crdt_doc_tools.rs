@@ -323,6 +323,63 @@ pub async fn dispatch_crdt_doc_add_sheet(
     }
 }
 
+// ── get_recent_changes ────────────────────────────────────────────────────────
+
+pub const TOOL_GET_RECENT_CHANGES: &str = "crdt_doc_get_recent_changes";
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct GetRecentChangesArgs {
+    /// Optional cursor — return only events after this id.
+    #[serde(default)]
+    pub since_event_id: Option<u64>,
+}
+
+/// Build the [`ToolDefinition`] for `crdt_doc_get_recent_changes`.
+pub fn tool_get_recent_changes() -> ToolDefinition {
+    super::build_synthetic_tool::<GetRecentChangesArgs>(
+        TOOL_GET_RECENT_CHANGES,
+        "Get a narration of recent peer changes to the document. \
+         Optionally filter by since_event_id. Returns \
+         { current_event_id, narration } where narration is a human-readable \
+         summary of all events since the cursor.",
+    )
+}
+
+/// Execute `get_recent_changes` against the runtime.
+pub fn execute_get_recent_changes(
+    ctx: &CrdtDocsContext,
+    args: GetRecentChangesArgs,
+) -> serde_json::Value {
+    let events = ctx
+        .runtime
+        .tracker
+        .since(&ctx.artifact_id, args.since_event_id);
+    let current_event_id = events.iter().map(|e| e.event_id).max();
+    let narration = if events.is_empty() {
+        "No changes since last check.".to_string()
+    } else {
+        events
+            .iter()
+            .map(|e| format!("- [{}] ({}): {}", e.event_id, e.origin, e.summary))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    serde_json::json!({
+        "current_event_id": current_event_id,
+        "narration": narration,
+    })
+}
+
+pub async fn dispatch_crdt_doc_get_recent_changes(
+    ctx: &CrdtDocsContext,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    match serde_json::from_value::<GetRecentChangesArgs>(args) {
+        Ok(a) => execute_get_recent_changes(ctx, a),
+        Err(e) => serde_json::json!({ "error": format!("invalid_args: {e}") }),
+    }
+}
+
 // ── all tools ─────────────────────────────────────────────────────────────────
 
 /// All CRDT document tool definitions.
@@ -333,6 +390,7 @@ pub fn build_all_crdt_doc_tools() -> Vec<ToolDefinition> {
         tool_set_cell(),
         tool_set_range(),
         tool_add_sheet(),
+        tool_get_recent_changes(),
     ]
 }
 
@@ -489,6 +547,36 @@ mod tests {
             },
         );
         assert_eq!(v["cells"].as_object().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn get_recent_changes_empty_then_populated() {
+        let (ctx, tmp) = fresh_ctx().await;
+
+        // Initially: no changes.
+        let v = execute_get_recent_changes(&ctx, GetRecentChangesArgs { since_event_id: None });
+        assert_eq!(v["narration"], "No changes since last check.");
+
+        // Record via a mutation.
+        let s = execute_add_sheet(&ctx, AddSheetArgs { name: "Sales".into() });
+        let _sheet_id = s["sheet_id"].as_str().unwrap();
+
+        let v = execute_get_recent_changes(&ctx, GetRecentChangesArgs { since_event_id: None });
+        let n = v["narration"].as_str().unwrap();
+        assert!(n.contains("added sheet"), "got: {n}");
+        assert!(n.contains("Sales"), "got: {n}");
+        let current = v["current_event_id"].as_u64().unwrap();
+
+        // since_event_id filters: passing current returns empty narration.
+        let v = execute_get_recent_changes(
+            &ctx,
+            GetRecentChangesArgs {
+                since_event_id: Some(current),
+            },
+        );
+        assert_eq!(v["narration"], "No changes since last check.");
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
