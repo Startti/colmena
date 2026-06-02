@@ -37,6 +37,7 @@ pub fn router(runtime: Arc<CrdtDocumentsRuntime>) -> Router {
         .route("/documents", post(create_handler).get(list_handler))
         .route("/documents/:id", delete(delete_handler))
         .route("/documents/:id/import", post(import_handler))
+        .route("/documents/:id/export.xlsx", get(export_handler))
         .with_state(runtime)
 }
 
@@ -222,6 +223,33 @@ async fn import_handler(
             .into_response()
         }
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+// ── Export handler ────────────────────────────────────────────────────────────
+
+async fn export_handler(
+    Path(id_str): Path<String>,
+    State(runtime): State<Arc<CrdtDocumentsRuntime>>,
+) -> Response {
+    let id_str = id_str.strip_suffix(".xlsx").unwrap_or(&id_str);
+    let id = match ArtifactId::from_str(id_str) {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid artifact id").into_response(),
+    };
+    let Some(entry) = runtime.registry.get(&id) else {
+        return (StatusCode::NOT_FOUND, "artifact not found").into_response();
+    };
+    match crate::crdt_documents::xlsx_export::export_doc_to_xlsx(&entry.doc) {
+        Ok(bytes) => (
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
