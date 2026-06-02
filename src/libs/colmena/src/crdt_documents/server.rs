@@ -14,6 +14,7 @@ use crate::crdt_documents::{
     projection, yjs_protocol, ArtifactId, CrdtDocumentsRuntime,
 };
 use axum::{
+    body::Bytes,
     extract::{ws::WebSocketUpgrade, Path, State},
     extract::Json as JsonExtract,
     http::{header, StatusCode},
@@ -35,6 +36,7 @@ pub fn router(runtime: Arc<CrdtDocumentsRuntime>) -> Router {
         .route("/documents/:id/projection.json", get(projection_handler))
         .route("/documents", post(create_handler).get(list_handler))
         .route("/documents/:id", delete(delete_handler))
+        .route("/documents/:id/import", post(import_handler))
         .with_state(runtime)
 }
 
@@ -187,6 +189,39 @@ async fn projection_handler(
     match runtime.registry.get(&id) {
         Some(entry) => Json(projection::project(&entry.doc)).into_response(),
         None => (StatusCode::NOT_FOUND, "artifact not found").into_response(),
+    }
+}
+
+// ── Import handler ────────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+struct ImportResponse {
+    sheets_imported: u32,
+    cells_imported: u64,
+}
+
+async fn import_handler(
+    Path(id_str): Path<String>,
+    State(runtime): State<Arc<CrdtDocumentsRuntime>>,
+    body: Bytes,
+) -> Response {
+    let id = match ArtifactId::from_str(&id_str) {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid artifact id").into_response(),
+    };
+    let entry = runtime.registry.get_or_create(&id, "(imported)");
+    match crate::crdt_documents::xlsx_import::import_xlsx_into_doc(&entry.doc, &body) {
+        Ok(stats) => {
+            // Tell the snapshot writer to flush soon.
+            entry.dirty.store(true, Ordering::Release);
+            entry.notify.notify_one();
+            Json(ImportResponse {
+                sheets_imported: stats.sheets_imported,
+                cells_imported: stats.cells_imported,
+            })
+            .into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
 }
 

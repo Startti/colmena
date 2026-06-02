@@ -12,6 +12,7 @@ pub mod runtime;
 pub mod server;
 pub mod snapshot_writer;
 pub mod storage;
+pub mod xlsx_import;
 pub mod yjs_protocol;
 
 pub use artifact_id::ArtifactId;

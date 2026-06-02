@@ -109,6 +109,7 @@ include_dir = "0.7"
 pdf-extract = "0.7"
 rust_xlsxwriter = "0.77"
 docx-rs = "0.4"
+calamine = "0.24"
 schemars = { version = "0.8", features = ["chrono", "uuid1", "preserve_order"] }
 ulid = "1"
 maud = "0.26"
@@ -142,7 +143,6 @@ serde_json = { version = "1.0", features = ["preserve_order"] }
 derivative = "2.2"
 tempfile = "3.10"
 serial_test = "3"
-calamine = "0.24"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower = { version = "0.5", features = ["util"] }
 
