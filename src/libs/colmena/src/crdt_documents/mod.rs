@@ -5,9 +5,11 @@
 //! removed in one commit after the GO/NO-GO verdict.
 
 pub mod agent_peer;
+pub mod artifact_id;
 pub mod doc_registry;
 pub mod projection;
 pub mod server;
 pub mod yjs_protocol;
 
+pub use artifact_id::ArtifactId;
 pub use doc_registry::DocRegistry;
