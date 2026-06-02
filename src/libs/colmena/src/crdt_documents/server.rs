@@ -166,13 +166,16 @@ async fn ws_handler(
                 .expect("ws thread rt");
             rt.block_on(async move {
                 let post_update = move |update_bytes: &[u8]| {
-                    // TODO(Task 18 — narration): decode update_bytes for a
-                    // human-readable per-cell diff summary instead of the
-                    // coarse placeholder below.
-                    let _ = update_bytes;
                     dirty.store(true, Ordering::Release);
                     notify.notify_one();
-                    tracker.record(&id_for_cb, "peer:browser", "ws update");
+                    // v1: coarse summary. narrate() would need the pre-update doc state to
+                    // produce a per-cell diff; handle_socket currently calls post_update
+                    // AFTER apply_update so we only have the post-state here. v1.1 should
+                    // either capture state before apply in handle_socket and pass it in,
+                    // or refactor handle_socket to invoke post_update with a pre-state
+                    // clone.
+                    let summary = format!("peer update ({} bytes)", update_bytes.len());
+                    tracker.record(&id_for_cb, "peer:browser", &summary);
                 };
                 if let Err(e) =
                     yjs_protocol::handle_socket(socket, doc, Some(post_update)).await
