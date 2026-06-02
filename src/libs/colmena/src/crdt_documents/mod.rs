@@ -4,7 +4,7 @@
 //! This module is SPIKE code. It is intentionally isolated so it can be
 //! removed in one commit after the GO/NO-GO verdict.
 
-pub mod agent_peer;
+pub mod tool_executor;
 pub mod artifact_id;
 pub mod doc_registry;
 pub mod projection;

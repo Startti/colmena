@@ -17,7 +17,7 @@
 //! framing), so clients built against any yrs generation interoperate.
 //!
 //! Spec §4.1: this lets any Yjs client (Univer's `y-websocket` provider
-//! or our own Rust `agent_peer`) sync with our server.
+//! or our own Rust `tool_executor`) sync with our server.
 
 use anyhow::{anyhow, Result};
 use axum::extract::ws::{Message, WebSocket};
@@ -42,7 +42,7 @@ const MSG_QUERY_AWARENESS: u8 = 3;
 
 /// Encode a sync_step1 message: `[MSG_SYNC][MSG_SYNC_STEP_1][sv_bytes]`.
 ///
-/// Exposed as `pub(super)` so `agent_peer` can send client-side step1 frames
+/// Exposed as `pub(super)` so `tool_executor` can send client-side step1 frames
 /// during the full sync handshake.
 pub(super) fn encode_sync_step1(sv: &StateVector) -> Vec<u8> {
     let mut enc = EncoderV1::new();
@@ -54,7 +54,7 @@ pub(super) fn encode_sync_step1(sv: &StateVector) -> Vec<u8> {
 
 /// Encode a sync_step2 message: `[MSG_SYNC][MSG_SYNC_STEP_2][update_bytes]`.
 ///
-/// Exposed as `pub(super)` so `agent_peer` can build client-side frames
+/// Exposed as `pub(super)` so `tool_executor` can build client-side frames
 /// without duplicating the framing logic.
 pub(super) fn encode_sync_step2(update: &[u8]) -> Vec<u8> {
     let mut enc = EncoderV1::new();
@@ -68,7 +68,7 @@ pub(super) fn encode_sync_step2(update: &[u8]) -> Vec<u8> {
 /// bytes (already unwrapped from the length-prefix).
 ///
 /// Returns `None` if `bytes` is not a well-formed step1 frame.
-/// Exposed as `pub(super)` for use by `agent_peer`.
+/// Exposed as `pub(super)` for use by `tool_executor`.
 pub(super) fn decode_sync_step1_sv(bytes: &[u8]) -> Option<Vec<u8>> {
     use yrs::encoding::read::{Cursor, Read};
     let mut cur = Cursor::new(bytes);
@@ -88,7 +88,7 @@ pub(super) fn decode_sync_step1_sv(bytes: &[u8]) -> Option<Vec<u8>> {
 ///
 /// Matches both `MSG_SYNC_STEP_2` and `MSG_SYNC_UPDATE` sub-tags, since both
 /// carry an update payload. Returns `None` for non-matching frames.
-/// Exposed as `pub(super)` so `agent_peer` can wait for the server's step2
+/// Exposed as `pub(super)` so `tool_executor` can wait for the server's step2
 /// during the full sync handshake.
 pub(super) fn decode_sync_step2_update(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(bytes);

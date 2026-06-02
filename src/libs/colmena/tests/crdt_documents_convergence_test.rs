@@ -2,7 +2,7 @@
 //! converge on the same `yrs::Doc` state.
 
 use colmena::crdt_documents::{
-    agent_peer::{apply_set_cell_in_proc, apply_set_cell_via_ws},
+    tool_executor::{apply_set_cell_in_proc, apply_set_cell_via_ws},
     doc_registry::DocRegistry,
     server::{router, SpikeState},
 };

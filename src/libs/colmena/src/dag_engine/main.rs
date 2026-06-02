@@ -210,7 +210,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 addr,
                 value,
             } => {
-                use colmena::crdt_documents::agent_peer::apply_set_cell_via_ws;
+                use colmena::crdt_documents::tool_executor::apply_set_cell_via_ws;
                 let json_val = serde_json::Value::String(value);
                 apply_set_cell_via_ws(&url, &sheet, &addr, &json_val).await?;
                 println!("✓ ws mutation applied");
