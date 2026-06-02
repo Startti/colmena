@@ -89,6 +89,30 @@ pub(super) fn sanitize_schema_for_llm_providers(value: &mut serde_json::Value) {
                     }
                 }
             }
+
+            // Schema-position keys whose children are themselves schemas —
+            // a raw `true` there (schemars emits this for opaque types like
+            // `serde_json::Value` used as a field type) is rejected by
+            // Gemini's proto Schema. Replace with `{}` so the field accepts
+            // any value.
+            for key in ["properties", "patternProperties", "definitions", "$defs"] {
+                if let Some(Value::Object(child_map)) = map.get_mut(key) {
+                    for (_, v) in child_map.iter_mut() {
+                        if v.is_boolean() {
+                            *v = Value::Object(serde_json::Map::new());
+                        }
+                    }
+                }
+            }
+            for key in ["anyOf", "oneOf", "allOf", "prefixItems"] {
+                if let Some(Value::Array(arr)) = map.get_mut(key) {
+                    for v in arr.iter_mut() {
+                        if v.is_boolean() {
+                            *v = Value::Object(serde_json::Map::new());
+                        }
+                    }
+                }
+            }
             let is_object_schema = map
                 .get("type")
                 .and_then(|t| t.as_str())
@@ -149,6 +173,29 @@ mod sanitize_tests {
         let mut v = json!({"type": ["string", "number"]});
         sanitize_schema_for_llm_providers(&mut v);
         assert_eq!(v["type"], json!(["string", "number"]));
+    }
+
+    #[test]
+    fn replaces_boolean_schema_in_properties() {
+        // schemars emits `true` for `serde_json::Value` fields — the
+        // SetCellArgs `value` field reproduces this.
+        let mut v = json!({
+            "type": "object",
+            "properties": {
+                "value": true
+            }
+        });
+        sanitize_schema_for_llm_providers(&mut v);
+        assert_eq!(v["properties"]["value"], json!({}));
+    }
+
+    #[test]
+    fn replaces_boolean_schema_in_anyof() {
+        let mut v = json!({
+            "anyOf": [{"type": "string"}, true]
+        });
+        sanitize_schema_for_llm_providers(&mut v);
+        assert_eq!(v["anyOf"][1], json!({}));
     }
 }
 
