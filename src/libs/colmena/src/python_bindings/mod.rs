@@ -1,3 +1,5 @@
+mod crdt_documents;
+
 use crate::llm::domain::{LlmError, LlmMessage, MessageRole, ProviderKind};
 use crate::shared::infrastructure::{ConfigResolver, ServiceContainerFactory};
 use futures::StreamExt;
@@ -503,6 +505,9 @@ fn colmena(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(default_registry, m)?)?;
     m.add_class::<Registry>()?;
     m.add("DagException", _py.get_type_bound::<DagException>())?;
+
+    // CRDT documents bindings (v1)
+    crdt_documents::register(m)?;
 
     Ok(())
 }
