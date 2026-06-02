@@ -72,6 +72,9 @@ async fn ws_handler(
         Ok(id) => id,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid artifact id").into_response(),
     };
+    // Auto-create on first WS hit: convenient for the demo HTML (user pastes a
+    // new URL → doc appears). Task 9 (POST /documents) will be the canonical
+    // create path; this auto-create remains the demo-ergonomic shortcut.
     let entry = runtime.registry.get_or_create(&id, "(untitled)");
     let doc = entry.doc.clone();
     let dirty = entry.dirty.clone();
@@ -87,7 +90,11 @@ async fn ws_handler(
                 .build()
                 .expect("ws thread rt");
             rt.block_on(async move {
-                let post_update = move |_update_bytes: &[u8]| {
+                let post_update = move |update_bytes: &[u8]| {
+                    // TODO(Task 17 — ChangeTracker): pass update_bytes to
+                    // runtime.tracker.record(&id, "peer:browser", narrate(...)) so the
+                    // LLM's get_recent_changes tool sees per-update summaries.
+                    let _ = update_bytes; // silence unused-variable until Task 17
                     dirty.store(true, Ordering::Release);
                     notify.notify_one();
                 };
