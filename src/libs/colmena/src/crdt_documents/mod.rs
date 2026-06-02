@@ -9,7 +9,9 @@ pub mod artifact_id;
 pub mod doc_registry;
 pub mod projection;
 pub mod server;
+pub mod storage;
 pub mod yjs_protocol;
 
 pub use artifact_id::ArtifactId;
 pub use doc_registry::DocRegistry;
+pub use storage::{ArtifactMeta, ArtifactStorage, LocalFsStorage, StorageConfig, StorageError};
