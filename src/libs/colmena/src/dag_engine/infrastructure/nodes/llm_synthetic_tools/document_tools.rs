@@ -19,7 +19,7 @@ use crate::documents::application::rollback::{RollbackInput, RollbackUseCase};
 use crate::documents::domain::ids::{ArtifactId, ArtifactKind, SessionId, VersionId};
 use crate::documents::domain::patch::{Patch, PatchSource};
 use crate::documents::domain::SessionArtifactIndex;
-use crate::llm::domain::tools::{ToolDefinition, ToolParameters};
+use crate::llm::domain::tools::ToolDefinition;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
@@ -135,69 +135,8 @@ pub struct DocumentRollbackArgs {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct DocumentListMyArtifactsArgs {}
 
-/// Generate a `crate::llm::domain::tools::ToolDefinition` whose JSON Schema is
-/// the schemars-derived schema (carried via `input_schema_override`). The
-/// structured `parameters` field is left empty because LLM providers consume
-/// the override verbatim when present.
-fn build_synthetic_tool<T: JsonSchema>(name: &str, description: &str) -> ToolDefinition {
-    let schema = schemars::schema_for!(T);
-    let mut schema_json =
-        serde_json::to_value(schema).expect("schemars schema must serialize to JSON Value");
-    sanitize_schema_for_llm_providers(&mut schema_json);
-    ToolDefinition {
-        name: name.to_string(),
-        description: description.to_string(),
-        parameters: ToolParameters::new(),
-        input_schema_override: Some(schema_json),
-    }
-}
-
-/// Walk a JSON Schema and normalize shapes that some LLM providers (notably
-/// OpenAI) reject:
-///
-/// 1. Boolean schemas at `items` / `additionalProperties` positions are
-///    replaced with `{}` (schemars emits `true` for opaque types like
-///    `serde_json::Value`, but OpenAI requires an object schema there).
-/// 2. Any `{"type": "object"}` without a `properties` field gets an empty
-///    `properties: {}` injected (OpenAI requires `properties` to be present
-///    even on schemas that take no parameters).
-fn sanitize_schema_for_llm_providers(value: &mut serde_json::Value) {
-    use serde_json::Value;
-    match value {
-        Value::Object(map) => {
-            for key in ["items", "additionalProperties"] {
-                if let Some(v) = map.get_mut(key) {
-                    if v.is_boolean() {
-                        *v = Value::Object(serde_json::Map::new());
-                    }
-                }
-            }
-            let is_object_schema = map
-                .get("type")
-                .and_then(|t| t.as_str())
-                .map(|t| t == "object")
-                .unwrap_or(false);
-            if is_object_schema && !map.contains_key("properties") {
-                map.insert(
-                    "properties".to_string(),
-                    Value::Object(serde_json::Map::new()),
-                );
-            }
-            for (_, v) in map.iter_mut() {
-                sanitize_schema_for_llm_providers(v);
-            }
-        }
-        Value::Array(arr) => {
-            for v in arr.iter_mut() {
-                sanitize_schema_for_llm_providers(v);
-            }
-        }
-        _ => {}
-    }
-}
-
 pub fn build_document_create_tool() -> ToolDefinition {
-    build_synthetic_tool::<DocumentCreateArgs>(
+    super::build_synthetic_tool::<DocumentCreateArgs>(
         DOCUMENT_CREATE_TOOL,
         "Create a new document artifact (Excel or Word). Returns the \
          artifact_id and initial version. Use for any new document task.",
@@ -205,7 +144,7 @@ pub fn build_document_create_tool() -> ToolDefinition {
 }
 
 pub fn build_document_apply_patch_tool() -> ToolDefinition {
-    build_synthetic_tool::<DocumentApplyPatchArgs>(
+    super::build_synthetic_tool::<DocumentApplyPatchArgs>(
         DOCUMENT_APPLY_PATCH_TOOL,
         "Apply a patch (list of ops) to an existing document atomically. \
          If the base_version is stale, the server auto-rebases when ops \
@@ -215,7 +154,7 @@ pub fn build_document_apply_patch_tool() -> ToolDefinition {
 }
 
 pub fn build_document_read_tool() -> ToolDefinition {
-    build_synthetic_tool::<DocumentReadArgs>(
+    super::build_synthetic_tool::<DocumentReadArgs>(
         DOCUMENT_READ_TOOL,
         "Read the IR of a document at a given version (or current). \
          Use `slice` to fetch only specific sheets, blocks or cell ranges \
@@ -224,7 +163,7 @@ pub fn build_document_read_tool() -> ToolDefinition {
 }
 
 pub fn build_document_get_head_tool() -> ToolDefinition {
-    build_synthetic_tool::<DocumentGetHeadArgs>(
+    super::build_synthetic_tool::<DocumentGetHeadArgs>(
         DOCUMENT_GET_HEAD_TOOL,
         "Get the current HEAD of an artifact. Optionally pass \
          `since_version` to receive a natural-language narration of \
@@ -234,7 +173,7 @@ pub fn build_document_get_head_tool() -> ToolDefinition {
 }
 
 pub fn build_document_list_versions_tool() -> ToolDefinition {
-    build_synthetic_tool::<DocumentListVersionsArgs>(
+    super::build_synthetic_tool::<DocumentListVersionsArgs>(
         DOCUMENT_LIST_VERSIONS_TOOL,
         "List the versions retained for an artifact, most recent \
          first, with timestamps, source (agent/user) and per-version \
@@ -243,7 +182,7 @@ pub fn build_document_list_versions_tool() -> ToolDefinition {
 }
 
 pub fn build_document_rollback_tool() -> ToolDefinition {
-    build_synthetic_tool::<DocumentRollbackArgs>(
+    super::build_synthetic_tool::<DocumentRollbackArgs>(
         DOCUMENT_ROLLBACK_TOOL,
         "Roll back an artifact to a previous version. The target's \
          IR is copied to a new HEAD; full history is preserved (this \
@@ -252,7 +191,7 @@ pub fn build_document_rollback_tool() -> ToolDefinition {
 }
 
 pub fn build_document_list_my_artifacts_tool() -> ToolDefinition {
-    build_synthetic_tool::<DocumentListMyArtifactsArgs>(
+    super::build_synthetic_tool::<DocumentListMyArtifactsArgs>(
         DOCUMENT_LIST_MY_ARTIFACTS_TOOL,
         "List every artifact that belongs to the current session. \
          Returns id, kind, label, current version and last update for \
