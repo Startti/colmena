@@ -181,8 +181,18 @@
     // log below will surface the actual id in DevTools so we can adjust.
     const INSERT_SHEET_MUTATION_ID = "sheet.mutation.insert-sheet";
     const REMOVE_SHEET_MUTATION_ID = "sheet.mutation.remove-sheet";
+    // Univer 0.2.x ships rename as either `set-worksheet-name` or
+    // `set-worksheet-name-mutation` depending on patch level — match
+    // both via prefix in the outbound handler.
+    const SET_WORKSHEET_NAME_MUTATION_PREFIX =
+      "sheet.mutation.set-worksheet-name";
+    // Inbound dispatch needs ONE concrete id. We try the suffixed
+    // form first and fall back to the bare form if Univer doesn't
+    // know it (see mountSheetObserver).
     const SET_WORKSHEET_NAME_MUTATION_ID =
       "sheet.mutation.set-worksheet-name-mutation";
+    const SET_WORKSHEET_NAME_MUTATION_FALLBACK =
+      "sheet.mutation.set-worksheet-name";
 
     // -------------------------------------------------------------------------
     // Helper: zero-based column index → A1-style column letter(s)
@@ -370,13 +380,29 @@
             const unitId = workbook.getUnitId();
             applyingFromYDoc = true;
             try {
-              commandService.syncExecuteCommand(
+              let dispatched = false;
+              const candidates = [
                 SET_WORKSHEET_NAME_MUTATION_ID,
-                { unitId, subUnitId: sheetId, name: newName });
-              console.log("[yjs -> univer] sheet renamed",
-                { id: sheetId, name: newName });
-            } catch (e) {
-              console.error("[yjs -> univer] rename dispatch failed", e);
+                SET_WORKSHEET_NAME_MUTATION_FALLBACK,
+              ];
+              for (const mid of candidates) {
+                try {
+                  commandService.syncExecuteCommand(mid, {
+                    unitId, subUnitId: sheetId, name: newName,
+                  });
+                  console.log("[yjs -> univer] sheet renamed",
+                    { id: sheetId, name: newName, via: mid });
+                  dispatched = true;
+                  break;
+                } catch (e) {
+                  // try next candidate
+                }
+              }
+              if (!dispatched) {
+                console.error("[yjs -> univer] rename dispatch failed — " +
+                  "no candidate id accepted",
+                  { tried: candidates, sheetId, newName });
+              }
             } finally {
               applyingFromYDoc = false;
             }
@@ -617,11 +643,20 @@
           return;
         }
 
-        if (cmd.id === SET_WORKSHEET_NAME_MUTATION_ID) {
+        if (typeof cmd.id === "string" &&
+            cmd.id.startsWith(SET_WORKSHEET_NAME_MUTATION_PREFIX)) {
           const p = cmd.params || {};
           const subUnitId = p.subUnitId;
-          const name = p.name;
-          if (!subUnitId || typeof name !== "string") return;
+          // Univer's rename mutation has been seen with the new name under
+          // `name` or `sheetName` depending on patch level — accept both.
+          const name = typeof p.name === "string"
+            ? p.name
+            : (typeof p.sheetName === "string" ? p.sheetName : null);
+          if (!subUnitId || !name) {
+            console.warn("[univer -> yjs] rename missing subUnitId/name",
+              { id: cmd.id, params: p });
+            return;
+          }
           for (let i = 0; i < sheetsArr.length; i++) {
             const s = sheetsArr.get(i);
             if (s.get("id") === subUnitId) {
@@ -629,7 +664,7 @@
               const target = allSheets.find((e) => e.id === subUnitId);
               if (target) target.name = name;
               console.log("[univer -> yjs] sheet renamed",
-                { subUnitId, name });
+                { id: cmd.id, subUnitId, name });
               return;
             }
           }
