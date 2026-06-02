@@ -181,17 +181,13 @@
     // log below will surface the actual id in DevTools so we can adjust.
     const INSERT_SHEET_MUTATION_ID = "sheet.mutation.insert-sheet";
     const REMOVE_SHEET_MUTATION_ID = "sheet.mutation.remove-sheet";
-    // Univer 0.2.x ships rename as either `set-worksheet-name` or
-    // `set-worksheet-name-mutation` depending on patch level — match
-    // both via prefix in the outbound handler.
-    const SET_WORKSHEET_NAME_MUTATION_PREFIX =
-      "sheet.mutation.set-worksheet-name";
-    // Inbound dispatch needs ONE concrete id. We try the suffixed
-    // form first and fall back to the bare form if Univer doesn't
-    // know it (see mountSheetObserver).
+    // Confirmed via browser smoke (Univer 0.2.10): the bare id is the
+    // one CommandService recognises. We keep the prefix for the
+    // outbound matcher so any future patch that renames to
+    // `-mutation` still gets caught.
     const SET_WORKSHEET_NAME_MUTATION_ID =
-      "sheet.mutation.set-worksheet-name-mutation";
-    const SET_WORKSHEET_NAME_MUTATION_FALLBACK =
+      "sheet.mutation.set-worksheet-name";
+    const SET_WORKSHEET_NAME_MUTATION_PREFIX =
       "sheet.mutation.set-worksheet-name";
 
     // -------------------------------------------------------------------------
@@ -380,29 +376,14 @@
             const unitId = workbook.getUnitId();
             applyingFromYDoc = true;
             try {
-              let dispatched = false;
-              const candidates = [
+              commandService.syncExecuteCommand(
                 SET_WORKSHEET_NAME_MUTATION_ID,
-                SET_WORKSHEET_NAME_MUTATION_FALLBACK,
-              ];
-              for (const mid of candidates) {
-                try {
-                  commandService.syncExecuteCommand(mid, {
-                    unitId, subUnitId: sheetId, name: newName,
-                  });
-                  console.log("[yjs -> univer] sheet renamed",
-                    { id: sheetId, name: newName, via: mid });
-                  dispatched = true;
-                  break;
-                } catch (e) {
-                  // try next candidate
-                }
-              }
-              if (!dispatched) {
-                console.error("[yjs -> univer] rename dispatch failed — " +
-                  "no candidate id accepted",
-                  { tried: candidates, sheetId, newName });
-              }
+                { unitId, subUnitId: sheetId, name: newName });
+              console.log("[yjs -> univer] sheet renamed",
+                { id: sheetId, name: newName });
+            } catch (e) {
+              console.error("[yjs -> univer] rename dispatch failed",
+                e, { sheetId, newName });
             } finally {
               applyingFromYDoc = false;
             }
