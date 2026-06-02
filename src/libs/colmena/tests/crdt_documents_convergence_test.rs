@@ -1,7 +1,7 @@
 //! R1.1 — two WS clients (no browser) hitting the spike server must
 //! converge on the same `yrs::Doc` state.
 
-use colmena::dag_engine::spike::{
+use colmena::crdt_documents::{
     agent_peer::{apply_set_cell_in_proc, apply_set_cell_via_ws},
     doc_registry::DocRegistry,
     server::{router, SpikeState},
@@ -52,7 +52,7 @@ async fn two_ws_agents_and_one_inproc_converge() {
     // Let the WS round-trips settle.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let projection = colmena::dag_engine::spike::projection::project(&doc);
+    let projection = colmena::crdt_documents::projection::project(&doc);
     let cells = &projection["sheets"][0]["cells"];
     assert_eq!(cells["A1"], serde_json::Value::String("from-A".into()));
     assert_eq!(cells["B1"], serde_json::json!(42.0));

@@ -6,7 +6,7 @@
 //!   GET  /projection/:id.json      — current Yrs → IR projection
 //!   POST /spike/agent-op           — in-proc mutation (sanity-check route)
 
-use crate::dag_engine::spike::{doc_registry::DocRegistry, projection, yjs_protocol};
+use crate::crdt_documents::{doc_registry::DocRegistry, projection, yjs_protocol};
 use axum::{
     extract::{ws::WebSocketUpgrade, Path, State},
     http::{header, StatusCode},
@@ -129,7 +129,7 @@ async fn agent_op_handler(
     Json(op): Json<AgentOp>,
 ) -> impl IntoResponse {
     let doc = state.registry.get_or_create(&op.artifact);
-    crate::dag_engine::spike::agent_peer::apply_set_cell_in_proc(
+    crate::crdt_documents::agent_peer::apply_set_cell_in_proc(
         &doc, &op.sheet, &op.addr, &op.value,
     );
     dump_projection(&state.dump_dir, &op.artifact, &doc);

@@ -77,7 +77,7 @@ pub async fn apply_set_cell_via_ws(
     addr: &str,
     value: &Value,
 ) -> Result<()> {
-    use crate::dag_engine::spike::yjs_protocol::{
+    use crate::crdt_documents::yjs_protocol::{
         decode_sync_step1_sv, decode_sync_step2_update, encode_sync_step1, encode_sync_step2,
     };
     use futures::{SinkExt, StreamExt};
@@ -162,7 +162,7 @@ pub async fn apply_set_cell_via_ws(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag_engine::spike::projection;
+    use crate::crdt_documents::projection;
 
     #[test]
     fn set_cell_then_project_reflects_value() {

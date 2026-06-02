@@ -1,3 +1,4 @@
+pub mod crdt_documents;
 pub mod dag_engine;
 pub mod documents;
 pub mod llm;

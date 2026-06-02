@@ -10,7 +10,7 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
-enum SpikeAgentMode {
+enum CrdtAgentMode {
     /// Connect to ws://.../yjs/<artifact> and apply a set_cell mutation.
     Ws {
         #[arg(long)]
@@ -22,7 +22,7 @@ enum SpikeAgentMode {
         #[arg(long)]
         value: String,
     },
-    /// POST to http://.../spike/agent-op (in-proc mutation via HTTP).
+    /// POST to http://.../crdt/agent-op (in-proc mutation via HTTP).
     Inproc {
         #[arg(long)]
         base_url: String,
@@ -63,21 +63,21 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         verbose: bool,
     },
-    /// Run the documents CRDT spike server (Phase 0).
-    SpikeYws {
+    /// Run the documents CRDT server.
+    CrdtYws {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
         #[arg(long, default_value_t = 8080)]
         port: u16,
         /// Directory where projection dumps are written.
-        #[arg(long, default_value = "/tmp/spike")]
+        #[arg(long, default_value = "/tmp/crdt")]
         dump_dir: String,
     },
-    /// One-shot agent peer for the spike. Mutates an artifact via WS
+    /// One-shot agent peer for the CRDT server. Mutates an artifact via WS
     /// (R1 path) or in-proc HTTP POST (sanity-check path).
-    SpikeAgent {
+    CrdtAgent {
         #[command(subcommand)]
-        mode: SpikeAgentMode,
+        mode: CrdtAgentMode,
     },
 }
 
@@ -188,8 +188,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             api::serve_dag(file_path, host, port).await?;
         }
 
-        Commands::SpikeYws { host, port, dump_dir } => {
-            use colmena::dag_engine::spike::{server::{router, SpikeState}, DocRegistry};
+        Commands::CrdtYws { host, port, dump_dir } => {
+            use colmena::crdt_documents::{server::{router, SpikeState}, DocRegistry};
             use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
             let state = SpikeState {
@@ -199,23 +199,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let app = router(state);
             let addr: SocketAddr = format!("{host}:{port}").parse()?;
             let listener = tokio::net::TcpListener::bind(addr).await?;
-            println!("🧪 spike-yws listening on http://{addr}  (dumps → {dump_dir})");
+            println!("🗂️ crdt-yws listening on http://{addr}  (dumps → {dump_dir})");
             axum::serve(listener, app).await?;
         }
 
-        Commands::SpikeAgent { mode } => match mode {
-            SpikeAgentMode::Ws {
+        Commands::CrdtAgent { mode } => match mode {
+            CrdtAgentMode::Ws {
                 url,
                 sheet,
                 addr,
                 value,
             } => {
-                use colmena::dag_engine::spike::agent_peer::apply_set_cell_via_ws;
+                use colmena::crdt_documents::agent_peer::apply_set_cell_via_ws;
                 let json_val = serde_json::Value::String(value);
                 apply_set_cell_via_ws(&url, &sheet, &addr, &json_val).await?;
                 println!("✓ ws mutation applied");
             }
-            SpikeAgentMode::Inproc {
+            CrdtAgentMode::Inproc {
                 base_url,
                 artifact,
                 sheet,
@@ -223,7 +223,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 value,
             } => {
                 let resp = reqwest::Client::new()
-                    .post(format!("{base_url}/spike/agent-op"))
+                    .post(format!("{base_url}/crdt/agent-op"))
                     .json(&serde_json::json!({
                         "artifact": artifact,
                         "sheet": sheet,
