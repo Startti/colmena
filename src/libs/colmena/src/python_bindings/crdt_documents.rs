@@ -98,6 +98,106 @@ fn read_sheet(py: Python<'_>, artifact_id: &str, sheet_id: &str) -> PyResult<PyO
     Ok(d.into_py(py))
 }
 
+#[pyfunction]
+#[pyo3(signature = (artifact_id, name))]
+#[allow(deprecated)]
+fn add_sheet(artifact_id: &str, name: &str) -> PyResult<String> {
+    let rt = runtime()?;
+    let id = parse_id(artifact_id)?;
+    let entry = rt.registry.get_or_create(&id, "(from python)");
+    let sheet_id = crate::crdt_documents::tool_executor::apply_add_sheet(&entry.doc, name);
+    entry.mark_dirty();
+    rt.tracker.record(&id, "python", &format!("added sheet '{name}'"));
+    Ok(sheet_id)
+}
+
+/// Write a sheet given column headers + rows of cell values. `mode` controls
+/// whether existing cells are replaced. The Python wrapper in
+/// `python/colmena_documents/__init__.py` provides the pandas DataFrame
+/// ergonomics on top.
+#[pyfunction]
+#[pyo3(signature = (artifact_id, sheet_id, columns, rows, mode = "replace"))]
+#[allow(deprecated)]
+fn write_sheet(
+    py: Python<'_>,
+    artifact_id: &str,
+    sheet_id: &str,
+    columns: Vec<String>,
+    rows: Vec<Vec<PyObject>>,
+    mode: &str,
+) -> PyResult<()> {
+    let rt = runtime()?;
+    let id = parse_id(artifact_id)?;
+    let Some(entry) = rt.registry.get(&id) else {
+        return Err(pyo3::exceptions::PyKeyError::new_err("artifact not found"));
+    };
+    if !matches!(mode, "replace" | "append") {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "mode must be 'replace' or 'append'",
+        ));
+    }
+
+    // Write headers to row 1.
+    for (col_idx, col_name) in columns.iter().enumerate() {
+        let addr = format!("{}{}", col_letter(col_idx as u32), 1);
+        crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
+            &entry.doc,
+            sheet_id,
+            &addr,
+            &serde_json::Value::String(col_name.clone()),
+        );
+    }
+    // Write data starting row 2.
+    for (row_idx, row) in rows.iter().enumerate() {
+        for (col_idx, py_val) in row.iter().enumerate() {
+            let addr = format!("{}{}", col_letter(col_idx as u32), row_idx + 2);
+            let value = pyobj_to_json(py, py_val)?;
+            crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
+                &entry.doc,
+                sheet_id,
+                &addr,
+                &value,
+            );
+        }
+    }
+    entry.mark_dirty();
+    rt.tracker.record(
+        &id,
+        "python",
+        &format!("wrote {} rows to {sheet_id}", rows.len()),
+    );
+    Ok(())
+}
+
+fn col_letter(mut col: u32) -> String {
+    let mut s = String::new();
+    loop {
+        s.insert(0, (b'A' + (col % 26) as u8) as char);
+        if col < 26 {
+            break;
+        }
+        col = col / 26 - 1;
+    }
+    s
+}
+
+fn pyobj_to_json(py: Python<'_>, obj: &PyObject) -> PyResult<serde_json::Value> {
+    let bound = obj.bind(py);
+    if bound.is_none() {
+        return Ok(serde_json::Value::Null);
+    }
+    if let Ok(s) = bound.extract::<&str>() {
+        return Ok(serde_json::Value::String(s.to_string()));
+    }
+    if let Ok(b) = bound.extract::<bool>() {
+        return Ok(serde_json::Value::Bool(b));
+    }
+    if let Ok(n) = bound.extract::<f64>() {
+        return Ok(serde_json::json!(n));
+    }
+    Ok(serde_json::Value::String(format!("{}", bound)))
+}
+
 /// Register the `documents` submodule on the parent `colmena` module.
 #[allow(deprecated)]
 pub fn register(parent: &PyModule) -> PyResult<()> {
@@ -105,6 +205,8 @@ pub fn register(parent: &PyModule) -> PyResult<()> {
     let m = PyModule::new(py, "documents")?;
     m.add_function(wrap_pyfunction!(list_sheets, m)?)?;
     m.add_function(wrap_pyfunction!(read_sheet, m)?)?;
+    m.add_function(wrap_pyfunction!(add_sheet, m)?)?;
+    m.add_function(wrap_pyfunction!(write_sheet, m)?)?;
     parent.add_submodule(m)?;
     Ok(())
 }
