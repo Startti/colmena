@@ -62,11 +62,211 @@ pub fn execute_list_sheets(ctx: &CrdtDocsContext) -> serde_json::Value {
     serde_json::json!({ "sheets": sheets })
 }
 
+// ── read ──────────────────────────────────────────────────────────────────────
+
+pub const TOOL_READ: &str = "crdt_doc_read";
+pub const TOOL_SET_CELL: &str = "crdt_doc_set_cell";
+pub const TOOL_SET_RANGE: &str = "crdt_doc_set_range";
+pub const TOOL_ADD_SHEET: &str = "crdt_doc_add_sheet";
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReadArgs {
+    pub sheet_id: String,
+    /// Optional A1-style range, e.g. "A1:D10". Omit for all cells.
+    #[serde(default)]
+    pub range: Option<String>,
+}
+
+/// Build the [`ToolDefinition`] for `crdt_doc_read`.
+pub fn tool_read() -> ToolDefinition {
+    super::build_synthetic_tool::<ReadArgs>(
+        TOOL_READ,
+        "Read cell values from a sheet. Returns a flat map of A1 addresses \
+         to values. Optionally restricts to a range.",
+    )
+}
+
+/// Execute `read` against the runtime.
+pub fn execute_read(ctx: &CrdtDocsContext, args: ReadArgs) -> serde_json::Value {
+    let Some(entry) = ctx.runtime.registry.get(&ctx.artifact_id) else {
+        return serde_json::json!({ "error": "artifact_not_found" });
+    };
+    let proj = crate::crdt_documents::projection::project(&entry.doc);
+    let sheets = proj["sheets"].as_array().cloned().unwrap_or_default();
+    let Some(sheet) = sheets
+        .into_iter()
+        .find(|s| s["id"].as_str() == Some(args.sheet_id.as_str()))
+    else {
+        return serde_json::json!({ "error": "sheet_not_found" });
+    };
+    let cells = sheet["cells"].as_object().cloned().unwrap_or_default();
+    let filtered: serde_json::Map<String, serde_json::Value> = match args.range {
+        None => cells.into_iter().collect(),
+        Some(range) => {
+            let Some(((r0, c0), (r1, c1))) = parse_range(&range) else {
+                return serde_json::json!({ "error": "invalid_range" });
+            };
+            cells
+                .into_iter()
+                .filter(|(addr, _)| match parse_a1(addr) {
+                    Some((r, c)) => r >= r0 && r <= r1 && c >= c0 && c <= c1,
+                    None => false,
+                })
+                .collect()
+        }
+    };
+    serde_json::json!({ "sheet_id": args.sheet_id, "cells": filtered })
+}
+
+fn parse_a1(addr: &str) -> Option<(u32, u32)> {
+    let split = addr.find(|c: char| c.is_ascii_digit())?;
+    let col_part = &addr[..split];
+    let row_part = &addr[split..];
+    let row: u32 = row_part.parse().ok()?;
+    let row = row.checked_sub(1)?;
+    let mut col: u32 = 0;
+    for ch in col_part.chars() {
+        if !ch.is_ascii_uppercase() {
+            return None;
+        }
+        col = col * 26 + (ch as u32 - 'A' as u32 + 1);
+    }
+    Some((row, col.checked_sub(1)?))
+}
+
+fn parse_range(range: &str) -> Option<((u32, u32), (u32, u32))> {
+    let (lhs, rhs) = range.split_once(':')?;
+    Some((parse_a1(lhs)?, parse_a1(rhs)?))
+}
+
+fn col_letter(mut col: u32) -> String {
+    let mut s = String::new();
+    loop {
+        s.insert(0, (b'A' + (col % 26) as u8) as char);
+        if col < 26 {
+            break;
+        }
+        col = col / 26 - 1;
+    }
+    s
+}
+
+// ── set_cell ──────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetCellArgs {
+    pub sheet_id: String,
+    pub addr: String,
+    pub value: serde_json::Value,
+}
+
+/// Build the [`ToolDefinition`] for `crdt_doc_set_cell`.
+pub fn tool_set_cell() -> ToolDefinition {
+    super::build_synthetic_tool::<SetCellArgs>(
+        TOOL_SET_CELL,
+        "Set a single cell. Value may be string, number, boolean, or null \
+         (null deletes).",
+    )
+}
+
+/// Execute `set_cell` against the runtime.
+pub fn execute_set_cell(ctx: &CrdtDocsContext, args: SetCellArgs) -> serde_json::Value {
+    let Some(entry) = ctx.runtime.registry.get(&ctx.artifact_id) else {
+        return serde_json::json!({ "error": "artifact_not_found" });
+    };
+    crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
+        &entry.doc,
+        &args.sheet_id,
+        &args.addr,
+        &args.value,
+    );
+    entry.mark_dirty();
+    serde_json::json!({ "ok": true })
+}
+
+// ── set_range ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetRangeArgs {
+    pub sheet_id: String,
+    pub start_addr: String,
+    /// Row-major 2D array of cell values.
+    pub values_2d: Vec<Vec<serde_json::Value>>,
+}
+
+/// Build the [`ToolDefinition`] for `crdt_doc_set_range`.
+pub fn tool_set_range() -> ToolDefinition {
+    super::build_synthetic_tool::<SetRangeArgs>(
+        TOOL_SET_RANGE,
+        "Bulk set a rectangular range starting at start_addr. values_2d is \
+         a row-major 2D array.",
+    )
+}
+
+/// Execute `set_range` against the runtime.
+pub fn execute_set_range(ctx: &CrdtDocsContext, args: SetRangeArgs) -> serde_json::Value {
+    let Some(entry) = ctx.runtime.registry.get(&ctx.artifact_id) else {
+        return serde_json::json!({ "error": "artifact_not_found" });
+    };
+    let Some((r0, c0)) = parse_a1(&args.start_addr) else {
+        return serde_json::json!({ "error": "invalid_start_addr" });
+    };
+    let mut cells_written = 0_usize;
+    for (dr, row) in args.values_2d.iter().enumerate() {
+        for (dc, value) in row.iter().enumerate() {
+            let r = r0 + dr as u32;
+            let c = c0 + dc as u32;
+            let addr = format!("{}{}", col_letter(c), r + 1);
+            crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
+                &entry.doc,
+                &args.sheet_id,
+                &addr,
+                value,
+            );
+            cells_written += 1;
+        }
+    }
+    entry.mark_dirty();
+    serde_json::json!({ "ok": true, "cells_written": cells_written })
+}
+
+// ── add_sheet ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddSheetArgs {
+    pub name: String,
+}
+
+/// Build the [`ToolDefinition`] for `crdt_doc_add_sheet`.
+pub fn tool_add_sheet() -> ToolDefinition {
+    super::build_synthetic_tool::<AddSheetArgs>(
+        TOOL_ADD_SHEET,
+        "Append a new sheet with the given name. Returns the generated sheet_id.",
+    )
+}
+
+/// Execute `add_sheet` against the runtime.
+pub fn execute_add_sheet(ctx: &CrdtDocsContext, args: AddSheetArgs) -> serde_json::Value {
+    let Some(entry) = ctx.runtime.registry.get(&ctx.artifact_id) else {
+        return serde_json::json!({ "error": "artifact_not_found" });
+    };
+    let sheet_id =
+        crate::crdt_documents::tool_executor::apply_add_sheet(&entry.doc, &args.name);
+    entry.mark_dirty();
+    serde_json::json!({ "sheet_id": sheet_id })
+}
+
 // ── all tools ─────────────────────────────────────────────────────────────────
 
-/// All CRDT document tool definitions (currently one; more added in Task 15).
+/// All CRDT document tool definitions.
 pub fn build_all_crdt_doc_tools() -> Vec<ToolDefinition> {
-    vec![tool_list_sheets()]
+    vec![
+        tool_list_sheets(),
+        tool_read(),
+        tool_set_cell(),
+        tool_set_range(),
+        tool_add_sheet(),
+    ]
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -132,5 +332,96 @@ mod tests {
             .to_string();
         // Empty args struct → schema should NOT expose artifact_id to the LLM
         assert!(!schema_str.contains("artifact_id"));
+    }
+
+    // ── helpers for new tool tests ────────────────────────────────────────────
+
+    async fn fresh_ctx() -> (CrdtDocsContext, std::path::PathBuf) {
+        let tmp = std::env::temp_dir().join(format!("t_{}", ulid::Ulid::new()));
+        let cfg = json!({ "storage_root": tmp.to_str().unwrap() });
+        let rt = Arc::new(CrdtDocumentsRuntime::from_config(&cfg).await.unwrap());
+        let id = ArtifactId::new();
+        let _ = rt.registry.get_or_create(&id, "t");
+        (
+            CrdtDocsContext {
+                runtime: rt,
+                artifact_id: id,
+            },
+            tmp,
+        )
+    }
+
+    #[tokio::test]
+    async fn set_cell_then_read_returns_value() {
+        let (ctx, tmp) = fresh_ctx().await;
+        let s = execute_add_sheet(&ctx, AddSheetArgs { name: "X".into() });
+        let sheet_id = s["sheet_id"].as_str().unwrap().to_string();
+        execute_set_cell(
+            &ctx,
+            SetCellArgs {
+                sheet_id: sheet_id.clone(),
+                addr: "A1".into(),
+                value: json!("hello"),
+            },
+        );
+        let v = execute_read(&ctx, ReadArgs { sheet_id, range: None });
+        assert_eq!(v["cells"]["A1"], "hello");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn set_range_writes_2d_block() {
+        let (ctx, tmp) = fresh_ctx().await;
+        let s = execute_add_sheet(&ctx, AddSheetArgs { name: "X".into() });
+        let sheet_id = s["sheet_id"].as_str().unwrap().to_string();
+        execute_set_range(
+            &ctx,
+            SetRangeArgs {
+                sheet_id: sheet_id.clone(),
+                start_addr: "B2".into(),
+                values_2d: vec![
+                    vec![json!("a"), json!("b")],
+                    vec![json!(1), json!(2)],
+                ],
+            },
+        );
+        let v = execute_read(&ctx, ReadArgs { sheet_id, range: None });
+        assert_eq!(v["cells"]["B2"], "a");
+        assert_eq!(v["cells"]["C2"], "b");
+        assert_eq!(v["cells"]["B3"], json!(1.0));
+        assert_eq!(v["cells"]["C3"], json!(2.0));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn read_with_range_filters() {
+        let (ctx, tmp) = fresh_ctx().await;
+        let s = execute_add_sheet(&ctx, AddSheetArgs { name: "X".into() });
+        let sheet_id = s["sheet_id"].as_str().unwrap().to_string();
+        execute_set_cell(
+            &ctx,
+            SetCellArgs {
+                sheet_id: sheet_id.clone(),
+                addr: "A1".into(),
+                value: json!(1),
+            },
+        );
+        execute_set_cell(
+            &ctx,
+            SetCellArgs {
+                sheet_id: sheet_id.clone(),
+                addr: "Z99".into(),
+                value: json!(2),
+            },
+        );
+        let v = execute_read(
+            &ctx,
+            ReadArgs {
+                sheet_id,
+                range: Some("A1:B2".into()),
+            },
+        );
+        assert_eq!(v["cells"].as_object().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
