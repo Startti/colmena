@@ -12,7 +12,7 @@ use crate::crdt_documents::{ArtifactId, ArtifactStorage};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Notify;
+use tokio::sync::{oneshot, Notify};
 use yrs::{Doc, ReadTxn, Transact};
 
 const TICK: Duration = Duration::from_secs(5);
@@ -20,13 +20,25 @@ const TICK: Duration = Duration::from_secs(5);
 pub struct SnapshotHandle {
     pub notify: Arc<Notify>,
     pub dirty: Arc<AtomicBool>,
-    pub shutdown: Arc<Notify>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    done_rx: Option<oneshot::Receiver<()>>,
 }
 
 impl SnapshotHandle {
     pub fn mark_dirty(&self) {
         self.dirty.store(true, Ordering::Release);
         self.notify.notify_one();
+    }
+
+    /// Signal shutdown and AWAIT the writer task's final flush. Idempotent:
+    /// calling twice is a no-op the second time.
+    pub async fn shutdown(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+            if let Some(done) = self.done_rx.take() {
+                let _ = done.await;
+            }
+        }
     }
 }
 
@@ -39,18 +51,18 @@ pub fn spawn_writer(
 ) -> SnapshotHandle {
     let notify = Arc::new(Notify::new());
     let dirty = Arc::new(AtomicBool::new(false));
-    let shutdown = Arc::new(Notify::new());
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+    let (done_tx, done_rx) = oneshot::channel::<()>();
 
     let task_notify = notify.clone();
     let task_dirty = dirty.clone();
-    let task_shutdown = shutdown.clone();
 
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(TICK) => {}
                 _ = task_notify.notified() => {}
-                _ = task_shutdown.notified() => {
+                _ = &mut shutdown_rx => {
                     flush(&id, &doc, storage.as_ref()).await;
                     break;
                 }
@@ -59,9 +71,15 @@ pub fn spawn_writer(
                 flush(&id, &doc, storage.as_ref()).await;
             }
         }
+        let _ = done_tx.send(());
     });
 
-    SnapshotHandle { notify, dirty, shutdown }
+    SnapshotHandle {
+        notify,
+        dirty,
+        shutdown_tx: Some(shutdown_tx),
+        done_rx: Some(done_rx),
+    }
 }
 
 async fn flush(id: &ArtifactId, doc: &Doc, storage: &dyn ArtifactStorage) {
@@ -88,7 +106,7 @@ mod tests {
             Arc::new(LocalFsStorage::new(root.clone()).unwrap());
         let id = ArtifactId::new();
         let doc = Arc::new(Doc::new());
-        let handle = spawn_writer(id.clone(), doc.clone(), storage.clone());
+        let mut handle = spawn_writer(id.clone(), doc.clone(), storage.clone());
 
         // Mutate.
         {
@@ -97,10 +115,7 @@ mod tests {
             m.insert(&mut txn, "marker", "hello");
         }
         handle.mark_dirty();
-        // Allow the task to process before we shutdown.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        handle.shutdown.notify_one();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        handle.shutdown().await;
 
         let loaded = storage.load_state(&id).await.unwrap().expect("state");
         let fresh = Doc::new();

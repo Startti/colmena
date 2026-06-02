@@ -30,8 +30,12 @@ async fn two_ws_agents_and_one_inproc_converge() {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-    let artifact = "converge_test";
-    let ws_url = format!("ws://{addr}/yjs/{artifact}");
+    // Create a valid artifact ID and use its string representation for the WS path.
+    // This allows both the WS handler (which uses from_raw) and in-proc code to
+    // reference the same artifact.
+    let id = ArtifactId::new();
+    let artifact_str = id.to_string();
+    let ws_url = format!("ws://{addr}/yjs/{artifact_str}");
 
     // Agent A via WS.
     apply_set_cell_via_ws(
@@ -54,8 +58,7 @@ async fn two_ws_agents_and_one_inproc_converge() {
     .expect("agent B");
 
     // Agent C: in-proc directly mutates the registered doc.
-    let id = ArtifactId::from_raw(artifact);
-    let entry = state.registry.get_or_create(&id, artifact);
+    let entry = state.registry.get_or_create(&id, &artifact_str);
     apply_set_cell_in_proc(&entry.doc, "s1", "C1", &serde_json::Value::Bool(true));
 
     // Let the WS round-trips settle.

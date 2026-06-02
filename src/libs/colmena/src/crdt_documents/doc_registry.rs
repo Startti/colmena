@@ -11,13 +11,24 @@ use crate::crdt_documents::{
 };
 use dashmap::DashMap;
 use std::sync::Arc;
+use tokio::sync::Notify;
 use yrs::updates::decoder::Decode;
 use yrs::{Doc, Transact};
 
 pub struct RegisteredArtifact {
     pub doc: Arc<Doc>,
-    pub snapshot: SnapshotHandle,
+    pub dirty: Arc<std::sync::atomic::AtomicBool>,
+    pub notify: Arc<Notify>,
+    snapshot: tokio::sync::Mutex<SnapshotHandle>,
     pub meta: ArtifactMeta,
+}
+
+impl RegisteredArtifact {
+    /// Mark the artifact as dirty, triggering the snapshot writer.
+    pub fn mark_dirty(&self) {
+        self.dirty.store(true, std::sync::atomic::Ordering::Release);
+        self.notify.notify_one();
+    }
 }
 
 pub struct DocRegistry {
@@ -46,9 +57,17 @@ impl DocRegistry {
                 }
             }
             let snapshot = spawn_writer(id.clone(), doc.clone(), self.storage.clone());
+            let notify = snapshot.notify.clone();
+            let dirty = snapshot.dirty.clone();
             self.docs.insert(
                 id.to_string(),
-                Arc::new(RegisteredArtifact { doc, snapshot, meta }),
+                Arc::new(RegisteredArtifact {
+                    doc,
+                    dirty,
+                    notify,
+                    snapshot: tokio::sync::Mutex::new(snapshot),
+                    meta,
+                }),
             );
             loaded += 1;
         }
@@ -61,6 +80,8 @@ impl DocRegistry {
             .or_insert_with(|| {
                 let doc = Arc::new(Doc::new());
                 let snapshot = spawn_writer(id.clone(), doc.clone(), self.storage.clone());
+                let notify = snapshot.notify.clone();
+                let dirty = snapshot.dirty.clone();
                 let now = chrono::Utc::now().timestamp();
                 let meta = ArtifactMeta {
                     artifact_id: id.clone(),
@@ -77,7 +98,13 @@ impl DocRegistry {
                         let _ = storage.save_meta(&meta_clone).await;
                     });
                 }
-                Arc::new(RegisteredArtifact { doc, snapshot, meta })
+                Arc::new(RegisteredArtifact {
+                    doc,
+                    dirty,
+                    notify,
+                    snapshot: tokio::sync::Mutex::new(snapshot),
+                    meta,
+                })
             })
             .clone()
     }
@@ -92,7 +119,8 @@ impl DocRegistry {
 
     pub async fn delete(&self, id: &ArtifactId) -> Result<(), StorageError> {
         if let Some((_, entry)) = self.docs.remove(&id.to_string()) {
-            entry.snapshot.shutdown.notify_one();
+            let mut guard = entry.snapshot.lock().await;
+            guard.shutdown().await;
         }
         self.storage.delete(id).await
     }

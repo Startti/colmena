@@ -23,7 +23,7 @@ impl ArtifactId {
     /// Wrap an arbitrary string as an `ArtifactId` without prefix/length
     /// validation. Intended for spike/server code that receives raw path
     /// segments; use `ArtifactId::new()` or `FromStr` for production paths.
-    pub fn from_raw(s: &str) -> Self {
+    pub(crate) fn from_raw(s: &str) -> Self {
         Self(s.to_string())
     }
 }
