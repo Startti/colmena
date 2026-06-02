@@ -25,45 +25,51 @@ pub fn project(doc: &Doc) -> Value {
             Some(yrs::Out::YMap(m)) => m,
             _ => continue,
         };
-        let id = sheet_map
-            .get(&txn, "id")
-            .and_then(|v| match v {
-                yrs::Out::Any(yrs::Any::String(s)) => Some(s.to_string()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        let name = sheet_map
-            .get(&txn, "name")
-            .and_then(|v| match v {
-                yrs::Out::Any(yrs::Any::String(s)) => Some(s.to_string()),
-                _ => None,
-            })
-            .unwrap_or_default();
-
-        let cells_map = match sheet_map.get(&txn, "cells") {
-            Some(yrs::Out::YMap(m)) => m,
-            _ => {
-                sheets_out.push(json!({ "id": id, "name": name, "cells": {} }));
-                continue;
-            }
-        };
-
-        let mut cells_out = serde_json::Map::new();
-        for (addr, cell_val) in cells_map.iter(&txn) {
-            let cell_map = match cell_val {
-                yrs::Out::YMap(m) => m,
-                _ => continue,
-            };
-            let v = match cell_map.get(&txn, "v") {
-                Some(yrs::Out::Any(any)) => any_to_json(&any),
-                _ => continue,
-            };
-            cells_out.insert(addr.to_string(), v);
-        }
-        sheets_out.push(json!({ "id": id, "name": name, "cells": cells_out }));
+        sheets_out.push(project_sheet(&txn, &sheet_map));
     }
 
     json!({ "sheets": sheets_out })
+}
+
+/// Project a single sheet's IR (used by `project` for each sheet, and by
+/// `tool_executor::apply_reorder_sheets` to snapshot before reordering —
+/// it currently inlines a near-identical helper, to be replaced post-Task 4).
+pub(crate) fn project_sheet<T: yrs::ReadTxn>(
+    txn: &T,
+    sheet_map: &yrs::MapRef,
+) -> serde_json::Value {
+    use yrs::Map;
+    let id = sheet_map
+        .get(txn, "id")
+        .and_then(|v| match v {
+            yrs::Out::Any(yrs::Any::String(s)) => Some(s.to_string()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let name = sheet_map
+        .get(txn, "name")
+        .and_then(|v| match v {
+            yrs::Out::Any(yrs::Any::String(s)) => Some(s.to_string()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let cells_map = match sheet_map.get(txn, "cells") {
+        Some(yrs::Out::YMap(m)) => m,
+        _ => return serde_json::json!({ "id": id, "name": name, "cells": {} }),
+    };
+    let mut cells_out = serde_json::Map::new();
+    for (addr, cell_val) in cells_map.iter(txn) {
+        let cell_map = match cell_val {
+            yrs::Out::YMap(m) => m,
+            _ => continue,
+        };
+        let v = match cell_map.get(txn, "v") {
+            Some(yrs::Out::Any(any)) => any_to_json(&any),
+            _ => continue,
+        };
+        cells_out.insert(addr.to_string(), v);
+    }
+    serde_json::json!({ "id": id, "name": name, "cells": cells_out })
 }
 
 fn any_to_json(any: &yrs::Any) -> Value {
@@ -166,6 +172,34 @@ mod tests {
         }
         let v = project(&doc);
         assert_eq!(v["sheets"][0]["cells"], json!({}));
+    }
+
+    #[test]
+    fn projects_multiple_sheets() {
+        let doc = Doc::new();
+        test_helpers::seed_simple(&doc, "s1", "Sales", &[("A1", "Apple")]);
+        // Append a second sheet manually inside a fresh transaction.
+        {
+            use yrs::{Any, Map, MapPrelim, Transact, WriteTxn};
+            let mut txn = doc.transact_mut();
+            let wb = txn.get_or_insert_map("workbook");
+            let sheets = match wb.get(&txn, "sheets") {
+                Some(yrs::Out::YArray(a)) => a,
+                _ => unreachable!(),
+            };
+            let s = sheets.push_back(&mut txn, MapPrelim::default());
+            s.insert(&mut txn, "id", "s2");
+            s.insert(&mut txn, "name", "Summary");
+            let cells = s.insert(&mut txn, "cells", MapPrelim::default());
+            let c = cells.insert(&mut txn, "B2", MapPrelim::default());
+            c.insert(&mut txn, "v", Any::Number(42.0));
+            c.insert(&mut txn, "t", Any::String("n".into()));
+        }
+        let v = project(&doc);
+        assert_eq!(v["sheets"].as_array().unwrap().len(), 2);
+        assert_eq!(v["sheets"][0]["name"], "Sales");
+        assert_eq!(v["sheets"][1]["name"], "Summary");
+        assert_eq!(v["sheets"][1]["cells"]["B2"], serde_json::json!(42.0));
     }
 
     #[test]
