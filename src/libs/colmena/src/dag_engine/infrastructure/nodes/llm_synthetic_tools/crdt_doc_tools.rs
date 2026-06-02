@@ -181,6 +181,11 @@ pub fn execute_set_cell(ctx: &CrdtDocsContext, args: SetCellArgs) -> serde_json:
         &args.value,
     );
     entry.mark_dirty();
+    ctx.runtime.tracker.record(
+        &ctx.artifact_id,
+        "agent:llm",
+        &format!("set {}!{} = {}", args.sheet_id, args.addr, args.value),
+    );
     serde_json::json!({ "ok": true })
 }
 
@@ -227,6 +232,14 @@ pub fn execute_set_range(ctx: &CrdtDocsContext, args: SetRangeArgs) -> serde_jso
         }
     }
     entry.mark_dirty();
+    ctx.runtime.tracker.record(
+        &ctx.artifact_id,
+        "agent:llm",
+        &format!(
+            "wrote {cells_written} cells starting at {}!{}",
+            args.sheet_id, args.start_addr
+        ),
+    );
     serde_json::json!({ "ok": true, "cells_written": cells_written })
 }
 
@@ -253,6 +266,11 @@ pub fn execute_add_sheet(ctx: &CrdtDocsContext, args: AddSheetArgs) -> serde_jso
     let sheet_id =
         crate::crdt_documents::tool_executor::apply_add_sheet(&entry.doc, &args.name);
     entry.mark_dirty();
+    ctx.runtime.tracker.record(
+        &ctx.artifact_id,
+        "agent:llm",
+        &format!("added sheet '{}' (id={sheet_id})", args.name),
+    );
     serde_json::json!({ "sheet_id": sheet_id })
 }
 

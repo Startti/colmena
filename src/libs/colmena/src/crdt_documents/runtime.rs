@@ -17,6 +17,7 @@ pub const DEFAULT_STORAGE_ROOT: &str = ".colmena/crdt_documents";
 pub struct CrdtDocumentsRuntime {
     pub registry: Arc<DocRegistry>,
     pub storage: Arc<dyn ArtifactStorage>,
+    pub tracker: Arc<crate::crdt_documents::ChangeTracker>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -85,8 +86,13 @@ impl CrdtDocumentsRuntime {
         let storage: Arc<dyn ArtifactStorage> = storage_cfg.build()?;
         let registry = Arc::new(DocRegistry::new(storage.clone()));
         let _ = registry.load_from_disk().await?;
+        let tracker = Arc::new(crate::crdt_documents::ChangeTracker::new());
 
-        Ok(Self { registry, storage })
+        Ok(Self {
+            registry,
+            storage,
+            tracker,
+        })
     }
 }
 

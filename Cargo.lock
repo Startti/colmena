@@ -518,6 +518,7 @@ dependencies = [
  "nucleo-matcher",
  "oas3",
  "once_cell",
+ "parking_lot",
  "pdf-extract",
  "pyo3",
  "pyo3-asyncio-0-21",

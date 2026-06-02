@@ -152,6 +152,8 @@ async fn ws_handler(
     let doc = entry.doc.clone();
     let dirty = entry.dirty.clone();
     let notify = entry.notify.clone();
+    let tracker = runtime.tracker.clone();
+    let id_for_cb = id.clone();
     ws.on_upgrade(move |socket| async move {
         // yrs::Subscription (Arc<dyn Drop>) is !Send. Drive the socket on a
         // dedicated thread with its own single-threaded tokio runtime so we
@@ -164,12 +166,13 @@ async fn ws_handler(
                 .expect("ws thread rt");
             rt.block_on(async move {
                 let post_update = move |update_bytes: &[u8]| {
-                    // TODO(Task 17 — ChangeTracker): pass update_bytes to
-                    // runtime.tracker.record(&id, "peer:browser", narrate(...)) so the
-                    // LLM's get_recent_changes tool sees per-update summaries.
-                    let _ = update_bytes; // silence unused-variable until Task 17
+                    // TODO(Task 18 — narration): decode update_bytes for a
+                    // human-readable per-cell diff summary instead of the
+                    // coarse placeholder below.
+                    let _ = update_bytes;
                     dirty.store(true, Ordering::Release);
                     notify.notify_one();
+                    tracker.record(&id_for_cb, "peer:browser", "ws update");
                 };
                 if let Err(e) =
                     yjs_protocol::handle_socket(socket, doc, Some(post_update)).await

@@ -4,6 +4,7 @@
 //! This module is SPIKE code. It is intentionally isolated so it can be
 //! removed in one commit after the GO/NO-GO verdict.
 
+pub mod change_tracker;
 pub mod tool_executor;
 pub mod artifact_id;
 pub mod doc_registry;
@@ -17,6 +18,7 @@ pub mod xlsx_import;
 pub mod yjs_protocol;
 
 pub use artifact_id::ArtifactId;
+pub use change_tracker::{ChangeEvent, ChangeTracker};
 pub use doc_registry::{DocRegistry, RegisteredArtifact};
 pub use runtime::{CrdtDocumentsRuntime, RuntimeError, DEFAULT_STORAGE_ROOT};
 pub use snapshot_writer::{spawn_writer, SnapshotHandle};
