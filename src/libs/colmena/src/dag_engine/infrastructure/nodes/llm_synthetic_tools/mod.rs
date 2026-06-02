@@ -109,3 +109,11 @@ pub use load_skill_tool::{
     build_load_skill_tool_definition, dispatch_load_skill, into_tool_result,
     LoadSkillDispatchResult, LOAD_SKILL_TOOL_NAME,
 };
+
+pub use crdt_doc_tools::{
+    build_all_crdt_doc_tools, dispatch_crdt_doc_add_sheet, dispatch_crdt_doc_list_sheets,
+    dispatch_crdt_doc_read, dispatch_crdt_doc_set_cell, dispatch_crdt_doc_set_range,
+    CrdtDocsContext, TOOL_ADD_SHEET as CRDT_DOC_ADD_SHEET_TOOL,
+    TOOL_LIST_SHEETS as CRDT_DOC_LIST_SHEETS_TOOL, TOOL_READ as CRDT_DOC_READ_TOOL,
+    TOOL_SET_CELL as CRDT_DOC_SET_CELL_TOOL, TOOL_SET_RANGE as CRDT_DOC_SET_RANGE_TOOL,
+};

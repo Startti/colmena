@@ -79,6 +79,11 @@ pub struct DagToolExecutor {
     documents_context: Option<
         Arc<crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::DocumentToolsContext>,
     >,
+    /// Per-call context for the v1 CRDT documents synthetic tools. Populated
+    /// via `with_crdt_documents()` from the llm_call node.
+    crdt_docs_context: Option<
+        Arc<crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::CrdtDocsContext>,
+    >,
     /// Snapshot of `ToolConfiguration` entries available for `describe_tool`
     /// to look up. When `Some(...)`, the executor intercepts `describe_tool`
     /// calls and dispatches against this slice; absent → describe_tool falls
@@ -169,6 +174,7 @@ impl DagToolExecutor {
             skill_repository: None,
             skill_observer: None,
             documents_context: None,
+            crdt_docs_context: None,
             describe_tool_lookup: None,
             describe_tool_observer: None,
             attachment_catalog: None,
@@ -237,6 +243,18 @@ impl DagToolExecutor {
         >,
     ) -> Self {
         self.documents_context = Some(ctx);
+        self
+    }
+
+    /// Attach a `CrdtDocsContext` so the five `crdt_doc_*` synthetic tool
+    /// calls dispatch to the v1 crdt_documents runtime.
+    pub fn with_crdt_documents(
+        mut self,
+        ctx: Arc<
+            crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::CrdtDocsContext,
+        >,
+    ) -> Self {
+        self.crdt_docs_context = Some(ctx);
         self
     }
 
@@ -662,6 +680,61 @@ impl DagToolExecutor {
                     }
                     n if n == DOCUMENT_ROLLBACK_TOOL => dispatch_document_rollback(ctx, args).await,
                     _ => dispatch_document_list_my_artifacts(ctx, args).await,
+                };
+
+                let success =
+                    !matches!(&result, serde_json::Value::Object(m) if m.contains_key("error"));
+                return Ok(crate::llm::domain::ToolResult {
+                    tool_call_id: tool_call.id.clone(),
+                    output: result.to_string(),
+                    success,
+                    error: None,
+                });
+            }
+        }
+
+        // --- Synthetic CRDT documents tools (crdt_doc_*) ---
+        if let Some(ctx) = self.crdt_docs_context.as_ref() {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
+                dispatch_crdt_doc_add_sheet, dispatch_crdt_doc_list_sheets,
+                dispatch_crdt_doc_read, dispatch_crdt_doc_set_cell, dispatch_crdt_doc_set_range,
+                CRDT_DOC_ADD_SHEET_TOOL, CRDT_DOC_LIST_SHEETS_TOOL, CRDT_DOC_READ_TOOL,
+                CRDT_DOC_SET_CELL_TOOL, CRDT_DOC_SET_RANGE_TOOL,
+            };
+
+            let name = tool_call.function.name.as_str();
+            let is_crdt_tool = matches!(
+                name,
+                n if n == CRDT_DOC_LIST_SHEETS_TOOL
+                    || n == CRDT_DOC_READ_TOOL
+                    || n == CRDT_DOC_SET_CELL_TOOL
+                    || n == CRDT_DOC_SET_RANGE_TOOL
+                    || n == CRDT_DOC_ADD_SHEET_TOOL
+            );
+
+            if is_crdt_tool {
+                let args: serde_json::Value = if tool_call.function.arguments.trim().is_empty() {
+                    serde_json::json!({})
+                } else {
+                    serde_json::from_str(&tool_call.function.arguments).map_err(|e| {
+                        LlmError::InvalidToolCall {
+                            reason: format!("Failed to parse arguments for tool {}: {}", name, e),
+                        }
+                    })?
+                };
+
+                let result = match name {
+                    n if n == CRDT_DOC_LIST_SHEETS_TOOL => {
+                        dispatch_crdt_doc_list_sheets(ctx, args).await
+                    }
+                    n if n == CRDT_DOC_READ_TOOL => dispatch_crdt_doc_read(ctx, args).await,
+                    n if n == CRDT_DOC_SET_CELL_TOOL => {
+                        dispatch_crdt_doc_set_cell(ctx, args).await
+                    }
+                    n if n == CRDT_DOC_SET_RANGE_TOOL => {
+                        dispatch_crdt_doc_set_range(ctx, args).await
+                    }
+                    _ => dispatch_crdt_doc_add_sheet(ctx, args).await,
                 };
 
                 let success =

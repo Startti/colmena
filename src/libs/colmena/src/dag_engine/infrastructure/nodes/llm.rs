@@ -15,10 +15,12 @@ use std::sync::Arc;
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
-    build_all_document_tools, build_describe_tool_definition, build_load_skill_tool_definition,
-    reconstruct_discovered_set, summary_for_catalog, CatalogEntry, DescribeToolDispatchResult,
-    DocumentToolsContext, ATTACHMENTS_SYSTEM_PRELUDE, DOCUMENTS_SYSTEM_PRELUDE,
+    build_all_crdt_doc_tools, build_all_document_tools, build_describe_tool_definition,
+    build_load_skill_tool_definition, reconstruct_discovered_set, summary_for_catalog,
+    CatalogEntry, CrdtDocsContext, DescribeToolDispatchResult, DocumentToolsContext,
+    ATTACHMENTS_SYSTEM_PRELUDE, DOCUMENTS_SYSTEM_PRELUDE,
 };
+use crate::crdt_documents::{ArtifactId, CrdtDocumentsRuntime};
 use crate::documents::application::DocumentRuntime;
 use crate::documents::domain::ids::SessionId as DocSessionId;
 use crate::llm::application::AgentService;
@@ -1598,6 +1600,41 @@ impl ExecutableNode for LlmNode {
             None => None,
         };
 
+        // Build crdt_documents context if the LLM node was configured with a
+        // `crdt_documents` block. The five v1 synthetic tools are exposed and
+        // dispatched through the runtime built here. artifact_id MUST be in the
+        // config (LLM never sets it); session_id is not relevant for the v1 CRDT
+        // tools since the registry is per-artifact, not per-session.
+        let crdt_docs_context: Option<Arc<CrdtDocsContext>> = match inputs
+            .get("crdt_documents")
+            .cloned()
+            .or_else(|| config.get("crdt_documents").cloned())
+        {
+            Some(crdt_cfg) => {
+                let artifact_id_str = crdt_cfg
+                    .get("artifact_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| -> Box<dyn Error + Send + Sync> {
+                        "crdt_documents config requires `artifact_id`".into()
+                    })?;
+                let artifact_id: ArtifactId = artifact_id_str.parse().map_err(|_| -> Box<dyn Error + Send + Sync> {
+                    "crdt_documents config has invalid `artifact_id` (expected art_<26-char-ULID>)".into()
+                })?;
+                match CrdtDocumentsRuntime::from_config(&crdt_cfg).await {
+                    Ok(rt) => Some(Arc::new(CrdtDocsContext {
+                        runtime: Arc::new(rt),
+                        artifact_id,
+                    })),
+                    Err(e) => {
+                        return Err(
+                            format!("invalid `crdt_documents` config on llm node: {e}").into(),
+                        );
+                    }
+                }
+            }
+            None => None,
+        };
+
         // ---- Step 4 (catalog building) — must precede executor block ----------------
         // Include both rows for the current provider AND `Generated` rows
         // (outputs from image_generation/edit/tts). The latter are resolved
@@ -1678,6 +1715,9 @@ impl ExecutableNode for LlmNode {
             executor = executor.with_agent_session_id(agent_session_id_str.clone());
             if let Some(ctx) = documents_context.clone() {
                 executor = executor.with_documents(ctx);
+            }
+            if let Some(ctx) = crdt_docs_context.clone() {
+                executor = executor.with_crdt_documents(ctx);
             }
             // ---- Step 5: Wire attachment catalog into executor ----------------------
             if !attachment_catalog.is_empty() {
@@ -1879,6 +1919,15 @@ impl ExecutableNode for LlmNode {
         // DocumentToolsContext above so dispatches succeed.
         if documents_context.is_some() {
             for td in build_all_document_tools() {
+                tools.push(td);
+            }
+        }
+
+        // When the LLM node has a `crdt_documents` config, expose the five
+        // synthetic crdt_doc_* tools. The executor was already wired with the
+        // matching CrdtDocsContext above so dispatches succeed.
+        if crdt_docs_context.is_some() {
+            for td in build_all_crdt_doc_tools() {
                 tools.push(td);
             }
         }

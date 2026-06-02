@@ -256,6 +256,55 @@ pub fn execute_add_sheet(ctx: &CrdtDocsContext, args: AddSheetArgs) -> serde_jso
     serde_json::json!({ "sheet_id": sheet_id })
 }
 
+// ── Dispatch wrappers (async — called from dag_tool_executor) ────────────────
+
+pub async fn dispatch_crdt_doc_list_sheets(
+    ctx: &CrdtDocsContext,
+    _args: serde_json::Value,
+) -> serde_json::Value {
+    execute_list_sheets(ctx)
+}
+
+pub async fn dispatch_crdt_doc_read(
+    ctx: &CrdtDocsContext,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    match serde_json::from_value::<ReadArgs>(args) {
+        Ok(a) => execute_read(ctx, a),
+        Err(e) => serde_json::json!({ "error": format!("invalid_args: {e}") }),
+    }
+}
+
+pub async fn dispatch_crdt_doc_set_cell(
+    ctx: &CrdtDocsContext,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    match serde_json::from_value::<SetCellArgs>(args) {
+        Ok(a) => execute_set_cell(ctx, a),
+        Err(e) => serde_json::json!({ "error": format!("invalid_args: {e}") }),
+    }
+}
+
+pub async fn dispatch_crdt_doc_set_range(
+    ctx: &CrdtDocsContext,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    match serde_json::from_value::<SetRangeArgs>(args) {
+        Ok(a) => execute_set_range(ctx, a),
+        Err(e) => serde_json::json!({ "error": format!("invalid_args: {e}") }),
+    }
+}
+
+pub async fn dispatch_crdt_doc_add_sheet(
+    ctx: &CrdtDocsContext,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    match serde_json::from_value::<AddSheetArgs>(args) {
+        Ok(a) => execute_add_sheet(ctx, a),
+        Err(e) => serde_json::json!({ "error": format!("invalid_args: {e}") }),
+    }
+}
+
 // ── all tools ─────────────────────────────────────────────────────────────────
 
 /// All CRDT document tool definitions.
