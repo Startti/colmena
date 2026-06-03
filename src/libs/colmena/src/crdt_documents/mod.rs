@@ -5,6 +5,7 @@
 //! removed in one commit after the GO/NO-GO verdict.
 
 pub mod change_tracker;
+pub mod change_tracker_store;
 pub mod narration;
 pub mod tool_executor;
 pub mod artifact_id;
@@ -22,6 +23,10 @@ pub mod yjs_protocol;
 
 pub use artifact_id::ArtifactId;
 pub use change_tracker::{ChangeEvent, ChangeTracker};
+pub use change_tracker_store::{
+    ChangeTrackerStore, ChangeTrackerStoreRef, InMemoryChangeTrackerStore,
+    NewEvent, StoreError as ChangeTrackerStoreError, StoredArtifact, StoredEvent,
+};
 pub use doc_registry::{DocRegistry, RegisteredArtifact};
 pub use runtime::{CrdtDocumentsRuntime, RuntimeError, DEFAULT_STORAGE_ROOT};
 pub use snapshot_writer::{spawn_writer, SnapshotHandle};
