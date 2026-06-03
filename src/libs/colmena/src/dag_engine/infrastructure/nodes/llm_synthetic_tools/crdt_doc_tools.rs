@@ -434,6 +434,147 @@ pub async fn dispatch_crdt_doc_get_recent_changes(
     }
 }
 
+// ── list_my_artifacts ─────────────────────────────────────────────────────────
+
+pub const TOOL_LIST_MY_ARTIFACTS: &str = "crdt_doc_list_my_artifacts";
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ListMyArtifactsArgs {
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// Build the [`ToolDefinition`] for `crdt_doc_list_my_artifacts`.
+pub fn tool_list_my_artifacts() -> ToolDefinition {
+    super::build_synthetic_tool::<ListMyArtifactsArgs>(
+        TOOL_LIST_MY_ARTIFACTS,
+        "List CRDT workbooks accessible to the current agent session. \
+         Returns id, name, created_at, last_accessed_at for each.",
+    )
+}
+
+/// Execute `list_my_artifacts` against the backend.
+pub async fn execute_list_my_artifacts(
+    ctx: &CrdtDocsContext,
+    args: ListMyArtifactsArgs,
+) -> serde_json::Value {
+    let Some(sid) = ctx.session_id() else {
+        return serde_json::json!({ "error": "session_required" });
+    };
+    let limit = args.limit.unwrap_or(50);
+    let arts = ctx
+        .backend()
+        .artifacts_for_session(sid, limit)
+        .await
+        .unwrap_or_default();
+    serde_json::json!({
+        "artifacts": arts.iter().map(|a| serde_json::json!({
+            "artifact_id": a.artifact_id,
+            "name": a.name,
+            "created_at": a.created_at,
+            "last_accessed_at": a.last_accessed_at,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+pub async fn dispatch_crdt_doc_list_my_artifacts(
+    ctx: &CrdtDocsContext,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    match serde_json::from_value::<ListMyArtifactsArgs>(args) {
+        Ok(a) => execute_list_my_artifacts(ctx, a).await,
+        Err(e) => serde_json::json!({ "error": format!("invalid_args: {e}") }),
+    }
+}
+
+// ── create_artifact ───────────────────────────────────────────────────────────
+
+pub const TOOL_CREATE_ARTIFACT: &str = "crdt_doc_create_artifact";
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateArtifactArgs {
+    pub name: String,
+}
+
+/// Build the [`ToolDefinition`] for `crdt_doc_create_artifact`.
+pub fn tool_create_artifact() -> ToolDefinition {
+    super::build_synthetic_tool::<CreateArtifactArgs>(
+        TOOL_CREATE_ARTIFACT,
+        "Create a new CRDT workbook for this session. Returns the new \
+         artifact_id. To mutate it you'll need a follow-up turn whose \
+         config pins this artifact_id (current limitation; multi-artifact \
+         write access is subsystem F).",
+    )
+}
+
+/// Execute `create_artifact`. In local mode this creates a doc in the
+/// shared `DocRegistry` and records a touch row in the backend. In
+/// ws_peer mode it POSTs to the CRDT documents server's `/documents`
+/// endpoint so the doc lives where the server can serve WS subscribers.
+pub async fn execute_create_artifact(
+    ctx: &CrdtDocsContext,
+    args: CreateArtifactArgs,
+) -> serde_json::Value {
+    let Some(sid) = ctx.session_id() else {
+        return serde_json::json!({ "error": "session_required" });
+    };
+
+    match ctx {
+        CrdtDocsContext::Local { runtime, .. } => {
+            let new_id = crate::crdt_documents::ArtifactId::new();
+            let _ = runtime.registry.get_or_create(&new_id, &args.name);
+            let _ = ctx
+                .backend()
+                .touch_artifact(sid, &new_id, Some(&args.name))
+                .await;
+            serde_json::json!({
+                "artifact_id": new_id.to_string(),
+                "name": args.name,
+            })
+        }
+        CrdtDocsContext::WsPeer { backend, .. } => {
+            // ws_peer mode: POST /documents to the server. Downcast the
+            // backend trait object to RestBackend to reuse its
+            // client + base_url. Requires `CrdtBackend: Any` (B-T5).
+            let rest_any = backend.as_ref() as &dyn std::any::Any;
+            let Some(rest) =
+                rest_any.downcast_ref::<crate::crdt_documents::RestBackend>()
+            else {
+                return serde_json::json!({
+                    "error": "internal: wrong backend type for ws_peer mode"
+                });
+            };
+            let url = format!("{}/documents", rest.base_url);
+            let body = serde_json::json!({
+                "name": args.name,
+                "agent_session_id": sid,
+            });
+            match rest.client.post(&url).json(&body).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(j) => j,
+                        Err(e) => serde_json::json!({ "error": format!("decode: {e}") }),
+                    }
+                }
+                Ok(resp) => {
+                    serde_json::json!({ "error": format!("status {}", resp.status()) })
+                }
+                Err(e) => serde_json::json!({ "error": format!("http: {e}") }),
+            }
+        }
+    }
+}
+
+pub async fn dispatch_crdt_doc_create_artifact(
+    ctx: &CrdtDocsContext,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    match serde_json::from_value::<CreateArtifactArgs>(args) {
+        Ok(a) => execute_create_artifact(ctx, a).await,
+        Err(e) => serde_json::json!({ "error": format!("invalid_args: {e}") }),
+    }
+}
+
 // ── all tools ─────────────────────────────────────────────────────────────────
 
 /// All CRDT document tool definitions.
@@ -445,6 +586,8 @@ pub fn build_all_crdt_doc_tools() -> Vec<ToolDefinition> {
         tool_set_range(),
         tool_add_sheet(),
         tool_get_recent_changes(),
+        tool_list_my_artifacts(),
+        tool_create_artifact(),
     ]
 }
 
@@ -517,6 +660,20 @@ mod tests {
         let _ = rt.registry.get_or_create(&id, "t");
         (
             CrdtDocsContext::new_local(rt, id, Some("test_session".to_string())),
+            tmp,
+        )
+    }
+
+    /// Variant of `fresh_ctx` that uses a caller-supplied session id, so
+    /// tests can verify session-scoped backend queries (artifacts_for_session).
+    async fn fresh_ctx_with_session(session_id: &str) -> (CrdtDocsContext, std::path::PathBuf) {
+        let tmp = std::env::temp_dir().join(format!("t_{}", ulid::Ulid::new()));
+        let cfg = json!({ "storage_root": tmp.to_str().unwrap() });
+        let rt = Arc::new(CrdtDocumentsRuntime::from_config(&cfg).await.unwrap());
+        let id = ArtifactId::new();
+        let _ = rt.registry.get_or_create(&id, "t");
+        (
+            CrdtDocsContext::new_local(rt, id, Some(session_id.to_string())),
             tmp,
         )
     }
@@ -679,6 +836,39 @@ mod tests {
         .await;
         assert!(v["events"].as_array().unwrap().is_empty());
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn list_my_artifacts_returns_session_artifacts() {
+        let (ctx, tmp) = fresh_ctx_with_session("s_list").await;
+        let aid1 = ArtifactId::new();
+        let aid2 = ArtifactId::new();
+        ctx.backend()
+            .touch_artifact("s_list", &aid1, Some("First"))
+            .await
+            .unwrap();
+        ctx.backend()
+            .touch_artifact("s_list", &aid2, Some("Second"))
+            .await
+            .unwrap();
+        let v = execute_list_my_artifacts(&ctx, ListMyArtifactsArgs { limit: None }).await;
+        assert_eq!(v["artifacts"].as_array().unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn create_artifact_returns_new_id_local_mode() {
+        let (ctx, tmp) = fresh_ctx_with_session("s_create").await;
+        let v = execute_create_artifact(
+            &ctx,
+            CreateArtifactArgs {
+                name: "Inventory Q3".into(),
+            },
+        )
+        .await;
+        assert!(v["artifact_id"].as_str().unwrap().starts_with("art_"));
+        assert_eq!(v["name"].as_str().unwrap(), "Inventory Q3");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

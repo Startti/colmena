@@ -81,9 +81,8 @@ pub struct DagToolExecutor {
     >,
     /// Per-call context for the v1 CRDT documents synthetic tools. Populated
     /// via `with_crdt_documents()` from the llm_call node.
-    crdt_docs_context: Option<
-        Arc<crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::CrdtDocsContext>,
-    >,
+    crdt_docs_context:
+        Option<Arc<crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::CrdtDocsContext>>,
     /// Snapshot of `ToolConfiguration` entries available for `describe_tool`
     /// to look up. When `Some(...)`, the executor intercepts `describe_tool`
     /// calls and dispatches against this slice; absent → describe_tool falls
@@ -250,9 +249,7 @@ impl DagToolExecutor {
     /// calls dispatch to the v1 crdt_documents runtime.
     pub fn with_crdt_documents(
         mut self,
-        ctx: Arc<
-            crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::CrdtDocsContext,
-        >,
+        ctx: Arc<crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::CrdtDocsContext>,
     ) -> Self {
         self.crdt_docs_context = Some(ctx);
         self
@@ -696,11 +693,12 @@ impl DagToolExecutor {
         // --- Synthetic CRDT documents tools (crdt_doc_*) ---
         if let Some(ctx) = self.crdt_docs_context.as_ref() {
             use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
-                dispatch_crdt_doc_add_sheet, dispatch_crdt_doc_get_recent_changes,
-                dispatch_crdt_doc_list_sheets, dispatch_crdt_doc_read,
-                dispatch_crdt_doc_set_cell, dispatch_crdt_doc_set_range,
-                CRDT_DOC_ADD_SHEET_TOOL, CRDT_DOC_GET_RECENT_CHANGES_TOOL,
-                CRDT_DOC_LIST_SHEETS_TOOL, CRDT_DOC_READ_TOOL,
+                dispatch_crdt_doc_add_sheet, dispatch_crdt_doc_create_artifact,
+                dispatch_crdt_doc_get_recent_changes, dispatch_crdt_doc_list_my_artifacts,
+                dispatch_crdt_doc_list_sheets, dispatch_crdt_doc_read, dispatch_crdt_doc_set_cell,
+                dispatch_crdt_doc_set_range, CRDT_DOC_ADD_SHEET_TOOL,
+                CRDT_DOC_CREATE_ARTIFACT_TOOL, CRDT_DOC_GET_RECENT_CHANGES_TOOL,
+                CRDT_DOC_LIST_MY_ARTIFACTS_TOOL, CRDT_DOC_LIST_SHEETS_TOOL, CRDT_DOC_READ_TOOL,
                 CRDT_DOC_SET_CELL_TOOL, CRDT_DOC_SET_RANGE_TOOL,
             };
 
@@ -713,6 +711,8 @@ impl DagToolExecutor {
                     || n == CRDT_DOC_SET_RANGE_TOOL
                     || n == CRDT_DOC_ADD_SHEET_TOOL
                     || n == CRDT_DOC_GET_RECENT_CHANGES_TOOL
+                    || n == CRDT_DOC_LIST_MY_ARTIFACTS_TOOL
+                    || n == CRDT_DOC_CREATE_ARTIFACT_TOOL
             );
 
             if is_crdt_tool {
@@ -731,14 +731,18 @@ impl DagToolExecutor {
                         dispatch_crdt_doc_list_sheets(ctx, args).await
                     }
                     n if n == CRDT_DOC_READ_TOOL => dispatch_crdt_doc_read(ctx, args).await,
-                    n if n == CRDT_DOC_SET_CELL_TOOL => {
-                        dispatch_crdt_doc_set_cell(ctx, args).await
-                    }
+                    n if n == CRDT_DOC_SET_CELL_TOOL => dispatch_crdt_doc_set_cell(ctx, args).await,
                     n if n == CRDT_DOC_SET_RANGE_TOOL => {
                         dispatch_crdt_doc_set_range(ctx, args).await
                     }
                     n if n == CRDT_DOC_ADD_SHEET_TOOL => {
                         dispatch_crdt_doc_add_sheet(ctx, args).await
+                    }
+                    n if n == CRDT_DOC_LIST_MY_ARTIFACTS_TOOL => {
+                        dispatch_crdt_doc_list_my_artifacts(ctx, args).await
+                    }
+                    n if n == CRDT_DOC_CREATE_ARTIFACT_TOOL => {
+                        dispatch_crdt_doc_create_artifact(ctx, args).await
                     }
                     _ => dispatch_crdt_doc_get_recent_changes(ctx, args).await,
                 };
