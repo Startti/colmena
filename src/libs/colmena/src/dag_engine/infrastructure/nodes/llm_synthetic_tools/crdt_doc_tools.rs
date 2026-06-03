@@ -354,19 +354,27 @@ pub const TOOL_GET_RECENT_CHANGES: &str = "crdt_doc_get_recent_changes";
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct GetRecentChangesArgs {
-    /// Optional cursor — return only events after this id.
+    /// Cursor — only events after this id. Default: agent's own cursor
+    /// (looked up via backend.cursor_for).
     #[serde(default)]
     pub since_event_id: Option<u64>,
+    /// Filter to one sheet. Default: all sheets.
+    #[serde(default)]
+    pub sheet_id: Option<String>,
+    /// Cap result count. Default: 50.
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 /// Build the [`ToolDefinition`] for `crdt_doc_get_recent_changes`.
 pub fn tool_get_recent_changes() -> ToolDefinition {
     super::build_synthetic_tool::<GetRecentChangesArgs>(
         TOOL_GET_RECENT_CHANGES,
-        "Get a narration of recent peer changes to the document. \
-         Optionally filter by since_event_id. Returns \
-         { current_event_id, narration } where narration is a human-readable \
-         summary of all events since the cursor.",
+        "Get recent peer changes to the document (events from other \
+         sessions; the agent's own mutations are excluded). Optionally \
+         filter by since_event_id, sheet_id, and limit. Returns \
+         { current_event_id, events: [...], truncated } where events is \
+         an array of { id, origin, sheet_id, summary, created_at }.",
     )
 }
 
@@ -375,30 +383,44 @@ pub async fn execute_get_recent_changes(
     ctx: &CrdtDocsContext,
     args: GetRecentChangesArgs,
 ) -> serde_json::Value {
+    let since = match args.since_event_id {
+        Some(s) => s,
+        None => match ctx.session_id() {
+            Some(sid) => ctx
+                .backend()
+                .cursor_for(sid, ctx.artifact_id())
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(0),
+            None => 0,
+        },
+    };
+    let limit = args.limit.unwrap_or(50);
+    let own_origin = ctx.session_id().map(|s| format!("agent:{s}"));
     let events = ctx
         .backend()
         .events_since(
             ctx.artifact_id(),
-            args.since_event_id.unwrap_or(0),
-            None,
-            None,
-            100,
+            since,
+            args.sheet_id.as_deref(),
+            own_origin.as_deref(),
+            limit,
         )
         .await
         .unwrap_or_default();
     let current_event_id = events.iter().map(|e| e.id).max();
-    let narration = if events.is_empty() {
-        "No changes since last check.".to_string()
-    } else {
-        events
-            .iter()
-            .map(|e| format!("- [{}] ({}): {}", e.id, e.origin, e.summary))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
+    let truncated = (events.len() as u32) >= limit;
     serde_json::json!({
         "current_event_id": current_event_id,
-        "narration": narration,
+        "events": events.iter().map(|e| serde_json::json!({
+            "id": e.id,
+            "origin": e.origin,
+            "sheet_id": e.sheet_id,
+            "summary": e.summary,
+            "created_at": e.created_at,
+        })).collect::<Vec<_>>(),
+        "truncated": truncated,
     })
 }
 
@@ -595,42 +617,67 @@ mod tests {
             &ctx,
             GetRecentChangesArgs {
                 since_event_id: None,
+                sheet_id: None,
+                limit: None,
             },
         )
         .await;
-        assert_eq!(v["narration"], "No changes since last check.");
+        let events = v["events"].as_array().unwrap();
+        assert!(events.is_empty());
+        assert_eq!(v["truncated"], false);
 
-        // Record via a mutation.
-        let s = execute_add_sheet(
+        // Seed a peer event (different origin so the own-origin filter
+        // doesn't hide it).
+        let peer_event_id = ctx
+            .backend()
+            .record_event(crate::crdt_documents::change_tracker_store::NewEvent {
+                artifact_id: ctx.artifact_id().clone(),
+                sheet_id: None,
+                origin: "agent:peer_session".to_string(),
+                summary: "added sheet 'Sales' (id=sh_peer)".to_string(),
+            })
+            .await
+            .unwrap();
+        assert!(peer_event_id > 0);
+
+        // Also do an own-session mutation — it should NOT appear (own-origin
+        // filter excludes it).
+        let _ = execute_add_sheet(
             &ctx,
             AddSheetArgs {
-                name: "Sales".into(),
+                name: "Own".into(),
             },
         )
         .await;
-        let _sheet_id = s["sheet_id"].as_str().unwrap();
 
         let v = execute_get_recent_changes(
             &ctx,
             GetRecentChangesArgs {
                 since_event_id: None,
+                sheet_id: None,
+                limit: None,
             },
         )
         .await;
-        let n = v["narration"].as_str().unwrap();
-        assert!(n.contains("added sheet"), "got: {n}");
-        assert!(n.contains("Sales"), "got: {n}");
+        let events = v["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1, "only the peer event should appear");
+        assert_eq!(events[0]["origin"], "agent:peer_session");
+        let s = events[0]["summary"].as_str().unwrap();
+        assert!(s.contains("added sheet"), "got: {s}");
+        assert!(s.contains("Sales"), "got: {s}");
         let current = v["current_event_id"].as_u64().unwrap();
 
-        // since_event_id filters: passing current returns empty narration.
+        // since_event_id filters: passing current returns empty events.
         let v = execute_get_recent_changes(
             &ctx,
             GetRecentChangesArgs {
                 since_event_id: Some(current),
+                sheet_id: None,
+                limit: None,
             },
         )
         .await;
-        assert_eq!(v["narration"], "No changes since last check.");
+        assert!(v["events"].as_array().unwrap().is_empty());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

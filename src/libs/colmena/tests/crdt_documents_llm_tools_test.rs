@@ -66,34 +66,63 @@ async fn full_tool_sequence_round_trips_through_runtime() {
     assert_eq!(sheets.len(), 1);
     assert_eq!(sheets[0]["name"], "Sales");
 
-    // 5. get_recent_changes — tracker should reflect add_sheet + set_range
+    // 5. get_recent_changes — own-session events are filtered out so this
+    //    starts empty even though we just made add_sheet + set_range.
     let v = execute_get_recent_changes(
         &ctx,
         GetRecentChangesArgs {
             since_event_id: None,
+            sheet_id: None,
+            limit: None,
         },
     )
     .await;
-    let narration = v["narration"].as_str().unwrap();
     assert!(
-        narration.contains("Sales"),
-        "narration missing 'Sales': {narration}"
-    );
-    assert!(
-        narration.contains("added sheet") || narration.contains("add"),
-        "narration missing add_sheet event: {narration}"
+        v["events"].as_array().unwrap().is_empty(),
+        "own-session events must be filtered out, got: {:?}",
+        v["events"]
     );
 
-    // 6. Cursor: pass current_event_id to verify it filters new events.
+    // 6. Seed a peer-side event and verify it surfaces.
+    let peer_event_id = rt
+        .store
+        .insert_event(colmena::crdt_documents::change_tracker_store::NewEvent {
+            artifact_id: id.clone(),
+            sheet_id: Some(sheet_id.clone()),
+            origin: "agent:other_peer".to_string(),
+            summary: "peer added a sheet 'Sales'".to_string(),
+        })
+        .await
+        .unwrap();
+
+    let v = execute_get_recent_changes(
+        &ctx,
+        GetRecentChangesArgs {
+            since_event_id: None,
+            sheet_id: None,
+            limit: None,
+        },
+    )
+    .await;
+    let events = v["events"].as_array().unwrap();
+    assert!(
+        events.iter().any(|e| e["id"] == json!(peer_event_id)
+            && e["origin"] == "agent:other_peer"),
+        "expected peer event in results: {events:?}"
+    );
+
+    // 7. Cursor: pass current_event_id to verify it filters new events.
     let current = v["current_event_id"].as_u64();
     let v2 = execute_get_recent_changes(
         &ctx,
         GetRecentChangesArgs {
             since_event_id: current,
+            sheet_id: None,
+            limit: None,
         },
     )
     .await;
-    assert_eq!(v2["narration"], "No changes since last check.");
+    assert!(v2["events"].as_array().unwrap().is_empty());
 
     // Final: verify the projection reflects the writes.
     let proj = project(&entry.doc);

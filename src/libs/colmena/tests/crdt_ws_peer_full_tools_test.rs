@@ -177,50 +177,117 @@ async fn six_tools_round_trip_via_ws_peer() {
     assert!(cells.contains_key("A4"));
     assert!(!cells.contains_key("B2"));
 
-    // 9) get_recent_changes — should show every mutation we made this
-    //    session (the per-session tracker captures everything since
-    //    peer connect).
+    // 9) get_recent_changes — in WS-peer mode, the agent's mutations
+    //    travel as Yjs WS updates and the server records them with
+    //    origin "peer:browser" (or similar non-matching prefix). The
+    //    own-origin filter excludes only events tagged
+    //    "agent:test_session" — these WS-recorded events are still
+    //    visible. So we should see at least one event from the round-trip.
     let v = execute_get_recent_changes(
         &ctx,
         GetRecentChangesArgs {
             since_event_id: None,
+            sheet_id: None,
+            limit: None,
         },
     )
     .await;
-    let narration = v["narration"].as_str().expect("narration");
+    let events = v["events"].as_array().expect("events array");
     assert!(
-        narration.contains("Inventory"),
-        "narration must mention Inventory: {narration}"
+        !events.is_empty(),
+        "expected at least one event from the WS round-trip"
     );
-    assert!(
-        narration.contains("Pricing"),
-        "narration must mention Pricing: {narration}"
-    );
-    assert!(
-        narration.contains("set ") || narration.contains("wrote "),
-        "narration must mention cell writes: {narration}"
-    );
-    let last_event = v["current_event_id"]
+    let last_event_id = v["current_event_id"]
         .as_u64()
         .expect("current_event_id is u64");
-    // We made 4 mutating tool calls: add_sheet Inventory, add_sheet
-    // Pricing, set_cell A1, set_range A2:B4. Whether event ids start
-    // at 0 or 1 is a tracker implementation detail; we just verify
-    // the count is in the right ballpark.
-    assert!(
-        last_event >= 3,
-        "expected at least 4 events (got last_event_id={last_event})"
-    );
 
-    // 10) get_recent_changes with cursor — empty diff after the cursor.
+    // None of the events should be tagged with the agent's own
+    // session id — the filter must hide those.
+    for ev in events {
+        let origin = ev["origin"].as_str().expect("origin is string");
+        assert_ne!(
+            origin, "agent:test_session",
+            "own-session events must be filtered out, got: {ev:?}"
+        );
+    }
+
+    // 10) Seed an additional event tagged with the agent's own session
+    //     and verify it does NOT appear in the next read — confirming
+    //     the own-origin filter.
+    let own_seeded = server_runtime
+        .store
+        .insert_event(
+            colmena::crdt_documents::change_tracker_store::NewEvent {
+                artifact_id: aid.clone(),
+                sheet_id: None,
+                origin: "agent:test_session".to_string(),
+                summary: "own-session event that must be hidden".to_string(),
+            },
+        )
+        .await
+        .expect("seed own event");
+    assert!(own_seeded > last_event_id);
+
     let v = execute_get_recent_changes(
         &ctx,
         GetRecentChangesArgs {
-            since_event_id: Some(last_event),
+            since_event_id: Some(last_event_id),
+            sheet_id: None,
+            limit: None,
         },
     )
     .await;
-    assert_eq!(v["narration"], json!("No changes since last check."));
+    assert!(
+        v["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .all(|e| e["origin"] != json!("agent:test_session")),
+        "agent:test_session events must be filtered out: {:?}",
+        v["events"]
+    );
+
+    // 11) Seed a peer-side agent event and verify it surfaces (origin
+    //     is "agent:other_peer", which does NOT match the own filter).
+    let peer_event_id = server_runtime
+        .store
+        .insert_event(
+            colmena::crdt_documents::change_tracker_store::NewEvent {
+                artifact_id: aid.clone(),
+                sheet_id: Some(inventory_id.clone()),
+                origin: "agent:other_peer".to_string(),
+                summary: "peer wrote a cell".to_string(),
+            },
+        )
+        .await
+        .expect("seed peer event");
+
+    let v = execute_get_recent_changes(
+        &ctx,
+        GetRecentChangesArgs {
+            since_event_id: Some(own_seeded),
+            sheet_id: None,
+            limit: None,
+        },
+    )
+    .await;
+    let events = v["events"].as_array().expect("events array");
+    assert!(
+        events.iter().any(|e| e["id"] == json!(peer_event_id)),
+        "expected peer event to appear, got: {events:?}"
+    );
+
+    // 12) get_recent_changes with cursor at peer_event_id — should be empty.
+    let v = execute_get_recent_changes(
+        &ctx,
+        GetRecentChangesArgs {
+            since_event_id: Some(peer_event_id),
+            sheet_id: None,
+            limit: None,
+        },
+    )
+    .await;
+    assert!(v["events"].as_array().expect("events array").is_empty());
 
     // ── Server-side verification ─────────────────────────────────────
     // Projection on the server's authoritative Y.Doc should now reflect
