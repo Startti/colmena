@@ -105,7 +105,7 @@ pub(super) fn decode_sync_step2_update(bytes: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Encode an update message: `[MSG_SYNC][MSG_SYNC_UPDATE][update_bytes]`.
-fn encode_update(update: &[u8]) -> Vec<u8> {
+pub(super) fn encode_update(update: &[u8]) -> Vec<u8> {
     let mut enc = EncoderV1::new();
     enc.write_var(MSG_SYNC);
     enc.write_var(MSG_SYNC_UPDATE);

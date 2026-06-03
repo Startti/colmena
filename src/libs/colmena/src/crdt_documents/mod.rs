@@ -15,6 +15,7 @@ pub mod runtime;
 pub mod server;
 pub mod snapshot_writer;
 pub mod storage;
+pub mod ws_peer;
 pub mod xlsx_export;
 pub mod xlsx_import;
 pub mod yjs_protocol;

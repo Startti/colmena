@@ -61,25 +61,25 @@ pub(super) fn sanitize_schema_for_llm_providers(value: &mut serde_json::Value) {
             map.remove("$schema");
 
             // (4) Collapse `"type": [...]` → singular type, dropping `"null"`.
-            if let Some(type_val) = map.get("type") {
-                if let Value::Array(arr) = type_val {
-                    let kept: Vec<String> = arr
-                        .iter()
-                        .filter_map(|v| v.as_str())
-                        .filter(|s| *s != "null")
-                        .map(|s| s.to_string())
-                        .collect();
-                    if kept.len() == 1 {
-                        map.insert("type".to_string(), Value::String(kept.into_iter().next().unwrap()));
-                    } else if kept.is_empty() {
-                        // Pathological: only "null" was in the list. Default
-                        // to "string" so the schema stays well-formed.
-                        map.insert("type".to_string(), Value::String("string".to_string()));
-                    } else {
-                        // Multi-type union (e.g. ["string","number"]) — leave
-                        // as-is. Not produced by our v0/v1 Args structs today.
-                    }
+            if let Some(Value::Array(arr)) = map.get("type") {
+                let kept: Vec<String> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|s| *s != "null")
+                    .map(|s| s.to_string())
+                    .collect();
+                if kept.len() == 1 {
+                    map.insert(
+                        "type".to_string(),
+                        Value::String(kept.into_iter().next().unwrap()),
+                    );
+                } else if kept.is_empty() {
+                    // Pathological: only "null" was in the list. Default
+                    // to "string" so the schema stays well-formed.
+                    map.insert("type".to_string(), Value::String("string".to_string()));
                 }
+                // Else: multi-type union (e.g. ["string","number"]) — leave
+                // as-is. Not produced by our v0/v1 Args structs today.
             }
 
             for key in ["items", "additionalProperties"] {
