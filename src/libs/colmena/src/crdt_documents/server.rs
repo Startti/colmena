@@ -11,20 +11,20 @@
 //!   DELETE /documents/:id                          — delete an artifact (stop writer + remove storage)
 
 use crate::crdt_documents::{
-    projection, yjs_protocol, ArtifactId, CrdtDocumentsRuntime,
+    change_tracker_store::NewEvent, projection, yjs_protocol, ArtifactId, CrdtDocumentsRuntime,
 };
 use axum::{
     body::Bytes,
-    extract::{ws::WebSocketUpgrade, Path, State},
     extract::Json as JsonExtract,
+    extract::{ws::WebSocketUpgrade, Path, Query, State},
     http::{header, StatusCode},
     response::{Html, IntoResponse, Json, Response},
     routing::{delete, get, post},
     Router,
 };
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tokio::fs;
 
 pub fn router(runtime: Arc<CrdtDocumentsRuntime>) -> Router {
@@ -47,6 +47,13 @@ pub fn router(runtime: Arc<CrdtDocumentsRuntime>) -> Router {
         .route("/documents/:id", delete(delete_handler))
         .route("/documents/:id/import", post(import_handler))
         .route("/documents/:id/export.xlsx", get(export_handler))
+        .route("/documents/:id/changes", get(changes_handler))
+        .route("/documents/:id/events", post(record_event_handler))
+        .route(
+            "/documents/:id/cursor",
+            get(get_cursor_handler).post(set_cursor_handler),
+        )
+        .route("/documents/by-session/:sid", get(by_session_handler))
         .with_state(runtime)
 }
 
@@ -55,6 +62,11 @@ pub fn router(runtime: Arc<CrdtDocumentsRuntime>) -> Router {
 #[derive(serde::Deserialize)]
 struct CreateRequest {
     name: String,
+    /// Optional agent session id. When present, the new artifact is also
+    /// registered in the change-tracker store via `touch_artifact` so that
+    /// `/documents/by-session/:sid` can surface it.
+    #[serde(default)]
+    agent_session_id: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -69,6 +81,13 @@ async fn create_handler(
 ) -> impl IntoResponse {
     let id = ArtifactId::new();
     let entry = runtime.registry.get_or_create(&id, &req.name);
+    if let Some(sid) = req.agent_session_id.as_deref() {
+        // Best-effort: a store-write failure should not fail artifact creation.
+        let _ = runtime
+            .store
+            .touch_artifact(sid, &id, Some(req.name.as_str()))
+            .await;
+    }
     (
         StatusCode::CREATED,
         Json(CreateResponse {
@@ -83,9 +102,7 @@ struct ListResponse {
     artifacts: Vec<crate::crdt_documents::ArtifactMeta>,
 }
 
-async fn list_handler(
-    State(runtime): State<Arc<CrdtDocumentsRuntime>>,
-) -> impl IntoResponse {
+async fn list_handler(State(runtime): State<Arc<CrdtDocumentsRuntime>>) -> impl IntoResponse {
     Json(ListResponse {
         artifacts: runtime.registry.list(),
     })
@@ -102,6 +119,155 @@ async fn delete_handler(
     match runtime.registry.delete(&id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+// ── Change-tracker REST handlers (B-T7) ───────────────────────────────────
+
+async fn changes_handler(
+    Path(id_str): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    State(runtime): State<Arc<CrdtDocumentsRuntime>>,
+) -> Response {
+    let id = match ArtifactId::from_str(&id_str) {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid artifact id").into_response(),
+    };
+    let since: u64 = params
+        .get("since")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let limit: u32 = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50);
+    let sheet_id = params.get("sheet_id").map(String::as_str);
+    let exclude_origin = params.get("exclude_origin").map(String::as_str);
+    match runtime
+        .store
+        .events_since(&id, since, sheet_id, exclude_origin, limit)
+        .await
+    {
+        Ok(evs) => {
+            let max_id = evs.iter().map(|e| e.id).max().unwrap_or(since);
+            let truncated = (evs.len() as u32) >= limit;
+            Json(serde_json::json!({
+                "current_event_id": max_id,
+                "events": evs.iter().map(|e| serde_json::json!({
+                    "id": e.id,
+                    "artifact_id": e.artifact_id,
+                    "sheet_id": e.sheet_id,
+                    "origin": e.origin,
+                    "summary": e.summary,
+                    "created_at": e.created_at,
+                })).collect::<Vec<_>>(),
+                "truncated": truncated,
+            }))
+            .into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RecordEventBody {
+    #[serde(default)]
+    sheet_id: Option<String>,
+    origin: String,
+    summary: String,
+}
+
+async fn record_event_handler(
+    Path(id_str): Path<String>,
+    State(runtime): State<Arc<CrdtDocumentsRuntime>>,
+    JsonExtract(body): JsonExtract<RecordEventBody>,
+) -> Response {
+    let id = match ArtifactId::from_str(&id_str) {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid artifact id").into_response(),
+    };
+    match runtime
+        .store
+        .insert_event(NewEvent {
+            artifact_id: id,
+            sheet_id: body.sheet_id,
+            origin: body.origin,
+            summary: body.summary,
+        })
+        .await
+    {
+        Ok(event_id) => Json(serde_json::json!({ "id": event_id })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct CursorBody {
+    agent_session_id: String,
+    last_event_id: u64,
+}
+
+async fn set_cursor_handler(
+    Path(id_str): Path<String>,
+    State(runtime): State<Arc<CrdtDocumentsRuntime>>,
+    JsonExtract(body): JsonExtract<CursorBody>,
+) -> Response {
+    let id = match ArtifactId::from_str(&id_str) {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid artifact id").into_response(),
+    };
+    match runtime
+        .store
+        .upsert_cursor(&body.agent_session_id, &id, body.last_event_id)
+        .await
+    {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    }
+}
+
+async fn get_cursor_handler(
+    Path(id_str): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    State(runtime): State<Arc<CrdtDocumentsRuntime>>,
+) -> Response {
+    let id = match ArtifactId::from_str(&id_str) {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid artifact id").into_response(),
+    };
+    let sid = match params.get("agent_session_id") {
+        Some(s) => s,
+        None => {
+            return (StatusCode::BAD_REQUEST, "agent_session_id required").into_response();
+        }
+    };
+    match runtime.store.cursor_for(sid, &id).await {
+        Ok(Some(c)) => Json(serde_json::json!({ "last_event_id": c })).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "no cursor").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    }
+}
+
+async fn by_session_handler(
+    Path(sid): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    State(runtime): State<Arc<CrdtDocumentsRuntime>>,
+) -> Response {
+    let limit: u32 = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50);
+    match runtime.store.artifacts_for_session(&sid, limit).await {
+        Ok(list) => Json(serde_json::json!({
+            "artifacts": list.iter().map(|a| serde_json::json!({
+                "artifact_id": a.artifact_id,
+                "name": a.name,
+                "created_at": a.created_at,
+                "last_accessed_at": a.last_accessed_at,
+            })).collect::<Vec<_>>(),
+        }))
+        .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
     }
 }
 
@@ -191,9 +357,7 @@ async fn ws_handler(
                             .await;
                     });
                 };
-                if let Err(e) =
-                    yjs_protocol::handle_socket(socket, doc, Some(post_update)).await
-                {
+                if let Err(e) = yjs_protocol::handle_socket(socket, doc, Some(post_update)).await {
                     tracing::warn!("ws handler ended with error: {e}");
                 }
                 let _ = done_tx.send(());
