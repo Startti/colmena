@@ -26,3 +26,4 @@ pub use doc_registry::{DocRegistry, RegisteredArtifact};
 pub use runtime::{CrdtDocumentsRuntime, RuntimeError, DEFAULT_STORAGE_ROOT};
 pub use snapshot_writer::{spawn_writer, SnapshotHandle};
 pub use storage::{ArtifactMeta, ArtifactStorage, LocalFsStorage, StorageConfig, StorageError};
+pub use ws_peer::{WsPeerArtifact, WsPeerError};

@@ -1605,6 +1605,14 @@ impl ExecutableNode for LlmNode {
         // dispatched through the runtime built here. artifact_id MUST be in the
         // config (LLM never sets it); session_id is not relevant for the v1 CRDT
         // tools since the registry is per-artifact, not per-session.
+        //
+        // For WsPeer mode, we also need to retain the peer handle so we can
+        // shutdown the WS cleanly at end-of-execute (flush pending updates
+        // before closing the socket). The context only holds `Arc<Doc>` +
+        // `Arc<AtomicBool>` cloned from the peer; ownership of the peer
+        // itself lives in this option.
+        let mut crdt_ws_peer_for_shutdown:
+            Option<crate::crdt_documents::WsPeerArtifact> = None;
         let crdt_docs_context: Option<Arc<CrdtDocsContext>> = match inputs
             .get("crdt_documents")
             .cloned()
@@ -1620,33 +1628,60 @@ impl ExecutableNode for LlmNode {
                 let artifact_id: ArtifactId = artifact_id_str.parse().map_err(|_| -> Box<dyn Error + Send + Sync> {
                     "crdt_documents config has invalid `artifact_id` (expected art_<26-char-ULID>)".into()
                 })?;
-                // Prefer the process-wide singleton if installed (e.g.
-                // by the `crdt-yws-graph` subcommand or ADP's worker).
-                // This is how the WS server and the LLM tool dispatcher
-                // share the SAME in-memory Y.Doc, so mutations from the
-                // agent show up live in any browser connected to the
-                // server. Falls back to `from_config` if no singleton —
-                // that path always created a fresh runtime per node, used
-                // by plain `dag_engine run` invocations that don't share
-                // state with a server.
-                let runtime_arc =
-                    if let Some(shared) = crate::crdt_documents::process_runtime::get_global() {
-                        shared
-                    } else {
-                        match CrdtDocumentsRuntime::from_config(&crdt_cfg).await {
-                            Ok(rt) => Arc::new(rt),
-                            Err(e) => {
-                                return Err(format!(
-                                    "invalid `crdt_documents` config on llm node: {e}"
-                                )
-                                .into());
-                            }
+                // Mode selection (descending priority):
+                //
+                // 1. `ws_url` present in config → WsPeer mode. The agent
+                //    opens a WS peer connection to a remote CRDT documents
+                //    service. The agent's worker is stateless; the
+                //    service holds the authoritative Y.Doc.
+                // 2. No `ws_url`, process-wide singleton installed (e.g.
+                //    `crdt-yws-graph` subcommand, future ADP worker
+                //    bootstrap that colocates server + executor) → Local
+                //    mode using the singleton runtime. Mutations are
+                //    visible live to any browser connected to that
+                //    server because they share the same Arc<Doc>.
+                // 3. Neither → Local mode with a freshly-built runtime
+                //    (plain `dag_engine run`, autonomous CLI). No live
+                //    server is involved; persistence is to disk only.
+                if let Some(ws_url) = crdt_cfg.get("ws_url").and_then(Value::as_str)
+                {
+                    match crate::crdt_documents::WsPeerArtifact::connect(
+                        ws_url,
+                        artifact_id.clone(),
+                    )
+                    .await
+                    {
+                        Ok(peer) => {
+                            let ctx = CrdtDocsContext::new_ws_peer(&peer);
+                            crdt_ws_peer_for_shutdown = Some(peer);
+                            Some(Arc::new(ctx))
                         }
-                    };
-                Some(Arc::new(CrdtDocsContext {
-                    runtime: runtime_arc,
-                    artifact_id,
-                }))
+                        Err(e) => {
+                            return Err(format!(
+                                "crdt_documents ws_peer connect failed: {e}"
+                            )
+                            .into());
+                        }
+                    }
+                } else {
+                    let runtime_arc =
+                        if let Some(shared) =
+                            crate::crdt_documents::process_runtime::get_global()
+                        {
+                            shared
+                        } else {
+                            match CrdtDocumentsRuntime::from_config(&crdt_cfg).await {
+                                Ok(rt) => Arc::new(rt),
+                                Err(e) => {
+                                    return Err(format!(
+                                        "invalid `crdt_documents` config on llm node: {e}"
+                                    )
+                                    .into());
+                                }
+                            }
+                        };
+                    Some(Arc::new(CrdtDocsContext::new_local(runtime_arc, artifact_id)))
+                }
             }
             None => None,
         };
@@ -2492,27 +2527,28 @@ impl ExecutableNode for LlmNode {
             "extra_info": extra_info
         });
 
-        // Drain the CRDT runtime's snapshot writers before returning.
-        // The writers run as detached `tokio::spawn` tasks; if the host
-        // tokio runtime is torn down before they get scheduled to flush
-        // (e.g. `cargo run --bin dag_engine -- run <graph.json>` exits as
-        // soon as this node returns), any mutations issued by the LLM
-        // tool dispatchers between the last 5s tick and now are lost.
-        // `shutdown` sends an explicit shutdown signal AND awaits the
-        // writer's final flush per artifact. Idempotent.
-        //
-        // Skip when the runtime is the process-wide singleton (installed
-        // by `crdt-yws-graph` / ADP worker bootstrap) — the singleton is
-        // owned by the host process, not by this graph execution, and
-        // must outlive the call so other nodes (and the WS server) can
-        // keep reading/writing it. Identity comparison via Arc::ptr_eq.
+        // CRDT cleanup per mode:
+        //   - Local + locally-owned runtime: drain snapshot writers so the
+        //     last mutations land on disk before the tokio runtime tears
+        //     down (writers are detached tokio::spawn tasks).
+        //   - Local + singleton runtime: skip — the singleton is owned by
+        //     the host process and must outlive this call.
+        //   - WsPeer: flush pending outbound updates and close the socket
+        //     cleanly. Without this, the last few CRDT updates queued in
+        //     the channel might not reach the server before the host
+        //     process exits.
         if let Some(ctx) = crdt_docs_context.as_ref() {
-            let is_shared = crate::crdt_documents::process_runtime::get_global()
-                .as_ref()
-                .is_some_and(|shared| Arc::ptr_eq(shared, &ctx.runtime));
-            if !is_shared {
-                ctx.runtime.shutdown().await;
+            if let CrdtDocsContext::Local { runtime, .. } = ctx.as_ref() {
+                let is_shared = crate::crdt_documents::process_runtime::get_global()
+                    .as_ref()
+                    .is_some_and(|shared| Arc::ptr_eq(shared, runtime));
+                if !is_shared {
+                    runtime.shutdown().await;
+                }
             }
+        }
+        if let Some(mut peer) = crdt_ws_peer_for_shutdown.take() {
+            peer.shutdown().await;
         }
 
         Ok(final_output)

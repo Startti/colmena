@@ -1,5 +1,6 @@
 //! Synthetic tools for the LLM node — tools that don't map to DAG nodes.
 
+pub mod crdt_doc_context;
 pub mod crdt_doc_tools;
 pub mod describe_tool;
 pub mod document_tools;

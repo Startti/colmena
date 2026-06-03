@@ -73,7 +73,7 @@ pub enum WsPeerError {
 pub struct WsPeerArtifact {
     pub doc: Arc<Doc>,
     pub artifact_id: ArtifactId,
-    alive: Arc<AtomicBool>,
+    pub alive: Arc<AtomicBool>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     done_rx: Option<oneshot::Receiver<()>>,
 }

@@ -9,21 +9,17 @@
 //! runtime. The `artifact_id` itself is injected by the executor from the
 //! `llm_call.config.crdt_documents` block — the LLM never sets it.
 
+#[cfg(test)]
 use crate::crdt_documents::{ArtifactId, CrdtDocumentsRuntime};
 use crate::llm::domain::tools::ToolDefinition;
 use schemars::JsonSchema;
 use serde::Deserialize;
+#[cfg(test)]
 use std::sync::Arc;
 
-pub const TOOL_LIST_SHEETS: &str = "crdt_doc_list_sheets";
+pub use super::crdt_doc_context::CrdtDocsContext;
 
-/// Execution context bundled by the LLM-call executor and passed to every
-/// CRDT tool dispatch. The `artifact_id` is resolved from the node config —
-/// the LLM never provides it.
-pub struct CrdtDocsContext {
-    pub runtime: Arc<CrdtDocumentsRuntime>,
-    pub artifact_id: ArtifactId,
-}
+pub const TOOL_LIST_SHEETS: &str = "crdt_doc_list_sheets";
 
 // ── list_sheets ───────────────────────────────────────────────────────────────
 
@@ -43,10 +39,10 @@ pub fn tool_list_sheets() -> ToolDefinition {
 /// `{ "sheets": [ { "sheet_id": "…", "name": "…" }, … ] }` or
 /// `{ "error": "artifact_not_found" }` when the id is not registered.
 pub fn execute_list_sheets(ctx: &CrdtDocsContext) -> serde_json::Value {
-    let Some(entry) = ctx.runtime.registry.get(&ctx.artifact_id) else {
+    let Some(doc) = ctx.doc() else {
         return serde_json::json!({ "error": "artifact_not_found" });
     };
-    let proj = crate::crdt_documents::projection::project(&entry.doc);
+    let proj = crate::crdt_documents::projection::project(&doc);
     let sheets: Vec<serde_json::Value> = proj["sheets"]
         .as_array()
         .cloned()
@@ -88,10 +84,10 @@ pub fn tool_read() -> ToolDefinition {
 
 /// Execute `read` against the runtime.
 pub fn execute_read(ctx: &CrdtDocsContext, args: ReadArgs) -> serde_json::Value {
-    let Some(entry) = ctx.runtime.registry.get(&ctx.artifact_id) else {
+    let Some(doc) = ctx.doc() else {
         return serde_json::json!({ "error": "artifact_not_found" });
     };
-    let proj = crate::crdt_documents::projection::project(&entry.doc);
+    let proj = crate::crdt_documents::projection::project(&doc);
     let sheets = proj["sheets"].as_array().cloned().unwrap_or_default();
     let Some(sheet) = sheets
         .into_iter()
@@ -171,18 +167,18 @@ pub fn tool_set_cell() -> ToolDefinition {
 
 /// Execute `set_cell` against the runtime.
 pub fn execute_set_cell(ctx: &CrdtDocsContext, args: SetCellArgs) -> serde_json::Value {
-    let Some(entry) = ctx.runtime.registry.get(&ctx.artifact_id) else {
+    let Some(doc) = ctx.doc() else {
         return serde_json::json!({ "error": "artifact_not_found" });
     };
     crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
-        &entry.doc,
+        &doc,
         &args.sheet_id,
         &args.addr,
         &args.value,
     );
-    entry.mark_dirty();
-    ctx.runtime.tracker.record(
-        &ctx.artifact_id,
+    ctx.mark_dirty();
+    ctx.tracker().record(
+        ctx.artifact_id(),
         "agent:llm",
         &format!("set {}!{} = {}", args.sheet_id, args.addr, args.value),
     );
@@ -210,7 +206,7 @@ pub fn tool_set_range() -> ToolDefinition {
 
 /// Execute `set_range` against the runtime.
 pub fn execute_set_range(ctx: &CrdtDocsContext, args: SetRangeArgs) -> serde_json::Value {
-    let Some(entry) = ctx.runtime.registry.get(&ctx.artifact_id) else {
+    let Some(doc) = ctx.doc() else {
         return serde_json::json!({ "error": "artifact_not_found" });
     };
     let Some((r0, c0)) = parse_a1(&args.start_addr) else {
@@ -223,7 +219,7 @@ pub fn execute_set_range(ctx: &CrdtDocsContext, args: SetRangeArgs) -> serde_jso
             let c = c0 + dc as u32;
             let addr = format!("{}{}", col_letter(c), r + 1);
             crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
-                &entry.doc,
+                &doc,
                 &args.sheet_id,
                 &addr,
                 value,
@@ -231,9 +227,9 @@ pub fn execute_set_range(ctx: &CrdtDocsContext, args: SetRangeArgs) -> serde_jso
             cells_written += 1;
         }
     }
-    entry.mark_dirty();
-    ctx.runtime.tracker.record(
-        &ctx.artifact_id,
+    ctx.mark_dirty();
+    ctx.tracker().record(
+        ctx.artifact_id(),
         "agent:llm",
         &format!(
             "wrote {cells_written} cells starting at {}!{}",
@@ -260,14 +256,13 @@ pub fn tool_add_sheet() -> ToolDefinition {
 
 /// Execute `add_sheet` against the runtime.
 pub fn execute_add_sheet(ctx: &CrdtDocsContext, args: AddSheetArgs) -> serde_json::Value {
-    let Some(entry) = ctx.runtime.registry.get(&ctx.artifact_id) else {
+    let Some(doc) = ctx.doc() else {
         return serde_json::json!({ "error": "artifact_not_found" });
     };
-    let sheet_id =
-        crate::crdt_documents::tool_executor::apply_add_sheet(&entry.doc, &args.name);
-    entry.mark_dirty();
-    ctx.runtime.tracker.record(
-        &ctx.artifact_id,
+    let sheet_id = crate::crdt_documents::tool_executor::apply_add_sheet(&doc, &args.name);
+    ctx.mark_dirty();
+    ctx.tracker().record(
+        ctx.artifact_id(),
         "agent:llm",
         &format!("added sheet '{}' (id={sheet_id})", args.name),
     );
@@ -351,9 +346,8 @@ pub fn execute_get_recent_changes(
     args: GetRecentChangesArgs,
 ) -> serde_json::Value {
     let events = ctx
-        .runtime
-        .tracker
-        .since(&ctx.artifact_id, args.since_event_id);
+        .tracker()
+        .since(ctx.artifact_id(), args.since_event_id);
     let current_event_id = events.iter().map(|e| e.event_id).max();
     let narration = if events.is_empty() {
         "No changes since last check.".to_string()
@@ -415,10 +409,7 @@ mod tests {
         let entry = rt.registry.get_or_create(&id, "workbook");
         apply_add_sheet(&entry.doc, "Sales");
         apply_add_sheet(&entry.doc, "Summary");
-        let ctx = CrdtDocsContext {
-            runtime: rt,
-            artifact_id: id,
-        };
+        let ctx = CrdtDocsContext::new_local(rt, id);
         let v = execute_list_sheets(&ctx);
         let sheets = v["sheets"].as_array().unwrap();
         assert_eq!(sheets.len(), 2);
@@ -432,10 +423,7 @@ mod tests {
     async fn returns_error_for_unknown_artifact() {
         let rt = make_runtime().await;
         let unknown = ArtifactId::new(); // never registered
-        let ctx = CrdtDocsContext {
-            runtime: rt,
-            artifact_id: unknown,
-        };
+        let ctx = CrdtDocsContext::new_local(rt, unknown);
         let v = execute_list_sheets(&ctx);
         assert_eq!(v["error"], "artifact_not_found");
     }
@@ -467,13 +455,7 @@ mod tests {
         let rt = Arc::new(CrdtDocumentsRuntime::from_config(&cfg).await.unwrap());
         let id = ArtifactId::new();
         let _ = rt.registry.get_or_create(&id, "t");
-        (
-            CrdtDocsContext {
-                runtime: rt,
-                artifact_id: id,
-            },
-            tmp,
-        )
+        (CrdtDocsContext::new_local(rt, id), tmp)
     }
 
     #[tokio::test]
