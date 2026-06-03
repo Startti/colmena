@@ -13,7 +13,9 @@
 //! | No `ws_url`, singleton installed  | [`CrdtDocsContext::Local`] using shared runtime | Colocated server + executor (`crdt-yws-graph` subcommand, monolithic deploy). |
 //! | Neither                           | [`CrdtDocsContext::Local`] using fresh runtime  | Plain `dag_engine run`, autonomous CLI, no live server. |
 
-use crate::crdt_documents::{ArtifactId, ChangeTracker, CrdtDocumentsRuntime, WsPeerArtifact};
+use crate::crdt_documents::{
+    ArtifactId, ChangeTracker, CrdtDocumentsRuntime, InMemoryChangeTrackerStore, WsPeerArtifact,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use yrs::Doc;
@@ -69,7 +71,7 @@ impl CrdtDocsContext {
             artifact_id: peer.artifact_id.clone(),
             doc: peer.doc.clone(),
             alive: peer.alive.clone(),
-            tracker: Arc::new(ChangeTracker::new()),
+            tracker: Arc::new(ChangeTracker::new(Arc::new(InMemoryChangeTrackerStore::new()))),
         }
     }
 

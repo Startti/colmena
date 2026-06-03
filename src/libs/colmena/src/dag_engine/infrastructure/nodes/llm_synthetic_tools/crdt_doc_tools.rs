@@ -166,7 +166,7 @@ pub fn tool_set_cell() -> ToolDefinition {
 }
 
 /// Execute `set_cell` against the runtime.
-pub fn execute_set_cell(ctx: &CrdtDocsContext, args: SetCellArgs) -> serde_json::Value {
+pub async fn execute_set_cell(ctx: &CrdtDocsContext, args: SetCellArgs) -> serde_json::Value {
     let Some(doc) = ctx.doc() else {
         return serde_json::json!({ "error": "artifact_not_found" });
     };
@@ -177,11 +177,14 @@ pub fn execute_set_cell(ctx: &CrdtDocsContext, args: SetCellArgs) -> serde_json:
         &args.value,
     );
     ctx.mark_dirty();
-    ctx.tracker().record(
-        ctx.artifact_id(),
-        "agent:llm",
-        &format!("set {}!{} = {}", args.sheet_id, args.addr, args.value),
-    );
+    ctx.tracker()
+        .record(
+            ctx.artifact_id(),
+            None,
+            "agent:llm",
+            &format!("set {}!{} = {}", args.sheet_id, args.addr, args.value),
+        )
+        .await;
     serde_json::json!({ "ok": true })
 }
 
@@ -205,7 +208,7 @@ pub fn tool_set_range() -> ToolDefinition {
 }
 
 /// Execute `set_range` against the runtime.
-pub fn execute_set_range(ctx: &CrdtDocsContext, args: SetRangeArgs) -> serde_json::Value {
+pub async fn execute_set_range(ctx: &CrdtDocsContext, args: SetRangeArgs) -> serde_json::Value {
     let Some(doc) = ctx.doc() else {
         return serde_json::json!({ "error": "artifact_not_found" });
     };
@@ -228,14 +231,17 @@ pub fn execute_set_range(ctx: &CrdtDocsContext, args: SetRangeArgs) -> serde_jso
         }
     }
     ctx.mark_dirty();
-    ctx.tracker().record(
-        ctx.artifact_id(),
-        "agent:llm",
-        &format!(
-            "wrote {cells_written} cells starting at {}!{}",
-            args.sheet_id, args.start_addr
-        ),
-    );
+    ctx.tracker()
+        .record(
+            ctx.artifact_id(),
+            None,
+            "agent:llm",
+            &format!(
+                "wrote {cells_written} cells starting at {}!{}",
+                args.sheet_id, args.start_addr
+            ),
+        )
+        .await;
     serde_json::json!({ "ok": true, "cells_written": cells_written })
 }
 
@@ -255,17 +261,20 @@ pub fn tool_add_sheet() -> ToolDefinition {
 }
 
 /// Execute `add_sheet` against the runtime.
-pub fn execute_add_sheet(ctx: &CrdtDocsContext, args: AddSheetArgs) -> serde_json::Value {
+pub async fn execute_add_sheet(ctx: &CrdtDocsContext, args: AddSheetArgs) -> serde_json::Value {
     let Some(doc) = ctx.doc() else {
         return serde_json::json!({ "error": "artifact_not_found" });
     };
     let sheet_id = crate::crdt_documents::tool_executor::apply_add_sheet(&doc, &args.name);
     ctx.mark_dirty();
-    ctx.tracker().record(
-        ctx.artifact_id(),
-        "agent:llm",
-        &format!("added sheet '{}' (id={sheet_id})", args.name),
-    );
+    ctx.tracker()
+        .record(
+            ctx.artifact_id(),
+            None,
+            "agent:llm",
+            &format!("added sheet '{}' (id={sheet_id})", args.name),
+        )
+        .await;
     serde_json::json!({ "sheet_id": sheet_id })
 }
 
@@ -293,7 +302,7 @@ pub async fn dispatch_crdt_doc_set_cell(
     args: serde_json::Value,
 ) -> serde_json::Value {
     match serde_json::from_value::<SetCellArgs>(args) {
-        Ok(a) => execute_set_cell(ctx, a),
+        Ok(a) => execute_set_cell(ctx, a).await,
         Err(e) => serde_json::json!({ "error": format!("invalid_args: {e}") }),
     }
 }
@@ -303,7 +312,7 @@ pub async fn dispatch_crdt_doc_set_range(
     args: serde_json::Value,
 ) -> serde_json::Value {
     match serde_json::from_value::<SetRangeArgs>(args) {
-        Ok(a) => execute_set_range(ctx, a),
+        Ok(a) => execute_set_range(ctx, a).await,
         Err(e) => serde_json::json!({ "error": format!("invalid_args: {e}") }),
     }
 }
@@ -313,7 +322,7 @@ pub async fn dispatch_crdt_doc_add_sheet(
     args: serde_json::Value,
 ) -> serde_json::Value {
     match serde_json::from_value::<AddSheetArgs>(args) {
-        Ok(a) => execute_add_sheet(ctx, a),
+        Ok(a) => execute_add_sheet(ctx, a).await,
         Err(e) => serde_json::json!({ "error": format!("invalid_args: {e}") }),
     }
 }
@@ -341,13 +350,14 @@ pub fn tool_get_recent_changes() -> ToolDefinition {
 }
 
 /// Execute `get_recent_changes` against the runtime.
-pub fn execute_get_recent_changes(
+pub async fn execute_get_recent_changes(
     ctx: &CrdtDocsContext,
     args: GetRecentChangesArgs,
 ) -> serde_json::Value {
     let events = ctx
         .tracker()
-        .since(ctx.artifact_id(), args.since_event_id);
+        .since(ctx.artifact_id(), args.since_event_id, None, None, 100)
+        .await;
     let current_event_id = events.iter().map(|e| e.event_id).max();
     let narration = if events.is_empty() {
         "No changes since last check.".to_string()
@@ -369,7 +379,7 @@ pub async fn dispatch_crdt_doc_get_recent_changes(
     args: serde_json::Value,
 ) -> serde_json::Value {
     match serde_json::from_value::<GetRecentChangesArgs>(args) {
-        Ok(a) => execute_get_recent_changes(ctx, a),
+        Ok(a) => execute_get_recent_changes(ctx, a).await,
         Err(e) => serde_json::json!({ "error": format!("invalid_args: {e}") }),
     }
 }
@@ -461,7 +471,7 @@ mod tests {
     #[tokio::test]
     async fn set_cell_then_read_returns_value() {
         let (ctx, tmp) = fresh_ctx().await;
-        let s = execute_add_sheet(&ctx, AddSheetArgs { name: "X".into() });
+        let s = execute_add_sheet(&ctx, AddSheetArgs { name: "X".into() }).await;
         let sheet_id = s["sheet_id"].as_str().unwrap().to_string();
         execute_set_cell(
             &ctx,
@@ -470,7 +480,8 @@ mod tests {
                 addr: "A1".into(),
                 value: json!("hello"),
             },
-        );
+        )
+        .await;
         let v = execute_read(&ctx, ReadArgs { sheet_id, range: None });
         assert_eq!(v["cells"]["A1"], "hello");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -479,7 +490,7 @@ mod tests {
     #[tokio::test]
     async fn set_range_writes_2d_block() {
         let (ctx, tmp) = fresh_ctx().await;
-        let s = execute_add_sheet(&ctx, AddSheetArgs { name: "X".into() });
+        let s = execute_add_sheet(&ctx, AddSheetArgs { name: "X".into() }).await;
         let sheet_id = s["sheet_id"].as_str().unwrap().to_string();
         execute_set_range(
             &ctx,
@@ -491,7 +502,8 @@ mod tests {
                     vec![json!(1), json!(2)],
                 ],
             },
-        );
+        )
+        .await;
         let v = execute_read(&ctx, ReadArgs { sheet_id, range: None });
         assert_eq!(v["cells"]["B2"], "a");
         assert_eq!(v["cells"]["C2"], "b");
@@ -503,7 +515,7 @@ mod tests {
     #[tokio::test]
     async fn read_with_range_filters() {
         let (ctx, tmp) = fresh_ctx().await;
-        let s = execute_add_sheet(&ctx, AddSheetArgs { name: "X".into() });
+        let s = execute_add_sheet(&ctx, AddSheetArgs { name: "X".into() }).await;
         let sheet_id = s["sheet_id"].as_str().unwrap().to_string();
         execute_set_cell(
             &ctx,
@@ -512,7 +524,8 @@ mod tests {
                 addr: "A1".into(),
                 value: json!(1),
             },
-        );
+        )
+        .await;
         execute_set_cell(
             &ctx,
             SetCellArgs {
@@ -520,7 +533,8 @@ mod tests {
                 addr: "Z99".into(),
                 value: json!(2),
             },
-        );
+        )
+        .await;
         let v = execute_read(
             &ctx,
             ReadArgs {
@@ -537,14 +551,16 @@ mod tests {
         let (ctx, tmp) = fresh_ctx().await;
 
         // Initially: no changes.
-        let v = execute_get_recent_changes(&ctx, GetRecentChangesArgs { since_event_id: None });
+        let v =
+            execute_get_recent_changes(&ctx, GetRecentChangesArgs { since_event_id: None }).await;
         assert_eq!(v["narration"], "No changes since last check.");
 
         // Record via a mutation.
-        let s = execute_add_sheet(&ctx, AddSheetArgs { name: "Sales".into() });
+        let s = execute_add_sheet(&ctx, AddSheetArgs { name: "Sales".into() }).await;
         let _sheet_id = s["sheet_id"].as_str().unwrap();
 
-        let v = execute_get_recent_changes(&ctx, GetRecentChangesArgs { since_event_id: None });
+        let v =
+            execute_get_recent_changes(&ctx, GetRecentChangesArgs { since_event_id: None }).await;
         let n = v["narration"].as_str().unwrap();
         assert!(n.contains("added sheet"), "got: {n}");
         assert!(n.contains("Sales"), "got: {n}");
@@ -556,7 +572,8 @@ mod tests {
             GetRecentChangesArgs {
                 since_event_id: Some(current),
             },
-        );
+        )
+        .await;
         assert_eq!(v["narration"], "No changes since last check.");
 
         let _ = std::fs::remove_dir_all(&tmp);

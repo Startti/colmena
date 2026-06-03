@@ -1,111 +1,160 @@
-//! In-memory rotative buffer of recent `Y.Doc` mutations per artifact.
+//! Façade over [`ChangeTrackerStore`]. Preserves the v1 public API
+//! (`record`, `since`, `ChangeEvent`) so existing call sites keep working.
+//! Behind the scenes, every operation goes through the configured store
+//! (in-memory or SQL).
 //!
-//! Used by `crdt_doc_get_recent_changes` (added in Task 19) to give the LLM
-//! a human-readable summary of what changed since a previous turn. v1 caps
-//! at 1000 events per artifact (oldest dropped on overflow).
+//! Previously this module owned an in-process `parking_lot::Mutex<HashMap<…>>`
+//! buffer capped at 1000 events per artifact. That state has been lifted into
+//! [`ChangeTrackerStore`] (see `change_tracker_store.rs`) so events survive
+//! across runtime restarts and can be queried from multiple processes (REST
+//! façade in B-T5/B-T7). The wrapper itself is now `async`: every method awaits
+//! the store and gracefully degrades on errors (best-effort recording).
 
-use crate::crdt_documents::ArtifactId;
-use parking_lot::Mutex;
-use std::collections::{HashMap, VecDeque};
+use crate::crdt_documents::{
+    change_tracker_store::{ChangeTrackerStore, NewEvent, StoredEvent},
+    ArtifactId,
+};
+use std::sync::Arc;
 
-const CAP_PER_ARTIFACT: usize = 1000;
-
+/// Event returned to callers of `ChangeTracker::since`. Shape preserved from
+/// v1 except for `timestamp_ms` (gone — the store records ISO 8601 strings
+/// via `created_at`) and the additional `artifact_id` / `sheet_id` fields
+/// surfaced for richer narration in B-T11.
 #[derive(Debug, Clone)]
 pub struct ChangeEvent {
     pub event_id: u64,
-    pub timestamp_ms: i64,
+    pub artifact_id: String,
+    pub sheet_id: Option<String>,
     pub origin: String,
     pub summary: String,
+    pub created_at: String,
 }
 
-#[derive(Default)]
-struct PerArtifact {
-    events: VecDeque<ChangeEvent>,
-    next_id: u64,
+impl From<StoredEvent> for ChangeEvent {
+    fn from(e: StoredEvent) -> Self {
+        ChangeEvent {
+            event_id: e.id,
+            artifact_id: e.artifact_id,
+            sheet_id: e.sheet_id,
+            origin: e.origin,
+            summary: e.summary,
+            created_at: e.created_at,
+        }
+    }
 }
 
+/// Thin async wrapper around a [`ChangeTrackerStore`]. Constructed by the
+/// runtime (B-T6 wires the SQL store; until then callers pass an
+/// [`crate::crdt_documents::InMemoryChangeTrackerStore`]).
 pub struct ChangeTracker {
-    by_artifact: Mutex<HashMap<String, PerArtifact>>,
+    store: Arc<dyn ChangeTrackerStore>,
 }
 
 impl ChangeTracker {
-    pub fn new() -> Self {
-        Self {
-            by_artifact: Mutex::new(HashMap::new()),
-        }
+    /// Build a tracker backed by `store`. The tracker is a cheap façade — it
+    /// just holds an `Arc<dyn ChangeTrackerStore>` and forwards every call.
+    pub fn new(store: Arc<dyn ChangeTrackerStore>) -> Self {
+        Self { store }
     }
 
-    pub fn record(&self, id: &ArtifactId, origin: &str, summary: &str) {
-        let mut guard = self.by_artifact.lock();
-        let entry = guard.entry(id.to_string()).or_default();
-        let ev = ChangeEvent {
-            event_id: entry.next_id,
-            timestamp_ms: chrono::Utc::now().timestamp_millis(),
-            origin: origin.to_string(),
-            summary: summary.to_string(),
-        };
-        entry.next_id += 1;
-        if entry.events.len() == CAP_PER_ARTIFACT {
-            entry.events.pop_front();
-        }
-        entry.events.push_back(ev);
+    /// Record an event. Returns the new event id, or `0` if the store
+    /// rejected the insert (the tracker is best-effort — callers use the
+    /// returned id only to advance turn high-water cursors). `sheet_id` is
+    /// optional so the tracker can keep recording document-level events
+    /// (e.g. `added sheet 'X'`) without forcing a synthetic sheet id.
+    pub async fn record(
+        &self,
+        artifact_id: &ArtifactId,
+        sheet_id: Option<&str>,
+        origin: &str,
+        summary: &str,
+    ) -> u64 {
+        self.store
+            .insert_event(NewEvent {
+                artifact_id: artifact_id.clone(),
+                sheet_id: sheet_id.map(|s| s.to_string()),
+                origin: origin.to_string(),
+                summary: summary.to_string(),
+            })
+            .await
+            .unwrap_or(0)
     }
 
-    pub fn since(&self, id: &ArtifactId, since: Option<u64>) -> Vec<ChangeEvent> {
-        let guard = self.by_artifact.lock();
-        let Some(entry) = guard.get(id.as_str()) else {
-            return Vec::new();
-        };
-        match since {
-            None => entry.events.iter().cloned().collect(),
-            Some(s) => entry
-                .events
-                .iter()
-                .filter(|e| e.event_id > s)
-                .cloned()
-                .collect(),
-        }
-    }
-}
-
-impl Default for ChangeTracker {
-    fn default() -> Self {
-        Self::new()
+    /// Query events after `since_event_id` (or from the beginning when
+    /// `None`). Optional filters by `sheet_id` and `exclude_origin` let
+    /// callers ignore their own writes (B-T9). `limit` caps the response —
+    /// pick a high enough value for the consumer (legacy callers use 100).
+    pub async fn since(
+        &self,
+        artifact_id: &ArtifactId,
+        since_event_id: Option<u64>,
+        sheet_id: Option<&str>,
+        exclude_origin: Option<&str>,
+        limit: u32,
+    ) -> Vec<ChangeEvent> {
+        let cursor = since_event_id.unwrap_or(0);
+        self.store
+            .events_since(artifact_id, cursor, sheet_id, exclude_origin, limit)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(ChangeEvent::from)
+            .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crdt_documents::InMemoryChangeTrackerStore;
 
-    #[test]
-    fn records_and_since_filters() {
-        let t = ChangeTracker::new();
+    fn new_tracker() -> ChangeTracker {
+        ChangeTracker::new(Arc::new(InMemoryChangeTrackerStore::new()))
+    }
+
+    #[tokio::test]
+    async fn records_and_since_filters() {
+        let t = new_tracker();
         let id = ArtifactId::new();
-        t.record(&id, "agent:test", "set A1");
-        t.record(&id, "agent:test", "set B1");
-        let all = t.since(&id, None);
+        let _ = t.record(&id, None, "agent:test", "set A1").await;
+        let _ = t.record(&id, None, "agent:test", "set B1").await;
+        let all = t.since(&id, None, None, None, 100).await;
         assert_eq!(all.len(), 2);
-        let after_first = t.since(&id, Some(all[0].event_id));
+        let after_first = t
+            .since(&id, Some(all[0].event_id), None, None, 100)
+            .await;
         assert_eq!(after_first.len(), 1);
         assert_eq!(after_first[0].summary, "set B1");
     }
 
-    #[test]
-    fn caps_at_1000() {
-        let t = ChangeTracker::new();
+    #[tokio::test]
+    async fn empty_for_unknown_artifact() {
+        let t = new_tracker();
         let id = ArtifactId::new();
-        for i in 0..1500 {
-            t.record(&id, "x", &format!("ev{i}"));
-        }
-        let all = t.since(&id, None);
-        assert_eq!(all.len(), 1000);
+        assert!(t.since(&id, None, None, None, 100).await.is_empty());
     }
 
-    #[test]
-    fn empty_for_unknown_artifact() {
-        let t = ChangeTracker::new();
+    #[tokio::test]
+    async fn exclude_origin_filters_out_self() {
+        let t = new_tracker();
         let id = ArtifactId::new();
-        assert!(t.since(&id, None).is_empty());
+        let _ = t.record(&id, None, "agent:me", "mine").await;
+        let _ = t.record(&id, None, "agent:other", "theirs").await;
+        let evs = t
+            .since(&id, None, None, Some("agent:me"), 100)
+            .await;
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].summary, "theirs");
+    }
+
+    #[tokio::test]
+    async fn sheet_filter_scopes_results() {
+        let t = new_tracker();
+        let id = ArtifactId::new();
+        let _ = t.record(&id, Some("sh_a"), "agent:llm", "a").await;
+        let _ = t.record(&id, Some("sh_b"), "agent:llm", "b").await;
+        let only_a = t.since(&id, None, Some("sh_a"), None, 100).await;
+        assert_eq!(only_a.len(), 1);
+        assert_eq!(only_a[0].summary, "a");
     }
 }

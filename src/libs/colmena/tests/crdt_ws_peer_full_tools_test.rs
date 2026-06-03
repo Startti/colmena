@@ -87,7 +87,8 @@ async fn six_tools_round_trip_via_ws_peer() {
         AddSheetArgs {
             name: "Inventory".into(),
         },
-    );
+    )
+    .await;
     let inventory_id = v["sheet_id"]
         .as_str()
         .expect("sheet_id present")
@@ -100,7 +101,8 @@ async fn six_tools_round_trip_via_ws_peer() {
         AddSheetArgs {
             name: "Pricing".into(),
         },
-    );
+    )
+    .await;
     let pricing_id = v["sheet_id"].as_str().unwrap().to_string();
 
     // 4) list_sheets — should now show both.
@@ -119,7 +121,8 @@ async fn six_tools_round_trip_via_ws_peer() {
             addr: "A1".into(),
             value: json!("Product"),
         },
-    );
+    )
+    .await;
     assert_eq!(v["ok"], json!(true));
 
     // 6) set_range on Inventory A2:B4 (3 rows × 2 cols = 6 cells).
@@ -134,7 +137,8 @@ async fn six_tools_round_trip_via_ws_peer() {
                 vec![json!("Plum"), json!(15)],
             ],
         },
-    );
+    )
+    .await;
     assert_eq!(v["cells_written"], json!(6));
 
     // Give the WS round-trip a moment to land on the server.
@@ -172,7 +176,8 @@ async fn six_tools_round_trip_via_ws_peer() {
     // 9) get_recent_changes — should show every mutation we made this
     //    session (the per-session tracker captures everything since
     //    peer connect).
-    let v = execute_get_recent_changes(&ctx, GetRecentChangesArgs { since_event_id: None });
+    let v =
+        execute_get_recent_changes(&ctx, GetRecentChangesArgs { since_event_id: None }).await;
     let narration = v["narration"].as_str().expect("narration");
     assert!(narration.contains("Inventory"), "narration must mention Inventory: {narration}");
     assert!(narration.contains("Pricing"), "narration must mention Pricing: {narration}");
@@ -198,7 +203,8 @@ async fn six_tools_round_trip_via_ws_peer() {
         GetRecentChangesArgs {
             since_event_id: Some(last_event),
         },
-    );
+    )
+    .await;
     assert_eq!(v["narration"], json!("No changes since last check."));
 
     // ── Server-side verification ─────────────────────────────────────

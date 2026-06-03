@@ -6,7 +6,8 @@
 //! in the existing documents module.
 
 use crate::crdt_documents::{
-    storage::StorageConfig, ArtifactStorage, DocRegistry, StorageError,
+    storage::StorageConfig, ArtifactStorage, DocRegistry, InMemoryChangeTrackerStore,
+    StorageError,
 };
 use serde_json::Value;
 use std::path::PathBuf;
@@ -86,7 +87,11 @@ impl CrdtDocumentsRuntime {
         let storage: Arc<dyn ArtifactStorage> = storage_cfg.build()?;
         let registry = Arc::new(DocRegistry::new(storage.clone()));
         let _ = registry.load_from_disk().await?;
-        let tracker = Arc::new(crate::crdt_documents::ChangeTracker::new());
+        // B-T4 placeholder: in-memory store. B-T6 will swap this for the
+        // SQLx-backed store wired from the runtime's pool/dialect.
+        let tracker = Arc::new(crate::crdt_documents::ChangeTracker::new(Arc::new(
+            InMemoryChangeTrackerStore::new(),
+        )));
 
         Ok(Self {
             registry,

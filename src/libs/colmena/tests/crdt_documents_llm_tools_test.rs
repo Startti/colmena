@@ -17,7 +17,7 @@ async fn full_tool_sequence_round_trips_through_runtime() {
     let ctx = CrdtDocsContext::new_local(rt.clone(), id.clone());
 
     // 1. add_sheet → "Sales"
-    let resp = execute_add_sheet(&ctx, AddSheetArgs { name: "Sales".into() });
+    let resp = execute_add_sheet(&ctx, AddSheetArgs { name: "Sales".into() }).await;
     let sheet_id = resp["sheet_id"].as_str().unwrap().to_string();
 
     // 2. set_range — write a 3x2 block (Product/Qty headers + 2 rows)
@@ -32,7 +32,8 @@ async fn full_tool_sequence_round_trips_through_runtime() {
                 vec![json!("Pear"), json!(20)],
             ],
         },
-    );
+    )
+    .await;
 
     // 3. read with explicit range
     let v = execute_read(
@@ -65,7 +66,8 @@ async fn full_tool_sequence_round_trips_through_runtime() {
         GetRecentChangesArgs {
             since_event_id: None,
         },
-    );
+    )
+    .await;
     let narration = v["narration"].as_str().unwrap();
     assert!(
         narration.contains("Sales"),
@@ -83,7 +85,8 @@ async fn full_tool_sequence_round_trips_through_runtime() {
         GetRecentChangesArgs {
             since_event_id: current,
         },
-    );
+    )
+    .await;
     assert_eq!(v2["narration"], "No changes since last check.");
 
     // Final: verify the projection reflects the writes.

@@ -107,7 +107,17 @@ fn add_sheet(artifact_id: &str, name: &str) -> PyResult<String> {
     let entry = rt.registry.get_or_create(&id, "(from python)");
     let sheet_id = crate::crdt_documents::tool_executor::apply_add_sheet(&entry.doc, name);
     entry.mark_dirty();
-    rt.tracker.record(&id, "python", &format!("added sheet '{name}'"));
+    // ChangeTracker is now async (B-T4) — block on the current tokio runtime
+    // to keep the PyO3 entry point synchronous. Python callers already need a
+    // tokio runtime present (see `runtime()` above), so `try_current()` is
+    // guaranteed to succeed here.
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let id_for_log = id.clone();
+        let msg = format!("added sheet '{name}'");
+        handle.block_on(async move {
+            rt.tracker.record(&id_for_log, None, "python", &msg).await;
+        });
+    }
     Ok(sheet_id)
 }
 
@@ -161,11 +171,14 @@ fn write_sheet(
         }
     }
     entry.mark_dirty();
-    rt.tracker.record(
-        &id,
-        "python",
-        &format!("wrote {} rows to {sheet_id}", rows.len()),
-    );
+    // ChangeTracker is now async (B-T4) — same pattern as `add_sheet` above.
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let id_for_log = id.clone();
+        let msg = format!("wrote {} rows to {sheet_id}", rows.len());
+        handle.block_on(async move {
+            rt.tracker.record(&id_for_log, None, "python", &msg).await;
+        });
+    }
     Ok(())
 }
 

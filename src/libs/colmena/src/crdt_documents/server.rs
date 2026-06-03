@@ -175,7 +175,21 @@ async fn ws_handler(
                     // or refactor handle_socket to invoke post_update with a pre-state
                     // clone.
                     let summary = format!("peer update ({} bytes)", update_bytes.len());
-                    tracker.record(&id_for_cb, "peer:browser", &summary);
+                    // ChangeTracker is async since B-T4. This callback runs in
+                    // a sync context (inside `handle_socket`'s update-observer
+                    // closure on a single-thread tokio runtime). Spawn a
+                    // fire-and-forget task so we don't block the WS reader.
+                    // Tradeoff: the tracker is best-effort, and under high
+                    // load an event could land out-of-order or be lost on
+                    // runtime tear-down. Acceptable for v1 — the change
+                    // narration is informational, not load-bearing.
+                    let tracker = tracker.clone();
+                    let id_for_cb = id_for_cb.clone();
+                    tokio::spawn(async move {
+                        tracker
+                            .record(&id_for_cb, None, "peer:browser", &summary)
+                            .await;
+                    });
                 };
                 if let Err(e) =
                     yjs_protocol::handle_socket(socket, doc, Some(post_update)).await
