@@ -33,6 +33,67 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 
 ---
 
+## CRDT Documents v1.1 — WS-peer auto-reconnect
+
+- **Origen:** decisión de scoping al implementar el modo `ws_peer` (V2-T1 a V2-T5, 2026-06-02). La política para v1 es fail-fast: si la WS muere mid-call, las tool calls subsiguientes devuelven `artifact_not_found`, el LLM ve el error y reporta al usuario. No hay retry.
+- **Problema:** un blip de red transitorio (5-10s) entre el worker y el CRDT documents service hace que el graph entero falle. El usuario tiene que reintentar manualmente.
+- **Workaround actual:** la mayoría de los blips son cortos. Si el deploy es intra-Cloud-Run la frecuencia debería ser baja (<1/1000 calls). Si se vuelve significativo, el usuario re-ejecuta el graph (la operación es generalmente idempotente desde la perspectiva del LLM — `set_range` no duplica datos).
+- **Por qué está parqueado:** auto-reconnect agrega ~150-300 LoC en `ws_peer.rs` (state machine de retry + backoff + dedup de updates ya enviados pre-disconnect). v1 prioriza shipping con el flow visible, no resiliencia operacional.
+- **Fix propuesto:** en `WsPeerArtifact`, agregar:
+  1. Política de reintento configurable (`max_retries`, `initial_backoff_ms`, `max_backoff_ms`).
+  2. State machine en el background task: `Healthy → Reconnecting → Failed` con counter de intentos.
+  3. Re-handshake completo (sync_step1 → sync_step2) post-reconnect — los updates locales no aplicados aún se quedan en la mpsc y se envían post-handshake. Yjs sync es idempotente, los re-applies son no-ops.
+  4. `is_alive()` queda `true` durante `Reconnecting`, `false` en `Failed`. Tool dispatchers no ven la diferencia.
+- **Acceptance criteria:**
+  - Integration test que mata el server mid-call, lo levanta de nuevo en <2s, y el agente termina el graph sin error.
+  - Logging estructurado de cada reconnect attempt.
+  - Backoff respeta `max_retries` antes de fallar.
+- **Estimación:** ~2 días dev. Riesgo: bugs sutiles en el sync v1 re-handshake si el state vector quedó desalineado pre-disconnect.
+- **Cuándo retomar:** cuando el deploy productivo muestre >1% de tool calls fallando por WS blips, o cuando ADP reporte UX afectado por reintentos manuales.
+- **Referencias:** [`src/libs/colmena/src/crdt_documents/ws_peer.rs`](../src/libs/colmena/src/crdt_documents/ws_peer.rs) — comment "Failure mode (v1 policy: fail-fast)".
+
+---
+
+## CRDT Documents v1.1 — TTL/eviction de Y.Docs idle en RAM
+
+- **Origen:** scope-cut al diseñar V2-T2 (2026-06-02). El `DocRegistry` actual nunca evicciona artifacts: cada `get_or_create` carga el Y.Doc en RAM y queda ahí hasta que el server reinicie.
+- **Problema:** memoria del CRDT documents service crece sin techo con # artifacts accedidos durante la vida del proceso. Un workbook real de Excel ocupa 1-10MB en RAM. Después de 1000 artifacts accedidos en 24h, el proceso usa 1-10GB.
+- **Workaround actual:** reiniciar el proceso cada N horas (Cloud Run `min_instances=1` + rolling restarts). Aceptable a baja escala (<100 artifacts/día) — el reinicio recarga snapshots desde disco al primer acceso.
+- **Por qué está parqueado:** v1 lanza con <100 artifacts esperados. Mejora cuantitativa, no cualitativa.
+- **Fix propuesto:** agregar TTL configurable al `DocRegistry`:
+  1. `RegisteredArtifact::last_accessed: AtomicI64` actualizado en cada `get()`.
+  2. Background task que cada N min escanea el registry, evicciona entradas con `last_accessed < now - TTL` Y `no peers WS conectados`.
+  3. Evict = drop del `Doc` en RAM. La próxima `get_or_create` lo relee del snapshot en disco.
+  4. Métricas: gauge `crdt_documents_in_ram`, counter `crdt_documents_evicted_total`.
+- **Acceptance criteria:**
+  - Integration test que crea 100 artifacts, espera TTL, verifica que <10 quedan en RAM.
+  - Performance: TTL eviction no bloquea WS upgrades (lock fino vs registry-wide lock).
+  - Snapshot reload < 200ms para un workbook de 1MB.
+- **Estimación:** ~1 día.
+- **Cuándo retomar:** cuando observemos memoria > 2GB o frecuencia de OOM > 0 en producción.
+
+---
+
+## CRDT Documents v1.1 — Redis pub/sub para broadcast cross-instancia
+
+- **Origen:** discusión arquitectónica 2026-06-02 sobre el modelo "RAM autoritativo en el server".
+- **Problema:** el CRDT documents server escala verticalmente pero no horizontal. Si scaleamos a 2+ instancias del WS server, un peer conectado a instancia A no ve mutaciones de peers conectados a instancia B. Sticky LB routing por `artifact_id` evita el problema pero limita la resiliencia (caída de un nodo pierde todas sus sessiones).
+- **Workaround actual:** `min_instances=1, max_instances=1` para el CRDT service. Acepta el single point of failure.
+- **Por qué está parqueado:** no hay carga aún. v1 con una instancia maneja > 1000 artifacts activos sin sweat.
+- **Fix propuesto:** agregar Redis pub/sub:
+  1. Cada server, al recibir un update vía WS, lo publica también a `redis://...:6379/channels/crdt:<artifact_id>`.
+  2. Cada server se suscribe a esos channels para los artifacts que tiene en RAM.
+  3. Al recibir un message del channel (de otra instancia), aplica el update a su Y.Doc local y lo broadcastea a sus propios peers WS.
+  4. Redis NO es source-of-truth — es solo el bus. Source of truth sigue siendo el snapshot en GCS.
+- **Acceptance criteria:**
+  - 2 instancias del CRDT server detrás de un LB random-routing.
+  - Peer P1 a instancia A, peer P2 a instancia B sobre el mismo artifact.
+  - Mutación de P1 visible en P2 con < 100ms latencia.
+- **Estimación:** ~2-3 días dev + Redis ops setup.
+- **Cuándo retomar:** cuando la carga justifique > 1 instancia del CRDT service.
+
+---
+
 ## Items resueltos recientemente
 
 El último item — `data:` (base64 inline) auto-summary v2 — se resolvió el 2026-05-18 (ver `docs/CHANGELOG_2026-05.md` → "Inline data: auto-summary (v2)"). Los detalles de la resolución viven en la git history (commits `cc924a3`, `a3053cd`).

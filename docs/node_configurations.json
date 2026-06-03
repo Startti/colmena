@@ -1554,40 +1554,52 @@
           "type": "object",
           "required": false,
           "default": null,
-          "description": "Optional. When present, the LLM gets 6 v1 synthetic tools for the CRDT documents feature (real-time collaborative xlsx workbooks). The artifact_id is required and the LLM never sees it — mutations target the registered Doc in-proc. The storage backend determines where changes are persisted (localfs for development, gcs for production).",
+          "description": "Optional. When present, the LLM gets 6 v1 synthetic tools for the CRDT documents feature (real-time collaborative xlsx workbooks). The artifact_id is required and the LLM never sees it. Three operating modes (descending priority): (1) `ws_url` set → WsPeer mode, the agent opens a WS peer to a remote CRDT documents service (production split topology). (2) `ws_url` omitted, process-wide singleton installed → shared in-process runtime (monolithic deploy / dev convenience via crdt-yws-graph). (3) neither → local autonomous mode, fresh runtime per call backed by `storage_*` fields (plain `dag_engine run`, no live server).",
           "properties": {
             "artifact_id": {
               "type": "string",
               "required": true,
-              "description": "Required. The artifact this llm_call mutates. Format: art_<26-char-ULID>. Static or $DYNAMIC. This is the stable handle to the collaborative document and is used internally to route mutations — the LLM never sees it."
+              "description": "Required. The artifact this llm_call mutates. Format: art_<26-char-ULID>. Static or $DYNAMIC. The LLM never sees it."
+            },
+            "ws_url": {
+              "type": "string",
+              "required": false,
+              "description": "Recommended for production. WebSocket URL to a running CRDT documents service (e.g. 'ws://crdt-service:8090/yjs'). When set, the agent connects as a peer: maintains a local Y.Doc replica synced via Yjs sync v1, propagates mutations to the server which fans them out to browsers and other agents. Disables local storage_* fields (server owns persistence). On WS connect failure the node fails fast — auto-reconnect is deferred to v1.1.",
+              "example": "ws://127.0.0.1:8090/yjs"
             },
             "storage_backend": {
               "type": "string",
               "enum": ["localfs", "gcs"],
               "default": "localfs",
-              "description": "Storage backend for persisting document snapshots and changes. 'localfs' stores under storage_root on the local filesystem (development), 'gcs' uploads to a Google Cloud Storage bucket (production)."
+              "description": "Storage backend for local mode (ignored when ws_url is set). 'localfs' stores under storage_root, 'gcs' uploads to a Google Cloud Storage bucket."
             },
             "storage_root": {
               "type": "string",
               "default": ".colmena/crdt_documents",
-              "description": "Filesystem root for localfs backend. Ignored when storage_backend='gcs'. Relative paths resolve against the process CWD."
+              "description": "Filesystem root for localfs backend. Ignored when storage_backend='gcs' or when ws_url is set."
             },
             "gcs_bucket": {
               "type": "string",
               "required": false,
-              "description": "Required if storage_backend='gcs'. The GCS bucket name where document snapshots are uploaded (e.g. 'my-colmena-docs')."
+              "description": "Required if storage_backend='gcs'. The GCS bucket name where document snapshots are uploaded (e.g. 'my-colmena-docs'). Ignored when ws_url is set."
             },
             "gcs_prefix": {
               "type": "string",
               "default": "colmena/crdt_documents",
-              "description": "Object key prefix in GCS. Ignored when storage_backend='localfs'. Document snapshots are stored at gs://{gcs_bucket}/{gcs_prefix}/{artifact_id}.xlsx."
+              "description": "Object key prefix in GCS. Ignored when storage_backend='localfs' or when ws_url is set."
             }
           },
           "required": ["artifact_id"],
-          "example": {
-            "artifact_id": "art_abc123def456ghi789jkl012mn",
-            "storage_backend": "localfs",
-            "storage_root": ".colmena/crdt_documents"
+          "examples": {
+            "ws_peer_production": {
+              "artifact_id": "art_abc123def456ghi789jkl012mn",
+              "ws_url": "ws://crdt-service.internal:8090/yjs"
+            },
+            "local_autonomous": {
+              "artifact_id": "art_abc123def456ghi789jkl012mn",
+              "storage_backend": "localfs",
+              "storage_root": ".colmena/crdt_documents"
+            }
           }
         }
       },

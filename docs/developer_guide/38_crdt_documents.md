@@ -155,24 +155,59 @@ Cuando un `llm_call` node incluye un bloque `crdt_documents` en su config, se ex
 | `crdt_doc_add_sheet` | `name` | `{sheet_id}` |
 | `crdt_doc_get_recent_changes` | `since_event_id?` | `{current_event_id, narration}` |
 
-### Config block
+### Config block — tres modos
+
+El bloque `crdt_documents` selecciona uno de tres modos según qué campos estén presentes. Prioridad descendente:
+
+#### Modo 1 — WsPeer (producción recomendada)
 
 ```json
-{
-  "type": "llm_call",
-  "config": {
-    "provider": "openai",
-    "model": "gpt-4o-mini",
-    "crdt_documents": {
-      "artifact_id": "art_01H1234567890ABCDEFGHJKMNP",
-      "storage_backend": "localfs",
-      "storage_root": ".colmena/crdt_documents"
-    }
-  }
+"crdt_documents": {
+  "artifact_id": "art_01H1234567890ABCDEFGHJKMNP",
+  "ws_url": "ws://crdt-service.internal:8090/yjs"
 }
 ```
 
-`artifact_id` **es required** y el LLM nunca lo ve — se inyecta server-side. El runtime se construye con `CrdtDocumentsRuntime::from_config(&cfg)`.
+El agente abre una conexión WebSocket al CRDT documents server, hace el handshake Yjs sync v1, y construye una **réplica local del Y.Doc**. Las mutaciones se propagan al server vía el protocolo de sync; el server hace fan-out a browsers y otros agentes conectados al mismo artifact.
+
+**Cuándo**: deployment en producción donde el WS server vive en su propio Cloud Run (separado del worker que ejecuta el graph). Persistencia es responsabilidad del server.
+
+**On-failure**: fail-fast. Si la conexión muere mid-call, las tool calls subsiguientes devuelven `artifact_not_found` y el LLM ve el error. Auto-reconnect está deferido a v1.1.
+
+#### Modo 2 — Local con singleton (monolito / dev colocalizado)
+
+```json
+"crdt_documents": {
+  "artifact_id": "art_01H1234567890ABCDEFGHJKMNP"
+}
+```
+
+(Sin `ws_url`.) Si el proceso instaló un `CrdtDocumentsRuntime` global via `process_runtime::set_global`, el agente lo reusa — comparte `Arc<DocRegistry>` con el WS server colocalizado. Mutaciones son escrituras directas al `Doc` en RAM; el server observa el doc y broadcastea a peers WS.
+
+**Cuándo**: deployment monolítico donde el worker hostea tanto la ejecución del graph como el WS server (ej. `crdt-yws-graph` subcommand para dev).
+
+#### Modo 3 — Local autónomo (CLI / tests)
+
+```json
+"crdt_documents": {
+  "artifact_id": "art_01H1234567890ABCDEFGHJKMNP",
+  "storage_backend": "localfs",
+  "storage_root": ".colmena/crdt_documents"
+}
+```
+
+(Sin `ws_url`, sin singleton.) Cada `execute()` construye un runtime nuevo via `CrdtDocumentsRuntime::from_config`. Persistencia a disco local (localfs) o GCS. No hay live server — los cambios solo viven en disco hasta que algo más los lea.
+
+**Cuándo**: pipelines batch sin componente live (`dag_engine run` standalone), tests automatizados que no levantan server.
+
+### Cómo se elige el modo (en código)
+
+En `llm.rs` el orden es:
+1. ¿Hay `ws_url` en config? → **WsPeer**, vía `WsPeerArtifact::connect`.
+2. ¿Hay `process_runtime::get_global()` instalado? → **Local con singleton**.
+3. Default → **Local autónomo**, `from_config`.
+
+`artifact_id` siempre es required y el LLM nunca lo ve.
 
 ### Flujo típico del agente
 
