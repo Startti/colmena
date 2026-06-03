@@ -2,6 +2,7 @@
 
 pub mod crdt_doc_context;
 pub mod crdt_doc_tools;
+pub mod crdt_summary;
 pub mod describe_tool;
 pub mod document_tools;
 pub mod lazy_tools_catalog;
@@ -168,6 +169,8 @@ pub use load_skill_tool::{
     build_load_skill_tool_definition, dispatch_load_skill, into_tool_result,
     LoadSkillDispatchResult, LOAD_SKILL_TOOL_NAME,
 };
+
+pub use crdt_summary::build_recent_changes_block;
 
 pub use crdt_doc_tools::{
     build_all_crdt_doc_tools, dispatch_crdt_doc_add_sheet, dispatch_crdt_doc_create_artifact,
