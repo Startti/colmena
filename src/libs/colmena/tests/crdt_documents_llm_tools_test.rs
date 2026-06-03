@@ -14,10 +14,7 @@ async fn full_tool_sequence_round_trips_through_runtime() {
     let rt = Arc::new(CrdtDocumentsRuntime::from_config(&cfg).await.unwrap());
     let id = ArtifactId::new();
     let entry = rt.registry.get_or_create(&id, "test");
-    let ctx = CrdtDocsContext {
-        runtime: rt.clone(),
-        artifact_id: id.clone(),
-    };
+    let ctx = CrdtDocsContext::new_local(rt.clone(), id.clone());
 
     // 1. add_sheet → "Sales"
     let resp = execute_add_sheet(&ctx, AddSheetArgs { name: "Sales".into() });

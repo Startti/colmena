@@ -138,6 +138,47 @@ pub(super) fn sanitize_schema_for_llm_providers(value: &mut serde_json::Value) {
     }
 }
 
+pub use describe_tool::{
+    dispatch_describe_tool, into_tool_result as describe_tool_into_tool_result,
+    DescribeToolDispatchResult, DESCRIBE_TOOL_NAME,
+};
+
+pub use document_tools::{
+    build_all_document_tools, build_document_apply_patch_tool, build_document_create_tool,
+    build_document_get_head_tool, build_document_list_my_artifacts_tool,
+    build_document_list_versions_tool, build_document_read_tool, build_document_rollback_tool,
+    dispatch_document_apply_patch, dispatch_document_create, dispatch_document_get_head,
+    dispatch_document_list_my_artifacts, dispatch_document_list_versions, dispatch_document_read,
+    dispatch_document_rollback, DocumentToolsContext, DOCUMENTS_SYSTEM_PRELUDE,
+    DOCUMENT_APPLY_PATCH_TOOL, DOCUMENT_CREATE_TOOL, DOCUMENT_GET_HEAD_TOOL,
+    DOCUMENT_LIST_MY_ARTIFACTS_TOOL, DOCUMENT_LIST_VERSIONS_TOOL, DOCUMENT_READ_TOOL,
+    DOCUMENT_ROLLBACK_TOOL,
+};
+
+pub use lazy_tools_catalog::{
+    build_describe_tool_definition, reconstruct_discovered_set, summary_for_catalog, CatalogEntry,
+};
+
+pub use load_attachment_tool::{
+    build_load_attachment_tool_definition, dispatch_load_attachment, ATTACHMENTS_SYSTEM_PRELUDE,
+    LOAD_ATTACHMENT_TOOL_NAME,
+};
+
+pub use load_skill_tool::{
+    build_load_skill_tool_definition, dispatch_load_skill, into_tool_result,
+    LoadSkillDispatchResult, LOAD_SKILL_TOOL_NAME,
+};
+
+pub use crdt_doc_tools::{
+    build_all_crdt_doc_tools, dispatch_crdt_doc_add_sheet, dispatch_crdt_doc_get_recent_changes,
+    dispatch_crdt_doc_list_sheets, dispatch_crdt_doc_read, dispatch_crdt_doc_set_cell,
+    dispatch_crdt_doc_set_range, CrdtDocsContext,
+    TOOL_ADD_SHEET as CRDT_DOC_ADD_SHEET_TOOL,
+    TOOL_GET_RECENT_CHANGES as CRDT_DOC_GET_RECENT_CHANGES_TOOL,
+    TOOL_LIST_SHEETS as CRDT_DOC_LIST_SHEETS_TOOL, TOOL_READ as CRDT_DOC_READ_TOOL,
+    TOOL_SET_CELL as CRDT_DOC_SET_CELL_TOOL, TOOL_SET_RANGE as CRDT_DOC_SET_RANGE_TOOL,
+};
+
 #[cfg(test)]
 mod sanitize_tests {
     use super::sanitize_schema_for_llm_providers;
@@ -199,44 +240,3 @@ mod sanitize_tests {
         assert_eq!(v["anyOf"][1], json!({}));
     }
 }
-
-pub use describe_tool::{
-    dispatch_describe_tool, into_tool_result as describe_tool_into_tool_result,
-    DescribeToolDispatchResult, DESCRIBE_TOOL_NAME,
-};
-
-pub use document_tools::{
-    build_all_document_tools, build_document_apply_patch_tool, build_document_create_tool,
-    build_document_get_head_tool, build_document_list_my_artifacts_tool,
-    build_document_list_versions_tool, build_document_read_tool, build_document_rollback_tool,
-    dispatch_document_apply_patch, dispatch_document_create, dispatch_document_get_head,
-    dispatch_document_list_my_artifacts, dispatch_document_list_versions, dispatch_document_read,
-    dispatch_document_rollback, DocumentToolsContext, DOCUMENTS_SYSTEM_PRELUDE,
-    DOCUMENT_APPLY_PATCH_TOOL, DOCUMENT_CREATE_TOOL, DOCUMENT_GET_HEAD_TOOL,
-    DOCUMENT_LIST_MY_ARTIFACTS_TOOL, DOCUMENT_LIST_VERSIONS_TOOL, DOCUMENT_READ_TOOL,
-    DOCUMENT_ROLLBACK_TOOL,
-};
-
-pub use lazy_tools_catalog::{
-    build_describe_tool_definition, reconstruct_discovered_set, summary_for_catalog, CatalogEntry,
-};
-
-pub use load_attachment_tool::{
-    build_load_attachment_tool_definition, dispatch_load_attachment, ATTACHMENTS_SYSTEM_PRELUDE,
-    LOAD_ATTACHMENT_TOOL_NAME,
-};
-
-pub use load_skill_tool::{
-    build_load_skill_tool_definition, dispatch_load_skill, into_tool_result,
-    LoadSkillDispatchResult, LOAD_SKILL_TOOL_NAME,
-};
-
-pub use crdt_doc_tools::{
-    build_all_crdt_doc_tools, dispatch_crdt_doc_add_sheet, dispatch_crdt_doc_get_recent_changes,
-    dispatch_crdt_doc_list_sheets, dispatch_crdt_doc_read, dispatch_crdt_doc_set_cell,
-    dispatch_crdt_doc_set_range, CrdtDocsContext,
-    TOOL_ADD_SHEET as CRDT_DOC_ADD_SHEET_TOOL,
-    TOOL_GET_RECENT_CHANGES as CRDT_DOC_GET_RECENT_CHANGES_TOOL,
-    TOOL_LIST_SHEETS as CRDT_DOC_LIST_SHEETS_TOOL, TOOL_READ as CRDT_DOC_READ_TOOL,
-    TOOL_SET_CELL as CRDT_DOC_SET_CELL_TOOL, TOOL_SET_RANGE as CRDT_DOC_SET_RANGE_TOOL,
-};

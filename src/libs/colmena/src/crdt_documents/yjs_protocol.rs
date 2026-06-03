@@ -331,7 +331,7 @@ mod tests {
         // then MSG_SYNC + sub-tag 0 (sync_step1) + empty state vector buffer
         enc.write_var(MSG_SYNC as u64);
         enc.write_var(MSG_SYNC_STEP_1 as u64);
-        enc.write_buf(&[]);
+        enc.write_buf([]);
         let bytes = enc.to_vec();
 
         let msgs = super::parse_msgs(&bytes).expect("parse must succeed");
@@ -354,11 +354,11 @@ mod tests {
         let mut enc = EncoderV1::new();
         // MSG_AWARENESS = 1 with a 4-byte payload
         enc.write_var(1u64);
-        enc.write_buf(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        enc.write_buf([0xDE, 0xAD, 0xBE, 0xEF]);
         // then a normal sync_step1 with an empty SV
         enc.write_var(MSG_SYNC as u64);
         enc.write_var(MSG_SYNC_STEP_1 as u64);
-        enc.write_buf(&[]);
+        enc.write_buf([]);
         let bytes = enc.to_vec();
 
         let msgs = super::parse_msgs(&bytes).expect("parse must succeed");
