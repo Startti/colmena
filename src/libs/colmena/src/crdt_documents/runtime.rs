@@ -19,6 +19,7 @@ pub struct CrdtDocumentsRuntime {
     pub registry: Arc<DocRegistry>,
     pub storage: Arc<dyn ArtifactStorage>,
     pub tracker: Arc<crate::crdt_documents::ChangeTracker>,
+    pub store: Arc<dyn crate::crdt_documents::ChangeTrackerStore>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -87,16 +88,64 @@ impl CrdtDocumentsRuntime {
         let storage: Arc<dyn ArtifactStorage> = storage_cfg.build()?;
         let registry = Arc::new(DocRegistry::new(storage.clone()));
         let _ = registry.load_from_disk().await?;
-        // B-T4 placeholder: in-memory store. B-T6 will swap this for the
-        // SQLx-backed store wired from the runtime's pool/dialect.
-        let tracker = Arc::new(crate::crdt_documents::ChangeTracker::new(Arc::new(
-            InMemoryChangeTrackerStore::new(),
-        )));
+
+        // Build the change tracker store. If a DATABASE_URL is available
+        // (via config field or env var) wire the SQLx store and run
+        // migrations. Otherwise fall back to the in-memory impl (dev / tests
+        // with no DB).
+        let database_url = cfg
+            .get("database_url")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .or_else(|| std::env::var("DATABASE_URL").ok());
+
+        let store: Arc<dyn crate::crdt_documents::ChangeTrackerStore> = match database_url {
+            Some(url) => {
+                use sqlx::any::{AnyConnectOptions, AnyPoolOptions};
+                use std::str::FromStr;
+                sqlx::any::install_default_drivers();
+                let opts = AnyConnectOptions::from_str(&url)
+                    .map_err(|e| RuntimeError::Config(format!("invalid DATABASE_URL: {e}")))?;
+                let pool = AnyPoolOptions::new()
+                    .connect_with(opts)
+                    .await
+                    .map_err(|e| RuntimeError::Config(format!("db connect: {e}")))?;
+                let dialect =
+                    crate::crdt_documents::change_tracker_store::SqlxDialect::from_url(&url)
+                        .ok_or_else(|| {
+                            RuntimeError::Config(format!(
+                                "unsupported DATABASE_URL scheme (expected postgres:// or sqlite:): {url}"
+                            ))
+                        })?;
+                match dialect {
+                    crate::crdt_documents::change_tracker_store::SqlxDialect::Postgres => {
+                        sqlx::migrate!("./migrations/postgres")
+                            .run(&pool)
+                            .await
+                            .map_err(|e| RuntimeError::Config(format!("migrate: {e}")))?;
+                    }
+                    crate::crdt_documents::change_tracker_store::SqlxDialect::Sqlite => {
+                        sqlx::migrate!("./migrations/sqlite")
+                            .run(&pool)
+                            .await
+                            .map_err(|e| RuntimeError::Config(format!("migrate: {e}")))?;
+                    }
+                }
+                Arc::new(
+                    crate::crdt_documents::change_tracker_store::SqlxChangeTrackerStore::new(
+                        pool, dialect,
+                    ),
+                )
+            }
+            None => Arc::new(InMemoryChangeTrackerStore::new()),
+        };
+        let tracker = Arc::new(crate::crdt_documents::ChangeTracker::new(store.clone()));
 
         Ok(Self {
             registry,
             storage,
             tracker,
+            store,
         })
     }
 
