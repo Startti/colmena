@@ -6,6 +6,7 @@
 
 pub mod change_tracker;
 pub mod change_tracker_store;
+pub mod crdt_backend;
 pub mod narration;
 pub mod tool_executor;
 pub mod artifact_id;
@@ -23,6 +24,7 @@ pub mod yjs_protocol;
 
 pub use artifact_id::ArtifactId;
 pub use change_tracker::{ChangeEvent, ChangeTracker};
+pub use crdt_backend::{BackendError, CrdtBackend, DirectBackend, RestBackend};
 pub use change_tracker_store::{
     ChangeTrackerStore, ChangeTrackerStoreRef, InMemoryChangeTrackerStore,
     NewEvent, StoreError as ChangeTrackerStoreError, StoredArtifact, StoredEvent,
