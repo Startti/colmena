@@ -371,17 +371,34 @@ impl ChangeTrackerStore for SqlxChangeTrackerStore {
 
         let events = rows
             .into_iter()
-            .map(|r| StoredEvent {
-                id: r.try_get::<i64, _>("id").unwrap_or(0) as u64,
-                artifact_id: r.try_get("artifact_id").unwrap_or_default(),
-                sheet_id: r.try_get("sheet_id").ok(),
-                origin: r.try_get("origin").unwrap_or_default(),
-                summary: r.try_get("summary").unwrap_or_default(),
-                created_at: r
-                    .try_get::<String, _>("created_at")
-                    .unwrap_or_else(|_| String::new()),
+            .map(|r| -> Result<StoredEvent, StoreError> {
+                let id: i64 = r
+                    .try_get("id")
+                    .map_err(|e| StoreError::Sql(e.to_string()))?;
+                let artifact_id: String = r
+                    .try_get("artifact_id")
+                    .map_err(|e| StoreError::Sql(e.to_string()))?;
+                // sheet_id is nullable — .ok() correctly maps NULL → None
+                let sheet_id: Option<String> = r.try_get("sheet_id").ok();
+                let origin: String = r
+                    .try_get("origin")
+                    .map_err(|e| StoreError::Sql(e.to_string()))?;
+                let summary: String = r
+                    .try_get("summary")
+                    .map_err(|e| StoreError::Sql(e.to_string()))?;
+                let created_at: String = r
+                    .try_get("created_at")
+                    .map_err(|e| StoreError::Sql(e.to_string()))?;
+                Ok(StoredEvent {
+                    id: id as u64,
+                    artifact_id,
+                    sheet_id,
+                    origin,
+                    summary,
+                    created_at,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(events)
     }
 
@@ -403,7 +420,15 @@ impl ChangeTrackerStore for SqlxChangeTrackerStore {
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| StoreError::Sql(e.to_string()))?;
-        Ok(row.map(|r| r.try_get::<i64, _>("last_event_id").unwrap_or(0) as u64))
+        match row {
+            Some(r) => {
+                let v: i64 = r
+                    .try_get("last_event_id")
+                    .map_err(|e| StoreError::Sql(e.to_string()))?;
+                Ok(Some(v as u64))
+            }
+            None => Ok(None),
+        }
     }
 
     async fn upsert_cursor(
@@ -482,17 +507,28 @@ impl ChangeTrackerStore for SqlxChangeTrackerStore {
             .fetch_all(&self.pool)
             .await
             .map_err(|e| StoreError::Sql(e.to_string()))?;
-        Ok(rows
-            .into_iter()
-            .map(|r| StoredArtifact {
-                artifact_id: r.try_get("artifact_id").unwrap_or_default(),
-                name: r.try_get("name").unwrap_or_default(),
-                created_at: r.try_get::<String, _>("created_at").unwrap_or_default(),
-                last_accessed_at: r
-                    .try_get::<String, _>("last_accessed_at")
-                    .unwrap_or_default(),
+        rows.into_iter()
+            .map(|r| -> Result<StoredArtifact, StoreError> {
+                let artifact_id: String = r
+                    .try_get("artifact_id")
+                    .map_err(|e| StoreError::Sql(e.to_string()))?;
+                let name: String = r
+                    .try_get("name")
+                    .map_err(|e| StoreError::Sql(e.to_string()))?;
+                let created_at: String = r
+                    .try_get("created_at")
+                    .map_err(|e| StoreError::Sql(e.to_string()))?;
+                let last_accessed_at: String = r
+                    .try_get("last_accessed_at")
+                    .map_err(|e| StoreError::Sql(e.to_string()))?;
+                Ok(StoredArtifact {
+                    artifact_id,
+                    name,
+                    created_at,
+                    last_accessed_at,
+                })
             })
-            .collect())
+            .collect()
     }
 }
 
