@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
 
+use crate::crdt_documents::{ArtifactId, CrdtDocumentsRuntime};
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
@@ -20,7 +21,6 @@ use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
     CatalogEntry, CrdtDocsContext, DescribeToolDispatchResult, DocumentToolsContext,
     ATTACHMENTS_SYSTEM_PRELUDE, DOCUMENTS_SYSTEM_PRELUDE,
 };
-use crate::crdt_documents::{ArtifactId, CrdtDocumentsRuntime};
 use crate::documents::application::DocumentRuntime;
 use crate::documents::domain::ids::SessionId as DocSessionId;
 use crate::llm::application::AgentService;
@@ -1611,8 +1611,7 @@ impl ExecutableNode for LlmNode {
         // before closing the socket). The context only holds `Arc<Doc>` +
         // `Arc<AtomicBool>` cloned from the peer; ownership of the peer
         // itself lives in this option.
-        let mut crdt_ws_peer_for_shutdown:
-            Option<crate::crdt_documents::WsPeerArtifact> = None;
+        let mut crdt_ws_peer_for_shutdown: Option<crate::crdt_documents::WsPeerArtifact> = None;
         let crdt_docs_context: Option<Arc<CrdtDocsContext>> = match inputs
             .get("crdt_documents")
             .cloned()
@@ -1643,8 +1642,7 @@ impl ExecutableNode for LlmNode {
                 // 3. Neither → Local mode with a freshly-built runtime
                 //    (plain `dag_engine run`, autonomous CLI). No live
                 //    server is involved; persistence is to disk only.
-                if let Some(ws_url) = crdt_cfg.get("ws_url").and_then(Value::as_str)
-                {
+                if let Some(ws_url) = crdt_cfg.get("ws_url").and_then(Value::as_str) {
                     match crate::crdt_documents::WsPeerArtifact::connect(
                         ws_url,
                         artifact_id.clone(),
@@ -1652,35 +1650,42 @@ impl ExecutableNode for LlmNode {
                     .await
                     {
                         Ok(peer) => {
-                            let ctx = CrdtDocsContext::new_ws_peer(&peer);
+                            let http_base = ws_url_to_http_base(ws_url);
+                            let ctx = CrdtDocsContext::new_ws_peer(
+                                &peer,
+                                agent_session_id_str.clone(),
+                                http_base,
+                            );
                             crdt_ws_peer_for_shutdown = Some(peer);
                             Some(Arc::new(ctx))
                         }
                         Err(e) => {
-                            return Err(format!(
-                                "crdt_documents ws_peer connect failed: {e}"
-                            )
-                            .into());
+                            return Err(
+                                format!("crdt_documents ws_peer connect failed: {e}").into()
+                            );
                         }
                     }
                 } else {
-                    let runtime_arc =
-                        if let Some(shared) =
-                            crate::crdt_documents::process_runtime::get_global()
-                        {
-                            shared
-                        } else {
-                            match CrdtDocumentsRuntime::from_config(&crdt_cfg).await {
-                                Ok(rt) => Arc::new(rt),
-                                Err(e) => {
-                                    return Err(format!(
-                                        "invalid `crdt_documents` config on llm node: {e}"
-                                    )
-                                    .into());
-                                }
+                    let runtime_arc = if let Some(shared) =
+                        crate::crdt_documents::process_runtime::get_global()
+                    {
+                        shared
+                    } else {
+                        match CrdtDocumentsRuntime::from_config(&crdt_cfg).await {
+                            Ok(rt) => Arc::new(rt),
+                            Err(e) => {
+                                return Err(format!(
+                                    "invalid `crdt_documents` config on llm node: {e}"
+                                )
+                                .into());
                             }
-                        };
-                    Some(Arc::new(CrdtDocsContext::new_local(runtime_arc, artifact_id)))
+                        }
+                    };
+                    Some(Arc::new(CrdtDocsContext::new_local(
+                        runtime_arc,
+                        artifact_id,
+                        agent_session_id_str.clone(),
+                    )))
                 }
             }
             None => None,
@@ -2653,6 +2658,25 @@ fn list_skill_dirs_sync(path: &str) -> Result<Vec<String>, std::io::Error> {
         }
     }
     Ok(out)
+}
+
+/// Derive the HTTP base URL for the CRDT documents REST API from a
+/// `ws_url` like `ws://host:port/yjs` → `http://host:port`. Mirrors
+/// the conventional pairing (WS at `/yjs`, REST at the root) used by
+/// `crdt_documents::server`. Conservative: if the input doesn't start
+/// with `ws://` or `wss://`, return it unchanged and let the agent
+/// surface HTTP errors when the backend is used.
+fn ws_url_to_http_base(ws_url: &str) -> String {
+    let http = if let Some(rest) = ws_url.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else if let Some(rest) = ws_url.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else {
+        ws_url.to_string()
+    };
+    http.trim_end_matches("/yjs")
+        .trim_end_matches('/')
+        .to_string()
 }
 
 /// Returns the SQLite `connection_url` if the node config declares one

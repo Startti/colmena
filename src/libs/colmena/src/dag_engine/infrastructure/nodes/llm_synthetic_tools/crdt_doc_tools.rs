@@ -177,14 +177,21 @@ pub async fn execute_set_cell(ctx: &CrdtDocsContext, args: SetCellArgs) -> serde
         &args.value,
     );
     ctx.mark_dirty();
-    ctx.tracker()
-        .record(
-            ctx.artifact_id(),
-            None,
-            "agent:llm",
-            &format!("set {}!{} = {}", args.sheet_id, args.addr, args.value),
-        )
-        .await;
+    let origin = ctx
+        .session_id()
+        .map(|s| format!("agent:{s}"))
+        .unwrap_or_else(|| "agent:llm".to_string());
+    let event_id = ctx
+        .backend()
+        .record_event(crate::crdt_documents::change_tracker_store::NewEvent {
+            artifact_id: ctx.artifact_id().clone(),
+            sheet_id: Some(args.sheet_id.clone()),
+            origin,
+            summary: format!("set {}!{} = {}", args.sheet_id, args.addr, args.value),
+        })
+        .await
+        .unwrap_or(0);
+    ctx.record_event_id(event_id);
     serde_json::json!({ "ok": true })
 }
 
@@ -231,17 +238,24 @@ pub async fn execute_set_range(ctx: &CrdtDocsContext, args: SetRangeArgs) -> ser
         }
     }
     ctx.mark_dirty();
-    ctx.tracker()
-        .record(
-            ctx.artifact_id(),
-            None,
-            "agent:llm",
-            &format!(
+    let origin = ctx
+        .session_id()
+        .map(|s| format!("agent:{s}"))
+        .unwrap_or_else(|| "agent:llm".to_string());
+    let event_id = ctx
+        .backend()
+        .record_event(crate::crdt_documents::change_tracker_store::NewEvent {
+            artifact_id: ctx.artifact_id().clone(),
+            sheet_id: Some(args.sheet_id.clone()),
+            origin,
+            summary: format!(
                 "wrote {cells_written} cells starting at {}!{}",
                 args.sheet_id, args.start_addr
             ),
-        )
-        .await;
+        })
+        .await
+        .unwrap_or(0);
+    ctx.record_event_id(event_id);
     serde_json::json!({ "ok": true, "cells_written": cells_written })
 }
 
@@ -267,14 +281,21 @@ pub async fn execute_add_sheet(ctx: &CrdtDocsContext, args: AddSheetArgs) -> ser
     };
     let sheet_id = crate::crdt_documents::tool_executor::apply_add_sheet(&doc, &args.name);
     ctx.mark_dirty();
-    ctx.tracker()
-        .record(
-            ctx.artifact_id(),
-            None,
-            "agent:llm",
-            &format!("added sheet '{}' (id={sheet_id})", args.name),
-        )
-        .await;
+    let origin = ctx
+        .session_id()
+        .map(|s| format!("agent:{s}"))
+        .unwrap_or_else(|| "agent:llm".to_string());
+    let event_id = ctx
+        .backend()
+        .record_event(crate::crdt_documents::change_tracker_store::NewEvent {
+            artifact_id: ctx.artifact_id().clone(),
+            sheet_id: None,
+            origin,
+            summary: format!("added sheet '{}' (id={sheet_id})", args.name),
+        })
+        .await
+        .unwrap_or(0);
+    ctx.record_event_id(event_id);
     serde_json::json!({ "sheet_id": sheet_id })
 }
 
@@ -355,16 +376,23 @@ pub async fn execute_get_recent_changes(
     args: GetRecentChangesArgs,
 ) -> serde_json::Value {
     let events = ctx
-        .tracker()
-        .since(ctx.artifact_id(), args.since_event_id, None, None, 100)
-        .await;
-    let current_event_id = events.iter().map(|e| e.event_id).max();
+        .backend()
+        .events_since(
+            ctx.artifact_id(),
+            args.since_event_id.unwrap_or(0),
+            None,
+            None,
+            100,
+        )
+        .await
+        .unwrap_or_default();
+    let current_event_id = events.iter().map(|e| e.id).max();
     let narration = if events.is_empty() {
         "No changes since last check.".to_string()
     } else {
         events
             .iter()
-            .map(|e| format!("- [{}] ({}): {}", e.event_id, e.origin, e.summary))
+            .map(|e| format!("- [{}] ({}): {}", e.id, e.origin, e.summary))
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -419,7 +447,7 @@ mod tests {
         let entry = rt.registry.get_or_create(&id, "workbook");
         apply_add_sheet(&entry.doc, "Sales");
         apply_add_sheet(&entry.doc, "Summary");
-        let ctx = CrdtDocsContext::new_local(rt, id);
+        let ctx = CrdtDocsContext::new_local(rt, id, Some("test_session".to_string()));
         let v = execute_list_sheets(&ctx);
         let sheets = v["sheets"].as_array().unwrap();
         assert_eq!(sheets.len(), 2);
@@ -433,7 +461,7 @@ mod tests {
     async fn returns_error_for_unknown_artifact() {
         let rt = make_runtime().await;
         let unknown = ArtifactId::new(); // never registered
-        let ctx = CrdtDocsContext::new_local(rt, unknown);
+        let ctx = CrdtDocsContext::new_local(rt, unknown, Some("test_session".to_string()));
         let v = execute_list_sheets(&ctx);
         assert_eq!(v["error"], "artifact_not_found");
     }
@@ -465,7 +493,10 @@ mod tests {
         let rt = Arc::new(CrdtDocumentsRuntime::from_config(&cfg).await.unwrap());
         let id = ArtifactId::new();
         let _ = rt.registry.get_or_create(&id, "t");
-        (CrdtDocsContext::new_local(rt, id), tmp)
+        (
+            CrdtDocsContext::new_local(rt, id, Some("test_session".to_string())),
+            tmp,
+        )
     }
 
     #[tokio::test]
@@ -482,7 +513,13 @@ mod tests {
             },
         )
         .await;
-        let v = execute_read(&ctx, ReadArgs { sheet_id, range: None });
+        let v = execute_read(
+            &ctx,
+            ReadArgs {
+                sheet_id,
+                range: None,
+            },
+        );
         assert_eq!(v["cells"]["A1"], "hello");
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -497,14 +534,17 @@ mod tests {
             SetRangeArgs {
                 sheet_id: sheet_id.clone(),
                 start_addr: "B2".into(),
-                values_2d: vec![
-                    vec![json!("a"), json!("b")],
-                    vec![json!(1), json!(2)],
-                ],
+                values_2d: vec![vec![json!("a"), json!("b")], vec![json!(1), json!(2)]],
             },
         )
         .await;
-        let v = execute_read(&ctx, ReadArgs { sheet_id, range: None });
+        let v = execute_read(
+            &ctx,
+            ReadArgs {
+                sheet_id,
+                range: None,
+            },
+        );
         assert_eq!(v["cells"]["B2"], "a");
         assert_eq!(v["cells"]["C2"], "b");
         assert_eq!(v["cells"]["B3"], json!(1.0));
@@ -551,16 +591,32 @@ mod tests {
         let (ctx, tmp) = fresh_ctx().await;
 
         // Initially: no changes.
-        let v =
-            execute_get_recent_changes(&ctx, GetRecentChangesArgs { since_event_id: None }).await;
+        let v = execute_get_recent_changes(
+            &ctx,
+            GetRecentChangesArgs {
+                since_event_id: None,
+            },
+        )
+        .await;
         assert_eq!(v["narration"], "No changes since last check.");
 
         // Record via a mutation.
-        let s = execute_add_sheet(&ctx, AddSheetArgs { name: "Sales".into() }).await;
+        let s = execute_add_sheet(
+            &ctx,
+            AddSheetArgs {
+                name: "Sales".into(),
+            },
+        )
+        .await;
         let _sheet_id = s["sheet_id"].as_str().unwrap();
 
-        let v =
-            execute_get_recent_changes(&ctx, GetRecentChangesArgs { since_event_id: None }).await;
+        let v = execute_get_recent_changes(
+            &ctx,
+            GetRecentChangesArgs {
+                since_event_id: None,
+            },
+        )
+        .await;
         let n = v["narration"].as_str().unwrap();
         assert!(n.contains("added sheet"), "got: {n}");
         assert!(n.contains("Sales"), "got: {n}");

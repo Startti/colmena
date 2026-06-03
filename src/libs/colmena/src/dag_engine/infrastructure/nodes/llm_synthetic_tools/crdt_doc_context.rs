@@ -14,21 +14,34 @@
 //! | Neither                           | [`CrdtDocsContext::Local`] using fresh runtime  | Plain `dag_engine run`, autonomous CLI, no live server. |
 
 use crate::crdt_documents::{
-    ArtifactId, ChangeTracker, CrdtDocumentsRuntime, InMemoryChangeTrackerStore, WsPeerArtifact,
+    crdt_backend::CrdtBackend, ArtifactId, CrdtDocumentsRuntime, DirectBackend, RestBackend,
+    WsPeerArtifact,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use yrs::Doc;
 
 /// Execution context bundled by `llm_call` and threaded into every
 /// `crdt_doc_*` tool dispatcher.
 pub enum CrdtDocsContext {
-    /// Doc lives in this process's [`DocRegistry`] (autonomous OR shared
-    /// in-process singleton). Mutations land on a `Y.Doc` we own; the
-    /// snapshot writer eventually persists to storage.
+    /// Doc lives in this process's [`crate::crdt_documents::DocRegistry`]
+    /// (autonomous OR shared in-process singleton). Mutations land on a
+    /// `Y.Doc` we own; the snapshot writer eventually persists to storage.
     Local {
         runtime: Arc<CrdtDocumentsRuntime>,
         artifact_id: ArtifactId,
+        /// agent_session_id captured from `llm_call` inputs. Used for
+        /// origin attribution on recorded events and as the key for
+        /// per-session cursor advancement (B-T12).
+        session_id: Option<String>,
+        /// Backend used to record/query change events. In Local mode this
+        /// wraps the runtime's `ChangeTrackerStore` directly.
+        backend: Arc<dyn CrdtBackend>,
+        /// Highest event id observed during this turn. Tool dispatchers
+        /// call `record_event_id` after every `backend.record_event`; the
+        /// lifecycle owner (`llm.rs`) reads `max_event_id_observed` to
+        /// advance the per-session cursor at end-of-turn.
+        max_event_id: Arc<AtomicU64>,
     },
     /// Doc lives in a CRDT documents service reachable over WebSocket.
     /// We keep a local CRDT replica; mutations push to the service via
@@ -44,20 +57,33 @@ pub enum CrdtDocsContext {
         /// observe this after each mutation to detect a dead socket
         /// (v1 fail-fast policy).
         alive: Arc<AtomicBool>,
-        /// Local tracker for this peer session. Scoped to the agent's
-        /// execution: `get_recent_changes` sees only what THIS agent did
-        /// (and what the server pushed back during the session).
-        tracker: Arc<ChangeTracker>,
+        /// agent_session_id captured from `llm_call` inputs (see Local).
+        session_id: Option<String>,
+        /// Backend used to record/query change events. In WsPeer mode
+        /// this is a REST client targeting the CRDT documents server.
+        backend: Arc<dyn CrdtBackend>,
+        /// Highest event id observed during this turn (see Local).
+        max_event_id: Arc<AtomicU64>,
     },
 }
 
 impl CrdtDocsContext {
     /// Build a context that delegates to a locally-owned (or singleton)
     /// `CrdtDocumentsRuntime`.
-    pub fn new_local(runtime: Arc<CrdtDocumentsRuntime>, artifact_id: ArtifactId) -> Self {
+    pub fn new_local(
+        runtime: Arc<CrdtDocumentsRuntime>,
+        artifact_id: ArtifactId,
+        session_id: Option<String>,
+    ) -> Self {
+        let backend: Arc<dyn CrdtBackend> = Arc::new(DirectBackend {
+            store: runtime.store.clone(),
+        });
         Self::Local {
             runtime,
             artifact_id,
+            session_id,
+            backend,
+            max_event_id: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -66,12 +92,24 @@ impl CrdtDocsContext {
     /// [`crate::crdt_documents::WsPeerArtifact::connect`]. The peer
     /// handle (for graceful shutdown) is consumed by the caller via
     /// the returned tuple — the context only borrows `doc` + `alive`.
-    pub fn new_ws_peer(peer: &WsPeerArtifact) -> Self {
+    ///
+    /// `server_base_url` is the HTTP base URL for the CRDT documents
+    /// service (e.g. `http://crdt-service:8090`) — derived from the
+    /// caller's `ws_url` by stripping `/yjs` and swapping `ws[s]://`
+    /// for `http[s]://`.
+    pub fn new_ws_peer(
+        peer: &WsPeerArtifact,
+        session_id: Option<String>,
+        server_base_url: impl Into<String>,
+    ) -> Self {
+        let backend: Arc<dyn CrdtBackend> = Arc::new(RestBackend::new(server_base_url));
         Self::WsPeer {
             artifact_id: peer.artifact_id.clone(),
             doc: peer.doc.clone(),
             alive: peer.alive.clone(),
-            tracker: Arc::new(ChangeTracker::new(Arc::new(InMemoryChangeTrackerStore::new()))),
+            session_id,
+            backend,
+            max_event_id: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -79,6 +117,25 @@ impl CrdtDocsContext {
     pub fn artifact_id(&self) -> &ArtifactId {
         match self {
             Self::Local { artifact_id, .. } | Self::WsPeer { artifact_id, .. } => artifact_id,
+        }
+    }
+
+    /// The agent_session_id (if any) used to attribute events recorded
+    /// during this turn.
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::Local { session_id, .. } | Self::WsPeer { session_id, .. } => {
+                session_id.as_deref()
+            }
+        }
+    }
+
+    /// Backend for change events. Local mode talks to the runtime's
+    /// `ChangeTrackerStore` directly; WsPeer mode does HTTP to the
+    /// CRDT documents server.
+    pub fn backend(&self) -> &dyn CrdtBackend {
+        match self {
+            Self::Local { backend, .. } | Self::WsPeer { backend, .. } => backend.as_ref(),
         }
     }
 
@@ -90,6 +147,7 @@ impl CrdtDocsContext {
             Self::Local {
                 runtime,
                 artifact_id,
+                ..
             } => runtime.registry.get(artifact_id).map(|e| e.doc.clone()),
             Self::WsPeer { doc, alive, .. } => {
                 if alive.load(Ordering::Acquire) {
@@ -110,6 +168,7 @@ impl CrdtDocsContext {
             Self::Local {
                 runtime,
                 artifact_id,
+                ..
             } => {
                 if let Some(e) = runtime.registry.get(artifact_id) {
                     e.mark_dirty();
@@ -119,13 +178,30 @@ impl CrdtDocsContext {
         }
     }
 
-    /// The change tracker used by `get_recent_changes`. In ws_peer mode
-    /// this is per-session; in local mode it's the runtime's shared
-    /// tracker.
-    pub fn tracker(&self) -> Arc<ChangeTracker> {
+    /// Track the highest event_id observed during this turn. Called by
+    /// tool dispatchers after `backend.record_event()`. The lifecycle
+    /// owner (`llm.rs`) reads `max_event_id_observed()` to advance the
+    /// cursor (B-T12).
+    pub fn record_event_id(&self, id: u64) {
+        let atomic = match self {
+            Self::Local { max_event_id, .. } | Self::WsPeer { max_event_id, .. } => max_event_id,
+        };
+        let mut cur = atomic.load(Ordering::Acquire);
+        while id > cur {
+            match atomic.compare_exchange_weak(cur, id, Ordering::Release, Ordering::Acquire) {
+                Ok(_) => break,
+                Err(observed) => cur = observed,
+            }
+        }
+    }
+
+    /// Highest event id observed via `record_event_id` during this turn.
+    /// Returns `0` when no event has been recorded.
+    pub fn max_event_id_observed(&self) -> u64 {
         match self {
-            Self::Local { runtime, .. } => runtime.tracker.clone(),
-            Self::WsPeer { tracker, .. } => tracker.clone(),
+            Self::Local { max_event_id, .. } | Self::WsPeer { max_event_id, .. } => {
+                max_event_id.load(Ordering::Acquire)
+            }
         }
     }
 

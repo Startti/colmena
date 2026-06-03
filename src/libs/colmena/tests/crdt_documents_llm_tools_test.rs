@@ -14,10 +14,16 @@ async fn full_tool_sequence_round_trips_through_runtime() {
     let rt = Arc::new(CrdtDocumentsRuntime::from_config(&cfg).await.unwrap());
     let id = ArtifactId::new();
     let entry = rt.registry.get_or_create(&id, "test");
-    let ctx = CrdtDocsContext::new_local(rt.clone(), id.clone());
+    let ctx = CrdtDocsContext::new_local(rt.clone(), id.clone(), Some("test_session".to_string()));
 
     // 1. add_sheet → "Sales"
-    let resp = execute_add_sheet(&ctx, AddSheetArgs { name: "Sales".into() }).await;
+    let resp = execute_add_sheet(
+        &ctx,
+        AddSheetArgs {
+            name: "Sales".into(),
+        },
+    )
+    .await;
     let sheet_id = resp["sheet_id"].as_str().unwrap().to_string();
 
     // 2. set_range — write a 3x2 block (Product/Qty headers + 2 rows)

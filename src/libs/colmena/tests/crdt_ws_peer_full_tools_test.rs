@@ -25,8 +25,8 @@ use colmena::crdt_documents::{
 use colmena::dag_engine::infrastructure::nodes::llm_synthetic_tools::crdt_doc_context::CrdtDocsContext;
 use colmena::dag_engine::infrastructure::nodes::llm_synthetic_tools::crdt_doc_tools::{
     execute_add_sheet, execute_get_recent_changes, execute_list_sheets, execute_read,
-    execute_set_cell, execute_set_range, AddSheetArgs, GetRecentChangesArgs, ReadArgs,
-    SetCellArgs, SetRangeArgs,
+    execute_set_cell, execute_set_range, AddSheetArgs, GetRecentChangesArgs, ReadArgs, SetCellArgs,
+    SetRangeArgs,
 };
 use serde_json::json;
 use std::net::SocketAddr;
@@ -45,7 +45,9 @@ async fn six_tools_round_trip_via_ws_peer() {
 
     // Pre-create the artifact so the peer has something to sync.
     let aid = ArtifactId::new();
-    let _seed = server_runtime.registry.get_or_create(&aid, "integration test");
+    let _seed = server_runtime
+        .registry
+        .get_or_create(&aid, "integration test");
 
     // NOTE: process_runtime::set_global is INTENTIONALLY skipped here. The
     // whole point of ws_peer mode is that the peer doesn't share an
@@ -70,11 +72,13 @@ async fn six_tools_round_trip_via_ws_peer() {
 
     // ── Peer side (the "agent" in the stateless worker) ──────────────
     let server_url = format!("ws://{}/yjs", addr);
+    let http_base = format!("http://{}", addr);
     let peer = WsPeerArtifact::connect(&server_url, aid.clone())
         .await
         .expect("peer connect");
     assert!(peer.is_alive());
-    let ctx = CrdtDocsContext::new_ws_peer(&peer);
+    let ctx =
+        CrdtDocsContext::new_ws_peer(&peer, Some("test_session".to_string()), http_base.clone());
 
     // 1) Initial list_sheets — no sheets yet (the seed artifact is empty).
     let v = execute_list_sheets(&ctx);
@@ -176,11 +180,22 @@ async fn six_tools_round_trip_via_ws_peer() {
     // 9) get_recent_changes — should show every mutation we made this
     //    session (the per-session tracker captures everything since
     //    peer connect).
-    let v =
-        execute_get_recent_changes(&ctx, GetRecentChangesArgs { since_event_id: None }).await;
+    let v = execute_get_recent_changes(
+        &ctx,
+        GetRecentChangesArgs {
+            since_event_id: None,
+        },
+    )
+    .await;
     let narration = v["narration"].as_str().expect("narration");
-    assert!(narration.contains("Inventory"), "narration must mention Inventory: {narration}");
-    assert!(narration.contains("Pricing"), "narration must mention Pricing: {narration}");
+    assert!(
+        narration.contains("Inventory"),
+        "narration must mention Inventory: {narration}"
+    );
+    assert!(
+        narration.contains("Pricing"),
+        "narration must mention Pricing: {narration}"
+    );
     assert!(
         narration.contains("set ") || narration.contains("wrote "),
         "narration must mention cell writes: {narration}"
@@ -220,7 +235,10 @@ async fn six_tools_round_trip_via_ws_peer() {
         .expect("Inventory present on server");
     let inventory_cells = inventory["cells"].as_object().unwrap();
     assert_eq!(inventory_cells.len(), 7); // A1 + A2:B4
-    assert_eq!(inventory_cells.get("A4").and_then(|v| v.as_str()), Some("Plum"));
+    assert_eq!(
+        inventory_cells.get("A4").and_then(|v| v.as_str()),
+        Some("Plum")
+    );
 
     // We have to silence pricing_id (unused, but useful as a test marker
     // — its sheet is empty by design).
