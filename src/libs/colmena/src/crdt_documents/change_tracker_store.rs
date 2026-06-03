@@ -233,6 +233,269 @@ fn chrono_now_iso() -> String {
 // Re-export Arc<dyn Trait> alias for convenience.
 pub type ChangeTrackerStoreRef = Arc<dyn ChangeTrackerStore>;
 
+// ── SQLx impl (sqlite + postgres via sqlx::Any) ──────────────────────────
+
+use sqlx::{AnyPool, Row};
+
+/// Which dialect this SQLx store talks. Determines placeholder syntax (`?` vs
+/// `$N`), RETURNING clause usage, and a couple of upsert syntax details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlxDialect {
+    Sqlite,
+    Postgres,
+}
+
+impl SqlxDialect {
+    /// Detect the dialect from a database URL (the prefix scheme).
+    pub fn from_url(url: &str) -> Option<Self> {
+        if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+            Some(Self::Postgres)
+        } else if url.starts_with("sqlite:") {
+            Some(Self::Sqlite)
+        } else {
+            None
+        }
+    }
+}
+
+pub struct SqlxChangeTrackerStore {
+    pool: AnyPool,
+    dialect: SqlxDialect,
+}
+
+impl SqlxChangeTrackerStore {
+    pub fn new(pool: AnyPool, dialect: SqlxDialect) -> Self {
+        Self { pool, dialect }
+    }
+
+    fn is_postgres(&self) -> bool {
+        self.dialect == SqlxDialect::Postgres
+    }
+}
+
+#[async_trait]
+impl ChangeTrackerStore for SqlxChangeTrackerStore {
+    async fn insert_event(&self, ev: NewEvent) -> Result<u64, StoreError> {
+        let aid = ev.artifact_id.to_string();
+
+        if self.is_postgres() {
+            let row = sqlx::query(
+                "INSERT INTO crdt_doc_events (artifact_id, sheet_id, origin, summary) \
+                 VALUES ($1, $2, $3, $4) RETURNING id",
+            )
+            .bind(&aid)
+            .bind(&ev.sheet_id)
+            .bind(&ev.origin)
+            .bind(&ev.summary)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| StoreError::Sql(e.to_string()))?;
+            let id: i64 = row
+                .try_get("id")
+                .map_err(|e| StoreError::Sql(e.to_string()))?;
+            Ok(id as u64)
+        } else {
+            sqlx::query(
+                "INSERT INTO crdt_doc_events (artifact_id, sheet_id, origin, summary) \
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(&aid)
+            .bind(&ev.sheet_id)
+            .bind(&ev.origin)
+            .bind(&ev.summary)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StoreError::Sql(e.to_string()))?;
+            let row = sqlx::query("SELECT last_insert_rowid() as id")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| StoreError::Sql(e.to_string()))?;
+            let id: i64 = row
+                .try_get("id")
+                .map_err(|e| StoreError::Sql(e.to_string()))?;
+            Ok(id as u64)
+        }
+    }
+
+    async fn events_since(
+        &self,
+        artifact_id: &ArtifactId,
+        since_event_id: u64,
+        sheet_id_filter: Option<&str>,
+        exclude_origin: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<StoredEvent>, StoreError> {
+        let mut sql = String::from(
+            "SELECT id, artifact_id, sheet_id, origin, summary, created_at \
+             FROM crdt_doc_events WHERE artifact_id = ? AND id > ?",
+        );
+        if sheet_id_filter.is_some() {
+            sql.push_str(" AND sheet_id = ?");
+        }
+        if exclude_origin.is_some() {
+            sql.push_str(" AND origin != ?");
+        }
+        sql.push_str(" ORDER BY id ASC LIMIT ?");
+
+        let final_sql = if self.is_postgres() {
+            let mut idx = 0usize;
+            sql.chars()
+                .map(|c| {
+                    if c == '?' {
+                        idx += 1;
+                        format!("${idx}")
+                    } else {
+                        c.to_string()
+                    }
+                })
+                .collect::<String>()
+        } else {
+            sql
+        };
+
+        let mut q = sqlx::query(&final_sql)
+            .bind(artifact_id.to_string())
+            .bind(since_event_id as i64);
+        if let Some(s) = sheet_id_filter {
+            q = q.bind(s.to_string());
+        }
+        if let Some(s) = exclude_origin {
+            q = q.bind(s.to_string());
+        }
+        q = q.bind(limit as i64);
+
+        let rows = q
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StoreError::Sql(e.to_string()))?;
+
+        let events = rows
+            .into_iter()
+            .map(|r| StoredEvent {
+                id: r.try_get::<i64, _>("id").unwrap_or(0) as u64,
+                artifact_id: r.try_get("artifact_id").unwrap_or_default(),
+                sheet_id: r.try_get("sheet_id").ok(),
+                origin: r.try_get("origin").unwrap_or_default(),
+                summary: r.try_get("summary").unwrap_or_default(),
+                created_at: r
+                    .try_get::<String, _>("created_at")
+                    .unwrap_or_else(|_| String::new()),
+            })
+            .collect();
+        Ok(events)
+    }
+
+    async fn cursor_for(
+        &self,
+        session_id: &str,
+        artifact_id: &ArtifactId,
+    ) -> Result<Option<u64>, StoreError> {
+        let sql = if self.is_postgres() {
+            "SELECT last_event_id FROM crdt_doc_session_cursors \
+             WHERE agent_session_id = $1 AND artifact_id = $2"
+        } else {
+            "SELECT last_event_id FROM crdt_doc_session_cursors \
+             WHERE agent_session_id = ? AND artifact_id = ?"
+        };
+        let row = sqlx::query(sql)
+            .bind(session_id)
+            .bind(artifact_id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StoreError::Sql(e.to_string()))?;
+        Ok(row.map(|r| r.try_get::<i64, _>("last_event_id").unwrap_or(0) as u64))
+    }
+
+    async fn upsert_cursor(
+        &self,
+        session_id: &str,
+        artifact_id: &ArtifactId,
+        last_event_id: u64,
+    ) -> Result<(), StoreError> {
+        let sql = if self.is_postgres() {
+            "INSERT INTO crdt_doc_session_cursors \
+             (agent_session_id, artifact_id, last_event_id) VALUES ($1, $2, $3) \
+             ON CONFLICT (agent_session_id, artifact_id) DO UPDATE \
+             SET last_event_id = EXCLUDED.last_event_id, updated_at = now()"
+        } else {
+            "INSERT INTO crdt_doc_session_cursors \
+             (agent_session_id, artifact_id, last_event_id) VALUES (?, ?, ?) \
+             ON CONFLICT (agent_session_id, artifact_id) DO UPDATE \
+             SET last_event_id = excluded.last_event_id, \
+                 updated_at = CURRENT_TIMESTAMP"
+        };
+        sqlx::query(sql)
+            .bind(session_id)
+            .bind(artifact_id.to_string())
+            .bind(last_event_id as i64)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StoreError::Sql(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn touch_artifact(
+        &self,
+        session_id: &str,
+        artifact_id: &ArtifactId,
+        name: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let name_or_default = name.unwrap_or("(untitled)");
+        let sql = if self.is_postgres() {
+            "INSERT INTO crdt_doc_session_artifacts \
+             (agent_session_id, artifact_id, name) VALUES ($1, $2, $3) \
+             ON CONFLICT (agent_session_id, artifact_id) DO UPDATE \
+             SET last_accessed_at = now(), name = EXCLUDED.name"
+        } else {
+            "INSERT INTO crdt_doc_session_artifacts \
+             (agent_session_id, artifact_id, name) VALUES (?, ?, ?) \
+             ON CONFLICT (agent_session_id, artifact_id) DO UPDATE \
+             SET last_accessed_at = CURRENT_TIMESTAMP, name = excluded.name"
+        };
+        sqlx::query(sql)
+            .bind(session_id)
+            .bind(artifact_id.to_string())
+            .bind(name_or_default)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StoreError::Sql(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn artifacts_for_session(
+        &self,
+        session_id: &str,
+        limit: u32,
+    ) -> Result<Vec<StoredArtifact>, StoreError> {
+        let sql = if self.is_postgres() {
+            "SELECT artifact_id, name, created_at, last_accessed_at \
+             FROM crdt_doc_session_artifacts WHERE agent_session_id = $1 \
+             ORDER BY last_accessed_at DESC LIMIT $2"
+        } else {
+            "SELECT artifact_id, name, created_at, last_accessed_at \
+             FROM crdt_doc_session_artifacts WHERE agent_session_id = ? \
+             ORDER BY last_accessed_at DESC LIMIT ?"
+        };
+        let rows = sqlx::query(sql)
+            .bind(session_id)
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StoreError::Sql(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| StoredArtifact {
+                artifact_id: r.try_get("artifact_id").unwrap_or_default(),
+                name: r.try_get("name").unwrap_or_default(),
+                created_at: r.try_get::<String, _>("created_at").unwrap_or_default(),
+                last_accessed_at: r
+                    .try_get::<String, _>("last_accessed_at")
+                    .unwrap_or_default(),
+            })
+            .collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,5 +583,45 @@ mod tests {
         // Most recent first (a2 was touched last)
         assert_eq!(list[0].name, "second");
         assert_eq!(list[1].name, "first");
+    }
+
+    #[tokio::test]
+    async fn sqlx_sqlite_round_trip() {
+        use sqlx::any::{AnyConnectOptions, AnyPoolOptions};
+        use std::str::FromStr;
+
+        sqlx::any::install_default_drivers();
+        let url = "sqlite::memory:".to_string();
+        let opts = AnyConnectOptions::from_str(&url).unwrap();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1) // single connection — :memory: db is per-connection
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations/sqlite")
+            .run(&pool)
+            .await
+            .unwrap();
+        let store = SqlxChangeTrackerStore::new(pool, SqlxDialect::Sqlite);
+        let aid = ArtifactId::new();
+        let id = store
+            .insert_event(make_event(&aid, "agent:s1", "test"))
+            .await
+            .unwrap();
+        assert!(id > 0);
+        let evs = store.events_since(&aid, 0, None, None, 10).await.unwrap();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].summary, "test");
+
+        store.upsert_cursor("s1", &aid, 42).await.unwrap();
+        assert_eq!(store.cursor_for("s1", &aid).await.unwrap(), Some(42));
+
+        store
+            .touch_artifact("s1", &aid, Some("My Sheet"))
+            .await
+            .unwrap();
+        let arts = store.artifacts_for_session("s1", 10).await.unwrap();
+        assert_eq!(arts.len(), 1);
+        assert_eq!(arts[0].name, "My Sheet");
     }
 }
