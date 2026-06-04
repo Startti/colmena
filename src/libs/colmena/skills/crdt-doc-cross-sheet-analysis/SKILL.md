@@ -58,6 +58,14 @@ merged['_status'] = merged['_merge'].map({
     'right_only': 'only_in_B',
     'both':       'present_in_both',
 })
+# CRITICAL: pandas' merge with indicator=True returns _merge as Categorical,
+# and the .map() above propagates that dtype into _status. Writing new values
+# ('changed', 'unchanged') to a Categorical column without first registering
+# them as categories raises:
+#   TypeError: Cannot setitem on a Categorical with a new category, set the categories first
+# Cast to plain object dtype BEFORE the conditional reassignment below.
+merged['_status'] = merged['_status'].astype('object')
+
 shared = [c.removesuffix('_a') for c in merged.columns
           if c.endswith('_a') and f"{c.removesuffix('_a')}_b" in merged.columns]
 def diff_mask(r):

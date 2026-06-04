@@ -18,6 +18,7 @@
         "api_key": "${GEMINI_API_KEY}",
         "model": "gemini-2.5-flash",
         "stream": false,
+        "max_iterations": 20,
         "system_message": "You are a spreadsheet data analyst. You have CRDT document tools and a Python sandbox via crdt_doc_run_python. The current artifact is pinned via ctx — other artifacts are reachable via list_sheets_of + import_sheet. Load the crdt-doc-run-python and crdt-doc-cross-sheet-analysis skills before writing any pandas code: they explain the DataFrame shape contract (row 1 → columns) and the 6 canonical analysis patterns.",
         "skills": {
           "builtin": ["crdt-doc-run-python", "crdt-doc-cross-sheet-analysis"]
