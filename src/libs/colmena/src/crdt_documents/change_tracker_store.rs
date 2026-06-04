@@ -295,21 +295,26 @@ impl ChangeTrackerStore for SqlxChangeTrackerStore {
                 .map_err(|e| StoreError::Sql(e.to_string()))?;
             Ok(id as u64)
         } else {
-            sqlx::query(
+            // Use RETURNING (sqlite ≥ 3.35) so the id comes back on the
+            // same connection as the INSERT. The previous two-statement
+            // form (`INSERT` then `SELECT last_insert_rowid()`) was wrong
+            // under a multi-connection pool: the two statements would
+            // land on different pool connections and `last_insert_rowid`
+            // would return 0 on the SELECT connection, silently
+            // returning event id 0 to callers. Reproduced by the
+            // recent_changes_round_trip_via_ws_peer integration test
+            // (B-T14) where set_cell would not bump max_event_id_observed.
+            let row = sqlx::query(
                 "INSERT INTO crdt_doc_events (artifact_id, sheet_id, origin, summary) \
-                 VALUES (?, ?, ?, ?)",
+                 VALUES (?, ?, ?, ?) RETURNING id",
             )
             .bind(&aid)
             .bind(&ev.sheet_id)
             .bind(&ev.origin)
             .bind(&ev.summary)
-            .execute(&self.pool)
+            .fetch_one(&self.pool)
             .await
             .map_err(|e| StoreError::Sql(e.to_string()))?;
-            let row = sqlx::query("SELECT last_insert_rowid() as id")
-                .fetch_one(&self.pool)
-                .await
-                .map_err(|e| StoreError::Sql(e.to_string()))?;
             let id: i64 = row
                 .try_get("id")
                 .map_err(|e| StoreError::Sql(e.to_string()))?;
