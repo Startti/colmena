@@ -85,30 +85,18 @@ pub fn tool_list_sheets_of() -> ToolDefinition {
     )
 }
 
-pub fn execute_list_sheets_of(ctx: &CrdtDocsContext, args: ListSheetsOfArgs) -> serde_json::Value {
-    use crate::crdt_documents::ArtifactId;
-    let aid: ArtifactId = match args.artifact_id.parse() {
-        Ok(a) => a,
-        Err(_) => {
-            return serde_json::json!({
-                "error": "invalid_artifact_id",
-                "value": args.artifact_id,
-            });
-        }
-    };
-    // Cross-artifact peek requires registry access — only available in
-    // Local mode. WsPeer mode would need a server-side endpoint (deferred
-    // to a follow-up task).
-    let runtime = match ctx {
-        CrdtDocsContext::Local { runtime, .. } => runtime,
-        CrdtDocsContext::WsPeer { .. } => {
-            return serde_json::json!({
-                "error": "unsupported_in_ws_peer_mode",
-                "message": "crdt_doc_list_sheets_of is only available in local mode",
-            });
-        }
-    };
-    let Some(entry) = runtime.registry.get(&aid) else {
+/// Core projection used by both `execute_list_sheets_of` (Local mode) and
+/// the REST `/documents/:id/sheets-with-counts` handler (WsPeer mode).
+///
+/// Looks up `aid` in `runtime.registry` and returns the same JSON shape the
+/// tool dispatcher returns:
+///   `{ artifact_id, name, sheets: [{sheet_id, name, n_rows, n_cols}, …] }`
+/// or `{ "error": "artifact_not_found", "artifact_id": "…" }`.
+pub fn list_sheets_of_runtime(
+    runtime: &crate::crdt_documents::CrdtDocumentsRuntime,
+    aid: &crate::crdt_documents::ArtifactId,
+) -> serde_json::Value {
+    let Some(entry) = runtime.registry.get(aid) else {
         return serde_json::json!({
             "error": "artifact_not_found",
             "artifact_id": aid.to_string(),
@@ -197,12 +185,61 @@ pub fn execute_list_sheets_of(ctx: &CrdtDocsContext, args: ListSheetsOfArgs) -> 
     })
 }
 
+pub async fn execute_list_sheets_of(
+    ctx: &CrdtDocsContext,
+    args: ListSheetsOfArgs,
+) -> serde_json::Value {
+    use crate::crdt_documents::ArtifactId;
+    let aid: ArtifactId = match args.artifact_id.parse() {
+        Ok(a) => a,
+        Err(_) => {
+            return serde_json::json!({
+                "error": "invalid_artifact_id",
+                "value": args.artifact_id,
+            });
+        }
+    };
+    match ctx {
+        CrdtDocsContext::Local { runtime, .. } => list_sheets_of_runtime(runtime, &aid),
+        CrdtDocsContext::WsPeer { backend, .. } => {
+            // WsPeer mode: hit the server's `/documents/:id/sheets-with-counts`
+            // endpoint. Downcast the backend to RestBackend to reuse its
+            // client + base_url (same pattern used by execute_create_artifact).
+            let rest_any = backend.as_ref() as &dyn std::any::Any;
+            let Some(rest) = rest_any.downcast_ref::<crate::crdt_documents::RestBackend>() else {
+                return serde_json::json!({
+                    "error": "internal: wrong backend type for ws_peer mode"
+                });
+            };
+            let url = format!("{}/documents/{}/sheets-with-counts", rest.base_url, aid);
+            match rest.client.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(v) => v,
+                        Err(e) => serde_json::json!({"error": format!("invalid_response: {e}")}),
+                    }
+                }
+                Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => {
+                    serde_json::json!({
+                        "error": "artifact_not_found",
+                        "artifact_id": aid.to_string(),
+                    })
+                }
+                Ok(resp) => serde_json::json!({
+                    "error": format!("server_error_{}", resp.status()),
+                }),
+                Err(e) => serde_json::json!({"error": format!("http_error: {e}")}),
+            }
+        }
+    }
+}
+
 pub async fn dispatch_crdt_doc_list_sheets_of(
     ctx: &CrdtDocsContext,
     args: serde_json::Value,
 ) -> serde_json::Value {
     match serde_json::from_value::<ListSheetsOfArgs>(args) {
-        Ok(a) => execute_list_sheets_of(ctx, a),
+        Ok(a) => execute_list_sheets_of(ctx, a).await,
         Err(e) => serde_json::json!({ "error": format!("invalid_args: {e}") }),
     }
 }

@@ -286,3 +286,201 @@ async fn record_event_invalid_artifact_id_returns_400() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// ── Cross-artifact endpoints (F-T10a) ─────────────────────────────────────
+
+#[tokio::test]
+async fn sheets_with_counts_endpoint_returns_sheets_with_counts() {
+    use colmena::crdt_documents::tool_executor::{apply_add_sheet, apply_set_cell_in_proc};
+
+    let (app, rt, tmp) = build_app().await;
+    // Seed an artifact with 2 sheets: "Inventory" (2×2) + "Empty".
+    let aid = ArtifactId::new();
+    let entry = rt.registry.get_or_create(&aid, "demo");
+    let inv_sid = apply_add_sheet(&entry.doc, "Inventory");
+    apply_set_cell_in_proc(&entry.doc, &inv_sid, "A1", &json!("Region"));
+    apply_set_cell_in_proc(&entry.doc, &inv_sid, "B1", &json!("Sales"));
+    apply_set_cell_in_proc(&entry.doc, &inv_sid, "A2", &json!("North"));
+    apply_set_cell_in_proc(&entry.doc, &inv_sid, "B2", &json!(100));
+    let _empty_sid = apply_add_sheet(&entry.doc, "Empty");
+
+    let (status, v) = get_json(&app, &format!("/documents/{aid}/sheets-with-counts")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["artifact_id"], aid.to_string());
+    assert_eq!(v["name"], "demo");
+    let sheets = v["sheets"].as_array().expect("sheets array");
+    assert_eq!(sheets.len(), 2);
+    let inventory = sheets
+        .iter()
+        .find(|s| s["name"] == json!("Inventory"))
+        .expect("Inventory present");
+    assert_eq!(inventory["n_rows"], 2);
+    assert_eq!(inventory["n_cols"], 2);
+    let empty = sheets
+        .iter()
+        .find(|s| s["name"] == json!("Empty"))
+        .expect("Empty present");
+    assert_eq!(empty["n_rows"], 0);
+    assert_eq!(empty["n_cols"], 0);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+async fn sheets_with_counts_endpoint_returns_404_for_unknown_artifact() {
+    let (app, _rt, tmp) = build_app().await;
+    let missing = ArtifactId::new();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/documents/{missing}/sheets-with-counts"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+async fn sheets_with_counts_endpoint_returns_400_for_invalid_id() {
+    let (app, _rt, tmp) = build_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/documents/not-an-id/sheets-with-counts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+async fn import_sheet_endpoint_clones_sheet() {
+    use colmena::crdt_documents::tool_executor::{apply_add_sheet, apply_set_cell_in_proc};
+
+    let (app, rt, tmp) = build_app().await;
+    // Source artifact with one populated sheet.
+    let src_aid = ArtifactId::new();
+    let src_entry = rt.registry.get_or_create(&src_aid, "source");
+    let src_sid = apply_add_sheet(&src_entry.doc, "Inventory");
+    apply_set_cell_in_proc(&src_entry.doc, &src_sid, "A1", &json!("Region"));
+    apply_set_cell_in_proc(&src_entry.doc, &src_sid, "B1", &json!("Sales"));
+
+    // Empty destination artifact.
+    let dest_aid = ArtifactId::new();
+    let _ = rt.registry.get_or_create(&dest_aid, "destination");
+
+    let (status, v) = post_json(
+        &app,
+        &format!("/documents/{dest_aid}/import-sheet"),
+        json!({
+            "source_artifact_id": src_aid.to_string(),
+            "source_sheet_id": src_sid,
+            "dest_session_id": "test_session",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(v["error"].is_null(), "got error: {:?}", v["error"]);
+    assert_eq!(v["n_rows"], 1);
+    assert_eq!(v["n_cols"], 2);
+    assert_eq!(v["source"]["artifact_id"], src_aid.to_string());
+    let new_sheet_id = v["sheet_id"].as_str().expect("sheet_id present");
+    assert!(new_sheet_id.starts_with("sh_"));
+
+    // Verify the destination now has the cloned sheet with same values.
+    let dest_entry = rt.registry.get(&dest_aid).unwrap();
+    let proj = colmena::crdt_documents::projection::project(&dest_entry.doc);
+    let sheets = proj["sheets"].as_array().unwrap();
+    assert_eq!(sheets.len(), 1);
+    assert_eq!(sheets[0]["cells"]["A1"], json!("Region"));
+    assert_eq!(sheets[0]["cells"]["B1"], json!("Sales"));
+
+    // Audit event should have been recorded with the dest_session_id.
+    let events = rt
+        .store
+        .events_since(&dest_aid, 0, None, None, 10)
+        .await
+        .expect("events_since");
+    let import_ev = events
+        .iter()
+        .find(|e| e.summary.contains("imported sheet"))
+        .expect("missing import event");
+    assert_eq!(import_ev.origin, "agent:test_session");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+async fn import_sheet_endpoint_returns_error_for_self_import() {
+    use colmena::crdt_documents::tool_executor::apply_add_sheet;
+
+    let (app, rt, tmp) = build_app().await;
+    let aid = ArtifactId::new();
+    let entry = rt.registry.get_or_create(&aid, "self");
+    let sid = apply_add_sheet(&entry.doc, "Solo");
+
+    let (status, v) = post_json(
+        &app,
+        &format!("/documents/{aid}/import-sheet"),
+        json!({
+            "source_artifact_id": aid.to_string(),
+            "source_sheet_id": sid,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["error"], "self_import_forbidden");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+async fn import_sheet_endpoint_returns_error_for_unknown_source() {
+    let (app, rt, tmp) = build_app().await;
+    let dest_aid = ArtifactId::new();
+    let _ = rt.registry.get_or_create(&dest_aid, "destination");
+    let missing_src = ArtifactId::new();
+
+    let (status, v) = post_json(
+        &app,
+        &format!("/documents/{dest_aid}/import-sheet"),
+        json!({
+            "source_artifact_id": missing_src.to_string(),
+            "source_sheet_id": "sh_anything",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["error"], "source_artifact_not_found");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+async fn import_sheet_endpoint_returns_error_for_invalid_source_id() {
+    let (app, rt, tmp) = build_app().await;
+    let dest_aid = ArtifactId::new();
+    let _ = rt.registry.get_or_create(&dest_aid, "destination");
+
+    let (status, v) = post_json(
+        &app,
+        &format!("/documents/{dest_aid}/import-sheet"),
+        json!({
+            "source_artifact_id": "not-a-ulid",
+            "source_sheet_id": "sh_x",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["error"], "invalid_artifact_id");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

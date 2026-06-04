@@ -131,58 +131,52 @@ fn count_sheets(doc: &yrs::Doc) -> usize {
     }
 }
 
-pub async fn execute_import_sheet(
-    ctx: &CrdtDocsContext,
-    args: ImportSheetArgs,
+/// Core sheet-import logic. Used by:
+///   * `execute_import_sheet` in Local mode (LLM dispatcher path).
+///   * `import_sheet_handler` in the REST server (WsPeer path).
+///
+/// The caller has already resolved `dest_aid` (the artifact receiving the
+/// cloned sheet); `src_aid` and `source_sheet_id` come from the LLM /
+/// REST body. `dest_session_id` is used to:
+///   1. Set the `origin` field on the audit event (`agent:<id>`); when
+///      `None` we fall back to `"agent:llm"` (Local default).
+///
+/// Returns the same JSON shape the LLM tool returns. Performs all
+/// validation (self-import, source existence, size cap, sheet-count cap)
+/// and records the audit event via the runtime's change-tracker store.
+pub async fn import_sheet_runtime(
+    runtime: &crate::crdt_documents::CrdtDocumentsRuntime,
+    dest_aid: &ArtifactId,
+    src_aid: &ArtifactId,
+    source_sheet_id: &str,
+    new_name: Option<String>,
+    dest_session_id: Option<&str>,
 ) -> serde_json::Value {
-    // 1. Parse + validate source ID.
-    let src_aid: ArtifactId = match args.source_artifact_id.parse() {
-        Ok(a) => a,
-        Err(_) => {
-            return serde_json::json!({
-                "error": "invalid_artifact_id",
-                "value": args.source_artifact_id,
-            })
-        }
-    };
-
     // 2. Forbid self-import (catches loops + makes intent explicit).
-    if &src_aid == ctx.artifact_id() {
+    if src_aid == dest_aid {
         return serde_json::json!({
             "error": "self_import_forbidden",
             "artifact_id": src_aid.to_string(),
         });
     }
 
-    // 3. Resolve source artifact via the registry. Cross-artifact reads
-    //    only work in Local mode (mirrors execute_list_sheets_of in F-T1).
-    let src_entry = match ctx {
-        CrdtDocsContext::Local { runtime, .. } => match runtime.registry.get(&src_aid) {
-            Some(e) => e,
-            None => {
-                return serde_json::json!({
-                    "error": "source_artifact_not_found",
-                    "artifact_id": src_aid.to_string(),
-                })
-            }
-        },
-        CrdtDocsContext::WsPeer { .. } => {
-            return serde_json::json!({
-                "error": "unsupported_in_ws_peer_mode",
-                "tool": TOOL_IMPORT_SHEET,
-            })
-        }
+    // 3. Resolve source artifact via the registry.
+    let Some(src_entry) = runtime.registry.get(src_aid) else {
+        return serde_json::json!({
+            "error": "source_artifact_not_found",
+            "artifact_id": src_aid.to_string(),
+        });
     };
 
     // 4. Extract the source sheet's cells + name.
-    let extracted = match extract_source_sheet(&src_entry.doc, &args.source_sheet_id) {
+    let extracted = match extract_source_sheet(&src_entry.doc, source_sheet_id) {
         Some(e) => e,
         None => {
             return serde_json::json!({
                 "error": "source_sheet_not_found",
                 "artifact_id": src_aid.to_string(),
-                "sheet_id": args.source_sheet_id,
-            })
+                "sheet_id": source_sheet_id,
+            });
         }
     };
 
@@ -196,9 +190,10 @@ pub async fn execute_import_sheet(
     }
 
     // 6. Resolve destination doc.
-    let Some(dest_doc) = ctx.doc() else {
+    let Some(dest_entry) = runtime.registry.get(dest_aid) else {
         return serde_json::json!({ "error": "artifact_not_found" });
     };
+    let dest_doc = dest_entry.doc.clone();
 
     // 7. Enforce max-sheets-per-artifact on destination.
     let n_existing = count_sheets(&dest_doc);
@@ -212,9 +207,8 @@ pub async fn execute_import_sheet(
 
     // 8. Compute the destination sheet name (collision-aware).
     let src_aid_str = src_aid.to_string();
-    let proposed_name = args
-        .new_name
-        .unwrap_or_else(|| format!("{} (from art_{})", extracted.name, &src_aid_str[4..8]));
+    let proposed_name =
+        new_name.unwrap_or_else(|| format!("{} (from art_{})", extracted.name, &src_aid_str[4..8]));
     let final_name = resolve_unique_sheet_name(&dest_doc, &proposed_name);
 
     // 9. Write into destination — one sheet creation + per-cell writes.
@@ -242,15 +236,14 @@ pub async fn execute_import_sheet(
     let n_cols = if has_any { max_col + 1 } else { 0 };
 
     // 10. Side-effects: dirty flag + audit event.
-    ctx.mark_dirty();
-    let origin = ctx
-        .session_id()
+    dest_entry.mark_dirty();
+    let origin = dest_session_id
         .map(|s| format!("agent:{s}"))
         .unwrap_or_else(|| "agent:llm".to_string());
-    let event_id = ctx
-        .backend()
-        .record_event(crate::crdt_documents::change_tracker_store::NewEvent {
-            artifact_id: ctx.artifact_id().clone(),
+    let event_id = runtime
+        .store
+        .insert_event(crate::crdt_documents::change_tracker_store::NewEvent {
+            artifact_id: dest_aid.clone(),
             sheet_id: Some(new_sheet_id.clone()),
             origin,
             summary: format!(
@@ -263,19 +256,110 @@ pub async fn execute_import_sheet(
         })
         .await
         .unwrap_or(0);
-    ctx.record_event_id(event_id);
 
     serde_json::json!({
         "sheet_id": new_sheet_id,
         "name": final_name,
         "n_rows": n_rows,
         "n_cols": n_cols,
+        "event_id": event_id,
         "source": {
             "artifact_id": src_aid.to_string(),
-            "sheet_id": args.source_sheet_id,
+            "sheet_id": source_sheet_id,
             "name": extracted.name,
         },
     })
+}
+
+pub async fn execute_import_sheet(
+    ctx: &CrdtDocsContext,
+    args: ImportSheetArgs,
+) -> serde_json::Value {
+    // 1. Parse + validate source ID.
+    let src_aid: ArtifactId = match args.source_artifact_id.parse() {
+        Ok(a) => a,
+        Err(_) => {
+            return serde_json::json!({
+                "error": "invalid_artifact_id",
+                "value": args.source_artifact_id,
+            })
+        }
+    };
+
+    match ctx {
+        CrdtDocsContext::Local { runtime, .. } => {
+            let result = import_sheet_runtime(
+                runtime,
+                ctx.artifact_id(),
+                &src_aid,
+                &args.source_sheet_id,
+                args.new_name,
+                ctx.session_id(),
+            )
+            .await;
+            // Bubble the event_id up to the per-turn cursor advancer.
+            if let Some(eid) = result.get("event_id").and_then(|v| v.as_u64()) {
+                ctx.record_event_id(eid);
+            }
+            // Strip the event_id from the LLM-visible payload to keep the
+            // tool surface stable.
+            let mut out = result;
+            if let Some(obj) = out.as_object_mut() {
+                obj.remove("event_id");
+            }
+            out
+        }
+        CrdtDocsContext::WsPeer { backend, .. } => {
+            let rest_any = backend.as_ref() as &dyn std::any::Any;
+            let Some(rest) = rest_any.downcast_ref::<crate::crdt_documents::RestBackend>() else {
+                return serde_json::json!({
+                    "error": "internal: wrong backend type for ws_peer mode"
+                });
+            };
+            let url = format!(
+                "{}/documents/{}/import-sheet",
+                rest.base_url,
+                ctx.artifact_id()
+            );
+            let mut body = serde_json::json!({
+                "source_artifact_id": args.source_artifact_id,
+                "source_sheet_id": args.source_sheet_id,
+            });
+            if let Some(n) = &args.new_name {
+                body["new_name"] = serde_json::json!(n);
+            }
+            if let Some(s) = ctx.session_id() {
+                body["dest_session_id"] = serde_json::json!(s);
+            }
+            match rest.client.post(&url).json(&body).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(mut v) => {
+                            if let Some(eid) = v.get("event_id").and_then(|x| x.as_u64()) {
+                                ctx.record_event_id(eid);
+                            }
+                            if let Some(obj) = v.as_object_mut() {
+                                obj.remove("event_id");
+                            }
+                            v
+                        }
+                        Err(e) => {
+                            serde_json::json!({"error": format!("invalid_response: {e}")})
+                        }
+                    }
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    // Try to parse error JSON from server; fall back to status code
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(v) => v,
+                        Err(_) => serde_json::json!({"error": format!("server_error_{status}")}),
+                    }
+                }
+                Err(e) => serde_json::json!({"error": format!("http_error: {e}")}),
+            }
+        }
+    }
 }
 
 pub async fn dispatch_crdt_doc_import_sheet(

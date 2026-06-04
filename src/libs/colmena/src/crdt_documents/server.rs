@@ -54,6 +54,11 @@ pub fn router(runtime: Arc<CrdtDocumentsRuntime>) -> Router {
             get(get_cursor_handler).post(set_cursor_handler),
         )
         .route("/documents/by-session/:sid", get(by_session_handler))
+        .route(
+            "/documents/:id/sheets-with-counts",
+            get(sheets_with_counts_handler),
+        )
+        .route("/documents/:id/import-sheet", post(import_sheet_handler))
         .with_state(runtime)
 }
 
@@ -269,6 +274,87 @@ async fn by_session_handler(
         .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
     }
+}
+
+// ── Cross-artifact handlers (F-T10a) ──────────────────────────────────────
+
+/// `GET /documents/:id/sheets-with-counts` — the WsPeer-mode backing for
+/// the `crdt_doc_list_sheets_of` LLM tool. Returns the same JSON shape the
+/// tool dispatcher produces in Local mode:
+///   `{ artifact_id, name, sheets: [{sheet_id, name, n_rows, n_cols}, …] }`
+/// or `404` when the artifact id is unknown to this server.
+async fn sheets_with_counts_handler(
+    Path(id_str): Path<String>,
+    State(runtime): State<Arc<CrdtDocumentsRuntime>>,
+) -> Response {
+    let id = match ArtifactId::from_str(&id_str) {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid artifact id").into_response(),
+    };
+    // Delegate to the same helper the tool dispatcher uses, then translate
+    // its `artifact_not_found` JSON to a real 404 (REST convention).
+    let v =
+        crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::crdt_doc_tools::list_sheets_of_runtime(
+            runtime.as_ref(),
+            &id,
+        );
+    if v.get("error").and_then(|e| e.as_str()) == Some("artifact_not_found") {
+        return (StatusCode::NOT_FOUND, "artifact not found").into_response();
+    }
+    Json(v).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct ImportSheetBody {
+    source_artifact_id: String,
+    source_sheet_id: String,
+    #[serde(default)]
+    new_name: Option<String>,
+    /// Agent session id used to attribute the audit event (`origin =
+    /// "agent:<id>"`). Optional — REST callers can omit, in which case the
+    /// helper falls back to `"agent:llm"`. The LLM dispatcher always
+    /// passes the ctx's session_id so production traffic is always
+    /// attributed.
+    #[serde(default)]
+    dest_session_id: Option<String>,
+}
+
+/// `POST /documents/:dest_id/import-sheet` — the WsPeer-mode backing for
+/// the `crdt_doc_import_sheet` LLM tool. Body:
+///   `{ source_artifact_id, source_sheet_id, new_name?, dest_session_id? }`
+///
+/// Validation (self-import, size cap, missing artifact/sheet) is done by
+/// the shared `import_sheet_runtime` helper; on validation failure we
+/// echo back the helper's JSON with a 200 (matches the LLM tool surface).
+async fn import_sheet_handler(
+    Path(id_str): Path<String>,
+    State(runtime): State<Arc<CrdtDocumentsRuntime>>,
+    JsonExtract(body): JsonExtract<ImportSheetBody>,
+) -> Response {
+    let dest_id = match ArtifactId::from_str(&id_str) {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid artifact id").into_response(),
+    };
+    let src_id: ArtifactId = match body.source_artifact_id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return Json(serde_json::json!({
+                "error": "invalid_artifact_id",
+                "value": body.source_artifact_id,
+            }))
+            .into_response();
+        }
+    };
+    let v = crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::crdt_doc_import_sheet::import_sheet_runtime(
+        runtime.as_ref(),
+        &dest_id,
+        &src_id,
+        &body.source_sheet_id,
+        body.new_name,
+        body.dest_session_id.as_deref(),
+    )
+    .await;
+    Json(v).into_response()
 }
 
 const INDEX_HTML: &str = include_str!("static/index.html");
