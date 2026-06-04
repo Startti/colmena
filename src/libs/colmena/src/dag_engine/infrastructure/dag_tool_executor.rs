@@ -695,11 +695,11 @@ impl DagToolExecutor {
             use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
                 dispatch_crdt_doc_add_sheet, dispatch_crdt_doc_create_artifact,
                 dispatch_crdt_doc_get_recent_changes, dispatch_crdt_doc_list_my_artifacts,
-                dispatch_crdt_doc_list_sheets, dispatch_crdt_doc_read, dispatch_crdt_doc_set_cell,
-                dispatch_crdt_doc_set_range, CRDT_DOC_ADD_SHEET_TOOL,
+                dispatch_crdt_doc_list_sheets, dispatch_crdt_doc_read, dispatch_crdt_doc_run_python,
+                dispatch_crdt_doc_set_cell, dispatch_crdt_doc_set_range, CRDT_DOC_ADD_SHEET_TOOL,
                 CRDT_DOC_CREATE_ARTIFACT_TOOL, CRDT_DOC_GET_RECENT_CHANGES_TOOL,
                 CRDT_DOC_LIST_MY_ARTIFACTS_TOOL, CRDT_DOC_LIST_SHEETS_TOOL, CRDT_DOC_READ_TOOL,
-                CRDT_DOC_SET_CELL_TOOL, CRDT_DOC_SET_RANGE_TOOL,
+                CRDT_DOC_RUN_PYTHON_TOOL, CRDT_DOC_SET_CELL_TOOL, CRDT_DOC_SET_RANGE_TOOL,
             };
 
             let name = tool_call.function.name.as_str();
@@ -713,6 +713,7 @@ impl DagToolExecutor {
                     || n == CRDT_DOC_GET_RECENT_CHANGES_TOOL
                     || n == CRDT_DOC_LIST_MY_ARTIFACTS_TOOL
                     || n == CRDT_DOC_CREATE_ARTIFACT_TOOL
+                    || n == CRDT_DOC_RUN_PYTHON_TOOL
             );
 
             if is_crdt_tool {
@@ -743,6 +744,9 @@ impl DagToolExecutor {
                     }
                     n if n == CRDT_DOC_CREATE_ARTIFACT_TOOL => {
                         dispatch_crdt_doc_create_artifact(ctx, args).await
+                    }
+                    n if n == CRDT_DOC_RUN_PYTHON_TOOL => {
+                        dispatch_crdt_doc_run_python(ctx, args).await
                     }
                     _ => dispatch_crdt_doc_get_recent_changes(ctx, args).await,
                 };

@@ -586,6 +586,7 @@ pub fn build_all_crdt_doc_tools() -> Vec<ToolDefinition> {
         tool_get_recent_changes(),
         tool_list_my_artifacts(),
         tool_create_artifact(),
+        super::tool_run_python(),
     ]
 }
 

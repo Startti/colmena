@@ -1,6 +1,7 @@
 //! Synthetic tools for the LLM node — tools that don't map to DAG nodes.
 
 pub mod crdt_doc_context;
+pub mod crdt_doc_run_python;
 pub mod crdt_doc_tools;
 pub mod crdt_summary;
 pub mod describe_tool;
@@ -182,6 +183,11 @@ pub use crdt_doc_tools::{
     TOOL_LIST_MY_ARTIFACTS as CRDT_DOC_LIST_MY_ARTIFACTS_TOOL,
     TOOL_LIST_SHEETS as CRDT_DOC_LIST_SHEETS_TOOL, TOOL_READ as CRDT_DOC_READ_TOOL,
     TOOL_SET_CELL as CRDT_DOC_SET_CELL_TOOL, TOOL_SET_RANGE as CRDT_DOC_SET_RANGE_TOOL,
+};
+
+pub use crdt_doc_run_python::{
+    dispatch_crdt_doc_run_python, execute_run_python, tool_run_python, RunPythonArgs,
+    TOOL_RUN_PYTHON as CRDT_DOC_RUN_PYTHON_TOOL,
 };
 
 #[cfg(test)]
