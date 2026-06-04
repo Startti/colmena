@@ -217,6 +217,58 @@ En `llm.rs` el orden es:
 4. Decidir mutaciones; aplicar con `crdt_doc_set_cell` / `crdt_doc_set_range`.
 5. Reportar al usuario el `current_event_id` para anclarse en el próximo turn.
 
+### 5.5 Recent changes awareness + discovery
+
+#### Auto-injected summary block
+
+Cuando `llm_call` corre con `crdt_documents` configurado AND con `agent_session_id`, el sistema auto-inyecta un bloque corto al `system_message` con los cambios que OTROS peers hicieron al workbook desde el último turn del agente:
+
+```
+---
+Workbook changes since your last turn (5 events, 2 peers):
+- Inventory: 3 changes by peer:browser
+- Pricing: 2 changes by agent:orchestrator
+Use `crdt_doc_get_recent_changes(sheet_id?)` for cell-level detail.
+---
+```
+
+Reglas:
+- Solo se inyecta si hay >0 eventos relevantes (filtra mutaciones del propio agente vía `origin = agent:{session_id}`).
+- Tope 10 sheets en el listado; overflow muestra `...and N more sheet/peer groups changed`.
+- Eventos de browser tienen `sheet_id` null en v1 (limitación documentada en BACKLOG); aparecen como bucket "Workbook (sheet unknown)".
+- El cursor del agente se actualiza al **final del turn** vía `backend.upsert_cursor` — si el turn falla mid-way, el cursor no se mueve.
+
+#### Tools nuevos / extendidos
+
+| Tool | Args | Returns |
+|------|------|---------|
+| `crdt_doc_get_recent_changes` | `since_event_id?`, `sheet_id?`, `limit?` (default 50) | `{current_event_id, events[], truncated}` |
+| `crdt_doc_list_my_artifacts` | `limit?` (default 50) | `{artifacts[{artifact_id, name, created_at, last_accessed_at}]}` |
+| `crdt_doc_create_artifact` | `name` | `{artifact_id, name}` — para mutar el nuevo artifact requiere otro turn que lo pinee en `crdt_documents.artifact_id` (limitación v1; multi-artifact write es subsistema F) |
+
+#### Tablas SQL
+
+Tres tablas se crean automáticamente al startup via migrations (`src/libs/colmena/migrations/{sqlite,postgres}/20260603000000_crdt_doc_changes.sql`):
+
+- `crdt_doc_events` — log append-only (`id, artifact_id, sheet_id?, origin, summary, created_at`). Indexado para drill-down por `(artifact_id, id)` y `(artifact_id, sheet_id, id)`.
+- `crdt_doc_session_cursors` — cursor por `(agent_session_id, artifact_id)` → `last_event_id`.
+- `crdt_doc_session_artifacts` — ownership: qué artifacts pertenecen a qué session (`agent_session_id, artifact_id, name, created_at, last_accessed_at`).
+
+#### Backend abstraction
+
+`CrdtDocsContext` ahora tiene un campo `backend: Arc<dyn CrdtBackend>` con dos implementaciones:
+
+- `DirectBackend`: Local mode — usa `ChangeTrackerStore` directo (worker = server colocalizado).
+- `RestBackend`: WsPeer mode — hace HTTP al server (worker stateless, server dedicado).
+
+Los tool dispatchers no saben qué modo está activo — solo llaman `ctx.backend().record_event(...)` etc.
+
+#### Attribution de origin
+
+- Mutaciones del agente: `origin = format!("agent:{session_id}")`.
+- Mutaciones de browsers: `origin = "peer:browser"` (atributo definido en el WS handshake vía query param `peer_type`).
+- Filtro de own-events en `get_recent_changes` y auto-summary: `WHERE origin != "agent:{session_id}"`.
+
 ---
 
 ## 6. Python helper (PyO3 + pandas)
