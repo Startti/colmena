@@ -14,7 +14,9 @@ import ast as _ast
 
 _ALLOWED_IMPORTS = {
     'math', 'json', 're', 'datetime', 'collections',
-    'itertools', 'functools', 'string', 'decimal', 'statistics'
+    'itertools', 'functools', 'string', 'decimal', 'statistics',
+    # crdt_doc_run_python additions (subsistema C, 2026-06):
+    'pandas', 'numpy', 'scipy',
 }
 _BANNED_BUILTINS = {'open', 'exec', 'eval', 'compile', '__import__'}
 
@@ -408,6 +410,55 @@ mod tests {
     // hangs even though the timeout fired. The timeout primitive itself is
     // upstream-tested by tokio. We verify wiring via the e2e graph in
     // tests/graphs/agents/python_sandbox_tool_test.json.
+
+    #[test]
+    fn restricted_mode_allows_pandas_import() {
+        pyo3::prepare_freethreaded_python();
+        pyo3::Python::with_gil(|py| {
+            let result = validate_sandbox(py, "import pandas as pd\noutput = 1");
+            match result {
+                Ok(None) => {} // OK — no violation
+                Ok(Some(v)) => panic!("expected pandas to pass, got violation: {v}"),
+                Err(e) => panic!("validator errored: {e}"),
+            }
+        });
+    }
+
+    #[test]
+    fn restricted_mode_allows_numpy_import() {
+        pyo3::prepare_freethreaded_python();
+        pyo3::Python::with_gil(|py| {
+            let result = validate_sandbox(py, "import numpy as np\noutput = 1");
+            match result {
+                Ok(None) => {}
+                other => panic!("expected numpy to pass: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn restricted_mode_allows_scipy_stats_import() {
+        pyo3::prepare_freethreaded_python();
+        pyo3::Python::with_gil(|py| {
+            let result = validate_sandbox(py, "from scipy import stats\noutput = 1");
+            match result {
+                Ok(None) => {}
+                other => panic!("expected `from scipy import stats` to pass: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn restricted_mode_still_rejects_requests_import() {
+        pyo3::prepare_freethreaded_python();
+        pyo3::Python::with_gil(|py| {
+            let result = validate_sandbox(py, "import requests\noutput = 1");
+            match result {
+                Ok(Some(_)) => {} // OK — violation reported
+                other => panic!("requests should be rejected: {other:?}"),
+            }
+        });
+    }
 
     #[tokio::test]
     async fn test_sandbox_skips_reserved_keys_as_python_vars() {
