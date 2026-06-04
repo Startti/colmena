@@ -60,3 +60,28 @@ Una sección por feature. Cada sección contiene:
 - Write-back solo a nueva sheet (no overwrite/append a sheet existente). Mejora: v1.1 cuando UX feedback lo amerite.
 - No multi-artifact en un solo call (cross-workbook joins son subsistema F).
 - Scipy whitelist es por top-level module (`scipy` completo, no solo `scipy.stats`) por cómo el AST validator hace split en `.`. En la práctica el agente solo usa `scipy.stats` para v1 use cases.
+
+---
+
+## 3. CRDT Documents — C smoke debt cleanup (post-subsistema C)
+
+**Qué cambió.** Cinco fixes destapados durante el browser smoke de C con xlsx 1000-row:
+
+1. **`crdt_doc_run_python` ahora retorna `loaded_sheet_columns` en cada error response.** El dispatcher ya tiene `records_by_sheet` en mano antes de invocar el sandbox, lo expone como `{sheet_id: [col1, col2, …]}` en errores. El agente puede self-corregir KeyError en 1 turn en vez del loop de 8 retries que observamos.
+2. **Nueva builtin skill `crdt-doc-run-python`** (`src/libs/colmena/skills/crdt-doc-run-python/SKILL.md`) que documenta el contrato de shape (Y.Doc row 1 → pandas columns, manejo de title rows en xlsx importado, type quirks, debug workflow). Se activa con `config.skills.builtin: ["crdt-doc-run-python"]`. El grafo de smoke C ahora la usa.
+3. **Frontend `static/index.html`:** botón "Import .xlsx…" abre file picker + POST a `/documents/:id/import` (estaba hardcoded a fetch `/spike.xlsx`, confundía a usuarios nuevos). Botón legacy "spike fixture" preservado para smoke graphs viejos. Grid `rowCount` bumpeado 100→50000 para que imports >100 filas sean visibles en el canvas (Univer es virtualizado → memoria ~0).
+4. **`scripts/check_python_env.sh`** valida match de ABI entre `.venv/bin/python` y el binario `dag_engine` (vía `otool -L`). Catch del numpy ImportError class de errores en <2s, con instrucciones de recovery para ambos paths (rebuild venv vs rebuild binary con `PYO3_PYTHON`).
+5. **`crdt-yws` / `crdt-yws-graph` startup logs** ahora imprimen path absoluto + count de artifacts loaded + warning si `--dump-dir` es relativo. Resuelve el "mystery artifact wipe" que pasamos investigando 20 min.
+
+**Por qué importa.** El smoke C consumió ~1.5 horas debuggeando issues que ninguno era del feature core de C — todas eran fricciones operacionales (ABI mismatch, hardcoded fixture, off-by-one en mental model, path relativo silente). Estos fixes los previenen permanentemente, especialmente importante porque F va a usar `run_python` masivamente y heredar los mismos riesgos.
+
+**Verificación end-to-end.** Re-corrida del smoke C atómico con todos los fixes: agente invoca `load_skill('crdt-doc-run-python')` antes del primer pandas call, ejecuta los 2 `run_python` (138 items < $10 + 15 cantidades únicas) **en 0 retries**, total 24,801 tokens (vs 14,239 sin skill — +10K por el skill, pero -8 iteraciones por el loop evitado).
+
+**Documentación de referencia.**
+- Skill: [`src/libs/colmena/skills/crdt-doc-run-python/SKILL.md`](../src/libs/colmena/skills/crdt-doc-run-python/SKILL.md)
+- Dev guide §7 actualizado con notas de persistencia: [`docs/developer_guide/38_crdt_documents.md`](developer_guide/38_crdt_documents.md)
+- Items deferidos en [`docs/BACKLOG.md`](BACKLOG.md): dynamic grid sizing desde Y.Doc max-row, auto-detect title row en `df_records`.
+
+**Commits.** `bde1d08`, `615d988`, `c5a8f70`, `f0d4aeb`, `7666653` (5 commits separados por fix).
+
+**Estado.** done.
