@@ -220,7 +220,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             api::serve_dag(file_path, host, port).await?;
         }
 
-        Commands::CrdtYws { host, port, dump_dir } => {
+        Commands::CrdtYws {
+            host,
+            port,
+            dump_dir,
+        } => {
             use colmena::crdt_documents::CrdtDocumentsRuntime;
             use std::{net::SocketAddr, sync::Arc};
 
@@ -236,9 +240,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let app = colmena::crdt_documents::server::router(runtime);
             let addr: SocketAddr = format!("{host}:{port}").parse()?;
             let listener = tokio::net::TcpListener::bind(addr).await?;
-            println!(
-                "🧪 crdt-yws listening on http://{addr}  (storage → {dump_dir})"
-            );
+            println!("🧪 crdt-yws listening on http://{addr}  (storage → {dump_dir})");
             axum::serve(listener, app).await?;
         }
 
@@ -269,8 +271,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?,
             );
-            process_runtime::set_global(runtime.clone())
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            process_runtime::set_global(runtime.clone()).map_err(|e| anyhow::anyhow!("{e}"))?;
 
             // 1b. Optionally pre-create an artifact so the graph (which
             //     references it by id) finds it on first tool call.
@@ -288,9 +289,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let app = colmena::crdt_documents::server::router(runtime.clone());
             let addr: SocketAddr = format!("{host}:{port}").parse()?;
             let listener = tokio::net::TcpListener::bind(addr).await?;
-            println!(
-                "🧪 crdt-yws-graph listening on http://{addr}  (storage → {dump_dir})"
-            );
+            println!("🧪 crdt-yws-graph listening on http://{addr}  (storage → {dump_dir})");
             let server_handle = tokio::spawn(async move {
                 if let Err(e) = axum::serve(listener, app).await {
                     eprintln!("server error: {e}");
@@ -367,9 +366,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             //    inspect the browser. The shared runtime is owned by this
             //    closure scope; on Ctrl+C we shutdown gracefully so the
             //    last snapshot writer flushes land on disk.
-            println!(
-                "✅ Graph done. Server still up on http://{addr} — Ctrl+C to exit."
-            );
+            println!("✅ Graph done. Server still up on http://{addr} — Ctrl+C to exit.");
             tokio::signal::ctrl_c().await?;
             println!("\n⏸  Shutting down server and draining writers…");
             server_handle.abort();

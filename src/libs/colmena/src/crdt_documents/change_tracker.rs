@@ -120,9 +120,7 @@ mod tests {
         let _ = t.record(&id, None, "agent:test", "set B1").await;
         let all = t.since(&id, None, None, None, 100).await;
         assert_eq!(all.len(), 2);
-        let after_first = t
-            .since(&id, Some(all[0].event_id), None, None, 100)
-            .await;
+        let after_first = t.since(&id, Some(all[0].event_id), None, None, 100).await;
         assert_eq!(after_first.len(), 1);
         assert_eq!(after_first[0].summary, "set B1");
     }
@@ -140,9 +138,7 @@ mod tests {
         let id = ArtifactId::new();
         let _ = t.record(&id, None, "agent:me", "mine").await;
         let _ = t.record(&id, None, "agent:other", "theirs").await;
-        let evs = t
-            .since(&id, None, None, Some("agent:me"), 100)
-            .await;
+        let evs = t.since(&id, None, None, Some("agent:me"), 100).await;
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].summary, "theirs");
     }

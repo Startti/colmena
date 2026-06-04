@@ -131,9 +131,7 @@ pub(super) fn parse_msgs(bytes: &[u8]) -> Result<Vec<SyncMsg>> {
     let mut cur = Cursor::new(bytes);
     let mut out = Vec::new();
     while cur.has_content() {
-        let outer_tag: u8 = cur
-            .read_var()
-            .map_err(|e| anyhow!("outer tag: {e:?}"))?;
+        let outer_tag: u8 = cur.read_var().map_err(|e| anyhow!("outer tag: {e:?}"))?;
         if outer_tag != MSG_SYNC {
             match outer_tag {
                 MSG_QUERY_AWARENESS => {
@@ -162,18 +160,16 @@ pub(super) fn parse_msgs(bytes: &[u8]) -> Result<Vec<SyncMsg>> {
             }
             continue;
         }
-        let sub_tag: u8 = cur
-            .read_var()
-            .map_err(|e| anyhow!("sync sub-tag: {e:?}"))?;
+        let sub_tag: u8 = cur.read_var().map_err(|e| anyhow!("sync sub-tag: {e:?}"))?;
         let payload = cur
             .read_buf()
             .map_err(|e| anyhow!("sync payload: {e:?}"))?
             .to_vec();
         match sub_tag {
             t if t == MSG_SYNC_STEP_1 => out.push(SyncMsg::Step1 { sv_bytes: payload }),
-            t if t == MSG_SYNC_STEP_2 || t == MSG_SYNC_UPDATE => {
-                out.push(SyncMsg::Step2OrUpdate { update_bytes: payload })
-            }
+            t if t == MSG_SYNC_STEP_2 || t == MSG_SYNC_UPDATE => out.push(SyncMsg::Step2OrUpdate {
+                update_bytes: payload,
+            }),
             _ => {} // ignore unknown sub-tags
         }
     }

@@ -4,9 +4,7 @@
 //! CRDT documents server).
 
 use crate::crdt_documents::{
-    change_tracker_store::{
-        ChangeTrackerStore, NewEvent, StoredArtifact, StoredEvent, StoreError,
-    },
+    change_tracker_store::{ChangeTrackerStore, NewEvent, StoreError, StoredArtifact, StoredEvent},
     ArtifactId,
 };
 use async_trait::async_trait;
@@ -83,7 +81,13 @@ impl CrdtBackend for DirectBackend {
     ) -> Result<Vec<StoredEvent>, BackendError> {
         Ok(self
             .store
-            .events_since(artifact_id, since_event_id, sheet_id_filter, exclude_origin, limit)
+            .events_since(
+                artifact_id,
+                since_event_id,
+                sheet_id_filter,
+                exclude_origin,
+                limit,
+            )
             .await?)
     }
     async fn upsert_cursor(
@@ -92,7 +96,10 @@ impl CrdtBackend for DirectBackend {
         artifact_id: &ArtifactId,
         last_event_id: u64,
     ) -> Result<(), BackendError> {
-        Ok(self.store.upsert_cursor(session_id, artifact_id, last_event_id).await?)
+        Ok(self
+            .store
+            .upsert_cursor(session_id, artifact_id, last_event_id)
+            .await?)
     }
     async fn cursor_for(
         &self,
@@ -114,7 +121,10 @@ impl CrdtBackend for DirectBackend {
         artifact_id: &ArtifactId,
         name: Option<&str>,
     ) -> Result<(), BackendError> {
-        Ok(self.store.touch_artifact(session_id, artifact_id, name).await?)
+        Ok(self
+            .store
+            .touch_artifact(session_id, artifact_id, name)
+            .await?)
     }
 }
 
@@ -321,10 +331,7 @@ mod tests {
             .await
             .unwrap();
         assert!(id > 0);
-        let evs = backend
-            .events_since(&aid, 0, None, None, 10)
-            .await
-            .unwrap();
+        let evs = backend.events_since(&aid, 0, None, None, 10).await.unwrap();
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].summary, "hello");
     }

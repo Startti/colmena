@@ -177,8 +177,10 @@ impl ChangeTrackerStore for InMemoryChangeTrackerStore {
         last_event_id: u64,
     ) -> Result<(), StoreError> {
         let mut g = self.inner.lock().unwrap();
-        g.cursors
-            .insert((session_id.to_string(), artifact_id.to_string()), last_event_id);
+        g.cursors.insert(
+            (session_id.to_string(), artifact_id.to_string()),
+            last_event_id,
+        );
         Ok(())
     }
 
@@ -555,8 +557,14 @@ mod tests {
     async fn in_memory_records_and_lists_events_in_order() {
         let store = InMemoryChangeTrackerStore::new();
         let aid = ArtifactId::new();
-        let id1 = store.insert_event(make_event(&aid, "agent:s1", "a")).await.unwrap();
-        let id2 = store.insert_event(make_event(&aid, "agent:s2", "b")).await.unwrap();
+        let id1 = store
+            .insert_event(make_event(&aid, "agent:s1", "a"))
+            .await
+            .unwrap();
+        let id2 = store
+            .insert_event(make_event(&aid, "agent:s2", "b"))
+            .await
+            .unwrap();
         assert!(id2 > id1);
         let evs = store.events_since(&aid, 0, None, None, 100).await.unwrap();
         assert_eq!(evs.len(), 2);
@@ -568,9 +576,18 @@ mod tests {
     async fn in_memory_filters_by_origin() {
         let store = InMemoryChangeTrackerStore::new();
         let aid = ArtifactId::new();
-        store.insert_event(make_event(&aid, "agent:me", "mine")).await.unwrap();
-        store.insert_event(make_event(&aid, "agent:other", "theirs")).await.unwrap();
-        let evs = store.events_since(&aid, 0, None, Some("agent:me"), 100).await.unwrap();
+        store
+            .insert_event(make_event(&aid, "agent:me", "mine"))
+            .await
+            .unwrap();
+        store
+            .insert_event(make_event(&aid, "agent:other", "theirs"))
+            .await
+            .unwrap();
+        let evs = store
+            .events_since(&aid, 0, None, Some("agent:me"), 100)
+            .await
+            .unwrap();
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].summary, "theirs");
     }
@@ -585,7 +602,10 @@ mod tests {
         ev_b.sheet_id = Some("sh_b".into());
         store.insert_event(ev_a).await.unwrap();
         store.insert_event(ev_b).await.unwrap();
-        let evs = store.events_since(&aid, 0, Some("sh_a"), None, 100).await.unwrap();
+        let evs = store
+            .events_since(&aid, 0, Some("sh_a"), None, 100)
+            .await
+            .unwrap();
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].summary, "a");
     }
@@ -595,7 +615,10 @@ mod tests {
         let store = InMemoryChangeTrackerStore::new();
         let aid = ArtifactId::new();
         for i in 0..10 {
-            store.insert_event(make_event(&aid, "agent:s1", &format!("e{i}"))).await.unwrap();
+            store
+                .insert_event(make_event(&aid, "agent:s1", &format!("e{i}")))
+                .await
+                .unwrap();
         }
         let evs = store.events_since(&aid, 0, None, None, 3).await.unwrap();
         assert_eq!(evs.len(), 3);
@@ -617,8 +640,14 @@ mod tests {
         let store = InMemoryChangeTrackerStore::new();
         let a1 = ArtifactId::new();
         let a2 = ArtifactId::new();
-        store.touch_artifact("s1", &a1, Some("first")).await.unwrap();
-        store.touch_artifact("s1", &a2, Some("second")).await.unwrap();
+        store
+            .touch_artifact("s1", &a1, Some("first"))
+            .await
+            .unwrap();
+        store
+            .touch_artifact("s1", &a2, Some("second"))
+            .await
+            .unwrap();
         let list = store.artifacts_for_session("s1", 10).await.unwrap();
         assert_eq!(list.len(), 2);
         // Most recent first (a2 was touched last)

@@ -34,7 +34,10 @@ pub fn import_xlsx_into_doc(doc: &Doc, bytes: &[u8]) -> Result<ImportStats, Impo
         _ => workbook.insert(&mut txn, "sheets", ArrayPrelim::default()),
     };
 
-    let mut stats = ImportStats { sheets_imported: 0, cells_imported: 0 };
+    let mut stats = ImportStats {
+        sheets_imported: 0,
+        cells_imported: 0,
+    };
     let sheet_names: Vec<String> = wb.sheet_names().to_vec();
     for sheet_name in sheet_names {
         let range = match wb.worksheet_range(&sheet_name) {
@@ -88,9 +91,7 @@ fn datatype_to_any(d: &Data) -> (yrs::Any, &'static str) {
         Data::Bool(b) => (yrs::Any::Bool(*b), "b"),
         Data::DateTime(dt) => (yrs::Any::Number(dt.as_f64()), "n"),
         Data::Error(_) | Data::Empty => (yrs::Any::Null, "s"),
-        Data::DateTimeIso(s) | Data::DurationIso(s) => {
-            (yrs::Any::String(s.clone().into()), "s")
-        }
+        Data::DateTimeIso(s) | Data::DurationIso(s) => (yrs::Any::String(s.clone().into()), "s"),
     }
 }
 

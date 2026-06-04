@@ -89,7 +89,7 @@ mod tests {
         apply_set_cell_in_proc(&doc, &s2, "A1", &serde_json::json!(42));
         let bytes = export_doc_to_xlsx(&doc).unwrap();
         assert_eq!(&bytes[..2], b"PK"); // xlsx is a zip
-        // Round-trip via the importer to confirm values survive.
+                                        // Round-trip via the importer to confirm values survive.
         let doc2 = Doc::new();
         crate::crdt_documents::xlsx_import::import_xlsx_into_doc(&doc2, &bytes).unwrap();
         let v = crate::crdt_documents::projection::project(&doc2);

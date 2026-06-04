@@ -537,9 +537,7 @@ pub async fn execute_create_artifact(
             // backend trait object to RestBackend to reuse its
             // client + base_url. Requires `CrdtBackend: Any` (B-T5).
             let rest_any = backend.as_ref() as &dyn std::any::Any;
-            let Some(rest) =
-                rest_any.downcast_ref::<crate::crdt_documents::RestBackend>()
-            else {
+            let Some(rest) = rest_any.downcast_ref::<crate::crdt_documents::RestBackend>() else {
                 return serde_json::json!({
                     "error": "internal: wrong backend type for ws_peer mode"
                 });
@@ -799,13 +797,7 @@ mod tests {
 
         // Also do an own-session mutation — it should NOT appear (own-origin
         // filter excludes it).
-        let _ = execute_add_sheet(
-            &ctx,
-            AddSheetArgs {
-                name: "Own".into(),
-            },
-        )
-        .await;
+        let _ = execute_add_sheet(&ctx, AddSheetArgs { name: "Own".into() }).await;
 
         let v = execute_get_recent_changes(
             &ctx,

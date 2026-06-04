@@ -215,14 +215,12 @@ async fn six_tools_round_trip_via_ws_peer() {
     //     the own-origin filter.
     let own_seeded = server_runtime
         .store
-        .insert_event(
-            colmena::crdt_documents::change_tracker_store::NewEvent {
-                artifact_id: aid.clone(),
-                sheet_id: None,
-                origin: "agent:test_session".to_string(),
-                summary: "own-session event that must be hidden".to_string(),
-            },
-        )
+        .insert_event(colmena::crdt_documents::change_tracker_store::NewEvent {
+            artifact_id: aid.clone(),
+            sheet_id: None,
+            origin: "agent:test_session".to_string(),
+            summary: "own-session event that must be hidden".to_string(),
+        })
         .await
         .expect("seed own event");
     assert!(own_seeded > last_event_id);
@@ -250,14 +248,12 @@ async fn six_tools_round_trip_via_ws_peer() {
     //     is "agent:other_peer", which does NOT match the own filter).
     let peer_event_id = server_runtime
         .store
-        .insert_event(
-            colmena::crdt_documents::change_tracker_store::NewEvent {
-                artifact_id: aid.clone(),
-                sheet_id: Some(inventory_id.clone()),
-                origin: "agent:other_peer".to_string(),
-                summary: "peer wrote a cell".to_string(),
-            },
-        )
+        .insert_event(colmena::crdt_documents::change_tracker_store::NewEvent {
+            artifact_id: aid.clone(),
+            sheet_id: Some(inventory_id.clone()),
+            origin: "agent:other_peer".to_string(),
+            summary: "peer wrote a cell".to_string(),
+        })
         .await
         .expect("seed peer event");
 

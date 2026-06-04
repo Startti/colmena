@@ -43,7 +43,9 @@ fn format_block(events: &[StoredEvent]) -> String {
     let peers: std::collections::HashSet<String> =
         events.iter().map(|e| e.origin.clone()).collect();
     for e in events {
-        *buckets.entry((e.sheet_id.clone(), e.origin.clone())).or_insert(0) += 1;
+        *buckets
+            .entry((e.sheet_id.clone(), e.origin.clone()))
+            .or_insert(0) += 1;
     }
     let mut lines: Vec<(String, String, u32)> = buckets
         .into_iter()
@@ -77,9 +79,7 @@ fn format_block(events: &[StoredEvent]) -> String {
             total_lines - MAX_SHEETS_IN_SUMMARY
         ));
     }
-    out.push_str(
-        "Use `crdt_doc_get_recent_changes(sheet_id?)` for cell-level detail.\n---\n",
-    );
+    out.push_str("Use `crdt_doc_get_recent_changes(sheet_id?)` for cell-level detail.\n---\n");
     out
 }
 

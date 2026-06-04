@@ -105,10 +105,7 @@ mod tests {
     use super::*;
 
     fn temp_root() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "crdt_storage_test_{}",
-            ulid::Ulid::new()
-        ));
+        let dir = std::env::temp_dir().join(format!("crdt_storage_test_{}", ulid::Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

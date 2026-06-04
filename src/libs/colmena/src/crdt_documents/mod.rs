@@ -4,19 +4,19 @@
 //! This module is SPIKE code. It is intentionally isolated so it can be
 //! removed in one commit after the GO/NO-GO verdict.
 
+pub mod artifact_id;
 pub mod change_tracker;
 pub mod change_tracker_store;
 pub mod crdt_backend;
-pub mod narration;
-pub mod tool_executor;
-pub mod artifact_id;
 pub mod doc_registry;
+pub mod narration;
 pub mod process_runtime;
 pub mod projection;
 pub mod runtime;
 pub mod server;
 pub mod snapshot_writer;
 pub mod storage;
+pub mod tool_executor;
 pub mod ws_peer;
 pub mod xlsx_export;
 pub mod xlsx_import;
@@ -24,11 +24,11 @@ pub mod yjs_protocol;
 
 pub use artifact_id::ArtifactId;
 pub use change_tracker::{ChangeEvent, ChangeTracker};
-pub use crdt_backend::{BackendError, CrdtBackend, DirectBackend, RestBackend};
 pub use change_tracker_store::{
-    ChangeTrackerStore, ChangeTrackerStoreRef, InMemoryChangeTrackerStore,
-    NewEvent, StoreError as ChangeTrackerStoreError, StoredArtifact, StoredEvent,
+    ChangeTrackerStore, ChangeTrackerStoreRef, InMemoryChangeTrackerStore, NewEvent,
+    StoreError as ChangeTrackerStoreError, StoredArtifact, StoredEvent,
 };
+pub use crdt_backend::{BackendError, CrdtBackend, DirectBackend, RestBackend};
 pub use doc_registry::{DocRegistry, RegisteredArtifact};
 pub use runtime::{CrdtDocumentsRuntime, RuntimeError, DEFAULT_STORAGE_ROOT};
 pub use snapshot_writer::{spawn_writer, SnapshotHandle};

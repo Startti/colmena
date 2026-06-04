@@ -83,10 +83,7 @@ async fn recent_changes_round_trip_via_ws_peer() {
 
     // 1) Auto-summary should show 2 peer:browser changes on Inventory.
     let block = build_recent_changes_block(&ctx).await.expect("block");
-    assert!(
-        block.contains("2 events, 1 peer"),
-        "block was: {block}"
-    );
+    assert!(block.contains("2 events, 1 peer"), "block was: {block}");
     assert!(
         block.contains("Inventory: 2 changes by peer:browser"),
         "block was: {block}"
@@ -137,7 +134,10 @@ async fn recent_changes_round_trip_via_ws_peer() {
     //    The agent's own record_event also calls ctx.record_event_id, so
     //    max_event_id_observed > 0.
     let max = ctx.max_event_id_observed();
-    assert!(max > 0, "agent should have observed at least its own event id");
+    assert!(
+        max > 0,
+        "agent should have observed at least its own event id"
+    );
     ctx.backend()
         .upsert_cursor(&session_id, &aid, max)
         .await

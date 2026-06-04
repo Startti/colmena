@@ -181,10 +181,7 @@ mod tests {
 fn json_to_any(v: &Value) -> (Any, &'static str) {
     match v {
         Value::String(s) => (Any::String(s.clone().into()), "s"),
-        Value::Number(n) => (
-            n.as_f64().map(Any::Number).unwrap_or(Any::Null),
-            "n",
-        ),
+        Value::Number(n) => (n.as_f64().map(Any::Number).unwrap_or(Any::Null), "n"),
         Value::Bool(b) => (Any::Bool(*b), "b"),
         _ => (Any::Null, "s"),
     }
@@ -214,7 +211,9 @@ pub fn apply_rename_sheet(doc: &Doc, sheet_id: &str, new_name: &str) -> bool {
     let mut txn = doc.transact_mut();
     // Find the index first (read phase), then mutate.
     let idx = find_sheet_index_in_txn(&txn, sheet_id);
-    let Some(i) = idx else { return false; };
+    let Some(i) = idx else {
+        return false;
+    };
     let wb = txn.get_or_insert_map("workbook");
     let sheets = match wb.get(&txn, "sheets") {
         Some(yrs::Out::YArray(a)) => a,
@@ -232,7 +231,9 @@ pub fn apply_rename_sheet(doc: &Doc, sheet_id: &str, new_name: &str) -> bool {
 pub fn apply_delete_sheet(doc: &Doc, sheet_id: &str) -> bool {
     let mut txn = doc.transact_mut();
     let idx = find_sheet_index_in_txn(&txn, sheet_id);
-    let Some(i) = idx else { return false; };
+    let Some(i) = idx else {
+        return false;
+    };
     let wb = txn.get_or_insert_map("workbook");
     let sheets = match wb.get(&txn, "sheets") {
         Some(yrs::Out::YArray(a)) => a,
@@ -305,7 +306,10 @@ pub fn apply_reorder_sheets(doc: &Doc, new_order: &[String]) -> bool {
         sheets.remove(&mut txn, i);
     }
     for desired_id in new_order {
-        let snap = match snapshots.iter().find(|s| s["id"].as_str() == Some(desired_id)) {
+        let snap = match snapshots
+            .iter()
+            .find(|s| s["id"].as_str() == Some(desired_id))
+        {
             Some(s) => s,
             None => return false,
         };

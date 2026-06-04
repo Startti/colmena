@@ -73,9 +73,7 @@ fn summarize_diff(before: &Value, after: &Value) -> String {
         for (addr, av) in &ac {
             match bc.get(addr) {
                 None => added.push(format!("{name}!{addr}={av}")),
-                Some(bv) if bv != av => {
-                    changed.push(format!("{name}!{addr}: {bv} → {av}"))
-                }
+                Some(bv) if bv != av => changed.push(format!("{name}!{addr}: {bv} → {av}")),
                 _ => {}
             }
         }

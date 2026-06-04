@@ -164,8 +164,7 @@ mod tests {
     fn temp_storage() -> (Arc<dyn ArtifactStorage>, PathBuf) {
         let dir = std::env::temp_dir().join(format!("reg_test_{}", ulid::Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage: Arc<dyn ArtifactStorage> =
-            Arc::new(LocalFsStorage::new(dir.clone()).unwrap());
+        let storage: Arc<dyn ArtifactStorage> = Arc::new(LocalFsStorage::new(dir.clone()).unwrap());
         (storage, dir)
     }
 

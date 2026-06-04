@@ -6,8 +6,7 @@
 //! in the existing documents module.
 
 use crate::crdt_documents::{
-    storage::StorageConfig, ArtifactStorage, DocRegistry, InMemoryChangeTrackerStore,
-    StorageError,
+    storage::StorageConfig, ArtifactStorage, DocRegistry, InMemoryChangeTrackerStore, StorageError,
 };
 use serde_json::Value;
 use std::path::PathBuf;
@@ -114,8 +113,8 @@ impl CrdtDocumentsRuntime {
                     crate::crdt_documents::change_tracker_store::SqlxDialect::from_url(&url)
                         .ok_or_else(|| {
                             RuntimeError::Config(format!(
-                                "unsupported DATABASE_URL scheme (expected postgres:// or sqlite:): {url}"
-                            ))
+                        "unsupported DATABASE_URL scheme (expected postgres:// or sqlite:): {url}"
+                    ))
                         })?;
                 match dialect {
                     crate::crdt_documents::change_tracker_store::SqlxDialect::Postgres => {

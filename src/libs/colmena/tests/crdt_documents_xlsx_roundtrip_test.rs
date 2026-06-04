@@ -20,7 +20,11 @@ fn import_mutate_export_reimport_isomorphic_on_values() {
 
     let doc = Doc::new();
     let stats = import_xlsx_into_doc(&doc, &fixture).unwrap();
-    assert!(stats.cells_imported >= 700, "expected ≥700 cells, got {}", stats.cells_imported);
+    assert!(
+        stats.cells_imported >= 700,
+        "expected ≥700 cells, got {}",
+        stats.cells_imported
+    );
 
     // Add a new sheet with two cells.
     let new_sheet = apply_add_sheet(&doc, "Notes");

@@ -106,8 +106,9 @@ async fn full_tool_sequence_round_trips_through_runtime() {
     .await;
     let events = v["events"].as_array().unwrap();
     assert!(
-        events.iter().any(|e| e["id"] == json!(peer_event_id)
-            && e["origin"] == "agent:other_peer"),
+        events
+            .iter()
+            .any(|e| e["id"] == json!(peer_event_id) && e["origin"] == "agent:other_peer"),
         "expected peer event in results: {events:?}"
     );
 

@@ -42,9 +42,8 @@ fn runtime() -> PyResult<Arc<CrdtDocumentsRuntime>> {
 }
 
 fn parse_id(s: &str) -> PyResult<ArtifactId> {
-    s.parse::<ArtifactId>().map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("invalid artifact_id: {e}"))
-    })
+    s.parse::<ArtifactId>()
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid artifact_id: {e}")))
 }
 
 #[pyfunction]
@@ -163,10 +162,7 @@ fn write_sheet(
             let addr = format!("{}{}", col_letter(col_idx as u32), row_idx + 2);
             let value = pyobj_to_json(py, py_val)?;
             crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
-                &entry.doc,
-                sheet_id,
-                &addr,
-                &value,
+                &entry.doc, sheet_id, &addr, &value,
             );
         }
     }

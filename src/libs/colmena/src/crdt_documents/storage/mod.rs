@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub mod localfs;
 #[cfg(feature = "gcs")]
 pub mod gcs;
+pub mod localfs;
 
 pub use localfs::LocalFsStorage;
 
@@ -45,9 +45,14 @@ pub trait ArtifactStorage: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub enum StorageConfig {
-    LocalFs { root: PathBuf },
+    LocalFs {
+        root: PathBuf,
+    },
     #[cfg(feature = "gcs")]
-    Gcs { bucket: String, prefix: String },
+    Gcs {
+        bucket: String,
+        prefix: String,
+    },
 }
 
 impl StorageConfig {
