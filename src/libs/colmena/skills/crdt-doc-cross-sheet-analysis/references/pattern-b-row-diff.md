@@ -1,0 +1,51 @@
+# Pattern B — Row diff by key column
+
+**When:** lists with unique identifiers (SKU, ID, email). You want to classify each row as `only_in_A`, `only_in_B`, `changed`, or `unchanged`. **This is the most common case.**
+
+**Note:** if either sheet has a title row in A1, apply header promotion first (see `crdt-doc-run-python` skill, reference `dataframe-shape`).
+
+```python
+import pandas as pd
+a, b = dfs[sid_a], dfs[sid_b]
+# Optional header promotion:
+# a.columns = a.iloc[0].tolist(); a = a.iloc[1:].reset_index(drop=True)
+# b.columns = b.iloc[0].tolist(); b = b.iloc[1:].reset_index(drop=True)
+
+merged = a.merge(b, on='SKU', how='outer', suffixes=('_a','_b'), indicator=True)
+merged['_status'] = merged['_merge'].map({
+    'left_only':  'only_in_A',
+    'right_only': 'only_in_B',
+    'both':       'present_in_both',
+})
+
+# CRITICAL: pandas' merge with indicator=True returns _merge as Categorical,
+# and the .map() above propagates that dtype into _status. Writing new values
+# ('changed', 'unchanged') to a Categorical column without first registering
+# them as categories raises:
+#   TypeError: Cannot setitem on a Categorical with a new category, set the categories first
+# Cast to plain object dtype BEFORE the conditional reassignment below.
+merged['_status'] = merged['_status'].astype('object')
+
+shared = [c.removesuffix('_a') for c in merged.columns
+          if c.endswith('_a') and f"{c.removesuffix('_a')}_b" in merged.columns]
+
+def diff_mask(r):
+    return any(
+        r[f"{c}_a"] != r[f"{c}_b"]
+        for c in shared
+        if pd.notna(r[f"{c}_a"]) and pd.notna(r[f"{c}_b"])
+    )
+
+merged.loc[merged['_status'] == 'present_in_both', '_status'] = merged.apply(
+    lambda r: 'changed' if diff_mask(r) else 'unchanged',
+    axis=1,
+)
+output_sheet = merged.drop(columns='_merge')
+output = merged['_status'].value_counts().to_dict()
+```
+
+**Output_sheet columns:** the key column + every non-key column suffixed with `_a` / `_b` + a `_status` column.
+
+**Tip:** replace `'SKU'` with the actual key column the user mentioned ("Producto", "ID", "email", etc).
+
+**Tip:** for numeric drift specifically (don't care about which fields, just "did values move"), Pattern D (statistical) may be a better fit.

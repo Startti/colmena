@@ -2021,10 +2021,19 @@ impl ExecutableNode for LlmNode {
             // instructions → tool rules. The helper returns `None` when
             // there is no session_id, no cursor delta, or no events.
             if let Some(ctx) = crdt_docs_context.as_ref() {
-                use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::build_recent_changes_block;
+                use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
+                    build_recent_changes_block, CRDT_SPREADSHEET_PROTOCOL_PRELUDE,
+                };
                 if let Some(block) = build_recent_changes_block(ctx.as_ref()).await {
                     sections.push(block);
                 }
+                // CRDT spreadsheet operating manual. Auto-injected so users
+                // can speak naturally ("compará Q3 y Q4") without naming
+                // tools or patterns. ~150 tokens fixed cost; pays back via
+                // fewer iterations on naive prompts. Skills are still
+                // loaded lazily-by-reference for the heavy detail.
+                sections.push(CRDT_SPREADSHEET_PROTOCOL_PRELUDE.to_string());
+                let _ = ctx; // already used above
             }
             if let Some(sys_msg) = system_message {
                 sections.push(sys_msg.to_string());

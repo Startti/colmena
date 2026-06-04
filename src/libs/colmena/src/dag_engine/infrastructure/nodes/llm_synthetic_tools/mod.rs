@@ -172,7 +172,7 @@ pub use load_skill_tool::{
     LoadSkillDispatchResult, LOAD_SKILL_TOOL_NAME,
 };
 
-pub use crdt_summary::build_recent_changes_block;
+pub use crdt_summary::{build_recent_changes_block, CRDT_SPREADSHEET_PROTOCOL_PRELUDE};
 
 pub use crdt_doc_tools::{
     build_all_crdt_doc_tools, dispatch_crdt_doc_add_sheet, dispatch_crdt_doc_create_artifact,

@@ -1,11 +1,56 @@
 //! Builds the "Recent changes since your last turn" block that
 //! llm.rs prepends to the system_message when a `crdt_documents`
 //! context is configured.
+//!
+//! Also exports `CRDT_SPREADSHEET_PROTOCOL_PRELUDE` — a short operating
+//! manual auto-injected into the system_message whenever crdt_documents
+//! is configured. It teaches the agent how to behave with naive,
+//! non-technical user prompts (when to discover, when to load skills,
+//! when to clarify, where to persist results) without requiring the
+//! user to know any of the tool names.
 
 use crate::crdt_documents::change_tracker_store::StoredEvent;
 use std::collections::HashMap;
 
 use super::crdt_doc_context::CrdtDocsContext;
+
+/// Operating manual injected into the system_message whenever a
+/// `crdt_documents` config block is present. Designed so a user who
+/// only says "compará los dos Q y mostrame diferencias" — no tool
+/// names, no `write_to_sheet`, no "patrón B" — still gets the right
+/// behavior. Skills are loaded lazily by reference to avoid bloating
+/// every turn with full pattern catalogs.
+pub const CRDT_SPREADSHEET_PROTOCOL_PRELUDE: &str = "## CRDT Spreadsheet Protocol\n\
+You have collaborative-spreadsheet tools (`crdt_doc_*`). The user is non-technical \
+and will describe what they want in natural language. They do NOT know tool names, \
+sheet ids, or which \"pattern\" to apply — translate their words to tool calls yourself.\n\n\
+**Always**:\n\
+1. **DISCOVER first.** On the first turn that touches a workbook, call \
+`crdt_doc_list_sheets` (current artifact) and `crdt_doc_list_my_artifacts` \
+(other workbooks in this session). If the user mentions other workbooks \
+(\"Q4\", \"el catálogo\", \"el reporte anterior\"), call \
+`crdt_doc_list_sheets_of` on each to peek before deciding.\n\
+2. **LOAD skills lazily.** Before writing any pandas code, \
+`load_skill('crdt-doc-run-python')`. For compare/join/enrich across sheets, \
+`load_skill('crdt-doc-cross-sheet-analysis')`. Each skill's index lists \
+specific references — load ONLY the reference you need \
+(e.g. `reference='pattern-b-row-diff'` or `reference='dataframe-shape'`). \
+This saves tokens.\n\
+3. **CLARIFY before acting on ambiguity.** Ask the user once if anything matters \
+for correctness: the key column (Producto / SKU / ID?), the output destination \
+(new sheet vs chat answer), the scope (which rows / which dates). Don't ask about \
+internals (sheet ids, tool names) — figure those out yourself.\n\
+4. **PERSIST derived results as new sheets** via `write_to_sheet`. Short summaries \
+(\"se encontraron N items\") go in chat. Anything tabular goes to a sheet so the \
+user keeps it.\n\
+5. **NAME results in the user's language.** \"Resumen Q3\", \"Diferencias Q3 vs Q4\", \
+not \"Output 1\" or \"diff_result\".\n\
+6. **CROSS-ARTIFACT pattern**: when the user wants something that involves another \
+workbook, the canonical flow is `list_sheets_of` → `import_sheet` (clones the sheet \
+into the current workbook) → `run_python` with both `sheet_ids`. You don't need \
+to ask the user permission to import — that's the only way to combine data, just \
+do it and tell them what you did.\n\n\
+The user's words → your job is the translation, not a syntax check.";
 
 const MAX_SHEETS_IN_SUMMARY: usize = 10;
 const MAX_EVENTS_TO_FETCH: u32 = 200;
