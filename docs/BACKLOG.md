@@ -133,6 +133,26 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 
 ---
 
+## CRDT Documents v1.1 — Configurable limits para `crdt_doc_run_python`
+
+- **Origen:** scope-cut al implementar subsistema C (2026-06-03/04). Los límites de tamaño/timeout viven hardcoded en `crdt_doc_run_python.rs`.
+- **Problema:** workbooks específicos pueden necesitar más memoria (datasets analíticos >100MB) o más tiempo de cómputo (joins complejos, statistical tests caros). El default conservador no acomoda casos legítimos.
+- **Workaround actual:** el agente puede dividir el análisis en múltiples calls más chicos. Para casos genuinamente grandes (10M+ rows), no hay path.
+- **Fix propuesto:**
+  1. Estructurar limits como `RunPythonLimits` struct con defaults match v1.
+  2. Cargar desde `crdt_documents.run_python_limits.*` (config del nodo) o env vars (`COLMENA_CRDT_PY_MAX_LOAD_MB`, `COLMENA_CRDT_PY_TIMEOUT_SECS`, etc).
+  3. Mantener ceiling absoluto hardcoded para prevenir abuse (ej. nunca permitir >1GB load aunque config diga).
+  4. Telemetry: counter por tipo de cap-hit.
+  5. Para `output_sheet` > 100K rows: chunked transact_mut (escribir en lotes de 10K para no bloquear el CRDT subscription).
+- **Acceptance criteria:**
+  - Operator puede subir el cap de 100MB → 500MB vía env var.
+  - Cap absoluto (1GB) sigue activo aunque config pida más.
+  - Métrica de cap-hits visible en logs/metrics.
+- **Estimación:** ~1 día dev + tests.
+- **Cuándo retomar:** cuando observemos usuarios chocando caps regularmente, o un cliente concreto pida specifically.
+
+---
+
 ## Items resueltos recientemente
 
 El último item — `data:` (base64 inline) auto-summary v2 — se resolvió el 2026-05-18 (ver `docs/CHANGELOG_2026-05.md` → "Inline data: auto-summary (v2)"). Los detalles de la resolución viven en la git history (commits `cc924a3`, `a3053cd`).
