@@ -66,6 +66,110 @@ fn validate_sandbox(py: Python<'_>, code: &str) -> Result<Option<String>, String
     }
 }
 
+/// Result of running a Python code string via the sandboxed helper.
+#[derive(Debug)]
+pub struct PythonRunResult {
+    /// The serialized value of the `output` variable in the user's namespace,
+    /// or `None` if the user did not assign `output`.
+    pub output: Option<Value>,
+    /// Captured stdout (best-effort — Python `print()` calls).
+    pub stdout: String,
+}
+
+/// Run a Python code string with the same semantics as the `python_script`
+/// DAG node. Used directly by other modules (e.g. `crdt_doc_run_python` tool)
+/// that need fine-grained control of the namespace and result extraction.
+///
+/// * `sandbox_mode`: `"none"` (full Python) or `"restricted"` (AST validation
+///   + import whitelist + banned-builtin enforcement).
+/// * `_timeout_secs`: reserved for the caller. This helper does NOT enforce a
+///   timeout — wrap the call in `tokio::task::spawn_blocking` +
+///   `tokio::time::timeout` if you need it.
+/// * `inputs`: a map of variable_name → JSON value to inject as Python globals
+///   before executing the code.
+///
+/// Errors: returns `Err(String)` on sandbox violation, syntax error, or
+/// runtime exception (with message + Python traceback when available).
+///
+/// Note: stdout is captured via a `sys.stdout` redirect orchestrated from
+/// Rust (not from user code), so the redirect does NOT require the user
+/// code to import `sys` — it remains compatible with `restricted` mode.
+pub fn execute_sandboxed_helper(
+    code: &str,
+    sandbox_mode: &str,
+    _timeout_secs: u64,
+    inputs: &serde_json::Map<String, Value>,
+) -> Result<PythonRunResult, String> {
+    Python::with_gil(|py| -> Result<PythonRunResult, String> {
+        // 1. Sandbox AST validation (only in restricted mode).
+        if sandbox_mode == "restricted" {
+            if let Some(violation) = validate_sandbox(py, code)? {
+                return Err(violation);
+            }
+        }
+
+        // 2. Build a single namespace dict used as both globals and locals,
+        // matching PythonNode::execute semantics exactly.
+        let locals = PyDict::new_bound(py);
+        for (key, value) in inputs.iter() {
+            let py_val = pythonize(py, value)
+                .map_err(|e| format!("Failed to convert input '{}' to Python: {}", key, e))?;
+            locals
+                .set_item(key, py_val)
+                .map_err(|e| format!("Failed to set input '{}': {}", key, e))?;
+        }
+
+        // 3. Set up stdout capture via sys.stdout = io.StringIO().
+        // Orchestrated from Rust so it works even in restricted mode (no
+        // `import sys` in user code required).
+        let sys_module = py
+            .import_bound("sys")
+            .map_err(|e| format!("import sys: {e}"))?;
+        let io_module = py
+            .import_bound("io")
+            .map_err(|e| format!("import io: {e}"))?;
+        let stdout_capture = io_module
+            .call_method0("StringIO")
+            .map_err(|e| format!("create StringIO: {e}"))?;
+        let original_stdout = sys_module
+            .getattr("stdout")
+            .map_err(|e| format!("get sys.stdout: {e}"))?;
+        sys_module
+            .setattr("stdout", &stdout_capture)
+            .map_err(|e| format!("redirect stdout: {e}"))?;
+
+        // 4. Execute user code.
+        let exec_result = py.run_bound(code, Some(&locals), Some(&locals));
+
+        // 5. Always restore stdout BEFORE returning, regardless of exec result.
+        let _ = sys_module.setattr("stdout", original_stdout);
+
+        // 6. Capture stdout text (best-effort).
+        let stdout = stdout_capture
+            .call_method0("getvalue")
+            .and_then(|v| v.extract::<String>())
+            .unwrap_or_default();
+
+        // 7. Surface execution errors AFTER restoring stdout.
+        if let Err(e) = exec_result {
+            return Err(format!("Python execution error: {}", e));
+        }
+
+        // 8. Extract `output` if defined. See PythonNode::execute for the
+        // Python ↔ JSON boundary rationale (no auto-coercion).
+        let output = match locals.get_item("output") {
+            Ok(Some(output_obj)) => {
+                let val: Value = depythonize_bound(output_obj)
+                    .map_err(|e| format!("Failed to convert Python 'output' to JSON: {}", e))?;
+                Some(val)
+            }
+            _ => None,
+        };
+
+        Ok(PythonRunResult { output, stdout })
+    })
+}
+
 #[async_trait]
 impl ExecutableNode for PythonNode {
     async fn execute(
@@ -112,9 +216,13 @@ impl ExecutableNode for PythonNode {
             .and_then(|v| v.as_u64())
             .unwrap_or(10);
 
-        // 3. Prepare inputs for the closure — skip sandbox config keys
+        // 3. Prepare inputs for the helper — skip sandbox config keys.
+        // Intrinsic Python ↔ JSON limitation for the `output` value: see
+        // execute_sandboxed_helper docs and docs/developer_guide/26_python_node.md
+        // → "The Python ↔ JSON Boundary" for the full list and recommended
+        // coercions. We do NOT auto-coerce.
         let sandbox_keys = ["sandbox_mode", "sandbox_timeout_secs", "code"];
-        let inputs_clone: NodeInputs = inputs
+        let helper_inputs: serde_json::Map<String, Value> = inputs
             .iter()
             .filter(|(k, _)| !sandbox_keys.contains(&k.as_str()))
             .map(|(k, v)| (k.clone(), v.clone()))
@@ -123,61 +231,18 @@ impl ExecutableNode for PythonNode {
         let code = code.to_string();
         let sandbox_mode_clone = sandbox_mode.clone();
 
-        // 4. Schedule blocking execution (CPython is not async-safe)
+        // 4. Schedule blocking execution (CPython is not async-safe).
         let blocking_task = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-            Python::with_gil(|py| {
-                // 4a. AST validation in restricted mode
-                if sandbox_mode_clone == "restricted" {
-                    if let Some(violation) = validate_sandbox(py, &code)? {
-                        return Err(violation);
-                    }
-                }
-
-                // 4b. Inject inputs as Python variables
-                let locals = PyDict::new_bound(py);
-                for (key, value) in &inputs_clone {
-                    let py_val = pythonize(py, value).map_err(|e| {
-                        format!("Failed to convert input '{}' to Python: {}", key, e)
-                    })?;
-                    locals
-                        .set_item(key, py_val)
-                        .map_err(|e| format!("Failed to set input '{}': {}", key, e))?;
-                }
-
-                // 4c. Execute user code
-                py.run_bound(&code, Some(&locals), Some(&locals))
-                    .map_err(|e| format!("Python execution error: {}", e))?;
-
-                // 4d. Extract result from 'output' variable.
-                //
-                // Intrinsic Python ↔ JSON limitation: depythonize fails when
-                // `output` contains a value JSON cannot represent — most commonly
-                // a dict with non-string keys (e.g. `output = {5: "x"}`), but
-                // also `set`, `bytes`, `datetime`, `Decimal`, custom classes,
-                // `float('nan')`/`float('inf')`, and circular references.
-                //
-                // We do NOT auto-coerce. Silent str()-on-keys would mask typos
-                // (forgetting quotes on a literal key) and would push the bug
-                // downstream where the cause is harder to diagnose. The user is
-                // expected to convert non-JSON types explicitly:
-                //   {str(k): v for k, v in d.items()}, list(my_set),
-                //   bytes.decode(), datetime.isoformat(), float(Decimal), ...
-                //
-                // See: docs/developer_guide/26_python_node.md → "The Python ↔
-                // JSON Boundary" for the full list and recommended coercions.
-                match locals.get_item("output") {
-                    Ok(Some(output_obj)) => {
-                        let json_output: Value = depythonize_bound(output_obj).map_err(|e| {
-                            format!("Failed to convert Python 'output' to JSON: {}", e)
-                        })?;
-                        Ok(json_output)
-                    }
-                    _ => Ok(Value::Null),
-                }
-            })
+            let result = execute_sandboxed_helper(
+                &code,
+                &sandbox_mode_clone,
+                timeout_secs,
+                &helper_inputs,
+            )?;
+            Ok(result.output.unwrap_or(Value::Null))
         });
 
-        // 5. Apply timeout in restricted mode; plain await otherwise
+        // 5. Apply timeout in restricted mode; plain await otherwise.
         let output_json = if sandbox_mode == "restricted" {
             tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), blocking_task)
                 .await
