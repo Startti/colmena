@@ -1,0 +1,37 @@
+{
+  "_comment": "Subsistema F browser smoke. Setup script (documented below) crea 2 artifacts (Q3 + Q4) e importa los xlsx via REST; este grafo ejecuta el agente que (1) lista sheets de Q4, (2) clona la sheet al principal Q3, (3) ejecuta los 3 outputs: row diff por SKU, schema diff, y join/enrich (Q4_Price en Q3). Verificás en el browser que aparezcan 3 hojas nuevas en el artifact principal. RUNNER SCRIPT: see comment block below the JSON in F-T6 of docs/superpowers/plans/2026-06-04-crdt-cross-sheet-analysis.md.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/f-cross-smoke",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Tengo dos artifacts de ventas: el actual es Q3 y quiero compararlo con Q4 ($DYNAMIC:art_q4). Hacé tres hojas en el actual:\n(1) Row diff por SKU mostrando qué se agregó/borró/cambió. write_to_sheet='Row Diff Q3 vs Q4'.\n(2) Schema diff entre las dos sheets de Inventory. write_to_sheet='Schema Diff'.\n(3) Enrichment: agregar a Q3 una columna nueva 'Q4_Price' con el precio de cada SKU que también existe en Q4 (left join). write_to_sheet='Q3 Enriched with Q4 Price'.\n\nProcedimiento canónico:\n- list_sheets_of(art_q4) para descubrir el sheet_id de Q4.\n- import_sheet para traer la sheet de Q4 al principal.\n- load_skill('crdt-doc-cross-sheet-analysis') para ver los 6 patrones canónicos.\n- run_python una vez por cada output (patrón B, C, E).\nReportá brevemente al final."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "system_message": "You are a spreadsheet data analyst. You have CRDT document tools and a Python sandbox via crdt_doc_run_python. The current artifact is pinned via ctx — other artifacts are reachable via list_sheets_of + import_sheet. Load the crdt-doc-run-python and crdt-doc-cross-sheet-analysis skills before writing any pandas code: they explain the DataFrame shape contract (row 1 → columns) and the 6 canonical analysis patterns.",
+        "skills": {
+          "builtin": ["crdt-doc-run-python", "crdt-doc-cross-sheet-analysis"]
+        },
+        "crdt_documents": {
+          "artifact_id": "$DYNAMIC:art_q3",
+          "ws_url": "ws://127.0.0.1:8090/yjs"
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent",   "to": "log" }
+  ]
+}
