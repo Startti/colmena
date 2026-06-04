@@ -1,6 +1,7 @@
 //! Synthetic tools for the LLM node — tools that don't map to DAG nodes.
 
 pub mod crdt_doc_context;
+pub mod crdt_doc_import_sheet;
 pub mod crdt_doc_run_python;
 pub mod crdt_doc_tools;
 pub mod crdt_summary;
@@ -190,6 +191,11 @@ pub use crdt_doc_tools::{
 pub use crdt_doc_run_python::{
     dispatch_crdt_doc_run_python, execute_run_python, tool_run_python, RunPythonArgs,
     TOOL_RUN_PYTHON as CRDT_DOC_RUN_PYTHON_TOOL,
+};
+
+pub use crdt_doc_import_sheet::{
+    dispatch_crdt_doc_import_sheet, execute_import_sheet, tool_import_sheet, ImportSheetArgs,
+    MAX_IMPORT_BYTES, MAX_SHEETS_PER_ARTIFACT, TOOL_IMPORT_SHEET as CRDT_DOC_IMPORT_SHEET_TOOL,
 };
 
 #[cfg(test)]

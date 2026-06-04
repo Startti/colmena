@@ -759,6 +759,7 @@ pub fn build_all_crdt_doc_tools() -> Vec<ToolDefinition> {
         tool_list_my_artifacts(),
         tool_create_artifact(),
         tool_list_sheets_of(),
+        super::crdt_doc_import_sheet::tool_import_sheet(),
         super::tool_run_python(),
     ]
 }
