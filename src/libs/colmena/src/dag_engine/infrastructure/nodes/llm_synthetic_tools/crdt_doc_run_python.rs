@@ -4,9 +4,7 @@
 //!   - Spec: docs/superpowers/specs/2026-06-03-crdt-pandas-integration-design.md
 //!   - Plan: docs/superpowers/plans/2026-06-03-crdt-pandas-integration.md (C-T5)
 
-use crate::crdt_documents::{
-    build_records_for_sheets, write_records_as_new_sheet, RecordsError,
-};
+use crate::crdt_documents::{build_records_for_sheets, write_records_as_new_sheet, RecordsError};
 use crate::dag_engine::infrastructure::nodes::python_node::execute_sandboxed_helper;
 use crate::llm::domain::tools::ToolDefinition;
 use schemars::JsonSchema;
@@ -58,10 +56,7 @@ pub fn tool_run_python() -> ToolDefinition {
 /// Execute `run_python` against the runtime: extract records from the
 /// requested sheets, run the user's wrapped code in the sandbox, and
 /// optionally persist `output_sheet` as a new sheet.
-pub async fn execute_run_python(
-    ctx: &CrdtDocsContext,
-    args: RunPythonArgs,
-) -> serde_json::Value {
+pub async fn execute_run_python(ctx: &CrdtDocsContext, args: RunPythonArgs) -> serde_json::Value {
     // 1. Validate args.
     if args.sheet_ids.is_empty() {
         return serde_json::json!({ "error": "sheet_ids must be non-empty" });
@@ -99,7 +94,10 @@ pub async fn execute_run_python(
         dfs_raw_json.insert(sid.clone(), serde_json::Value::Array(array));
     }
     let mut inputs = serde_json::Map::new();
-    inputs.insert("_dfs_raw".to_string(), serde_json::Value::Object(dfs_raw_json));
+    inputs.insert(
+        "_dfs_raw".to_string(),
+        serde_json::Value::Object(dfs_raw_json),
+    );
 
     // 4. Wrap user code with prelude (build dfs) and postlude (package output).
     let wrapped_code = wrap_user_code(&args.code);

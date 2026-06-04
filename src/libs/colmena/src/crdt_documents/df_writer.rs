@@ -51,7 +51,10 @@ pub fn write_records_as_new_sheet(
     };
 
     let (rows_to_write, truncated_at) = if records.len() > MAX_OUTPUT_SHEET_ROWS {
-        (&records[..MAX_OUTPUT_SHEET_ROWS], Some(MAX_OUTPUT_SHEET_ROWS))
+        (
+            &records[..MAX_OUTPUT_SHEET_ROWS],
+            Some(MAX_OUTPUT_SHEET_ROWS),
+        )
     } else {
         (records, None)
     };

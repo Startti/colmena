@@ -233,12 +233,8 @@ impl ExecutableNode for PythonNode {
 
         // 4. Schedule blocking execution (CPython is not async-safe).
         let blocking_task = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-            let result = execute_sandboxed_helper(
-                &code,
-                &sandbox_mode_clone,
-                timeout_secs,
-                &helper_inputs,
-            )?;
+            let result =
+                execute_sandboxed_helper(&code, &sandbox_mode_clone, timeout_secs, &helper_inputs)?;
             Ok(result.output.unwrap_or(Value::Null))
         });
 

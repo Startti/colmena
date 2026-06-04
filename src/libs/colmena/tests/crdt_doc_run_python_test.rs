@@ -104,7 +104,11 @@ output = "summary written"
         write_to_sheet: Some("Summary".to_string()),
     };
     let result = execute_run_python(&ctx, args).await;
-    assert!(result["error"].is_null(), "got error: {:?}", result["error"]);
+    assert!(
+        result["error"].is_null(),
+        "got error: {:?}",
+        result["error"]
+    );
     let wrote = &result["wrote_sheet"];
     assert_eq!(wrote["name"], "Summary");
     assert_eq!(wrote["n_rows"], 2);
@@ -144,7 +148,11 @@ output = "ok"
         write_to_sheet: Some("Summary".to_string()),
     };
     let result = execute_run_python(&ctx, args).await;
-    assert!(result["error"].is_null(), "got error: {:?}", result["error"]);
+    assert!(
+        result["error"].is_null(),
+        "got error: {:?}",
+        result["error"]
+    );
     assert_eq!(result["wrote_sheet"]["name"], "Summary (2)");
 
     let _ = std::fs::remove_dir_all(&tmp);
