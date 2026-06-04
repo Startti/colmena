@@ -965,8 +965,8 @@
     },
 
     "crdt_documents": {
-      "summary": "Six synthetic LLM tools for real-time collaborative xlsx workbooks (v1 CRDT documents feature). Exposed when an llm_call's config includes the crdt_documents block with an artifact_id. All mutations are in-process against a Yrs-backed document; persisted snapshots are stored locally or in GCS. No tool_configurations needed — the engine auto-creates them when crdt_documents is present.",
-      "synthetic_tools": ["crdt_doc_list_sheets", "crdt_doc_read", "crdt_doc_set_cell", "crdt_doc_set_range", "crdt_doc_add_sheet", "crdt_doc_get_recent_changes"],
+      "summary": "Synthetic LLM tools for real-time collaborative xlsx workbooks (v1 CRDT documents feature). Exposed when an llm_call's config includes the crdt_documents block with an artifact_id. All mutations are in-process against a Yrs-backed document; persisted snapshots are stored locally or in GCS. No tool_configurations needed — the engine auto-creates them when crdt_documents is present. Subsystem F (cross-sheet) adds crdt_doc_list_sheets_of + crdt_doc_import_sheet and extends crdt_doc_get_recent_changes with an optional artifact_id filter.",
+      "synthetic_tools": ["crdt_doc_list_sheets", "crdt_doc_read", "crdt_doc_set_cell", "crdt_doc_set_range", "crdt_doc_add_sheet", "crdt_doc_get_recent_changes", "crdt_doc_list_sheets_of", "crdt_doc_import_sheet"],
       "how_exposed": "Automatically registered when llm_call.config.crdt_documents is present (with artifact_id, storage_backend, etc.). The LLM never sees the artifact_id or storage config — those are internal routing parameters managed by the engine.",
       "lifecycle": "All mutations modify the in-process Yrs document. The ChangeTracker records operations for narration (get_recent_changes). Snapshots are persisted after each DAG run via ArtifactStorage (localfs or gcs).",
       "examples": {
@@ -1138,7 +1138,7 @@
         },
         "crdt_doc_get_recent_changes": {
           "name": "crdt_doc_get_recent_changes",
-          "description": "Retrieve a human-readable narration of recent peer changes. Useful for multi-agent or multi-user scenarios to see what other editors did. Optionally specify since_event_id to get only changes after a certain point.",
+          "description": "Retrieve a human-readable narration of recent peer changes. Useful for multi-agent or multi-user scenarios to see what other editors did. Optionally specify since_event_id to get only changes after a certain point. Subsystem F adds optional artifact_id to audit a different artifact than the ctx's.",
           "input_schema": {
             "type": "object",
             "properties": {
@@ -1146,6 +1146,11 @@
                 "type": "integer",
                 "required": false,
                 "description": "Optional u64 event ID. If provided, only changes after this event are returned. If omitted, returns all recorded changes."
+              },
+              "artifact_id": {
+                "type": "string",
+                "required": false,
+                "description": "NEW in F: if set, audits this artifact instead of the ctx's. Default: ctx artifact (subsystem B behaviour)."
               }
             },
             "required": []
@@ -1157,11 +1162,80 @@
               "narration": { "type": "string", "description": "Human-readable text summarizing recent changes (e.g., 'Peer A set cell B2 to 150. Peer B added sheet Q4Data.')." }
             }
           }
+        },
+        "crdt_doc_list_sheets_of": {
+          "name": "crdt_doc_list_sheets_of",
+          "description": "Peek at the sheets of any artifact in the registry (cross-artifact, no session ownership check). Use to discover a source_sheet_id before crdt_doc_import_sheet.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "required": true,
+                "description": "ULID of the artifact to inspect."
+              }
+            },
+            "required": ["artifact_id"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "artifact_id": { "type": "string", "description": "Echoed artifact ULID." },
+              "name": { "type": "string", "description": "Artifact display name." },
+              "sheets": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "sheet_id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "n_rows": { "type": "integer" },
+                    "n_cols": { "type": "integer" }
+                  }
+                },
+                "description": "Per-sheet metadata with dimensions, suitable to pick a source_sheet_id."
+              }
+            }
+          }
+        },
+        "crdt_doc_import_sheet": {
+          "name": "crdt_doc_import_sheet",
+          "description": "Clone a sheet from another artifact into the current artifact (snapshot only — no live link). After import, use crdt_doc_run_python with multi-sheet to analyze. Collisions resolved with ' (2)', ' (3)', … suffix.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "source_artifact_id": {
+                "type": "string",
+                "required": true,
+                "description": "Source artifact ULID."
+              },
+              "source_sheet_id": {
+                "type": "string",
+                "required": true,
+                "description": "Source sheet id within that artifact."
+              },
+              "new_name": {
+                "type": "string",
+                "required": false,
+                "description": "Optional override; default \"<source_name> (from art_xxxx)\"."
+              }
+            },
+            "required": ["source_artifact_id", "source_sheet_id"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "sheet_id": { "type": "string", "description": "ULID of the newly cloned sheet in the current artifact." },
+              "name": { "type": "string", "description": "Final name after collision resolution." },
+              "n_rows": { "type": "integer", "description": "Cloned row count." },
+              "n_cols": { "type": "integer", "description": "Cloned column count." }
+            }
+          }
         }
       },
       "special_behaviors": [
         "artifact_id is never exposed to the LLM — the engine uses it internally to route mutations to the correct in-process document.",
-        "All 6 tools are auto-registered when crdt_documents is present; you do NOT need to manually add them to tool_configurations.",
+        "All v1 tools are auto-registered when crdt_documents is present; you do NOT need to manually add them to tool_configurations.",
         "Mutations modify the live Yrs document in-process with immediate effect (no latency). Snapshots are written after the DAG run completes.",
         "ChangeTracker auto-records mutations for narration; peers can call get_recent_changes to see a human-readable summary of edits.",
         "Storage backend (localfs vs gcs) is transparent to the LLM — all tools work identically regardless of where snapshots are persisted.",

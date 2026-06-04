@@ -347,6 +347,32 @@ En producción ADP el worker container debe incluir estas deps. Si no están, lo
 
 ---
 
+### 5.7 Cross-sheet & cross-artifact analysis (subsistema F)
+
+**Por qué existe.** Los workflows reales con xlsx tienen dos formatos: (a) un workbook con varias hojas que se comparan entre sí, (b) dos+ workbooks separados que se quieren cruzar. F unifica ambos casos vía clonado: cualquier sheet de cualquier artifact se puede traer al artifact actual y a partir de ahí todo es multi-sheet pandas (que ya funcionaba desde C).
+
+**Tools nuevos:**
+
+- `crdt_doc_list_sheets_of({artifact_id})` — peek a otro artifact sin clonar. Devuelve `{artifact_id, name, sheets:[{sheet_id, name, n_rows, n_cols}]}`.
+- `crdt_doc_import_sheet({source_artifact_id, source_sheet_id, new_name?})` — clona la sheet completa al artifact actual. Snapshot (no live link). Resuelve collisions con sufijo ` (2)`, ` (3)`, …
+- `crdt_doc_get_recent_changes` extendido — ahora acepta `artifact_id?` opcional para auditar otros artifacts.
+
+**Caps:** `MAX_IMPORT_BYTES = 100 MB` (mismo que `run_python`), `MAX_SHEETS_PER_ARTIFACT = 100` (defensivo).
+
+**Skill builtin:** `crdt-doc-cross-sheet-analysis` documenta 6 patrones canónicos pandas (cell-diff, row-diff por key, schema-diff, statistical, join/enrich, conditional transform) con snippets verbatim. Activación: `config.skills.builtin: ["crdt-doc-cross-sheet-analysis"]`.
+
+**Auditoría cross-session.** El evento del import incluye el artifact origen en el summary (`"imported sheet 'X' (N rows × M cols) from artifact art_xxxx"`), entonces el log de cambios recientes muestra qué entró desde dónde sin importar quién creó el origen.
+
+**Limitaciones v1:**
+- Snapshot only — cambios posteriores en el source NO se propagan al clone (live linking es BACKLOG).
+- No hay `crdt_doc_delete_sheet` para limpiar sheets clonadas (BACKLOG).
+- Permisos por artifact: cualquier agente con el `artifact_id` puede leer e importar; modelo de permisos es BACKLOG (bloqueante para subsistema A).
+- Cross-session discovery sigue scoped a `list_my_artifacts` (session-only); cuando shippeemos workspace concept los tools de F siguen funcionando sin cambios.
+
+Spec completa: [`docs/superpowers/specs/2026-06-04-crdt-cross-sheet-analysis-design.md`](../superpowers/specs/2026-06-04-crdt-cross-sheet-analysis-design.md).
+
+---
+
 ## 6. Python helper (PyO3 + pandas)
 
 El módulo nativo `colmena.documents` se expone vía bindings PyO3 cuando se compila con `--features python`:
