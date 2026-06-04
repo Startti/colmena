@@ -73,7 +73,7 @@ async fn six_tools_round_trip_via_ws_peer() {
     // ── Peer side (the "agent" in the stateless worker) ──────────────
     let server_url = format!("ws://{}/yjs", addr);
     let http_base = format!("http://{}", addr);
-    let peer = WsPeerArtifact::connect(&server_url, aid.clone())
+    let peer = WsPeerArtifact::connect(&server_url, aid.clone(), "agent", Some("test_session"))
         .await
         .expect("peer connect");
     assert!(peer.is_alive());
@@ -177,12 +177,13 @@ async fn six_tools_round_trip_via_ws_peer() {
     assert!(cells.contains_key("A4"));
     assert!(!cells.contains_key("B2"));
 
-    // 9) get_recent_changes — in WS-peer mode, the agent's mutations
-    //    travel as Yjs WS updates and the server records them with
-    //    origin "peer:browser" (or similar non-matching prefix). The
-    //    own-origin filter excludes only events tagged
-    //    "agent:test_session" — these WS-recorded events are still
-    //    visible. So we should see at least one event from the round-trip.
+    // 9) get_recent_changes — after B-T13, the agent's WS-peer mutations
+    //    are attributed by the server with origin "agent:test_session"
+    //    (from the peer_type=agent&session_id=test_session URL query
+    //    params on the WS upgrade). The own-origin filter then correctly
+    //    hides them from the agent itself. So the call should either
+    //    return no events, OR only events whose origin is not the
+    //    agent's own session.
     let v = execute_get_recent_changes(
         &ctx,
         GetRecentChangesArgs {
@@ -193,13 +194,11 @@ async fn six_tools_round_trip_via_ws_peer() {
     )
     .await;
     let events = v["events"].as_array().expect("events array");
-    assert!(
-        !events.is_empty(),
-        "expected at least one event from the WS round-trip"
-    );
-    let last_event_id = v["current_event_id"]
-        .as_u64()
-        .expect("current_event_id is u64");
+    // After B-T13 the round-trip may produce zero visible events from the
+    // agent's POV (all are own-origin and filtered). `current_event_id`
+    // is then `null` from the tool's perspective; we treat that as 0
+    // so the cursor-based read below still works.
+    let last_event_id = v["current_event_id"].as_u64().unwrap_or(0);
 
     // None of the events should be tagged with the agent's own
     // session id — the filter must hide those.

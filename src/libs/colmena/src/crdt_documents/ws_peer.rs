@@ -26,6 +26,8 @@
 //! let peer = WsPeerArtifact::connect(
 //!     "ws://crdt-service:8090",
 //!     artifact_id,
+//!     "agent",
+//!     Some("session_abc123"),
 //! ).await?;
 //! // mutate peer.doc through the tool dispatchers …
 //! peer.shutdown().await; // flush pending updates and close cleanly
@@ -82,15 +84,26 @@ impl WsPeerArtifact {
     /// Open a WS connection to `<server_url>/<artifact_id>` and complete the
     /// sync v1 handshake. The server's WS route is `/yjs/:id`, so a typical
     /// `server_url` is `ws://host:port/yjs`.
+    ///
+    /// `peer_type` (typically `"agent"` or `"browser"`) and the optional
+    /// `session_id` are passed as URL query params so the server can attribute
+    /// inbound updates to the correct origin (see B-T13). Omitted params
+    /// default to `peer:browser` on the server side.
     pub async fn connect(
         server_url: &str,
         artifact_id: ArtifactId,
+        peer_type: &str,
+        session_id: Option<&str>,
     ) -> Result<Self, WsPeerError> {
-        let full_url = format!(
-            "{}/{}",
+        let mut full_url = format!(
+            "{}/{}?peer_type={}",
             server_url.trim_end_matches('/'),
-            artifact_id.as_str()
+            artifact_id.as_str(),
+            peer_type,
         );
+        if let Some(sid) = session_id {
+            full_url.push_str(&format!("&session_id={sid}"));
+        }
 
         let (mut ws, _resp) = tokio_tungstenite::connect_async(&full_url)
             .await
@@ -105,20 +118,15 @@ impl WsPeerArtifact {
             match ws.next().await {
                 Some(Ok(TMsg::Binary(bytes))) => {
                     if let Some(sv_bytes) = decode_sync_step1_sv(&bytes) {
-                        break StateVector::decode_v1(&sv_bytes).map_err(|e| {
-                            WsPeerError::Sync(format!("decode server sv: {e:?}"))
-                        })?;
+                        break StateVector::decode_v1(&sv_bytes)
+                            .map_err(|e| WsPeerError::Sync(format!("decode server sv: {e:?}")))?;
                     }
                     // Non-sync frame (awareness, auth) — keep reading.
                     continue;
                 }
                 Some(Ok(_)) => continue,
                 Some(Err(e)) => return Err(WsPeerError::Sync(format!("recv step1: {e}"))),
-                None => {
-                    return Err(WsPeerError::Sync(
-                        "ws closed before sync_step1".into(),
-                    ))
-                }
+                None => return Err(WsPeerError::Sync("ws closed before sync_step1".into())),
             }
         };
 
@@ -138,14 +146,8 @@ impl WsPeerArtifact {
                     continue;
                 }
                 Some(Ok(_)) => continue,
-                Some(Err(e)) => {
-                    return Err(WsPeerError::Sync(format!("recv step2: {e}")))
-                }
-                None => {
-                    return Err(WsPeerError::Sync(
-                        "ws closed before sync_step2".into(),
-                    ))
-                }
+                Some(Err(e)) => return Err(WsPeerError::Sync(format!("recv step2: {e}"))),
+                None => return Err(WsPeerError::Sync("ws closed before sync_step2".into())),
             }
         };
 
@@ -153,9 +155,8 @@ impl WsPeerArtifact {
         // shares the same CRDT object IDs as the server's, so updates flow
         // cleanly in both directions.
         {
-            let update = Update::decode_v1(&server_state_bytes).map_err(|e| {
-                WsPeerError::Sync(format!("decode server state: {e:?}"))
-            })?;
+            let update = Update::decode_v1(&server_state_bytes)
+                .map_err(|e| WsPeerError::Sync(format!("decode server state: {e:?}")))?;
             doc.transact_mut()
                 .apply_update(update)
                 .map_err(|e| WsPeerError::Sync(format!("apply server state: {e:?}")))?;
@@ -351,7 +352,7 @@ mod tests {
 
         // Connect a peer.
         let server_url = format!("ws://{}/yjs", addr);
-        let mut peer = WsPeerArtifact::connect(&server_url, aid.clone())
+        let mut peer = WsPeerArtifact::connect(&server_url, aid.clone(), "agent", None)
             .await
             .expect("peer connect");
         assert!(peer.is_alive());
@@ -414,7 +415,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let server_url = format!("ws://{}/yjs", addr);
-        let mut peer = WsPeerArtifact::connect(&server_url, aid.clone())
+        let mut peer = WsPeerArtifact::connect(&server_url, aid.clone(), "agent", None)
             .await
             .expect("peer connect");
 

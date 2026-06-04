@@ -1646,6 +1646,8 @@ impl ExecutableNode for LlmNode {
                     match crate::crdt_documents::WsPeerArtifact::connect(
                         ws_url,
                         artifact_id.clone(),
+                        "agent",
+                        agent_session_id_str.as_deref(),
                     )
                     .await
                     {

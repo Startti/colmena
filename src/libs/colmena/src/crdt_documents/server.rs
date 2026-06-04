@@ -305,6 +305,7 @@ async fn fixture_xlsx() -> Response {
 async fn ws_handler(
     ws: WebSocketUpgrade,
     Path(id_str): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
     State(runtime): State<Arc<CrdtDocumentsRuntime>>,
 ) -> Response {
     let id = match ArtifactId::from_str(&id_str) {
@@ -320,6 +321,15 @@ async fn ws_handler(
     let notify = entry.notify.clone();
     let tracker = runtime.tracker.clone();
     let id_for_cb = id.clone();
+    // B-T13: capture peer attribution from URL query params so the server
+    // can distinguish agent vs browser updates (and which agent session).
+    // Defaulting to `"browser"` keeps demo HTMLs (which don't pass query
+    // params) working unchanged.
+    let peer_type = params
+        .get("peer_type")
+        .cloned()
+        .unwrap_or_else(|| "browser".to_string());
+    let session_id_opt = params.get("session_id").cloned();
     ws.on_upgrade(move |socket| async move {
         // yrs::Subscription (Arc<dyn Drop>) is !Send. Drive the socket on a
         // dedicated thread with its own single-threaded tokio runtime so we
@@ -341,6 +351,18 @@ async fn ws_handler(
                     // or refactor handle_socket to invoke post_update with a pre-state
                     // clone.
                     let summary = format!("peer update ({} bytes)", update_bytes.len());
+                    // B-T13: derive origin from the peer_type + session_id
+                    // captured at WS upgrade. Agent peers get
+                    // `agent:<session_id>` (or `agent:anonymous` if no
+                    // session_id was provided); everything else falls back
+                    // to the legacy `peer:browser` label.
+                    let origin = match peer_type.as_str() {
+                        "agent" => session_id_opt
+                            .as_deref()
+                            .map(|s| format!("agent:{s}"))
+                            .unwrap_or_else(|| "agent:anonymous".to_string()),
+                        _ => "peer:browser".to_string(),
+                    };
                     // ChangeTracker is async since B-T4. This callback runs in
                     // a sync context (inside `handle_socket`'s update-observer
                     // closure on a single-thread tokio runtime). Spawn a
@@ -352,9 +374,7 @@ async fn ws_handler(
                     let tracker = tracker.clone();
                     let id_for_cb = id_for_cb.clone();
                     tokio::spawn(async move {
-                        tracker
-                            .record(&id_for_cb, None, "peer:browser", &summary)
-                            .await;
+                        tracker.record(&id_for_cb, None, &origin, &summary).await;
                     });
                 };
                 if let Err(e) = yjs_protocol::handle_socket(socket, doc, Some(post_update)).await {
