@@ -1,0 +1,34 @@
+{
+  "_comment": "Subsistema C smoke — self-contained pandas analysis. El agente crea datos, los analiza con pandas, y escribe el resultado como una nueva hoja. Verificás en el browser que 'Summary by Region' aparezca con las 3 regiones agregadas.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/c-pandas-smoke",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Set up and analyze a small sales workbook. (1) Create a sheet 'Inventory'. (2) Write 7 rows of data using crdt_doc_set_range starting at A1: row1 ['Region','Sales','Qty'], then rows with ['North',100,5], ['North',200,8], ['South',150,6], ['South',300,12], ['West',250,10], ['West',100,4]. (3) Use crdt_doc_run_python to compute total Sales and total Qty by Region. The Python code should do `df = dfs[sheet_id]; output_sheet = df.groupby('Region').agg({'Sales':'sum','Qty':'sum'}).reset_index()` and you must pass write_to_sheet='Summary by Region'. Set output to a short text confirming what you did. (4) Report briefly to the user."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "system_message": "You are a data analyst agent. Use the crdt_doc_* tools. When the user asks for derived tables, use crdt_doc_run_python with write_to_sheet to persist them. For Python code, prefer pandas idioms.",
+        "crdt_documents": {
+          "artifact_id": "$DYNAMIC:artifact_id",
+          "ws_url": "ws://127.0.0.1:8090/yjs"
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent",   "to": "log" }
+  ]
+}
