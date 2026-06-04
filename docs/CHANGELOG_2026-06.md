@@ -85,3 +85,29 @@ Una sección por feature. Cada sección contiene:
 **Commits.** `bde1d08`, `615d988`, `c5a8f70`, `f0d4aeb`, `7666653` (5 commits separados por fix).
 
 **Estado.** done.
+
+---
+
+## 4. CRDT Documents — Cross-sheet & cross-artifact analysis (subsistema F)
+
+**Qué cambió.** El agente puede comparar, unir, enriquecer o transformar datos entre sheets — ya sea dentro del mismo artifact o trayéndolas desde otros artifacts. Dos tools nuevos: `crdt_doc_list_sheets_of({artifact_id})` (peek cross-artifact sin clonar) y `crdt_doc_import_sheet({source_artifact_id, source_sheet_id, new_name?})` (clonado snapshot al artifact actual). Una skill builtin nueva: `crdt-doc-cross-sheet-analysis` con 6 patrones pandas canónicos (cell-diff, row-diff por key, schema-diff, statistical, join/enrich, conditional transform). Extensión backward-compatible a `crdt_doc_get_recent_changes` con `artifact_id?` opcional para auditar otros artifacts. Cero cambios a `crdt_doc_run_python` (subsistema C) — la sheet clonada vive en el mismo artifact que el principal, multi-sheet ya funcionaba.
+
+**Por qué importa.** Los workflows reales con xlsx exigen cruzar varias hojas / varios workbooks (versionado Q3 vs Q4, enrichment con catálogo, reglas externas). Sin F la única forma era pasar todo el contenido vía prompt o usar set_range manualmente — ambos prohibitivos en tokens y propensos a error. F unifica ambos casos en un solo flujo (`list_sheets_of → import_sheet → run_python`) reusando 100% de la infra de B (audit) y C (pandas).
+
+**Documentación de referencia.**
+- Spec: [`docs/superpowers/specs/2026-06-04-crdt-cross-sheet-analysis-design.md`](superpowers/specs/2026-06-04-crdt-cross-sheet-analysis-design.md)
+- Plan: [`docs/superpowers/plans/2026-06-04-crdt-cross-sheet-analysis.md`](superpowers/plans/2026-06-04-crdt-cross-sheet-analysis.md)
+- Dev guide §5.7: [`docs/developer_guide/38_crdt_documents.md`](developer_guide/38_crdt_documents.md)
+- Items deferidos: [`docs/BACKLOG.md`](BACKLOG.md) — multi-session workspace (bloqueante para A), live linking, delete sheet, consolidate parse_a1, reuse projection in list_sheets_of.
+
+**Commits (F-T1 a F-T10).** Ver `git log feature/docs --grep="F-T"`.
+
+**Estado.** done.
+
+**Limitaciones conocidas v1.**
+- Snapshot only — sin live linking (BACKLOG v1.1).
+- Sin tool de delete_sheet — el cap de 100 sheets/artifact protege pero no limpia (BACKLOG).
+- Discovery sigue session-scoped (`list_my_artifacts`); cross-session via workspace es v1.1 bloqueante para subsistema A.
+- Sin permission model — cualquier agente con `artifact_id` puede leer/importar.
+
+**Forward compatibility.** Los tools de F no enforcean session ownership a nivel de tool — cuando workspace concept aterrize en v1.1, solo el discovery cambia; los tools de F siguen funcionando sin modificación.
