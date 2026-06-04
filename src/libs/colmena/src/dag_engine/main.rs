@@ -237,10 +237,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?,
             );
-            let app = colmena::crdt_documents::server::router(runtime);
+            let app = colmena::crdt_documents::server::router(runtime.clone());
             let addr: SocketAddr = format!("{host}:{port}").parse()?;
             let listener = tokio::net::TcpListener::bind(addr).await?;
-            println!("🧪 crdt-yws listening on http://{addr}  (storage → {dump_dir})");
+            // Resolve the storage path to its absolute form so the operator
+            // sees EXACTLY where artifacts will persist. The default
+            // ".colmena/crdt_documents" is RELATIVE to cwd, which silently
+            // breaks artifact reuse if the server is started from different
+            // directories between runs (caused mysterious "sheets: []" on
+            // restart during dev). Also report how many artifacts loaded.
+            let storage_abs = std::fs::canonicalize(&dump_dir)
+                .unwrap_or_else(|_| std::path::PathBuf::from(&dump_dir))
+                .display()
+                .to_string();
+            let n_loaded = runtime.registry.len();
+            println!("🧪 crdt-yws listening on http://{addr}");
+            println!("   storage → {storage_abs}");
+            println!("   loaded  → {n_loaded} artifact(s) from disk");
+            if dump_dir.starts_with('.') || !dump_dir.starts_with('/') {
+                println!(
+                    "   ⚠️  --dump-dir is RELATIVE; start the server from a stable cwd \
+                     or pass an absolute path to keep artifacts across restarts."
+                );
+            }
             axum::serve(listener, app).await?;
         }
 
@@ -289,7 +308,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let app = colmena::crdt_documents::server::router(runtime.clone());
             let addr: SocketAddr = format!("{host}:{port}").parse()?;
             let listener = tokio::net::TcpListener::bind(addr).await?;
-            println!("🧪 crdt-yws-graph listening on http://{addr}  (storage → {dump_dir})");
+            // Same persistence diagnostics as CrdtYws — see comment there.
+            let storage_abs = std::fs::canonicalize(&dump_dir)
+                .unwrap_or_else(|_| std::path::PathBuf::from(&dump_dir))
+                .display()
+                .to_string();
+            let n_loaded = runtime.registry.len();
+            println!("🧪 crdt-yws-graph listening on http://{addr}");
+            println!("   storage → {storage_abs}");
+            println!("   loaded  → {n_loaded} artifact(s) from disk");
+            if !dump_dir.starts_with('/') {
+                println!(
+                    "   ⚠️  --dump-dir is RELATIVE; start from a stable cwd \
+                     or pass an absolute path to keep artifacts across restarts."
+                );
+            }
             let server_handle = tokio::spawn(async move {
                 if let Err(e) = axum::serve(listener, app).await {
                     eprintln!("server error: {e}");

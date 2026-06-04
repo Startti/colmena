@@ -399,6 +399,11 @@ El binding requiere un **tokio runtime activo** en el proceso Python — se obti
 - Default `storage_root`: `.colmena/crdt_documents`.
 - Override: env `COLMENA_CRDT_DOCUMENTS_STORAGE_ROOT` (para PyO3) o el campo `storage_root` del config block.
 
+> ⚠️ **El default es RELATIVO al cwd.** Si arrancás `cargo run --bin dag_engine -- crdt-yws` desde un directorio y la siguiente vez desde otro, vas a perder acceso a los artifacts persistidos (el `DocRegistry::load_from_disk` no los va a encontrar). Síntoma típico: pegabas `?artifact=art_…` en el browser y veías sheets vacías o el agente devolvía `sheets: []` aunque "ayer funcionaba". Soluciones:
+> - Arrancar siempre desde el repo root (`cd ~/proyectos/colmena && cargo run …`).
+> - O pasar un path absoluto: `--dump-dir /Users/me/colmena_data`.
+> - Verificar al arranque: el server imprime `storage → <abs path>` y `loaded → N artifact(s) from disk`. Si N=0 y esperabas más, el path está mal.
+
 ### Snapshot writer
 
 - Per-artifact tokio task.
