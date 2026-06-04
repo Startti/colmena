@@ -536,6 +536,11 @@ pub struct GetRecentChangesArgs {
     /// Cap result count. Default: 50.
     #[serde(default)]
     pub limit: Option<u32>,
+    /// NEW in F (subsystem F): if provided, audits THIS artifact instead of
+    /// the ctx's pinned artifact. Enables cross-artifact inspection without
+    /// rebinding ctx. Default: ctx.artifact_id() (B behaviour unchanged).
+    #[serde(default)]
+    pub artifact_id: Option<String>,
 }
 
 /// Build the [`ToolDefinition`] for `crdt_doc_get_recent_changes`.
@@ -546,7 +551,9 @@ pub fn tool_get_recent_changes() -> ToolDefinition {
          sessions; the agent's own mutations are excluded). Optionally \
          filter by since_event_id, sheet_id, and limit. Returns \
          { current_event_id, events: [...], truncated } where events is \
-         an array of { id, origin, sheet_id, summary, created_at }.",
+         an array of { id, origin, sheet_id, summary, created_at }. \
+         Pass artifact_id to audit a different artifact than the ctx's \
+         pinned one (cross-artifact inspection).",
     )
 }
 
@@ -555,12 +562,26 @@ pub async fn execute_get_recent_changes(
     ctx: &CrdtDocsContext,
     args: GetRecentChangesArgs,
 ) -> serde_json::Value {
+    // F-T3: if args.artifact_id is provided, audit that artifact instead
+    // of the ctx's pinned one (cross-artifact inspection).
+    let target_aid: crate::crdt_documents::ArtifactId = match args.artifact_id.as_deref() {
+        Some(s) => match s.parse() {
+            Ok(a) => a,
+            Err(_) => {
+                return serde_json::json!({
+                    "error": "invalid_artifact_id",
+                    "value": s,
+                });
+            }
+        },
+        None => ctx.artifact_id().clone(),
+    };
     let since = match args.since_event_id {
         Some(s) => s,
         None => match ctx.session_id() {
             Some(sid) => ctx
                 .backend()
-                .cursor_for(sid, ctx.artifact_id())
+                .cursor_for(sid, &target_aid)
                 .await
                 .ok()
                 .flatten()
@@ -573,7 +594,7 @@ pub async fn execute_get_recent_changes(
     let events = ctx
         .backend()
         .events_since(
-            ctx.artifact_id(),
+            &target_aid,
             since,
             args.sheet_id.as_deref(),
             own_origin.as_deref(),
@@ -949,6 +970,7 @@ mod tests {
                 since_event_id: None,
                 sheet_id: None,
                 limit: None,
+                artifact_id: None,
             },
         )
         .await;
@@ -980,6 +1002,7 @@ mod tests {
                 since_event_id: None,
                 sheet_id: None,
                 limit: None,
+                artifact_id: None,
             },
         )
         .await;
@@ -998,6 +1021,7 @@ mod tests {
                 since_event_id: Some(current),
                 sheet_id: None,
                 limit: None,
+                artifact_id: None,
             },
         )
         .await;

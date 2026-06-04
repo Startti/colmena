@@ -190,6 +190,7 @@ async fn six_tools_round_trip_via_ws_peer() {
             since_event_id: None,
             sheet_id: None,
             limit: None,
+            artifact_id: None,
         },
     )
     .await;
@@ -231,6 +232,7 @@ async fn six_tools_round_trip_via_ws_peer() {
             since_event_id: Some(last_event_id),
             sheet_id: None,
             limit: None,
+            artifact_id: None,
         },
     )
     .await;
@@ -263,6 +265,7 @@ async fn six_tools_round_trip_via_ws_peer() {
             since_event_id: Some(own_seeded),
             sheet_id: None,
             limit: None,
+            artifact_id: None,
         },
     )
     .await;
@@ -279,6 +282,7 @@ async fn six_tools_round_trip_via_ws_peer() {
             since_event_id: Some(peer_event_id),
             sheet_id: None,
             limit: None,
+            artifact_id: None,
         },
     )
     .await;

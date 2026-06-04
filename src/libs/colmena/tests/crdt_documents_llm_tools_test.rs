@@ -74,6 +74,7 @@ async fn full_tool_sequence_round_trips_through_runtime() {
             since_event_id: None,
             sheet_id: None,
             limit: None,
+            artifact_id: None,
         },
     )
     .await;
@@ -101,6 +102,7 @@ async fn full_tool_sequence_round_trips_through_runtime() {
             since_event_id: None,
             sheet_id: None,
             limit: None,
+            artifact_id: None,
         },
     )
     .await;
@@ -120,6 +122,7 @@ async fn full_tool_sequence_round_trips_through_runtime() {
             since_event_id: current,
             sheet_id: None,
             limit: None,
+            artifact_id: None,
         },
     )
     .await;

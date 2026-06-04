@@ -12,13 +12,22 @@ use colmena::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
     build_recent_changes_block,
     crdt_doc_context::CrdtDocsContext,
     crdt_doc_tools::{
-        execute_get_recent_changes, execute_list_my_artifacts, execute_set_cell,
-        GetRecentChangesArgs, ListMyArtifactsArgs, SetCellArgs,
+        dispatch_crdt_doc_get_recent_changes, execute_get_recent_changes,
+        execute_list_my_artifacts, execute_set_cell, GetRecentChangesArgs, ListMyArtifactsArgs,
+        SetCellArgs,
     },
 };
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
+
+async fn make_runtime() -> (Arc<CrdtDocumentsRuntime>, std::path::PathBuf) {
+    let tmp = std::env::temp_dir().join(format!("rcf_{}", ulid::Ulid::new()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let cfg = json!({"storage_backend": "localfs", "storage_root": tmp.to_str().unwrap()});
+    let rt = Arc::new(CrdtDocumentsRuntime::from_config(&cfg).await.unwrap());
+    (rt, tmp)
+}
 
 #[tokio::test]
 async fn recent_changes_round_trip_via_ws_peer() {
@@ -96,6 +105,7 @@ async fn recent_changes_round_trip_via_ws_peer() {
             since_event_id: None,
             sheet_id: Some("Inventory".into()),
             limit: None,
+            artifact_id: None,
         },
     )
     .await;
@@ -164,4 +174,60 @@ async fn recent_changes_round_trip_via_ws_peer() {
     peer.shutdown().await;
     server_runtime.shutdown().await;
     let _ = std::fs::remove_dir_all(&dump);
+}
+
+#[tokio::test]
+async fn get_recent_changes_artifact_filter_works() {
+    // Cross-artifact audit: ctx is on A, but agent queries events of B.
+    use colmena::crdt_documents::change_tracker_store::NewEvent;
+    let (rt, tmp) = make_runtime().await;
+    let aid_a = ArtifactId::new();
+    let aid_b = ArtifactId::new();
+    let _ = rt.registry.get_or_create(&aid_a, "A");
+    let _ = rt.registry.get_or_create(&aid_b, "B");
+    rt.store
+        .insert_event(NewEvent {
+            artifact_id: aid_b.clone(),
+            sheet_id: None,
+            origin: "agent:other_session".to_string(),
+            summary: "did something in B".to_string(),
+        })
+        .await
+        .unwrap();
+    let ctx = CrdtDocsContext::new_local(rt.clone(), aid_a, Some("s".to_string()));
+    let result = dispatch_crdt_doc_get_recent_changes(
+        &ctx,
+        json!({
+            "artifact_id": aid_b.to_string(),
+        }),
+    )
+    .await;
+    let events = result["events"].as_array().expect("events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["summary"], "did something in B");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+async fn get_recent_changes_backward_compat_no_arg() {
+    // No artifact_id → audits the ctx artifact (B behaviour unchanged).
+    use colmena::crdt_documents::change_tracker_store::NewEvent;
+    let (rt, tmp) = make_runtime().await;
+    let aid_a = ArtifactId::new();
+    let _ = rt.registry.get_or_create(&aid_a, "A");
+    rt.store
+        .insert_event(NewEvent {
+            artifact_id: aid_a.clone(),
+            sheet_id: None,
+            origin: "agent:other_session".to_string(),
+            summary: "did something in A".to_string(),
+        })
+        .await
+        .unwrap();
+    let ctx = CrdtDocsContext::new_local(rt.clone(), aid_a.clone(), Some("s".to_string()));
+    let result = dispatch_crdt_doc_get_recent_changes(&ctx, json!({})).await;
+    let events = result["events"].as_array().expect("events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["summary"], "did something in A");
+    let _ = std::fs::remove_dir_all(&tmp);
 }
