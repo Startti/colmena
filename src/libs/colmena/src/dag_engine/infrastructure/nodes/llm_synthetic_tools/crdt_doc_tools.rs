@@ -58,6 +58,178 @@ pub fn execute_list_sheets(ctx: &CrdtDocsContext) -> serde_json::Value {
     serde_json::json!({ "sheets": sheets })
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// crdt_doc_list_sheets_of — peek at another artifact's sheets (F)
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub const TOOL_LIST_SHEETS_OF: &str = "crdt_doc_list_sheets_of";
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListSheetsOfArgs {
+    /// ID del artifact cuyo listado de sheets queremos. Puede ser cualquier
+    /// artifact del registry — NO enforce session ownership (el agente debe
+    /// haber obtenido el ID legítimamente vía list_my_artifacts, prompt
+    /// explícito, o futuro workspace listing).
+    pub artifact_id: String,
+}
+
+pub fn tool_list_sheets_of() -> ToolDefinition {
+    super::build_synthetic_tool::<ListSheetsOfArgs>(
+        TOOL_LIST_SHEETS_OF,
+        "List the sheets of a different artifact (not the current one). \
+         Use this to peek at what's inside another workbook BEFORE deciding \
+         to clone a sheet from it via crdt_doc_import_sheet. Returns \
+         {artifact_id, name, sheets:[{sheet_id, name, n_rows, n_cols}]}. \
+         The agent must already know the target artifact_id (from \
+         crdt_doc_list_my_artifacts or from the user's prompt).",
+    )
+}
+
+pub fn execute_list_sheets_of(ctx: &CrdtDocsContext, args: ListSheetsOfArgs) -> serde_json::Value {
+    use crate::crdt_documents::ArtifactId;
+    let aid: ArtifactId = match args.artifact_id.parse() {
+        Ok(a) => a,
+        Err(_) => {
+            return serde_json::json!({
+                "error": "invalid_artifact_id",
+                "value": args.artifact_id,
+            });
+        }
+    };
+    // Cross-artifact peek requires registry access — only available in
+    // Local mode. WsPeer mode would need a server-side endpoint (deferred
+    // to a follow-up task).
+    let runtime = match ctx {
+        CrdtDocsContext::Local { runtime, .. } => runtime,
+        CrdtDocsContext::WsPeer { .. } => {
+            return serde_json::json!({
+                "error": "unsupported_in_ws_peer_mode",
+                "message": "crdt_doc_list_sheets_of is only available in local mode",
+            });
+        }
+    };
+    let Some(entry) = runtime.registry.get(&aid) else {
+        return serde_json::json!({
+            "error": "artifact_not_found",
+            "artifact_id": aid.to_string(),
+        });
+    };
+    // Project sheets directly from the Y.Doc — counts computed on-the-fly
+    // from each sheet's cells Y.Map (no SQL needed). Mirrors the trait
+    // imports used in `crdt_documents::projection::project`.
+    use yrs::{Array, Map, ReadTxn, Transact};
+    let txn = entry.doc.transact();
+    let workbook = match txn.get_map("workbook") {
+        Some(m) => m,
+        None => {
+            return serde_json::json!({
+                "artifact_id": aid.to_string(),
+                "name": entry.meta.name.clone(),
+                "sheets": [],
+            });
+        }
+    };
+    let sheets_arr = match workbook.get(&txn, "sheets") {
+        Some(yrs::Out::YArray(a)) => a,
+        _ => {
+            return serde_json::json!({
+                "artifact_id": aid.to_string(),
+                "name": entry.meta.name.clone(),
+                "sheets": [],
+            });
+        }
+    };
+    let mut sheets_out = Vec::with_capacity(sheets_arr.len(&txn) as usize);
+    for i in 0..sheets_arr.len(&txn) {
+        let sheet_map = match sheets_arr.get(&txn, i) {
+            Some(yrs::Out::YMap(m)) => m,
+            _ => continue,
+        };
+        let sid = match sheet_map.get(&txn, "id") {
+            Some(yrs::Out::Any(yrs::Any::String(s))) => s.to_string(),
+            _ => continue,
+        };
+        let name = match sheet_map.get(&txn, "name") {
+            Some(yrs::Out::Any(yrs::Any::String(s))) => s.to_string(),
+            _ => String::new(),
+        };
+        // Compute n_rows / n_cols by walking cells addresses
+        let (n_rows, n_cols) = match sheet_map.get(&txn, "cells") {
+            Some(yrs::Out::YMap(cells_map)) => {
+                let mut max_row = 0u32;
+                let mut max_col = 0u32;
+                let mut has_any = false;
+                for (addr, _) in cells_map.iter(&txn) {
+                    if let Some((r, c)) = parse_a1_to_rc(addr) {
+                        if !has_any {
+                            max_row = r;
+                            max_col = c;
+                            has_any = true;
+                        } else {
+                            if r > max_row {
+                                max_row = r;
+                            }
+                            if c > max_col {
+                                max_col = c;
+                            }
+                        }
+                    }
+                }
+                if has_any {
+                    (max_row + 1, max_col + 1) // 1-indexed inclusive counts
+                } else {
+                    (0, 0)
+                }
+            }
+            _ => (0, 0),
+        };
+        sheets_out.push(serde_json::json!({
+            "sheet_id": sid,
+            "name": name,
+            "n_rows": n_rows,
+            "n_cols": n_cols,
+        }));
+    }
+    serde_json::json!({
+        "artifact_id": aid.to_string(),
+        "name": entry.meta.name.clone(),
+        "sheets": sheets_out,
+    })
+}
+
+pub async fn dispatch_crdt_doc_list_sheets_of(
+    ctx: &CrdtDocsContext,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    match serde_json::from_value::<ListSheetsOfArgs>(args) {
+        Ok(a) => execute_list_sheets_of(ctx, a),
+        Err(e) => serde_json::json!({ "error": format!("invalid_args: {e}") }),
+    }
+}
+
+// Internal helper — parses "A1", "AA12" into (row_idx0, col_idx0).
+// Returns None if format is invalid.
+pub(super) fn parse_a1_to_rc(addr: &str) -> Option<(u32, u32)> {
+    let split = addr.find(|c: char| c.is_ascii_digit())?;
+    if split == 0 {
+        return None;
+    }
+    let col_part = &addr[..split];
+    let row_part = &addr[split..];
+    let row: u32 = row_part.parse().ok()?;
+    let row = row.checked_sub(1)?;
+    let mut col: u32 = 0;
+    for ch in col_part.chars() {
+        if !ch.is_ascii_alphabetic() {
+            return None;
+        }
+        col = col
+            .checked_mul(26)?
+            .checked_add((ch.to_ascii_uppercase() as u32) - ('A' as u32) + 1)?;
+    }
+    Some((row, col.checked_sub(1)?))
+}
+
 // ── read ──────────────────────────────────────────────────────────────────────
 
 pub const TOOL_READ: &str = "crdt_doc_read";
@@ -586,6 +758,7 @@ pub fn build_all_crdt_doc_tools() -> Vec<ToolDefinition> {
         tool_get_recent_changes(),
         tool_list_my_artifacts(),
         tool_create_artifact(),
+        tool_list_sheets_of(),
         super::tool_run_python(),
     ]
 }
