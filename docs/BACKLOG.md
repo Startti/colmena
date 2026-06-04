@@ -94,6 +94,45 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 
 ---
 
+## CRDT Documents v1.1 — Per-cell attribution para peer:browser events
+
+- **Origen:** scope-cut al implementar subsistema B (2026-06-03). El server recibe updates Yjs binarios opacos de browsers; no puede saber qué sheet/celda cambió sin inferencia activa.
+- **Problema:** los eventos de `peer:browser` quedan con `sheet_id: NULL` y summary "peer update (N bytes)". En el auto-summary aparecen como "Workbook (sheet unknown): N changes by peer:browser", lo cual es menos informativo que "Inventory: N changes by peer:browser".
+- **Workaround actual:** acepta granularidad coarse. Si el agente necesita saber qué sheet cambió, debe leer el doc directamente vía `crdt_doc_list_sheets` + `crdt_doc_read`.
+- **Por qué está parqueado:** el v1 prioriza el flow end-to-end. La inferencia per-cell requiere un diff de projection antes/después del apply_update, lo cual es trabajo no trivial.
+- **Fix propuesto:**
+  1. En `handle_socket`, antes de cada `apply_update`, capturar la projection actual del Y.Doc.
+  2. Aplicar el update.
+  3. Diffear la projection nueva contra la vieja.
+  4. Por cada celda cambiada, registrar un event con sheet_id, addr, value (antes/después).
+- **Acceptance criteria:**
+  - peer:browser events tienen sheet_id + addr poblados.
+  - Auto-summary muestra "Inventory: 3 changes by peer:browser" en vez de "Workbook (sheet unknown)".
+  - Performance: el diff per-update < 5ms para workbooks <1MB.
+- **Estimación:** ~1-2 días. Medir impacto perf con benchmark.
+- **Cuándo retomar:** cuando UX feedback indique que la atribución coarse es limitante (probable para flows colaborativos browser+agente).
+
+---
+
+## CRDT Documents v1.1 — Paginación de list_my_artifacts
+
+- **Origen:** scope-cut subsistema B (2026-06-03).
+- **Problema:** sesiones con >50 artifacts solo ven los 50 más recientes via `crdt_doc_list_my_artifacts`. No hay cursor de paginación.
+- **Workaround actual:** los 50 más recientes alcanzan para la mayoría de flows. Cliente puede pasar `limit` mayor (sin tope técnico, pero impacta performance/payload del response).
+- **Fix propuesto:** agregar `offset` o `cursor: Option<String>` (timestamp-based). Devolver `next_cursor` cuando hay más.
+- **Cuándo retomar:** cuando reportemos sesiones con >50 artifacts.
+
+---
+
+## CRDT Documents v1.1 — Retención TTL en `crdt_doc_events`
+
+- **Origen:** decisión durante diseño B (2026-06-03).
+- **Problema:** la tabla crece sin límite. Para una sesión de uso intenso (1 evento/min × 100 días) son 144k rows. Manejable, pero crece.
+- **Fix propuesto:** scheduled job (Cloud Scheduler) que ejecuta `DELETE FROM crdt_doc_events WHERE created_at < now() - INTERVAL '90 days'`. Configurable. Patrón ya establecido en colmena: `attachment_gc` binary corre como Cloud Run Job + Cloud Scheduler.
+- **Cuándo retomar:** cuando la tabla supere 1M rows en producción.
+
+---
+
 ## Items resueltos recientemente
 
 El último item — `data:` (base64 inline) auto-summary v2 — se resolvió el 2026-05-18 (ver `docs/CHANGELOG_2026-05.md` → "Inline data: auto-summary (v2)"). Los detalles de la resolución viven en la git history (commits `cc924a3`, `a3053cd`).
