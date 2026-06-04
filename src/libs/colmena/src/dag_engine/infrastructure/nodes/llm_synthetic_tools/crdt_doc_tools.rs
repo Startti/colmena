@@ -66,10 +66,10 @@ pub const TOOL_LIST_SHEETS_OF: &str = "crdt_doc_list_sheets_of";
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ListSheetsOfArgs {
-    /// ID del artifact cuyo listado de sheets queremos. Puede ser cualquier
-    /// artifact del registry — NO enforce session ownership (el agente debe
-    /// haber obtenido el ID legítimamente vía list_my_artifacts, prompt
-    /// explícito, o futuro workspace listing).
+    /// ID of the artifact whose sheets we want to list. Can be any artifact
+    /// in the registry — does NOT enforce session ownership (the agent must
+    /// have legitimately obtained this ID via list_my_artifacts, an explicit
+    /// prompt, or future workspace listing).
     pub artifact_id: String,
 }
 
