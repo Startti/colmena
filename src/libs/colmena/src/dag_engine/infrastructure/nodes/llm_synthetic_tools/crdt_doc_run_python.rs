@@ -49,7 +49,16 @@ pub fn tool_run_python() -> ToolDefinition {
          `output_sheet` is persisted as a new sheet with that name. \
          Use this for analysis on large sheets — only the first ~10 rows \
          need to pass through your context (use crdt_doc_read for a sample); \
-         the code runs server-side on the full data.",
+         the code runs server-side on the full data.\n\n\
+         IMPORTANT — DataFrame shape: row 1 of the Y.Doc is ALWAYS used as \
+         column names (empty cells become `col_A`, `col_B`, …). If the spreadsheet \
+         has a title row at the top (single cell in A1), the real header row \
+         arrives as `df.iloc[0]` (the first record), NOT as the column names. \
+         In that case promote it: `df.columns = df.iloc[0].tolist(); df = \
+         df.iloc[1:].reset_index(drop=True)`. \
+         On error the tool returns `loaded_sheet_columns: {sheet_id: [...]}` \
+         showing the real columns of every loaded sheet — use this to debug \
+         KeyError without retrying blindly.",
     )
 }
 
@@ -84,6 +93,11 @@ pub async fn execute_run_python(ctx: &CrdtDocsContext, args: RunPythonArgs) -> s
     //    values are lists of dicts (records). The auto-prelude builds
     //    pandas DataFrames from these.
     let mut dfs_raw_json = serde_json::Map::new();
+    // Capture column names per sheet — surfaced on errors so the LLM can
+    // self-correct without an extra round trip (e.g. when its pandas code
+    // hits a KeyError because the header row in the Y.Doc was a single
+    // title cell instead of the real column names).
+    let mut loaded_sheet_columns = serde_json::Map::new();
     for (sid, recs) in &records_by_sheet {
         let array: Vec<serde_json::Value> = recs
             .records
@@ -92,7 +106,17 @@ pub async fn execute_run_python(ctx: &CrdtDocsContext, args: RunPythonArgs) -> s
             .map(serde_json::Value::Object)
             .collect();
         dfs_raw_json.insert(sid.clone(), serde_json::Value::Array(array));
+        loaded_sheet_columns.insert(
+            sid.clone(),
+            serde_json::Value::Array(
+                recs.columns
+                    .iter()
+                    .map(|c| serde_json::Value::String(c.clone()))
+                    .collect(),
+            ),
+        );
     }
+    let loaded_sheet_columns = serde_json::Value::Object(loaded_sheet_columns);
     let mut inputs = serde_json::Map::new();
     inputs.insert(
         "_dfs_raw".to_string(),
@@ -119,14 +143,19 @@ pub async fn execute_run_python(ctx: &CrdtDocsContext, args: RunPythonArgs) -> s
                 "wrote_sheet": serde_json::Value::Null,
                 "stdout": "",
                 "error": truncate(&e, ERROR_BYTE_CAP),
+                "loaded_sheet_columns": loaded_sheet_columns,
             });
         }
         Ok(Err(join_err)) => {
-            return serde_json::json!({ "error": format!("internal join error: {join_err}") });
+            return serde_json::json!({
+                "error": format!("internal join error: {join_err}"),
+                "loaded_sheet_columns": loaded_sheet_columns,
+            });
         }
         Err(_) => {
             return serde_json::json!({
                 "error": format!("code execution exceeded {CODE_TIMEOUT_SECS}s timeout"),
+                "loaded_sheet_columns": loaded_sheet_columns,
             });
         }
     };
@@ -199,6 +228,7 @@ pub async fn execute_run_python(ctx: &CrdtDocsContext, args: RunPythonArgs) -> s
                         "wrote_sheet": serde_json::Value::Null,
                         "stdout": truncate(&helper_result.stdout, STDOUT_BYTE_CAP),
                         "error": format!("write_to_sheet failed: {e}"),
+                        "loaded_sheet_columns": loaded_sheet_columns,
                     });
                 }
             }

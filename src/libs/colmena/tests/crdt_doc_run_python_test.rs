@@ -131,6 +131,49 @@ output = "summary written"
 
 #[tokio::test]
 #[ignore = "requires pandas+numpy in system Python"]
+async fn run_python_error_response_includes_loaded_sheet_columns() {
+    // Debt fix: when user code raises a KeyError (or any exception), the response
+    // must include the actual columns of every loaded sheet so the LLM can
+    // self-correct in ONE turn instead of looping with the same bad assumption.
+    // This is exactly the pattern that bit us during the C smoke with an
+    // imported xlsx that had a title row in A1: the agent kept retrying
+    // `df.iloc[1]` for headers instead of inspecting `df.columns`.
+    let (ctx, _aid, _rt, tmp, sheet_id) = make_test_ctx().await;
+
+    let args = RunPythonArgs {
+        sheet_ids: vec![sheet_id.clone()],
+        // Reference a column that does not exist → KeyError.
+        code: format!(r#"df = dfs["{sheet_id}"]; output = df["NonExistentCol"].sum()"#),
+        write_to_sheet: None,
+    };
+    let result = execute_run_python(&ctx, args).await;
+    assert!(
+        result["error"].is_string(),
+        "expected error string, got: {:?}",
+        result["error"]
+    );
+    let loaded = &result["loaded_sheet_columns"];
+    assert!(
+        loaded.is_object(),
+        "expected loaded_sheet_columns object, got: {loaded:?}"
+    );
+    let cols = loaded[&sheet_id].as_array().expect("columns array");
+    let col_names: Vec<&str> = cols.iter().filter_map(|v| v.as_str()).collect();
+    // Inventory was seeded with Region + Sales in row 1, so those should be the columns.
+    assert!(
+        col_names.contains(&"Region"),
+        "expected Region in {col_names:?}"
+    );
+    assert!(
+        col_names.contains(&"Sales"),
+        "expected Sales in {col_names:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+#[ignore = "requires pandas+numpy in system Python"]
 async fn run_python_name_collision_appends_suffix() {
     let (ctx, _aid, runtime, tmp, sheet_id) = make_test_ctx().await;
     // Pre-create a sheet named "Summary" so the run_python writeback hits a collision.
