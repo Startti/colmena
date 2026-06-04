@@ -40,7 +40,9 @@
     Artifact: <code id="artifact">spike-doc</code>
     | WS: <code id="ws-status">connecting&hellip;</code>
     | Tab id: <code id="tab"></code>
-    | <button id="import-xlsx" type="button" disabled>Import /spike.xlsx</button>
+    | <button id="import-xlsx" type="button" disabled>Import .xlsx&hellip;</button>
+    | <button id="import-fixture" type="button" disabled title="Import the legacy spike fixture (for quick demos)">spike fixture</button>
+    <input id="import-file-input" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style="display:none">
   </div>
   <div id="univer"></div>
 
@@ -277,7 +279,10 @@
           id: s.id,
           name: s.name,
           cellData: {},
-          rowCount: 100,
+          // Univer is a virtualized grid — large rowCount has negligible
+          // memory cost (cells only allocate when written). Bumped from 100
+          // so imported xlsx with thousands of rows render fully.
+          rowCount: 50000,
           columnCount: 26,
         };
       }
@@ -475,7 +480,9 @@
                         id,
                         name,
                         cellData: {},
-                        rowCount: 100,
+                        // Match the rowCount used at initial mount above
+                        // so dynamically-inserted sheets show full data.
+                        rowCount: 50000,
                         columnCount: 26,
                       },
                     });
@@ -654,20 +661,64 @@
       });
 
       // -----------------------------------------------------------------
-      // xlsx import button (R5.1 + R5.2)
+      // xlsx import — two flavors
       //
-      // Enabled after sync so sheetsArr is valid.  On click: fetch
-      // /spike.xlsx, parse with SheetJS, write each non-empty cell into
-      // the Y.Doc cells Y.Map inside a single ydoc.transact.  The writes
-      // propagate via WS to all peers AND the server's Y.Doc.  The local
-      // inbound observer fires and dispatches SetRangeValues → canvas
-      // updates.  Other tabs' observers also fire → convergence.
+      //  1) Primary button "Import .xlsx…" → opens an OS file picker, then
+      //     POSTs the chosen file to /documents/:artifact/import. The server
+      //     parses with rust_xlsxwriter and writes ALL sheets into the Y.Doc
+      //     in one transaction. WS propagates the delta to every connected
+      //     peer (including this tab) — Univer renders the new data live.
+      //
+      //  2) Secondary button "spike fixture" → keeps the legacy in-browser
+      //     SheetJS import of /spike.xlsx so the smoke graph
+      //     llm_agent_smoke_ws_peer.json (and other docs that demo against
+      //     the fixture) continue to work. Single-sheet, first-sheet-only.
+      //
+      // The historical button label "Import /spike.xlsx" with the hardcoded
+      // fetch path was a footgun for first-time users (they thought they were
+      // importing their own file). The new layout makes the user's file the
+      // default action, and the fixture is opt-in for demos.
       // -----------------------------------------------------------------
       const importBtn = document.getElementById("import-xlsx");
+      const fixtureBtn = document.getElementById("import-fixture");
+      const fileInput = document.getElementById("import-file-input");
       importBtn.disabled = false;
-      importBtn.addEventListener("click", async () => {
+      fixtureBtn.disabled = false;
+
+      // Primary path — file picker → server-side import
+      importBtn.addEventListener("click", () => fileInput.click());
+      fileInput.addEventListener("change", async () => {
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) return;
         importBtn.disabled = true;
-        importBtn.textContent = "Importing…";
+        importBtn.textContent = `Uploading ${file.name}…`;
+        try {
+          const resp = await fetch(`/documents/${encodeURIComponent(artifact)}/import`, {
+            method: "POST",
+            headers: { "Content-Type": "application/octet-stream" },
+            body: file,
+          });
+          if (!resp.ok) {
+            const text = await resp.text();
+            throw new Error(`HTTP ${resp.status}: ${text}`);
+          }
+          const stats = await resp.json();
+          importBtn.textContent =
+            `Imported ${stats.cells_imported} cells across ${stats.sheets_imported} sheet(s) ✓`;
+          console.log("[xlsx import → REST]", stats);
+        } catch (e) {
+          importBtn.textContent = "Import failed";
+          console.error("[xlsx import → REST] failed:", e);
+        } finally {
+          importBtn.disabled = false;
+          fileInput.value = ""; // allow re-picking the same file
+        }
+      });
+
+      // Legacy fixture path — in-browser SheetJS write to first sheet
+      fixtureBtn.addEventListener("click", async () => {
+        fixtureBtn.disabled = true;
+        fixtureBtn.textContent = "Importing fixture…";
         try {
           const XLSX = await import("https://esm.sh/xlsx@0.18.5");
           const resp = await fetch("/spike.xlsx");
@@ -678,9 +729,6 @@
           const ws = wb.Sheets[firstSheetName];
 
           // v1: import writes to the FIRST sheet of the current Y.Doc.
-          // Multi-sheet xlsx import (one Y.Doc sheet per workbook sheet) is
-          // handled server-side via POST /documents/:id/import; this button
-          // is the in-browser shortcut for the demo fixture.
           const firstCellsMap = allSheets[0].cellsMap;
           const range = XLSX.utils.decode_range(ws["!ref"] || "A1:A1");
           let count = 0;
@@ -705,12 +753,13 @@
               }
             }
           });
-          importBtn.textContent = `Imported ${count} cells ✓`;
-          console.log("[xlsx import]", count, "cells written to Y.Doc");
+          fixtureBtn.textContent = `Fixture: ${count} cells ✓`;
+          console.log("[xlsx fixture]", count, "cells written to Y.Doc");
         } catch (e) {
-          importBtn.textContent = "Import failed";
-          console.error("[xlsx import] failed:", e);
-          importBtn.disabled = false;
+          fixtureBtn.textContent = "Fixture import failed";
+          console.error("[xlsx fixture] failed:", e);
+        } finally {
+          fixtureBtn.disabled = false;
         }
       });
 
