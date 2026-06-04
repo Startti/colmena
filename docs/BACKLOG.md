@@ -186,6 +186,92 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 
 ---
 
+## CRDT Documents v1.1 — Multi-session workspace visibility
+
+- **Origen:** restricción explícita en F (subsistema 3, 2026-06-04): hoy `crdt_doc_list_my_artifacts` filtra por session_id, así que un agente solo descubre artifacts creados en su misma sesión. El owner pidió específicamente que "diferentes agentes en diferentes turnos incluso con diferentes agent session id puedan crear artefactos que otros agentes modifiquen lean o comparen".
+- **Problema:** sin esto, F funciona dentro de una sesión pero no entre sesiones. El usuario tiene que pasar el `artifact_id` explícito en el prompt para cruzar sesiones, lo cual no escala a flujos colaborativos reales.
+- **Fix propuesto:**
+  1. Introducir concepto de "workspace" (= organización, team, project) en `crdt_doc_session_artifacts`: relación N:N en vez de "owned by one session".
+  2. Nuevo tool `crdt_doc_list_workspace_artifacts({workspace_id?})` que devuelve los artifacts del workspace del caller. Default workspace = el del session id.
+  3. Modelo de permisos opcional por artifact (`read | read_write | owner`) gateado por workspace membership.
+  4. Mecanismo de share/link entre artifacts con auditoría (quién compartió con quién cuándo).
+- **Acceptance criteria:**
+  - Agente A (session_id=s1) crea artifact art_X. Agente B (session_id=s2, mismo workspace) lo descubre vía `list_workspace_artifacts` y lo importa vía `import_sheet`.
+  - Agente C (otro workspace) NO ve art_X.
+  - Owner puede revocar acceso de un workspace a un artifact.
+- **Estimación:** ~2-3 días dev (incluyendo migrations + tools + tests).
+- **Cuándo retomar:** bloqueante para subsistema A (microservice deploy multi-tenant). Antes de subir a prod multi-usuario.
+
+---
+
+## CRDT Documents v1.1 — Live linking de sheets clonadas
+
+- **Origen:** decisión explícita en F: el clonado de `crdt_doc_import_sheet` es snapshot only — cambios posteriores en el source no se propagan al clone.
+- **Problema:** para análisis "vivos" (ej: dashboard que compara Q3 con Q4 en tiempo real mientras Q4 se actualiza), el agente o el usuario tienen que re-importar manualmente.
+- **Fix propuesto:**
+  1. Nuevo flag `live: true` en `import_sheet` que registra una subscripción del clone al source.
+  2. Cuando el source cambia (vía `cells_map.observe`), aplicar el delta al clone con conflict resolution (last-write-wins por celda).
+  3. Manejo de borrado del source: el clone se "freezes" en el último estado y se marca con flag visible.
+  4. Cleanup automático cuando el artifact destino se borra.
+- **Acceptance criteria:**
+  - Edito una celda en el source → se refleja en el clone dentro de 1s.
+  - Borro la sheet source → el clone queda en el estado final con flag "source deleted".
+  - Borro el clone → no afecta el source.
+- **Estimación:** ~2 días (subscription management + conflict resolution + cleanup paths + tests).
+- **Cuándo retomar:** cuando aparezca un caso de uso real de "dashboard cross-artifact" (compare/enrich que necesita seguir cambios upstream).
+
+---
+
+## CRDT Documents v1.1 — Eliminar sheets
+
+- **Origen:** F clona sheets y no provee mecanismo para limpiar. El cap de 100 sheets/artifact protege contra runaway pero no permite mantener el workbook ordenado.
+- **Problema:** después de un análisis, el agente o el usuario quieren eliminar las sheets clonadas temporales. Hoy no hay tool ni acción en el canvas.
+- **Fix propuesto:**
+  1. Nuevo tool `crdt_doc_delete_sheet({sheet_id, confirm?})` que elimina la sheet del Y.Doc en una transacción. Requiere `confirm: true` explícito para prevenir borrado accidental por el LLM.
+  2. UI button en Univer para que el usuario también pueda borrar (probablemente ya existe en Univer — solo wirearlo al delta del Y.Doc).
+  3. Audit event con el nombre y resumen del contenido borrado (para soft-undo manual si fuera necesario).
+- **Acceptance criteria:**
+  - Borrar una sheet decrementa `MAX_SHEETS_PER_ARTIFACT` counter; siguiente import vuelve a entrar.
+  - El borrado se propaga vía WS a todos los peers.
+  - Event log conserva el resumen para auditoría.
+- **Estimación:** ~4-6 horas dev.
+- **Cuándo retomar:** post-merge de F, cuando el feedback real de usuarios muestre que el clutter de sheets clonadas es molesto.
+
+---
+
+## CRDT Documents v1.1 — Consolidar parser A1 (parse_a1 / parse_a1_to_rc)
+
+- **Origen:** code review de F-T1 (2026-06-04). Hay 3 copias del parser de direcciones A1 → (row, col) en el codebase: `crdt_documents/df_records.rs:124` (`parse_a1`), `crdt_documents/xlsx_export.rs:58` (`parse_a1`), `dag_engine/infrastructure/nodes/llm_synthetic_tools/crdt_doc_tools.rs:212` (`parse_a1_to_rc`, agregado por F-T1).
+- **Problema:** las 3 copias difieren en detalles (la nueva acepta lowercase via `to_ascii_uppercase`, las otras dos requieren uppercase). Cualquier futura mejora (overflow handling, validación, soporte para R1C1) tiene que tocarse en 3 lugares.
+- **Fix propuesto:**
+  1. Crear `src/libs/colmena/src/crdt_documents/addr.rs` con la función canónica (e.g. `pub fn parse_a1(addr: &str) -> Option<(u32, u32)>` con doc + tests).
+  2. Migrar los 3 call-sites a importarla.
+  3. Eliminar las versiones locales.
+- **Acceptance criteria:**
+  - Solo 1 implementación de A1 parsing en todo el crate (verificado por `grep -rn "fn parse_a1" src/`).
+  - Comportamiento idéntico en los 3 call-sites (tests cubren A1, AA12, Z99, edge cases con lowercase/digits-only/empty).
+- **Estimación:** ~2 horas.
+- **Cuándo retomar:** próxima vez que F o cualquier subsistema toque address parsing, o como tarea de cleanup standalone.
+
+---
+
+## CRDT Documents v1.1 — Reutilizar projection::project en list_sheets_of
+
+- **Origen:** code review de F-T1 (2026-06-04). `execute_list_sheets_of` walking del Y.Doc (~70 líneas) replica lógica que `crdt_documents::projection::project` ya hace. La projection actual no incluye `n_rows`/`n_cols` por sheet, lo que forzó la duplicación.
+- **Problema:** mantener dos caminos paralelos que recorren la misma estructura del Y.Doc invita drift. Si la estructura cambia (e.g. agregamos `revision` por sheet), hay que actualizar ambos lugares.
+- **Fix propuesto:**
+  1. Extender `projection::project` (o agregar `project_summary` companion) que incluya opcionalmente `n_rows` y `n_cols` por sheet (computados desde max addr en cells map).
+  2. Reescribir `execute_list_sheets_of` para usar `project_summary` + filtrar a los campos LLM-relevantes.
+  3. Beneficio adicional: si v1.1 incorpora más metadata por sheet (e.g. `created_by_origin`, `last_modified_at`), aparece automáticamente para el LLM via projection.
+- **Acceptance criteria:**
+  - `execute_list_sheets_of` deja de hacer raw Y.Doc walking.
+  - Tests de F-T1 (`crdt_doc_list_sheets_of_test`) siguen pasando sin cambios.
+  - Output schema es bit-exact al actual.
+- **Estimación:** ~3 horas.
+- **Cuándo retomar:** junto con la consolidación del parser A1 (mismo touchpoint conceptual: cleanup del module crdt_documents).
+
+---
+
 ## Items resueltos recientemente
 
 El último item — `data:` (base64 inline) auto-summary v2 — se resolvió el 2026-05-18 (ver `docs/CHANGELOG_2026-05.md` → "Inline data: auto-summary (v2)"). Los detalles de la resolución viven en la git history (commits `cc924a3`, `a3053cd`).
