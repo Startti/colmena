@@ -269,6 +269,82 @@ Los tool dispatchers no saben qué modo está activo — solo llaman `ctx.backen
 - Mutaciones de browsers: `origin = "peer:browser"` (atributo definido en el WS handshake vía query param `peer_type`).
 - Filtro de own-events en `get_recent_changes` y auto-summary: `WHERE origin != "agent:{session_id}"`.
 
+### 5.6 Python/pandas analysis (subsistema C)
+
+Tool: `crdt_doc_run_python(sheet_ids, code, write_to_sheet?)`.
+
+#### Por qué existe
+
+Para Excel grandes (>1000 filas), pasar todo el contenido al LLM en su contexto es prohibitivo en tokens (~125k tokens para un workbook de 10k filas). La pattern: agente lee solo un sample con `crdt_doc_read("A1:Z10")` para entender el schema, después llama `run_python` con código que opera sobre el dataset completo server-side.
+
+Ahorro típico: 10x-1000x en tokens dependiendo del tamaño.
+
+#### Cómo se usa típicamente
+
+```
+Turn 1 — exploración (cheap):
+   crdt_doc_list_sheets()
+   crdt_doc_read(sh_inventory, "A1:Z10")
+   
+Turn 2 — análisis:
+   crdt_doc_run_python(
+       sheet_ids=["sh_inventory"],
+       code="
+           df = dfs['sh_inventory']
+           output = df.groupby('Region')['Sales'].sum().to_dict()
+       "
+   )
+   → output = {"North": 450, "South": 320, ...}
+   
+Turn 3 — persistir resultado en una nueva hoja:
+   crdt_doc_run_python(
+       sheet_ids=["sh_inventory"],
+       code="
+           df = dfs['sh_inventory']
+           output_sheet = df.groupby('Region').agg({'Sales': 'sum', 'Qty': 'mean'}).reset_index()
+       ",
+       write_to_sheet="Summary by Region"
+   )
+   → wrote_sheet = {sheet_id: "sh_summary", name: "Summary by Region", n_rows: 4, preview: [...]}
+```
+
+#### Sandbox + librerías
+
+Reusa la infra `restricted` de `python_script` (AST validation + import whitelist + banned builtins). v1 agrega `pandas`, `numpy`, `scipy` a la whitelist. Bloqueados (sin cambio): `open, exec, eval, compile, __import__` + cualquier import fuera de la whitelist (incluye `requests`, `urllib`, `os`, `subprocess`, etc.).
+
+#### Convenciones de I/O
+
+- **Input**: `dfs: dict[sheet_id, pd.DataFrame]` — una DataFrame por sheet pedido. Row 1 del workbook = column names. Headers ausentes/no-string → fallback `col_A`, `col_B`.
+- **Output al LLM**: variable `output` (cualquier JSON-serializable). Cap 10KB; trunca con `_output_truncated: true`.
+- **Write-back**: variable `output_sheet` (pd.DataFrame). Solo se escribe si `write_to_sheet` está en args. Headers as row 1, sin index. Name collisions → auto-suffix `" (2)"`, `" (3)"`. Cap 100k rows; trunca con `truncated_at` en response.
+
+#### Límites v1 (hardcoded, deuda técnica)
+
+| Límite | Valor | Path v1.1 |
+|---|---|---|
+| Combined records load | 100 MB | Configurable via `crdt_documents.run_python_limits.max_load_mb` |
+| Code execution timeout | 30s | Idem (`timeout_secs`) |
+| `output` to LLM | 10 KB | Idem |
+| `stdout` / `error` | 10 KB cada uno | Idem |
+| `output_sheet` rows | 100K | Idem + chunked writes para evitar transact_mut gigante |
+| Sheet name | 31 chars (Excel xlsx limit) | Stays — hard limit |
+
+Ver `docs/BACKLOG.md` → "Configurable limits para `crdt_doc_run_python`".
+
+#### Modo Local vs WsPeer
+
+Mismo comportamiento. En WsPeer mode el worker tiene la réplica Y.Doc local via WS, entonces la construcción del DataFrame es local, sin roundtrip. Las escrituras de `output_sheet` van como mutaciones Y.Doc → propagan al server via WS → fan-out a browsers.
+
+#### Requisito de runtime
+
+Pandas, numpy y scipy deben estar disponibles en el Python embebido por PyO3 del worker. En el `.venv` del proyecto:
+
+```bash
+.venv/bin/pip install pandas numpy scipy
+```
+
+En producción ADP el worker container debe incluir estas deps. Si no están, los tests `#[ignore]` correspondientes se skipean y el tool retorna error de "module not found" en ejecución.
+
 ---
 
 ## 6. Python helper (PyO3 + pandas)
