@@ -8,6 +8,7 @@ pub mod artifact_id;
 pub mod change_tracker;
 pub mod change_tracker_store;
 pub mod crdt_backend;
+pub mod df_records;
 pub mod doc_registry;
 pub mod narration;
 pub mod process_runtime;
@@ -29,6 +30,10 @@ pub use change_tracker_store::{
     StoreError as ChangeTrackerStoreError, StoredArtifact, StoredEvent,
 };
 pub use crdt_backend::{BackendError, CrdtBackend, DirectBackend, RestBackend};
+pub use df_records::{
+    build_records_for_sheets, build_sheet_records, RecordsError, SheetRecords,
+    COMBINED_RECORDS_SIZE_CAP_BYTES,
+};
 pub use doc_registry::{DocRegistry, RegisteredArtifact};
 pub use runtime::{CrdtDocumentsRuntime, RuntimeError, DEFAULT_STORAGE_ROOT};
 pub use snapshot_writer::{spawn_writer, SnapshotHandle};
