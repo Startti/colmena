@@ -2014,6 +2014,16 @@ impl ExecutableNode for LlmNode {
                 .unwrap_or("es-CO");
             let context_block = format_temporal_context_block(tz_str, loc_str, locale_str);
             sections.push(context_block);
+            // CRDT recent-changes auto-context. Append after the temporal
+            // block so the order is: temporal → workbook-changes → user
+            // instructions → tool rules. The helper returns `None` when
+            // there is no session_id, no cursor delta, or no events.
+            if let Some(ctx) = crdt_docs_context.as_ref() {
+                use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::build_recent_changes_block;
+                if let Some(block) = build_recent_changes_block(ctx.as_ref()).await {
+                    sections.push(block);
+                }
+            }
             if let Some(sys_msg) = system_message {
                 sections.push(sys_msg.to_string());
             }
@@ -2542,6 +2552,24 @@ impl ExecutableNode for LlmNode {
         //     cleanly. Without this, the last few CRDT updates queued in
         //     the channel might not reach the server before the host
         //     process exits.
+        // Advance the agent's cursor for this artifact so the NEXT turn's
+        // auto-summary block omits events we already saw during this turn.
+        // `max_event_id_observed` is updated by every tool dispatcher after
+        // `backend.record_event()`. We persist it via the same backend so
+        // both Local and WsPeer modes work. Errors are deliberately
+        // swallowed — failing to update the cursor means the next turn
+        // re-shows old events, which is annoying but not fatal.
+        if let Some(ctx) = crdt_docs_context.as_ref() {
+            if let Some(sid) = ctx.session_id() {
+                let max = ctx.max_event_id_observed();
+                if max > 0 {
+                    let _ = ctx
+                        .backend()
+                        .upsert_cursor(sid, ctx.artifact_id(), max)
+                        .await;
+                }
+            }
+        }
         if let Some(ctx) = crdt_docs_context.as_ref() {
             if let CrdtDocsContext::Local { runtime, .. } = ctx.as_ref() {
                 let is_shared = crate::crdt_documents::process_runtime::get_global()
