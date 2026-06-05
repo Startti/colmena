@@ -34,7 +34,11 @@ Never ask about tool/sheet IDs.\n\
 6. CROSS-ARTIFACT: `list_sheets_of` → `import_sheet` (clones to current) → `run_python`. \
 Don't ask permission to import — just do it and report.\n\n\
 If you see `[skill X loaded earlier]` in a tool result, the skill body was omitted from \
-history to save tokens — call `load_skill` again if you need to re-read it.";
+history to save tokens — call `load_skill` again if you need to re-read it.\n\n\
+If you see a `## Conversation summary` block early in this context, it's a compact \
+one-line-per-message view of older turns (originals were too big to re-send each turn). \
+Each line is tagged `[Tn]`. To re-read the FULL content of any turn, call \
+`recall_history(turn=n)` — sparingly, it re-loads that message into your context.";
 
 const MAX_SHEETS_IN_SUMMARY: usize = 10;
 const MAX_EVENTS_TO_FETCH: u32 = 200;

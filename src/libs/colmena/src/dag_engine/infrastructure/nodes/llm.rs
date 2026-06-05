@@ -1750,8 +1750,24 @@ impl ExecutableNode for LlmNode {
                 Vec::new()
             };
 
+        // F-T15 — resolve the ConversationRepository EARLIER (it's used both
+        // here for the executor's recall_history wiring AND later by
+        // AgentService for its history operations). Falls back to an in-memory
+        // repo when the operator hasn't configured persistent memory; either
+        // way recall_history works for the duration of the run.
+        let conversation_repo: Arc<dyn crate::llm::domain::ConversationRepository> =
+            match repo_instance.clone() {
+                Some(repo) => repo,
+                None => {
+                    use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
+                    Arc::new(InMemoryConversationRepository::new())
+                }
+            };
+
         let tool_executor = {
             let mut executor = DagToolExecutor::new(registry, tool_configurations);
+            executor = executor
+                .with_conversation_history(conversation_repo.clone(), conversation_key.clone());
             // Per-llm_call override of the tool-result string cap. Inputs win
             // over config so a graph can dynamically widen the cap when it
             // expects a large legitimate payload (e.g. a long document body).
@@ -1870,21 +1886,10 @@ impl ExecutableNode for LlmNode {
         // Let's use the repo_instance if available. If not, we create a temporary one?
         // Or we modify AgentService to make repo optional? No.
 
-        // Let's assume for this phase that we use the provided repo or fail if tools are needed but no repo?
-        // But AgentService is the *only* way we call LLM now (according to plan).
-        // So we need a repo.
-
-        let conversation_repo: Arc<dyn crate::llm::domain::ConversationRepository> =
-            match repo_instance {
-                Some(repo) => repo,
-                None => {
-                    // Fallback to a lightweight in-memory repository
-                    // This allows stateless LLM calls without requiring database connections
-                    use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
-                    Arc::new(InMemoryConversationRepository::new())
-                }
-            };
-
+        // `conversation_repo` was resolved earlier (~line 1753) so the
+        // tool_executor could wire it for the recall_history dispatch. Reuse
+        // the same Arc here for AgentService — both must read/write to the
+        // same backing store.
         let agent_service = AgentService::new(llm_repo_arc, conversation_repo.clone());
 
         // Resume path — when re-entered with `__colmena_resume_answer`, the
@@ -2000,6 +2005,17 @@ impl ExecutableNode for LlmNode {
                 }
                 tools.push(td);
             }
+        }
+
+        // F-T15 — expose recall_history synthetic tool whenever the LLM node
+        // has persisted memory (which it always does — repo_instance defaults
+        // to InMemoryConversationRepository even without explicit memory
+        // config). The executor wiring below pairs it with conversation_repo
+        // + conversation_key so the dispatch can read the persisted history.
+        // Always eager: it's small and complements the rolling-summary block.
+        {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::tool_recall_history;
+            tools.push(tool_recall_history());
         }
 
         // 2.2 Build the final system message. We assemble up to three sections,

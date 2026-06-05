@@ -10,6 +10,7 @@ pub mod document_tools;
 pub mod lazy_tools_catalog;
 pub mod load_attachment_tool;
 pub mod load_skill_tool;
+pub mod recall_history;
 
 // ── Shared schema helpers ────────────────────────────────────────────────────
 //
@@ -196,6 +197,11 @@ pub use crdt_doc_run_python::{
 pub use crdt_doc_import_sheet::{
     dispatch_crdt_doc_import_sheet, execute_import_sheet, tool_import_sheet, ImportSheetArgs,
     MAX_IMPORT_BYTES, MAX_SHEETS_PER_ARTIFACT, TOOL_IMPORT_SHEET as CRDT_DOC_IMPORT_SHEET_TOOL,
+};
+
+pub use recall_history::{
+    dispatch_recall_history, tool_recall_history, RecallHistoryArgs,
+    TOOL_RECALL_HISTORY as RECALL_HISTORY_TOOL,
 };
 
 #[cfg(test)]

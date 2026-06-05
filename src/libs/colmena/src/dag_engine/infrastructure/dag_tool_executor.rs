@@ -95,6 +95,13 @@ pub struct DagToolExecutor {
     /// registry handle stays in the llm_call node; we only need the catalog
     /// here so dispatch can succeed without an extra dependency.
     attachment_catalog: Option<Vec<crate::llm::domain::ConversationAttachment>>,
+    /// F-T15: per-call wiring for the `recall_history` synthetic tool.
+    /// When both fields are populated, the executor intercepts `recall_history`
+    /// tool calls and reads the persisted conversation directly. When either is
+    /// `None`, recall_history returns an error (gives a clear signal to the
+    /// caller that the feature isn't wired in this run).
+    conversation_repository: Option<Arc<dyn crate::llm::domain::ConversationRepository>>,
+    conversation_key: Option<crate::llm::domain::ConversationKey>,
     /// Per-string size cap applied to tool results before they are returned
     /// to the LLM. Strings whose byte length exceeds this value are replaced
     /// with `[truncated: original_size=N bytes]`. Defaults to
@@ -177,8 +184,22 @@ impl DagToolExecutor {
             describe_tool_lookup: None,
             describe_tool_observer: None,
             attachment_catalog: None,
+            conversation_repository: None,
+            conversation_key: None,
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_STRING_BYTES,
         }
+    }
+
+    /// F-T15: wire the conversation repository so `recall_history(turn=N)`
+    /// can dispatch by reading the persisted history directly.
+    pub fn with_conversation_history(
+        mut self,
+        repo: Arc<dyn crate::llm::domain::ConversationRepository>,
+        key: crate::llm::domain::ConversationKey,
+    ) -> Self {
+        self.conversation_repository = Some(repo);
+        self.conversation_key = Some(key);
+        self
     }
 
     /// Builder: override the per-string cap applied to tool results.
@@ -771,6 +792,48 @@ impl DagToolExecutor {
                     error: None,
                 });
             }
+        }
+
+        // --- F-T15: recall_history synthetic tool ---
+        // Active whenever a conversation_repository + conversation_key are wired.
+        // Independent of crdt_docs — useful for any LLM node with persistent memory.
+        if tool_call.function.name
+            == crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::RECALL_HISTORY_TOOL
+        {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::dispatch_recall_history;
+            let (Some(repo), Some(key)) = (
+                self.conversation_repository.as_ref(),
+                self.conversation_key.as_ref(),
+            ) else {
+                return Ok(crate::llm::domain::ToolResult {
+                    tool_call_id: tool_call.id.clone(),
+                    output: serde_json::json!({
+                        "error": "recall_history_not_wired",
+                        "hint": "This LLM node was constructed without conversation history access."
+                    })
+                    .to_string(),
+                    success: false,
+                    error: None,
+                });
+            };
+            let args: serde_json::Value = if tool_call.function.arguments.trim().is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(&tool_call.function.arguments).map_err(|e| {
+                    LlmError::InvalidToolCall {
+                        reason: format!("Failed to parse recall_history arguments: {e}"),
+                    }
+                })?
+            };
+            let result = dispatch_recall_history(repo, key, args).await;
+            let success =
+                !matches!(&result, serde_json::Value::Object(m) if m.contains_key("error"));
+            return Ok(crate::llm::domain::ToolResult {
+                tool_call_id: tool_call.id.clone(),
+                output: result.to_string(),
+                success,
+                error: None,
+            });
         }
 
         // --- Toolkit dispatch: names of the form "<alias>__<sub_tool>" ---
