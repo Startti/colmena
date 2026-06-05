@@ -1,6 +1,7 @@
 pub mod crdt_documents;
 pub mod dag_engine;
 pub mod documents;
+pub mod gsheets;
 pub mod llm;
 pub mod skills;
 pub mod storage;
