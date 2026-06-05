@@ -6,11 +6,237 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 use yrs::{Any, Array, ArrayPrelim, Doc, Map, MapPrelim, ReadTxn, Transact, WriteTxn};
 
+use crate::crdt_documents::formula_engine::{
+    evaluate, parse, recalc_chain, CellResolver, EvalValue, ExcelError, FormulaSource, ParseOutcome,
+};
+use crate::crdt_documents::formula_engine_yrs_resolver::YrsResolver;
+
+/// Outcome of an `apply_set_cell_in_proc` call.
+///
+/// Returns how many dependent cells were recalculated and any warnings
+/// produced (unsupported functions → `NeedsBrowser`, evaluation errors,
+/// cycle detection). Callers can attach this to tool results so the agent
+/// can react (e.g. surface `NeedsBrowser` cells to the user).
+#[derive(Debug, Clone, serde::Serialize, Default)]
+pub struct SetCellOutcome {
+    pub cells_recalculated: usize,
+    pub warnings: Vec<SetCellWarning>,
+}
+
+/// Warning produced during a set-cell + recalc operation.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "kind")]
+pub enum SetCellWarning {
+    /// The formula references at least one function not supported by the
+    /// backend formula engine. The cell was persisted as a placeholder
+    /// (`v = formula text`, `fs = needs_browser`) so the frontend can
+    /// evaluate it.
+    #[serde(rename = "needs_browser")]
+    NeedsBrowser {
+        addr: String,
+        functions: Vec<String>,
+    },
+    /// Evaluation produced an Excel-style error (or an internal failure
+    /// mapped to `#VALUE!`).
+    #[serde(rename = "eval_error")]
+    EvalError { addr: String, error: String },
+    /// A cycle was detected while computing the recalc chain. The cells
+    /// that could not be ordered are listed in `chain`.
+    #[serde(rename = "cycle")]
+    Cycle { chain: Vec<(String, String)> },
+}
+
 /// Sanity-check route: mutates the doc directly without going through WS.
 ///
 /// Creates the workbook/sheets/cells structure on demand. Idempotent on
 /// the sheet entry (looks up by `sheet_id`; creates if missing).
-pub fn apply_set_cell_in_proc(doc: &Doc, sheet_id: &str, addr: &str, value: &Value) {
+///
+/// **Formula support (D-T5):** if `value` is a string starting with `=`,
+/// the formula is parsed and evaluated server-side via
+/// [`crate::crdt_documents::formula_engine`]. The cell ends up with
+/// `{v: <evaluated value>, t: <type>, f: <formula text>, fs: "be"}` on
+/// success, or `{v: <formula text>, t: 1, f: <formula text>, fs:
+/// "needs_browser"}` if any referenced function is not supported by the
+/// backend engine. After a successful write, all intra-sheet dependents
+/// are recomputed in topological order.
+///
+/// Returns a [`SetCellOutcome`] carrying the number of dependents
+/// recalculated and any warnings (unsupported functions, eval errors,
+/// or cycles).
+pub fn apply_set_cell_in_proc(
+    doc: &Doc,
+    sheet_id: &str,
+    addr: &str,
+    value: &Value,
+) -> SetCellOutcome {
+    let mut outcome = SetCellOutcome::default();
+
+    // ── Formula path ────────────────────────────────────────────────
+    if let Some(text) = value.as_str().filter(|s| s.starts_with('=')) {
+        match parse(text) {
+            ParseOutcome::Ok(ast) => {
+                // `parse()` only returns `Ok` when every referenced
+                // function is supported by formualizer — the
+                // unsupported branch is handled by the `NeedsBrowser`
+                // arm below.
+
+                // Evaluate against the current doc state.
+                let (eval_v, eval_t) = {
+                    let resolver = YrsResolver::new(doc);
+                    match evaluate(&ast, &resolver, sheet_id) {
+                        Ok(EvalValue::Number(n)) => (serde_json::json!(n), 2u8),
+                        Ok(EvalValue::String(s)) => (serde_json::json!(s), 1u8),
+                        Ok(EvalValue::Bool(b)) => (serde_json::json!(b), 3u8),
+                        Ok(EvalValue::Error(err)) => {
+                            outcome.warnings.push(SetCellWarning::EvalError {
+                                addr: addr.to_string(),
+                                error: err.as_excel().to_string(),
+                            });
+                            (serde_json::json!(err.as_excel()), 4u8)
+                        }
+                        Err(e) => {
+                            outcome.warnings.push(SetCellWarning::EvalError {
+                                addr: addr.to_string(),
+                                error: format!("internal: {e}"),
+                            });
+                            (serde_json::json!(ExcelError::Value.as_excel()), 4u8)
+                        }
+                    }
+                };
+                write_cell_raw(
+                    doc,
+                    sheet_id,
+                    addr,
+                    &eval_v,
+                    eval_t,
+                    Some(text),
+                    Some(FormulaSource::Backend),
+                );
+
+                // Recalc downstream dependents.
+                let chain = {
+                    let resolver = YrsResolver::new(doc);
+                    recalc_chain(addr, sheet_id, &resolver)
+                };
+                match chain {
+                    Ok(chain) => {
+                        for (sh, ad) in &chain {
+                            recompute_dependent(doc, sh, ad);
+                        }
+                        outcome.cells_recalculated = chain.len();
+                    }
+                    Err(cycle) => {
+                        outcome
+                            .warnings
+                            .push(SetCellWarning::Cycle { chain: cycle.chain });
+                    }
+                }
+                return outcome;
+            }
+            ParseOutcome::NeedsBrowser { unsupported_fns } => {
+                // `parse()` already detected unsupported functions and
+                // refused to return an AST. Persist a `needs_browser`
+                // placeholder so the frontend can evaluate it on the
+                // client.
+                write_cell_raw(
+                    doc,
+                    sheet_id,
+                    addr,
+                    &Value::String(text.to_string()),
+                    1,
+                    Some(text),
+                    Some(FormulaSource::NeedsBrowser),
+                );
+                outcome.warnings.push(SetCellWarning::NeedsBrowser {
+                    addr: addr.to_string(),
+                    functions: unsupported_fns,
+                });
+                return outcome;
+            }
+            ParseOutcome::ParseError(_) => {
+                // Parser couldn't make sense of the text — fall through to
+                // a literal write so the cell isn't lost.
+            }
+        }
+    }
+
+    // ── Literal path ────────────────────────────────────────────────
+    let type_tag = json_value_type_tag(value);
+    write_cell_raw(doc, sheet_id, addr, value, type_tag, None, None);
+
+    // Even literal writes may invalidate dependents (e.g. setting a number
+    // that another cell's formula references). Fast-path: skip the
+    // dep-graph walk when the sheet has no formulas at all — important
+    // for bulk writers like `df_writer` that may insert 100K+ literal
+    // cells in a row.
+    if sheet_has_any_formula(doc, sheet_id) {
+        let chain = {
+            let resolver = YrsResolver::new(doc);
+            recalc_chain(addr, sheet_id, &resolver)
+        };
+        if let Ok(chain) = chain {
+            for (sh, ad) in &chain {
+                recompute_dependent(doc, sh, ad);
+            }
+            outcome.cells_recalculated = chain.len();
+        }
+    }
+    outcome
+}
+
+/// Cheap probe: does the named sheet have at least one formula cell?
+///
+/// Reads the `has_formulas` flag we set on the sheet map whenever a
+/// formula cell is written via `write_cell_raw`. Once set, the flag is
+/// never cleared — a sheet that contained a formula and then had it
+/// deleted will still report `true` and pay the cost of an empty
+/// dep-graph walk on subsequent literal writes. That false-positive is
+/// harmless (a `recalc_chain` that finds no dependents is fast) and
+/// avoids the cost of accurate refcounting in the hot path.
+///
+/// Returns `false` when the sheet doesn't exist or the flag is missing.
+fn sheet_has_any_formula(doc: &Doc, sheet_id: &str) -> bool {
+    let txn = doc.transact();
+    let Some(workbook) = txn.get_map("workbook") else {
+        return false;
+    };
+    let Some(yrs::Out::YArray(sheets)) = workbook.get(&txn, "sheets") else {
+        return false;
+    };
+    for i in 0..sheets.len(&txn) {
+        let Some(yrs::Out::YMap(s)) = sheets.get(&txn, i) else {
+            continue;
+        };
+        let Some(yrs::Out::Any(yrs::Any::String(id))) = s.get(&txn, "id") else {
+            continue;
+        };
+        if id.as_ref() != sheet_id {
+            continue;
+        }
+        return matches!(
+            s.get(&txn, "has_formulas"),
+            Some(yrs::Out::Any(yrs::Any::Bool(true)))
+        );
+    }
+    false
+}
+
+/// Internal helper: write `{v, t, f?, fs?}` to a cell, creating the
+/// workbook/sheet/cells parents on demand. Idempotent on sheet lookup
+/// by id.
+///
+/// If `formula_text` is `Some`, sets the `f` key; otherwise removes any
+/// stale `f` value (turning a former formula cell back into a literal).
+/// Same for `fs`.
+fn write_cell_raw(
+    doc: &Doc,
+    sheet_id: &str,
+    addr: &str,
+    value_json: &Value,
+    type_tag: u8,
+    formula_text: Option<&str>,
+    fs: Option<FormulaSource>,
+) {
     let mut txn = doc.transact_mut();
     let workbook = txn.get_or_insert_map("workbook");
     let sheets_arr = match workbook.get(&txn, "sheets") {
@@ -18,7 +244,6 @@ pub fn apply_set_cell_in_proc(doc: &Doc, sheet_id: &str, addr: &str, value: &Val
         _ => workbook.insert(&mut txn, "sheets", ArrayPrelim::default()),
     };
 
-    // Find sheet by id, or push a new one.
     let mut sheet_idx: Option<u32> = None;
     for i in 0..sheets_arr.len(&txn) {
         if let Some(yrs::Out::YMap(m)) = sheets_arr.get(&txn, i) {
@@ -50,9 +275,67 @@ pub fn apply_set_cell_in_proc(doc: &Doc, sheet_id: &str, addr: &str, value: &Val
     };
 
     let cell = cells.insert(&mut txn, addr, MapPrelim::default());
-    let (any, type_tag) = json_to_any(value);
+    let (any, _) = json_to_any(value_json);
     cell.insert(&mut txn, "v", any);
-    cell.insert(&mut txn, "t", type_tag);
+    cell.insert(&mut txn, "t", yrs::Any::BigInt(type_tag as i64));
+
+    if let Some(text) = formula_text {
+        cell.insert(&mut txn, "f", text.to_string());
+        // Sticky flag read by `sheet_has_any_formula` to short-circuit
+        // the literal-write recalc walk when no formulas exist.
+        sheet.insert(&mut txn, "has_formulas", yrs::Any::Bool(true));
+    } else {
+        // `Map::remove` is idempotent on missing keys.
+        cell.remove(&mut txn, "f");
+    }
+    if let Some(src) = fs {
+        cell.insert(&mut txn, "fs", src.as_str().to_string());
+    } else {
+        cell.remove(&mut txn, "fs");
+    }
+}
+
+/// Re-evaluate a single dependent cell's formula and write the new value
+/// back into the doc. Preserves `f` and `fs` (only `v` and `t` change).
+///
+/// Made `pub` so D-T8's `df_writer` (which recomputes after batch column
+/// writes) can call the same code path.
+pub fn recompute_dependent(doc: &Doc, sheet: &str, addr: &str) {
+    // Pull the formula text out under a read txn, then drop the resolver
+    // before we open a write txn. We collect the iterator into a Vec first
+    // because the boxed iterator borrows the resolver, and we need the
+    // resolver to drop before returning from this block.
+    let formula_text: Option<String> = {
+        let resolver = YrsResolver::new(doc);
+        let formulas: Vec<(String, String)> = resolver.iter_formulas_in_sheet(sheet).collect();
+        formulas
+            .into_iter()
+            .find(|(a, _)| a == addr)
+            .map(|(_, t)| t)
+    };
+    let Some(ft) = formula_text else { return };
+    let ParseOutcome::Ok(ast) = parse(&ft) else {
+        return;
+    };
+    let (dv, dt) = {
+        let resolver = YrsResolver::new(doc);
+        match evaluate(&ast, &resolver, sheet) {
+            Ok(EvalValue::Number(n)) => (serde_json::json!(n), 2u8),
+            Ok(EvalValue::String(s)) => (serde_json::json!(s), 1u8),
+            Ok(EvalValue::Bool(b)) => (serde_json::json!(b), 3u8),
+            Ok(EvalValue::Error(e)) => (serde_json::json!(e.as_excel()), 4u8),
+            Err(_) => (serde_json::json!(ExcelError::Value.as_excel()), 4u8),
+        }
+    };
+    write_cell_raw(
+        doc,
+        sheet,
+        addr,
+        &dv,
+        dt,
+        Some(&ft),
+        Some(FormulaSource::Backend),
+    );
 }
 
 /// Connects to `url` as a Yjs WS client, applies `set_cell(sheet_id, addr,
@@ -163,6 +446,8 @@ pub async fn apply_set_cell_via_ws(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crdt_documents::formula_engine::CellResolver;
+    use crate::crdt_documents::formula_engine_yrs_resolver::YrsResolver;
     use crate::crdt_documents::projection;
 
     #[test]
@@ -176,6 +461,116 @@ mod tests {
             serde_json::Value::String("Hola".into())
         );
     }
+
+    #[test]
+    fn set_cell_persists_formula_and_evaluated_value() {
+        let doc = Doc::new();
+        apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(2));
+        apply_set_cell_in_proc(&doc, "Sheet1", "A2", &serde_json::json!(3));
+        apply_set_cell_in_proc(&doc, "Sheet1", "A3", &serde_json::json!(5));
+
+        let outcome =
+            apply_set_cell_in_proc(&doc, "Sheet1", "B1", &serde_json::json!("=SUM(A1:A3)"));
+
+        let r = YrsResolver::new(&doc);
+        let cell = r.get("Sheet1", "B1").expect("B1");
+        assert_eq!(cell.v.as_f64(), Some(10.0));
+
+        // Verify f + fs are persisted in the y-doc cell map.
+        let txn = doc.transact();
+        let workbook = txn.get_map("workbook").unwrap();
+        let sheets = match workbook.get(&txn, "sheets").unwrap() {
+            yrs::Out::YArray(a) => a,
+            _ => panic!("expected sheets array"),
+        };
+        let yrs::Out::YMap(sheet) = sheets.get(&txn, 0).unwrap() else {
+            panic!()
+        };
+        let yrs::Out::YMap(cells) = sheet.get(&txn, "cells").unwrap() else {
+            panic!()
+        };
+        let yrs::Out::YMap(b1) = cells.get(&txn, "B1").unwrap() else {
+            panic!()
+        };
+        let yrs::Out::Any(yrs::Any::String(f)) = b1.get(&txn, "f").unwrap() else {
+            panic!()
+        };
+        assert_eq!(f.as_ref(), "=SUM(A1:A3)");
+        let yrs::Out::Any(yrs::Any::String(fs)) = b1.get(&txn, "fs").unwrap() else {
+            panic!()
+        };
+        assert_eq!(fs.as_ref(), "be");
+
+        // No dependents reference B1, so nothing else recalculates.
+        assert_eq!(outcome.cells_recalculated, 0);
+        assert!(outcome.warnings.is_empty());
+    }
+
+    #[test]
+    fn set_cell_recalculates_dependents_in_topo_order() {
+        let doc = Doc::new();
+        apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(1));
+        apply_set_cell_in_proc(&doc, "Sheet1", "B1", &serde_json::json!("=A1+10")); // → 11
+        apply_set_cell_in_proc(&doc, "Sheet1", "C1", &serde_json::json!("=B1*2")); // → 22
+
+        // Now mutate A1 — B1 and C1 must update.
+        let outcome = apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(5));
+
+        assert_eq!(outcome.cells_recalculated, 2);
+
+        let r = YrsResolver::new(&doc);
+        assert_eq!(r.get("Sheet1", "B1").unwrap().v.as_f64(), Some(15.0));
+        assert_eq!(r.get("Sheet1", "C1").unwrap().v.as_f64(), Some(30.0));
+    }
+
+    #[test]
+    fn set_cell_with_unsupported_function_marks_needs_browser() {
+        // Pick a function genuinely not in formualizer's registry. BOGUSFN
+        // should be safe; verify in the test's precondition.
+        let doc = Doc::new();
+        assert!(
+            !crate::crdt_documents::formula_engine::is_supported_fn("BOGUSFN"),
+            "precondition: BOGUSFN must be unsupported"
+        );
+        let outcome =
+            apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!("=BOGUSFN(1)"));
+        match outcome.warnings.as_slice() {
+            [SetCellWarning::NeedsBrowser { addr, functions }] => {
+                assert_eq!(addr, "A1");
+                assert!(functions.iter().any(|f| f.eq_ignore_ascii_case("BOGUSFN")));
+            }
+            other => panic!("expected one NeedsBrowser warning, got {:?}", other),
+        }
+        let r = YrsResolver::new(&doc);
+        let cell = r.get("Sheet1", "A1").unwrap();
+        // v carries the formula text placeholder (string type).
+        assert_eq!(cell.v.as_str(), Some("=BOGUSFN(1)"));
+        assert_eq!(cell.t, 1);
+    }
+
+    #[test]
+    fn set_range_with_mixed_cells_recalculates() {
+        let doc = Doc::new();
+        apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(0));
+        apply_set_cell_in_proc(&doc, "Sheet1", "B1", &serde_json::json!(0));
+        apply_set_cell_in_proc(&doc, "Sheet1", "D1", &serde_json::json!("=A1+B1"));
+
+        let mut total_recalc = 0usize;
+        let o1 = apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(5));
+        total_recalc += o1.cells_recalculated;
+        let o2 = apply_set_cell_in_proc(&doc, "Sheet1", "B1", &serde_json::json!(10));
+        total_recalc += o2.cells_recalculated;
+        let o3 = apply_set_cell_in_proc(&doc, "Sheet1", "C1", &serde_json::json!(20));
+        total_recalc += o3.cells_recalculated;
+
+        // D1 was recalculated by the time o2 landed (and again by o1).
+        assert!(
+            total_recalc >= 2,
+            "expected at least 2 recalcs, got {total_recalc}"
+        );
+        let r = YrsResolver::new(&doc);
+        assert_eq!(r.get("Sheet1", "D1").unwrap().v.as_f64(), Some(15.0));
+    }
 }
 
 fn json_to_any(v: &Value) -> (Any, &'static str) {
@@ -184,6 +579,18 @@ fn json_to_any(v: &Value) -> (Any, &'static str) {
         Value::Number(n) => (n.as_f64().map(Any::Number).unwrap_or(Any::Null), "n"),
         Value::Bool(b) => (Any::Bool(*b), "b"),
         _ => (Any::Null, "s"),
+    }
+}
+
+/// Map a JSON value to the numeric type tag used by the formula engine
+/// (1=string, 2=number, 3=bool, 4=error/other). Used by `write_cell_raw`
+/// callers that need a `u8` tag.
+fn json_value_type_tag(v: &Value) -> u8 {
+    match v {
+        Value::String(_) => 1,
+        Value::Number(_) => 2,
+        Value::Bool(_) => 3,
+        _ => 1,
     }
 }
 
