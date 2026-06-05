@@ -76,12 +76,7 @@ pub struct ListSheetsOfArgs {
 pub fn tool_list_sheets_of() -> ToolDefinition {
     super::build_synthetic_tool::<ListSheetsOfArgs>(
         TOOL_LIST_SHEETS_OF,
-        "List the sheets of a different artifact (not the current one). \
-         Use this to peek at what's inside another workbook BEFORE deciding \
-         to clone a sheet from it via crdt_doc_import_sheet. Returns \
-         {artifact_id, name, sheets:[{sheet_id, name, n_rows, n_cols}]}. \
-         The agent must already know the target artifact_id (from \
-         crdt_doc_list_my_artifacts or from the user's prompt).",
+        "Peek at another artifact's sheets (cross-artifact). Use before crdt_doc_import_sheet.",
     )
 }
 
@@ -584,13 +579,8 @@ pub struct GetRecentChangesArgs {
 pub fn tool_get_recent_changes() -> ToolDefinition {
     super::build_synthetic_tool::<GetRecentChangesArgs>(
         TOOL_GET_RECENT_CHANGES,
-        "Get recent peer changes to the document (events from other \
-         sessions; the agent's own mutations are excluded). Optionally \
-         filter by since_event_id, sheet_id, and limit. Returns \
-         { current_event_id, events: [...], truncated } where events is \
-         an array of { id, origin, sheet_id, summary, created_at }. \
-         Pass artifact_id to audit a different artifact than the ctx's \
-         pinned one (cross-artifact inspection).",
+        "Recent events on the document (excludes the agent's own mutations). \
+         Pass artifact_id to audit a different artifact than the ctx's pinned one.",
     )
 }
 
@@ -678,8 +668,7 @@ pub struct ListMyArtifactsArgs {
 pub fn tool_list_my_artifacts() -> ToolDefinition {
     super::build_synthetic_tool::<ListMyArtifactsArgs>(
         TOOL_LIST_MY_ARTIFACTS,
-        "List CRDT workbooks accessible to the current agent session. \
-         Returns id, name, created_at, last_accessed_at for each.",
+        "List CRDT workbooks accessible to this session.",
     )
 }
 
@@ -730,10 +719,7 @@ pub struct CreateArtifactArgs {
 pub fn tool_create_artifact() -> ToolDefinition {
     super::build_synthetic_tool::<CreateArtifactArgs>(
         TOOL_CREATE_ARTIFACT,
-        "Create a new CRDT workbook for this session. Returns the new \
-         artifact_id. To mutate it you'll need a follow-up turn whose \
-         config pins this artifact_id (current limitation; multi-artifact \
-         write access is subsystem F).",
+        "Create a new CRDT workbook for this session. Returns artifact_id.",
     )
 }
 

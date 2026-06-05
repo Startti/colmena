@@ -42,23 +42,10 @@ pub struct RunPythonArgs {
 pub fn tool_run_python() -> ToolDefinition {
     super::build_synthetic_tool::<RunPythonArgs>(
         TOOL_RUN_PYTHON,
-        "Run sandboxed Python code (pandas, numpy, scipy.stats) against \
-         workbook data. Loads requested sheets as `dfs[sheet_id]` pandas \
-         DataFrames. The code must define `output` (returned to you) and/or \
-         `output_sheet` (a DataFrame). If `write_to_sheet` is set, \
-         `output_sheet` is persisted as a new sheet with that name. \
-         Use this for analysis on large sheets — only the first ~10 rows \
-         need to pass through your context (use crdt_doc_read for a sample); \
-         the code runs server-side on the full data.\n\n\
-         IMPORTANT — DataFrame shape: row 1 of the Y.Doc is ALWAYS used as \
-         column names (empty cells become `col_A`, `col_B`, …). If the spreadsheet \
-         has a title row at the top (single cell in A1), the real header row \
-         arrives as `df.iloc[0]` (the first record), NOT as the column names. \
-         In that case promote it: `df.columns = df.iloc[0].tolist(); df = \
-         df.iloc[1:].reset_index(drop=True)`. \
-         On error the tool returns `loaded_sheet_columns: {sheet_id: [...]}` \
-         showing the real columns of every loaded sheet — use this to debug \
-         KeyError without retrying blindly.",
+        "Run sandboxed Python (pandas/numpy/scipy.stats) over requested sheets \
+         as `dfs[sheet_id]`. Define `output` and/or `output_sheet`; pass \
+         `write_to_sheet` to persist. Load skill crdt-doc-run-python for the \
+         shape/output/debug contract.",
     )
 }
 

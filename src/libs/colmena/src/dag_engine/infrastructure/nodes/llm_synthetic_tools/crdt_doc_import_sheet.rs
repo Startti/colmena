@@ -45,16 +45,8 @@ pub struct ImportSheetArgs {
 pub fn tool_import_sheet() -> ToolDefinition {
     super::build_synthetic_tool::<ImportSheetArgs>(
         TOOL_IMPORT_SHEET,
-        "Clone a sheet from another artifact into the CURRENT artifact \
-         (the one your ctx is pinned to). The cloned sheet becomes a normal \
-         sheet in the current workbook — you can read it, modify it, or pass \
-         it together with original sheets to crdt_doc_run_python for \
-         multi-sheet analysis (merge, compare, enrich, etc.). \n\
-         IMPORTANT: snapshot only — later changes to the source do NOT \
-         propagate. Re-import if you need fresh data. \n\
-         Use AFTER crdt_doc_list_sheets_of (to discover the source_sheet_id). \
-         See the crdt-doc-cross-sheet-analysis skill for the 6 canonical \
-         pandas patterns this enables.",
+        "Clone a sheet from another artifact into the current one (snapshot, \
+         not a live link). Use after crdt_doc_list_sheets_of.",
     )
 }
 

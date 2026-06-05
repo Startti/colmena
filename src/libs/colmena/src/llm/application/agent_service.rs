@@ -140,7 +140,75 @@ impl AgentService {
             };
             let mut request = LlmRequest::new(messages.clone(), config.clone(), should_stream)?;
             if !iteration_tools.is_empty() {
-                request = request.with_tools(iteration_tools);
+                request = request.with_tools(iteration_tools.clone());
+            }
+
+            // Per-iteration prompt-size diagnostic. Gated by env var so it has
+            // ZERO runtime cost when disabled. Used during F-T13/F-T14 to measure
+            // token-optimization wins between commits.
+            //   COLMENA_DUMP_PROMPT_SIZES=1  → one-line summary per iteration
+            //   COLMENA_DUMP_PROMPT_FULL=1   → full per-message + per-tool breakdown
+            if std::env::var("COLMENA_DUMP_PROMPT_SIZES").is_ok() {
+                let msgs_json = serde_json::to_string(&messages).unwrap_or_default();
+                let tools_json = serde_json::to_string(&iteration_tools).unwrap_or_default();
+                let n_msgs = messages.len();
+                let per_msg_sizes: Vec<usize> = messages
+                    .iter()
+                    .map(|m| serde_json::to_string(m).map(|s| s.len()).unwrap_or(0))
+                    .collect();
+                eprintln!(
+                    "📊 [iter] msgs={} (json_chars={} ≈ {}T)  tools={} (json_chars={} ≈ {}T)  per_msg_sizes={:?}",
+                    n_msgs,
+                    msgs_json.len(),
+                    msgs_json.len() / 4,
+                    iteration_tools.len(),
+                    tools_json.len(),
+                    tools_json.len() / 4,
+                    per_msg_sizes
+                );
+
+                // FULL DUMP — on EVERY iter when COLMENA_DUMP_PROMPT_FULL is set.
+                // The last iter dump tells us the real cumulative cost at end of run.
+                if std::env::var("COLMENA_DUMP_PROMPT_FULL").is_ok() {
+                    eprintln!(
+                        "\n🔬 [FULL DUMP iter (n_msgs={})] ───────────────────",
+                        n_msgs
+                    );
+                    for (i, m) in messages.iter().enumerate() {
+                        let s = serde_json::to_string(m).unwrap_or_default();
+                        // Trim each to first 400 chars for sanity
+                        let preview = if s.len() > 600 {
+                            format!("{}...[+{} chars]", &s[..400], s.len() - 400)
+                        } else {
+                            s.clone()
+                        };
+                        eprintln!(
+                            "  msg[{}] {}ch  {}T  ::  {}",
+                            i,
+                            s.len(),
+                            s.len() / 4,
+                            preview
+                        );
+                    }
+                    // Per-tool size breakdown
+                    eprintln!(
+                        "  --- TOOLS ({} total, {} chars = {} T) ---",
+                        iteration_tools.len(),
+                        tools_json.len(),
+                        tools_json.len() / 4
+                    );
+                    for (i, td) in iteration_tools.iter().enumerate() {
+                        let s = serde_json::to_string(td).unwrap_or_default();
+                        eprintln!(
+                            "    tool[{}] {} ({}ch = {}T)",
+                            i,
+                            td.name,
+                            s.len(),
+                            s.len() / 4
+                        );
+                    }
+                    eprintln!("──────────────────────────────────────────────\n");
+                }
             }
 
             // Decide between call() and stream()

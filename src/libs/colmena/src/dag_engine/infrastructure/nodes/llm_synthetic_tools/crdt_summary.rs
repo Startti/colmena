@@ -20,37 +20,21 @@ use super::crdt_doc_context::CrdtDocsContext;
 /// names, no `write_to_sheet`, no "patrón B" — still gets the right
 /// behavior. Skills are loaded lazily by reference to avoid bloating
 /// every turn with full pattern catalogs.
-pub const CRDT_SPREADSHEET_PROTOCOL_PRELUDE: &str = "## CRDT Spreadsheet Protocol\n\
-You have collaborative-spreadsheet tools (`crdt_doc_*`). The user is non-technical \
-and will describe what they want in natural language. They do NOT know tool names, \
-sheet ids, or which \"pattern\" to apply — translate their words to tool calls yourself.\n\n\
-**Always**:\n\
-1. **DISCOVER first.** On the first turn that touches a workbook, call \
-`crdt_doc_list_sheets` (current artifact) and `crdt_doc_list_my_artifacts` \
-(other workbooks in this session). If the user mentions other workbooks \
-(\"Q4\", \"el catálogo\", \"el reporte anterior\"), call \
-`crdt_doc_list_sheets_of` on each to peek before deciding.\n\
-2. **LOAD skills lazily.** Before writing any pandas code, \
-`load_skill('crdt-doc-run-python')`. For compare/join/enrich across sheets, \
-`load_skill('crdt-doc-cross-sheet-analysis')`. Each skill's index lists \
-specific references — load ONLY the reference you need \
-(e.g. `reference='pattern-b-row-diff'` or `reference='dataframe-shape'`). \
-This saves tokens.\n\
-3. **CLARIFY before acting on ambiguity.** Ask the user once if anything matters \
-for correctness: the key column (Producto / SKU / ID?), the output destination \
-(new sheet vs chat answer), the scope (which rows / which dates). Don't ask about \
-internals (sheet ids, tool names) — figure those out yourself.\n\
-4. **PERSIST derived results as new sheets** via `write_to_sheet`. Short summaries \
-(\"se encontraron N items\") go in chat. Anything tabular goes to a sheet so the \
-user keeps it.\n\
-5. **NAME results in the user's language.** \"Resumen Q3\", \"Diferencias Q3 vs Q4\", \
-not \"Output 1\" or \"diff_result\".\n\
-6. **CROSS-ARTIFACT pattern**: when the user wants something that involves another \
-workbook, the canonical flow is `list_sheets_of` → `import_sheet` (clones the sheet \
-into the current workbook) → `run_python` with both `sheet_ids`. You don't need \
-to ask the user permission to import — that's the only way to combine data, just \
-do it and tell them what you did.\n\n\
-The user's words → your job is the translation, not a syntax check.";
+pub const CRDT_SPREADSHEET_PROTOCOL_PRELUDE: &str = "## Spreadsheet Protocol\n\
+Translate the user's natural language to crdt_doc_* tools — they don't know tool/sheet names.\n\
+1. DISCOVER: `crdt_doc_list_sheets` + `crdt_doc_list_my_artifacts`. If the user names other \
+workbooks, `crdt_doc_list_sheets_of` each.\n\
+2. LOAD skills lazily by reference. Before pandas: `load_skill('crdt-doc-run-python')`. \
+For compare/join/enrich: `load_skill('crdt-doc-cross-sheet-analysis')`. Then load the \
+specific reference (e.g. `pattern-b-row-diff`) — not the whole skill.\n\
+3. CLARIFY only what's needed for correctness (key column, output destination). \
+Never ask about tool/sheet IDs.\n\
+4. PERSIST tabular results via `write_to_sheet`. Short summaries in chat.\n\
+5. NAME sheets in the user's language (\"Diferencias Q3 vs Q4\", not \"Output 1\").\n\
+6. CROSS-ARTIFACT: `list_sheets_of` → `import_sheet` (clones to current) → `run_python`. \
+Don't ask permission to import — just do it and report.\n\n\
+If you see `[skill X loaded earlier]` in a tool result, the skill body was omitted from \
+history to save tokens — call `load_skill` again if you need to re-read it.";
 
 const MAX_SHEETS_IN_SUMMARY: usize = 10;
 const MAX_EVENTS_TO_FETCH: u32 = 200;

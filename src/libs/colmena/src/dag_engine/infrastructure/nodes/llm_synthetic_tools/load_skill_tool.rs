@@ -29,12 +29,9 @@ pub fn build_load_skill_tool_definition(repository: &Arc<dyn SkillRepository>) -
     };
 
     let description = format!(
-        "Load a specialized knowledge skill on demand when the user's task benefits from it. \
-Call this tool BEFORE responding when you identify that one of the skills below applies. \
-You may call it multiple times to load several skills or to load a skill's reference material.\n\n\
-Available skills:\n{}\n\n\
-After loading a skill, if its content lists available references, you may call load_skill \
-again with the `reference` parameter to load that additional material.",
+        "Load a knowledge skill on demand. Call BEFORE responding when relevant. \
+Pass `reference` to load a specific sub-document listed in a skill's index.\n\n\
+Skills:\n{}",
         catalog_lines.join("\n")
     );
 
@@ -51,10 +48,7 @@ again with the `reference` parameter to load that additional material.",
         "reference".to_string(),
         ParameterProperty::new(
             "string".to_string(),
-            "Optional name of a reference file within the skill. Only use after loading the \
-skill and seeing it declares this reference. \
-To navigate nested references, separate names with '/'. Example: 'frameworks/django'."
-                .to_string(),
+            "Optional reference name within the skill. Use 'a/b' for nested.".to_string(),
         ),
     );
 

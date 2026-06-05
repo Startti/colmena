@@ -2073,9 +2073,11 @@ impl ExecutableNode for LlmNode {
                     .map(|t| format!("- {}", t.name))
                     .collect();
                 if !tool_names.is_empty() {
+                    // Tools list goes via tools[] JSON; we only nudge usage policy here.
+                    // Trimmed from a 4-bullet ~600-char block to a single line for F-T14.
                     sections.push(format!(
-                        "## Tool Use Instructions\nYou have access to the following tools:\n{}\n\nRules:\n- ALWAYS use the available tools to answer questions that require real or live data. Never answer from your own knowledge when a tool can provide the data.\n- Call the most relevant tool before responding. Do not skip tool calls.\n- If a tool call fails, report the error clearly instead of guessing an answer.\n- Only respond without a tool call when the user's request is purely conversational and no tool is needed.",
-                        tool_names.join("\n")
+                        "## Tools\nAvailable: {}.\nPrefer tools over guessing. Report errors clearly.",
+                        tool_names.iter().map(|t| t.trim_start_matches("- ")).collect::<Vec<_>>().join(", ")
                     ));
                 }
             }
