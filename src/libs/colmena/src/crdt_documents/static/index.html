@@ -341,7 +341,16 @@
               if (!parsed) continue;
 
               cellValue[parsed.row] = cellValue[parsed.row] || {};
-              cellValue[parsed.row][parsed.col] = { v: cellMap.get("v") };
+              const cellOut = { v: cellMap.get("v") };
+              const fText = cellMap.get("f");
+              if (fText !== undefined && fText !== null && fText !== "") {
+                cellOut.f = fText;
+              }
+              const fsTag = cellMap.get("fs");
+              if (fsTag !== undefined && fsTag !== null && fsTag !== "") {
+                cellOut.fs = fsTag;
+              }
+              cellValue[parsed.row][parsed.col] = cellOut;
             }
           }
           if (Object.keys(cellValue).length === 0) return;
@@ -531,6 +540,7 @@
               const col = Number(colStr);
               const addr = colNumberToA1(col) + String(row + 1);
               const v = cellPayload?.v ?? null;
+              const f = cellPayload?.f;
 
               let cellMap = cellsMap.get(addr);
               if (!cellMap) {
@@ -540,6 +550,19 @@
               cellMap.set("v", v);
               cellMap.set("t", typeof v === "number" ? "n"
                           : typeof v === "boolean" ? "b" : "s");
+
+              // D-T14: round-trip the formula text. If Univer evaluated a formula
+              // client-side, persist both the formula and a frontend-source tag so
+              // the backend skill can tell it came from the browser (vs `fs:"be"`
+              // when the backend evaluator wrote it).
+              if (typeof f === "string" && f.length > 0) {
+                cellMap.set("f", f);
+                cellMap.set("fs", "fe");
+              } else {
+                // Literal write — clear any prior formula on this cell.
+                if (cellMap.has("f")) cellMap.delete("f");
+                if (cellMap.has("fs")) cellMap.delete("fs");
+              }
             }
           }
         });
