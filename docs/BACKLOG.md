@@ -293,6 +293,78 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 
 Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 → 2026-06-05). El core ya está shippeado en develop; estos son refinamientos diferidos.
 
+- [ ] **Univer ↔ yrs formula round-trip — frontend integration gap (top priority for ADP frontend team).**
+  El backend (`apply_set_cell_in_proc`) persiste correctamente `{v, t, f, fs}`
+  en cada escritura de fórmula. El inbound observer del demo estático
+  (`src/libs/colmena/src/crdt_documents/static/index.html`, D-T14) reenvía
+  `f`/`fs` a Univer vía `SET_RANGE_VALUES_MUTATION`. Sin embargo, el
+  `UniverFormulaEnginePlugin` re-procesa la celda después de aplicar nuestra
+  mutación y emite una **segunda mutación** cuyo `cellPayload` NO preserva
+  `f`. El outbound handler (D-T14) escribe esa segunda mutación de vuelta al
+  yrs Doc como `{v, t}` solamente, **sobrescribiendo `f`/`fs` originales en
+  milisegundos**.
+
+  **Síntomas cuando hay un browser conectado:**
+  - `f`/`fs` desaparecen del yrs Doc poco después de que el backend los escribe.
+  - `crdt_doc_read(include_formulas=true)` devuelve sólo `{v}` para esas celdas.
+  - Escrituras literales del agente en celdas de input no cascadean
+    (`recalc_chain` no encuentra fórmulas que recorrer).
+  - Ediciones del usuario en Univer tampoco disparan el cascade del backend
+    (D-T15) porque el dep-graph está vacío.
+
+  **Repro:**
+  ```bash
+  cargo run --release --bin dag_engine crdt-yws-graph \
+    tests/graphs/crdt_documents/d_formulas_interactive_demo.json \
+    --seed-artifact-id <ULID> --wait-before-graph 30 ...
+  ```
+  Conectar un browser dentro de los 30s. Tras correr el grafo:
+  `curl http://127.0.0.1:8090/documents/<ULID>/projection.json` muestra las
+  celdas sin `f`. El mismo test sin browser conectado pasa 100% verde
+  (D-T15 unit tests + smoke en `feature/docs` HEAD).
+
+  **Para el equipo de frontend del ADP** (la fix real vive ahí, no acá):
+  - **Path 1 (recomendado)**: cambiar el inbound de
+    `SET_RANGE_VALUES_MUTATION` a `SET_RANGE_VALUES_COMMAND` (el command de
+    Univer de nivel superior). El path de comando pasa por el command
+    service, al que el formula engine se subscribe para indexar — esto le
+    "enseña" al engine las dependencias de la fórmula y evita el ciclo
+    re-process-and-strip. Riesgo: el command dispara `onCommandExecuted`
+    como echo outbound; requiere manejo cuidadoso del flag
+    `applyingFromYDoc`.
+  - **Path 2**: después de aplicar la mutación, llamar explícitamente
+    `formulaEngine.registerFormula(unitId, sheetId, addr, fText)` (o
+    equivalente de la API 0.x de Univer) para que el engine indexe la
+    fórmula. Menos invasivo que Path 1 pero depende de que la API interna de
+    Univer sea estable.
+  - **Path 3 (fallback)**: mantener la arquitectura actual y endurecer el
+    outbound handler — cuando llegue una `SET_RANGE_VALUES_MUTATION` desde
+    Univer sin `f`, chequear el yrs Doc por un `f` existente en esa celda y
+    preservarlo (no sobrescribir). Limita el daño pero no soluciona que
+    el engine de Univer no conozca las fórmulas escritas por el backend.
+
+  **Contrato forward-compat para cualquier frontend** (independiente del
+  path elegido): el schema de celda en yrs es
+  `workbook.sheets[i].cells.<A1> = {v, t, f?, fs?}` donde
+  `fs ∈ {"be", "fe", "needs_browser"}`. Los frontends DEBEN preservar
+  `f`/`fs` en cualquier escritura de celda que no sea un reemplazo literal
+  explícito (por el usuario) de la fórmula.
+
+  D-T14 dejó el plumbing de `f`/`fs` por inbound + outbound. D-T15 dejó el
+  observer server-side que cascadea fórmulas cuando llegan ediciones del
+  browser — funciona correctamente cuando `f` está intacta, pero hoy no se
+  puede ejercitar porque `f` ya se perdió cuando dispararía. Una vez que
+  cualquiera de los 3 paths aterrice y `f` sobreviva el round-trip, el
+  observer de D-T15 + el cascade client-side de Univer deberían funcionar
+  sin cambios adicionales.
+
+  **Referencias:**
+  - D-T14: commits `25633fa`, `6a14571` (plumbing inbound/outbound).
+  - D-T15: commit `19bb419` (server-side recalc observer).
+  - Demo: `src/libs/colmena/src/crdt_documents/static/index.html` (sección
+    inbound observer + outbound `onCellChanged`).
+  - Schema de celdas: `crdt_documents::tool_executor::apply_set_cell_in_proc`.
+
 - [ ] **Cross-sheet eager recalc** — cuando `Sheet2!A1` cambia, los
   dependientes en `Sheet1` que la referencian deben auto-actualizarse.
   Hoy quedan stale hasta que alguien los re-toca. Spec §11.

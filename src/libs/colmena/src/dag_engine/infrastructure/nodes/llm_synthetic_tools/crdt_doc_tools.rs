@@ -308,12 +308,21 @@ pub fn execute_read(ctx: &CrdtDocsContext, args: ReadArgs) -> serde_json::Value 
     };
     // Pre-parse range once so we can apply it to both branches uniformly
     // (and surface invalid_range before doing any projection work).
+    // UX alias: a single A1 like "C1" auto-expands to "C1:C1" so the agent
+    // doesn't waste a turn discovering the colon convention.
     let range_bounds = match args.range.as_deref() {
         None => None,
-        Some(range) => match parse_range(range) {
-            Some(b) => Some(b),
-            None => return serde_json::json!({ "error": "invalid_range" }),
-        },
+        Some(range) => {
+            let normalized = if range.contains(':') {
+                std::borrow::Cow::Borrowed(range)
+            } else {
+                std::borrow::Cow::Owned(format!("{range}:{range}"))
+            };
+            match parse_range(&normalized) {
+                Some(b) => Some(b),
+                None => return serde_json::json!({ "error": "invalid_range" }),
+            }
+        }
     };
     let in_range = |addr: &str| -> bool {
         match range_bounds {
@@ -407,6 +416,10 @@ fn col_letter(mut col: u32) -> String {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetCellArgs {
     pub sheet_id: String,
+    /// A1-style cell address (e.g. "A1"). Also accepts the alias `address`
+    /// for ergonomics — the agent often guesses that name even though the
+    /// canonical schema documents `addr`.
+    #[serde(alias = "address")]
     pub addr: String,
     pub value: serde_json::Value,
 }
@@ -464,8 +477,11 @@ pub async fn execute_set_cell(ctx: &CrdtDocsContext, args: SetCellArgs) -> serde
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetRangeArgs {
     pub sheet_id: String,
+    /// A1-style top-left cell of the range. Accepts `start` as alias.
+    #[serde(alias = "start")]
     pub start_addr: String,
-    /// Row-major 2D array of cell values.
+    /// Row-major 2D array of cell values. Accepts `values` as alias.
+    #[serde(alias = "values")]
     pub values_2d: Vec<Vec<serde_json::Value>>,
 }
 
@@ -1362,6 +1378,73 @@ mod tests {
         .await;
         assert!(v["artifact_id"].as_str().unwrap().starts_with("art_"));
         assert_eq!(v["name"].as_str().unwrap(), "Inventory Q3");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── D-T16 UX alias coverage ───────────────────────────────────────────
+
+    #[test]
+    fn set_cell_args_accept_address_alias() {
+        let v = json!({
+            "sheet_id": "Sheet1",
+            "address": "A1",
+            "value": 42,
+        });
+        let parsed: SetCellArgs = serde_json::from_value(v).unwrap();
+        assert_eq!(parsed.addr, "A1");
+    }
+
+    #[test]
+    fn set_cell_args_canonical_addr_still_works() {
+        let v = json!({
+            "sheet_id": "Sheet1",
+            "addr": "B2",
+            "value": "x",
+        });
+        let parsed: SetCellArgs = serde_json::from_value(v).unwrap();
+        assert_eq!(parsed.addr, "B2");
+    }
+
+    #[test]
+    fn set_range_args_accept_start_and_values_aliases() {
+        let v = json!({
+            "sheet_id": "Sheet1",
+            "start": "A1",
+            "values": [[1, 2], [3, 4]],
+        });
+        let parsed: SetRangeArgs = serde_json::from_value(v).unwrap();
+        assert_eq!(parsed.start_addr, "A1");
+        assert_eq!(parsed.values_2d.len(), 2);
+        assert_eq!(parsed.values_2d[1][1], json!(4));
+    }
+
+    #[tokio::test]
+    async fn read_accepts_single_a1_range() {
+        // D-T16: passing `range: "C1"` (no colon) should auto-expand to
+        // `C1:C1` instead of returning `invalid_range`.
+        let (ctx, tmp) = fresh_ctx().await;
+        let s = execute_add_sheet(&ctx, AddSheetArgs { name: "X".into() }).await;
+        let sheet_id = s["sheet_id"].as_str().unwrap().to_string();
+        execute_set_cell(
+            &ctx,
+            SetCellArgs {
+                sheet_id: sheet_id.clone(),
+                addr: "C1".into(),
+                value: json!("hi"),
+            },
+        )
+        .await;
+        let v = execute_read(
+            &ctx,
+            ReadArgs {
+                sheet_id: sheet_id.clone(),
+                range: Some("C1".into()),
+                include_formulas: false,
+            },
+        );
+        assert_eq!(v["cells"]["C1"], "hi");
+        // Nothing outside C1 leaked in.
+        assert_eq!(v["cells"].as_object().unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -432,6 +432,39 @@ Cells with no formula stay as `{v}` only.
 
 `crdt_doc_list_sheets` each sheet entry adds `formula_count: <integer>`.
 
+#### 5.8.1 Frontend integration contract (for ADP frontend team)
+
+El backend escribe cada celda como `{v, t, f?, fs?}`. Cualquier frontend que
+sincronice contra el yrs Doc vía el protocolo WS sync v1 **DEBE preservar
+`f` y `fs`** en cualquier escritura de celda que no sea un reemplazo
+literal explícito (por el usuario) de la fórmula. No preservarlos rompe el
+cascade de recalc — el observer en `crdt_documents::recalc_observer` (D-T15)
+depende de que `f` esté presente en el yrs Doc para identificar dependientes.
+
+Los valores de `fs` son:
+- `"be"` — evaluado por el backend (`formula_engine` vía formualizer).
+- `"fe"` — evaluado por el frontend (Univer u equivalente).
+- `"needs_browser"` — función no soportada por el backend; el frontend
+  debe evaluar y escribir el `v` computado más `fs="fe"`.
+
+Para Univer específicamente, el demo estático en
+`src/libs/colmena/src/crdt_documents/static/index.html` usa
+`SET_RANGE_VALUES_MUTATION` para el inbound (yrs → Univer). Esto funciona
+visualmente pero **NO registra la fórmula con `UniverFormulaEnginePlugin`**,
+así que el cascade client-side y la preservación round-trip están rotos.
+Ver entrada de BACKLOG "Univer ↔ yrs formula round-trip" para los tres
+candidatos de fix.
+
+El protocolo es:
+- **WS sync** para datos de celda (yjs sync v1).
+- **REST endpoints** para projection (`GET /documents/:id/projection.json`),
+  artifact CRUD, change events.
+- **HTTP POST `/documents/:id/import-sheet`** para imports de xlsx.
+
+La superficie de tools que ve el agente (`crdt_doc_*`) está documentada en
+`docs/node_as_tools_reference.json` y nunca cruza el límite WS — los agentes
+hablan in-proc con el runtime vía `apply_set_cell_in_proc` y compañía.
+
 ---
 
 ## 6. Python helper (PyO3 + pandas)

@@ -193,4 +193,25 @@ Ambas con costo CERO cuando están off. Útil para medir el impacto de cualquier
 - Plan: [`docs/superpowers/plans/2026-06-04-crdt-formulas.md`](superpowers/plans/2026-06-04-crdt-formulas.md).
 - Backlog: v1.1 follow-ups en `docs/BACKLOG.md` → "CRDT Documents v1.1 — Formulas (subsystem D follow-ups)".
 
-**Estado.** D-T1..D-T12 done; D-T13 (final sweep) pending.
+**Adicional shippeado (D-T14, D-T15, D-T16).**
+- **D-T14** (`6a14571`, `25633fa`): plumbing `f`/`fs` por el demo Univer
+  estático (inbound `SET_RANGE_VALUES_MUTATION` + outbound
+  `applyingFromYDoc` guard) + replayCells inicial.
+- **D-T15** (`19bb419`): server-side `recalc_observer` que dispara
+  `recompute_dependent` sobre ediciones que llegan vía WS desde un peer
+  browser. Funciona end-to-end cuando `f` está intacta en el yrs Doc.
+- **D-T16** (este commit): UX aliases en los dispatchers de `crdt_doc_*`
+  (`address`→`addr`, `start`→`start_addr`, `values`→`values_2d`, `range`
+  auto-expande single-cell `"C1"` a `"C1:C1"`) + dev guide §5.8.1
+  "Frontend integration contract" + entrada top-priority en BACKLOG D
+  documentando el gap Univer↔yrs (re-process strip `f`) con tres paths
+  candidatos para el equipo del frontend del ADP.
+
+**Limitación conocida (handover al frontend del ADP).** Cuando hay un browser
+Univer conectado, el `UniverFormulaEnginePlugin` re-procesa la celda tras
+aplicar la mutación inbound y emite una segunda mutación sin `f`. El outbound
+del demo la propaga al yrs Doc y borra `f`/`fs`. El backend (D-T1..D-T15) es
+correcto y funciona 100% sin browser; la fix vive en el frontend de ADP. Ver
+BACKLOG → "Univer ↔ yrs formula round-trip".
+
+**Estado.** D-T1..D-T16 done.
