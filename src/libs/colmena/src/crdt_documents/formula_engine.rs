@@ -64,8 +64,8 @@ pub enum ParseOutcome {
 /// Opaque wrapper around a parsed formualizer AST + the original text.
 #[derive(Debug)]
 pub struct ParsedFormula {
-    pub(crate) ast: ASTNode,
-    pub(crate) original_text: String,
+    ast: ASTNode,
+    original_text: String,
 }
 
 impl ParsedFormula {
@@ -164,8 +164,17 @@ impl From<FzExcelError> for ExcelError {
 
 /// Public error returned by `evaluate` for genuine internal failures (not
 /// for Excel-semantics errors, which round-trip as `EvalValue::Error`).
+///
+/// `EvalError::Internal` is reserved for non-Excel-modeling failures (e.g.
+/// interpreter panics caught by future panic guards, or yrs-level errors
+/// surfaced by D-T4's `YrsResolver`). Today every formualizer-side error is
+/// converted to `EvalValue::Error(ExcelError)` and this variant is
+/// **currently unreachable** from this implementation — it is kept on the
+/// signature deliberately for forward compatibility so adding new failure
+/// paths later doesn't require a breaking API change.
 #[derive(Debug, thiserror::Error)]
 pub enum EvalError {
+    // NOTE: kept even though currently unreachable. See type doc comment.
     #[error("internal evaluator error: {0}")]
     Internal(String),
 }
@@ -216,10 +225,13 @@ pub fn parse(text: &str) -> ParseOutcome {
 /// `current_sheet` is the sheet the formula lives on — used to resolve
 /// unqualified references like `A1`.
 ///
-/// Excel-semantic errors (`#DIV/0!`, `#REF!`, etc.) are returned inside
-/// `EvalValue::Error(_)`. `EvalError::Internal` is only returned for genuine
-/// infrastructure failures (today there are none — kept for forward
-/// compatibility with D-T4's YrsResolver).
+/// Returns `EvalError::Internal` for non-Excel-modeling failures (e.g.
+/// interpreter panics caught by future panic guards). Today every
+/// formualizer-side error is converted to `EvalValue::Error(ExcelError)`
+/// — `EvalError::Internal` is reserved for forward compatibility (D-T4's
+/// `YrsResolver` may surface yrs-level errors here). The variant is
+/// intentionally kept on the signature even though it is unreachable
+/// from this implementation.
 pub fn evaluate(
     formula: &ParsedFormula,
     resolver: &dyn CellResolver,
@@ -238,9 +250,15 @@ pub fn evaluate(
 }
 
 /// Collect every function name referenced anywhere in the parsed AST.
+///
+/// The returned vector is **sorted alphabetically and deduplicated**, so
+/// callers (e.g. D-T5's `unsupported_fns` projection field) don't need to
+/// clean up duplicates from formulas like `=SUM(A1)+SUM(B1)`.
 pub fn function_names(formula: &ParsedFormula) -> Vec<String> {
     let mut names = Vec::new();
     walk_for_fns(&formula.ast.node_type, &mut names);
+    names.sort();
+    names.dedup();
     names
 }
 
@@ -260,10 +278,10 @@ pub fn all_supported(names: &[String]) -> bool {
 /* ───────────────────────────── internals ─────────────────────────────── */
 
 fn collect_unsupported_fns(formula: &ParsedFormula) -> Vec<String> {
+    // `function_names` already returns a sorted, deduped vector — we only
+    // need to filter to the unsupported names.
     let mut all = function_names(formula);
     all.retain(|n| !is_supported_fn(n));
-    all.sort();
-    all.dedup();
     all
 }
 
@@ -299,6 +317,16 @@ fn walk_for_fns(node_type: &ASTNodeType, out: &mut Vec<String>) {
     }
 }
 
+/// Collapse a formualizer `LiteralValue` into our 4-shape `EvalValue`.
+///
+/// **Known limitation — `LiteralValue::Empty → Number(0.0)`**: empty cells
+/// are collapsed to `Number(0.0)` matching Excel's display behaviour in
+/// arithmetic context (e.g. `=A1+1` where `A1` is blank yields `1`). When
+/// this propagates to a top-level evaluation, callers cannot distinguish
+/// a cell that evaluates to literal `0` from a cell that was blank. This
+/// is intentional for D-T2; if D-T5's projection needs to round-trip
+/// blank cells faithfully, add an `EvalValue::Empty` variant and remap
+/// that branch.
 fn literal_to_eval(lit: LiteralValue) -> EvalValue {
     match lit {
         LiteralValue::Number(n) => EvalValue::Number(n),
@@ -632,5 +660,51 @@ mod tests {
     #[test]
     fn is_supported_returns_true_for_sum() {
         assert!(is_supported_fn("SUM"));
+    }
+
+    #[test]
+    fn coord_to_a1_handles_multi_letter_columns() {
+        // Bijective base-26: col=1 → A, col=26 → Z, col=27 → AA, col=703 → AAA.
+        assert_eq!(coord_to_a1(1, 1), "A1");
+        assert_eq!(coord_to_a1(1, 26), "Z1");
+        assert_eq!(coord_to_a1(1, 27), "AA1");
+        assert_eq!(coord_to_a1(12, 703), "AAA12");
+    }
+
+    #[test]
+    fn function_names_dedupes_repeats() {
+        let ParseOutcome::Ok(ast) = parse("=SUM(A1)+SUM(B1)+AVERAGE(A1:A3)") else {
+            panic!()
+        };
+        let names = function_names(&ast);
+        let mut sorted = names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted, names, "function_names output must already be dedup'd");
+        assert_eq!(names.len(), 2, "expected 2 distinct fns, got {names:?}");
+        assert!(names.iter().any(|n| n.eq_ignore_ascii_case("SUM")));
+        assert!(names.iter().any(|n| n.eq_ignore_ascii_case("AVERAGE")));
+    }
+
+    #[test]
+    fn parse_marks_unknown_function_as_needs_browser() {
+        // "BOGUSXYZ" is not a real Excel function and should not be registered.
+        // If formualizer ever adds it, swap for another guaranteed-missing name.
+        assert!(
+            !is_supported_fn("BOGUSXYZ"),
+            "precondition: BOGUSXYZ must be unsupported"
+        );
+        let outcome = parse("=BOGUSXYZ(A1)");
+        match outcome {
+            ParseOutcome::NeedsBrowser { unsupported_fns } => {
+                assert!(
+                    unsupported_fns
+                        .iter()
+                        .any(|n| n.eq_ignore_ascii_case("BOGUSXYZ")),
+                    "expected BOGUSXYZ in unsupported_fns, got {unsupported_fns:?}"
+                );
+            }
+            other => panic!("expected NeedsBrowser, got {other:?}"),
+        }
     }
 }
