@@ -72,6 +72,66 @@ pub(crate) fn project_sheet<T: yrs::ReadTxn>(
     serde_json::json!({ "id": id, "name": name, "cells": cells_out })
 }
 
+/// Formula-aware projection of a single sheet's cells.
+///
+/// Returns a flat A1-keyed map (same key shape as the default `project_sheet`
+/// `cells` field). Each value is an object `{v}` for literal cells, or
+/// `{v, f, fs}` when the cell carries formula metadata. Used by
+/// `crdt_doc_read(include_formulas=true)` so the agent can audit or inspect
+/// formulas without changing the default (scalar / pandas-friendly) shape.
+///
+/// Returns an empty map if `sheet_id` is not present in the workbook.
+pub fn project_sheet_cells_with_formulas(
+    doc: &Doc,
+    sheet_id: &str,
+) -> serde_json::Map<String, Value> {
+    let txn = doc.transact();
+    let mut out = serde_json::Map::new();
+    let Some(workbook) = txn.get_map("workbook") else {
+        return out;
+    };
+    let Some(yrs::Out::YArray(sheets)) = workbook.get(&txn, "sheets") else {
+        return out;
+    };
+    for i in 0..sheets.len(&txn) {
+        let Some(yrs::Out::YMap(sheet)) = sheets.get(&txn, i) else {
+            continue;
+        };
+        let id_matches = matches!(
+            sheet.get(&txn, "id"),
+            Some(yrs::Out::Any(yrs::Any::String(ref s))) if s.as_ref() == sheet_id
+        );
+        if !id_matches {
+            continue;
+        }
+        let Some(yrs::Out::YMap(cells)) = sheet.get(&txn, "cells") else {
+            return out;
+        };
+        for (addr, cell_val) in cells.iter(&txn) {
+            let yrs::Out::YMap(cell_map) = cell_val else {
+                continue;
+            };
+            // Skip cells without `v` to match `project_sheet`'s contract
+            // (malformed cells are silently dropped).
+            let v = match cell_map.get(&txn, "v") {
+                Some(yrs::Out::Any(any)) => any_to_json(&any),
+                _ => continue,
+            };
+            let mut entry = serde_json::Map::new();
+            entry.insert("v".to_string(), v);
+            if let Some(yrs::Out::Any(yrs::Any::String(f))) = cell_map.get(&txn, "f") {
+                entry.insert("f".to_string(), Value::String(f.to_string()));
+            }
+            if let Some(yrs::Out::Any(yrs::Any::String(fs))) = cell_map.get(&txn, "fs") {
+                entry.insert("fs".to_string(), Value::String(fs.to_string()));
+            }
+            out.insert(addr.to_string(), Value::Object(entry));
+        }
+        break;
+    }
+    out
+}
+
 fn any_to_json(any: &yrs::Any) -> Value {
     match any {
         yrs::Any::Null | yrs::Any::Undefined => Value::Null,
@@ -229,5 +289,60 @@ mod tests {
             "p50 was {}us, want < 50000us (50ms)",
             p50_us
         );
+    }
+}
+
+#[cfg(test)]
+mod formula_projection_tests {
+    use super::*;
+    use crate::crdt_documents::tool_executor::{apply_add_sheet, apply_set_cell_in_proc};
+    use yrs::Doc;
+
+    #[test]
+    fn project_with_formulas_emits_v_f_fs() {
+        // Seed: A1=5 (literal), B1="=A1*2" (backend-eval formula).
+        let doc = Doc::new();
+        let sheet_id = apply_add_sheet(&doc, "Sheet1");
+        let _ = apply_set_cell_in_proc(&doc, &sheet_id, "A1", &serde_json::json!(5));
+        let _ = apply_set_cell_in_proc(&doc, &sheet_id, "B1", &serde_json::json!("=A1*2"));
+
+        let cells = project_sheet_cells_with_formulas(&doc, &sheet_id);
+        assert_eq!(cells.len(), 2, "expected A1 and B1, got {cells:?}");
+
+        // A1 has no formula → just {v}.
+        let a1 = cells["A1"].as_object().expect("A1 is object");
+        assert_eq!(a1.get("v").and_then(|v| v.as_f64()), Some(5.0));
+        assert!(a1.get("f").is_none(), "A1 should not have 'f'");
+        assert!(a1.get("fs").is_none(), "A1 should not have 'fs'");
+
+        // B1 has a formula → {v, f, fs}.
+        let b1 = cells["B1"].as_object().expect("B1 is object");
+        assert_eq!(
+            b1.get("v").and_then(|v| v.as_f64()),
+            Some(10.0),
+            "B1 v should be evaluated 10.0"
+        );
+        assert_eq!(b1.get("f").and_then(|v| v.as_str()), Some("=A1*2"));
+        assert_eq!(
+            b1.get("fs").and_then(|v| v.as_str()),
+            Some("be"),
+            "B1 fs should be 'be' (backend-evaluated)"
+        );
+    }
+
+    #[test]
+    fn project_with_formulas_empty_sheet_returns_empty() {
+        let doc = Doc::new();
+        let out = project_sheet_cells_with_formulas(&doc, "nonexistent");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn project_with_formulas_unknown_sheet_id_returns_empty() {
+        let doc = Doc::new();
+        let real_sheet_id = apply_add_sheet(&doc, "Real");
+        let _ = apply_set_cell_in_proc(&doc, &real_sheet_id, "A1", &serde_json::json!(1));
+        let out = project_sheet_cells_with_formulas(&doc, "sh_does_not_exist");
+        assert!(out.is_empty());
     }
 }

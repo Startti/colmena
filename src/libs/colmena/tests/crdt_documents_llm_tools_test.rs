@@ -47,6 +47,7 @@ async fn full_tool_sequence_round_trips_through_runtime() {
         ReadArgs {
             sheet_id: sheet_id.clone(),
             range: Some("A1:B3".into()),
+            include_formulas: false,
         },
     );
     let cells = v["cells"].as_object().unwrap();

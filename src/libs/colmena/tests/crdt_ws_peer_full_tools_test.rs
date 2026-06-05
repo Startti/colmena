@@ -154,6 +154,7 @@ async fn six_tools_round_trip_via_ws_peer() {
         ReadArgs {
             sheet_id: inventory_id.clone(),
             range: None,
+            include_formulas: false,
         },
     );
     let cells = v["cells"].as_object().expect("cells object");
@@ -168,6 +169,7 @@ async fn six_tools_round_trip_via_ws_peer() {
         ReadArgs {
             sheet_id: inventory_id.clone(),
             range: Some("A2:A4".into()),
+            include_formulas: false,
         },
     );
     let cells = v["cells"].as_object().unwrap();

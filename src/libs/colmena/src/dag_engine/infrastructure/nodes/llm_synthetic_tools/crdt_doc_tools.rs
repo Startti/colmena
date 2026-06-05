@@ -275,6 +275,11 @@ pub struct ReadArgs {
     /// Optional A1-style range, e.g. "A1:D10". Omit for all cells.
     #[serde(default)]
     pub range: Option<String>,
+    /// When true, each cell becomes `{v}` or `{v, f, fs}` (formula text +
+    /// source tag) instead of a bare scalar. Default false keeps the
+    /// pandas-friendly shape. Use for auditing or inspecting formulas.
+    #[serde(default)]
+    pub include_formulas: bool,
 }
 
 /// Build the [`ToolDefinition`] for `crdt_doc_read`.
@@ -282,7 +287,9 @@ pub fn tool_read() -> ToolDefinition {
     super::build_synthetic_tool::<ReadArgs>(
         TOOL_READ,
         "Read cell values from a sheet. Returns a flat map of A1 addresses \
-         to values. Optionally restricts to a range.",
+         to values (scalars — pandas-friendly). Optionally restricts to a \
+         range. Pass include_formulas:true to get {v, f?, fs?} per cell \
+         (useful for inspecting or auditing formulas).",
     )
 }
 
@@ -291,6 +298,53 @@ pub fn execute_read(ctx: &CrdtDocsContext, args: ReadArgs) -> serde_json::Value 
     let Some(doc) = ctx.doc() else {
         return serde_json::json!({ "error": "artifact_not_found" });
     };
+    // Pre-parse range once so we can apply it to both branches uniformly
+    // (and surface invalid_range before doing any projection work).
+    let range_bounds = match args.range.as_deref() {
+        None => None,
+        Some(range) => match parse_range(range) {
+            Some(b) => Some(b),
+            None => return serde_json::json!({ "error": "invalid_range" }),
+        },
+    };
+    let in_range = |addr: &str| -> bool {
+        match range_bounds {
+            None => true,
+            Some(((r0, c0), (r1, c1))) => match parse_a1(addr) {
+                Some((r, c)) => r >= r0 && r <= r1 && c >= c0 && c <= c1,
+                None => false,
+            },
+        }
+    };
+
+    if args.include_formulas {
+        // D-T6: formula-aware shape. Verify the sheet exists by looking at
+        // the projection's sheet ids — `project_sheet_cells_with_formulas`
+        // returns an empty map for unknown sheets, which would otherwise
+        // mask "sheet_not_found" as "empty sheet".
+        let proj = crate::crdt_documents::projection::project(&doc);
+        let sheet_exists = proj["sheets"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .any(|s| s["id"].as_str() == Some(args.sheet_id.as_str()))
+            })
+            .unwrap_or(false);
+        if !sheet_exists {
+            return serde_json::json!({ "error": "sheet_not_found" });
+        }
+        let all_cells = crate::crdt_documents::projection::project_sheet_cells_with_formulas(
+            &doc,
+            &args.sheet_id,
+        );
+        let filtered: serde_json::Map<String, serde_json::Value> = all_cells
+            .into_iter()
+            .filter(|(addr, _)| in_range(addr))
+            .collect();
+        return serde_json::json!({ "sheet_id": args.sheet_id, "cells": filtered });
+    }
+
+    // Default (back-compat): scalar values, pandas-friendly.
     let proj = crate::crdt_documents::projection::project(&doc);
     let sheets = proj["sheets"].as_array().cloned().unwrap_or_default();
     let Some(sheet) = sheets
@@ -300,21 +354,10 @@ pub fn execute_read(ctx: &CrdtDocsContext, args: ReadArgs) -> serde_json::Value 
         return serde_json::json!({ "error": "sheet_not_found" });
     };
     let cells = sheet["cells"].as_object().cloned().unwrap_or_default();
-    let filtered: serde_json::Map<String, serde_json::Value> = match args.range {
-        None => cells.into_iter().collect(),
-        Some(range) => {
-            let Some(((r0, c0), (r1, c1))) = parse_range(&range) else {
-                return serde_json::json!({ "error": "invalid_range" });
-            };
-            cells
-                .into_iter()
-                .filter(|(addr, _)| match parse_a1(addr) {
-                    Some((r, c)) => r >= r0 && r <= r1 && c >= c0 && c <= c1,
-                    None => false,
-                })
-                .collect()
-        }
-    };
+    let filtered: serde_json::Map<String, serde_json::Value> = cells
+        .into_iter()
+        .filter(|(addr, _)| in_range(addr))
+        .collect();
     serde_json::json!({ "sheet_id": args.sheet_id, "cells": filtered })
 }
 
@@ -935,6 +978,7 @@ mod tests {
             ReadArgs {
                 sheet_id,
                 range: None,
+                include_formulas: false,
             },
         );
         assert_eq!(v["cells"]["A1"], "hello");
@@ -960,6 +1004,7 @@ mod tests {
             ReadArgs {
                 sheet_id,
                 range: None,
+                include_formulas: false,
             },
         );
         assert_eq!(v["cells"]["B2"], "a");
@@ -1067,6 +1112,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_with_include_formulas_returns_v_f_fs() {
+        // D-T6: include_formulas=true → cells become {v}/{v,f,fs} objects.
+        let (ctx, tmp) = fresh_ctx().await;
+        let s = execute_add_sheet(&ctx, AddSheetArgs { name: "X".into() }).await;
+        let sheet_id = s["sheet_id"].as_str().unwrap().to_string();
+
+        // Literal cell.
+        execute_set_cell(
+            &ctx,
+            SetCellArgs {
+                sheet_id: sheet_id.clone(),
+                addr: "A1".into(),
+                value: json!(5),
+            },
+        )
+        .await;
+        // Formula cell — should be backend-evaluated (fs="be") with v=10.
+        execute_set_cell(
+            &ctx,
+            SetCellArgs {
+                sheet_id: sheet_id.clone(),
+                addr: "B1".into(),
+                value: json!("=A1*2"),
+            },
+        )
+        .await;
+
+        // Default read (back-compat): scalars.
+        let v_scalar = execute_read(
+            &ctx,
+            ReadArgs {
+                sheet_id: sheet_id.clone(),
+                range: None,
+                include_formulas: false,
+            },
+        );
+        assert_eq!(v_scalar["cells"]["A1"], json!(5.0));
+        assert_eq!(v_scalar["cells"]["B1"], json!(10.0));
+
+        // Formula-aware read.
+        let v = execute_read(
+            &ctx,
+            ReadArgs {
+                sheet_id: sheet_id.clone(),
+                range: None,
+                include_formulas: true,
+            },
+        );
+        let a1 = v["cells"]["A1"].as_object().expect("A1 is object");
+        assert_eq!(a1["v"], json!(5.0));
+        assert!(a1.get("f").is_none());
+        assert!(a1.get("fs").is_none());
+
+        let b1 = v["cells"]["B1"].as_object().expect("B1 is object");
+        assert_eq!(b1["v"], json!(10.0));
+        assert_eq!(b1["f"], json!("=A1*2"));
+        assert_eq!(b1["fs"], json!("be"));
+
+        // Sheet-not-found still surfaces with include_formulas=true.
+        let err = execute_read(
+            &ctx,
+            ReadArgs {
+                sheet_id: "sh_nope".into(),
+                range: None,
+                include_formulas: true,
+            },
+        );
+        assert_eq!(err["error"], "sheet_not_found");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
     async fn read_with_range_filters() {
         let (ctx, tmp) = fresh_ctx().await;
         let s = execute_add_sheet(&ctx, AddSheetArgs { name: "X".into() }).await;
@@ -1094,6 +1212,7 @@ mod tests {
             ReadArgs {
                 sheet_id,
                 range: Some("A1:B2".into()),
+                include_formulas: false,
             },
         );
         assert_eq!(v["cells"].as_object().unwrap().len(), 1);
