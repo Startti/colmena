@@ -189,6 +189,19 @@ pub enum EvalError {
 pub trait CellResolver: Send + Sync {
     fn get(&self, sheet: &str, addr: &str) -> Option<CellSnapshot>;
     fn sheet_exists(&self, sheet: &str) -> bool;
+
+    /// Iterate every cell that has a formula text, scoped to one sheet.
+    /// Returned tuples: (addr, formula_text). Order arbitrary.
+    ///
+    /// Used by `dependents_of` / `recalc_chain` to build the intra-sheet
+    /// dependency graph. The default `ResolverAdapter` used during
+    /// `evaluate()` never calls this — it's only needed by the dep-graph
+    /// machinery — so implementations that don't drive recalc can return
+    /// an empty iterator (e.g. the smoke-test `StubResolver`).
+    fn iter_formulas_in_sheet<'a>(
+        &'a self,
+        sheet: &str,
+    ) -> Box<dyn Iterator<Item = (String, String)> + 'a>;
 }
 
 /* ─────────────────────────── parse / evaluate ────────────────────────── */
@@ -548,6 +561,190 @@ impl<'a> EvaluationContext for ResolverAdapter<'a> {
     }
 }
 
+/* ────────────────────── dependency graph (D-T3) ──────────────────────── */
+
+/// Collect every cell that `formula` references, resolved against
+/// `current_sheet` for unqualified refs (e.g. `A1` on `Sheet1` → `("Sheet1","A1")`).
+/// Range references are expanded to the full set of constituent cells in
+/// row-major order (left-to-right within each row, top-to-bottom across rows).
+///
+/// Returned tuples are `(sheet, addr)` where `addr` is A1-style.
+///
+/// **Implementation choice:** delegates to formualizer's built-in
+/// `ASTNode::get_dependencies()` (verified at
+/// `formualizer-parse-2.0.0/src/parser.rs:1823`) which already walks every
+/// AST variant and returns `Vec<&ReferenceType>` in source order. We only
+/// need to (a) drop non-cell flavours (NamedRange/Table/External/3D — they
+/// can't appear in v1's intra-sheet dep graph anyway) and (b) expand range
+/// references to their full cell list. Hand-rolling the walker (à la
+/// `walk_for_fns`) would duplicate `collect_dependencies` for no benefit.
+///
+/// Non-cell reference flavours (`NamedRange`, `Table`, `External`, `Cell3D`,
+/// `Range3D`) are silently skipped — D-T3's recalc graph is intra-sheet
+/// rectangular only; spec §11 defers those flavours to a later iteration.
+pub fn referenced_cells(formula: &ParsedFormula, current_sheet: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for r in formula.ast.get_dependencies() {
+        match r {
+            ReferenceType::Cell {
+                sheet, row, col, ..
+            } => {
+                let sheet_name = sheet.as_deref().unwrap_or(current_sheet).to_string();
+                out.push((sheet_name, coord_to_a1(*row, *col)));
+            }
+            ReferenceType::Range {
+                sheet,
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+                ..
+            } => {
+                let (Some(sr), Some(sc), Some(er), Some(ec)) =
+                    (*start_row, *start_col, *end_row, *end_col)
+                else {
+                    // Unbounded ranges (A:A, 1:1) are not supported in v1 —
+                    // skip rather than fabricate a phantom cell list.
+                    continue;
+                };
+                let (sr, er) = if sr <= er { (sr, er) } else { (er, sr) };
+                let (sc, ec) = if sc <= ec { (sc, ec) } else { (ec, sc) };
+                let sheet_name = sheet.as_deref().unwrap_or(current_sheet).to_string();
+                for row in sr..=er {
+                    for col in sc..=ec {
+                        out.push((sheet_name.clone(), coord_to_a1(row, col)));
+                    }
+                }
+            }
+            // NamedRange / Table / External / Cell3D / Range3D — out of scope
+            // for the v1 dep graph.
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Find every cell in `sheet` whose formula directly references
+/// `(sheet, changed_addr)`. Intra-sheet only — cross-sheet dependents are
+/// not returned in v1 (spec §11).
+pub fn dependents_of(
+    changed_addr: &str,
+    sheet: &str,
+    resolver: &dyn CellResolver,
+) -> Vec<(String, String)> {
+    let target = (sheet.to_string(), changed_addr.to_string());
+    let mut out = Vec::new();
+    for (other_addr, text) in resolver.iter_formulas_in_sheet(sheet) {
+        if let ParseOutcome::Ok(ast) = parse(&text) {
+            if referenced_cells(&ast, sheet).contains(&target) {
+                out.push((sheet.to_string(), other_addr));
+            }
+        }
+    }
+    out
+}
+
+/// Error returned by `recalc_chain` when the dependency graph contains a
+/// cycle. `chain` lists the cells that participate in the cycle (i.e. the
+/// nodes whose in-degree never reached zero in the Kahn pass).
+#[derive(Debug, thiserror::Error)]
+#[error("cycle detected: {chain:?}")]
+pub struct CycleError {
+    pub chain: Vec<(String, String)>,
+}
+
+/// Compute the topological recalc order starting from a cell that just
+/// changed. Walks the transitive intra-sheet dependents reachable from
+/// `(sheet, changed_addr)` and returns them in dependency order — every cell
+/// appears after all the cells it depends on.
+///
+/// The starting cell is **not** included in the returned chain (it is the
+/// cause of the recalc, not a target of it).
+///
+/// Returns `CycleError` if the dep graph contains a cycle; the error's
+/// `chain` lists the cycle participants.
+///
+/// Algorithm: BFS to discover the transitive set of dependents, then build
+/// adjacency / in-degree maps and run Kahn's topo sort starting from the
+/// changed cell (in-degree 0). Any node still showing in-degree > 0 after
+/// the queue empties is on a cycle.
+pub fn recalc_chain(
+    changed_addr: &str,
+    sheet: &str,
+    resolver: &dyn CellResolver,
+) -> Result<Vec<(String, String)>, CycleError> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    let start = (sheet.to_string(), changed_addr.to_string());
+
+    // BFS to find every cell transitively dependent on `start`. Each edge
+    // points from a cell to a cell that references it (predecessor →
+    // successor in the recalc order).
+    let mut nodes: HashSet<(String, String)> = HashSet::new();
+    nodes.insert(start.clone());
+    let mut adjacency: HashMap<(String, String), Vec<(String, String)>> = HashMap::new();
+    let mut frontier: VecDeque<(String, String)> = VecDeque::new();
+    frontier.push_back(start.clone());
+
+    while let Some(cell) = frontier.pop_front() {
+        let direct = dependents_of(&cell.1, &cell.0, resolver);
+        for dep in direct {
+            adjacency.entry(cell.clone()).or_default().push(dep.clone());
+            if nodes.insert(dep.clone()) {
+                frontier.push_back(dep);
+            }
+        }
+    }
+
+    // Compute in-degree for each discovered node.
+    let mut in_degree: HashMap<(String, String), usize> =
+        nodes.iter().map(|n| (n.clone(), 0_usize)).collect();
+    for succs in adjacency.values() {
+        for s in succs {
+            *in_degree.entry(s.clone()).or_insert(0) += 1;
+        }
+    }
+
+    // Kahn: start the queue from nodes with in-degree 0. In a healthy graph
+    // that's just `start` (everything else is reached via at least one
+    // edge); on a cycle there may be no zero-degree node and the queue
+    // stays empty.
+    let mut queue: VecDeque<(String, String)> = in_degree
+        .iter()
+        .filter_map(|(n, &d)| if d == 0 { Some(n.clone()) } else { None })
+        .collect();
+
+    let mut order: Vec<(String, String)> = Vec::with_capacity(nodes.len());
+    while let Some(cell) = queue.pop_front() {
+        order.push(cell.clone());
+        if let Some(succs) = adjacency.get(&cell) {
+            for s in succs {
+                if let Some(d) = in_degree.get_mut(s) {
+                    *d -= 1;
+                    if *d == 0 {
+                        queue.push_back(s.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Any node with in_degree > 0 at this point is on a cycle.
+    if order.len() < nodes.len() {
+        let mut chain: Vec<(String, String)> = in_degree
+            .into_iter()
+            .filter_map(|(n, d)| if d > 0 { Some(n) } else { None })
+            .collect();
+        chain.sort();
+        return Err(CycleError { chain });
+    }
+
+    // Drop the changed cell itself — callers only want the cells they need
+    // to recalc, not the trigger.
+    order.retain(|n| n != &start);
+    Ok(order)
+}
+
 /* ────────────────────────────── tests ────────────────────────────────── */
 
 #[cfg(test)]
@@ -586,6 +783,12 @@ mod tests {
         }
         fn sheet_exists(&self, sheet: &str) -> bool {
             self.sheets.iter().any(|s| s == sheet)
+        }
+        fn iter_formulas_in_sheet<'a>(
+            &'a self,
+            _sheet: &str,
+        ) -> Box<dyn Iterator<Item = (String, String)> + 'a> {
+            Box::new(std::iter::empty())
         }
     }
 
@@ -680,10 +883,144 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort();
         sorted.dedup();
-        assert_eq!(sorted, names, "function_names output must already be dedup'd");
+        assert_eq!(
+            sorted, names,
+            "function_names output must already be dedup'd"
+        );
         assert_eq!(names.len(), 2, "expected 2 distinct fns, got {names:?}");
         assert!(names.iter().any(|n| n.eq_ignore_ascii_case("SUM")));
         assert!(names.iter().any(|n| n.eq_ignore_ascii_case("AVERAGE")));
+    }
+
+    /* ───── dep-graph fixture + tests (D-T3) ───── */
+
+    pub(super) struct ResolverWithFormulas {
+        pub cells: HashMap<(String, String), CellSnapshot>,
+        pub formulas: HashMap<(String, String), String>,
+        pub sheets: Vec<String>,
+    }
+
+    impl ResolverWithFormulas {
+        pub fn new(sheets: &[&str]) -> Self {
+            Self {
+                cells: HashMap::new(),
+                formulas: HashMap::new(),
+                sheets: sheets.iter().map(|s| s.to_string()).collect(),
+            }
+        }
+        pub fn set_num(&mut self, sheet: &str, addr: &str, v: f64) {
+            self.cells.insert(
+                (sheet.to_string(), addr.to_string()),
+                CellSnapshot {
+                    v: serde_json::json!(v),
+                    t: 2,
+                },
+            );
+        }
+        pub fn set_formula(&mut self, sheet: &str, addr: &str, f: &str) {
+            self.formulas
+                .insert((sheet.to_string(), addr.to_string()), f.to_string());
+        }
+    }
+
+    impl CellResolver for ResolverWithFormulas {
+        fn get(&self, sheet: &str, addr: &str) -> Option<CellSnapshot> {
+            self.cells
+                .get(&(sheet.to_string(), addr.to_string()))
+                .cloned()
+        }
+        fn sheet_exists(&self, sheet: &str) -> bool {
+            self.sheets.iter().any(|s| s == sheet)
+        }
+        fn iter_formulas_in_sheet<'a>(
+            &'a self,
+            sheet: &str,
+        ) -> Box<dyn Iterator<Item = (String, String)> + 'a> {
+            let s = sheet.to_string();
+            Box::new(
+                self.formulas
+                    .iter()
+                    .filter(move |((sh, _), _)| sh == &s)
+                    .map(|((_, addr), f)| (addr.clone(), f.clone())),
+            )
+        }
+    }
+
+    #[test]
+    fn referenced_cells_single_ref() {
+        let ParseOutcome::Ok(ast) = parse("=A1+1") else {
+            panic!()
+        };
+        let refs = referenced_cells(&ast, "Sheet1");
+        assert_eq!(refs, vec![("Sheet1".to_string(), "A1".to_string())]);
+    }
+
+    #[test]
+    fn referenced_cells_range_expanded() {
+        let ParseOutcome::Ok(ast) = parse("=SUM(A1:A3)") else {
+            panic!()
+        };
+        let refs = referenced_cells(&ast, "Sheet1");
+        assert_eq!(
+            refs,
+            vec![
+                ("Sheet1".to_string(), "A1".to_string()),
+                ("Sheet1".to_string(), "A2".to_string()),
+                ("Sheet1".to_string(), "A3".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn referenced_cells_cross_sheet_keeps_other_sheet() {
+        let ParseOutcome::Ok(ast) = parse("=Sheet2!A1+B2") else {
+            panic!()
+        };
+        let mut refs = referenced_cells(&ast, "Sheet1");
+        refs.sort();
+        assert_eq!(
+            refs,
+            vec![
+                ("Sheet1".to_string(), "B2".to_string()),
+                ("Sheet2".to_string(), "A1".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn dependents_of_finds_direct_reference() {
+        let mut r = ResolverWithFormulas::new(&["Sheet1"]);
+        r.set_num("Sheet1", "A1", 5.0);
+        r.set_formula("Sheet1", "B1", "=A1+1");
+
+        let deps = dependents_of("A1", "Sheet1", &r);
+        assert_eq!(deps, vec![("Sheet1".to_string(), "B1".to_string())]);
+    }
+
+    #[test]
+    fn recalc_chain_linear_order() {
+        // A1 changes; B1 = A1+1; C1 = B1*2. Expected order: B1, then C1.
+        let mut r = ResolverWithFormulas::new(&["Sheet1"]);
+        r.set_num("Sheet1", "A1", 1.0);
+        r.set_formula("Sheet1", "B1", "=A1+1");
+        r.set_formula("Sheet1", "C1", "=B1*2");
+        let chain = recalc_chain("A1", "Sheet1", &r).unwrap();
+        assert_eq!(
+            chain,
+            vec![
+                ("Sheet1".to_string(), "B1".to_string()),
+                ("Sheet1".to_string(), "C1".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn recalc_chain_detects_cycle() {
+        let mut r = ResolverWithFormulas::new(&["Sheet1"]);
+        r.set_formula("Sheet1", "A1", "=B1+1");
+        r.set_formula("Sheet1", "B1", "=A1+1");
+        let res = recalc_chain("A1", "Sheet1", &r);
+        assert!(matches!(res, Err(CycleError { .. })));
     }
 
     #[test]
