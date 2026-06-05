@@ -9,3 +9,4 @@
 //! and delegate to the `SheetsClient` trait.
 
 pub mod domain;
+pub mod infrastructure;
