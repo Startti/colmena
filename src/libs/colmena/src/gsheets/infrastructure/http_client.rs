@@ -20,6 +20,14 @@ pub struct GoogleSheetsHttpClient {
     http: Client,
     token: TokenProvider,
     max_retries: u32,
+    /// Base unit for exponential backoff. Production uses 1s; tests use
+    /// 50ms to keep wiremock tests fast.
+    retry_base_delay: Duration,
+    /// Service account email parsed from the credentials JSON, if any.
+    /// Used to populate `PermissionDenied(sa_email)` so the agent can
+    /// tell the user which email to share spreadsheets with. Empty
+    /// string when running under ADC (no SA JSON file available).
+    sa_email: String,
     sheets_base: String,
     #[allow(dead_code)] // Used by E-T5 admin endpoints (create/export xlsx).
     drive_base: String,
@@ -34,10 +42,26 @@ impl GoogleSheetsHttpClient {
             .timeout(cfg.request_timeout)
             .build()
             .map_err(|e| SheetsError::Internal(format!("reqwest builder: {e}")))?;
+        // Parse the SA email out of the credentials JSON once at construction
+        // so PermissionDenied can carry it as a hint. Failure to read or
+        // parse falls back silently to empty string (ADC path also empty).
+        let sa_email = cfg
+            .credentials_path
+            .as_ref()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .and_then(|v| {
+                v.get("client_email")
+                    .and_then(|e| e.as_str())
+                    .map(String::from)
+            })
+            .unwrap_or_default();
         Ok(Self {
             http,
             token: TokenProvider::new(cfg.scopes.clone()),
             max_retries: cfg.max_retries,
+            retry_base_delay: Duration::from_secs(1), // production: 1s/2s/4s
+            sa_email,
             sheets_base: SHEETS_BASE.to_string(),
             drive_base: DRIVE_BASE.to_string(),
             drive_upload_base: DRIVE_UPLOAD_BASE.to_string(),
@@ -56,6 +80,8 @@ impl GoogleSheetsHttpClient {
                 .unwrap(),
             token: TokenProvider::new(vec!["test".to_string()]),
             max_retries: 2,
+            retry_base_delay: Duration::from_millis(50), // tests: 50ms/100ms/200ms
+            sa_email: String::new(),                     // ADC-style for tests
             sheets_base: sheets_base.to_string(),
             drive_base: drive_base.to_string(),
             drive_upload_base: drive_upload_base.to_string(),
@@ -85,21 +111,21 @@ impl GoogleSheetsHttpClient {
                     continue;
                 }
                 StatusCode::FORBIDDEN => {
-                    return Err(SheetsError::PermissionDenied(String::new()));
+                    return Err(SheetsError::PermissionDenied(self.sa_email.clone()));
                 }
                 StatusCode::NOT_FOUND => {
                     return Err(SheetsError::SpreadsheetNotFound(url.to_string()));
                 }
                 StatusCode::TOO_MANY_REQUESTS => {
                     if attempt < self.max_retries {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        tokio::time::sleep(self.retry_base_delay * (1 << attempt)).await;
                         continue;
                     }
                     return Err(SheetsError::RateLimit(60));
                 }
                 s if s.is_server_error() => {
                     if attempt < self.max_retries {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        tokio::time::sleep(self.retry_base_delay * (1 << attempt)).await;
                         continue;
                     }
                     return Err(SheetsError::Http(format!("server error {s}")));
@@ -137,7 +163,7 @@ impl GoogleSheetsHttpClient {
                     continue;
                 }
                 StatusCode::FORBIDDEN => {
-                    return Err(SheetsError::PermissionDenied(String::new()));
+                    return Err(SheetsError::PermissionDenied(self.sa_email.clone()));
                 }
                 StatusCode::NOT_FOUND => {
                     return Err(SheetsError::SpreadsheetNotFound(url.to_string()));
@@ -151,14 +177,14 @@ impl GoogleSheetsHttpClient {
                 }
                 StatusCode::TOO_MANY_REQUESTS => {
                     if attempt < self.max_retries {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        tokio::time::sleep(self.retry_base_delay * (1 << attempt)).await;
                         continue;
                     }
                     return Err(SheetsError::RateLimit(60));
                 }
                 s if s.is_server_error() => {
                     if attempt < self.max_retries {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        tokio::time::sleep(self.retry_base_delay * (1 << attempt)).await;
                         continue;
                     }
                     return Err(SheetsError::Http(format!("server error {s}")));
@@ -182,9 +208,10 @@ impl SheetsClient for GoogleSheetsHttpClient {
         range: Option<&str>,
         opts: ReadOptions,
     ) -> Result<ReadResponse, SheetsError> {
+        let quoted_sheet = quote_sheet_for_range(sheet);
         let full_range = match range {
-            Some(r) => format!("{sheet}!{r}"),
-            None => sheet.to_string(),
+            Some(r) => format!("{quoted_sheet}!{r}"),
+            None => quoted_sheet,
         };
         let url = format!(
             "{}/{}/values/{}?valueRenderOption={}",
@@ -256,7 +283,7 @@ impl SheetsClient for GoogleSheetsHttpClient {
         addr: &str,
         value: CellValue,
     ) -> Result<(), SheetsError> {
-        let range = format!("{sheet}!{addr}");
+        let range = format!("{}!{addr}", quote_sheet_for_range(sheet));
         let url = format!(
             "{}/{}/values/{}?valueInputOption=USER_ENTERED",
             self.sheets_base,
@@ -279,7 +306,7 @@ impl SheetsClient for GoogleSheetsHttpClient {
         start_addr: &str,
         values_2d: Vec<Vec<CellValue>>,
     ) -> Result<SetRangeResponse, SheetsError> {
-        let range = format!("{sheet}!{start_addr}");
+        let range = format!("{}!{start_addr}", quote_sheet_for_range(sheet));
         let url = format!(
             "{}/{}/values/{}?valueInputOption=USER_ENTERED",
             self.sheets_base,
@@ -335,8 +362,32 @@ impl SheetsClient for GoogleSheetsHttpClient {
     }
 }
 
+/// Wrap a sheet name in single quotes if it contains anything other
+/// than ASCII alphanumeric or underscore. Internal `'` characters are
+/// escaped by doubling per Google's range syntax: `It's` → `'It''s'`.
+fn quote_sheet_for_range(sheet: &str) -> String {
+    let needs_quoting = sheet.is_empty()
+        || sheet
+            .chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || c == '_'));
+    if needs_quoting {
+        format!("'{}'", sheet.replace('\'', "''"))
+    } else {
+        sheet.to_string()
+    }
+}
+
 /// Convert a `[[col_header,...], [v1, v2, ...], ...]` rectangle into
 /// `[{col_header: v1, ...}, ...]`. The first row is taken as headers.
+///
+/// Contract (pinned by unit tests):
+/// - Rows with MORE cells than headers: extra cells are silently
+///   discarded (column-projection model — matches pandas behavior).
+/// - Headers with empty names (`""`): those columns are skipped, and
+///   the corresponding cell in every data row is omitted from the
+///   record.
+/// - Rows with FEWER cells than headers: missing cells become
+///   `Value::Null`.
 fn rectangle_to_records(rect: &Value) -> Value {
     let Some(rows) = rect.as_array() else {
         return Value::Array(Vec::new());
@@ -534,7 +585,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_range_401_refreshes_token_and_retries_once() {
+    async fn read_range_401_invalidates_cache_and_retries() {
+        // NOTE: this test asserts the RETRY behavior after a 401 only.
+        // It does NOT verify that a FRESH token is sent on the retry —
+        // doing so would require either mocking yup-oauth2 (out of scope
+        // for the unit-test layer) or restructuring `TokenProvider` to
+        // accept an injectable token source. The end-to-end refresh path
+        // is covered by the integration tests in E-T9.
         let (server, client) = setup_mock().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(401))
@@ -563,5 +620,33 @@ mod tests {
             .await
             .expect("retry succeeds");
         assert_eq!(resp.values, serde_json::json!([["ok"]]));
+    }
+
+    #[test]
+    fn rectangle_to_records_drops_cells_past_header_count() {
+        let rect = serde_json::json!([
+            ["A", "B"],   // 2 headers
+            [1, 2, 3, 4], // 4 cells — extras 3 and 4 dropped
+        ]);
+        let r = rectangle_to_records(&rect);
+        assert_eq!(r, serde_json::json!([{"A": 1, "B": 2}]));
+    }
+
+    #[test]
+    fn rectangle_to_records_skips_columns_with_empty_headers() {
+        let rect = serde_json::json!([
+            ["A", "", "C"], // middle header empty
+            [1, 2, 3],
+        ]);
+        let r = rectangle_to_records(&rect);
+        assert_eq!(r, serde_json::json!([{"A": 1, "C": 3}]));
+    }
+
+    #[test]
+    fn quote_sheet_for_range_handles_spaces_and_apostrophes() {
+        assert_eq!(quote_sheet_for_range("Sheet1"), "Sheet1");
+        assert_eq!(quote_sheet_for_range("My Sheet"), "'My Sheet'");
+        assert_eq!(quote_sheet_for_range("It's"), "'It''s'");
+        assert_eq!(quote_sheet_for_range(""), "''");
     }
 }
