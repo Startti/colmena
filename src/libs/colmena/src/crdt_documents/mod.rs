@@ -12,6 +12,7 @@ pub mod df_records;
 pub mod df_writer;
 pub mod doc_registry;
 pub mod formula_engine;
+pub mod formula_engine_yrs_resolver;
 pub mod narration;
 pub mod process_runtime;
 pub mod projection;
