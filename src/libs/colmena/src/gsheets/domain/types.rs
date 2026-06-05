@@ -48,6 +48,8 @@ impl CellValue {
         }
     }
 
+    /// Convert back to a `serde_json::Value` for tool-result payloads
+    /// or wire encoding. Inverse of [`Self::from_json`].
     pub fn to_json(&self) -> serde_json::Value {
         match self {
             Self::Null => serde_json::Value::Null,
@@ -71,6 +73,8 @@ pub enum ValueRenderOption {
 }
 
 impl ValueRenderOption {
+    /// Wire-format string for the Sheets API `valueRenderOption`
+    /// query param. Matches the names Google's REST docs use.
     pub fn as_api_str(self) -> &'static str {
         match self {
             Self::FormattedValue => "FORMATTED_VALUE",
@@ -81,7 +85,7 @@ impl ValueRenderOption {
 }
 
 /// Options passed to a read call.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadOptions {
     pub value_render: ValueRenderOption,
     /// When true, the response shape is a list of records keyed by the
