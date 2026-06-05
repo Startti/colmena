@@ -414,7 +414,16 @@
           const parsed = parseAddr(addr);
           if (!parsed) continue;
           replayCellValue[parsed.row] = replayCellValue[parsed.row] || {};
-          replayCellValue[parsed.row][parsed.col] = { v: cellMap.get("v") };
+          const cellOut = { v: cellMap.get("v") };
+          const fText = cellMap.get("f");
+          if (fText !== undefined && fText !== null && fText !== "") {
+            cellOut.f = fText;
+          }
+          const fsTag = cellMap.get("fs");
+          if (fsTag !== undefined && fsTag !== null && fsTag !== "") {
+            cellOut.fs = fsTag;
+          }
+          replayCellValue[parsed.row][parsed.col] = cellOut;
         }
         if (Object.keys(replayCellValue).length === 0) return;
         const workbook = instanceService.getCurrentUnitForType(2);
