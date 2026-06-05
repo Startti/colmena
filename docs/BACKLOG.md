@@ -289,6 +289,60 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 
 ---
 
+## CRDT Documents v1.1 — Formulas (subsystem D follow-ups)
+
+Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 → 2026-06-05). El core ya está shippeado en develop; estos son refinamientos diferidos.
+
+- [ ] **Cross-sheet eager recalc** — cuando `Sheet2!A1` cambia, los
+  dependientes en `Sheet1` que la referencian deben auto-actualizarse.
+  Hoy quedan stale hasta que alguien los re-toca. Spec §11.
+
+- [ ] **`crdt_doc_recalc(sheet?, all=true)` tool** — refresh explícito,
+  necesario para el caso cross-sheet stale y para escenarios post-import.
+
+- [ ] **Cross-artifact references** `='[OtherWB.xlsx]Sheet1'!A1`.
+
+- [ ] **Array formulas** `{=SUM(A1:A10*B1:B10)}` — validar semántica de
+  formualizer, diseñar UI de spill.
+
+- [ ] **Defined names** `=SalesTotal`.
+
+- [ ] **AST caching** por celda para evitar re-parse en cada recalc.
+
+- [ ] **Univer-side `fs:"fe"` hook** — patch chico en el cliente (~30
+  líneas) para que las fórmulas tipeadas por el usuario carguen
+  `fs:"fe"` en vez de `fs:undefined`.
+
+- [ ] **Anti-divergence Playwright bridge** — terminar el evaluador
+  Univer-side en `tests/formula_divergence.rs` (el test
+  `univer_matches_formualizer` está stub con `unimplemented!()`). El
+  bridge spawnaría headless Chromium via Playwright, cargaría Univer,
+  evaluaría cada fixture en el browser y compararía contra formualizer.
+  Crecer el corpus hacia el target original de 80 fixtures cuando el
+  bridge exista.
+
+- [ ] **Structured `kind` field on CRDT events** — hoy
+  `formula_replaced_by_literal` está codificado en el string `summary`
+  con un prefix. Un enum `kind` tipado en el event store sería más
+  robusto para parsing downstream.
+
+- [ ] **Textual-fallback recalc for `needs_browser` cells** — hoy
+  `dependents_of` silenciosamente excluye celdas con `fs:"needs_browser"`
+  del grafo de dependencias (porque `parse()` retorna `NeedsBrowser` para
+  ellas). Un scan textual atraparía refs a A1 dentro de una fórmula
+  no-parseable y al menos notificaría al usuario que la celda está stale.
+
+- [ ] **`CellResolver::get_formula(sheet, addr)`** método del trait —
+  hoy el lookup walkea `iter_formulas_in_sheet` linealmente. Lookup
+  directo mejoraría performance de recalc en sheets grandes.
+
+**Referencias:**
+- Spec: [`docs/superpowers/specs/2026-06-04-crdt-formulas-design.md`](superpowers/specs/2026-06-04-crdt-formulas-design.md).
+- Plan: [`docs/superpowers/plans/2026-06-04-crdt-formulas.md`](superpowers/plans/2026-06-04-crdt-formulas.md).
+- Cambios shippeados: ver `docs/CHANGELOG_2026-06.md` → entry D.
+
+---
+
 ## Items resueltos recientemente
 
 El último item — `data:` (base64 inline) auto-summary v2 — se resolvió el 2026-05-18 (ver `docs/CHANGELOG_2026-05.md` → "Inline data: auto-summary (v2)"). Los detalles de la resolución viven en la git history (commits `cc924a3`, `a3053cd`).

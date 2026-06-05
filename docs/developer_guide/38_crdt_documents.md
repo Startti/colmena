@@ -371,6 +371,67 @@ En producción ADP el worker container debe incluir estas deps. Si no están, lo
 
 Spec completa: [`docs/superpowers/specs/2026-06-04-crdt-cross-sheet-analysis-design.md`](../superpowers/specs/2026-06-04-crdt-cross-sheet-analysis-design.md).
 
+### 5.8 Formulas (Subsystem D)
+
+Cells with a value starting with `=` are treated as Excel-style formulas:
+
+- **Parsed and evaluated server-side** by [`formualizer`](https://crates.io/crates/formualizer)
+  before persistence (`apply_set_cell_in_proc`).
+- Cell state grows two optional keys: `f` (formula text) and
+  `fs` (source: `"be"` backend, `"fe"` browser, `"needs_browser"`).
+- Dependent formulas in the same sheet recalculate immediately
+  (intra-sheet eager — cross-sheet recalc is v1.1).
+- Reads return scalars by default. Pass `include_formulas: true`
+  to `crdt_doc_read` to see the `{v, f, fs}` shape.
+- `crdt_doc_list_sheets` returns `formula_count` per sheet so agents can
+  decide whether to bother with the formula-aware read.
+- Unsupported functions (functions formualizer doesn't recognize): cell is
+  written with `fs:"needs_browser"`, value = formula text as placeholder.
+  Tool result includes `warnings: [{kind:"needs_browser", addr, functions}]`.
+- pandas (`run_python`) writing back over a formula cell removes `f`/`fs`,
+  records a `FormulaReplacement` in `DfWriterOutcome`, and emits a
+  `formula_replaced_by_literal` CRDT event.
+
+The full design is at
+[`docs/superpowers/specs/2026-06-04-crdt-formulas-design.md`](../superpowers/specs/2026-06-04-crdt-formulas-design.md).
+Agent-facing patterns live in the skill at
+`src/libs/colmena/skills/crdt-doc-formulas/`.
+
+#### Tool result shape changes
+
+`crdt_doc_set_cell` returns:
+
+```json
+{
+  "ok": true,
+  "cells_recalculated": 3,
+  "warnings": [
+    {"kind": "needs_browser",  "addr": "B1", "functions": ["XLOOKUP"]},
+    {"kind": "eval_error",     "addr": "C1", "error": "#DIV/0!"},
+    {"kind": "cycle",          "chain": [["Sheet1","A1"], ["Sheet1","B1"]]},
+    {"kind": "parse_error",    "addr": "D1", "error": "..."}
+  ]
+}
+```
+
+`crdt_doc_set_range` aggregates the same warnings across the batch +
+`total_cells_recalculated`.
+
+`crdt_doc_read(include_formulas: true)` cells become objects:
+
+```json
+{
+  "cells": {
+    "A1": {"v": 5},
+    "B1": {"v": 10, "f": "=A1*2", "fs": "be"}
+  }
+}
+```
+
+Cells with no formula stay as `{v}` only.
+
+`crdt_doc_list_sheets` each sheet entry adds `formula_count: <integer>`.
+
 ---
 
 ## 6. Python helper (PyO3 + pandas)

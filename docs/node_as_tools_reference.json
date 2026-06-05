@@ -965,7 +965,7 @@
     },
 
     "crdt_documents": {
-      "summary": "Synthetic LLM tools for real-time collaborative xlsx workbooks (v1 CRDT documents feature). Exposed when an llm_call's config includes the crdt_documents block with an artifact_id. All mutations are in-process against a Yrs-backed document; persisted snapshots are stored locally or in GCS. No tool_configurations needed — the engine auto-creates them when crdt_documents is present. Subsystem F (cross-sheet) adds crdt_doc_list_sheets_of + crdt_doc_import_sheet and extends crdt_doc_get_recent_changes with an optional artifact_id filter.",
+      "summary": "Synthetic LLM tools for real-time collaborative xlsx workbooks (v1 CRDT documents feature). Exposed when an llm_call's config includes the crdt_documents block with an artifact_id. All mutations are in-process against a Yrs-backed document; persisted snapshots are stored locally or in GCS. No tool_configurations needed — the engine auto-creates them when crdt_documents is present. Subsystem F (cross-sheet) adds crdt_doc_list_sheets_of + crdt_doc_import_sheet and extends crdt_doc_get_recent_changes with an optional artifact_id filter. Subsystem D (formulas v1) adds server-side formula evaluation: any cell value starting with '=' is parsed and evaluated by formualizer before persistence, with intra-sheet eager recalc of dependents; set_cell/set_range return cells_recalculated + structured warnings; read accepts include_formulas to expose the {v, f, fs} shape; list_sheets returns formula_count per sheet. See docs/developer_guide/38_crdt_documents.md §5.8.",
       "synthetic_tools": ["crdt_doc_list_sheets", "crdt_doc_read", "crdt_doc_set_cell", "crdt_doc_set_range", "crdt_doc_add_sheet", "crdt_doc_get_recent_changes", "crdt_doc_list_sheets_of", "crdt_doc_import_sheet"],
       "how_exposed": "Automatically registered when llm_call.config.crdt_documents is present (with artifact_id, storage_backend, etc.). The LLM never sees the artifact_id or storage config — those are internal routing parameters managed by the engine.",
       "lifecycle": "All mutations modify the in-process Yrs document. The ChangeTracker records operations for narration (get_recent_changes). Snapshots are persisted after each DAG run via ArtifactStorage (localfs or gcs).",
@@ -991,7 +991,7 @@
       "tool_descriptions": {
         "crdt_doc_list_sheets": {
           "name": "crdt_doc_list_sheets",
-          "description": "List all sheets in the artifact document. Returns metadata (sheet_id, name) for each sheet. Use this to discover available sheets before read/write operations.",
+          "description": "List all sheets in the artifact document. Returns metadata (sheet_id, name, formula_count) for each sheet. Use this to discover available sheets before read/write operations; formula_count helps decide whether to pass include_formulas=true to crdt_doc_read.",
           "input_schema": {
             "type": "object",
             "properties": {},
@@ -1007,17 +1007,18 @@
                   "type": "object",
                   "properties": {
                     "sheet_id": { "type": "string", "description": "Unique identifier for the sheet." },
-                    "name": { "type": "string", "description": "Human-readable sheet name (e.g. 'Sheet1', 'Q3 Data')." }
+                    "name": { "type": "string", "description": "Human-readable sheet name (e.g. 'Sheet1', 'Q3 Data')." },
+                    "formula_count": { "type": "integer", "description": "NEW in D (formulas v1): number of cells in this sheet that store a formula (cells with `f` set). 0 means the sheet has no formulas — agents can skip include_formulas=true when reading." }
                   }
                 },
-                "description": "Array of sheet records, each with sheet_id and name."
+                "description": "Array of sheet records, each with sheet_id, name and formula_count."
               }
             }
           }
         },
         "crdt_doc_read": {
           "name": "crdt_doc_read",
-          "description": "Read cell values from a sheet. Optionally specify a range (A1-style notation) to fetch only a region; otherwise returns all non-empty cells.",
+          "description": "Read cell values from a sheet. Optionally specify a range (A1-style notation) to fetch only a region; otherwise returns all non-empty cells. By default returns scalar values per cell. NEW in D (formulas v1): pass include_formulas=true to receive {v, f?, fs?} objects instead, exposing formula text and source (`be` backend, `fe` browser, `needs_browser`).",
           "input_schema": {
             "type": "object",
             "properties": {
@@ -1030,6 +1031,12 @@
                 "type": "string",
                 "required": false,
                 "description": "Optional range in A1 notation (e.g. 'A1:D10', 'B2:B20'). If omitted, returns all non-empty cells."
+              },
+              "include_formulas": {
+                "type": "boolean",
+                "required": false,
+                "default": false,
+                "description": "NEW in D (formulas v1). When false (default), cells map to scalar values for back-compat with pandas/inspection flows. When true, each cell is an object {v, f?, fs?}: v is the evaluated value, f is the formula text (only present for formula cells), fs is the source ('be'=backend formualizer, 'fe'=browser Univer, 'needs_browser'=unsupported function persisted as placeholder)."
               }
             },
             "required": ["sheet_id"]
@@ -1040,7 +1047,7 @@
               "sheet_id": { "type": "string", "description": "The sheet_id that was read." },
               "cells": {
                 "type": "object",
-                "description": "Map of cell addresses to values (e.g. {'A1': 'Revenue', 'A2': 1000, 'B1': 'Expenses'}).",
+                "description": "Map of cell addresses to values. Shape depends on include_formulas: when false (default), values are scalars (string/number/bool/null) — e.g. {'A1': 'Revenue', 'B1': 10}. When true, each cell is {v, f?, fs?} — e.g. {'A1': {'v': 5}, 'B1': {'v': 10, 'f': '=A1*2', 'fs': 'be'}}. Cells without a formula stay as {v} only in formula-aware mode.",
                 "additionalProperties": true
               }
             }
@@ -1048,7 +1055,7 @@
         },
         "crdt_doc_set_cell": {
           "name": "crdt_doc_set_cell",
-          "description": "Set a single cell to a value. Address in A1 notation.",
+          "description": "Set a single cell to a value. Address in A1 notation. NEW in D (formulas v1): values starting with '=' are parsed as Excel-style formulas and evaluated server-side by formualizer. To store a literal '=text' use the Excel apostrophe convention ('=text). Dependent formulas in the same sheet recalc immediately (intra-sheet eager).",
           "input_schema": {
             "type": "object",
             "properties": {
@@ -1065,7 +1072,7 @@
               "value": {
                 "type": ["string", "number", "boolean", "null"],
                 "required": true,
-                "description": "The value to set. Can be a string, number, boolean, or null (to clear the cell)."
+                "description": "The value to set. Can be a string, number, boolean, or null (to clear the cell). NEW in D: strings starting with '=' are parsed as formulas (e.g. '=A1+B1', '=SUM(A1:A10)'). Prefix with a single quote to store a literal — e.g. \"'=raw\" stores the string '=raw' verbatim."
               }
             },
             "required": ["sheet_id", "addr", "value"]
@@ -1073,13 +1080,19 @@
           "output_schema": {
             "type": "object",
             "properties": {
-              "ok": { "type": "boolean", "description": "True if the set succeeded." }
+              "ok": { "type": "boolean", "description": "True if the set succeeded." },
+              "cells_recalculated": { "type": "integer", "description": "NEW in D: count of dependent formula cells re-evaluated in the same sheet after this write (0 if the cell has no dependents)." },
+              "warnings": {
+                "type": "array",
+                "description": "NEW in D: structured warnings emitted during evaluation or recalc. Empty array if everything evaluated cleanly. Each warning has a discriminating `kind` field:\n- {kind:'needs_browser', addr, functions:[...]}: a function outside formualizer's set was used; cell persisted as placeholder with fs='needs_browser'.\n- {kind:'eval_error', addr, error}: formualizer returned an error value (#DIV/0!, #REF!, etc.).\n- {kind:'cycle', chain:[[sheet,addr], ...]}: dependency cycle detected during recalc.\n- {kind:'parse_error', addr, error}: formula text could not be parsed.",
+                "items": { "type": "object", "additionalProperties": true }
+              }
             }
           }
         },
         "crdt_doc_set_range": {
           "name": "crdt_doc_set_range",
-          "description": "Bulk set a rectangular range of cells. Supply a 2D row-major array of values.",
+          "description": "Bulk set a rectangular range of cells. Supply a 2D row-major array of values. NEW in D (formulas v1): each cell in values_2d is processed identically to crdt_doc_set_cell — strings starting with '=' are evaluated as formulas; recalc cascade runs per-cell. Warnings and cells_recalculated counts are aggregated across the batch.",
           "input_schema": {
             "type": "object",
             "properties": {
@@ -1102,7 +1115,7 @@
                   }
                 },
                 "required": true,
-                "description": "Row-major 2D array of values. Each inner array is one row. All rows should have the same length for a rectangular range."
+                "description": "Row-major 2D array of values. Each inner array is one row. All rows should have the same length for a rectangular range. NEW in D: any string starting with '=' becomes a formula."
               }
             },
             "required": ["sheet_id", "start_addr", "values_2d"]
@@ -1111,7 +1124,13 @@
             "type": "object",
             "properties": {
               "ok": { "type": "boolean", "description": "True if the write succeeded." },
-              "cells_written": { "type": "integer", "description": "Number of cells successfully set." }
+              "cells_written": { "type": "integer", "description": "Number of cells successfully set." },
+              "total_cells_recalculated": { "type": "integer", "description": "NEW in D: sum of dependent-formula recalcs across every cell in the batch." },
+              "warnings": {
+                "type": "array",
+                "description": "NEW in D: aggregated structured warnings across the batch (same shapes as crdt_doc_set_cell: kind in {'needs_browser','eval_error','cycle','parse_error'}). Empty if every cell evaluated cleanly.",
+                "items": { "type": "object", "additionalProperties": true }
+              }
             }
           }
         },

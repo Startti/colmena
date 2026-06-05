@@ -152,3 +152,45 @@ Ambas con costo CERO cuando están off. Útil para medir el impacto de cualquier
 **Commits.** `e293001` (A1), `2ead7b1` (A2), `60ca29a` (A3), este (A4 — docs).
 
 **Estado.** done.
+
+---
+
+## 6. CRDT formulas (subsystem D, v1)
+
+- **Backend formula evaluator** via `formualizer = "0.6"`. Cells with a
+  leading `=` are parsed, evaluated, and persisted with `{v, t, f, fs}`.
+- **Intra-sheet eager recalc** — dependent formulas refresh in topo
+  order on every `set_cell`/`set_range`/`run_python` write.
+- **`crdt_doc_read(include_formulas: bool = false)`** — back-compat
+  default for pandas; opt-in formula-aware shape `{v, f?, fs?}` per cell.
+- **`crdt_doc_list_sheets`** now returns `formula_count` per sheet.
+- **`needs_browser` fallback** — functions outside formualizer's set are
+  persisted as placeholders with a warning so the agent can decide.
+- **Tool warnings**: `set_cell` / `set_range` / `run_python` now surface
+  `cells_recalculated` + structured warnings (`needs_browser`,
+  `eval_error`, `cycle`, `parse_error`).
+- **pandas write-back** strips formula metadata, emits a
+  `formula_replaced_by_literal` CRDT event, and cascades dependent recalc.
+- **Skill `crdt-doc-formulas`** — 3 patterns (write, read-evaluated,
+  needs_browser fallback) auto-loaded by the skill registry.
+- **Anti-divergence benchmark** (`#[ignore]`-gated) — 40 fixtures green
+  against formualizer; Univer-side Playwright bridge tracked in BACKLOG.
+- **⚠️ BREAKING**: strings starting with `=` passed to `crdt_doc_set_cell`
+  are now parsed as formulas. To store a literal `=text`, prefix with `'`
+  (Excel convention). No existing test graphs do this — verified via
+  `grep -rn '"\\"=' tests/graphs/` returning zero matches.
+- **⚠️ API CHANGE**: `apply_set_cell_in_proc` signature changed from
+  `()` to `SetCellOutcome` (struct with `cells_recalculated` and
+  `warnings`). `SetCellOutcome` is `#[must_use]`. 43 call sites updated
+  in this repo; downstream consumers of this internal API must bind the
+  return value.
+- **⚠️ API CHANGE**: `df_writer::apply_records_to_doc` is new and
+  requires the target sheet to exist (`WriterError::SheetNotFound`).
+  The existing `write_records_as_new_sheet` continues to behave as before.
+
+**Referencias:**
+- Spec: [`docs/superpowers/specs/2026-06-04-crdt-formulas-design.md`](superpowers/specs/2026-06-04-crdt-formulas-design.md).
+- Plan: [`docs/superpowers/plans/2026-06-04-crdt-formulas.md`](superpowers/plans/2026-06-04-crdt-formulas.md).
+- Backlog: v1.1 follow-ups en `docs/BACKLOG.md` → "CRDT Documents v1.1 — Formulas (subsystem D follow-ups)".
+
+**Estado.** D-T1..D-T12 done; D-T13 (final sweep) pending.
