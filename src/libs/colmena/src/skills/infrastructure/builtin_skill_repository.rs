@@ -267,9 +267,32 @@ mod tests {
             names
         );
         assert!(
+            names.contains(&"crdt-doc-formulas".to_string()),
+            "expected crdt-doc-formulas in: {:?}",
+            names
+        );
+        assert!(
             !names.contains(&"_placeholder".to_string()),
             "_placeholder must not appear in available_builtin_names"
         );
+    }
+
+    #[tokio::test]
+    async fn crdt_doc_formulas_is_loadable() {
+        let repo = BuiltinSkillRepository::new(&["crdt-doc-formulas".to_string()]).unwrap();
+        let skill = repo.load_skill("crdt-doc-formulas").await.unwrap();
+        assert_eq!(skill.name, "crdt-doc-formulas");
+        assert_eq!(skill.references.len(), 3);
+        let ref_names: Vec<&str> = skill.references.iter().map(|r| r.name.as_str()).collect();
+        assert!(ref_names.contains(&"write-formula"));
+        assert!(ref_names.contains(&"read-with-formulas"));
+        assert!(ref_names.contains(&"needs-browser-fallback"));
+
+        // Each reference must be loadable
+        for r in &["write-formula", "read-with-formulas", "needs-browser-fallback"] {
+            let reference = repo.load_reference("crdt-doc-formulas", r).await.unwrap();
+            assert!(!reference.body.is_empty(), "{} body must not be empty", r);
+        }
     }
 
     #[tokio::test]
