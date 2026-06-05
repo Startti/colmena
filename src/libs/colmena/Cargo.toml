@@ -75,7 +75,7 @@ bytes = "1.0"
 # --- NEW FOR MILESTONE 2 ---
 # Web Framework
 axum = { version = "0.7", features = ["ws"] }
-yrs = "0.26"
+yrs = { version = "0.26", features = ["sync"] }
 y-sync = "0.4"
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 # Tracing/Logging (Optional but recommended for servers)

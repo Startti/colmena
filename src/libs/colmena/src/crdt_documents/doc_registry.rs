@@ -5,6 +5,7 @@
 //! disk at startup via `load_from_disk`.
 
 use crate::crdt_documents::{
+    recalc_observer::attach_recalc_observer,
     snapshot_writer::{spawn_writer, SnapshotHandle},
     storage::{ArtifactMeta, ArtifactStorage},
     ArtifactId, StorageError,
@@ -21,6 +22,13 @@ pub struct RegisteredArtifact {
     pub notify: Arc<Notify>,
     snapshot: tokio::sync::Mutex<SnapshotHandle>,
     pub meta: ArtifactMeta,
+    /// D-T15: keeps the server-side recalc observer alive for this
+    /// artifact's lifetime. Drops along with the rest of the
+    /// `RegisteredArtifact`, unsubscribing the observer cleanly.
+    /// `Option` because we want to keep construction infallible —
+    /// observer attach errors are logged but don't abort artifact
+    /// creation.
+    _recalc_sub: Option<yrs::Subscription>,
 }
 
 impl RegisteredArtifact {
@@ -59,6 +67,17 @@ impl DocRegistry {
             let snapshot = spawn_writer(id.clone(), doc.clone(), self.storage.clone());
             let notify = snapshot.notify.clone();
             let dirty = snapshot.dirty.clone();
+            let recalc_sub = match attach_recalc_observer(doc.clone()) {
+                Ok(sub) => Some(sub),
+                Err(e) => {
+                    tracing::warn!(
+                        artifact_id = %id,
+                        error = %e,
+                        "failed to attach recalc observer (D-T15) — browser-originated edits won't trigger server-side formula recalc",
+                    );
+                    None
+                }
+            };
             self.docs.insert(
                 id.to_string(),
                 Arc::new(RegisteredArtifact {
@@ -67,6 +86,7 @@ impl DocRegistry {
                     notify,
                     snapshot: tokio::sync::Mutex::new(snapshot),
                     meta,
+                    _recalc_sub: recalc_sub,
                 }),
             );
             loaded += 1;
@@ -82,6 +102,17 @@ impl DocRegistry {
                 let snapshot = spawn_writer(id.clone(), doc.clone(), self.storage.clone());
                 let notify = snapshot.notify.clone();
                 let dirty = snapshot.dirty.clone();
+                let recalc_sub = match attach_recalc_observer(doc.clone()) {
+                    Ok(sub) => Some(sub),
+                    Err(e) => {
+                        tracing::warn!(
+                            artifact_id = %id,
+                            error = %e,
+                            "failed to attach recalc observer (D-T15) — browser-originated edits won't trigger server-side formula recalc",
+                        );
+                        None
+                    }
+                };
                 let now = chrono::Utc::now().timestamp();
                 let meta = ArtifactMeta {
                     artifact_id: id.clone(),
@@ -104,6 +135,7 @@ impl DocRegistry {
                     notify,
                     snapshot: tokio::sync::Mutex::new(snapshot),
                     meta,
+                    _recalc_sub: recalc_sub,
                 })
             })
             .clone()

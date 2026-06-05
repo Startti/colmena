@@ -10,6 +10,7 @@ use crate::crdt_documents::formula_engine::{
     evaluate, parse, recalc_chain, CellResolver, EvalValue, ExcelError, FormulaSource, ParseOutcome,
 };
 use crate::crdt_documents::formula_engine_yrs_resolver::YrsResolver;
+use crate::crdt_documents::recalc_observer::SERVER_TX_ORIGIN;
 
 /// Outcome of an `apply_set_cell_in_proc` call.
 ///
@@ -249,7 +250,10 @@ fn write_cell_raw(
     formula_text: Option<&str>,
     fs: Option<FormulaSource>,
 ) {
-    let mut txn = doc.transact_mut();
+    // Tag the write so the D-T15 recalc observer skips it (server-
+    // originated writes already include the recalc cascade — no need
+    // for the observer to fire on its own writes).
+    let mut txn = doc.transact_mut_with(SERVER_TX_ORIGIN);
     let workbook = txn.get_or_insert_map("workbook");
     let sheets_arr = match workbook.get(&txn, "sheets") {
         Some(yrs::Out::YArray(a)) => a,
@@ -777,7 +781,7 @@ fn json_value_type_tag(v: &Value) -> u8 {
 /// Append a new sheet to the workbook. Returns the generated sheet id
 /// (format: `sh_<ULID>`).
 pub fn apply_add_sheet(doc: &Doc, name: &str) -> String {
-    let mut txn = doc.transact_mut();
+    let mut txn = doc.transact_mut_with(SERVER_TX_ORIGIN);
     let wb = txn.get_or_insert_map("workbook");
     let sheets = match wb.get(&txn, "sheets") {
         Some(yrs::Out::YArray(a)) => a,
@@ -793,7 +797,7 @@ pub fn apply_add_sheet(doc: &Doc, name: &str) -> String {
 
 /// Rename a sheet by id. Returns `false` if no sheet with that id is found.
 pub fn apply_rename_sheet(doc: &Doc, sheet_id: &str, new_name: &str) -> bool {
-    let mut txn = doc.transact_mut();
+    let mut txn = doc.transact_mut_with(SERVER_TX_ORIGIN);
     // Find the index first (read phase), then mutate.
     let idx = find_sheet_index_in_txn(&txn, sheet_id);
     let Some(i) = idx else {
@@ -814,7 +818,7 @@ pub fn apply_rename_sheet(doc: &Doc, sheet_id: &str, new_name: &str) -> bool {
 
 /// Delete a sheet by id. Returns `false` if not found.
 pub fn apply_delete_sheet(doc: &Doc, sheet_id: &str) -> bool {
-    let mut txn = doc.transact_mut();
+    let mut txn = doc.transact_mut_with(SERVER_TX_ORIGIN);
     let idx = find_sheet_index_in_txn(&txn, sheet_id);
     let Some(i) = idx else {
         return false;
@@ -880,7 +884,7 @@ pub fn apply_reorder_sheets(doc: &Doc, new_order: &[String]) -> bool {
     // tools 3-14 are invoked from a single DAG agent at a time. When multi-peer
     // concurrent reorder becomes a requirement (Task 15+), wrap both phases in
     // a per-document Mutex or fold the validation into a single transact_mut.
-    let mut txn = doc.transact_mut();
+    let mut txn = doc.transact_mut_with(SERVER_TX_ORIGIN);
     let wb = txn.get_or_insert_map("workbook");
     let sheets = match wb.get(&txn, "sheets") {
         Some(yrs::Out::YArray(a)) => a,

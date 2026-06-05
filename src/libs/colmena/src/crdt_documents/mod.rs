@@ -16,6 +16,7 @@ pub mod formula_engine_yrs_resolver;
 pub mod narration;
 pub mod process_runtime;
 pub mod projection;
+pub mod recalc_observer;
 pub mod runtime;
 pub mod server;
 pub mod snapshot_writer;
