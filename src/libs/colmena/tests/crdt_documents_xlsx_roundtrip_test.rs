@@ -28,8 +28,8 @@ fn import_mutate_export_reimport_isomorphic_on_values() {
 
     // Add a new sheet with two cells.
     let new_sheet = apply_add_sheet(&doc, "Notes");
-    apply_set_cell_in_proc(&doc, &new_sheet, "A1", &json!("Hello"));
-    apply_set_cell_in_proc(&doc, &new_sheet, "B1", &json!(123));
+    let _ = apply_set_cell_in_proc(&doc, &new_sheet, "A1", &json!("Hello"));
+    let _ = apply_set_cell_in_proc(&doc, &new_sheet, "B1", &json!(123));
 
     // Export.
     let exported = export_doc_to_xlsx(&doc).unwrap();

@@ -28,10 +28,10 @@ async fn list_sheets_of_returns_sheets_for_any_artifact() {
     let aid_b = ArtifactId::new();
     let entry_b = rt.registry.get_or_create(&aid_b, "B");
     let sheet_id = apply_add_sheet(&entry_b.doc, "Inventory");
-    apply_set_cell_in_proc(&entry_b.doc, &sheet_id, "A1", &json!("Region"));
-    apply_set_cell_in_proc(&entry_b.doc, &sheet_id, "B1", &json!("Sales"));
-    apply_set_cell_in_proc(&entry_b.doc, &sheet_id, "A2", &json!("North"));
-    apply_set_cell_in_proc(&entry_b.doc, &sheet_id, "B2", &json!(100));
+    let _ = apply_set_cell_in_proc(&entry_b.doc, &sheet_id, "A1", &json!("Region"));
+    let _ = apply_set_cell_in_proc(&entry_b.doc, &sheet_id, "B1", &json!("Sales"));
+    let _ = apply_set_cell_in_proc(&entry_b.doc, &sheet_id, "A2", &json!("North"));
+    let _ = apply_set_cell_in_proc(&entry_b.doc, &sheet_id, "B2", &json!(100));
     let _entry_a = rt.registry.get_or_create(&aid_a, "A");
 
     let ctx = CrdtDocsContext::new_local(rt.clone(), aid_a.clone(), Some("s".to_string()));
@@ -79,7 +79,7 @@ async fn list_sheets_of_returns_multiple_sheets_in_order() {
     let sid1 = apply_add_sheet(&entry_b.doc, "First");
     let sid2 = apply_add_sheet(&entry_b.doc, "Second");
     let sid3 = apply_add_sheet(&entry_b.doc, "Third");
-    apply_set_cell_in_proc(&entry_b.doc, &sid1, "A1", &json!("x"));
+    let _ = apply_set_cell_in_proc(&entry_b.doc, &sid1, "A1", &json!("x"));
     let _entry_a = rt.registry.get_or_create(&aid_a, "A");
     let ctx = CrdtDocsContext::new_local(rt.clone(), aid_a, Some("s".to_string()));
     let result =
@@ -111,7 +111,7 @@ async fn list_sheets_of_handles_sparse_cells_correctly() {
     let aid_b = ArtifactId::new();
     let entry_b = rt.registry.get_or_create(&aid_b, "B");
     let sid = apply_add_sheet(&entry_b.doc, "Sparse");
-    apply_set_cell_in_proc(&entry_b.doc, &sid, "C5", &json!("only_cell"));
+    let _ = apply_set_cell_in_proc(&entry_b.doc, &sid, "C5", &json!("only_cell"));
     let _ = rt.registry.get_or_create(&aid_a, "A");
     let ctx = CrdtDocsContext::new_local(rt.clone(), aid_a, Some("s".to_string()));
     let result =

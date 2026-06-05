@@ -49,11 +49,11 @@ async fn cross_sheet_row_diff_via_clone_plus_run_python() {
 
     // Q3: header SKU/Price, rows A/100, B/200, C/300
     let sid_q3 = apply_add_sheet(&entry_q3.doc, "Inventory");
-    apply_set_cell_in_proc(&entry_q3.doc, &sid_q3, "A1", &json!("SKU"));
-    apply_set_cell_in_proc(&entry_q3.doc, &sid_q3, "B1", &json!("Price"));
+    let _ = apply_set_cell_in_proc(&entry_q3.doc, &sid_q3, "A1", &json!("SKU"));
+    let _ = apply_set_cell_in_proc(&entry_q3.doc, &sid_q3, "B1", &json!("Price"));
     for (i, (sku, price)) in [("A", 100), ("B", 200), ("C", 300)].iter().enumerate() {
-        apply_set_cell_in_proc(&entry_q3.doc, &sid_q3, &format!("A{}", i + 2), &json!(sku));
-        apply_set_cell_in_proc(
+        let _ = apply_set_cell_in_proc(&entry_q3.doc, &sid_q3, &format!("A{}", i + 2), &json!(sku));
+        let _ = apply_set_cell_in_proc(
             &entry_q3.doc,
             &sid_q3,
             &format!("B{}", i + 2),
@@ -63,11 +63,11 @@ async fn cross_sheet_row_diff_via_clone_plus_run_python() {
 
     // Q4: B/250 (changed), C/300 (same), D/400 (new). A is gone.
     let sid_q4 = apply_add_sheet(&entry_q4.doc, "Inventory");
-    apply_set_cell_in_proc(&entry_q4.doc, &sid_q4, "A1", &json!("SKU"));
-    apply_set_cell_in_proc(&entry_q4.doc, &sid_q4, "B1", &json!("Price"));
+    let _ = apply_set_cell_in_proc(&entry_q4.doc, &sid_q4, "A1", &json!("SKU"));
+    let _ = apply_set_cell_in_proc(&entry_q4.doc, &sid_q4, "B1", &json!("Price"));
     for (i, (sku, price)) in [("B", 250), ("C", 300), ("D", 400)].iter().enumerate() {
-        apply_set_cell_in_proc(&entry_q4.doc, &sid_q4, &format!("A{}", i + 2), &json!(sku));
-        apply_set_cell_in_proc(
+        let _ = apply_set_cell_in_proc(&entry_q4.doc, &sid_q4, &format!("A{}", i + 2), &json!(sku));
+        let _ = apply_set_cell_in_proc(
             &entry_q4.doc,
             &sid_q4,
             &format!("B{}", i + 2),

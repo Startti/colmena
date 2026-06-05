@@ -135,7 +135,7 @@ mod tests {
         // make that explicit (the underlying JSON value is numerically equal
         // but the serde `Number` representation differs Int vs Float).
         let doc = Doc::new();
-        apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(42));
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(42));
         let r = YrsResolver::new(&doc);
         let cell = r.get("Sheet1", "A1").expect("A1");
         assert_eq!(cell.v.as_f64(), Some(42.0));
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn yrs_resolver_reports_sheet_existence() {
         let doc = Doc::new();
-        apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(1));
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(1));
         let r = YrsResolver::new(&doc);
         assert!(r.sheet_exists("Sheet1"));
         assert!(!r.sheet_exists("Sheet99"));
@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn yrs_resolver_iter_formulas_returns_empty_when_none() {
         let doc = Doc::new();
-        apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(1));
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(1));
         let r = YrsResolver::new(&doc);
         let formulas: Vec<_> = r.iter_formulas_in_sheet("Sheet1").collect();
         assert!(formulas.is_empty());

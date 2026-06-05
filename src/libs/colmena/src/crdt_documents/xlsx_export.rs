@@ -85,8 +85,8 @@ mod tests {
         let doc = Doc::new();
         let s1 = apply_add_sheet(&doc, "Sales");
         let s2 = apply_add_sheet(&doc, "Summary");
-        apply_set_cell_in_proc(&doc, &s1, "A1", &serde_json::json!("Product"));
-        apply_set_cell_in_proc(&doc, &s2, "A1", &serde_json::json!(42));
+        let _ = apply_set_cell_in_proc(&doc, &s1, "A1", &serde_json::json!("Product"));
+        let _ = apply_set_cell_in_proc(&doc, &s2, "A1", &serde_json::json!(42));
         let bytes = export_doc_to_xlsx(&doc).unwrap();
         assert_eq!(&bytes[..2], b"PK"); // xlsx is a zip
                                         // Round-trip via the importer to confirm values survive.

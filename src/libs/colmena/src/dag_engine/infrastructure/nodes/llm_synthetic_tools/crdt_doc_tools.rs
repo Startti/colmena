@@ -374,7 +374,7 @@ pub async fn execute_set_cell(ctx: &CrdtDocsContext, args: SetCellArgs) -> serde
     let Some(doc) = ctx.doc() else {
         return serde_json::json!({ "error": "artifact_not_found" });
     };
-    crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
+    let _ = crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
         &doc,
         &args.sheet_id,
         &args.addr,
@@ -432,7 +432,7 @@ pub async fn execute_set_range(ctx: &CrdtDocsContext, args: SetRangeArgs) -> ser
             let r = r0 + dr as u32;
             let c = c0 + dc as u32;
             let addr = format!("{}{}", col_letter(c), r + 1);
-            crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
+            let _ = crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
                 &doc,
                 &args.sheet_id,
                 &addr,

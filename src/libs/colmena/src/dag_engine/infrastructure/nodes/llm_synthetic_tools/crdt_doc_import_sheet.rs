@@ -213,7 +213,7 @@ pub async fn import_sheet_runtime(
         // We deliberately ignore the source `t` annotation: the writer
         // re-derives it from the JSON value via `apply_set_cell_in_proc`,
         // which matches the policy applied to any other tool-driven write.
-        apply_set_cell_in_proc(&dest_doc, &new_sheet_id, addr, v_json);
+        let _ = apply_set_cell_in_proc(&dest_doc, &new_sheet_id, addr, v_json);
         has_any = true;
         if let Some((r, c)) = super::crdt_doc_tools::parse_a1_to_rc(addr) {
             if r > max_row {

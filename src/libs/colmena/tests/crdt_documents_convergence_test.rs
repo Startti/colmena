@@ -49,7 +49,7 @@ async fn two_ws_agents_and_one_inproc_converge() {
     .expect("agent B");
 
     // Agent C: in-proc directly mutates the registered doc.
-    apply_set_cell_in_proc(&entry.doc, "s1", "C1", &serde_json::Value::Bool(true));
+    let _ = apply_set_cell_in_proc(&entry.doc, "s1", "C1", &serde_json::Value::Bool(true));
 
     // Let the WS round-trips settle.
     tokio::time::sleep(Duration::from_millis(200)).await;

@@ -126,7 +126,7 @@ mod tests {
             working.transact_mut().apply_update(u).unwrap();
         }
         let sv_before = working.transact().state_vector();
-        apply_set_cell_in_proc(&working, &sid, "A1", &json!("hello"));
+        let _ = apply_set_cell_in_proc(&working, &sid, "A1", &json!("hello"));
         let diff = working.transact().encode_diff_v1(&sv_before);
 
         let summary = narrate(&before, &diff);
@@ -157,7 +157,7 @@ mod tests {
     fn summarises_changed_cell() {
         let before = Doc::new();
         let sid = apply_add_sheet(&before, "S");
-        apply_set_cell_in_proc(&before, &sid, "A1", &json!("old"));
+        let _ = apply_set_cell_in_proc(&before, &sid, "A1", &json!("old"));
 
         let baseline = before
             .transact()
@@ -167,7 +167,7 @@ mod tests {
             working.transact_mut().apply_update(u).unwrap();
         }
         let sv_before = working.transact().state_vector();
-        apply_set_cell_in_proc(&working, &sid, "A1", &json!("new"));
+        let _ = apply_set_cell_in_proc(&working, &sid, "A1", &json!("new"));
         let diff = working.transact().encode_diff_v1(&sv_before);
 
         let summary = narrate(&before, &diff);

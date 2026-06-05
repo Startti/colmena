@@ -298,10 +298,10 @@ async fn sheets_with_counts_endpoint_returns_sheets_with_counts() {
     let aid = ArtifactId::new();
     let entry = rt.registry.get_or_create(&aid, "demo");
     let inv_sid = apply_add_sheet(&entry.doc, "Inventory");
-    apply_set_cell_in_proc(&entry.doc, &inv_sid, "A1", &json!("Region"));
-    apply_set_cell_in_proc(&entry.doc, &inv_sid, "B1", &json!("Sales"));
-    apply_set_cell_in_proc(&entry.doc, &inv_sid, "A2", &json!("North"));
-    apply_set_cell_in_proc(&entry.doc, &inv_sid, "B2", &json!(100));
+    let _ = apply_set_cell_in_proc(&entry.doc, &inv_sid, "A1", &json!("Region"));
+    let _ = apply_set_cell_in_proc(&entry.doc, &inv_sid, "B1", &json!("Sales"));
+    let _ = apply_set_cell_in_proc(&entry.doc, &inv_sid, "A2", &json!("North"));
+    let _ = apply_set_cell_in_proc(&entry.doc, &inv_sid, "B2", &json!(100));
     let _empty_sid = apply_add_sheet(&entry.doc, "Empty");
 
     let (status, v) = get_json(&app, &format!("/documents/{aid}/sheets-with-counts")).await;
@@ -370,8 +370,8 @@ async fn import_sheet_endpoint_clones_sheet() {
     let src_aid = ArtifactId::new();
     let src_entry = rt.registry.get_or_create(&src_aid, "source");
     let src_sid = apply_add_sheet(&src_entry.doc, "Inventory");
-    apply_set_cell_in_proc(&src_entry.doc, &src_sid, "A1", &json!("Region"));
-    apply_set_cell_in_proc(&src_entry.doc, &src_sid, "B1", &json!("Sales"));
+    let _ = apply_set_cell_in_proc(&src_entry.doc, &src_sid, "A1", &json!("Region"));
+    let _ = apply_set_cell_in_proc(&src_entry.doc, &src_sid, "B1", &json!("Sales"));
 
     // Empty destination artifact.
     let dest_aid = ArtifactId::new();

@@ -29,10 +29,10 @@ async fn make_two_artifacts() -> (
     let _ = rt.registry.get_or_create(&aid_p, "principal");
     let entry_s = rt.registry.get_or_create(&aid_s, "secondary");
     let sid = apply_add_sheet(&entry_s.doc, "Inventory");
-    apply_set_cell_in_proc(&entry_s.doc, &sid, "A1", &json!("Region"));
-    apply_set_cell_in_proc(&entry_s.doc, &sid, "B1", &json!("Sales"));
-    apply_set_cell_in_proc(&entry_s.doc, &sid, "A2", &json!("North"));
-    apply_set_cell_in_proc(&entry_s.doc, &sid, "B2", &json!(100));
+    let _ = apply_set_cell_in_proc(&entry_s.doc, &sid, "A1", &json!("Region"));
+    let _ = apply_set_cell_in_proc(&entry_s.doc, &sid, "B1", &json!("Sales"));
+    let _ = apply_set_cell_in_proc(&entry_s.doc, &sid, "A2", &json!("North"));
+    let _ = apply_set_cell_in_proc(&entry_s.doc, &sid, "B2", &json!(100));
     (rt, aid_p, aid_s, sid, tmp)
 }
 

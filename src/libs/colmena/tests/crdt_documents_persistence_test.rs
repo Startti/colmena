@@ -21,7 +21,7 @@ async fn write_drop_reload_survives() {
         let rt = Arc::new(CrdtDocumentsRuntime::from_config(&cfg).await.unwrap());
         let entry = rt.registry.get_or_create(&id, "persist-test");
         let s = apply_add_sheet(&entry.doc, "S");
-        apply_set_cell_in_proc(&entry.doc, &s, "A1", &json!("hello"));
+        let _ = apply_set_cell_in_proc(&entry.doc, &s, "A1", &json!("hello"));
         entry.mark_dirty();
 
         // Wait past the 5s snapshot tick so the writer task flushes.

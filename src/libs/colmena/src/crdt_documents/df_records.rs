@@ -157,12 +157,12 @@ mod tests {
     fn make_doc_with_inventory() -> (Doc, String) {
         let doc = Doc::new();
         let sheet_id = apply_add_sheet(&doc, "Inventory");
-        apply_set_cell_in_proc(&doc, &sheet_id, "A1", &serde_json::json!("Product"));
-        apply_set_cell_in_proc(&doc, &sheet_id, "B1", &serde_json::json!("Qty"));
-        apply_set_cell_in_proc(&doc, &sheet_id, "A2", &serde_json::json!("Apple"));
-        apply_set_cell_in_proc(&doc, &sheet_id, "B2", &serde_json::json!(10));
-        apply_set_cell_in_proc(&doc, &sheet_id, "A3", &serde_json::json!("Pear"));
-        apply_set_cell_in_proc(&doc, &sheet_id, "B3", &serde_json::json!(20));
+        let _ = apply_set_cell_in_proc(&doc, &sheet_id, "A1", &serde_json::json!("Product"));
+        let _ = apply_set_cell_in_proc(&doc, &sheet_id, "B1", &serde_json::json!("Qty"));
+        let _ = apply_set_cell_in_proc(&doc, &sheet_id, "A2", &serde_json::json!("Apple"));
+        let _ = apply_set_cell_in_proc(&doc, &sheet_id, "B2", &serde_json::json!(10));
+        let _ = apply_set_cell_in_proc(&doc, &sheet_id, "A3", &serde_json::json!("Pear"));
+        let _ = apply_set_cell_in_proc(&doc, &sheet_id, "B3", &serde_json::json!(20));
         (doc, sheet_id)
     }
 
@@ -198,8 +198,8 @@ mod tests {
     fn headers_only_returns_zero_rows_with_columns() {
         let doc = Doc::new();
         let sid = apply_add_sheet(&doc, "HeadersOnly");
-        apply_set_cell_in_proc(&doc, &sid, "A1", &serde_json::json!("X"));
-        apply_set_cell_in_proc(&doc, &sid, "B1", &serde_json::json!("Y"));
+        let _ = apply_set_cell_in_proc(&doc, &sid, "A1", &serde_json::json!("X"));
+        let _ = apply_set_cell_in_proc(&doc, &sid, "B1", &serde_json::json!("Y"));
         let recs = build_sheet_records(&doc, &sid).unwrap();
         assert_eq!(recs.columns, vec!["X".to_string(), "Y".to_string()]);
         assert_eq!(recs.records.len(), 0);
@@ -209,9 +209,9 @@ mod tests {
     fn non_string_headers_fall_back_to_stringified() {
         let doc = Doc::new();
         let sid = apply_add_sheet(&doc, "BadHeaders");
-        apply_set_cell_in_proc(&doc, &sid, "A1", &serde_json::json!(1.5));
-        apply_set_cell_in_proc(&doc, &sid, "B1", &serde_json::json!(2.5));
-        apply_set_cell_in_proc(&doc, &sid, "A2", &serde_json::json!("data"));
+        let _ = apply_set_cell_in_proc(&doc, &sid, "A1", &serde_json::json!(1.5));
+        let _ = apply_set_cell_in_proc(&doc, &sid, "B1", &serde_json::json!(2.5));
+        let _ = apply_set_cell_in_proc(&doc, &sid, "A2", &serde_json::json!("data"));
         let recs = build_sheet_records(&doc, &sid).unwrap();
         assert_eq!(recs.columns, vec!["1.5".to_string(), "2.5".to_string()]);
     }
@@ -220,9 +220,9 @@ mod tests {
     fn sparse_cells_become_null_in_records() {
         let doc = Doc::new();
         let sid = apply_add_sheet(&doc, "Sparse");
-        apply_set_cell_in_proc(&doc, &sid, "A1", &serde_json::json!("X"));
-        apply_set_cell_in_proc(&doc, &sid, "B1", &serde_json::json!("Y"));
-        apply_set_cell_in_proc(&doc, &sid, "A2", &serde_json::json!("filled"));
+        let _ = apply_set_cell_in_proc(&doc, &sid, "A1", &serde_json::json!("X"));
+        let _ = apply_set_cell_in_proc(&doc, &sid, "B1", &serde_json::json!("Y"));
+        let _ = apply_set_cell_in_proc(&doc, &sid, "A2", &serde_json::json!("filled"));
         let recs = build_sheet_records(&doc, &sid).unwrap();
         assert_eq!(recs.records.len(), 1);
         assert_eq!(recs.records[0]["X"], serde_json::json!("filled"));
@@ -234,10 +234,10 @@ mod tests {
         let doc = Doc::new();
         let s1 = apply_add_sheet(&doc, "First");
         let s2 = apply_add_sheet(&doc, "Second");
-        apply_set_cell_in_proc(&doc, &s1, "A1", &serde_json::json!("A"));
-        apply_set_cell_in_proc(&doc, &s1, "A2", &serde_json::json!(1));
-        apply_set_cell_in_proc(&doc, &s2, "A1", &serde_json::json!("B"));
-        apply_set_cell_in_proc(&doc, &s2, "A2", &serde_json::json!(2));
+        let _ = apply_set_cell_in_proc(&doc, &s1, "A1", &serde_json::json!("A"));
+        let _ = apply_set_cell_in_proc(&doc, &s1, "A2", &serde_json::json!(1));
+        let _ = apply_set_cell_in_proc(&doc, &s2, "A1", &serde_json::json!("B"));
+        let _ = apply_set_cell_in_proc(&doc, &s2, "A2", &serde_json::json!(2));
         let map = build_records_for_sheets(&doc, &[s1.clone(), s2.clone()]).unwrap();
         assert_eq!(map.len(), 2);
         assert!(map.contains_key(&s1));

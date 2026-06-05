@@ -40,14 +40,14 @@ async fn make_test_ctx() -> (
 
     // Seed Inventory with sample data: 4 rows of (Region, Sales).
     let sheet_id = apply_add_sheet(&entry.doc, "Inventory");
-    apply_set_cell_in_proc(&entry.doc, &sheet_id, "A1", &json!("Region"));
-    apply_set_cell_in_proc(&entry.doc, &sheet_id, "B1", &json!("Sales"));
-    apply_set_cell_in_proc(&entry.doc, &sheet_id, "A2", &json!("North"));
-    apply_set_cell_in_proc(&entry.doc, &sheet_id, "B2", &json!(100));
-    apply_set_cell_in_proc(&entry.doc, &sheet_id, "A3", &json!("North"));
-    apply_set_cell_in_proc(&entry.doc, &sheet_id, "B3", &json!(200));
-    apply_set_cell_in_proc(&entry.doc, &sheet_id, "A4", &json!("South"));
-    apply_set_cell_in_proc(&entry.doc, &sheet_id, "B4", &json!(150));
+    let _ = apply_set_cell_in_proc(&entry.doc, &sheet_id, "A1", &json!("Region"));
+    let _ = apply_set_cell_in_proc(&entry.doc, &sheet_id, "B1", &json!("Sales"));
+    let _ = apply_set_cell_in_proc(&entry.doc, &sheet_id, "A2", &json!("North"));
+    let _ = apply_set_cell_in_proc(&entry.doc, &sheet_id, "B2", &json!(100));
+    let _ = apply_set_cell_in_proc(&entry.doc, &sheet_id, "A3", &json!("North"));
+    let _ = apply_set_cell_in_proc(&entry.doc, &sheet_id, "B3", &json!(200));
+    let _ = apply_set_cell_in_proc(&entry.doc, &sheet_id, "A4", &json!("South"));
+    let _ = apply_set_cell_in_proc(&entry.doc, &sheet_id, "B4", &json!(150));
 
     let ctx = CrdtDocsContext::new_local(
         runtime.clone(),

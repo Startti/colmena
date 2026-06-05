@@ -18,6 +18,7 @@ use crate::crdt_documents::formula_engine_yrs_resolver::YrsResolver;
 /// cycle detection). Callers can attach this to tool results so the agent
 /// can react (e.g. surface `NeedsBrowser` cells to the user).
 #[derive(Debug, Clone, serde::Serialize, Default)]
+#[must_use = "SetCellOutcome carries warnings + recalc counts; explicitly bind or `let _ = ...`"]
 pub struct SetCellOutcome {
     pub cells_recalculated: usize,
     pub warnings: Vec<SetCellWarning>,
@@ -44,6 +45,12 @@ pub enum SetCellWarning {
     /// that could not be ordered are listed in `chain`.
     #[serde(rename = "cycle")]
     Cycle { chain: Vec<(String, String)> },
+    /// The formula text starts with `=` but the parser couldn't make
+    /// sense of it (malformed syntax, e.g. unclosed parens). The raw
+    /// text is still persisted as a literal so the user's input is
+    /// preserved; this warning lets the agent surface the parse error.
+    #[serde(rename = "parse_error")]
+    ParseError { addr: String, error: String },
 }
 
 /// Sanity-check route: mutates the doc directly without going through WS.
@@ -153,9 +160,14 @@ pub fn apply_set_cell_in_proc(
                 });
                 return outcome;
             }
-            ParseOutcome::ParseError(_) => {
-                // Parser couldn't make sense of the text — fall through to
-                // a literal write so the cell isn't lost.
+            ParseOutcome::ParseError(msg) => {
+                // Parser couldn't make sense of the text — surface the
+                // error to the agent, then fall through to a literal
+                // write so the raw text isn't lost.
+                outcome.warnings.push(SetCellWarning::ParseError {
+                    addr: addr.to_string(),
+                    error: msg,
+                });
             }
         }
     }
@@ -274,7 +286,13 @@ fn write_cell_raw(
         _ => sheet.insert(&mut txn, "cells", MapPrelim::default()),
     };
 
-    let cell = cells.insert(&mut txn, addr, MapPrelim::default());
+    // Reuse the existing cell map if present so the CRDT history for
+    // `v` / `t` / `f` / `fs` is preserved across overwrites. When the
+    // cell is new, fall back to inserting a fresh empty map.
+    let cell = match cells.get(&txn, addr) {
+        Some(yrs::Out::YMap(c)) => c,
+        _ => cells.insert(&mut txn, addr, MapPrelim::default()),
+    };
     let (any, _) = json_to_any(value_json);
     cell.insert(&mut txn, "v", any);
     cell.insert(&mut txn, "t", yrs::Any::BigInt(type_tag as i64));
@@ -285,12 +303,15 @@ fn write_cell_raw(
         // the literal-write recalc walk when no formulas exist.
         sheet.insert(&mut txn, "has_formulas", yrs::Any::Bool(true));
     } else {
-        // `Map::remove` is idempotent on missing keys.
+        // Load-bearing: clears any stale `f` from a prior formula
+        // write so this cell becomes a true literal. `Map::remove`
+        // is idempotent on missing keys.
         cell.remove(&mut txn, "f");
     }
     if let Some(src) = fs {
         cell.insert(&mut txn, "fs", src.as_str().to_string());
     } else {
+        // Load-bearing: see `f` above.
         cell.remove(&mut txn, "fs");
     }
 }
@@ -427,7 +448,7 @@ pub async fn apply_set_cell_via_ws(
             .apply_update(update)
             .map_err(|e| anyhow!("apply server state: {e:?}"))?;
     }
-    apply_set_cell_in_proc(&local, sheet_id, addr, value);
+    let _ = apply_set_cell_in_proc(&local, sheet_id, addr, value);
 
     // Step 5: Compute diff of our new mutation against the server's known SV,
     // then send it.
@@ -453,7 +474,7 @@ mod tests {
     #[test]
     fn set_cell_then_project_reflects_value() {
         let doc = Doc::new();
-        apply_set_cell_in_proc(&doc, "s1", "A1", &Value::String("Hola".into()));
+        let _ = apply_set_cell_in_proc(&doc, "s1", "A1", &Value::String("Hola".into()));
         let v = projection::project(&doc);
         eprintln!("projection: {v}");
         assert_eq!(
@@ -465,9 +486,9 @@ mod tests {
     #[test]
     fn set_cell_persists_formula_and_evaluated_value() {
         let doc = Doc::new();
-        apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(2));
-        apply_set_cell_in_proc(&doc, "Sheet1", "A2", &serde_json::json!(3));
-        apply_set_cell_in_proc(&doc, "Sheet1", "A3", &serde_json::json!(5));
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(2));
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "A2", &serde_json::json!(3));
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "A3", &serde_json::json!(5));
 
         let outcome =
             apply_set_cell_in_proc(&doc, "Sheet1", "B1", &serde_json::json!("=SUM(A1:A3)"));
@@ -509,9 +530,9 @@ mod tests {
     #[test]
     fn set_cell_recalculates_dependents_in_topo_order() {
         let doc = Doc::new();
-        apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(1));
-        apply_set_cell_in_proc(&doc, "Sheet1", "B1", &serde_json::json!("=A1+10")); // → 11
-        apply_set_cell_in_proc(&doc, "Sheet1", "C1", &serde_json::json!("=B1*2")); // → 22
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(1));
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "B1", &serde_json::json!("=A1+10")); // → 11
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "C1", &serde_json::json!("=B1*2")); // → 22
 
         // Now mutate A1 — B1 and C1 must update.
         let outcome = apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(5));
@@ -549,11 +570,149 @@ mod tests {
     }
 
     #[test]
+    fn set_cell_with_eval_error_emits_warning_and_persists_excel_error() {
+        let doc = Doc::new();
+        let outcome = apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!("=1/0"));
+
+        // Warning surfaces the Excel error.
+        match outcome.warnings.as_slice() {
+            [SetCellWarning::EvalError { addr, error }] => {
+                assert_eq!(addr, "A1");
+                assert!(
+                    error.contains("#DIV/0!"),
+                    "expected #DIV/0! error, got {error}"
+                );
+            }
+            other => panic!("expected one EvalError warning, got {:?}", other),
+        }
+
+        // Cell persists with the error string + t=4.
+        let r = YrsResolver::new(&doc);
+        let cell = r.get("Sheet1", "A1").unwrap();
+        assert_eq!(cell.v.as_str(), Some("#DIV/0!"));
+        assert_eq!(cell.t, 4);
+    }
+
+    #[test]
+    fn set_cell_with_cycle_emits_cycle_warning() {
+        let doc = Doc::new();
+        // Seed mutual references: A1=B1+1, B1=A1+1.
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(0));
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "B1", &serde_json::json!("=A1+1"));
+        // Now change A1 to also reference B1 → cycle.
+        let outcome = apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!("=B1+1"));
+
+        // The cell IS written (we don't roll back its value).
+        let r = YrsResolver::new(&doc);
+        let cell = r.get("Sheet1", "A1").unwrap();
+        assert!(cell.v.as_f64().is_some() || cell.v.as_str().is_some());
+
+        // Cycle warning surfaces.
+        let cycle = outcome
+            .warnings
+            .iter()
+            .find_map(|w| {
+                if let SetCellWarning::Cycle { chain } = w {
+                    Some(chain.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("expected one Cycle warning");
+        // Chain should include both A1 and B1.
+        let chain_set: std::collections::HashSet<_> = cycle.iter().cloned().collect();
+        assert!(chain_set.contains(&("Sheet1".to_string(), "A1".to_string())));
+        assert!(chain_set.contains(&("Sheet1".to_string(), "B1".to_string())));
+    }
+
+    #[test]
+    fn literal_write_on_formula_free_sheet_skips_recalc() {
+        // On a sheet with NO formulas, literal writes must not trigger
+        // any recalc work. We verify this by writing a literal and asserting
+        // cells_recalculated is 0 (no formulas to recalc) AND no extra
+        // sheet-level keys are produced beyond what the literal write needs.
+        let doc = Doc::new();
+        // First write — sheet is brand new, no formulas exist.
+        let outcome = apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(1));
+        assert_eq!(outcome.cells_recalculated, 0);
+        assert!(outcome.warnings.is_empty());
+
+        // Second literal write — still no formulas.
+        let outcome2 = apply_set_cell_in_proc(&doc, "Sheet1", "A2", &serde_json::json!(2));
+        assert_eq!(outcome2.cells_recalculated, 0);
+        assert!(outcome2.warnings.is_empty());
+
+        // No "has_formulas" key should be present yet.
+        let txn = doc.transact();
+        let workbook = txn.get_map("workbook").unwrap();
+        let sheets = match workbook.get(&txn, "sheets").unwrap() {
+            yrs::Out::YArray(a) => a,
+            _ => panic!(),
+        };
+        let yrs::Out::YMap(sheet) = sheets.get(&txn, 0).unwrap() else {
+            panic!()
+        };
+        assert!(
+            sheet.get(&txn, "has_formulas").is_none(),
+            "has_formulas should not be set when no formula has ever been written"
+        );
+
+        // Now write a formula → flag must flip.
+        drop(txn);
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "B1", &serde_json::json!("=A1+A2"));
+        let txn = doc.transact();
+        let workbook = txn.get_map("workbook").unwrap();
+        let sheets = match workbook.get(&txn, "sheets").unwrap() {
+            yrs::Out::YArray(a) => a,
+            _ => panic!(),
+        };
+        let yrs::Out::YMap(sheet) = sheets.get(&txn, 0).unwrap() else {
+            panic!()
+        };
+        let yrs::Out::Any(yrs::Any::Bool(flag)) = sheet.get(&txn, "has_formulas").unwrap() else {
+            panic!("has_formulas should be a Bool after formula write");
+        };
+        assert!(flag, "has_formulas should be true after a formula write");
+    }
+
+    #[test]
+    fn set_cell_with_parse_error_emits_warning_and_persists_literal() {
+        let doc = Doc::new();
+        let outcome = apply_set_cell_in_proc(
+            &doc,
+            "Sheet1",
+            "A1",
+            &serde_json::json!("=SUM("), // Malformed: unclosed paren
+        );
+
+        // Warning surfaces the parse error.
+        let parse_err = outcome.warnings.iter().find_map(|w| {
+            if let SetCellWarning::ParseError { addr, error } = w {
+                Some((addr.clone(), error.clone()))
+            } else {
+                None
+            }
+        });
+        assert!(
+            parse_err.is_some(),
+            "expected ParseError warning, got {:?}",
+            outcome.warnings
+        );
+
+        // The cell still gets the raw text persisted as a literal (no f/fs).
+        let r = YrsResolver::new(&doc);
+        let cell = r.get("Sheet1", "A1").unwrap();
+        assert_eq!(cell.v.as_str(), Some("=SUM("));
+        // Type is string (1), not error (4).
+        assert_eq!(cell.t, 1);
+    }
+
+    #[test]
     fn set_range_with_mixed_cells_recalculates() {
         let doc = Doc::new();
-        apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(0));
-        apply_set_cell_in_proc(&doc, "Sheet1", "B1", &serde_json::json!(0));
-        apply_set_cell_in_proc(&doc, "Sheet1", "D1", &serde_json::json!("=A1+B1"));
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(0));
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "B1", &serde_json::json!(0));
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "D1", &serde_json::json!("=A1+B1"));
 
         let mut total_recalc = 0usize;
         let o1 = apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(5));
@@ -585,12 +744,17 @@ fn json_to_any(v: &Value) -> (Any, &'static str) {
 /// Map a JSON value to the numeric type tag used by the formula engine
 /// (1=string, 2=number, 3=bool, 4=error/other). Used by `write_cell_raw`
 /// callers that need a `u8` tag.
+///
+/// Catch-all (`Null` / `Array` / `Object`) maps to `4` (error) — those
+/// values aren't representable as scalar cell types, so `#N/A`-style
+/// error semantics is a more honest signal than silently coercing them
+/// to a string.
 fn json_value_type_tag(v: &Value) -> u8 {
     match v {
         Value::String(_) => 1,
         Value::Number(_) => 2,
         Value::Bool(_) => 3,
-        _ => 1,
+        _ => 4,
     }
 }
 
@@ -825,7 +989,7 @@ mod multi_sheet_tests {
     fn rename_sheet_changes_name_only() {
         let doc = Doc::new();
         let id = apply_add_sheet(&doc, "Old");
-        apply_set_cell_in_proc(&doc, &id, "A1", &serde_json::json!("kept"));
+        let _ = apply_set_cell_in_proc(&doc, &id, "A1", &serde_json::json!("kept"));
         assert!(apply_rename_sheet(&doc, &id, "New"));
         let v = project(&doc);
         assert_eq!(v["sheets"][0]["name"], "New");

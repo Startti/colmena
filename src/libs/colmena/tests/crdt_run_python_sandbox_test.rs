@@ -28,8 +28,8 @@ async fn make_minimal_ctx() -> (CrdtDocsContext, String, std::path::PathBuf) {
     let aid = ArtifactId::new();
     let entry = runtime.registry.get_or_create(&aid, "test");
     let sid = apply_add_sheet(&entry.doc, "S");
-    apply_set_cell_in_proc(&entry.doc, &sid, "A1", &json!("x"));
-    apply_set_cell_in_proc(&entry.doc, &sid, "A2", &json!("y"));
+    let _ = apply_set_cell_in_proc(&entry.doc, &sid, "A1", &json!("x"));
+    let _ = apply_set_cell_in_proc(&entry.doc, &sid, "A2", &json!("y"));
     let ctx = CrdtDocsContext::new_local(runtime, aid, Some("sb_test".to_string()));
     (ctx, sid, tmp)
 }
