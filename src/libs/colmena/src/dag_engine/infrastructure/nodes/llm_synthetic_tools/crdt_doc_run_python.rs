@@ -194,6 +194,14 @@ pub async fn execute_run_python(ctx: &CrdtDocsContext, args: RunPythonArgs) -> s
                         // new-sheet path since the sheet was just created,
                         // but the field is part of the contract).
                         "cells_recalculated": wr.cells_recalculated,
+                        // D-T8: per-cell warnings (NeedsBrowser, EvalError,
+                        // Cycle, ParseError) bubbled up from
+                        // `apply_set_cell_in_proc`. Always empty for the
+                        // new-sheet path today, but the field is part of
+                        // the contract so future in-place writers route
+                        // through the same response shape.
+                        "warnings": serde_json::to_value(&wr.warnings)
+                            .unwrap_or(serde_json::Value::Array(vec![])),
                     });
                     ctx.mark_dirty();
                     let origin = ctx

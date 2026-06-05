@@ -9,9 +9,12 @@
 //! `crdt_doc_run_python` dispatcher) can emit a
 //! `formula_replaced_by_literal` CRDT event for downstream consumers.
 
+use crate::crdt_documents::formula_engine::CellResolver;
 use crate::crdt_documents::formula_engine_yrs_resolver::YrsResolver;
 use crate::crdt_documents::projection;
-use crate::crdt_documents::tool_executor::{apply_add_sheet, apply_set_cell_in_proc};
+use crate::crdt_documents::tool_executor::{
+    apply_add_sheet, apply_set_cell_in_proc, SetCellWarning,
+};
 use serde_json::{Map, Value};
 use yrs::Doc;
 
@@ -26,6 +29,8 @@ pub const MAX_SHEET_NAME_LEN: usize = 31;
 pub enum WriterError {
     #[error("sheet name is empty")]
     EmptyName,
+    #[error("sheet '{0}' does not exist")]
+    SheetNotFound(String),
 }
 
 #[derive(Debug, Clone)]
@@ -48,12 +53,18 @@ pub struct WriteResult {
     /// effect of these writes (aggregated across all per-cell
     /// [`apply_set_cell_in_proc`] calls).
     pub cells_recalculated: usize,
+    /// D-T8: warnings produced by per-cell
+    /// [`apply_set_cell_in_proc`] calls (`NeedsBrowser`, `EvalError`,
+    /// `Cycle`, `ParseError`). Always empty for the new-sheet path —
+    /// populated only when records contain formulas (relevant to
+    /// [`apply_records_to_doc`]).
+    pub warnings: Vec<SetCellWarning>,
 }
 
 /// D-T8: outcome of a records-to-doc apply. Returned by
 /// [`apply_records_to_doc`] so the caller (the `crdt_doc_run_python`
 /// dispatcher) can emit `formula_replaced_by_literal` events and surface
-/// the cascade recalc count in the tool result.
+/// the cascade recalc count and per-cell warnings in the tool result.
 #[derive(Debug, Clone, Default)]
 pub struct DfWriterOutcome {
     /// Cells that previously had a formula and were overwritten with a
@@ -63,6 +74,11 @@ pub struct DfWriterOutcome {
     /// Total cells whose formulas were re-evaluated as a result of these
     /// writes.
     pub cells_recalculated: usize,
+    /// Warnings produced by per-cell [`apply_set_cell_in_proc`] calls
+    /// (e.g. `NeedsBrowser`, `EvalError`, `Cycle`, `ParseError`). Caller
+    /// is expected to forward these to the tool result so the agent
+    /// can react.
+    pub warnings: Vec<SetCellWarning>,
 }
 
 /// D-T8: one cell whose formula was replaced by a literal value during a
@@ -106,6 +122,7 @@ pub fn write_records_as_new_sheet(
 
     let mut formula_replacements: Vec<FormulaReplacement> = Vec::new();
     let mut cells_recalculated: usize = 0;
+    let mut warnings: Vec<SetCellWarning> = Vec::new();
 
     // Write column names in row 1.
     for (i, col_name) in columns.iter().enumerate() {
@@ -117,6 +134,7 @@ pub fn write_records_as_new_sheet(
             &Value::String(col_name.clone()),
             &mut formula_replacements,
             &mut cells_recalculated,
+            &mut warnings,
         );
     }
 
@@ -136,6 +154,7 @@ pub fn write_records_as_new_sheet(
                 &val,
                 &mut formula_replacements,
                 &mut cells_recalculated,
+                &mut warnings,
             );
         }
     }
@@ -148,6 +167,7 @@ pub fn write_records_as_new_sheet(
         truncated_at,
         formula_replacements,
         cells_recalculated,
+        warnings,
     })
 }
 
@@ -175,6 +195,19 @@ pub fn apply_records_to_doc(
     if sheet_id.is_empty() {
         return Err(WriterError::EmptyName);
     }
+    // Reject writes to a sheet that doesn't exist. Without this guard,
+    // `apply_set_cell_in_proc` would silently create the sheet via its
+    // lazy `get_or_insert` logic — undesired in the pandas write-back
+    // path (typo / race condition → silent shadow sheet).
+    //
+    // Scoped so the read txn drops before any per-cell write opens its
+    // own mut txn downstream.
+    {
+        let resolver = YrsResolver::new(doc);
+        if !resolver.sheet_exists(sheet_id) {
+            return Err(WriterError::SheetNotFound(sheet_id.to_string()));
+        }
+    }
     let mut outcome = DfWriterOutcome::default();
     for record in records {
         for (addr, val) in record {
@@ -188,6 +221,7 @@ pub fn apply_records_to_doc(
                 val,
                 &mut outcome.formula_replacements,
                 &mut outcome.cells_recalculated,
+                &mut outcome.warnings,
             );
         }
     }
@@ -204,6 +238,7 @@ fn write_one_cell(
     value: &Value,
     formula_replacements: &mut Vec<FormulaReplacement>,
     cells_recalculated: &mut usize,
+    warnings: &mut Vec<SetCellWarning>,
 ) {
     // Peek the prior formula (if any) BEFORE the write — once
     // `apply_set_cell_in_proc` takes the literal path, `f`/`fs` are
@@ -229,6 +264,7 @@ fn write_one_cell(
     }
     let set_outcome = apply_set_cell_in_proc(doc, sheet_id, addr, value);
     *cells_recalculated += set_outcome.cells_recalculated;
+    warnings.extend(set_outcome.warnings);
 }
 
 /// Resolve a unique sheet name. Tries `requested`, then `"requested (2)"`,
@@ -451,6 +487,51 @@ mod tests {
             resolver.get_formula("Sheet1", "B1").as_deref(),
             Some("=A1*3")
         );
+    }
+
+    #[test]
+    fn apply_records_to_doc_propagates_set_cell_warnings() {
+        use crate::crdt_documents::tool_executor::{apply_set_cell_in_proc, SetCellWarning};
+        let doc = Doc::new();
+        // Sheet must exist (fix 2's check rejects missing sheets).
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "A1", &json!(1));
+
+        // Write a formula with an unknown function → NeedsBrowser warning.
+        let records = vec![make_record(&[("A1", json!("=BOGUSFN(1)"))])];
+        let outcome = apply_records_to_doc(&doc, "Sheet1", &records).unwrap();
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|w| matches!(w, SetCellWarning::NeedsBrowser { .. })),
+            "expected NeedsBrowser warning, got {:?}",
+            outcome.warnings
+        );
+    }
+
+    #[test]
+    fn apply_records_to_doc_rejects_nonexistent_sheet() {
+        let doc = Doc::new();
+        let records = vec![make_record(&[("A1", json!(1))])];
+        let err = apply_records_to_doc(&doc, "Nonexistent", &records).unwrap_err();
+        assert!(
+            matches!(err, WriterError::SheetNotFound(_)),
+            "expected SheetNotFound, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn overwriting_formula_with_formula_does_not_record_replacement() {
+        use crate::crdt_documents::tool_executor::apply_set_cell_in_proc;
+        let doc = Doc::new();
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "A1", &json!(2));
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "B1", &json!("=A1*2"));
+
+        // Overwrite B1 with a DIFFERENT formula (not a literal).
+        let records = vec![make_record(&[("B1", json!("=A1*3"))])];
+        let outcome = apply_records_to_doc(&doc, "Sheet1", &records).unwrap();
+        // No replacement event — modifying a formula isn't "replaced by literal".
+        assert!(outcome.formula_replacements.is_empty());
     }
 
     #[test]
