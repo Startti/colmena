@@ -132,6 +132,49 @@ pub fn project_sheet_cells_with_formulas(
     out
 }
 
+/// Count the number of cells in `sheet_id` that carry a non-empty formula
+/// (i.e. their YMap has a string `f` key). Returns `0` when the sheet doesn't
+/// exist or the workbook has no `sheets` array. Used by
+/// `crdt_doc_list_sheets` so the agent can decide whether to pay the cost
+/// of `crdt_doc_read(include_formulas=true)` on a subsequent call.
+pub fn count_formulas_in_sheet(doc: &Doc, sheet_id: &str) -> u32 {
+    let txn = doc.transact();
+    let Some(workbook) = txn.get_map("workbook") else {
+        return 0;
+    };
+    let Some(yrs::Out::YArray(sheets)) = workbook.get(&txn, "sheets") else {
+        return 0;
+    };
+    for i in 0..sheets.len(&txn) {
+        let Some(yrs::Out::YMap(sheet)) = sheets.get(&txn, i) else {
+            continue;
+        };
+        let id_matches = matches!(
+            sheet.get(&txn, "id"),
+            Some(yrs::Out::Any(yrs::Any::String(ref s))) if s.as_ref() == sheet_id
+        );
+        if !id_matches {
+            continue;
+        }
+        let Some(yrs::Out::YMap(cells)) = sheet.get(&txn, "cells") else {
+            return 0;
+        };
+        let mut n = 0u32;
+        for (_addr, cell_val) in cells.iter(&txn) {
+            let yrs::Out::YMap(cell_map) = cell_val else {
+                continue;
+            };
+            if let Some(yrs::Out::Any(yrs::Any::String(f))) = cell_map.get(&txn, "f") {
+                if !f.is_empty() {
+                    n += 1;
+                }
+            }
+        }
+        return n;
+    }
+    0
+}
+
 fn any_to_json(any: &yrs::Any) -> Value {
     match any {
         yrs::Any::Null | yrs::Any::Undefined => Value::Null,

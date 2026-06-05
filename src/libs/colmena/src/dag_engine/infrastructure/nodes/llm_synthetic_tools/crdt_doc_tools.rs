@@ -36,8 +36,12 @@ pub fn tool_list_sheets() -> ToolDefinition {
 }
 
 /// Execute `list_sheets` against the runtime. Returns
-/// `{ "sheets": [ { "sheet_id": "…", "name": "…" }, … ] }` or
-/// `{ "error": "artifact_not_found" }` when the id is not registered.
+/// `{ "sheets": [ { "sheet_id": "…", "name": "…", "formula_count": N }, … ] }`
+/// or `{ "error": "artifact_not_found" }` when the id is not registered.
+///
+/// `formula_count` is the number of cells in the sheet that carry a non-empty
+/// `f` (formula) entry. Lets the agent decide whether `include_formulas=true`
+/// on a subsequent `crdt_doc_read` is worth the payload cost.
 pub fn execute_list_sheets(ctx: &CrdtDocsContext) -> serde_json::Value {
     let Some(doc) = ctx.doc() else {
         return serde_json::json!({ "error": "artifact_not_found" });
@@ -49,9 +53,13 @@ pub fn execute_list_sheets(ctx: &CrdtDocsContext) -> serde_json::Value {
         .unwrap_or_default()
         .into_iter()
         .map(|s| {
+            let sheet_id = s["id"].as_str().unwrap_or("");
+            let formula_count =
+                crate::crdt_documents::projection::count_formulas_in_sheet(&doc, sheet_id);
             serde_json::json!({
                 "sheet_id": s["id"],
                 "name": s["name"],
+                "formula_count": formula_count,
             })
         })
         .collect();
@@ -910,6 +918,38 @@ mod tests {
         let ctx = CrdtDocsContext::new_local(rt, unknown, Some("test_session".to_string()));
         let v = execute_list_sheets(&ctx);
         assert_eq!(v["error"], "artifact_not_found");
+    }
+
+    #[tokio::test]
+    async fn list_sheets_reports_formula_count() {
+        // D-T7: per-sheet `formula_count` lets the agent decide whether
+        // `crdt_doc_read(include_formulas=true)` is worth the payload cost.
+        use crate::crdt_documents::tool_executor::{apply_add_sheet, apply_set_cell_in_proc};
+        let rt = make_runtime().await;
+        let id = ArtifactId::new();
+        let entry = rt.registry.get_or_create(&id, "workbook");
+
+        // Sheet1: A1=1 (literal), B1="=A1+1" (formula), C1="=A1*2" (formula)
+        let s1 = apply_add_sheet(&entry.doc, "Sheet1");
+        let _ = apply_set_cell_in_proc(&entry.doc, &s1, "A1", &json!(1));
+        let _ = apply_set_cell_in_proc(&entry.doc, &s1, "B1", &json!("=A1+1"));
+        let _ = apply_set_cell_in_proc(&entry.doc, &s1, "C1", &json!("=A1*2"));
+
+        // Sheet2: A1=10 literal only (no formulas).
+        let s2 = apply_add_sheet(&entry.doc, "Sheet2");
+        let _ = apply_set_cell_in_proc(&entry.doc, &s2, "A1", &json!(10));
+
+        let ctx = CrdtDocsContext::new_local(rt, id, Some("test_session".to_string()));
+        let v = execute_list_sheets(&ctx);
+        let sheets = v["sheets"].as_array().unwrap();
+        assert_eq!(sheets.len(), 2);
+
+        let by_name: std::collections::HashMap<&str, &serde_json::Value> = sheets
+            .iter()
+            .map(|s| (s["name"].as_str().unwrap(), s))
+            .collect();
+        assert_eq!(by_name["Sheet1"]["formula_count"], json!(2));
+        assert_eq!(by_name["Sheet2"]["formula_count"], json!(0));
     }
 
     #[test]
