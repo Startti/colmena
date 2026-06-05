@@ -111,3 +111,44 @@ Una sección por feature. Cada sección contiene:
 - Sin permission model — cualquier agente con `artifact_id` puede leer/importar.
 
 **Forward compatibility.** Los tools de F no enforcean session ownership a nivel de tool — cuando workspace concept aterrize en v1.1, solo el discovery cambia; los tools de F siguen funcionando sin modificación.
+
+---
+
+## 5. Token optimization — Plan GAMMA (F-T14)
+
+**Qué cambió.** Tres optimizaciones acumulativas para reducir tokens enviados al LLM en cada iteración del ReAct loop. Todas miden con el smoke `f_cross_artifact_smoke.json` contra el baseline previo (gemini-2.5-flash).
+
+| Step | Cambio | Per-iter avg (T) | vs baseline |
+|---|---|---:|---:|
+| Baseline | — | 7,925 | — |
+| **A1** | Comprimir descriptions de tools crdt_doc_* + load_skill + system PRELUDE + tool-use rules | 7,344 | -7% |
+| **A1+A2** | + skill-out-of-history (compactar load_skill tool results >N=3 turnos atrás) | 6,120 | -23% |
+| **A1+A2+A3** | + lazy_tool_loading extendido a synthetic crdt_doc_* | **4,670** | **-41%** |
+
+**A1 (commit `e293001`)** — string compression. crdt_doc_run_python description: 458T → 110T. crdt_doc_import_sheet: 361T → 60T. Etcétera. PRELUDE auto-injected (`CRDT_SPREADSHEET_PROTOCOL_PRELUDE`) reescrito de 6 rules con ejemplos a 6 rules en 1 línea cada una. "Tool Use Instructions" del system message reducido de 4 bullets verbose a 1 línea. Total: -870T per iter fijo.
+
+**A2 (commit `2ead7b1`)** — skill-out-of-history. Nueva función `compact_old_load_skill_in_history()` en `agent_service.rs`: para cada Tool message con `tool_call_id` que el matching Assistant emitió como `load_skill` y está más de 8 mensajes atrás (≈3 ReAct turns), reemplaza el body por un marker `"[skill X loaded earlier (N chars). Call load_skill again to re-read.]"`. La conversación persistida en `conversation_repository` NO se altera — solo el `LlmRequest` enviado al provider. Provider-agnostic: funciona en OpenAI, Anthropic, Gemini sin cambios al adapter. 6 unit tests nuevos cubren noop, happy path con/sin reference, preservación de tool calls recientes, no-load_skill tools intactos, idempotencia.
+
+**A3 (commit `60ca29a`)** — lazy_tool_loading para synthetic tools. Cuando ambos `lazy_tool_loading: true` y `crdt_documents` config están seteados, los crdt_doc_* tools se registran como CatalogEntry (con summary auto-derivado del description) en vez de inyectarse directo al tools[] array. La infraestructura existente de lazy (`describe_tool` + `tools_provider` closure) los expone sólo después que el agente los descubre. `load_skill` queda always-eager (es el entry point de skill discovery). Tools[] arranca con 2 tools (~826T), crece hasta 6 (~1411T) en lugar del fijo 12 tools (~2453T).
+
+**Por qué importa.** ReAct loops re-envían toda la conversación + tools cada iteración. Por design las APIs son stateless. Para un smoke típico de F (10-17 iter con 4 outputs), bajar de 100K → 75K total tokens es:
+- ~25% menos $$$ por run (~$0.043 → $0.032 en Gemini Flash)
+- Latencia menor (menos bytes que procesar per iter)
+- Headroom para que el agente "piense" más sin agotar context window
+
+A escala (ADP con miles de runs/día) el ahorro acumulado es relevante.
+
+**Bonus instrumentación.** En `agent_service.rs` quedó formalizada una diagnóstica gated por env vars:
+- `COLMENA_DUMP_PROMPT_SIZES=1` → 1 line per iter con sizes de msgs + tools
+- `COLMENA_DUMP_PROMPT_FULL=1` → full breakdown de cada msg + cada tool
+
+Ambas con costo CERO cuando están off. Útil para medir el impacto de cualquier optimización futura sin agregar lógica nueva.
+
+**Limitaciones / forward-compat.**
+- A3 sigue la convención existente: `load_skill` siempre eager. Si en el futuro hay 100 skills, el catálogo de load_skill crece — habría que considerar un segundo nivel de lazy para skills. v1.1.
+- Prompt caching nativo de los providers (Anthropic con cache_control, Gemini Cached Content API) NO se implementó en este PR. El adapter de OpenAI ya tiene caching automático; Anthropic adapter lee `cache_read_input_tokens` pero no SETEA markers; Gemini adapter no tiene nada. Item BACKLOG para v1.1.
+- Mock 3 (análisis estático) predijo ~6K para A3 pero el run real dio ~10K — la diferencia es que A3 también previene el "growth" de tools cuando hay errores o re-pruebas (el agente ya descubrió la tool, no necesita re-descubrir).
+
+**Commits.** `e293001` (A1), `2ead7b1` (A2), `60ca29a` (A3), este (A4 — docs).
+
+**Estado.** done.
