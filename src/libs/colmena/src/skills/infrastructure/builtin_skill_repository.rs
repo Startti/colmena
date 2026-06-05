@@ -289,7 +289,11 @@ mod tests {
         assert!(ref_names.contains(&"needs-browser-fallback"));
 
         // Each reference must be loadable
-        for r in &["write-formula", "read-with-formulas", "needs-browser-fallback"] {
+        for r in &[
+            "write-formula",
+            "read-with-formulas",
+            "needs-browser-fallback",
+        ] {
             let reference = repo.load_reference("crdt-doc-formulas", r).await.unwrap();
             assert!(!reference.body.is_empty(), "{} body must not be empty", r);
         }

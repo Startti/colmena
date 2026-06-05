@@ -13,7 +13,7 @@
 //!   cargo test --test formula_divergence -- --ignored --nocapture
 
 use colmena::crdt_documents::formula_engine::{
-    CellResolver, CellSnapshot, EvalValue, ParseOutcome, evaluate, parse,
+    evaluate, parse, CellResolver, CellSnapshot, EvalValue, ParseOutcome,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -121,10 +121,7 @@ fn formualizer_matches_expected_values() {
         match (&f.expected_value, &f.expected_error, &actual) {
             (Some(exp_v), None, Ok(act_v)) => {
                 if !values_equivalent(exp_v, act_v) {
-                    failed.push((
-                        f.name.clone(),
-                        format!("expected {exp_v:?}, got {act_v:?}"),
-                    ));
+                    failed.push((f.name.clone(), format!("expected {exp_v:?}, got {act_v:?}")));
                 }
             }
             (None, Some(exp_e), Err(act_e)) => {
