@@ -1,9 +1,17 @@
 use crate::llm::domain::{
     ConversationKey, ConversationRepository, FileData, LlmConfig, LlmError, LlmMessage,
-    LlmRepository, LlmRequest, LlmResponse, LlmStreamPart, LlmUsage, ToolCall, ToolDefinition,
-    ToolExecutor, ToolResult,
+    LlmRepository, LlmRequest, LlmResponse, LlmStreamPart, LlmUsage, MessageRole, ToolCall,
+    ToolDefinition, ToolExecutor, ToolResult,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Number of trailing messages to keep verbatim when compacting old
+/// `load_skill` tool results in the request. `keep_recent_msgs = 8` covers
+/// roughly the last 3 ReAct turns (assistant + 1-2 tool results per turn);
+/// anything older with `load_skill` content is replaced by a short marker.
+/// Set to `usize::MAX` to disable.
+const COMPACT_LOAD_SKILL_KEEP_RECENT_MSGS: usize = 8;
 
 /// A closure that derives the tool list to send on each ReAct iteration from
 /// the current message history. Used to implement lazy tool loading without
@@ -138,7 +146,17 @@ impl AgentService {
                 Some(p) => p(&messages),
                 None => tools.clone(),
             };
-            let mut request = LlmRequest::new(messages.clone(), config.clone(), should_stream)?;
+            // F-T14 step A2 — skill-out-of-history.
+            // Compact the LlmRequest's view of history (NOT the persisted
+            // conversation): for any `load_skill` tool result older than
+            // `COMPACT_LOAD_SKILL_KEEP_RECENT_MSGS`, replace its content with a
+            // short marker. The agent's protocol prelude tells the model it
+            // can re-call `load_skill` if it needs to re-read the body.
+            // Conversation_repository keeps the full history intact for
+            // resume / inspection.
+            let request_messages =
+                compact_old_load_skill_in_history(&messages, COMPACT_LOAD_SKILL_KEEP_RECENT_MSGS);
+            let mut request = LlmRequest::new(request_messages, config.clone(), should_stream)?;
             if !iteration_tools.is_empty() {
                 request = request.with_tools(iteration_tools.clone());
             }
@@ -149,10 +167,17 @@ impl AgentService {
             //   COLMENA_DUMP_PROMPT_SIZES=1  → one-line summary per iteration
             //   COLMENA_DUMP_PROMPT_FULL=1   → full per-message + per-tool breakdown
             if std::env::var("COLMENA_DUMP_PROMPT_SIZES").is_ok() {
-                let msgs_json = serde_json::to_string(&messages).unwrap_or_default();
+                // Dump the COMPACTED messages — these are what gets sent over the
+                // wire to the provider. The persisted in-memory `messages` still
+                // has the full skill content for resume/debug.
+                let msgs_to_dump = compact_old_load_skill_in_history(
+                    &messages,
+                    COMPACT_LOAD_SKILL_KEEP_RECENT_MSGS,
+                );
+                let msgs_json = serde_json::to_string(&msgs_to_dump).unwrap_or_default();
                 let tools_json = serde_json::to_string(&iteration_tools).unwrap_or_default();
-                let n_msgs = messages.len();
-                let per_msg_sizes: Vec<usize> = messages
+                let n_msgs = msgs_to_dump.len();
+                let per_msg_sizes: Vec<usize> = msgs_to_dump
                     .iter()
                     .map(|m| serde_json::to_string(m).map(|s| s.len()).unwrap_or(0))
                     .collect();
@@ -174,7 +199,7 @@ impl AgentService {
                         "\n🔬 [FULL DUMP iter (n_msgs={})] ───────────────────",
                         n_msgs
                     );
-                    for (i, m) in messages.iter().enumerate() {
+                    for (i, m) in msgs_to_dump.iter().enumerate() {
                         let s = serde_json::to_string(m).unwrap_or_default();
                         // Trim each to first 400 chars for sanity
                         let preview = if s.len() > 600 {
@@ -562,6 +587,104 @@ impl AgentService {
     }
 }
 
+/// Compact `load_skill` tool results that are older than `keep_recent_msgs`
+/// into a short marker. Returns a new Vec — never mutates the input.
+///
+/// Why: skill bodies (catalog + reference content) are static — the model
+/// reads them once at load time, then they live in `messages` forever and get
+/// re-sent verbatim in every subsequent ReAct iteration's prompt. For a smoke
+/// with 3-5 skill loads and 10 iterations, this re-sends 13-15K tokens of
+/// redundant content. Marker replacement saves ~95% of that cost; if the
+/// model truly needs to re-read a skill, the protocol prelude (auto-injected
+/// when `crdt_documents` is configured) tells it to just call `load_skill`
+/// again.
+///
+/// Detection: for each Tool message, find the matching Assistant message that
+/// emitted the tool call by `tool_call_id` and check whether the function name
+/// was `load_skill`. Only matches by exact function name — `crdt_doc_*` tool
+/// results stay intact (they're either tiny or stateful and worth re-sending).
+///
+/// Provider-agnostic: each provider adapter serializes `LlmMessage` to its
+/// own request format; the compact marker is just a Tool message with shorter
+/// content, so no adapter changes needed.
+fn compact_old_load_skill_in_history(
+    messages: &[LlmMessage],
+    keep_recent_msgs: usize,
+) -> Vec<LlmMessage> {
+    let mut out: Vec<LlmMessage> = messages.to_vec();
+    if out.len() <= keep_recent_msgs {
+        return out;
+    }
+
+    // Build: tool_call_id → load_skill arguments (only for load_skill calls).
+    let mut load_skill_calls: HashMap<String, String> = HashMap::new();
+    for msg in out.iter() {
+        let Some(tcs) = msg.tool_calls() else {
+            continue;
+        };
+        for tc in tcs {
+            if tc.function.name == "load_skill" {
+                load_skill_calls.insert(tc.id.clone(), tc.function.arguments.clone());
+            }
+        }
+    }
+
+    if load_skill_calls.is_empty() {
+        return out;
+    }
+
+    let boundary = out.len().saturating_sub(keep_recent_msgs);
+
+    // Two-phase scan: collect indices that need rewriting first (immutable
+    // borrow), then mutate (mutable borrow). Avoids the needless-range-loop
+    // lint without losing clarity.
+    let mut to_compact: Vec<(usize, String, String)> = Vec::new();
+    for (i, msg) in out.iter().enumerate().take(boundary) {
+        if msg.role() != &MessageRole::Tool {
+            continue;
+        }
+        let Some(tcid) = msg.tool_call_id().map(|s| s.to_string()) else {
+            continue;
+        };
+        let Some(args) = load_skill_calls.get(&tcid) else {
+            continue;
+        };
+        // Skip already-marked messages (idempotent).
+        if msg.content().starts_with("[skill ") && msg.content().ends_with(']') {
+            continue;
+        }
+        to_compact.push((i, tcid, args.clone()));
+    }
+
+    for (i, tcid, args) in to_compact {
+        let original_size = out[i].content().len();
+
+        // Parse args to make the marker descriptive (best-effort).
+        let marker = match serde_json::from_str::<serde_json::Value>(&args) {
+            Ok(v) => {
+                let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+                match v.get("reference").and_then(|x| x.as_str()) {
+                    Some(r) => format!(
+                        "[skill '{name}' (ref={r}) loaded earlier ({original_size} chars). \
+                         Call load_skill again to re-read.]"
+                    ),
+                    None => format!(
+                        "[skill '{name}' loaded earlier ({original_size} chars). \
+                         Call load_skill again to re-read.]"
+                    ),
+                }
+            }
+            Err(_) => format!("[skill loaded earlier ({original_size} chars)]"),
+        };
+
+        if let Ok(new_msg) = LlmMessage::tool(tcid, marker) {
+            out[i] = new_msg;
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,6 +694,188 @@ mod tests {
     use mockall::mock;
     use mockall::predicate::*;
     use std::sync::Arc;
+
+    // ── F-T14 step A2: skill-out-of-history compaction tests ────────────────
+
+    fn fc(name: &str, args: &str) -> FunctionCall {
+        FunctionCall {
+            name: name.to_string(),
+            arguments: args.to_string(),
+        }
+    }
+
+    fn tool_call(id: &str, name: &str, args: &str) -> ToolCall {
+        ToolCall::new(id.to_string(), fc(name, args))
+    }
+
+    #[test]
+    fn compact_noop_when_history_shorter_than_keep_recent() {
+        let msgs = vec![
+            LlmMessage::user("hi".to_string()).unwrap(),
+            LlmMessage::assistant("ok".to_string()).unwrap(),
+        ];
+        let out = compact_old_load_skill_in_history(&msgs, 10);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].content(), "hi");
+        assert_eq!(out[1].content(), "ok");
+    }
+
+    #[test]
+    fn compact_noop_when_no_load_skill_in_history() {
+        // 12 msgs, none from load_skill — compaction must not change anything.
+        let mut msgs = Vec::new();
+        msgs.push(LlmMessage::user("u".to_string()).unwrap());
+        for i in 0..11 {
+            msgs.push(LlmMessage::tool(format!("t{i}"), format!("payload {i}")).unwrap());
+        }
+        let out = compact_old_load_skill_in_history(&msgs, 3);
+        assert_eq!(out.len(), msgs.len());
+        for (a, b) in out.iter().zip(msgs.iter()) {
+            assert_eq!(a.content(), b.content());
+        }
+    }
+
+    #[test]
+    #[allow(clippy::vec_init_then_push)] // tests build heterogeneous msg seqs
+    fn compact_replaces_old_load_skill_results_with_markers() {
+        // Build: 12 msgs total.
+        // msg[0] user, msg[1] assistant load_skill(name=foo), msg[2] tool result (foo body),
+        // msg[3] assistant load_skill(name=bar,reference=ref1), msg[4] tool result (bar body),
+        // msg[5..11] more stuff
+        // keep_recent = 4 → boundary = 8. msgs 0..7 are compactable, 8..11 stay verbatim.
+        let mut msgs = Vec::new();
+        msgs.push(LlmMessage::user("u".to_string()).unwrap());
+        msgs.push(
+            LlmMessage::assistant_with_tool_calls(
+                String::new(),
+                vec![tool_call("call_a", "load_skill", "{\"name\":\"foo\"}")],
+            )
+            .unwrap(),
+        );
+        msgs.push(
+            LlmMessage::tool("call_a".to_string(), "FULL FOO SKILL BODY".repeat(20)).unwrap(),
+        );
+        msgs.push(
+            LlmMessage::assistant_with_tool_calls(
+                String::new(),
+                vec![tool_call(
+                    "call_b",
+                    "load_skill",
+                    "{\"name\":\"bar\",\"reference\":\"ref1\"}",
+                )],
+            )
+            .unwrap(),
+        );
+        msgs.push(LlmMessage::tool("call_b".to_string(), "FULL BAR REF1 BODY".repeat(20)).unwrap());
+        for i in 0..7 {
+            msgs.push(LlmMessage::assistant(format!("filler {i}")).unwrap());
+        }
+        assert_eq!(msgs.len(), 12);
+
+        let out = compact_old_load_skill_in_history(&msgs, 4);
+        assert_eq!(out.len(), 12);
+
+        // msg[2] (load_skill foo result) is at index 2, boundary = 12 - 4 = 8 → compacted.
+        assert!(
+            out[2]
+                .content()
+                .starts_with("[skill 'foo' loaded earlier ("),
+            "expected marker; got: {}",
+            out[2].content()
+        );
+        // msg[4] (load_skill bar ref1 result) at index 4 → compacted with reference.
+        assert!(
+            out[4].content().contains("(ref=ref1)"),
+            "expected ref marker; got: {}",
+            out[4].content()
+        );
+        // Marker much shorter than original
+        let original_size = msgs[2].content().len();
+        assert!(
+            out[2].content().len() < original_size / 3,
+            "marker should be a small fraction of original"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::vec_init_then_push)] // tests build heterogeneous msg seqs
+    fn compact_preserves_recent_load_skill_results() {
+        // Build: 10 msgs, the LAST msg is a load_skill tool result. keep_recent=4
+        // → boundary = 6. msgs[6..] should remain verbatim.
+        let mut msgs = Vec::new();
+        for i in 0..7 {
+            msgs.push(LlmMessage::user(format!("u{i}")).unwrap());
+        }
+        msgs.push(
+            LlmMessage::assistant_with_tool_calls(
+                String::new(),
+                vec![tool_call("recent", "load_skill", "{\"name\":\"recent\"}")],
+            )
+            .unwrap(),
+        );
+        msgs.push(LlmMessage::tool("recent".to_string(), "FRESH SKILL BODY".to_string()).unwrap());
+        msgs.push(LlmMessage::assistant("ack".to_string()).unwrap());
+        assert_eq!(msgs.len(), 10);
+
+        let out = compact_old_load_skill_in_history(&msgs, 4);
+        // msg[8] is the tool result for "recent" load — index 8 >= boundary 6 → NOT compacted.
+        assert_eq!(out[8].content(), "FRESH SKILL BODY");
+    }
+
+    #[test]
+    #[allow(clippy::vec_init_then_push)]
+    fn compact_skips_non_load_skill_tools_even_if_old() {
+        let mut msgs = Vec::new();
+        msgs.push(
+            LlmMessage::assistant_with_tool_calls(
+                String::new(),
+                vec![tool_call("call_x", "crdt_doc_run_python", "{}")],
+            )
+            .unwrap(),
+        );
+        msgs.push(
+            LlmMessage::tool(
+                "call_x".to_string(),
+                "{\"output\": \"pandas result\"}".to_string(),
+            )
+            .unwrap(),
+        );
+        for i in 0..10 {
+            msgs.push(LlmMessage::assistant(format!("filler {i}")).unwrap());
+        }
+        let out = compact_old_load_skill_in_history(&msgs, 4);
+        // msg[1] (crdt_doc_run_python result) stays untouched.
+        assert_eq!(out[1].content(), "{\"output\": \"pandas result\"}");
+    }
+
+    #[test]
+    #[allow(clippy::vec_init_then_push)]
+    fn compact_is_idempotent_does_not_remark_already_marked() {
+        let mut msgs = Vec::new();
+        msgs.push(
+            LlmMessage::assistant_with_tool_calls(
+                String::new(),
+                vec![tool_call("c", "load_skill", "{\"name\":\"x\"}")],
+            )
+            .unwrap(),
+        );
+        msgs.push(
+            LlmMessage::tool(
+                "c".to_string(),
+                "[skill 'x' loaded earlier (1234 chars). Call load_skill again to re-read.]"
+                    .to_string(),
+            )
+            .unwrap(),
+        );
+        for i in 0..10 {
+            msgs.push(LlmMessage::assistant(format!("filler {i}")).unwrap());
+        }
+        let out = compact_old_load_skill_in_history(&msgs, 4);
+        // Already a marker → not re-marked (would show "(NaN chars)" or grow).
+        assert_eq!(out[1].content(), msgs[1].content());
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
 
     // Mock LlmRepository
     mock! {
