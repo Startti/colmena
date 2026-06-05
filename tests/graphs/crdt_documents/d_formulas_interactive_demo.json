@@ -1,5 +1,5 @@
 {
-  "_comment": "D-T10 interactive demo — Agent builds a Q1 Sales spreadsheet with formulas, user watches LIVE in browser via Univer. Launch with: cargo run --bin dag_engine -- crdt-yws-graph tests/graphs/crdt_documents/d_formulas_interactive_demo.json --seed-artifact-id art_01HQXKDF0RM5HASEDEM5T6789B --wait-before-graph 30 --agent-session-id agent_demo_$(date +%s). Then open http://127.0.0.1:8090/?artifact=art_01HQXKDF0RM5HASEDEM5T6789B in your browser within 30s. After the graph completes, the server stays up — manually edit cells in Univer and they sync live with the agent's view.",
+  "_comment": "D-T10 interactive demo — Agent builds a Q1 Sales spreadsheet with formulas, user watches LIVE in browser via Univer. Launch with: cargo run --bin dag_engine -- crdt-yws-graph tests/graphs/crdt_documents/d_formulas_interactive_demo.json --seed-artifact-id art_01HQXKDF0RM5HASEDEM7U6789C --wait-before-graph 30 --agent-session-id agent_demo_$(date +%s). Then open http://127.0.0.1:8090/?artifact=art_01HQXKDF0RM5HASEDEM7U6789C in your browser within 30s. After the graph completes, the server stays up — manually edit cells in Univer and they sync live with the agent's view.",
   "nodes": {
     "trigger": {
       "type": "trigger_webhook",
@@ -35,7 +35,7 @@
           "crdt_doc_create_artifact"
         ],
         "crdt_documents": {
-          "artifact_id": "art_01HQXKDF0RM5HASEDEM5T6789B"
+          "artifact_id": "art_01HQXKDF0RM5HASEDEM7U6789C"
         }
       }
     },
