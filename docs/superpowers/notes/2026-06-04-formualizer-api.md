@@ -37,12 +37,67 @@ Internally calls `parse_with_dialect(formula, FormulaDialect::Excel)`. Re-export
 
 ### Returned AST type
 
+Verified by reading `formualizer-parse-2.0.0/src/parser.rs:1723-1731` (`ASTNode`) and `:1676-1702` (`ASTNodeType`).
+
 ```rust
-pub struct formualizer::ASTNode { /* ... */ }                  // re-exported from formualizer_parse
-pub enum   formualizer::ASTNodeType { Function, Reference, Literal, ... }
+pub struct formualizer::ASTNode {
+    pub node_type: ASTNodeType,
+    pub source_token: Option<Token>,
+    pub contains_volatile: bool,   // set by parser when volatility classifier provided
+}
+// NOTE: there is NO `children` field — recursion goes through ASTNodeType variants.
+
+pub enum formualizer::ASTNodeType {
+    Literal(LiteralValue),
+    Reference { original: String, reference: ReferenceType },
+    UnaryOp   { op: String, expr: Box<ASTNode> },
+    BinaryOp  { op: String, left: Box<ASTNode>, right: Box<ASTNode> },
+    Function  { name: String, args: Vec<ASTNode> },
+    Call      { callee: Box<ASTNode>, args: Vec<ASTNode> },   // LAMBDA immediate-invocation
+    Array(Vec<Vec<ASTNode>>),
+}
 ```
 
-`ASTNode` exposes `.node_type` (an `ASTNodeType`). For walking dependents (D-T3), match on `ASTNodeType::Reference { reference: ReferenceType, .. }` and recurse over `node.children` (field on `ASTNode`).
+To walk the AST for D-T3 (`dependents_of`) and D-T5 (recalc cascade), match on the variants and recurse into their child-bearing fields:
+
+```rust
+fn walk_refs(node: &ASTNode, out: &mut Vec<CellRef>) {
+    match &node.node_type {
+        ASTNodeType::Reference { reference, .. } => {
+            // map ReferenceType -> CellRef(s); skip non-cell flavours (NamedRange/Table/External)
+            if let Some(cells) = reference_to_cellrefs(reference) {
+                out.extend(cells);
+            }
+        }
+        ASTNodeType::UnaryOp { expr, .. } => walk_refs(expr, out),
+        ASTNodeType::BinaryOp { left, right, .. } => {
+            walk_refs(left, out);
+            walk_refs(right, out);
+        }
+        ASTNodeType::Function { args, .. } => {
+            for arg in args { walk_refs(arg, out); }
+        }
+        ASTNodeType::Call { callee, args } => {
+            walk_refs(callee, out);
+            for arg in args { walk_refs(arg, out); }
+        }
+        ASTNodeType::Array(rows) => {
+            for row in rows {
+                for cell in row { walk_refs(cell, out); }
+            }
+        }
+        ASTNodeType::Literal(_) => { /* leaf, no refs */ }
+    }
+}
+```
+
+**Built-in helpers** — before writing your own walker, check the methods on `ASTNode` itself in `formualizer-parse-2.0.0/src/parser.rs:1823+`:
+- `pub fn get_dependencies(&self) -> Vec<&ReferenceType>` — collects every reference (cell, range, named, table) in source order. This is the cheapest correct implementation for D-T3's first cut.
+- `pub fn get_dependency_strings(&self) -> Vec<String>` — same, stringified.
+- `pub fn visit_refs<V: FnMut(RefView<'_>)>(&self, V)` — allocation-free traversal that hands you a borrowed `RefView` per reference (preferred for hot paths).
+- `pub fn refs(&self) -> RefIter<'_>` — iterator equivalent of `visit_refs`.
+
+Prefer `visit_refs`/`refs` over a hand-rolled walker; only fall back to the match skeleton above if you need to distinguish variants beyond "is a reference".
 
 ### Parser error type
 
@@ -93,15 +148,15 @@ impl Workbook {
         sheet: &str,
         row: u32,        // 1-based
         col: u32,        // 1-based, Excel-style (A=1)
-        formula: &str,   // must start with '='
-    ) -> Result<(), ExcelError>;
+        formula: &str,   // leading '=' is auto-prepended if missing — see gotcha #3
+    ) -> Result<(), IoError>;
 
     pub fn evaluate_cell(
         &mut self,
         sheet: &str,
         row: u32,
         col: u32,
-    ) -> Result<LiteralValue, ExcelError>;
+    ) -> Result<LiteralValue, IoError>;
 
     pub fn get_value(&self, sheet: &str, row: u32, col: u32) -> Option<LiteralValue>;
     // batch variants: set_formulas, evaluate_cells, evaluate_cells_cancellable
@@ -252,6 +307,7 @@ assert!(formualizer::eval::function_registry::get("", "NOTAREALFUNCTION").is_non
 |------|-------|-------|
 | `formualizer::ExcelError` | `formualizer-common 2.0.0` | the evaluator's runtime error; carries `ExcelErrorKind` (`Ref`, `Value`, `Div0`, `Name`, `NImpl`, `Cancelled`, etc.) and an `ErrorContext`. Construct with `ExcelError::new(kind).with_message("...")`. |
 | `formualizer::ExcelErrorKind` | `formualizer-common 2.0.0` | enum of all Excel error codes. Use `NImpl` for "not yet implemented" branches in `YrsResolver`. |
+| `formualizer::workbook::IoError` | `formualizer-workbook 0.6.0` | catch-all error returned by `Workbook::{set_formula, evaluate_cell, set_value, prepare_graph_*, evaluate_cells*, etc.}`. Re-exported at `formualizer-workbook-0.6.0/src/lib.rs:32`. Variants (see `src/error.rs:4-55`): `Backend { backend, message }`, `Engine(#[from] ExcelError)` (so any `ExcelError` auto-converts via `?`), `FormulaParser { sheet, row, col, message }`, `Schema { message, source }`, `Unsupported { feature, context }`, `CellError { sheet, row, col, message }`, `LoadBudgetExceeded { backend, sheet, message }`, `Io(#[from] std::io::Error)`, plus feature-gated `Json` / `Calamine`. For D-T5's error→`#REF!` mapping, pattern-match on `IoError::Engine(excel_err)` first to recover the underlying `ExcelErrorKind`. |
 | `formualizer::parse::parser::ParserError` | `formualizer-parse 2.0.0` | plain struct `{ message, position }`. |
 | `formualizer::parse::types::ParsingError` | `formualizer-parse 2.0.0` | rich enum used internally; usually surfaced as a `ParserError::message`. |
 
@@ -261,7 +317,13 @@ assert!(formualizer::eval::function_registry::get("", "NOTAREALFUNCTION").is_non
    docs.rs links, double-check you're reading `formualizer-parse 2.0.0`
    docs, not the 0.x line — the AST shape changed.
 2. **1-based row/col everywhere** in `Workbook::set_formula`/`evaluate_cell`/`CellRef::new_absolute`. yrs cells are typically 0-based in our records — convert at the boundary.
-3. **Formulas MUST start with `=`** when passed to `Workbook::set_formula` (the parser strips it). If a string lacks the leading `=`, the workbook stores it as a literal text cell — silently wrong.
+3. **`Workbook::set_formula` is LENIENT about the leading `=`** — verified at `formualizer-workbook-0.6.0/src/workbook.rs:2123-2127`:
+   ```rust
+   let with_eq = if formula.starts_with('=') { formula.to_string() } else { format!("={formula}") };
+   ```
+   The workbook will happily accept `"SUM(A1:A3)"` and turn it into `"=SUM(A1:A3)"` before parsing. The low-level `formualizer::parse::parser::parse` is also lenient — the tokenizer does not require a leading `=` (the only `starts_with('=')` check in `formualizer-parse` lives in `pretty.rs`, used for pretty-printing, not parsing).
+
+   **Implication for D-T5:** the leading-`=` check in our backend's `apply_set_cell_in_proc` is the ONLY guard against treating literal text as a formula. If you forget it, an agent setting cell A1 to `"hello"` will be fed to `set_formula` as `"=hello"`, parsed as a `NamedRange("hello")` lookup, evaluated, and most likely return `#NAME?` instead of storing the literal string the agent intended. Keep the `if value.starts_with('=') { set_formula } else { set_value }` discipline at the backend boundary; do NOT rely on formualizer to reject non-formulas. There is no stricter parse entry point in formualizer 0.6 — leniency is the contract at every layer.
 4. **`add_sheet` errors if the sheet already exists** — always gate on `has_sheet(name)` first (as `doc_examples::eval_scalar` does).
 5. **Default feature set is heavy.** `portable-wasm` brings in eval+workbook+sheetport+parse+common together. If we later need a leaner build, switch to `default-features = false, features = ["parse", "eval", "common"]` and drop the `Workbook` path.
 6. **`FunctionProvider::get_function` is fallible** in the type signature (`Option`), so our `YrsResolver` impl can simply delegate to the global registry — no `Result` wrapping needed.
@@ -270,7 +332,13 @@ assert!(formualizer::eval::function_registry::get("", "NOTAREALFUNCTION").is_non
 
 ## 9. Verified-but-not-exhaustive
 
-The smoke covers parse + Workbook eval + doc_examples eval + function lookup. The following are documented above based on reading the source but were NOT exercised in the smoke — D-T2/D-T4 should re-confirm by writing a tiny mock resolver:
+The smoke covers parse + Workbook eval + doc_examples eval + function lookup. Errata pass on 2026-06-05 added direct source-reading for:
+
+- `ASTNode` / `ASTNodeType` shape — verified at `formualizer-parse-2.0.0/src/parser.rs:1676-1731` (no `children` field; recursion goes through variant fields). The built-in helpers `get_dependencies` / `visit_refs` / `refs` were also verified at `:1823-1900`.
+- `Workbook::{set_formula, evaluate_cell}` return `Result<_, IoError>`, not `Result<_, ExcelError>` — verified at `formualizer-workbook-0.6.0/src/workbook.rs:2110-2116` and `:2601-2611`. `IoError` re-export verified at `formualizer-workbook-0.6.0/src/lib.rs:32`, full variant list at `src/error.rs:4-55`.
+- `Workbook::set_formula` and `parse(..)` are both lenient about the leading `=` — `set_formula` auto-prepends (`src/workbook.rs:2123-2127`), and the parse tokenizer has no `=` requirement (no `starts_with('=')` gate exists outside `pretty.rs`).
+
+Still NOT exercised in code — D-T2/D-T4 should re-confirm by writing a tiny mock resolver:
 
 - Implementing `EvaluationContext` end-to-end and calling `Interpreter::evaluate_ast`.
 - `CalcValue::into_literal` / `as_scalar` exact return type when the AST evaluates to a range.
