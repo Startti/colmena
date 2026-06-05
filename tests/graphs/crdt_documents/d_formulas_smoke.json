@@ -1,0 +1,48 @@
+{
+  "_comment": "Subsistema D smoke — formulas en CRDT spreadsheets. Ejecuta un workflow de 6 pasos: setear datos numericos, escribir =SUM(A1:A5), validar cascade recalc al cambiar A3, leer con include_formulas=true para confirmar la forma {v,f,fs}, y verificar el warning needs_browser ante una funcion no soportada. Local mode (sin ws_url) — el agente CRDT runtime queda autonomo dentro del proceso. SETUP (one-shot, before first run): el artifact_id pineado en `crdt_documents.artifact_id` debe existir bajo storage_root antes que el LLM node arranque (la pinned id no se auto-crea — la runtime carga artifacts via list+meta.json). Comando: `mkdir -p /tmp/crdt_d_formulas_smoke/art_SQWG057ZMAZ340W7W1PQKGTCPF && printf '{\"artifact_id\":\"art_SQWG057ZMAZ340W7W1PQKGTCPF\",\"name\":\"D-T10 Formulas Smoke\",\"created_at\":1733400000,\"updated_at\":1733400000,\"sheet_count\":0}' > /tmp/crdt_d_formulas_smoke/art_SQWG057ZMAZ340W7W1PQKGTCPF/meta.json`. Luego: `cargo run --bin dag_engine -- run tests/graphs/crdt_documents/d_formulas_smoke.json --agent-session-id agent_d_formulas_smoke_001 --include-extra-info`.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/d-formulas-smoke",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Run this 6-step formula smoke and report what you observed in each step.\n\n1. Ensure a sheet named 'Sheet1' exists in the current artifact. Use crdt_doc_list_sheets first; if 'Sheet1' is missing call crdt_doc_add_sheet with name='Sheet1'.\n2. Set A1..A5 to 10, 20, 30, 40, 50 in 'Sheet1'. Use a single crdt_doc_set_range call with start='A1' and values=[[10],[20],[30],[40],[50]].\n3. Set B1 to the formula =SUM(A1:A5) via crdt_doc_set_cell(sheet='Sheet1', addr='B1', value='=SUM(A1:A5)'). Report the cells_recalculated field and the evaluated numeric value of B1 (should be 150).\n4. Change A3 to 100 via crdt_doc_set_cell(sheet='Sheet1', addr='A3', value=100). Confirm B1 auto-recalculates to 220, and report cells_recalculated from the response.\n5. Call crdt_doc_read(sheet='Sheet1', include_formulas=true). Confirm B1 came back as an object with v=220, f='=SUM(A1:A5)', and fs='be'.\n6. Set C1 to a deliberately unsupported function: crdt_doc_set_cell(sheet='Sheet1', addr='C1', value='=BOGUSXYZ()'). Confirm the response 'warnings' array contains a needs_browser entry naming BOGUSXYZ.\n\nFinal report (under 200 words): list each step with the key value or warning observed. Do not stop until all 6 steps were attempted."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 20,
+        "lazy_tool_loading": true,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "You are a spreadsheet assistant exercising the CRDT formula engine. Use the crdt_doc_* tools to manipulate the workbook. Always inspect the tool response payload (cells_recalculated, warnings, fs values) and surface what you observed. Load the crdt-doc-formulas skill (and its references) before writing or reading formulas.",
+        "skills": {
+          "builtin": ["crdt-doc-formulas"]
+        },
+        "enabled_tools": [
+          "crdt_doc_list_sheets",
+          "crdt_doc_add_sheet",
+          "crdt_doc_set_cell",
+          "crdt_doc_set_range",
+          "crdt_doc_read",
+          "crdt_doc_create_artifact"
+        ],
+        "crdt_documents": {
+          "artifact_id": "art_SQWG057ZMAZ340W7W1PQKGTCPF",
+          "storage_root": "/tmp/crdt_d_formulas_smoke"
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent",   "to": "log" }
+  ]
+}
