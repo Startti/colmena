@@ -374,7 +374,7 @@ pub async fn execute_set_cell(ctx: &CrdtDocsContext, args: SetCellArgs) -> serde
     let Some(doc) = ctx.doc() else {
         return serde_json::json!({ "error": "artifact_not_found" });
     };
-    let _ = crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
+    let outcome = crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
         &doc,
         &args.sheet_id,
         &args.addr,
@@ -396,7 +396,16 @@ pub async fn execute_set_cell(ctx: &CrdtDocsContext, args: SetCellArgs) -> serde
         .await
         .unwrap_or(0);
     ctx.record_event_id(event_id);
-    serde_json::json!({ "ok": true })
+    // D-T5: surface SetCellOutcome to the agent so it can react to
+    // unsupported functions (NeedsBrowser), eval errors, cycles, or
+    // parse errors. `cells_recalculated` lets the agent see the
+    // dependent cascade size; `warnings` is `[]` when everything was
+    // clean (literal write or simple formula with no issues).
+    serde_json::json!({
+        "ok": true,
+        "cells_recalculated": outcome.cells_recalculated,
+        "warnings": outcome.warnings,
+    })
 }
 
 // ── set_range ─────────────────────────────────────────────────────────────────
@@ -427,17 +436,24 @@ pub async fn execute_set_range(ctx: &CrdtDocsContext, args: SetRangeArgs) -> ser
         return serde_json::json!({ "error": "invalid_start_addr" });
     };
     let mut cells_written = 0_usize;
+    // D-T5: accumulate recalc count + warnings across the whole batch so
+    // the agent sees one aggregate result (per-cell warnings carry their
+    // own `addr` field, so they remain individually attributable).
+    let mut total_cells_recalculated = 0_usize;
+    let mut all_warnings: Vec<crate::crdt_documents::tool_executor::SetCellWarning> = Vec::new();
     for (dr, row) in args.values_2d.iter().enumerate() {
         for (dc, value) in row.iter().enumerate() {
             let r = r0 + dr as u32;
             let c = c0 + dc as u32;
             let addr = format!("{}{}", col_letter(c), r + 1);
-            let _ = crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
+            let outcome = crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
                 &doc,
                 &args.sheet_id,
                 &addr,
                 value,
             );
+            total_cells_recalculated += outcome.cells_recalculated;
+            all_warnings.extend(outcome.warnings);
             cells_written += 1;
         }
     }
@@ -460,7 +476,12 @@ pub async fn execute_set_range(ctx: &CrdtDocsContext, args: SetRangeArgs) -> ser
         .await
         .unwrap_or(0);
     ctx.record_event_id(event_id);
-    serde_json::json!({ "ok": true, "cells_written": cells_written })
+    serde_json::json!({
+        "ok": true,
+        "cells_written": cells_written,
+        "total_cells_recalculated": total_cells_recalculated,
+        "warnings": all_warnings,
+    })
 }
 
 // ── add_sheet ─────────────────────────────────────────────────────────────────
@@ -945,6 +966,103 @@ mod tests {
         assert_eq!(v["cells"]["C2"], "b");
         assert_eq!(v["cells"]["B3"], json!(1.0));
         assert_eq!(v["cells"]["C3"], json!(2.0));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn execute_set_cell_surfaces_cells_recalculated_and_warnings() {
+        // Seed: A1=1, B1="=A1+1", then set A1 to "=BOGUSFN(1)" so the
+        // new write emits a NeedsBrowser warning. The dispatcher must
+        // pass both `cells_recalculated` and `warnings` through to the
+        // agent.
+        let (ctx, tmp) = fresh_ctx().await;
+        let s = execute_add_sheet(&ctx, AddSheetArgs { name: "X".into() }).await;
+        let sheet_id = s["sheet_id"].as_str().unwrap().to_string();
+        execute_set_cell(
+            &ctx,
+            SetCellArgs {
+                sheet_id: sheet_id.clone(),
+                addr: "A1".into(),
+                value: json!(1),
+            },
+        )
+        .await;
+        execute_set_cell(
+            &ctx,
+            SetCellArgs {
+                sheet_id: sheet_id.clone(),
+                addr: "B1".into(),
+                value: json!("=A1+1"),
+            },
+        )
+        .await;
+
+        // The NeedsBrowser write — A1 becomes a needs_browser placeholder.
+        let v = execute_set_cell(
+            &ctx,
+            SetCellArgs {
+                sheet_id: sheet_id.clone(),
+                addr: "A1".into(),
+                value: json!("=BOGUSFN(1)"),
+            },
+        )
+        .await;
+        assert_eq!(v["ok"], true);
+        assert!(
+            v.get("cells_recalculated").is_some(),
+            "tool result must carry cells_recalculated; got {v}"
+        );
+        let warnings = v["warnings"]
+            .as_array()
+            .expect("warnings must be an array");
+        assert_eq!(warnings.len(), 1, "expected one NeedsBrowser warning; got {v}");
+        assert_eq!(warnings[0]["kind"], "needs_browser");
+        assert_eq!(warnings[0]["addr"], "A1");
+
+        // A clean write should still produce an empty warnings array (not
+        // missing, not null) so the agent never has to special-case shape.
+        let v_clean = execute_set_cell(
+            &ctx,
+            SetCellArgs {
+                sheet_id: sheet_id.clone(),
+                addr: "C1".into(),
+                value: json!(42),
+            },
+        )
+        .await;
+        assert_eq!(v_clean["ok"], true);
+        assert_eq!(v_clean["warnings"], json!([]));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn execute_set_range_aggregates_recalc_and_warnings() {
+        // Range write where one cell triggers a NeedsBrowser warning.
+        // Result must aggregate: total_cells_recalculated is a number,
+        // warnings is a flat list across the batch.
+        let (ctx, tmp) = fresh_ctx().await;
+        let s = execute_add_sheet(&ctx, AddSheetArgs { name: "X".into() }).await;
+        let sheet_id = s["sheet_id"].as_str().unwrap().to_string();
+        let v = execute_set_range(
+            &ctx,
+            SetRangeArgs {
+                sheet_id: sheet_id.clone(),
+                start_addr: "A1".into(),
+                values_2d: vec![vec![
+                    json!(1),
+                    json!("=BOGUSFN(1)"),
+                    json!("hello"),
+                ]],
+            },
+        )
+        .await;
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["cells_written"], 3);
+        assert!(v.get("total_cells_recalculated").is_some());
+        let warnings = v["warnings"].as_array().expect("warnings array");
+        assert_eq!(warnings.len(), 1, "expected one warning across the batch; got {v}");
+        assert_eq!(warnings[0]["kind"], "needs_browser");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

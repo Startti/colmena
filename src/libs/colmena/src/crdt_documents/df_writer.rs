@@ -64,6 +64,7 @@ pub fn write_records_as_new_sheet(
     // Write column names in row 1.
     for (i, col_name) in columns.iter().enumerate() {
         let addr = format!("{}{}", col_letter(i as u32), 1);
+        // D-T8 TODO: replace with cascade recalc + formula_replaced_by_literal event emission.
         let _ = apply_set_cell_in_proc(doc, &sheet_id, &addr, &Value::String(col_name.clone()));
     }
 
@@ -76,6 +77,7 @@ pub fn write_records_as_new_sheet(
             if val.is_null() {
                 continue;
             }
+            // D-T8 TODO: replace with cascade recalc + formula_replaced_by_literal event emission.
             let _ = apply_set_cell_in_proc(doc, &sheet_id, &addr, &val);
         }
     }

@@ -448,7 +448,21 @@ pub async fn apply_set_cell_via_ws(
             .apply_update(update)
             .map_err(|e| anyhow!("apply server state: {e:?}"))?;
     }
-    let _ = apply_set_cell_in_proc(&local, sheet_id, addr, value);
+    // D-T5: the WS protocol has no return channel for SetCellOutcome —
+    // the diff we ship over the wire is the only payload the server sees.
+    // To keep warnings visible in observability we log them here at WARN
+    // level; the agent that triggered the WS write won't see them in its
+    // tool result, but operators tailing logs will.
+    let outcome = apply_set_cell_in_proc(&local, sheet_id, addr, value);
+    if !outcome.warnings.is_empty() {
+        tracing::warn!(
+            sheet_id = %sheet_id,
+            addr = %addr,
+            warnings = ?outcome.warnings,
+            "set_cell via WS produced warnings (cells_recalculated={})",
+            outcome.cells_recalculated,
+        );
+    }
 
     // Step 5: Compute diff of our new mutation against the server's known SV,
     // then send it.
