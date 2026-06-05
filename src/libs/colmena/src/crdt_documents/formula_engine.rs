@@ -625,8 +625,15 @@ pub fn referenced_cells(formula: &ParsedFormula, current_sheet: &str) -> Vec<(St
 }
 
 /// Find every cell in `sheet` whose formula directly references
-/// `(sheet, changed_addr)`. Intra-sheet only — cross-sheet dependents are
-/// not returned in v1 (spec §11).
+/// `(sheet, changed_addr)`. Cross-sheet dependents are NOT returned in v1
+/// (intra-sheet only; see spec §11).
+///
+/// Formulas that fail to parse server-side (e.g. those using browser-only
+/// functions — `ParseOutcome::NeedsBrowser`) are EXCLUDED from the
+/// dep graph. Their dependents will not be cascaded by `recalc_chain`
+/// until D-Tx adds a textual fallback notion of dependency. This is a
+/// known divergence from Univer's client-side recalc and should be
+/// surfaced to the agent via the `needs_browser` warning on `set_cell`.
 pub fn dependents_of(
     changed_addr: &str,
     sheet: &str,
@@ -635,6 +642,9 @@ pub fn dependents_of(
     let target = (sheet.to_string(), changed_addr.to_string());
     let mut out = Vec::new();
     for (other_addr, text) in resolver.iter_formulas_in_sheet(sheet) {
+        // NOTE: parse failures (including NeedsBrowser) silently exclude
+        // that cell from the dep graph. See dependents_of doc-comment +
+        // BACKLOG "textual-fallback recalc for needs_browser cells".
         if let ParseOutcome::Ok(ast) = parse(&text) {
             if referenced_cells(&ast, sheet).contains(&target) {
                 out.push((sheet.to_string(), other_addr));
@@ -644,9 +654,11 @@ pub fn dependents_of(
     out
 }
 
-/// Error returned by `recalc_chain` when the dependency graph contains a
-/// cycle. `chain` lists the cells that participate in the cycle (i.e. the
-/// nodes whose in-degree never reached zero in the Kahn pass).
+/// Returned by `recalc_chain` when the dep graph contains a cycle.
+/// `chain` lists every cell that could NOT be ordered — this includes
+/// the cells participating in the cycle AND any cells downstream of
+/// them (still blocked because some upstream cell is part of the cycle).
+/// For a precise SCC, consider Tarjan's algorithm — out of scope for v1.
 #[derive(Debug, thiserror::Error)]
 #[error("cycle detected: {chain:?}")]
 pub struct CycleError {
@@ -709,6 +721,10 @@ pub fn recalc_chain(
     // that's just `start` (everything else is reached via at least one
     // edge); on a cycle there may be no zero-degree node and the queue
     // stays empty.
+    // Today only `start` ever has in-degree 0, so HashMap iteration
+    // order is irrelevant. If a future caller seeds multiple roots
+    // (e.g. a batch recalc), sort by (sheet, addr) here to keep the
+    // output deterministic for tests.
     let mut queue: VecDeque<(String, String)> = in_degree
         .iter()
         .filter_map(|(n, &d)| if d == 0 { Some(n.clone()) } else { None })
@@ -1021,6 +1037,66 @@ mod tests {
         r.set_formula("Sheet1", "B1", "=A1+1");
         let res = recalc_chain("A1", "Sheet1", &r);
         assert!(matches!(res, Err(CycleError { .. })));
+    }
+
+    #[test]
+    fn referenced_cells_dedups_implicit_via_caller() {
+        // `=A1+A1` returns the same ref twice; we deliberately do NOT dedupe
+        // inside `referenced_cells` (the dep-graph callers handle uniqueness
+        // via HashSet keys). Documenting the contract with a test.
+        let ParseOutcome::Ok(ast) = parse("=A1+A1") else {
+            panic!()
+        };
+        let refs = referenced_cells(&ast, "Sheet1");
+        assert_eq!(
+            refs.len(),
+            2,
+            "referenced_cells does not dedupe — caller's job"
+        );
+        assert!(refs.iter().all(|(s, a)| s == "Sheet1" && a == "A1"));
+    }
+
+    #[test]
+    fn recalc_chain_returns_empty_for_isolated_cell() {
+        // A1 with no formulas referencing it → empty chain, not an error.
+        let mut r = ResolverWithFormulas::new(&["Sheet1"]);
+        r.set_num("Sheet1", "A1", 1.0);
+        let chain = recalc_chain("A1", "Sheet1", &r).unwrap();
+        assert!(chain.is_empty());
+    }
+
+    #[test]
+    fn recalc_chain_handles_diamond() {
+        // A1 → B1, A1 → C1, B1 → D1, C1 → D1. D1 has in-degree 2.
+        // Expected: A1 (excluded), then any order of B1/C1, then D1 LAST.
+        let mut r = ResolverWithFormulas::new(&["Sheet1"]);
+        r.set_num("Sheet1", "A1", 1.0);
+        r.set_formula("Sheet1", "B1", "=A1+1");
+        r.set_formula("Sheet1", "C1", "=A1*2");
+        r.set_formula("Sheet1", "D1", "=B1+C1");
+        let chain = recalc_chain("A1", "Sheet1", &r).unwrap();
+        assert_eq!(chain.len(), 3, "chain = {chain:?}");
+        // D1 must come last (after B1 and C1).
+        assert_eq!(chain[2], ("Sheet1".to_string(), "D1".to_string()));
+        // B1 and C1 in positions 0 and 1, order unspecified.
+        let pre_d: std::collections::HashSet<_> = chain[..2].iter().cloned().collect();
+        assert!(pre_d.contains(&("Sheet1".to_string(), "B1".to_string())));
+        assert!(pre_d.contains(&("Sheet1".to_string(), "C1".to_string())));
+    }
+
+    #[test]
+    fn recalc_chain_cycle_reports_members() {
+        // A1↔B1, plus C1=B1 (downstream). Chain should contain A1, B1
+        // (cycle members) AND C1 (blocked downstream).
+        let mut r = ResolverWithFormulas::new(&["Sheet1"]);
+        r.set_formula("Sheet1", "A1", "=B1+1");
+        r.set_formula("Sheet1", "B1", "=A1+1");
+        r.set_formula("Sheet1", "C1", "=B1");
+        let err = recalc_chain("A1", "Sheet1", &r).unwrap_err();
+        let chain_set: std::collections::HashSet<_> = err.chain.iter().cloned().collect();
+        assert!(chain_set.contains(&("Sheet1".to_string(), "A1".to_string())));
+        assert!(chain_set.contains(&("Sheet1".to_string(), "B1".to_string())));
+        assert!(chain_set.contains(&("Sheet1".to_string(), "C1".to_string())));
     }
 
     #[test]
