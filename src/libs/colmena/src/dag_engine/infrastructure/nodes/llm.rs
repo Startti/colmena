@@ -1539,11 +1539,11 @@ impl ExecutableNode for LlmNode {
         let mut catalog: Vec<CatalogEntry> = Vec::new();
         let mut lookup_for_describe: Vec<ToolConfiguration> = Vec::new();
         if lazy_tool_loading {
-            if tool_configurations.is_empty() {
-                colmena_log!(
-                    "WARN: lazy_tool_loading: true but tool_configurations is empty — feature will no-op."
-                );
-            }
+            // NOTE: F-T14 step A3 expanded lazy's coverage to synthetic
+            // crdt_doc_* tools, so a fully-empty catalog now only happens when
+            // there are no tool_configurations AND no crdt_documents context.
+            // We check for that case AFTER both sources have populated the
+            // catalog (below, near the crdt_doc_* registration block).
             for cfg in tool_configurations.values() {
                 if cfg.eager {
                     continue;
@@ -1981,11 +1981,23 @@ impl ExecutableNode for LlmNode {
             }
         }
 
-        // When the LLM node has a `crdt_documents` config, expose the five
-        // synthetic crdt_doc_* tools. The executor was already wired with the
-        // matching CrdtDocsContext above so dispatches succeed.
+        // When the LLM node has a `crdt_documents` config, expose the synthetic
+        // crdt_doc_* tools. The executor was already wired with the matching
+        // CrdtDocsContext above so dispatches succeed.
+        //
+        // F-T14 step A3 — when `lazy_tool_loading: true` is also set, register
+        // each crdt_doc_* tool as a CatalogEntry so the existing lazy mechanism
+        // hides their full schemas until the agent calls describe_tool(name).
+        // load_skill is always eager — it's the entry point for skill discovery
+        // and small enough to carry every iteration.
         if crdt_docs_context.is_some() {
             for td in build_all_crdt_doc_tools() {
+                if lazy_tool_loading {
+                    catalog.push(CatalogEntry {
+                        name: td.name.clone(),
+                        summary: summary_for_catalog(None, &td.description),
+                    });
+                }
                 tools.push(td);
             }
         }
