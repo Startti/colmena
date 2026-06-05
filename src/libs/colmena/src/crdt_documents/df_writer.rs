@@ -1,7 +1,15 @@
 //! Convert records-style data (output_sheet from `crdt_doc_run_python`)
 //! into Y.Doc sheet writes. Owns sheet creation, name collision
 //! resolution, and per-cell writes via `apply_set_cell_in_proc`.
+//!
+//! D-T8: when pandas overwrites a cell that previously held a formula,
+//! [`apply_set_cell_in_proc`]'s literal path already strips `f`/`fs` and
+//! cascades a recalc through intra-sheet dependents. This module captures
+//! the prior formula text BEFORE each write so the caller (the
+//! `crdt_doc_run_python` dispatcher) can emit a
+//! `formula_replaced_by_literal` CRDT event for downstream consumers.
 
+use crate::crdt_documents::formula_engine_yrs_resolver::YrsResolver;
 use crate::crdt_documents::projection;
 use crate::crdt_documents::tool_executor::{apply_add_sheet, apply_set_cell_in_proc};
 use serde_json::{Map, Value};
@@ -29,6 +37,41 @@ pub struct WriteResult {
     /// Set to `Some(MAX_OUTPUT_SHEET_ROWS)` when the input records exceeded
     /// the cap and were truncated.
     pub truncated_at: Option<usize>,
+    /// D-T8: cells whose previous content was a formula and were
+    /// overwritten with a literal during this write. In the
+    /// new-sheet path this is always empty (the sheet was just created
+    /// and has no prior formulas), but the field is part of the contract
+    /// so callers can route the event-emission code through the same
+    /// path regardless of where the writes landed.
+    pub formula_replacements: Vec<FormulaReplacement>,
+    /// D-T8: total intra-sheet dependent cells re-evaluated as a side
+    /// effect of these writes (aggregated across all per-cell
+    /// [`apply_set_cell_in_proc`] calls).
+    pub cells_recalculated: usize,
+}
+
+/// D-T8: outcome of a records-to-doc apply. Returned by
+/// [`apply_records_to_doc`] so the caller (the `crdt_doc_run_python`
+/// dispatcher) can emit `formula_replaced_by_literal` events and surface
+/// the cascade recalc count in the tool result.
+#[derive(Debug, Clone, Default)]
+pub struct DfWriterOutcome {
+    /// Cells that previously had a formula and were overwritten with a
+    /// literal. Caller is expected to emit `formula_replaced_by_literal`
+    /// events for each entry.
+    pub formula_replacements: Vec<FormulaReplacement>,
+    /// Total cells whose formulas were re-evaluated as a result of these
+    /// writes.
+    pub cells_recalculated: usize,
+}
+
+/// D-T8: one cell whose formula was replaced by a literal value during a
+/// records-to-doc apply.
+#[derive(Debug, Clone)]
+pub struct FormulaReplacement {
+    pub sheet: String,
+    pub addr: String,
+    pub prior_formula: String,
 }
 
 /// Write `records` as a new sheet named `requested_name` (with auto-suffix
@@ -61,11 +104,20 @@ pub fn write_records_as_new_sheet(
 
     let sheet_id = apply_add_sheet(doc, &resolved_capped);
 
+    let mut formula_replacements: Vec<FormulaReplacement> = Vec::new();
+    let mut cells_recalculated: usize = 0;
+
     // Write column names in row 1.
     for (i, col_name) in columns.iter().enumerate() {
         let addr = format!("{}{}", col_letter(i as u32), 1);
-        // D-T8 TODO: replace with cascade recalc + formula_replaced_by_literal event emission.
-        let _ = apply_set_cell_in_proc(doc, &sheet_id, &addr, &Value::String(col_name.clone()));
+        write_one_cell(
+            doc,
+            &sheet_id,
+            &addr,
+            &Value::String(col_name.clone()),
+            &mut formula_replacements,
+            &mut cells_recalculated,
+        );
     }
 
     // Write data starting at row 2.
@@ -77,8 +129,14 @@ pub fn write_records_as_new_sheet(
             if val.is_null() {
                 continue;
             }
-            // D-T8 TODO: replace with cascade recalc + formula_replaced_by_literal event emission.
-            let _ = apply_set_cell_in_proc(doc, &sheet_id, &addr, &val);
+            write_one_cell(
+                doc,
+                &sheet_id,
+                &addr,
+                &val,
+                &mut formula_replacements,
+                &mut cells_recalculated,
+            );
         }
     }
 
@@ -88,7 +146,89 @@ pub fn write_records_as_new_sheet(
         n_rows: rows_to_write.len(),
         n_cols: columns.len(),
         truncated_at,
+        formula_replacements,
+        cells_recalculated,
     })
+}
+
+/// D-T8: write a batch of records into an EXISTING sheet, where each
+/// record's keys are A1-notation cell addresses and values are the
+/// literal values to set. Unlike [`write_records_as_new_sheet`], this
+/// function does NOT create the sheet — it writes in-place, which is
+/// where formula-replacement detection actually matters (the
+/// new-sheet path can never have prior formulas).
+///
+/// For each cell address about to be written, this function peeks the
+/// current `f` value via [`YrsResolver::get_formula`]; if present, the
+/// prior formula is recorded in the returned [`DfWriterOutcome`] so the
+/// caller can emit a `formula_replaced_by_literal` CRDT event. The
+/// actual write goes through [`apply_set_cell_in_proc`], whose literal
+/// path already strips `f`/`fs` and cascades a recalc through intra-sheet
+/// dependents.
+///
+/// Null values in a record are skipped (matches the new-sheet path).
+pub fn apply_records_to_doc(
+    doc: &Doc,
+    sheet_id: &str,
+    records: &[Map<String, Value>],
+) -> Result<DfWriterOutcome, WriterError> {
+    if sheet_id.is_empty() {
+        return Err(WriterError::EmptyName);
+    }
+    let mut outcome = DfWriterOutcome::default();
+    for record in records {
+        for (addr, val) in record {
+            if val.is_null() {
+                continue;
+            }
+            write_one_cell(
+                doc,
+                sheet_id,
+                addr,
+                val,
+                &mut outcome.formula_replacements,
+                &mut outcome.cells_recalculated,
+            );
+        }
+    }
+    Ok(outcome)
+}
+
+/// Internal helper: peek prior formula, write the cell, accumulate the
+/// replacement entry + recalc count. Used by both the new-sheet writer
+/// and [`apply_records_to_doc`].
+fn write_one_cell(
+    doc: &Doc,
+    sheet_id: &str,
+    addr: &str,
+    value: &Value,
+    formula_replacements: &mut Vec<FormulaReplacement>,
+    cells_recalculated: &mut usize,
+) {
+    // Peek the prior formula (if any) BEFORE the write — once
+    // `apply_set_cell_in_proc` takes the literal path, `f`/`fs` are
+    // cleared and the prior formula text is gone.
+    //
+    // If the new value is itself a formula (starts with `=`), this is
+    // formula-to-formula, not a "replaced by literal" event — skip the
+    // record. The cascade recalc still runs as part of
+    // `apply_set_cell_in_proc`.
+    let new_is_formula = matches!(value.as_str(), Some(s) if s.starts_with('='));
+    if !new_is_formula {
+        let prior = {
+            let resolver = YrsResolver::new(doc);
+            resolver.get_formula(sheet_id, addr)
+        };
+        if let Some(prior_formula) = prior {
+            formula_replacements.push(FormulaReplacement {
+                sheet: sheet_id.to_string(),
+                addr: addr.to_string(),
+                prior_formula,
+            });
+        }
+    }
+    let set_outcome = apply_set_cell_in_proc(doc, sheet_id, addr, value);
+    *cells_recalculated += set_outcome.cells_recalculated;
 }
 
 /// Resolve a unique sheet name. Tries `requested`, then `"requested (2)"`,
@@ -206,6 +346,111 @@ mod tests {
         let doc = Doc::new();
         let err = write_records_as_new_sheet(&doc, "", &[], &[]).unwrap_err();
         assert!(matches!(err, WriterError::EmptyName));
+    }
+
+    #[test]
+    fn overwriting_formula_cell_records_replacement() {
+        // D-T8: when pandas overwrites a formula cell with a literal,
+        // the prior formula text must be captured in the outcome AND
+        // the cell must end up with no `f`/`fs`.
+        let doc = Doc::new();
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "A1", &json!(10));
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "B1", &json!("=A1*2"));
+        // B1 now has f="=A1*2".
+
+        // Pandas overwrites B1 with literal 999 (and re-writes A1).
+        let records = vec![make_record(&[("A1", json!(10)), ("B1", json!(999))])];
+        let outcome = apply_records_to_doc(&doc, "Sheet1", &records).unwrap();
+
+        // Expect exactly one replacement: B1 with prior_formula "=A1*2".
+        assert_eq!(outcome.formula_replacements.len(), 1);
+        let r = &outcome.formula_replacements[0];
+        assert_eq!(r.sheet, "Sheet1");
+        assert_eq!(r.addr, "B1");
+        assert_eq!(r.prior_formula, "=A1*2");
+
+        // The cell now has no f/fs.
+        use yrs::{Array as _, Map as _, Out, ReadTxn, Transact};
+        let txn = doc.transact();
+        let workbook = txn.get_map("workbook").unwrap();
+        let Out::YArray(sheets) = workbook.get(&txn, "sheets").unwrap() else {
+            panic!("sheets")
+        };
+        let Out::YMap(sheet) = sheets.get(&txn, 0).unwrap() else {
+            panic!("sheet0")
+        };
+        let Out::YMap(cells) = sheet.get(&txn, "cells").unwrap() else {
+            panic!("cells")
+        };
+        let Out::YMap(b1) = cells.get(&txn, "B1").unwrap() else {
+            panic!("B1")
+        };
+        assert!(b1.get(&txn, "f").is_none(), "f should be cleared");
+        assert!(b1.get(&txn, "fs").is_none(), "fs should be cleared");
+        let Some(Out::Any(yrs::Any::Number(v))) = b1.get(&txn, "v") else {
+            panic!("v not Number")
+        };
+        assert!((v - 999.0).abs() < 1e-9, "v={v}");
+    }
+
+    #[test]
+    fn overwriting_input_cell_recalculates_dependent_formulas() {
+        // D-T8: when pandas overwrites an INPUT cell (a literal that a
+        // formula depends on), the dependent formula must recompute via
+        // the cascade in `apply_set_cell_in_proc`.
+        use crate::crdt_documents::formula_engine::CellResolver;
+        use crate::crdt_documents::formula_engine_yrs_resolver::YrsResolver;
+
+        let doc = Doc::new();
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "A1", &json!(10));
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "B1", &json!("=A1*2")); // -> 20
+
+        // Pandas overwrites A1 only with literal 50 — B1's formula
+        // stays untouched and must recompute to 100 via the cascade.
+        let records = vec![make_record(&[("A1", json!(50))])];
+        let outcome = apply_records_to_doc(&doc, "Sheet1", &records).unwrap();
+
+        // B1 must have recalculated to 100 (the dependent formula refreshed).
+        let r = YrsResolver::new(&doc);
+        let b1 = r.get("Sheet1", "B1").unwrap();
+        assert_eq!(b1.v.as_f64(), Some(100.0));
+
+        // outcome.cells_recalculated >= 1 (B1 recalculated).
+        assert!(
+            outcome.cells_recalculated >= 1,
+            "got {}",
+            outcome.cells_recalculated
+        );
+        // No formula replacements — A1 was a literal, not a formula.
+        assert!(outcome.formula_replacements.is_empty());
+    }
+
+    #[test]
+    fn apply_records_to_doc_rejects_empty_sheet_id() {
+        let doc = Doc::new();
+        let err = apply_records_to_doc(&doc, "", &[]).unwrap_err();
+        assert!(matches!(err, WriterError::EmptyName));
+    }
+
+    #[test]
+    fn apply_records_to_doc_skips_null_values_and_does_not_strip_existing_formula() {
+        // D-T8: a null in the record means "don't touch this cell".
+        // Verify the existing formula at that address is preserved.
+        let doc = Doc::new();
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "A1", &json!(7));
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "B1", &json!("=A1*3")); // -> 21
+
+        let records = vec![make_record(&[("B1", json!(null))])];
+        let outcome = apply_records_to_doc(&doc, "Sheet1", &records).unwrap();
+        assert!(outcome.formula_replacements.is_empty());
+        assert_eq!(outcome.cells_recalculated, 0);
+
+        // B1's formula still there.
+        let resolver = crate::crdt_documents::formula_engine_yrs_resolver::YrsResolver::new(&doc);
+        assert_eq!(
+            resolver.get_formula("Sheet1", "B1").as_deref(),
+            Some("=A1*3")
+        );
     }
 
     #[test]

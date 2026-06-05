@@ -188,6 +188,12 @@ pub async fn execute_run_python(ctx: &CrdtDocsContext, args: RunPythonArgs) -> s
                         "n_cols": wr.n_cols,
                         "preview": preview,
                         "truncated_at": wr.truncated_at,
+                        // D-T8: surface the recalc count so the agent can
+                        // see whether dependent formulas refreshed as a
+                        // side effect of the write (always 0 in the
+                        // new-sheet path since the sheet was just created,
+                        // but the field is part of the contract).
+                        "cells_recalculated": wr.cells_recalculated,
                     });
                     ctx.mark_dirty();
                     let origin = ctx
@@ -199,7 +205,7 @@ pub async fn execute_run_python(ctx: &CrdtDocsContext, args: RunPythonArgs) -> s
                         .record_event(crate::crdt_documents::change_tracker_store::NewEvent {
                             artifact_id: ctx.artifact_id().clone(),
                             sheet_id: Some(wr.sheet_id.clone()),
-                            origin,
+                            origin: origin.clone(),
                             summary: format!(
                                 "wrote {} rows via run_python to new sheet '{}'",
                                 wr.n_rows, wr.resolved_name
@@ -208,6 +214,29 @@ pub async fn execute_run_python(ctx: &CrdtDocsContext, args: RunPythonArgs) -> s
                         .await
                         .unwrap_or(0);
                     ctx.record_event_id(event_id);
+
+                    // D-T8: emit `formula_replaced_by_literal` events for any
+                    // cells whose formula was overwritten with a literal. In
+                    // the new-sheet path `formula_replacements` is always
+                    // empty (the sheet was just created and had no prior
+                    // formulas), so this loop is a no-op today. Kept here so
+                    // that future in-place writers exercising
+                    // `apply_records_to_doc` route through the same event-
+                    // emission path with no caller changes.
+                    for repl in &wr.formula_replacements {
+                        let _ = ctx
+                            .backend()
+                            .record_event(crate::crdt_documents::change_tracker_store::NewEvent {
+                                artifact_id: ctx.artifact_id().clone(),
+                                sheet_id: Some(repl.sheet.clone()),
+                                origin: origin.clone(),
+                                summary: format!(
+                                    "formula_replaced_by_literal: {}!{} (was '{}')",
+                                    repl.sheet, repl.addr, repl.prior_formula
+                                ),
+                            })
+                            .await;
+                    }
                 }
                 Err(e) => {
                     return serde_json::json!({

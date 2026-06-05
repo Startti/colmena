@@ -1097,10 +1097,12 @@ mod tests {
             v.get("cells_recalculated").is_some(),
             "tool result must carry cells_recalculated; got {v}"
         );
-        let warnings = v["warnings"]
-            .as_array()
-            .expect("warnings must be an array");
-        assert_eq!(warnings.len(), 1, "expected one NeedsBrowser warning; got {v}");
+        let warnings = v["warnings"].as_array().expect("warnings must be an array");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected one NeedsBrowser warning; got {v}"
+        );
         assert_eq!(warnings[0]["kind"], "needs_browser");
         assert_eq!(warnings[0]["addr"], "A1");
 
@@ -1134,11 +1136,7 @@ mod tests {
             SetRangeArgs {
                 sheet_id: sheet_id.clone(),
                 start_addr: "A1".into(),
-                values_2d: vec![vec![
-                    json!(1),
-                    json!("=BOGUSFN(1)"),
-                    json!("hello"),
-                ]],
+                values_2d: vec![vec![json!(1), json!("=BOGUSFN(1)"), json!("hello")]],
             },
         )
         .await;
@@ -1146,7 +1144,11 @@ mod tests {
         assert_eq!(v["cells_written"], 3);
         assert!(v.get("total_cells_recalculated").is_some());
         let warnings = v["warnings"].as_array().expect("warnings array");
-        assert_eq!(warnings.len(), 1, "expected one warning across the batch; got {v}");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected one warning across the batch; got {v}"
+        );
         assert_eq!(warnings[0]["kind"], "needs_browser");
         let _ = std::fs::remove_dir_all(&tmp);
     }

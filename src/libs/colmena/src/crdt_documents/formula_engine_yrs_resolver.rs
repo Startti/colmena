@@ -16,6 +16,44 @@ impl<'a> YrsResolver<'a> {
     pub fn new(doc: &'a Doc) -> Self {
         Self { doc }
     }
+
+    /// Peek at the formula text persisted on a cell, if any.
+    ///
+    /// Returns `Some(formula_text)` when the cell has an `f` field set
+    /// (i.e. it's a formula cell), `None` otherwise. Used by D-T8's
+    /// `df_writer` to detect cells whose formulas are about to be
+    /// overwritten by literal writes, so a `formula_replaced_by_literal`
+    /// event can be emitted by the caller.
+    pub fn get_formula(&self, sheet: &str, addr: &str) -> Option<String> {
+        let txn = self.doc.transact();
+        let workbook = txn.get_map("workbook")?;
+        let sheets = match workbook.get(&txn, "sheets")? {
+            Out::YArray(a) => a,
+            _ => return None,
+        };
+        for i in 0..sheets.len(&txn) {
+            let Some(Out::YMap(s)) = sheets.get(&txn, i) else {
+                continue;
+            };
+            let Some(Out::Any(Any::String(id))) = s.get(&txn, "id") else {
+                continue;
+            };
+            if id.as_ref() != sheet {
+                continue;
+            }
+            let Some(Out::YMap(cells)) = s.get(&txn, "cells") else {
+                return None;
+            };
+            let Some(Out::YMap(cell)) = cells.get(&txn, addr) else {
+                return None;
+            };
+            return match cell.get(&txn, "f") {
+                Some(Out::Any(Any::String(f))) => Some(f.to_string()),
+                _ => None,
+            };
+        }
+        None
+    }
 }
 
 impl<'a> CellResolver for YrsResolver<'a> {
@@ -165,5 +203,20 @@ mod tests {
         let r = YrsResolver::new(&doc);
         assert!(r.get("Sheet1", "A1").is_none());
         assert!(!r.sheet_exists("Sheet1"));
+    }
+
+    #[test]
+    fn yrs_resolver_get_formula_returns_text_for_formula_cell() {
+        let doc = Doc::new();
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "A1", &serde_json::json!(2));
+        let _ = apply_set_cell_in_proc(&doc, "Sheet1", "B1", &serde_json::json!("=A1*10"));
+        let r = YrsResolver::new(&doc);
+        assert_eq!(r.get_formula("Sheet1", "B1").as_deref(), Some("=A1*10"));
+        // Literal cells return None.
+        assert!(r.get_formula("Sheet1", "A1").is_none());
+        // Missing cells return None.
+        assert!(r.get_formula("Sheet1", "Z99").is_none());
+        // Missing sheet returns None.
+        assert!(r.get_formula("Ghost", "A1").is_none());
     }
 }
