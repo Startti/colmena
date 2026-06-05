@@ -11,6 +11,7 @@ pub mod crdt_backend;
 pub mod df_records;
 pub mod df_writer;
 pub mod doc_registry;
+pub mod formula_engine;
 pub mod narration;
 pub mod process_runtime;
 pub mod projection;

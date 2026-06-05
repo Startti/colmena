@@ -346,3 +346,116 @@ Still NOT exercised in code — D-T2/D-T4 should re-confirm by writing a tiny mo
 - `TableReference` shape when an LLM-authored formula uses `Table1[#All]` syntax.
 
 If any of those four turn out to differ in practice, update this file in the same commit as the divergence — it is the single source of truth referenced by every D-T* task.
+
+## 10. D-T2 addendum (2026-06-05)
+
+Exercised the low-level `EvaluationContext` path end-to-end while building
+`crdt_documents::formula_engine`. Corrections / clarifications below.
+
+### 10.1 Builtins are NOT auto-registered
+
+`formualizer::eval::function_registry::get("", "SUM")` returns `None` on a
+fresh process. You MUST call `formualizer::eval::builtins::load_builtins()`
+(or the workbook-level `formualizer::workbook::ensure_builtins_loaded()`)
+once before any parse/evaluate/is-supported call. The registry is a
+process-wide `DashMap`; loading is idempotent, but the meta-crate does not
+ship an automatic init hook. `formula_engine.rs` wraps this in a
+`OnceLock`-guarded `ensure_builtins()`.
+
+`Workbook::new()` triggers this internally — that's why the D-T1 smoke
+"just worked" while a direct `Interpreter::new(&adapter)` path does not.
+
+### 10.2 Interpreter calls `resolve_cell_reference_value`, not `resolve_cell_reference`
+
+The trait `ReferenceResolver::resolve_cell_reference(sheet, row, col)` is
+the *legacy* method. The interpreter (`interpreter.rs:425` and `:830`,
+`:852`) preferentially calls `EvaluationContext::resolve_cell_reference_value(...)`.
+
+The default impl of that method (`traits.rs:1193-1209`) routes through
+`resolve_range_view`, whose default impl returns `#N/IMPL!`. So
+implementing only the legacy `ReferenceResolver` makes EVERY cell ref in a
+formula evaluate to `#N/IMPL!`.
+
+**Fix:** override `EvaluationContext::resolve_cell_reference_value`
+explicitly. Cleanest pattern is to delegate to the legacy trait method:
+
+```rust
+impl<'a> EvaluationContext for Adapter<'a> {
+    fn resolve_cell_reference_value(
+        &self,
+        sheet: Option<&str>,
+        row: u32,
+        col: u32,
+        _current_sheet: &str,
+    ) -> Result<LiteralValue, ExcelError> {
+        self.resolve_cell_reference(sheet, row, col)
+    }
+    // …also override resolve_range_view; see 10.3.
+}
+```
+
+### 10.3 `resolve_range_view` must be overridden too — `RangeView::from_owned_rows` is the canonical constructor
+
+For range refs (`A1:A3`, `SUM(A:A)` once unbounded ranges are added), the
+interpreter calls `EvaluationContext::resolve_range_view(reference, current_sheet)`.
+Default impl returns `#N/IMPL!`. Override it and return a
+`RangeView::from_owned_rows(rows, self.date_system())`.
+
+Pattern (lifted from `test_workbook.rs:229-262`):
+
+```rust
+fn resolve_range_view<'c>(
+    &'c self,
+    reference: &ReferenceType,
+    current_sheet: &str,
+) -> Result<RangeView<'c>, ExcelError> {
+    match reference {
+        ReferenceType::Cell { sheet, row, col, .. } => {
+            let v = self.resolve_cell_reference(sheet.as_deref().or(Some(current_sheet)), *row, *col)
+                .unwrap_or_else(LiteralValue::Error);
+            Ok(RangeView::from_owned_rows(vec![vec![v]], self.date_system()))
+        }
+        ReferenceType::NamedRange(name) => {
+            let rows = self.resolve_named_range_reference(name)?;
+            Ok(RangeView::from_owned_rows(rows, self.date_system()))
+        }
+        _ => {
+            let r = self.resolve_range_like(reference)?;  // generic fallback (Tables, rect ranges, 3D)
+            let owned = r.materialise().into_owned();
+            Ok(RangeView::from_owned_rows(owned, self.date_system()))
+        }
+    }
+}
+```
+
+`RangeView::from_owned_rows` is at `formualizer::eval::engine::range_view::RangeView::from_owned_rows(rows: Vec<Vec<LiteralValue>>, date_system: DateSystem) -> RangeView<'static>`.
+
+### 10.4 `Resolver` is a marker super-trait with default method `resolve_range_like`
+
+To get `resolve_range_like` (used in 10.3's `_` branch), you must
+`impl Resolver for YourAdapter {}` (with no methods — it's just the
+super-trait composition of `ReferenceResolver + RangeResolver +
+NamedRangeResolver + TableResolver`). The default `resolve_range_like`
+handles Tables, rect Ranges, NamedRange, 3D refs — exactly what you want.
+
+### 10.5 `ExcelErrorKind::Div` (not `DivZero`)
+
+The variant for `#DIV/0!` is `ExcelErrorKind::Div`, not `DivZero`. Display
+renders as `#DIV/0!`. Similarly:
+`Na` → `#N/A`, `Circ` → `#CIRC!`, `NImpl` → `#N/IMPL!`.
+
+### 10.6 `ParsedFormula` ergonomics
+
+`formualizer::parse::parser::parse(text)` returns the AST. We wrap it in a
+colmena-owned `ParsedFormula { ast, original_text }` so D-T3
+(`dependents_of`) and D-T8 can walk the AST without re-parsing, and so
+downstream code never imports formualizer types directly.
+
+### 10.7 `LiteralValue::Int` exists alongside `Number`
+
+The smoke uses `Number(4.0)`, but `=1+2` parses as integer literals and
+arithmetic may return `LiteralValue::Int(3)` (not `Number(3.0)`). For
+`=2+3*4` in this task it returned `Number(14.0)` (one operand is a Number
+intermediate), but D-T5's projection code should handle both `Int(i64)` and
+`Number(f64)` by collapsing `Int` to `f64` (or the JSON projection will
+emit different shapes for the same arithmetic identity).
