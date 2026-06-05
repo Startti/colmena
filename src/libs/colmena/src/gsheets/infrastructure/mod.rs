@@ -2,4 +2,4 @@
 
 pub mod auth;
 pub mod config;
-// pub mod http_client; — added in E-T4
+pub mod http_client;

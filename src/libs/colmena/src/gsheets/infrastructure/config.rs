@@ -77,13 +77,7 @@ mod tests {
             request_timeout: Duration::from_secs(30),
             max_retries: 3,
         };
-        assert!(cfg
-            .scopes
-            .iter()
-            .any(|s| s.ends_with("/spreadsheets")));
-        assert!(cfg
-            .scopes
-            .iter()
-            .any(|s| s.ends_with("/drive.file")));
+        assert!(cfg.scopes.iter().any(|s| s.ends_with("/spreadsheets")));
+        assert!(cfg.scopes.iter().any(|s| s.ends_with("/drive.file")));
     }
 }

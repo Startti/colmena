@@ -3,8 +3,8 @@
 //! (added in E-T4/T5) is the production impl; tests use a mock impl.
 
 use crate::gsheets::domain::{
-    CellValue, ReadOptions, ReadResponse, SetRangeResponse, SheetMeta, SheetsError,
-    SpreadsheetId, SpreadsheetMeta,
+    CellValue, ReadOptions, ReadResponse, SetRangeResponse, SheetMeta, SheetsError, SpreadsheetId,
+    SpreadsheetMeta,
 };
 use async_trait::async_trait;
 
@@ -22,11 +22,7 @@ pub trait SheetsClient: Send + Sync {
 
     async fn list_sheets(&self, id: &SpreadsheetId) -> Result<Vec<SheetMeta>, SheetsError>;
 
-    async fn add_sheet(
-        &self,
-        id: &SpreadsheetId,
-        name: &str,
-    ) -> Result<SheetMeta, SheetsError>;
+    async fn add_sheet(&self, id: &SpreadsheetId, name: &str) -> Result<SheetMeta, SheetsError>;
 
     /// `name_or_sheet_id` accepts either the human-friendly sheet title
     /// or a stringified numeric `SheetId`. Implementations resolve.

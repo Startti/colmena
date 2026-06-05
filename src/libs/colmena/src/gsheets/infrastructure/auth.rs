@@ -21,6 +21,12 @@ struct CachedToken {
 pub struct TokenProvider {
     cache: Arc<Mutex<Option<CachedToken>>>,
     scopes: Vec<String>,
+    /// Test-only sticky token. When set (via `set_token_for_test`), the
+    /// `invalidate()` call re-seeds the cache from this value instead of
+    /// clearing it, so wiremock 401-refresh tests don't fall through to
+    /// `yup-oauth2` (which would fail without real ADC creds).
+    #[cfg(test)]
+    sticky_test_token: Arc<Mutex<Option<String>>>,
 }
 
 impl TokenProvider {
@@ -28,6 +34,8 @@ impl TokenProvider {
         Self {
             cache: Arc::new(Mutex::new(None)),
             scopes,
+            #[cfg(test)]
+            sticky_test_token: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -89,19 +97,38 @@ impl TokenProvider {
     }
 
     /// Force-invalidate the cache. Called by the HTTP client after a 401
-    /// to trigger refresh on the retry.
+    /// to trigger refresh on the retry. In tests with a sticky token, the
+    /// cache is re-seeded from that sticky value instead of cleared.
     pub async fn invalidate(&self) {
         let mut cache = self.cache.lock().await;
+        #[cfg(test)]
+        {
+            let sticky = self.sticky_test_token.lock().await;
+            if let Some(t) = sticky.as_ref() {
+                *cache = Some(CachedToken {
+                    token: t.clone(),
+                    expires_at: Instant::now() + Duration::from_secs(60 * 60),
+                });
+                return;
+            }
+        }
         *cache = None;
     }
 
     /// Test-only: seed the cache with a known token so HTTP tests don't
-    /// hit yup-oauth2. Available only under `#[cfg(test)]`.
+    /// hit yup-oauth2. The token is also marked sticky so that
+    /// `invalidate()` (called after a 401) re-seeds rather than clears.
+    /// Available only under `#[cfg(test)]`.
     #[cfg(test)]
     pub async fn set_token_for_test(&self, token: impl Into<String>) {
+        let s = token.into();
+        {
+            let mut sticky = self.sticky_test_token.lock().await;
+            *sticky = Some(s.clone());
+        }
         let mut cache = self.cache.lock().await;
         *cache = Some(CachedToken {
-            token: token.into(),
+            token: s,
             expires_at: Instant::now() + Duration::from_secs(60 * 60),
         });
     }

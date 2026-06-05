@@ -167,8 +167,14 @@ mod tests {
 
     #[test]
     fn value_render_option_api_strings_match_google_docs() {
-        assert_eq!(ValueRenderOption::FormattedValue.as_api_str(), "FORMATTED_VALUE");
-        assert_eq!(ValueRenderOption::UnformattedValue.as_api_str(), "UNFORMATTED_VALUE");
+        assert_eq!(
+            ValueRenderOption::FormattedValue.as_api_str(),
+            "FORMATTED_VALUE"
+        );
+        assert_eq!(
+            ValueRenderOption::UnformattedValue.as_api_str(),
+            "UNFORMATTED_VALUE"
+        );
         assert_eq!(ValueRenderOption::Formula.as_api_str(), "FORMULA");
     }
 }
