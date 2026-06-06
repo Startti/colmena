@@ -43,10 +43,11 @@ pub struct ImportSheetArgs {
 }
 
 pub fn tool_import_sheet() -> ToolDefinition {
-    super::build_synthetic_tool::<ImportSheetArgs>(
+    super::build_synthetic_tool_with_summary::<ImportSheetArgs>(
         TOOL_IMPORT_SHEET,
         "Clone a sheet from another artifact into the current one (snapshot, \
          not a live link). Use after crdt_doc_list_sheets_of.",
+        "Clone a sheet from another CRDT artifact into the current one",
     )
 }
 

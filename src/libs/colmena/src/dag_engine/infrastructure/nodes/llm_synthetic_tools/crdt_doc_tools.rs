@@ -29,9 +29,10 @@ pub struct ListSheetsArgs {}
 
 /// Build the [`ToolDefinition`] for `crdt_doc_list_sheets`.
 pub fn tool_list_sheets() -> ToolDefinition {
-    super::build_synthetic_tool::<ListSheetsArgs>(
+    super::build_synthetic_tool_with_summary::<ListSheetsArgs>(
         TOOL_LIST_SHEETS,
         "List the sheets in the current CRDT document. Returns id + name for each sheet.",
+        "List every tab (sheet) inside the current CRDT document artifact",
     )
 }
 
@@ -82,9 +83,10 @@ pub struct ListSheetsOfArgs {
 }
 
 pub fn tool_list_sheets_of() -> ToolDefinition {
-    super::build_synthetic_tool::<ListSheetsOfArgs>(
+    super::build_synthetic_tool_with_summary::<ListSheetsOfArgs>(
         TOOL_LIST_SHEETS_OF,
         "Peek at another artifact's sheets (cross-artifact). Use before crdt_doc_import_sheet.",
+        "List tabs inside a specific CRDT artifact by ID",
     )
 }
 
@@ -292,12 +294,13 @@ pub struct ReadArgs {
 
 /// Build the [`ToolDefinition`] for `crdt_doc_read`.
 pub fn tool_read() -> ToolDefinition {
-    super::build_synthetic_tool::<ReadArgs>(
+    super::build_synthetic_tool_with_summary::<ReadArgs>(
         TOOL_READ,
         "Read cell values from a sheet. Returns a flat map of A1 addresses \
          to values (scalars — pandas-friendly). Optionally restricts to a \
          range. Pass include_formulas:true to get {v, f?, fs?} per cell \
          (useful for inspecting or auditing formulas).",
+        "Read a cell range from the current CRDT document; supports include_formulas for round-trip",
     )
 }
 
@@ -426,10 +429,11 @@ pub struct SetCellArgs {
 
 /// Build the [`ToolDefinition`] for `crdt_doc_set_cell`.
 pub fn tool_set_cell() -> ToolDefinition {
-    super::build_synthetic_tool::<SetCellArgs>(
+    super::build_synthetic_tool_with_summary::<SetCellArgs>(
         TOOL_SET_CELL,
         "Set a single cell. Value may be string, number, boolean, or null \
          (null deletes).",
+        "Write a value or formula into one cell of the current CRDT document",
     )
 }
 
@@ -487,10 +491,11 @@ pub struct SetRangeArgs {
 
 /// Build the [`ToolDefinition`] for `crdt_doc_set_range`.
 pub fn tool_set_range() -> ToolDefinition {
-    super::build_synthetic_tool::<SetRangeArgs>(
+    super::build_synthetic_tool_with_summary::<SetRangeArgs>(
         TOOL_SET_RANGE,
         "Bulk set a rectangular range starting at start_addr. values_2d is \
          a row-major 2D array.",
+        "Write a 2-D values array into the current CRDT document starting at an address",
     )
 }
 
@@ -560,9 +565,10 @@ pub struct AddSheetArgs {
 
 /// Build the [`ToolDefinition`] for `crdt_doc_add_sheet`.
 pub fn tool_add_sheet() -> ToolDefinition {
-    super::build_synthetic_tool::<AddSheetArgs>(
+    super::build_synthetic_tool_with_summary::<AddSheetArgs>(
         TOOL_ADD_SHEET,
         "Append a new sheet with the given name. Returns the generated sheet_id.",
+        "Create a new tab inside the current CRDT document",
     )
 }
 
@@ -665,10 +671,11 @@ pub struct GetRecentChangesArgs {
 
 /// Build the [`ToolDefinition`] for `crdt_doc_get_recent_changes`.
 pub fn tool_get_recent_changes() -> ToolDefinition {
-    super::build_synthetic_tool::<GetRecentChangesArgs>(
+    super::build_synthetic_tool_with_summary::<GetRecentChangesArgs>(
         TOOL_GET_RECENT_CHANGES,
         "Recent events on the document (excludes the agent's own mutations). \
          Pass artifact_id to audit a different artifact than the ctx's pinned one.",
+        "List recent CRDT change events since the agent's cursor",
     )
 }
 
@@ -754,9 +761,10 @@ pub struct ListMyArtifactsArgs {
 
 /// Build the [`ToolDefinition`] for `crdt_doc_list_my_artifacts`.
 pub fn tool_list_my_artifacts() -> ToolDefinition {
-    super::build_synthetic_tool::<ListMyArtifactsArgs>(
+    super::build_synthetic_tool_with_summary::<ListMyArtifactsArgs>(
         TOOL_LIST_MY_ARTIFACTS,
         "List CRDT workbooks accessible to this session.",
+        "List CRDT artifacts owned by or shared with the current session",
     )
 }
 
@@ -805,9 +813,10 @@ pub struct CreateArtifactArgs {
 
 /// Build the [`ToolDefinition`] for `crdt_doc_create_artifact`.
 pub fn tool_create_artifact() -> ToolDefinition {
-    super::build_synthetic_tool::<CreateArtifactArgs>(
+    super::build_synthetic_tool_with_summary::<CreateArtifactArgs>(
         TOOL_CREATE_ARTIFACT,
         "Create a new CRDT workbook for this session. Returns artifact_id.",
+        "Create a new empty CRDT spreadsheet artifact",
     )
 }
 

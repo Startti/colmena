@@ -40,12 +40,13 @@ pub struct RunPythonArgs {
 
 /// Build the [`ToolDefinition`] for `crdt_doc_run_python`.
 pub fn tool_run_python() -> ToolDefinition {
-    super::build_synthetic_tool::<RunPythonArgs>(
+    super::build_synthetic_tool_with_summary::<RunPythonArgs>(
         TOOL_RUN_PYTHON,
         "Run sandboxed Python (pandas/numpy/scipy.stats) over requested sheets \
          as `dfs[sheet_id]`. Define `output` and/or `output_sheet`; pass \
          `write_to_sheet` to persist. Load skill crdt-doc-run-python for the \
          shape/output/debug contract.",
+        "Run sandboxed pandas analysis over CRDT sheets without loading rows through the LLM",
     )
 }
 
