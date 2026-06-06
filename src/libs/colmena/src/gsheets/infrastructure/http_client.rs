@@ -29,9 +29,7 @@ pub struct GoogleSheetsHttpClient {
     /// string when running under ADC (no SA JSON file available).
     sa_email: String,
     sheets_base: String,
-    #[allow(dead_code)] // Used by E-T5 admin endpoints (create/export xlsx).
     drive_base: String,
-    #[allow(dead_code)] // Used by E-T5 admin endpoints (create_from_xlsx).
     drive_upload_base: String,
 }
 
@@ -197,6 +195,120 @@ impl GoogleSheetsHttpClient {
         }
         Err(SheetsError::Http("retries exhausted".to_string()))
     }
+
+    /// Bearer-auth POST with retry on 429/5xx + 401-refresh.
+    async fn post_json(&self, url: &str, body: Value) -> Result<Value, SheetsError> {
+        for attempt in 0..=self.max_retries {
+            let token = self.token.token().await?;
+            let resp = self
+                .http
+                .post(url)
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| SheetsError::Http(format!("send: {e}")))?;
+            match resp.status() {
+                StatusCode::OK => {
+                    return resp
+                        .json::<Value>()
+                        .await
+                        .map_err(|e| SheetsError::Http(format!("json: {e}")));
+                }
+                StatusCode::UNAUTHORIZED if attempt == 0 => {
+                    self.token.invalidate().await;
+                    continue;
+                }
+                StatusCode::FORBIDDEN => {
+                    return Err(SheetsError::PermissionDenied(self.sa_email.clone()));
+                }
+                StatusCode::NOT_FOUND => {
+                    return Err(SheetsError::SpreadsheetNotFound(url.to_string()));
+                }
+                StatusCode::TOO_MANY_REQUESTS => {
+                    if attempt < self.max_retries {
+                        tokio::time::sleep(self.retry_base_delay * (1 << attempt)).await;
+                        continue;
+                    }
+                    return Err(SheetsError::RateLimit(60));
+                }
+                s if s.is_server_error() => {
+                    if attempt < self.max_retries {
+                        tokio::time::sleep(self.retry_base_delay * (1 << attempt)).await;
+                        continue;
+                    }
+                    return Err(SheetsError::Http(format!("server error {s}")));
+                }
+                s => {
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(SheetsError::Http(format!("status {s}: {body}")));
+                }
+            }
+        }
+        Err(SheetsError::Http("retries exhausted".to_string()))
+    }
+
+    /// Parse a Sheets API response into [`SpreadsheetMeta`]. Used by
+    /// `create_spreadsheet` (response has `spreadsheetId` inline) and
+    /// `create_from_xlsx` (Drive returns the id; we fetch metadata
+    /// separately and pass `default_id` so spreadsheets without that
+    /// field still resolve).
+    fn parse_meta(value: &Value, default_id: Option<&str>) -> Result<SpreadsheetMeta, SheetsError> {
+        let id = value
+            .get("spreadsheetId")
+            .and_then(Value::as_str)
+            .or(default_id)
+            .ok_or_else(|| SheetsError::Internal("missing spreadsheetId".into()))?
+            .to_string();
+        let title = value
+            .get("properties")
+            .and_then(|p| p.get("title"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let url = value
+            .get("spreadsheetUrl")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .unwrap_or_else(|| format!("https://docs.google.com/spreadsheets/d/{id}"));
+        let sheets = value
+            .get("sheets")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| {
+                        let props = s.get("properties")?;
+                        let grid = props.get("gridProperties");
+                        Some(SheetMeta {
+                            sheet_id: SheetId(
+                                props.get("sheetId").and_then(Value::as_i64).unwrap_or(0),
+                            ),
+                            title: props
+                                .get("title")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string(),
+                            index: props.get("index").and_then(Value::as_u64).unwrap_or(0) as u32,
+                            row_count: grid
+                                .and_then(|g| g.get("rowCount"))
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0) as u32,
+                            col_count: grid
+                                .and_then(|g| g.get("columnCount"))
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0) as u32,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(SpreadsheetMeta {
+            spreadsheet_id: SpreadsheetId(id),
+            title,
+            url,
+            sheets,
+        })
+    }
 }
 
 #[async_trait]
@@ -336,29 +448,162 @@ impl SheetsClient for GoogleSheetsHttpClient {
         })
     }
 
-    // Stubs — filled in by E-T5.
-    async fn create_spreadsheet(&self, _title: &str) -> Result<SpreadsheetMeta, SheetsError> {
-        unimplemented!("E-T5")
+    async fn create_spreadsheet(&self, title: &str) -> Result<SpreadsheetMeta, SheetsError> {
+        let url = self.sheets_base.clone();
+        let body = serde_json::json!({
+            "properties": {"title": title},
+        });
+        let resp = self.post_json(&url, body).await?;
+        Self::parse_meta(&resp, None)
     }
+
     async fn create_from_xlsx(
         &self,
-        _title: &str,
-        _bytes: Vec<u8>,
+        title: &str,
+        bytes: Vec<u8>,
     ) -> Result<SpreadsheetMeta, SheetsError> {
-        unimplemented!("E-T5")
+        let token = self.token.token().await?;
+        let upload_url = format!("{}?uploadType=multipart", self.drive_upload_base);
+
+        let boundary = format!("colmena-bnd-{}", uuid::Uuid::new_v4().simple());
+        let metadata = serde_json::json!({
+            "name": title,
+            "mimeType": "application/vnd.google-apps.spreadsheet",
+        })
+        .to_string();
+        let mut body: Vec<u8> = Vec::with_capacity(bytes.len() + 512);
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(b"Content-Type: application/json; charset=UTF-8\r\n\r\n");
+        body.extend_from_slice(metadata.as_bytes());
+        body.extend_from_slice(format!("\r\n--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            b"Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n\r\n",
+        );
+        body.extend_from_slice(&bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let resp = self
+            .http
+            .post(&upload_url)
+            .bearer_auth(&token)
+            .header(
+                "Content-Type",
+                format!("multipart/related; boundary={boundary}"),
+            )
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| SheetsError::Http(format!("upload send: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(match status {
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+                    SheetsError::PermissionDenied(self.sa_email.clone())
+                }
+                _ => SheetsError::Http(format!("upload {status}: {body}")),
+            });
+        }
+        let drive_resp: Value = resp
+            .json()
+            .await
+            .map_err(|e| SheetsError::Http(format!("upload json: {e}")))?;
+        let new_id = drive_resp
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| SheetsError::Internal("drive upload missing id".into()))?
+            .to_string();
+
+        let meta_url = format!("{}/{}", self.sheets_base, new_id);
+        let meta_resp = self.get_json(&meta_url).await?;
+        Self::parse_meta(&meta_resp, Some(&new_id))
     }
-    async fn export_xlsx(&self, _id: &SpreadsheetId) -> Result<Vec<u8>, SheetsError> {
-        unimplemented!("E-T5")
+
+    async fn export_xlsx(&self, id: &SpreadsheetId) -> Result<Vec<u8>, SheetsError> {
+        let token = self.token.token().await?;
+        let url = format!(
+            "{}/{}/export?mimeType=application%2Fvnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            self.drive_base, id.0
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|e| SheetsError::Http(format!("export send: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(match status {
+                StatusCode::NOT_FOUND => SheetsError::SpreadsheetNotFound(id.0.clone()),
+                StatusCode::FORBIDDEN => SheetsError::PermissionDenied(self.sa_email.clone()),
+                _ => SheetsError::Http(format!("export {status}: {body}")),
+            });
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| SheetsError::Http(format!("export bytes: {e}")))?;
+        Ok(bytes.to_vec())
     }
-    async fn add_sheet(&self, _id: &SpreadsheetId, _name: &str) -> Result<SheetMeta, SheetsError> {
-        unimplemented!("E-T5")
+
+    async fn add_sheet(&self, id: &SpreadsheetId, name: &str) -> Result<SheetMeta, SheetsError> {
+        let url = format!("{}/{}:batchUpdate", self.sheets_base, id.0);
+        let body = serde_json::json!({
+            "requests": [{"addSheet": {"properties": {"title": name}}}],
+        });
+        let resp = self.post_json(&url, body).await?;
+        let props = resp
+            .get("replies")
+            .and_then(|r| r.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|r| r.get("addSheet"))
+            .and_then(|r| r.get("properties"))
+            .ok_or_else(|| SheetsError::Internal("missing addSheet.properties".into()))?;
+        let grid = props.get("gridProperties");
+        Ok(SheetMeta {
+            sheet_id: SheetId(props.get("sheetId").and_then(Value::as_i64).unwrap_or(0)),
+            title: props
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            index: props.get("index").and_then(Value::as_u64).unwrap_or(0) as u32,
+            row_count: grid
+                .and_then(|g| g.get("rowCount"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as u32,
+            col_count: grid
+                .and_then(|g| g.get("columnCount"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as u32,
+        })
     }
+
     async fn delete_sheet(
         &self,
-        _id: &SpreadsheetId,
-        _name_or_sheet_id: &str,
+        id: &SpreadsheetId,
+        name_or_sheet_id: &str,
     ) -> Result<(), SheetsError> {
-        unimplemented!("E-T5")
+        let sheet_id: i64 = match name_or_sheet_id.parse::<i64>() {
+            Ok(n) => n,
+            Err(_) => {
+                let sheets = self.list_sheets(id).await?;
+                let m = sheets
+                    .iter()
+                    .find(|s| s.title == name_or_sheet_id)
+                    .ok_or_else(|| SheetsError::SheetNotFound(name_or_sheet_id.to_string()))?;
+                m.sheet_id.0
+            }
+        };
+        let url = format!("{}/{}:batchUpdate", self.sheets_base, id.0);
+        let body = serde_json::json!({
+            "requests": [{"deleteSheet": {"sheetId": sheet_id}}],
+        });
+        let _ = self.post_json(&url, body).await?;
+        Ok(())
     }
 }
 
@@ -648,5 +893,125 @@ mod tests {
         assert_eq!(quote_sheet_for_range("My Sheet"), "'My Sheet'");
         assert_eq!(quote_sheet_for_range("It's"), "'It''s'");
         assert_eq!(quote_sheet_for_range(""), "''");
+    }
+
+    #[tokio::test]
+    async fn create_spreadsheet_returns_meta_with_url() {
+        let (server, client) = setup_mock().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/v4/spreadsheets$|/$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "spreadsheetId": "new_id",
+                "properties": {"title": "My Sheet"},
+                "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/new_id",
+                "sheets": [{"properties": {
+                    "sheetId": 0, "title": "Sheet1", "index": 0,
+                    "gridProperties": {"rowCount": 1000, "columnCount": 26}
+                }}],
+            })))
+            .mount(&server)
+            .await;
+        let meta = client
+            .create_spreadsheet("My Sheet")
+            .await
+            .expect("create ok");
+        assert_eq!(meta.spreadsheet_id.0, "new_id");
+        assert_eq!(meta.title, "My Sheet");
+        assert!(meta.url.contains("new_id"));
+        assert_eq!(meta.sheets.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn add_sheet_returns_new_tab_meta() {
+        let (server, client) = setup_mock().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/abc:batchUpdate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "replies": [{
+                    "addSheet": {"properties": {
+                        "sheetId": 999, "title": "New", "index": 1,
+                        "gridProperties": {"rowCount": 1000, "columnCount": 26}
+                    }}
+                }],
+            })))
+            .mount(&server)
+            .await;
+        let m = client
+            .add_sheet(&SpreadsheetId("abc".into()), "New")
+            .await
+            .expect("add ok");
+        assert_eq!(m.title, "New");
+        assert_eq!(m.sheet_id, SheetId(999));
+    }
+
+    #[tokio::test]
+    async fn delete_sheet_by_numeric_id() {
+        let (server, client) = setup_mock().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/abc:batchUpdate"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"replies":[]})),
+            )
+            .mount(&server)
+            .await;
+        client
+            .delete_sheet(&SpreadsheetId("abc".into()), "999")
+            .await
+            .expect("delete ok");
+    }
+
+    #[tokio::test]
+    async fn create_from_xlsx_uploads_via_drive_and_returns_meta() {
+        let (server, client) = setup_mock().await;
+        // In tests, drive_upload_base = server.uri() (no path component),
+        // so the upload request hits "/" with ?uploadType=multipart.
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "new_sheet_id",
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/new_sheet_id$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "spreadsheetId": "new_sheet_id",
+                "properties": {"title": "Q3 Sales"},
+                "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/new_sheet_id",
+                "sheets": [],
+            })))
+            .mount(&server)
+            .await;
+
+        let meta = client
+            .create_from_xlsx("Q3 Sales", b"fake-xlsx-bytes".to_vec())
+            .await
+            .expect("upload ok");
+        assert_eq!(meta.spreadsheet_id.0, "new_sheet_id");
+        assert_eq!(meta.title, "Q3 Sales");
+    }
+
+    #[tokio::test]
+    async fn export_xlsx_returns_binary_bytes() {
+        let (server, client) = setup_mock().await;
+        // In tests, drive_base = server.uri() (no path component), so the
+        // export request hits "/abc/export" not "/files/abc/export".
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/abc/export$"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(b"FAKE_XLSX_BYTES".as_ref())
+                    .insert_header(
+                        "content-type",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    ),
+            )
+            .mount(&server)
+            .await;
+        let bytes = client
+            .export_xlsx(&SpreadsheetId("abc".into()))
+            .await
+            .expect("export ok");
+        assert_eq!(bytes, b"FAKE_XLSX_BYTES");
     }
 }
