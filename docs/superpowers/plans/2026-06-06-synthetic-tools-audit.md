@@ -49,7 +49,7 @@ Generated for E-T15a. Enumerates every Rust-side synthetic tool builder, current
 
 | Builder | Tool name (constant) | Has summary today | Proposed summary |
 |---|---|---|---|
-| `tool_run_python` | `crdt_doc_run_python` | No | Run sandboxed Python (pandas/numpy/scipy.stats) over requested sheets; define output and/or output_sheet |
+| `tool_run_python` | `crdt_doc_run_python` | No | Run sandboxed pandas analysis over CRDT sheets without loading rows through the LLM |
 
 ---
 
@@ -68,7 +68,7 @@ Generated for E-T15a. Enumerates every Rust-side synthetic tool builder, current
 | `build_document_create_tool` | `document_create` | No | Create a new document artifact (Excel or Word); returns artifact_id and initial version |
 | `build_document_apply_patch_tool` | `document_apply_patch` | No | Apply a patch (list of ops) to an existing document atomically with auto-rebase on non-conflicting changes |
 | `build_document_read_tool` | `document_read` | No | Read the IR of a document at a given version (or current HEAD) with optional slicing |
-| `build_document_get_head_tool` | `document_get_head` | No | Get the current HEAD of an artifact; optionally receive a natural-language narration of user edits since a baseline version |
+| `build_document_get_head_tool` | `document_get_head` | No | Get the current HEAD of an artifact, optionally with a human-readable summary of edits since a baseline version |
 | `build_document_list_versions_tool` | `document_list_versions` | No | List the versions retained for an artifact with timestamps, source and per-version summary |
 | `build_document_rollback_tool` | `document_rollback` | No | Roll back an artifact to a previous version; full history is preserved |
 | `build_document_list_my_artifacts_tool` | `document_list_my_artifacts` | No | List every document artifact that belongs to the current session with metadata |
@@ -96,7 +96,7 @@ Generated for E-T15a. Enumerates every Rust-side synthetic tool builder, current
 
 | Builder | Tool name (constant) | Has summary today | Proposed summary |
 |---|---|---|---|
-| `tool_recall_history` | `recall_history` | No | Re-read the FULL original content of one past message by its turn index from the conversation summary |
+| `tool_recall_history` | `recall_history` | No | Re-read the original content of one past message by its turn index |
 
 ---
 
