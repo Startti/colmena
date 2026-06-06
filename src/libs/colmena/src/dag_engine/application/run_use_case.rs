@@ -253,6 +253,19 @@ impl DagRunUseCase {
                 }
             }
 
+            // Build the resuming-node-ids set BEFORE the main loop.
+            // The loop's `all_outputs.remove(&node_id)` at the top of each
+            // iteration destroys the SUSPENDED marker once a node re-executes,
+            // so we snapshot the set up front.
+            //
+            // A node is "resuming" iff its persisted output has
+            // `__colmena_status: "SUSPENDED"` (recursive). Used below
+            // to gate `__colmena_resume_answer` injection.
+            //
+            // Spec: docs/superpowers/specs/2026-06-05-suspend-resume-answer-routing-fix-design.md §4.1
+            let resuming_node_ids: std::collections::HashSet<String> =
+                Self::compute_resuming_node_ids(&all_outputs, &resume_answer);
+
             if !global_shared_state.is_object() {
                 global_shared_state = serde_json::json!({});
             }
@@ -374,8 +387,21 @@ impl DagRunUseCase {
                     }
                 }
 
+                // Inject __colmena_resume_answer only for nodes that were SUSPENDED
+                // in the persisted snapshot. See spec §3.1 and §4.1.2.
                 if let Some(ans) = &resume_answer {
-                    inputs.insert("__colmena_resume_answer".to_string(), Value::String(ans.clone()));
+                    if resuming_node_ids.contains(&node_id) {
+                        inputs.insert(
+                            "__colmena_resume_answer".to_string(),
+                            Value::String(ans.clone()),
+                        );
+                    } else {
+                        tracing::trace!(
+                            target: "colmena::dag_engine",
+                            node_id = %node_id,
+                            "resume_answer present but node was not in SUSPENDED set; skipping injection"
+                        );
+                    }
                 }
                 let node_id_path = match &path_prefix {
                     Some(prefix) => format!("{}/{}", prefix, node_id),
