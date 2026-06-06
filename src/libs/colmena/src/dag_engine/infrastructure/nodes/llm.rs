@@ -2018,6 +2018,92 @@ impl ExecutableNode for LlmNode {
             tools.push(tool_recall_history());
         }
 
+        // E-T8 — expose the 9 synthetic Google Sheets tools (gsheets_*) when
+        // their names appear in `enabled_tools` (or `enabled_tools: "*"`).
+        // Unlike crdt_doc_* / document_* tools, gsheets has no per-node
+        // context object — credentials are sourced from process-level env
+        // (ADC or `GOOGLE_APPLICATION_CREDENTIALS`), so the only opt-in signal
+        // is the user listing them under `enabled_tools`.
+        //
+        // ALL 9 tool DEFINITIONS are published (for schema discovery), even
+        // though E-T7 only wired 7 dispatchers in `dag_tool_executor`. The
+        // xlsx pair (`gsheets_create_from_xlsx`, `gsheets_export_xlsx`) will
+        // surface a router-level error on invocation until E-T7b lands —
+        // their schemas are still useful for the agent to plan against.
+        //
+        // Honors `lazy_tool_loading`: when enabled, each gsheets tool is
+        // also registered as a `CatalogEntry` so its full schema stays hidden
+        // until the agent calls `describe_tool(name)` — same pattern as the
+        // crdt_doc_* block above.
+        {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
+                gsheets_tool_add_sheet, gsheets_tool_create_from_xlsx,
+                gsheets_tool_create_spreadsheet, gsheets_tool_delete_sheet,
+                gsheets_tool_export_xlsx, gsheets_tool_list_sheets, gsheets_tool_read,
+                gsheets_tool_set_cell, gsheets_tool_set_range, GSHEETS_ADD_SHEET_TOOL,
+                GSHEETS_CREATE_FROM_XLSX_TOOL, GSHEETS_CREATE_SPREADSHEET_TOOL,
+                GSHEETS_DELETE_SHEET_TOOL, GSHEETS_EXPORT_XLSX_TOOL, GSHEETS_LIST_SHEETS_TOOL,
+                GSHEETS_READ_TOOL, GSHEETS_SET_CELL_TOOL, GSHEETS_SET_RANGE_TOOL,
+            };
+
+            // Determine which gsheets tools the user opted into. `"*"` enables
+            // all 9; an array enables each named entry; a single string enables
+            // one. Anything else (or absent config) leaves gsheets disabled.
+            let wants: std::collections::HashSet<&str> = match enabled_tools_config {
+                Some(Value::String(s)) if s == "*" => [
+                    GSHEETS_CREATE_SPREADSHEET_TOOL,
+                    GSHEETS_CREATE_FROM_XLSX_TOOL,
+                    GSHEETS_EXPORT_XLSX_TOOL,
+                    GSHEETS_LIST_SHEETS_TOOL,
+                    GSHEETS_ADD_SHEET_TOOL,
+                    GSHEETS_DELETE_SHEET_TOOL,
+                    GSHEETS_READ_TOOL,
+                    GSHEETS_SET_CELL_TOOL,
+                    GSHEETS_SET_RANGE_TOOL,
+                ]
+                .into_iter()
+                .collect(),
+                Some(Value::String(s)) => std::iter::once(s.as_str()).collect(),
+                Some(Value::Array(arr)) => arr.iter().filter_map(|v| v.as_str()).collect(),
+                _ => std::collections::HashSet::new(),
+            };
+
+            let gsheets_entries: [(&str, fn() -> crate::llm::domain::ToolDefinition); 9] = [
+                (
+                    GSHEETS_CREATE_SPREADSHEET_TOOL,
+                    gsheets_tool_create_spreadsheet,
+                ),
+                (GSHEETS_CREATE_FROM_XLSX_TOOL, gsheets_tool_create_from_xlsx),
+                (GSHEETS_EXPORT_XLSX_TOOL, gsheets_tool_export_xlsx),
+                (GSHEETS_LIST_SHEETS_TOOL, gsheets_tool_list_sheets),
+                (GSHEETS_ADD_SHEET_TOOL, gsheets_tool_add_sheet),
+                (GSHEETS_DELETE_SHEET_TOOL, gsheets_tool_delete_sheet),
+                (GSHEETS_READ_TOOL, gsheets_tool_read),
+                (GSHEETS_SET_CELL_TOOL, gsheets_tool_set_cell),
+                (GSHEETS_SET_RANGE_TOOL, gsheets_tool_set_range),
+            ];
+
+            for (name, builder) in gsheets_entries {
+                // Skip if the user did not opt in, OR if a `tool_configurations`
+                // entry / earlier `filter_enabled_tools` pass already added it
+                // (dedup by tool name keeps the catalog single-valued).
+                if !wants.contains(name) {
+                    continue;
+                }
+                if tools.iter().any(|t| t.name == name) {
+                    continue;
+                }
+                let td = builder();
+                if lazy_tool_loading {
+                    catalog.push(CatalogEntry {
+                        name: td.name.clone(),
+                        summary: summary_for_catalog(None, &td.description),
+                    });
+                }
+                tools.push(td);
+            }
+        }
+
         // 2.2 Build the final system message. We assemble up to three sections,
         // each emitted only when relevant:
         //   - the user-provided `system_message` (if any),
