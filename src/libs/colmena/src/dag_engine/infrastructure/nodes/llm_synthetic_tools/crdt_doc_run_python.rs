@@ -7,6 +7,7 @@
 use crate::crdt_documents::{build_records_for_sheets, write_records_as_new_sheet, RecordsError};
 use crate::dag_engine::infrastructure::nodes::python_node::execute_sandboxed_helper;
 use crate::llm::domain::tools::ToolDefinition;
+use crate::text;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -42,11 +43,8 @@ pub struct RunPythonArgs {
 pub fn tool_run_python() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<RunPythonArgs>(
         TOOL_RUN_PYTHON,
-        "Run sandboxed Python (pandas/numpy/scipy.stats) over requested sheets \
-         as `dfs[sheet_id]`. Define `output` and/or `output_sheet`; pass \
-         `write_to_sheet` to persist. Load skill crdt-doc-run-python for the \
-         shape/output/debug contract.",
-        "Run sandboxed pandas analysis over CRDT sheets without loading rows through the LLM",
+        text::tool_description(TOOL_RUN_PYTHON),
+        text::tool_summary(TOOL_RUN_PYTHON),
     )
 }
 
