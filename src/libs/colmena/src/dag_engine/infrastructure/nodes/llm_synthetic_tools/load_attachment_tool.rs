@@ -82,7 +82,7 @@ pub fn build_load_attachment_tool_definition(catalog: &[ConversationAttachment])
     ToolDefinition {
         name: LOAD_ATTACHMENT_TOOL_NAME.to_string(),
         description,
-        summary: None,
+        summary: Some("Materialize a registered attachment's content (with auto-summary for large files) into the conversation".to_string()),
         parameters: ToolParameters {
             schema_type: "object".to_string(),
             properties,

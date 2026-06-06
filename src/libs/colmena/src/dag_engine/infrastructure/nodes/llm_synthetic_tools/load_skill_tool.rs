@@ -55,7 +55,7 @@ Skills:\n{}",
     ToolDefinition {
         name: LOAD_SKILL_TOOL_NAME.to_string(),
         description,
-        summary: None,
+        summary: Some("Load a markdown skill bundle into the conversation; reveals built-in or user-provided guidance on demand".to_string()),
         parameters: ToolParameters {
             schema_type: "object".to_string(),
             properties,
