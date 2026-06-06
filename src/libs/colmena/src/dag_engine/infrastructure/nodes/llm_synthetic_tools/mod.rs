@@ -206,7 +206,12 @@ pub use recall_history::{
 };
 
 pub use gsheets_tools::{
-    tool_add_sheet as gsheets_tool_add_sheet,
+    dispatch_add_sheet as dispatch_gsheets_add_sheet,
+    dispatch_create_spreadsheet as dispatch_gsheets_create_spreadsheet,
+    dispatch_delete_sheet as dispatch_gsheets_delete_sheet,
+    dispatch_list_sheets as dispatch_gsheets_list_sheets, dispatch_read as dispatch_gsheets_read,
+    dispatch_set_cell as dispatch_gsheets_set_cell,
+    dispatch_set_range as dispatch_gsheets_set_range, tool_add_sheet as gsheets_tool_add_sheet,
     tool_create_from_xlsx as gsheets_tool_create_from_xlsx,
     tool_create_spreadsheet as gsheets_tool_create_spreadsheet,
     tool_delete_sheet as gsheets_tool_delete_sheet, tool_export_xlsx as gsheets_tool_export_xlsx,

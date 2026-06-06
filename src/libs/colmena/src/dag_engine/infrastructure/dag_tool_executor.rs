@@ -794,6 +794,75 @@ impl DagToolExecutor {
             }
         }
 
+        // --- E-T7: Synthetic Google Sheets tools (gsheets_*) ---
+        // These dispatchers are self-contained — they build their own
+        // SheetsClient from environment/config and need no executor context.
+        // The xlsx pair (gsheets_create_from_xlsx, gsheets_export_xlsx) is
+        // DEFERRED to E-T7b because they require attachment-byte plumbing
+        // that does not yet exist in the executor: `load_attachment` here
+        // only emits a sentinel and the actual bytes are fetched higher up
+        // in the LLM loop; there is no symmetric "register bytes as a new
+        // attachment" path either. Adding both would require threading an
+        // attachment fetcher + registrar through DagToolExecutor — out of
+        // scope for E-T7 (router wiring) and tracked separately.
+        {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
+                dispatch_gsheets_add_sheet, dispatch_gsheets_create_spreadsheet,
+                dispatch_gsheets_delete_sheet, dispatch_gsheets_list_sheets, dispatch_gsheets_read,
+                dispatch_gsheets_set_cell, dispatch_gsheets_set_range, GSHEETS_ADD_SHEET_TOOL,
+                GSHEETS_CREATE_SPREADSHEET_TOOL, GSHEETS_DELETE_SHEET_TOOL,
+                GSHEETS_LIST_SHEETS_TOOL, GSHEETS_READ_TOOL, GSHEETS_SET_CELL_TOOL,
+                GSHEETS_SET_RANGE_TOOL,
+            };
+
+            let name = tool_call.function.name.as_str();
+            let is_gsheets_tool = matches!(
+                name,
+                n if n == GSHEETS_CREATE_SPREADSHEET_TOOL
+                    || n == GSHEETS_LIST_SHEETS_TOOL
+                    || n == GSHEETS_ADD_SHEET_TOOL
+                    || n == GSHEETS_DELETE_SHEET_TOOL
+                    || n == GSHEETS_READ_TOOL
+                    || n == GSHEETS_SET_CELL_TOOL
+                    || n == GSHEETS_SET_RANGE_TOOL
+            );
+
+            if is_gsheets_tool {
+                let args: serde_json::Value = if tool_call.function.arguments.trim().is_empty() {
+                    serde_json::json!({})
+                } else {
+                    serde_json::from_str(&tool_call.function.arguments).map_err(|e| {
+                        LlmError::InvalidToolCall {
+                            reason: format!("Failed to parse arguments for tool {}: {}", name, e),
+                        }
+                    })?
+                };
+
+                let result = match name {
+                    n if n == GSHEETS_CREATE_SPREADSHEET_TOOL => {
+                        dispatch_gsheets_create_spreadsheet(args).await
+                    }
+                    n if n == GSHEETS_LIST_SHEETS_TOOL => dispatch_gsheets_list_sheets(args).await,
+                    n if n == GSHEETS_ADD_SHEET_TOOL => dispatch_gsheets_add_sheet(args).await,
+                    n if n == GSHEETS_DELETE_SHEET_TOOL => {
+                        dispatch_gsheets_delete_sheet(args).await
+                    }
+                    n if n == GSHEETS_READ_TOOL => dispatch_gsheets_read(args).await,
+                    n if n == GSHEETS_SET_CELL_TOOL => dispatch_gsheets_set_cell(args).await,
+                    _ => dispatch_gsheets_set_range(args).await,
+                };
+
+                let success =
+                    !matches!(&result, serde_json::Value::Object(m) if m.contains_key("error"));
+                return Ok(crate::llm::domain::ToolResult {
+                    tool_call_id: tool_call.id.clone(),
+                    output: result.to_string(),
+                    success,
+                    error: None,
+                });
+            }
+        }
+
         // --- F-T15: recall_history synthetic tool ---
         // Active whenever a conversation_repository + conversation_key are wired.
         // Independent of crdt_docs — useful for any LLM node with persistent memory.
