@@ -11,11 +11,13 @@ use std::sync::{Arc, Weak};
 
 /// Template for the phase reactor schema constraints injected by the orchestrator.
 /// Uses `{agents_list}` as a placeholder for the available agents.
-const PHASE_REACTOR_TEMPLATE: &str = include_str!("../../../../text/prompts/orchestrator_phase_reactor.md");
+const PHASE_REACTOR_TEMPLATE: &str =
+    include_str!("../../../../text/prompts/orchestrator_phase_reactor.md");
 
 /// Anti-hallucination grounding rules appended to both reactor system messages
 /// after the schema template / user-provided system message.
-const ORCHESTRATOR_GROUNDING: &str = include_str!("../../../../text/prompts/orchestrator_grounding.md");
+const ORCHESTRATOR_GROUNDING: &str =
+    include_str!("../../../../text/prompts/orchestrator_grounding.md");
 
 /// Default system message used as a fallback when the user has not provided one
 /// for the final reactor. The grounding rules are appended on top of this.

@@ -10,7 +10,6 @@
 //! context and passes it down. If a malicious model includes `session_id` in
 //! the JSON, it is silently ignored by the typed structs below.
 
-use crate::text;
 use crate::documents::application::apply_patch::{ApplyPatchInput, ApplyPatchUseCase};
 use crate::documents::application::create_document::{CreateDocumentInput, CreateDocumentUseCase};
 use crate::documents::application::get_head::{GetHeadInput, GetHeadUseCase};
@@ -21,6 +20,7 @@ use crate::documents::domain::ids::{ArtifactId, ArtifactKind, SessionId, Version
 use crate::documents::domain::patch::{Patch, PatchSource};
 use crate::documents::domain::SessionArtifactIndex;
 use crate::llm::domain::tools::ToolDefinition;
+use crate::text;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;

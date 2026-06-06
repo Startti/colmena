@@ -68,9 +68,7 @@ pub fn tool_description(name: &str) -> &'static str {
     load()
         .get(name)
         .map(|t| t.description.as_str())
-        .unwrap_or_else(|| {
-            panic!("Missing 'description' for '{name}' in text/tools/*.yaml")
-        })
+        .unwrap_or_else(|| panic!("Missing 'description' for '{name}' in text/tools/*.yaml"))
 }
 
 /// Every tool name currently in the registry. Used by tests to detect
@@ -97,7 +95,11 @@ mod tests {
         // that gracefully — the orphan/missing tests run later.
         let names = all_tool_names();
         // Length is 0 before tool migrations, > 0 after. Either is OK.
-        assert!(names.len() <= 100, "registry suspiciously large: {}", names.len());
+        assert!(
+            names.len() <= 100,
+            "registry suspiciously large: {}",
+            names.len()
+        );
     }
 
     #[test]
@@ -117,7 +119,10 @@ mod tests {
         // We can't reach the panic without spawning a subprocess; we sanity-check
         // that the shape of detection is correct.
         for k in parsed_b.keys() {
-            assert!(m.contains_key(k.as_str()), "duplicate detection sanity check failed");
+            assert!(
+                m.contains_key(k.as_str()),
+                "duplicate detection sanity check failed"
+            );
         }
     }
 }

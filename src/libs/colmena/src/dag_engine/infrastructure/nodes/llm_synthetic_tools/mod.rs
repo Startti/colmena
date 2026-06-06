@@ -463,9 +463,8 @@ mod text_coverage_tests {
         // Path: from mod.rs → up to repo root → docs/developer_guide/41_builtin_tools_index.md
         // mod.rs is at src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mod.rs
         //   = 8 directories under repo root
-        const INDEX_DOC: &str = include_str!(
-            "../../../../../../../../docs/developer_guide/41_builtin_tools_index.md"
-        );
+        const INDEX_DOC: &str =
+            include_str!("../../../../../../../../docs/developer_guide/41_builtin_tools_index.md");
 
         let registered: Vec<String> = all_synthetic_tools()
             .iter()

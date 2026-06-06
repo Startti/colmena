@@ -11,7 +11,8 @@ use crate::dag_engine::infrastructure::nodes::util::extract_with_schema::{
 };
 use crate::llm::domain::ProviderKind;
 
-const ROUTING_SYSTEM_MSG: &str = include_str!("../../../../../text/prompts/routing_classifier_system.md");
+const ROUTING_SYSTEM_MSG: &str =
+    include_str!("../../../../../text/prompts/routing_classifier_system.md");
 
 /// Picks the winning branch for mode A and returns (branch_index, llm_reason).
 pub async fn pick_branch(
