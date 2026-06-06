@@ -446,6 +446,33 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
 
 ---
 
+## Toolkit packages v1.1
+
+- [ ] **Auto-inject package description** into agent system message when a
+  package is enabled (one-paragraph orientation block, collapsed in
+  `lazy_tool_loading` catalogs). Provides discoverable context on what the
+  package is for + when to use it.
+- [ ] **Unknown alias warning** — when `enabled_tools` contains a name that
+  matches no tool, package, or `configured_alias`, surface a structured
+  warning in `extra_info` instead of silently producing an empty filter.
+  Catches typos early.
+- [ ] **DAG-node summaries** — extend `ExecutableNode` trait with optional
+  `summary()` method so DAG nodes used as tools (via `tool_configurations`)
+  can declare a default; the user's
+  `tool_configurations.<name>.summary` overrides it per agent. Enables lazy
+  loading for user-created tools without duplication.
+- [ ] **Cross-feature validation** — when `enabled_tools` contains both a
+  toolkit package and individual tools from that package,
+  detect conflicts and warn (e.g.
+  `["gsheets", "gsheets_read"]` is redundant).
+
+**Referencias:**
+- Spec: `docs/superpowers/specs/2026-06-06-toolkit-packages-design.md`.
+- Dev guide: `docs/developer_guide/40_toolkit_packages.md`.
+- Implementación inicial: commits E-T16.
+
+---
+
 ## Items resueltos recientemente
 
 El último item — `data:` (base64 inline) auto-summary v2 — se resolvió el 2026-05-18 (ver `docs/CHANGELOG_2026-05.md` → "Inline data: auto-summary (v2)"). Los detalles de la resolución viven en la git history (commits `cc924a3`, `a3053cd`).

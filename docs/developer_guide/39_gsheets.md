@@ -5,6 +5,29 @@
 > Drive API. Auth via Service Account JSON or Application Default
 > Credentials. No OAuth user-scoped flow in v1.
 
+## Recommended activation
+
+Enable the whole gsheets surface with one alias:
+
+```json
+"enabled_tools": ["gsheets"]
+```
+
+This expands to all 10 gsheets tools via the toolkit-packages registry.
+For a read-only-style agent, exclude write tools:
+
+```json
+"enabled_tools": [
+  "gsheets",
+  "!gsheets_delete_sheet",
+  "!gsheets_add_sheet",
+  "!gsheets_create_spreadsheet",
+  "!gsheets_create_from_xlsx"
+]
+```
+
+See [40_toolkit_packages.md](40_toolkit_packages.md) for the full syntax and exclusion semantics.
+
 ## Tool surface
 
 | Tool | What it does |

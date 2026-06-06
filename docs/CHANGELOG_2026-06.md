@@ -305,3 +305,61 @@ Files:
 - `docs/developer_guide/39_gsheets.md`, `docs/node_as_tools_reference.json` — schema + guidance.
 
 **Estado.** done.
+
+---
+
+### E-T15 — Synthetic tool summaries for lazy tool loading
+
+- **Every Rust-side synthetic tool** now declares a `summary` (10-200
+  chars) via `build_synthetic_tool_with_summary` or direct
+  `ToolDefinition.summary` field. Enforced in CI by the
+  `every_synthetic_tool_has_summary` test in `llm_synthetic_tools/mod.rs`.
+  Builds refuse to ship if any synthetic tool is missing a summary.
+- **31 tools covered:** gsheets (10), crdt_doc (6), document (7),
+  api_explorer (5) + load_skill, describe_tool, load_attachment (3
+  built-ins, always present in `lazy_tool_loading: true`).
+- **Exemption:** DAG nodes used as tools via `tool_configurations` are
+  exempt — their descriptions are user-supplied per agent and dynamic.
+  Lazy catalog falls back to truncated `description` for those.
+- **Impact:** `lazy_tool_loading: true` catalogs are now always
+  consistent and informative. No incomplete tool entries reaching the LLM.
+
+**Estado.** done.
+
+---
+
+### E-T16 — Toolkit packages: enable many tools via single alias
+
+- **New concept:** a toolkit package is a static registry of related
+  tools bundled under a short alias. Instead of
+  `enabled_tools: ["gsheets_list_sheets", "gsheets_read", ...]`, use
+  `enabled_tools: ["gsheets"]` and the engine expands to all 10
+  gsheets_* tools at runtime.
+- **First package: gsheets** — 10 tools (create, create_from_xlsx,
+  export, list_sheets, add_sheet, delete_sheet, read, set_cell,
+  set_range, run_python).
+- **Exclusion syntax:** `enabled_tools: ["gsheets", "!gsheets_delete_sheet"]`
+  removes a single tool from a package.
+- **Naming convention enforced:** package aliases must NOT contain `_`.
+  Tool names MUST contain `_` after namespace (e.g.
+  `gsheets_read`). CI test `package_aliases_have_no_underscore` enforces
+  this for visual disambiguation.
+- **Edge cases handled:** unknown aliases silent (return 0 tools), exclude
+  tool not in includes is no-op, exclude-alone is empty result
+  (no panic).
+- **Back-compat:** `api_explorer`'s `__` prefix-rule still works.
+- **Registration:** new packages appended to `TOOLKIT_PACKAGES` in
+  `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/toolkit_packages.rs`
+  with one struct literal.
+- **Integration:** works seamlessly with `lazy_tool_loading` (catalog
+  is unpacked at load time).
+- **Docs:** new dev guide §40 `toolkit_packages.md` with full syntax,
+  naming convention, exclusion semantics, edge cases, and registration
+  how-to.
+
+**Referencias:**
+- Spec: `docs/superpowers/specs/2026-06-06-toolkit-packages-design.md`.
+- Plan: `docs/superpowers/plans/2026-06-06-toolkit-packages-and-summaries.md`.
+- Dev guide §40: `docs/developer_guide/40_toolkit_packages.md`.
+
+**Estado.** done.

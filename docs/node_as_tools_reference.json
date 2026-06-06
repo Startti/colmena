@@ -1694,5 +1694,25 @@
       "mergeable_fields": "Fields where fixed + dynamic values are merged rather than overridden.",
       "field_mapping":  "Maps each LLM parameter to its destination container field."
     }
+  },
+
+  "toolkit_packages": {
+    "description": "Curated bundles of synthetic tools exposed under a single alias. Use enabled_tools: [\"gsheets\"] to expand to all gsheets_* tools at once. Exclusion via !toolname is supported.",
+    "gsheets": {
+      "description": "Read, write, and analyze Google Sheets workbooks (10 tools)",
+      "tools": [
+        "gsheets_create_spreadsheet",
+        "gsheets_create_from_xlsx",
+        "gsheets_export_xlsx",
+        "gsheets_list_sheets",
+        "gsheets_add_sheet",
+        "gsheets_delete_sheet",
+        "gsheets_read",
+        "gsheets_set_cell",
+        "gsheets_set_range",
+        "gsheets_run_python"
+      ],
+      "exclusion_example": "[\"gsheets\", \"!gsheets_delete_sheet\"]"
+    }
   }
 }

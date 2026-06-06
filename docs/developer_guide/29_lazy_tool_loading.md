@@ -2,6 +2,19 @@
 
 Carga progresiva del schema de tools para nodos LLM. Cuando un `llm_call` tiene muchas tools (>10), inyectar todos los schemas completos en cada request al provider degrada la atención del modelo. Esta feature expone un catálogo ligero (`name + summary`) y solo revela el schema completo de las tools que el LLM decide usar, llamando al tool sintético `describe_tool`.
 
+## Summary requirement
+
+Every Rust-side synthetic tool MUST declare a `summary` between 10 and 200
+characters via `build_synthetic_tool_with_summary` (or by setting the
+`summary` field on `ToolDefinition` directly). This is enforced in CI by
+the `every_synthetic_tool_has_summary` test in
+`llm_synthetic_tools/mod.rs`. Builds refuse to ship if any synthetic tool
+is missing a summary.
+
+DAG nodes used as tools (via `tool_configurations`) are exempt — their
+descriptions are user-supplied per agent and dynamic. For those, the
+lazy-loading catalog falls back to a truncated `description`.
+
 ## Activación
 
 Boolean a nivel del `llm_call`:
