@@ -313,27 +313,31 @@ Todos viven en `tests/graphs/`:
 
 | Grafo | Categoría | Qué ejercita |
 |---|---|---|
-| [`basic/test_suspend_manual.json`](../../tests/graphs/basic/test_suspend_manual.json) | mínimo | `suspend` puro entre `mock_input` y `log`. Smoke test base. |
+| [`basic/test_suspend_manual.json`](../../tests/graphs/basic/test_suspend_manual.json) | mínimo | `suspend` (id=`approve_continue`) entre `input` y `log`. Smoke test base. |
+| [`advanced/test_suspend.json`](../../tests/graphs/advanced/test_suspend.json) | mínimo | `suspend` (id=`manual_input`) entre `mock_input` y `log`. Variante con input mockeado. |
 | [`basic/suspend_in_subgraph.json`](../../tests/graphs/basic/suspend_in_subgraph.json) | composición | `suspend` dentro de un `subgraph` que burbujea al padre. |
-| [`advanced/test_suspend.json`](../../tests/graphs/advanced/test_suspend.json) | aprobación | `suspend` actuando como gate de aprobación entre `input` y `log`. |
+| [`basic/suspend_then_llm_resume.json`](../../tests/graphs/basic/suspend_then_llm_resume.json) | composición LLM | `suspend → llm_call`. Repro del bug ADP 2026-06-04 (fix del routing de `__colmena_resume_answer`). |
+| [`basic/suspend_cascade.json`](../../tests/graphs/basic/suspend_cascade.json) | cascada | `suspend → suspend`. Regression guard para cascada de suspends consecutivos. |
+| [`basic/suspend_email_approval_demo.json`](../../tests/graphs/basic/suspend_email_approval_demo.json) | demo realista | `llm(draft) → suspend → router → send/cancel/revise`. HITL canónico approve/reject sobre respuesta libre. |
 | [`advanced/nested_orchestrators_suspend.json`](../../tests/graphs/advanced/nested_orchestrators_suspend.json) | orchestrator anidado | 2 orchestrators anidados + `suspend` en el agente más profundo (3 niveles de cascade). |
+| [`advanced/llm_tool_suspend_smoke.json`](../../tests/graphs/advanced/llm_tool_suspend_smoke.json) | LLM con suspend tool | `llm_call` con `secure_suspend` registrado como tool `ask_secret`. |
 
 Ejecutar (siempre con `--agent-session-id` estable):
 
 ```bash
 source .env
 
-# Run inicial
+# Run inicial — el grafo suspende
 cargo run --bin dag_engine -- run \
   tests/graphs/basic/test_suspend_manual.json \
   --agent-session-id agent_t1
 
-# Resume
+# Resume — el id de Q/A debe coincidir con `config.id` del nodo (acá: `approve_continue`)
 cargo run --bin dag_engine -- run \
   tests/graphs/basic/test_suspend_manual.json \
   --agent-session-id agent_t1 \
-  --answer "Q[manual_input]: Provide some manual input
-A[manual_input]: hello world"
+  --answer "Q[approve_continue]: ¿Apruebas continuar con el proceso?
+A[approve_continue]: sí, aprobado"
 ```
 
 ---
@@ -357,6 +361,7 @@ Detalles adicionales (troubleshooting profundo de Q/A, multi-suspend, secure_sus
 ## 9. Referencias cruzadas
 
 - **Esquema canónico**: [`docs/node_configurations.json`](../node_configurations.json) → entrada `suspend`.
+- **Fix de ruteo de `resume_answer`**: [`docs/superpowers/specs/2026-06-05-suspend-resume-answer-routing-fix-design.md`](../superpowers/specs/2026-06-05-suspend-resume-answer-routing-fix-design.md) — el engine inyecta `__colmena_resume_answer` solo en nodos que estaban SUSPENDED en el snapshot persistido.
 - **Spec del formato Q/A**: [`docs/superpowers/specs/2026-05-08-suspend-qa-response-format-design.md`](../superpowers/specs/2026-05-08-suspend-qa-response-format-design.md).
 - **Secure variant**: [`13_security_strategy.md`](13_security_strategy.md) (`secure_suspend`).
 - **HITL en subgrafos**: [`19_nested_agents_and_subgraphs.md`](19_nested_agents_and_subgraphs.md).

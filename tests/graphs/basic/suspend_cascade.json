@@ -1,0 +1,20 @@
+{
+  "comment": "Regression graph for suspend→suspend cascade (spec §5 row 2). Run 1 suspends at ask_one. Run 2 answers ask_one and must suspend fresh at ask_two. Run 3 answers ask_two and must reach finish. Used by suspend_resume_routing::suspend_cascade_resumes_each_node_independently.",
+  "nodes": {
+    "start": { "type": "mock_input", "config": { "input_data": "kickoff" } },
+    "ask_one": {
+      "type": "suspend",
+      "config": { "id": "ask_one", "question": "Primera pregunta?", "question_type": "open" }
+    },
+    "ask_two": {
+      "type": "suspend",
+      "config": { "id": "ask_two", "question": "Segunda pregunta?", "question_type": "open" }
+    },
+    "finish": { "type": "log", "config": { "prefix": "cascade_result:" } }
+  },
+  "edges": [
+    { "from": "start",   "to": "ask_one" },
+    { "from": "ask_one", "to": "ask_two" },
+    { "from": "ask_two", "to": "finish" }
+  ]
+}
