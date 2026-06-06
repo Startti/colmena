@@ -19,6 +19,12 @@
   - `python_bindings/` — PyO3 bindings (`#[pyclass]`, `#[pymethods]`)
   - `node_bindings/` — napi-rs bindings (`#[napi]`, `#[napi(object)]`)
   - `shared/` — Config resolver, service container
+- `src/libs/colmena/text/` — **LLM-facing text registry**. Every prompt,
+  description, and summary the LLM reads lives here as YAML or Markdown.
+  Edit a file in `text/prompts/` or `text/tools/` to change what the
+  model sees — no Rust changes needed. See
+  [docs/developer_guide/41_builtin_tools_index.md](docs/developer_guide/41_builtin_tools_index.md)
+  for the user-facing index.
 - `python/tests/` — Python test scripts
 - `tests/` — Rust integration tests
 - `tests/graphs/` — JSON DAG test graphs (basic/, agents/, advanced/, memory/, media/)

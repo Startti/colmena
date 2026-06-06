@@ -479,6 +479,24 @@ El último item — `data:` (base64 inline) auto-summary v2 — se resolvió el 
 
 ---
 
+---
+
+## Text centralization follow-ups
+
+- **Auto-generated tools index** — replace the hand-written
+  `41_builtin_tools_index.md` with a build step that reads
+  `text/tools/*.yaml` and writes the markdown. The completeness test
+  shipped in E-T18b would become redundant; the build step would be the
+  single source of truth.
+- **i18n support for tool text** — extend the YAML schema to allow
+  language-keyed entries (`summary.en`, `summary.es`) and add a runtime
+  language selector. Out of scope today; only English tool text ships.
+- **Hot reload for `text/`** — watch the folder for changes and reparse
+  YAMLs without restart. Useful for prompt iteration during development;
+  complex because the binary embeds the YAML via `include_str!`.
+
+---
+
 ## Cómo agregar un item a este backlog
 
 Cada entrada debe tener:

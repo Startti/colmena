@@ -363,3 +363,23 @@ Files:
 - Dev guide §40: `docs/developer_guide/40_toolkit_packages.md`.
 
 **Estado.** done.
+
+---
+
+## 7. Text centralization + built-in tools index (E-T17 + E-T18)
+
+- **E-T17 shipped 2026-06-06** — LLM-facing text centralization. Every
+  Rust-inline tool description, summary, system prelude, and Python
+  sandbox auto-prelude moved into a top-level
+  [`src/libs/colmena/text/`](../src/libs/colmena/text/) folder organized
+  as `prompts/*.md` (monolithic) plus `tools/*.yaml` (structured). New
+  loader at `src/text/mod.rs` resolves names with `text::tool_summary` /
+  `text::tool_description`. Builders panic at startup if any tool is
+  missing from the registry. CI tests verify: YAML parses, no orphan
+  entries, every registered tool has an entry, ToolDefinition.summary
+  matches the YAML.
+- **E-T18 shipped 2026-06-06** — new
+  [`docs/developer_guide/41_builtin_tools_index.md`](developer_guide/41_builtin_tools_index.md)
+  lists every built-in synthetic tool (31 total) with its summary and
+  detailed-doc link. CI test (`index_doc_covers_all_registered_tools`)
+  refuses to ship if a new tool is added without an index entry.
