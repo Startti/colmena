@@ -1,0 +1,37 @@
+{
+  "comment": "Repro graph for ADP bug 2026-06-04: suspend → llm_call on resume. Used by suspend_resume_routing integration test (ScriptedAdapter; no real API call). Run 1 suspends at ask_name. Run 2 resumes and must let poet run fresh (not enter the resume-tool branch). Before the fix, the engine cascades __colmena_resume_answer into poet, which aborts with 'no pending tool call found'.",
+  "nodes": {
+    "start": {
+      "type": "mock_input",
+      "config": { "input_data": "kickoff" }
+    },
+    "ask_name": {
+      "type": "suspend",
+      "config": {
+        "id": "ask_name",
+        "question": "¿Cuál es tu nombre?",
+        "question_type": "open"
+      }
+    },
+    "poet": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "Devuelve un saludo corto al usuario. Una sola línea.",
+        "stream": false
+      }
+    },
+    "finish": {
+      "type": "log",
+      "config": { "prefix": "result:" }
+    }
+  },
+  "edges": [
+    { "from": "start",    "to": "ask_name" },
+    { "from": "ask_name", "to": "poet" },
+    { "from": "poet",     "to": "finish" }
+  ]
+}
