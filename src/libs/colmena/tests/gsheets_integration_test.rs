@@ -85,9 +85,14 @@ async fn formula_evaluated_server_side() {
     )
     .await
     .expect("seed");
-    c.set_cell(&id, &tab, "B1", CellValue::String("=SUM(A1:A3)".to_string()))
-        .await
-        .expect("write formula");
+    c.set_cell(
+        &id,
+        &tab,
+        "B1",
+        CellValue::String("=SUM(A1:A3)".to_string()),
+    )
+    .await
+    .expect("write formula");
 
     // Read as evaluated number.
     let r = c
