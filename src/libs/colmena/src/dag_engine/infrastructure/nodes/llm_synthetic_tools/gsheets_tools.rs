@@ -24,6 +24,7 @@ use crate::gsheets::domain::{
 use crate::gsheets::infrastructure::config::GSheetsConfig;
 use crate::gsheets::infrastructure::http_client::GoogleSheetsHttpClient;
 use crate::llm::domain::tools::ToolDefinition;
+use crate::text;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -139,88 +140,72 @@ fn parse_value_render(s: Option<&str>) -> ValueRenderOption {
 pub fn tool_create_spreadsheet() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<CreateSpreadsheetArgs>(
         TOOL_CREATE_SPREADSHEET,
-        "Create a new empty Google Spreadsheet with the given title. \
-         Returns {spreadsheet_id, url} you can use in subsequent calls.",
-        "Create a new Google Sheets workbook and return its URL",
+        text::tool_description(TOOL_CREATE_SPREADSHEET),
+        text::tool_summary(TOOL_CREATE_SPREADSHEET),
     )
 }
 
 pub fn tool_create_from_xlsx() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<CreateFromXlsxArgs>(
         TOOL_CREATE_FROM_XLSX,
-        "Upload an .xlsx attachment as a NATIVE Google Spreadsheet \
-         (auto-conversion via Drive API). attachment_id refers to a \
-         file already present in the run's attachment store. Returns \
-         {spreadsheet_id, url, sheets[]} with the converted tabs.",
-        "Upload a local .xlsx attachment and convert it into a new Google Sheet",
+        text::tool_description(TOOL_CREATE_FROM_XLSX),
+        text::tool_summary(TOOL_CREATE_FROM_XLSX),
     )
 }
 
 pub fn tool_export_xlsx() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<ExportXlsxArgs>(
         TOOL_EXPORT_XLSX,
-        "Download a Google Spreadsheet as .xlsx and register it as an \
-         attachment. Returns {attachment_id}.",
-        "Download an existing Google Sheet as .xlsx bytes attachment",
+        text::tool_description(TOOL_EXPORT_XLSX),
+        text::tool_summary(TOOL_EXPORT_XLSX),
     )
 }
 
 pub fn tool_list_sheets() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<ListSheetsArgs>(
         TOOL_LIST_SHEETS,
-        "List the tabs (sheets) inside a Google Spreadsheet. Returns \
-         {sheets: [{sheet_id, title, index, row_count, col_count}]}.",
-        "List every tab (sheet) inside a spreadsheet by ID",
+        text::tool_description(TOOL_LIST_SHEETS),
+        text::tool_summary(TOOL_LIST_SHEETS),
     )
 }
 
 pub fn tool_add_sheet() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<AddSheetArgs>(
         TOOL_ADD_SHEET,
-        "Add a new tab (sheet) to an existing Google Spreadsheet. \
-         Returns {sheet_id, title}.",
-        "Create a new tab inside an existing spreadsheet",
+        text::tool_description(TOOL_ADD_SHEET),
+        text::tool_summary(TOOL_ADD_SHEET),
     )
 }
 
 pub fn tool_delete_sheet() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<DeleteSheetArgs>(
         TOOL_DELETE_SHEET,
-        "Delete a tab from a Google Spreadsheet. `sheet` accepts \
-         either the human title or a stringified numeric sheet_id.",
-        "Permanently delete a tab from a spreadsheet",
+        text::tool_description(TOOL_DELETE_SHEET),
+        text::tool_summary(TOOL_DELETE_SHEET),
     )
 }
 
 pub fn tool_read() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<ReadArgs>(
         TOOL_READ,
-        "Read cells from a tab. Defaults: value_render=UNFORMATTED_VALUE \
-         (pandas-friendly scalars), as_records=false (2D array). Set \
-         value_render='FORMULA' to read formula text instead of \
-         evaluated values. Set as_records=true to use the first row as \
-         headers and return [{col: val, ...}].",
-        "Read a cell range from a tab; supports formatted, unformatted, and formula render modes",
+        text::tool_description(TOOL_READ),
+        text::tool_summary(TOOL_READ),
     )
 }
 
 pub fn tool_set_cell() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<SetCellArgs>(
         TOOL_SET_CELL,
-        "Write a single cell. Strings starting with `=` are evaluated \
-         by Google as formulas (USER_ENTERED valueInputOption). \
-         Cascading recalc happens server-side automatically.",
-        "Write one value or formula into a single cell",
+        text::tool_description(TOOL_SET_CELL),
+        text::tool_summary(TOOL_SET_CELL),
     )
 }
 
 pub fn tool_set_range() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<SetRangeArgs>(
         TOOL_SET_RANGE,
-        "Bulk-write a rectangular block of cells starting at start_addr. \
-         values_2d is a row-major 2D array. Strings starting with `=` \
-         are evaluated by Google as formulas.",
-        "Write a 2-D values array starting at a given address",
+        text::tool_description(TOOL_SET_RANGE),
+        text::tool_summary(TOOL_SET_RANGE),
     )
 }
 

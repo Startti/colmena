@@ -1,1 +1,49 @@
-{}
+gsheets_create_spreadsheet:
+  summary: Create a new Google Sheets workbook and return its URL
+  description: |
+    Create a new empty Google Spreadsheet with the given title. Returns {spreadsheet_id, url} you can use in subsequent calls.
+
+gsheets_create_from_xlsx:
+  summary: Upload a local .xlsx attachment and convert it into a new Google Sheet
+  description: |
+    Upload an .xlsx attachment as a NATIVE Google Spreadsheet (auto-conversion via Drive API). attachment_id refers to a file already present in the run's attachment store. Returns {spreadsheet_id, url, sheets[]} with the converted tabs.
+
+gsheets_export_xlsx:
+  summary: Download an existing Google Sheet as .xlsx bytes attachment
+  description: |
+    Download a Google Spreadsheet as .xlsx and register it as an attachment. Returns {attachment_id}.
+
+gsheets_list_sheets:
+  summary: List every tab (sheet) inside a spreadsheet by ID
+  description: |
+    List the tabs (sheets) inside a Google Spreadsheet. Returns {sheets: [{sheet_id, title, index, row_count, col_count}]}.
+
+gsheets_add_sheet:
+  summary: Create a new tab inside an existing spreadsheet
+  description: |
+    Add a new tab (sheet) to an existing Google Spreadsheet. Returns {sheet_id, title}.
+
+gsheets_delete_sheet:
+  summary: Permanently delete a tab from a spreadsheet
+  description: |
+    Delete a tab from a Google Spreadsheet. `sheet` accepts either the human title or a stringified numeric sheet_id.
+
+gsheets_read:
+  summary: Read a cell range from a tab; supports formatted, unformatted, and formula render modes
+  description: |
+    Read cells from a tab. Defaults: value_render=UNFORMATTED_VALUE (pandas-friendly scalars), as_records=false (2D array). Set value_render='FORMULA' to read formula text instead of evaluated values. Set as_records=true to use the first row as headers and return [{col: val, ...}].
+
+gsheets_set_cell:
+  summary: Write one value or formula into a single cell
+  description: |
+    Write a single cell. Strings starting with `=` are evaluated by Google as formulas (USER_ENTERED valueInputOption). Cascading recalc happens server-side automatically.
+
+gsheets_set_range:
+  summary: Write a 2-D values array starting at a given address
+  description: |
+    Bulk-write a rectangular block of cells starting at start_addr. values_2d is a row-major 2D array. Strings starting with `=` are evaluated by Google as formulas.
+
+gsheets_run_python:
+  summary: Run sandboxed pandas analysis over sheet ranges loaded directly by the dispatcher (rows never pass through the LLM)
+  description: |
+    Run sandboxed Python (pandas/numpy/scipy.stats) over data loaded directly from Google Sheets. Each `bindings` entry becomes a Python global (a list of dicts you can pass to pd.DataFrame). Rows NEVER pass through the LLM — only the final `output`. Use this for any analysis over more than ~50 rows.

@@ -16,6 +16,7 @@ use crate::gsheets::domain::{ReadOptions, ReadResponse, SheetsClient, Spreadshee
 use crate::gsheets::infrastructure::config::GSheetsConfig;
 use crate::gsheets::infrastructure::http_client::GoogleSheetsHttpClient;
 use crate::llm::domain::tools::ToolDefinition;
+use crate::text;
 use futures::future::join_all;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -68,11 +69,8 @@ pub struct GsheetsBinding {
 pub fn tool_gsheets_run_python() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<GsheetsRunPythonArgs>(
         TOOL_GSHEETS_RUN_PYTHON,
-        "Run sandboxed Python (pandas/numpy/scipy.stats) over data loaded directly \
-         from Google Sheets. Each `bindings` entry becomes a Python global (a list \
-         of dicts you can pass to pd.DataFrame). Rows NEVER pass through the LLM — \
-         only the final `output`. Use this for any analysis over more than ~50 rows.",
-        "Run sandboxed pandas analysis over sheet ranges loaded directly by the dispatcher (rows never pass through the LLM)",
+        text::tool_description(TOOL_GSHEETS_RUN_PYTHON),
+        text::tool_summary(TOOL_GSHEETS_RUN_PYTHON),
     )
 }
 
