@@ -1,0 +1,34 @@
+{
+  "_comment": "Smoke test for E-T16: enabled_tools: ['gsheets'] expands to all 10 gsheets tools via the toolkit_packages registry, without listing them individually. Requires set -a; source .env; set +a; export PYTHONPATH=/Users/danielgarcia/startti/colmena/.venv/lib/python3.14/site-packages; cargo run --release --bin dag_engine -- run tests/graphs/agents/gsheets_package_smoke.json --agent-session-id smoke_$(date +%s) --include-extra-info",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/gsheets-pkg-smoke",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Listame las pestañas del spreadsheet 1F7AsFx4yW4uVnJRaRWwpzQuSNvruqGohI2B2NRygT-Y. Solo una llamada a gsheets_list_sheets y reportame el nombre de las pestañas."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 4,
+        "lazy_tool_loading": false,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "You are a smoke-test agent. Use gsheets_list_sheets to answer the user, then reply.",
+        "enabled_tools": ["gsheets"]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}
