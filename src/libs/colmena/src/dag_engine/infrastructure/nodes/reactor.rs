@@ -71,7 +71,7 @@ fn reactor_schema() -> Value {
 }
 
 /// Default system prompt for every ReactorNode.
-const DEFAULT_REACTOR_SYSTEM_MSG: &str = include_str!("prompts/reactor_system.md");
+const DEFAULT_REACTOR_SYSTEM_MSG: &str = include_str!("../../../../text/prompts/reactor_system.md");
 
 pub struct ReactorNode {
     #[allow(dead_code)]

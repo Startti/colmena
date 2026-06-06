@@ -47,7 +47,7 @@ fn critic_schema() -> Value {
 }
 
 /// Default system prompt baked into every CriticNode.
-const DEFAULT_CRITIC_SYSTEM_MSG: &str = include_str!("prompts/critic_system.md");
+const DEFAULT_CRITIC_SYSTEM_MSG: &str = include_str!("../../../../text/prompts/critic_system.md");
 
 pub struct CriticNode;
 

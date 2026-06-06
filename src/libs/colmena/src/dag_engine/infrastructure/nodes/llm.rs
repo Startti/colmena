@@ -34,7 +34,7 @@ use std::sync::Weak;
 /// Default system message used when the user has not provided one. Instructs the
 /// model to stay grounded in the context it has received and avoid fabricating
 /// specific facts that are not present in the conversation.
-const LLM_DEFAULT_SYSTEM: &str = include_str!("prompts/llm_default_system.md");
+const LLM_DEFAULT_SYSTEM: &str = include_str!("../../../../text/prompts/llm_default_system.md");
 
 /// Filter the catalog of available tools down to the set the LLM should see.
 ///

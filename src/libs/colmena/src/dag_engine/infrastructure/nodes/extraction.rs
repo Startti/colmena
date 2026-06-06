@@ -9,7 +9,7 @@ use crate::llm::domain::ProviderKind;
 
 /// Default system prompt template for ExtractionNode.
 /// Uses `{user_instructions}` and `{schema}` as placeholders.
-const DEFAULT_EXTRACTION_SYSTEM_MSG: &str = include_str!("prompts/extraction_system.md");
+const DEFAULT_EXTRACTION_SYSTEM_MSG: &str = include_str!("../../../../text/prompts/extraction_system.md");
 
 pub struct ExtractionNode {
     task_memory_repo: Option<Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>>,

@@ -13,7 +13,7 @@ use crate::dag_engine::infrastructure::nodes::util::extract_with_schema::{
 use crate::dag_engine::infrastructure::nodes::util::inline_schema::inline_to_json_schema;
 use crate::llm::domain::ProviderKind;
 
-const EXTRACTION_SYSTEM_MSG: &str = include_str!("../prompts/extraction_system.md");
+const EXTRACTION_SYSTEM_MSG: &str = include_str!("../../../../../text/prompts/extraction_system.md");
 
 /// Returns (branch_index, extracted_json) when a branch matches.
 /// On no-match, returns an error that includes the extracted JSON for diagnostics.
