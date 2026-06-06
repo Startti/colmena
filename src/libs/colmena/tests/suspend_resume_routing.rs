@@ -173,7 +173,9 @@ async fn suspend_then_llm_resume_runs_llm_fresh() {
         let (events, output) = run_until_finish(&eng, repro_graph(), None, &chat).await;
         tracing::info!(?output, "run 1: graph finished");
 
-        let has_error = events.iter().any(|ev| matches!(ev, DagExecutionEvent::Error { .. }));
+        let has_error = events
+            .iter()
+            .any(|ev| matches!(ev, DagExecutionEvent::Error { .. }));
         assert!(
             !has_error,
             "run 1 should not produce any Error events, got: {events:?}"
@@ -264,9 +266,7 @@ async fn suspend_cascade_resumes_each_node_independently() {
     let chat = unique_chat("srr_cascade");
     cleanup(&chat).await;
 
-    tracing::info!(
-        "=== TEST: suspend_cascade_resumes_each_node_independently (chat={chat}) ==="
-    );
+    tracing::info!("=== TEST: suspend_cascade_resumes_each_node_independently (chat={chat}) ===");
 
     let eng = engine().await;
 
@@ -297,8 +297,7 @@ async fn suspend_cascade_resumes_each_node_independently() {
     {
         tracing::info!("--- run 2: answering ask_one, expecting SUSPENDED at ask_two ---");
         let ans1 = "Q[ask_one]: Primera pregunta?\nA[ask_one]: alfa".to_string();
-        let (_events, output) =
-            run_until_finish(&eng, cascade_graph(), Some(ans1), &chat).await;
+        let (_events, output) = run_until_finish(&eng, cascade_graph(), Some(ans1), &chat).await;
         tracing::info!(?output, "run 2: graph finished");
 
         assert_eq!(
@@ -322,14 +321,16 @@ async fn suspend_cascade_resumes_each_node_independently() {
     {
         tracing::info!("--- run 3: answering ask_two, expecting finish node ---");
         let ans2 = "Q[ask_two]: Segunda pregunta?\nA[ask_two]: beta".to_string();
-        let (events, output) =
-            run_until_finish(&eng, cascade_graph(), Some(ans2), &chat).await;
+        let (events, output) = run_until_finish(&eng, cascade_graph(), Some(ans2), &chat).await;
         tracing::info!(?output, "run 3: graph finished");
 
-        let reached_finish = events.iter().any(|e| {
-            matches!(e, DagExecutionEvent::NodeFinish { node_id, .. } if node_id == "finish")
-        });
-        assert!(reached_finish, "run 3 must reach `finish` node, events: {events:?}");
+        let reached_finish = events.iter().any(
+            |e| matches!(e, DagExecutionEvent::NodeFinish { node_id, .. } if node_id == "finish"),
+        );
+        assert!(
+            reached_finish,
+            "run 3 must reach `finish` node, events: {events:?}"
+        );
 
         assert!(
             output.get("__colmena_status").and_then(|v| v.as_str()) != Some("SUSPENDED"),

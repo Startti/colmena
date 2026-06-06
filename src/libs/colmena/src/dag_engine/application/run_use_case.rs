@@ -1071,10 +1071,7 @@ mod resuming_node_ids_tests {
     #[test]
     fn empty_when_resume_answer_is_none() {
         let mut all = HashMap::new();
-        all.insert(
-            "n1".to_string(),
-            json!({ "__colmena_status": "SUSPENDED" }),
-        );
+        all.insert("n1".to_string(), json!({ "__colmena_status": "SUSPENDED" }));
         let set = DagRunUseCase::compute_resuming_node_ids(&all, &None);
         assert!(set.is_empty(), "fresh run must yield empty set");
     }
@@ -1086,18 +1083,12 @@ mod resuming_node_ids_tests {
             "suspended_one".to_string(),
             json!({ "__colmena_status": "SUSPENDED", "question": "x" }),
         );
-        all.insert(
-            "ran_fine".to_string(),
-            json!({ "output": 42 }),
-        );
+        all.insert("ran_fine".to_string(), json!({ "output": 42 }));
         all.insert(
             "another_suspend".to_string(),
             json!({ "__colmena_status": "SUSPENDED" }),
         );
-        let set = DagRunUseCase::compute_resuming_node_ids(
-            &all,
-            &Some("anything".to_string()),
-        );
+        let set = DagRunUseCase::compute_resuming_node_ids(&all, &Some("anything".to_string()));
         assert_eq!(set.len(), 2);
         assert!(set.contains("suspended_one"));
         assert!(set.contains("another_suspend"));
@@ -1116,20 +1107,14 @@ mod resuming_node_ids_tests {
                 "meta": { "child": "inner_node" }
             }),
         );
-        let set = DagRunUseCase::compute_resuming_node_ids(
-            &all,
-            &Some("ans".to_string()),
-        );
+        let set = DagRunUseCase::compute_resuming_node_ids(&all, &Some("ans".to_string()));
         assert!(set.contains("wrapper"));
     }
 
     #[test]
     fn empty_all_outputs_yields_empty_set() {
         let all: HashMap<String, serde_json::Value> = HashMap::new();
-        let set = DagRunUseCase::compute_resuming_node_ids(
-            &all,
-            &Some("ans".to_string()),
-        );
+        let set = DagRunUseCase::compute_resuming_node_ids(&all, &Some("ans".to_string()));
         assert!(set.is_empty());
     }
 }

@@ -1812,7 +1812,8 @@ impl ExecutableNode for LlmNode {
                 // Propagate without persisting a tool message; the next resume will
                 // walk the same pending call.
                 if let Ok(parsed) = serde_json::from_str::<Value>(&result.output) {
-                    if parsed.get("__colmena_status").and_then(|v| v.as_str()) == Some("SUSPENDED") {
+                    if parsed.get("__colmena_status").and_then(|v| v.as_str()) == Some("SUSPENDED")
+                    {
                         return Ok(json!({
                             "__colmena_status": "SUSPENDED",
                             "questions": parsed.get("questions").cloned().unwrap_or(Value::Null),
