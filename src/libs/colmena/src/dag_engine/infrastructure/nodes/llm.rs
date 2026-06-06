@@ -1798,46 +1798,66 @@ impl ExecutableNode for LlmNode {
         // receives the resolved tool result and continues.
         if let Some(answer) = resume_answer.as_deref() {
             let conversation = conversation_repo.get_by_id(&conversation_key).await?;
-            let pending = find_pending_tool_call(&conversation.messages)
-                .ok_or("llm_call resume: no pending tool call found in conversation history")?;
+            let maybe_pending = find_pending_tool_call(&conversation.messages);
+            if let Some(pending) = maybe_pending {
+                tracing::info!(
+                    target: "colmena::llm_node",
+                    "llm_call: resume — replaying pending tool with user answer"
+                );
+                let result = tool_executor
+                    .execute_with_resume_answer(&pending, answer)
+                    .await?;
 
-            tracing::info!(
-                target: "colmena::llm_node",
-                "llm_call: resume — replaying pending tool with user answer"
-            );
-            let result = tool_executor
-                .execute_with_resume_answer(&pending, answer)
-                .await?;
-
-            // Multi-suspend — the resumed tool itself returned SUSPENDED again.
-            // Propagate without persisting a tool message; the next resume will
-            // walk the same pending call.
-            if let Ok(parsed) = serde_json::from_str::<Value>(&result.output) {
-                if parsed.get("__colmena_status").and_then(|v| v.as_str()) == Some("SUSPENDED") {
-                    return Ok(json!({
-                        "__colmena_status": "SUSPENDED",
-                        "questions": parsed.get("questions").cloned().unwrap_or(Value::Null),
-                        "_pending_tool_call_id": pending.id.clone(),
-                        "_conversation_key": {
-                            "session_id": session_id_str.clone(),
-                            "agent_session_id": agent_session_id_str.clone(),
-                            "node_id": node_id_path_str.clone(),
-                        },
-                    }));
+                // Multi-suspend — the resumed tool itself returned SUSPENDED again.
+                // Propagate without persisting a tool message; the next resume will
+                // walk the same pending call.
+                if let Ok(parsed) = serde_json::from_str::<Value>(&result.output) {
+                    if parsed.get("__colmena_status").and_then(|v| v.as_str()) == Some("SUSPENDED") {
+                        return Ok(json!({
+                            "__colmena_status": "SUSPENDED",
+                            "questions": parsed.get("questions").cloned().unwrap_or(Value::Null),
+                            "_pending_tool_call_id": pending.id.clone(),
+                            "_conversation_key": {
+                                "session_id": session_id_str.clone(),
+                                "agent_session_id": agent_session_id_str.clone(),
+                                "node_id": node_id_path_str.clone(),
+                            },
+                        }));
+                    }
                 }
+
+                // Persist the resolved tool message so agent_service.run will see it
+                // when it loads the conversation history below.
+                let tool_msg = LlmMessage::tool(pending.id.clone(), result.output.clone())?;
+                conversation_repo
+                    .add_message(&conversation_key, tool_msg)
+                    .await?;
+
+                tracing::info!(
+                    target: "colmena::llm",
+                    "resume_tool_re_executed_continuing_loop"
+                );
+            } else {
+                // Defense-in-depth: if the engine's per-node gating
+                // (run_use_case.rs §4.1) is broken and we received
+                // __colmena_resume_answer despite having no pending tool
+                // call, fall through to the fresh-run path instead of
+                // aborting the DAG.
+                //
+                // Spec: docs/superpowers/specs/2026-06-05-suspend-resume-answer-routing-fix-design.md §4.2.1
+                let node_name = inputs
+                    .get("__node_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(unknown)");
+                tracing::warn!(
+                    target: "colmena::llm_node",
+                    node_id = node_name,
+                    "llm_call: resume_answer present but no pending tool call in history; \
+                     falling through to fresh run (engine routing may be broken)"
+                );
+                // Intentional fallthrough — control continues to the
+                // standard agent_service.run path below.
             }
-
-            // Persist the resolved tool message so agent_service.run will see it
-            // when it loads the conversation history below.
-            let tool_msg = LlmMessage::tool(pending.id.clone(), result.output.clone())?;
-            conversation_repo
-                .add_message(&conversation_key, tool_msg)
-                .await?;
-
-            tracing::info!(
-                target: "colmena::llm",
-                "resume_tool_re_executed_continuing_loop"
-            );
         }
 
         // Decide which tools are exposed to the LLM.
