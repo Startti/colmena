@@ -1,1 +1,34 @@
-{}
+document_create:
+  summary: "Create a new document artifact (Excel or Word); returns artifact_id and initial version"
+  description: |
+    Create a new document artifact (Excel or Word). Returns the artifact_id and initial version. Use for any new document task.
+
+document_apply_patch:
+  summary: "Apply a patch (list of ops) to an existing document atomically with auto-rebase on non-conflicting changes"
+  description: |
+    Apply a patch (list of ops) to an existing document atomically. If the base_version is stale, the server auto-rebases when ops don't conflict. On conflict, returns a VersionConflict with structured details.
+
+document_read:
+  summary: "Read the IR of a document at a given version (or current HEAD) with optional slicing"
+  description: |
+    Read the IR of a document at a given version (or current). Use `slice` to fetch only specific sheets, blocks or cell ranges when the document is large.
+
+document_get_head:
+  summary: "Get the current HEAD of an artifact, optionally with a human-readable summary of edits since a baseline version"
+  description: |
+    Get the current HEAD of an artifact. Optionally pass `since_version` to receive a natural-language narration of every user edit between that version and HEAD — useful before applying a new patch to ensure you operate on fresh state.
+
+document_list_versions:
+  summary: "List the versions retained for an artifact with timestamps, source and per-version summary"
+  description: |
+    List the versions retained for an artifact, most recent first, with timestamps, source (agent/user) and per-version summary. Use as a precursor to `document_rollback`.
+
+document_rollback:
+  summary: "Roll back an artifact to a previous version; full history is preserved"
+  description: |
+    Roll back an artifact to a previous version. The target's IR is copied to a new HEAD; full history is preserved (this is not a destructive operation).
+
+document_list_my_artifacts:
+  summary: "List every document artifact that belongs to the current session with metadata"
+  description: |
+    List every artifact that belongs to the current session. Returns id, kind, label, current version and last update for each. Takes no parameters: the session is resolved server-side.

@@ -10,6 +10,7 @@
 //! context and passes it down. If a malicious model includes `session_id` in
 //! the JSON, it is silently ignored by the typed structs below.
 
+use crate::text;
 use crate::documents::application::apply_patch::{ApplyPatchInput, ApplyPatchUseCase};
 use crate::documents::application::create_document::{CreateDocumentInput, CreateDocumentUseCase};
 use crate::documents::application::get_head::{GetHeadInput, GetHeadUseCase};
@@ -138,71 +139,56 @@ pub struct DocumentListMyArtifactsArgs {}
 pub fn build_document_create_tool() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<DocumentCreateArgs>(
         DOCUMENT_CREATE_TOOL,
-        "Create a new document artifact (Excel or Word). Returns the \
-         artifact_id and initial version. Use for any new document task.",
-        "Create a new document artifact (Excel or Word); returns artifact_id and initial version",
+        text::tool_description(DOCUMENT_CREATE_TOOL),
+        text::tool_summary(DOCUMENT_CREATE_TOOL),
     )
 }
 
 pub fn build_document_apply_patch_tool() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<DocumentApplyPatchArgs>(
         DOCUMENT_APPLY_PATCH_TOOL,
-        "Apply a patch (list of ops) to an existing document atomically. \
-         If the base_version is stale, the server auto-rebases when ops \
-         don't conflict. On conflict, returns a VersionConflict with \
-         structured details.",
-        "Apply a patch (list of ops) to an existing document atomically with auto-rebase on non-conflicting changes",
+        text::tool_description(DOCUMENT_APPLY_PATCH_TOOL),
+        text::tool_summary(DOCUMENT_APPLY_PATCH_TOOL),
     )
 }
 
 pub fn build_document_read_tool() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<DocumentReadArgs>(
         DOCUMENT_READ_TOOL,
-        "Read the IR of a document at a given version (or current). \
-         Use `slice` to fetch only specific sheets, blocks or cell ranges \
-         when the document is large.",
-        "Read the IR of a document at a given version (or current HEAD) with optional slicing",
+        text::tool_description(DOCUMENT_READ_TOOL),
+        text::tool_summary(DOCUMENT_READ_TOOL),
     )
 }
 
 pub fn build_document_get_head_tool() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<DocumentGetHeadArgs>(
         DOCUMENT_GET_HEAD_TOOL,
-        "Get the current HEAD of an artifact. Optionally pass \
-         `since_version` to receive a natural-language narration of \
-         every user edit between that version and HEAD — useful before \
-         applying a new patch to ensure you operate on fresh state.",
-        "Get the current HEAD of an artifact, optionally with a human-readable summary of edits since a baseline version",
+        text::tool_description(DOCUMENT_GET_HEAD_TOOL),
+        text::tool_summary(DOCUMENT_GET_HEAD_TOOL),
     )
 }
 
 pub fn build_document_list_versions_tool() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<DocumentListVersionsArgs>(
         DOCUMENT_LIST_VERSIONS_TOOL,
-        "List the versions retained for an artifact, most recent \
-         first, with timestamps, source (agent/user) and per-version \
-         summary. Use as a precursor to `document_rollback`.",
-        "List the versions retained for an artifact with timestamps, source and per-version summary",
+        text::tool_description(DOCUMENT_LIST_VERSIONS_TOOL),
+        text::tool_summary(DOCUMENT_LIST_VERSIONS_TOOL),
     )
 }
 
 pub fn build_document_rollback_tool() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<DocumentRollbackArgs>(
         DOCUMENT_ROLLBACK_TOOL,
-        "Roll back an artifact to a previous version. The target's \
-         IR is copied to a new HEAD; full history is preserved (this \
-         is not a destructive operation).",
-        "Roll back an artifact to a previous version; full history is preserved",
+        text::tool_description(DOCUMENT_ROLLBACK_TOOL),
+        text::tool_summary(DOCUMENT_ROLLBACK_TOOL),
     )
 }
 
 pub fn build_document_list_my_artifacts_tool() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<DocumentListMyArtifactsArgs>(
         DOCUMENT_LIST_MY_ARTIFACTS_TOOL,
-        "List every artifact that belongs to the current session. \
-         Returns id, kind, label, current version and last update for \
-         each. Takes no parameters: the session is resolved server-side.",
-        "List every document artifact that belongs to the current session with metadata",
+        text::tool_description(DOCUMENT_LIST_MY_ARTIFACTS_TOOL),
+        text::tool_summary(DOCUMENT_LIST_MY_ARTIFACTS_TOOL),
     )
 }
 
