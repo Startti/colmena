@@ -322,6 +322,117 @@ pub use gsheets_tools::{
 };
 
 #[cfg(test)]
+mod summary_coverage_tests {
+    //! Enforces that EVERY synthetic tool registered in colmena declares a
+    //! `summary` between 10 and 200 chars. The build refuses to ship if a
+    //! new tool is added without one.
+    //!
+    //! `describe_tool` is exempt: it is constructed dynamically per turn by
+    //! `lazy_tools_catalog::build_describe_tool_definition` and does not go
+    //! through the synthetic-tool builders covered here.
+
+    use crate::llm::domain::tools::ToolDefinition;
+    use crate::skills::domain::{Skill, SkillCatalogEntry, SkillError, SkillReference};
+    use async_trait::async_trait;
+    use std::sync::Arc;
+
+    /// Minimal in-test SkillRepository that returns an empty catalog.
+    struct EmptySkillRepo;
+
+    #[async_trait]
+    impl crate::skills::domain::SkillRepository for EmptySkillRepo {
+        fn list_available(&self) -> Vec<SkillCatalogEntry> {
+            vec![]
+        }
+        async fn load_skill(&self, _name: &str) -> Result<Skill, SkillError> {
+            Err(SkillError::SkillNotFound("test".to_string()))
+        }
+        async fn load_reference(
+            &self,
+            _skill_name: &str,
+            _reference_name: &str,
+        ) -> Result<SkillReference, SkillError> {
+            Err(SkillError::SkillNotFound("test".to_string()))
+        }
+    }
+
+    /// Returns every synthetic ToolDefinition the colmena library registers,
+    /// excluding describe_tool (dynamic per-turn construction).
+    fn all_synthetic_tools() -> Vec<ToolDefinition> {
+        // gsheets — 9 tools + gsheets_run_python
+        let mut tools = vec![
+            super::gsheets_tools::tool_create_spreadsheet(),
+            super::gsheets_tools::tool_create_from_xlsx(),
+            super::gsheets_tools::tool_export_xlsx(),
+            super::gsheets_tools::tool_list_sheets(),
+            super::gsheets_tools::tool_add_sheet(),
+            super::gsheets_tools::tool_delete_sheet(),
+            super::gsheets_tools::tool_read(),
+            super::gsheets_tools::tool_set_cell(),
+            super::gsheets_tools::tool_set_range(),
+            super::gsheets_run_python::tool_gsheets_run_python(),
+        ];
+
+        // crdt_doc — 9 tools (via collector)
+        tools.extend(super::crdt_doc_tools::build_all_crdt_doc_tools());
+
+        // crdt_doc_run_python + crdt_doc_import_sheet
+        tools.push(super::crdt_doc_run_python::tool_run_python());
+        tools.push(super::crdt_doc_import_sheet::tool_import_sheet());
+
+        // document_tools — 7 tools (via collector)
+        tools.extend(super::document_tools::build_all_document_tools());
+
+        // recall_history — 1 tool
+        tools.push(super::recall_history::tool_recall_history());
+
+        // load_attachment — 1 tool; pass empty catalog (valid defensive path per docs)
+        tools.push(super::load_attachment_tool::build_load_attachment_tool_definition(&[]));
+
+        // load_skill — 1 tool; pass an empty-catalog repository
+        let repo: Arc<dyn crate::skills::domain::SkillRepository> = Arc::new(EmptySkillRepo);
+        tools.push(super::load_skill_tool::build_load_skill_tool_definition(&repo));
+
+        tools
+    }
+
+    #[test]
+    fn every_synthetic_tool_has_summary() {
+        let tools = all_synthetic_tools();
+        let mut missing: Vec<String> = Vec::new();
+        let mut out_of_bounds: Vec<(String, usize)> = Vec::new();
+
+        for td in &tools {
+            match td.summary.as_deref() {
+                None => missing.push(td.name.clone()),
+                Some(s) => {
+                    let len = s.chars().count();
+                    if !(10..=200).contains(&len) {
+                        out_of_bounds.push((td.name.clone(), len));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "These synthetic tools are missing a summary: {:?}. \
+             Add one via build_synthetic_tool_with_summary.",
+            missing
+        );
+        assert!(
+            out_of_bounds.is_empty(),
+            "These synthetic tools have summaries outside the 10..=200 char range: {:?}",
+            out_of_bounds
+        );
+        assert!(
+            !tools.is_empty(),
+            "all_synthetic_tools() returned 0 entries — wiring bug"
+        );
+    }
+}
+
+#[cfg(test)]
 mod synthetic_builder_tests {
     use super::*;
     use schemars::JsonSchema;
