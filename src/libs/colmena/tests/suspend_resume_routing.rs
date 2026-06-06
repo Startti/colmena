@@ -14,6 +14,7 @@ use colmena::dag_engine::domain::graph::Graph;
 use colmena::dag_engine::engine::{ColmenaEngine, EngineConfig};
 use colmena::llm::infrastructure::{OverrideGuard, ScriptedAdapter, ScriptedResponse};
 use futures::StreamExt;
+use serial_test::serial;
 use std::sync::Arc;
 
 fn init_logs() {
@@ -149,6 +150,7 @@ async fn run_until_finish(
 /// branch and panics with "no pending tool call found in conversation
 /// history".
 #[tokio::test]
+#[serial]
 #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
 async fn suspend_then_llm_resume_runs_llm_fresh() {
     init_logs();
@@ -231,5 +233,110 @@ async fn suspend_then_llm_resume_runs_llm_fresh() {
         );
     }
 
+    eng.shutdown().await;
+}
+
+fn cascade_graph() -> Graph {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../tests/graphs/basic/suspend_cascade.json"
+    );
+    let raw = std::fs::read_to_string(path).expect("suspend_cascade.json must exist");
+    serde_json::from_str(&raw).expect("valid graph JSON")
+}
+
+/// Verifies the suspend → suspend cascade resume scenario (spec §5 row 2).
+///
+/// Run 1: the graph suspends at `ask_one`. GraphFinish carries
+/// `__colmena_status == "SUSPENDED"` and `questions[0].id == "ask_one"`.
+///
+/// Run 2: answer `ask_one` only. Engine must route the resume answer only to
+/// `ask_one`, then run `ask_two` fresh and suspend there. Before the fix, the
+/// engine cascaded `__colmena_resume_answer` into `ask_two`, which then failed
+/// with "missing answer for ask_two".
+///
+/// Run 3: answer `ask_two`. Engine must route correctly and reach `finish`.
+#[tokio::test]
+#[serial]
+#[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+async fn suspend_cascade_resumes_each_node_independently() {
+    init_logs();
+    let chat = unique_chat("srr_cascade");
+    cleanup(&chat).await;
+
+    tracing::info!(
+        "=== TEST: suspend_cascade_resumes_each_node_independently (chat={chat}) ==="
+    );
+
+    let eng = engine().await;
+
+    // --- Run 1: must suspend at ask_one ---
+    {
+        tracing::info!("--- run 1: expecting SUSPENDED at ask_one ---");
+        let (_events, output) = run_until_finish(&eng, cascade_graph(), None, &chat).await;
+        tracing::info!(?output, "run 1: graph finished");
+
+        assert_eq!(
+            output.get("__colmena_status").and_then(|v| v.as_str()),
+            Some("SUSPENDED"),
+            "run 1 expected SUSPENDED, got: {output}"
+        );
+        assert_eq!(
+            output
+                .get("questions")
+                .and_then(|q| q.as_array())
+                .and_then(|a| a.first())
+                .and_then(|q| q.get("id"))
+                .and_then(|v| v.as_str()),
+            Some("ask_one"),
+            "run 1 must pause at ask_one, got: {output:#}"
+        );
+    }
+
+    // --- Run 2: answer ask_one. Must suspend fresh at ask_two ---
+    {
+        tracing::info!("--- run 2: answering ask_one, expecting SUSPENDED at ask_two ---");
+        let ans1 = "Q[ask_one]: Primera pregunta?\nA[ask_one]: alfa".to_string();
+        let (_events, output) =
+            run_until_finish(&eng, cascade_graph(), Some(ans1), &chat).await;
+        tracing::info!(?output, "run 2: graph finished");
+
+        assert_eq!(
+            output.get("__colmena_status").and_then(|v| v.as_str()),
+            Some("SUSPENDED"),
+            "run 2 expected SUSPENDED at ask_two, got: {output}"
+        );
+        assert_eq!(
+            output
+                .get("questions")
+                .and_then(|q| q.as_array())
+                .and_then(|a| a.first())
+                .and_then(|q| q.get("id"))
+                .and_then(|v| v.as_str()),
+            Some("ask_two"),
+            "run 2 must pause at ask_two, got: {output:#}"
+        );
+    }
+
+    // --- Run 3: answer ask_two. Must reach finish ---
+    {
+        tracing::info!("--- run 3: answering ask_two, expecting finish node ---");
+        let ans2 = "Q[ask_two]: Segunda pregunta?\nA[ask_two]: beta".to_string();
+        let (events, output) =
+            run_until_finish(&eng, cascade_graph(), Some(ans2), &chat).await;
+        tracing::info!(?output, "run 3: graph finished");
+
+        let reached_finish = events.iter().any(|e| {
+            matches!(e, DagExecutionEvent::NodeFinish { node_id, .. } if node_id == "finish")
+        });
+        assert!(reached_finish, "run 3 must reach `finish` node, events: {events:?}");
+
+        assert!(
+            output.get("__colmena_status").and_then(|v| v.as_str()) != Some("SUSPENDED"),
+            "run 3 must complete (not stay SUSPENDED), got: {output}"
+        );
+    }
+
+    cleanup(&chat).await;
     eng.shutdown().await;
 }
