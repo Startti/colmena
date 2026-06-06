@@ -357,6 +357,7 @@ Detalles adicionales (troubleshooting profundo de Q/A, multi-suspend, secure_sus
 ## 9. Referencias cruzadas
 
 - **Esquema canónico**: [`docs/node_configurations.json`](../node_configurations.json) → entrada `suspend`.
+- **Fix de ruteo de `resume_answer`**: [`docs/superpowers/specs/2026-06-05-suspend-resume-answer-routing-fix-design.md`](../superpowers/specs/2026-06-05-suspend-resume-answer-routing-fix-design.md) — el engine inyecta `__colmena_resume_answer` solo en nodos que estaban SUSPENDED en el snapshot persistido.
 - **Spec del formato Q/A**: [`docs/superpowers/specs/2026-05-08-suspend-qa-response-format-design.md`](../superpowers/specs/2026-05-08-suspend-qa-response-format-design.md).
 - **Secure variant**: [`13_security_strategy.md`](13_security_strategy.md) (`secure_suspend`).
 - **HITL en subgrafos**: [`19_nested_agents_and_subgraphs.md`](19_nested_agents_and_subgraphs.md).
