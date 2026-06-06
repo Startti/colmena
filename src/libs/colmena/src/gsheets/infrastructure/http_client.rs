@@ -86,6 +86,15 @@ impl GoogleSheetsHttpClient {
         }
     }
 
+    /// Test-only helper that seeds a sticky bearer token on the
+    /// internal `TokenProvider`. Used by tests in sibling modules
+    /// (e.g. `gsheets_run_python::tests`) that can't reach the private
+    /// `token` field directly.
+    #[cfg(test)]
+    pub async fn token_test_seed(&self, token: impl Into<String>) {
+        self.token.set_token_for_test(token).await;
+    }
+
     /// Bearer-auth GET with retry on 429/5xx + 401-refresh.
     async fn get_json(&self, url: &str) -> Result<Value, SheetsError> {
         for attempt in 0..=self.max_retries {

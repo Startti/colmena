@@ -26,14 +26,47 @@ results are written back via `gsheets_set_range`.
 
 1. `gsheets_list_sheets({spreadsheet_id})` — discover tabs in the
    spreadsheet you have an id for.
-2. `gsheets_read({spreadsheet_id, sheet, range?, as_records: true})` —
-   pull source data as `[{col: val, ...}, ...]` records, ready for
-   `pd.DataFrame(records)`.
-3. `run_python({script, inputs})` — do the analysis (joins, diffs,
-   pivots, etc.). Output is more records.
+2. **For any analysis over more than ~50 rows, prefer
+   `gsheets_run_python`** — see the next section. It loads rows server-
+   side, so they never burn LLM context tokens.
+3. For inspection / small reads / when you need formula text:
+   `gsheets_read({spreadsheet_id, sheet, range?, as_records: true})` —
+   pull source data as `[{col: val, ...}, ...]` records.
 4. `gsheets_add_sheet({spreadsheet_id, name})` if needed, then
    `gsheets_set_range({spreadsheet_id, sheet, start_addr, values_2d})`
    with `[headers, ...rows]` as the 2D array.
+
+## Loading rows without burning tokens — `gsheets_run_python`
+
+`gsheets_read` dumps every row into the LLM context. For 5000 sales
+rows that's ~150k tokens you pay for even though pandas could do the
+analysis in 30 lines of Python.
+
+`gsheets_run_python` solves this: you describe the analysis as Python
+code; the dispatcher fetches every binding **in parallel** directly
+from Google, runs the code in a sandbox, and the LLM only sees the
+final `output`. Rows never round-trip.
+
+```json
+{
+  "bindings": [
+    {"var": "products", "spreadsheet_id": "1AbC...XyZ", "sheet": "Products"},
+    {"var": "sales",    "spreadsheet_id": "1AbC...XyZ", "sheet": "Sales",   "range": "A1:H5001"}
+  ],
+  "code": "import pandas as pd\nprods = pd.DataFrame(products)\nsold  = pd.DataFrame(sales)\nmerged = prods.merge(sold, on='sku', how='left')\noutput = {\n    'total_skus':  len(prods),\n    'total_sold':  int(sold['qty'].sum()),\n    'top_5':       merged.nlargest(5, 'qty')[['sku','name','qty']].to_dict('records'),\n}"
+}
+```
+
+- Each binding's records list is bound under its `var` name (a list of
+  `{col: val, ...}` dicts).
+- Define `output` — any JSON-serializable value. That's what comes back.
+- Errors include `loaded_columns` per binding so you can self-correct a
+  `KeyError` without re-fetching.
+- Bindings fetched in parallel; sandbox runs with a 30-second cap.
+
+Anti-pattern: do NOT `gsheets_read` then send rows to a separate
+`run_python` for analysis — that pays the token cost twice (read into
+context, then back to sandbox). Use `gsheets_run_python` instead.
 
 ## When to load which reference
 

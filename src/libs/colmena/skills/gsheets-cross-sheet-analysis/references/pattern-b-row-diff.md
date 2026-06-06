@@ -1,5 +1,7 @@
 # Pattern B — Row diff by key column
 
+> **Use `gsheets_run_python` for any analysis over >50 rows** — pass each sheet as a binding; the rows never load into LLM context. Use `gsheets_read` only for inspection / small reads / `value_render: "FORMULA"`. The code in this reference is the body of `gsheets_run_python`s `code` argument; bind each sheet under the records-list name you pick (e.g. `records_a`, `records_b`).
+
 > Same pattern as the crdt-doc equivalent — see `crdt-doc-cross-sheet-analysis` if you need the local-CRDT variant.
 
 **When:** lists with unique identifiers (SKU, ID, email). You want to classify each row as `only_in_A`, `only_in_B`, `changed`, or `unchanged`. **This is the most common case.**

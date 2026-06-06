@@ -1,5 +1,7 @@
 # Pattern A — Cell-by-cell diff
 
+> **Use `gsheets_run_python` for any analysis over >50 rows** — pass each sheet as a binding; the rows never load into LLM context. Use `gsheets_read` only for inspection / small reads / `value_render: "FORMULA"`. The code in this reference is the body of `gsheets_run_python`s `code` argument; bind each sheet under the records-list name you pick (e.g. `records_a`, `records_b`).
+
 > Same pattern as the crdt-doc equivalent — see `crdt-doc-cross-sheet-analysis` if you need the local-CRDT variant.
 
 **When:** two versions of the same report that should have identical layout (same rows, same columns). You want to spot which cells changed value.

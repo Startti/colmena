@@ -1,5 +1,7 @@
 # Pattern C — Schema diff
 
+> **Use `gsheets_run_python` for any analysis over >50 rows** — pass each sheet as a binding; the rows never load into LLM context. Use `gsheets_read` only for inspection / small reads / `value_render: "FORMULA"`. The code in this reference is the body of `gsheets_run_python`s `code` argument; bind each sheet under the records-list name you pick (e.g. `records_a`, `records_b`).
+
 > Same pattern as the crdt-doc equivalent — see `crdt-doc-cross-sheet-analysis` if you need the local-CRDT variant.
 
 **When:** quick structural check — "qué columnas existen en cada uno y con qué tipo". Useful as a sanity check before any deeper diff (e.g. detect that Q4 added a "Discount" column or renamed "Precio" to "Price").

@@ -7,6 +7,7 @@ pub mod crdt_doc_tools;
 pub mod crdt_summary;
 pub mod describe_tool;
 pub mod document_tools;
+pub mod gsheets_run_python;
 pub mod gsheets_tools;
 pub mod lazy_tools_catalog;
 pub mod load_attachment_tool;
@@ -59,7 +60,82 @@ pub(super) fn build_synthetic_tool<T: JsonSchema>(name: &str, description: &str)
 ///    write it as a scalar. The "is this field optional" signal is carried
 ///    by the parent object's `required` array, which schemars already omits
 ///    for `Option<T>` fields — so dropping the `null` member loses nothing.
+/// 5. `$ref` references to `#/definitions/X` or `#/$defs/X` are inlined
+///    (the referenced schema body is substituted at the ref site), and the
+///    top-level `definitions` / `$defs` maps are then dropped. Gemini's proto
+///    schema rejects both `$ref` and `definitions`. This runs ONCE at the
+///    top before the recursive per-node normalization, so authors can freely
+///    use nested struct/enum types in Args without thinking about it.
 pub(super) fn sanitize_schema_for_llm_providers(value: &mut serde_json::Value) {
+    inline_refs_top_level(value);
+    normalize_recursive(value);
+}
+
+/// Extract `definitions` / `$defs` from the top-level object, then walk the
+/// tree replacing any `{"$ref": "#/definitions/X"}` with a clone of `X`'s
+/// schema body. Nested refs in resolved bodies are resolved transitively.
+fn inline_refs_top_level(value: &mut serde_json::Value) {
+    use serde_json::Value;
+    let mut defs: serde_json::Map<String, Value> = serde_json::Map::new();
+    if let Value::Object(map) = value {
+        if let Some(Value::Object(d)) = map.remove("definitions") {
+            for (k, v) in d {
+                defs.insert(k, v);
+            }
+        }
+        if let Some(Value::Object(d)) = map.remove("$defs") {
+            for (k, v) in d {
+                defs.insert(k, v);
+            }
+        }
+    }
+    if defs.is_empty() {
+        return;
+    }
+    resolve_refs(value, &defs, 0);
+}
+
+fn resolve_refs(
+    value: &mut serde_json::Value,
+    defs: &serde_json::Map<String, serde_json::Value>,
+    depth: usize,
+) {
+    use serde_json::Value;
+    // Defensive: bail on pathological recursion. Real schemars output for
+    // our Args structs is shallow; 32 is generous and catches cycles before
+    // they stack-overflow.
+    if depth > 32 {
+        return;
+    }
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(ref_path)) = map.get("$ref") {
+                let name = ref_path
+                    .strip_prefix("#/definitions/")
+                    .or_else(|| ref_path.strip_prefix("#/$defs/"));
+                if let Some(n) = name {
+                    if let Some(resolved) = defs.get(n) {
+                        let mut new_value = resolved.clone();
+                        resolve_refs(&mut new_value, defs, depth + 1);
+                        *value = new_value;
+                        return;
+                    }
+                }
+            }
+            for (_, v) in map.iter_mut() {
+                resolve_refs(v, defs, depth + 1);
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                resolve_refs(v, defs, depth + 1);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalize_recursive(value: &mut serde_json::Value) {
     use serde_json::Value;
     match value {
         Value::Object(map) => {
@@ -131,12 +207,12 @@ pub(super) fn sanitize_schema_for_llm_providers(value: &mut serde_json::Value) {
                 );
             }
             for (_, v) in map.iter_mut() {
-                sanitize_schema_for_llm_providers(v);
+                normalize_recursive(v);
             }
         }
         Value::Array(arr) => {
             for v in arr.iter_mut() {
-                sanitize_schema_for_llm_providers(v);
+                normalize_recursive(v);
             }
         }
         _ => {}
@@ -203,6 +279,12 @@ pub use crdt_doc_import_sheet::{
 pub use recall_history::{
     dispatch_recall_history, tool_recall_history, RecallHistoryArgs,
     TOOL_RECALL_HISTORY as RECALL_HISTORY_TOOL,
+};
+
+pub use gsheets_run_python::{
+    dispatch_gsheets_run_python, dispatch_gsheets_run_python_with_client,
+    tool_gsheets_run_python as gsheets_tool_run_python, GsheetsBinding, GsheetsRunPythonArgs,
+    TOOL_GSHEETS_RUN_PYTHON,
 };
 
 pub use gsheets_tools::{
@@ -284,5 +366,57 @@ mod sanitize_tests {
         });
         sanitize_schema_for_llm_providers(&mut v);
         assert_eq!(v["anyOf"][1], json!({}));
+    }
+
+    #[test]
+    fn inlines_dollar_ref_from_definitions() {
+        // schemars emits `$ref` + `definitions` for any nested struct/enum.
+        // Gemini rejects both — sanitizer must inline the ref body and drop
+        // the definitions map. Reproduces what `Vec<GsheetsBinding>` produces.
+        let mut v = json!({
+            "type": "object",
+            "properties": {
+                "bindings": {
+                    "type": "array",
+                    "items": { "$ref": "#/definitions/Binding" }
+                }
+            },
+            "definitions": {
+                "Binding": {
+                    "type": "object",
+                    "properties": {
+                        "var": { "type": "string" }
+                    }
+                }
+            }
+        });
+        sanitize_schema_for_llm_providers(&mut v);
+        assert!(v.get("definitions").is_none(), "definitions must be dropped");
+        assert!(
+            v["properties"]["bindings"]["items"].get("$ref").is_none(),
+            "$ref must be inlined"
+        );
+        assert_eq!(
+            v["properties"]["bindings"]["items"]["properties"]["var"]["type"],
+            json!("string")
+        );
+    }
+
+    #[test]
+    fn inlines_dollar_ref_from_dollar_defs() {
+        // schemars 0.8 emits `$defs` instead of `definitions` in some modes —
+        // handle both for forward-compat.
+        let mut v = json!({
+            "type": "object",
+            "properties": {
+                "x": { "$ref": "#/$defs/Foo" }
+            },
+            "$defs": {
+                "Foo": { "type": "string" }
+            }
+        });
+        sanitize_schema_for_llm_providers(&mut v);
+        assert!(v.get("$defs").is_none());
+        assert_eq!(v["properties"]["x"]["type"], json!("string"));
     }
 }

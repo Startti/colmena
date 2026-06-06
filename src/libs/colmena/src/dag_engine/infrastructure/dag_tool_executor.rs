@@ -809,10 +809,10 @@ impl DagToolExecutor {
             use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
                 dispatch_gsheets_add_sheet, dispatch_gsheets_create_spreadsheet,
                 dispatch_gsheets_delete_sheet, dispatch_gsheets_list_sheets, dispatch_gsheets_read,
-                dispatch_gsheets_set_cell, dispatch_gsheets_set_range, GSHEETS_ADD_SHEET_TOOL,
-                GSHEETS_CREATE_SPREADSHEET_TOOL, GSHEETS_DELETE_SHEET_TOOL,
+                dispatch_gsheets_run_python, dispatch_gsheets_set_cell, dispatch_gsheets_set_range,
+                GSHEETS_ADD_SHEET_TOOL, GSHEETS_CREATE_SPREADSHEET_TOOL, GSHEETS_DELETE_SHEET_TOOL,
                 GSHEETS_LIST_SHEETS_TOOL, GSHEETS_READ_TOOL, GSHEETS_SET_CELL_TOOL,
-                GSHEETS_SET_RANGE_TOOL,
+                GSHEETS_SET_RANGE_TOOL, TOOL_GSHEETS_RUN_PYTHON,
             };
 
             let name = tool_call.function.name.as_str();
@@ -825,6 +825,7 @@ impl DagToolExecutor {
                     || n == GSHEETS_READ_TOOL
                     || n == GSHEETS_SET_CELL_TOOL
                     || n == GSHEETS_SET_RANGE_TOOL
+                    || n == TOOL_GSHEETS_RUN_PYTHON
             );
 
             if is_gsheets_tool {
@@ -849,7 +850,12 @@ impl DagToolExecutor {
                     }
                     n if n == GSHEETS_READ_TOOL => dispatch_gsheets_read(args).await,
                     n if n == GSHEETS_SET_CELL_TOOL => dispatch_gsheets_set_cell(args).await,
-                    _ => dispatch_gsheets_set_range(args).await,
+                    n if n == GSHEETS_SET_RANGE_TOOL => dispatch_gsheets_set_range(args).await,
+                    n if n == TOOL_GSHEETS_RUN_PYTHON => dispatch_gsheets_run_python(args).await,
+                    other => serde_json::json!({
+                        "error": "unknown_gsheets_tool",
+                        "message": format!("router matched gsheets prefix but no dispatch arm for `{other}` — this is a bug in dag_tool_executor"),
+                    }),
                 };
 
                 let success =

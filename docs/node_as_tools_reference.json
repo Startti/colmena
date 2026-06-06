@@ -1267,11 +1267,11 @@
     },
 
     "gsheets": {
-      "summary": "Synthetic LLM tools for Google Sheets (subsystem E v1). 9 tools that mirror the crdt_doc_* shape so the same skills/agent prompts work against native Google Spreadsheets. Auto-registered when an llm_call's `enabled_tools` includes `gsheets`. Auth via Service Account JSON (GOOGLE_APPLICATION_CREDENTIALS) or Application Default Credentials — no per-graph config needed. Formulas are evaluated server-side by Google (USER_ENTERED valueInputOption). UX aliases carried forward from D-T16: `address`↔`addr`, `start`↔`start_addr`, `values`↔`values_2d`, `name`↔`sheet`. Single-A1 ranges auto-expanded (`\"C1\"` → `\"C1:C1\"`). 7 of 9 tools fully wired in v1; the xlsx pair (`gsheets_create_from_xlsx`, `gsheets_export_xlsx`) is published but errors at runtime — see BACKLOG E-T7b. See docs/developer_guide/39_gsheets.md.",
+      "summary": "Synthetic LLM tools for Google Sheets (subsystem E v1). 10 tools that mirror the crdt_doc_* shape so the same skills/agent prompts work against native Google Spreadsheets. Auto-registered when an llm_call's `enabled_tools` includes `gsheets`. Auth via Service Account JSON (GOOGLE_APPLICATION_CREDENTIALS) or Application Default Credentials — no per-graph config needed. Formulas are evaluated server-side by Google (USER_ENTERED valueInputOption). UX aliases carried forward from D-T16: `address`↔`addr`, `start`↔`start_addr`, `values`↔`values_2d`, `name`↔`sheet`. Single-A1 ranges auto-expanded (`\"C1\"` → `\"C1:C1\"`). 7 of 9 tools fully wired in v1; the xlsx pair (`gsheets_create_from_xlsx`, `gsheets_export_xlsx`) is published but errors at runtime — see BACKLOG E-T7b. See docs/developer_guide/39_gsheets.md.",
       "synthetic_tools": [
         "gsheets_create_spreadsheet", "gsheets_create_from_xlsx", "gsheets_export_xlsx",
         "gsheets_list_sheets", "gsheets_add_sheet", "gsheets_delete_sheet",
-        "gsheets_read", "gsheets_set_cell", "gsheets_set_range"
+        "gsheets_read", "gsheets_run_python", "gsheets_set_cell", "gsheets_set_range"
       ],
       "how_exposed": "Add `\"gsheets\"` to llm_call.config.enabled_tools (flag-only activation, like api_explorer). No tool_configurations entry required. Auth resolves at first call via GOOGLE_APPLICATION_CREDENTIALS env var or ADC.",
       "lifecycle": "Each call makes one or more HTTPS requests to sheets.googleapis.com / drive.googleapis.com. Tokens cached 50 min. Auto-retry on 429 / 5xx with exponential backoff.",
@@ -1433,6 +1433,41 @@
               "sheet": { "type": "string" },
               "range": { "type": "string", "description": "Echo of the resolved A1 range Google returned." },
               "values": { "type": "array", "description": "2D row-major array when as_records=false; array of {col:val} objects when as_records=true." }
+            }
+          }
+        },
+        "gsheets_run_python": {
+          "name": "gsheets_run_python",
+          "description": "Run sandboxed Python (pandas/numpy/scipy.stats) over data loaded directly from Google Sheets. Each `bindings` entry becomes a Python global (a list of dicts you can pass to pd.DataFrame). Rows NEVER pass through the LLM — only the final `output`. PREFERRED for any analysis over more than ~50 rows.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "bindings": {
+                "type": "array",
+                "required": true,
+                "description": "Spreadsheet ranges to load. Each binding becomes a Python global under the name `var`. Bindings are fetched IN PARALLEL.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "var":            { "type": "string", "required": true, "description": "Python variable name to bind the records to." },
+                    "spreadsheet_id": { "type": "string", "required": true },
+                    "sheet":          { "type": "string", "required": true, "description": "Tab name." },
+                    "range":          { "type": "string", "required": false, "description": "Optional A1 range. Omit to read the entire tab." }
+                  },
+                  "required": ["var", "spreadsheet_id", "sheet"]
+                }
+              },
+              "code": { "type": "string", "required": true, "description": "Python code. Access pandas as `pd`, numpy as `np`, scipy.stats as `stats`, plus each binding under its `var` name. Define `output` (JSON-serializable)." }
+            },
+            "required": ["bindings", "code"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "output":          { "description": "Whatever `output` was set to in the code. Capped at 10 KB JSON; oversize replaced with a truncated string." },
+              "stdout":          { "type": "string", "description": "Captured stdout (10 KB cap)." },
+              "error":           { "type": ["string", "null"], "description": "Null on success; sandbox/python error message otherwise." },
+              "loaded_columns":  { "type": "object", "description": "On error only — `{<var>: [col, ...]}` from the first record of each binding. Lets the LLM self-correct without re-fetching." }
             }
           }
         },

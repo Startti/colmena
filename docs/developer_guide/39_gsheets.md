@@ -16,6 +16,7 @@
 | `gsheets_add_sheet` | Add a new tab. |
 | `gsheets_delete_sheet` | Delete a tab by title or numeric id. |
 | `gsheets_read` | Read cells; `value_render` controls formula vs evaluated; `as_records` controls 2D-array vs records shape. |
+| `gsheets_run_python` | **Preferred for analysis.** Run sandboxed pandas/numpy/scipy code against one or more sheet ranges loaded server-side — rows NEVER pass through the LLM context. See section below. |
 | `gsheets_set_cell` | Write one cell. Strings starting with `=` are evaluated by Google server-side. |
 | `gsheets_set_range` | Bulk-write a rectangular block. Same formula semantics. |
 
@@ -52,6 +53,40 @@ the computed number, or `value_render="FORMULA"` to get the text.
 Same shape as `crdt_doc_*` analysis (subsystem F). Skill
 `gsheets-cross-sheet-analysis` documents 6 patterns
 (`pattern-a-cell-diff` through `pattern-f-conditional-transform`).
+
+## Bulk analysis without LLM cost: `gsheets_run_python` (E-T14)
+
+`gsheets_read` is fine for inspection (< 50 rows) but burns context
+tokens at scale — 5000 rows ≈ 150k tokens just to feed pandas. The
+`gsheets_run_python` tool reverses the flow: the LLM describes the
+analysis as Python code, the dispatcher fetches every binding
+**in parallel** server-side, runs the code in the existing sandbox
+(same `execute_sandboxed_helper` used by `crdt_doc_run_python` and
+`python_script`), and returns only `output` to the LLM.
+
+```json
+{
+  "bindings": [
+    {"var": "products", "spreadsheet_id": "<id>", "sheet": "Products"},
+    {"var": "sales",    "spreadsheet_id": "<id>", "sheet": "Sales", "range": "A1:H5001"}
+  ],
+  "code": "import pandas as pd\nprods = pd.DataFrame(products)\nsold  = pd.DataFrame(sales)\nmerged = prods.merge(sold, on='sku', how='left')\noutput = merged.nlargest(5, 'qty')[['sku','name','qty']].to_dict('records')"
+}
+```
+
+Mirrors `crdt_doc_run_python` (subsystem C, §5.6) — same prelude,
+postlude, output / stdout / error caps (10 KB each), and 30-second
+timeout. Differences vs the CRDT cousin:
+
+- No `write_to_sheet` mode in v1 — write-back is still `gsheets_set_range`
+  invoked separately.
+- Each binding's records list is bound directly under the user-chosen
+  `var` (the LLM calls `pd.DataFrame(<var>)` itself). The CRDT tool
+  auto-builds `dfs[<sheet_id>]` because there's no per-binding name.
+- Errors carry `loaded_columns: {<var>: [...]}` so the LLM can fix a
+  `KeyError` without re-fetching.
+
+Source: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_run_python.rs`.
 
 ## Hexagonal layout
 

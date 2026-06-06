@@ -249,3 +249,59 @@ BACKLOG → "Univer ↔ yrs formula round-trip".
 
 Refs: spec `docs/superpowers/specs/2026-06-05-google-sheets-design.md`,
 plan `docs/superpowers/plans/2026-06-05-google-sheets.md`.
+
+---
+
+### E-T14 — `gsheets_run_python`: analyze sheets without loading rows through LLM context
+
+- **New synthetic LLM tool** `gsheets_run_python` (10th gsheets tool).
+  Mirrors `crdt_doc_run_python` (subsystem C) one-for-one: same
+  `execute_sandboxed_helper`, same auto-prelude (`pandas as pd`,
+  `numpy as np`, `scipy.stats as stats`), same output/stdout/error caps
+  (10 KB each), same 30-second timeout. Reuse only — zero new
+  dependencies.
+- **The point.** Before E-T14, the only way to do pandas analysis over
+  a Google Sheet was `gsheets_read` → dump every row into the LLM
+  context → `run_python`. 5000 sales rows = ~150k tokens just to feed
+  pandas. With E-T14 the LLM describes the analysis as code; the
+  dispatcher fetches each binding **in parallel** server-side, runs
+  the sandbox, and only the final `output` returns to the LLM.
+- **Bindings shape.** `bindings: [{var, spreadsheet_id, sheet, range?}]`.
+  Each binding becomes a Python global under `var` (a list of
+  `{col: val}` dicts ready for `pd.DataFrame(<var>)`). The LLM picks
+  the variable names, not a sheet-id-keyed `dfs` dict — every binding
+  is already explicitly named in the call.
+- **Parallel fetch** via `futures::future::join_all` — the win is
+  perf, not just token savings: two sheets that each take 400 ms
+  round-trip now finish together in ~400 ms instead of ~800 ms.
+- **Error envelope carries `loaded_columns`** per binding — same
+  pattern as `crdt_doc_run_python.loaded_sheet_columns`. A KeyError
+  surfaces the actual column set so the LLM self-corrects in one
+  round-trip.
+- **Wired everywhere:** router in `dag_tool_executor.rs` (gsheets
+  block — the catch-all that previously forwarded to `set_range` is
+  now an explicit unknown-tool error so misrouted names can't silently
+  do the wrong write), `llm.rs` registration (`enabled_tools: "*"`
+  now opts into 10 tools instead of 9; explicit
+  `enabled_tools: ["gsheets_run_python"]` works too).
+- **Skill update.** `gsheets-cross-sheet-analysis/SKILL.md` adds a
+  "Loading rows without burning tokens" section with a realistic
+  two-sheet pandas merge example. Every pattern reference (A-F) now
+  carries a top-of-file directive: use `gsheets_run_python` for >50
+  rows, `gsheets_read` only for inspection / small reads /
+  `value_render: "FORMULA"`.
+- **Tests.** Wiremock-backed dispatcher tests (parallel fetch, KeyError
+  → `loaded_columns`, empty/duplicate binding rejection). pandas
+  available case is skipped in CI envs without pandas installed; the
+  `loaded_columns` contract is exercised regardless. All 28 gsheets
+  module tests still green.
+
+Files:
+- `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_run_python.rs` — new.
+- `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mod.rs` — re-export.
+- `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs` — router (catch-all hardened).
+- `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs` — 9-tool array bumped to 10.
+- `src/libs/colmena/src/gsheets/infrastructure/http_client.rs` — `#[cfg(test)] pub async fn token_test_seed` so sibling-module wiremock tests can seed the token cache.
+- `docs/developer_guide/39_gsheets.md`, `docs/node_as_tools_reference.json` — schema + guidance.
+
+**Estado.** done.

@@ -2040,14 +2040,15 @@ impl ExecutableNode for LlmNode {
                 gsheets_tool_add_sheet, gsheets_tool_create_from_xlsx,
                 gsheets_tool_create_spreadsheet, gsheets_tool_delete_sheet,
                 gsheets_tool_export_xlsx, gsheets_tool_list_sheets, gsheets_tool_read,
-                gsheets_tool_set_cell, gsheets_tool_set_range, GSHEETS_ADD_SHEET_TOOL,
-                GSHEETS_CREATE_FROM_XLSX_TOOL, GSHEETS_CREATE_SPREADSHEET_TOOL,
-                GSHEETS_DELETE_SHEET_TOOL, GSHEETS_EXPORT_XLSX_TOOL, GSHEETS_LIST_SHEETS_TOOL,
-                GSHEETS_READ_TOOL, GSHEETS_SET_CELL_TOOL, GSHEETS_SET_RANGE_TOOL,
+                gsheets_tool_run_python, gsheets_tool_set_cell, gsheets_tool_set_range,
+                GSHEETS_ADD_SHEET_TOOL, GSHEETS_CREATE_FROM_XLSX_TOOL,
+                GSHEETS_CREATE_SPREADSHEET_TOOL, GSHEETS_DELETE_SHEET_TOOL,
+                GSHEETS_EXPORT_XLSX_TOOL, GSHEETS_LIST_SHEETS_TOOL, GSHEETS_READ_TOOL,
+                GSHEETS_SET_CELL_TOOL, GSHEETS_SET_RANGE_TOOL, TOOL_GSHEETS_RUN_PYTHON,
             };
 
             // Determine which gsheets tools the user opted into. `"*"` enables
-            // all 9; an array enables each named entry; a single string enables
+            // all 10; an array enables each named entry; a single string enables
             // one. Anything else (or absent config) leaves gsheets disabled.
             let wants: std::collections::HashSet<&str> = match enabled_tools_config {
                 Some(Value::String(s)) if s == "*" => [
@@ -2060,6 +2061,7 @@ impl ExecutableNode for LlmNode {
                     GSHEETS_READ_TOOL,
                     GSHEETS_SET_CELL_TOOL,
                     GSHEETS_SET_RANGE_TOOL,
+                    TOOL_GSHEETS_RUN_PYTHON,
                 ]
                 .into_iter()
                 .collect(),
@@ -2068,7 +2070,7 @@ impl ExecutableNode for LlmNode {
                 _ => std::collections::HashSet::new(),
             };
 
-            let gsheets_entries: [(&str, fn() -> crate::llm::domain::ToolDefinition); 9] = [
+            let gsheets_entries: [(&str, fn() -> crate::llm::domain::ToolDefinition); 10] = [
                 (
                     GSHEETS_CREATE_SPREADSHEET_TOOL,
                     gsheets_tool_create_spreadsheet,
@@ -2081,6 +2083,7 @@ impl ExecutableNode for LlmNode {
                 (GSHEETS_READ_TOOL, gsheets_tool_read),
                 (GSHEETS_SET_CELL_TOOL, gsheets_tool_set_cell),
                 (GSHEETS_SET_RANGE_TOOL, gsheets_tool_set_range),
+                (TOOL_GSHEETS_RUN_PYTHON, gsheets_tool_run_python),
             ];
 
             for (name, builder) in gsheets_entries {
