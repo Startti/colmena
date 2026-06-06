@@ -2,7 +2,7 @@
 
 **Fecha:** 2026-06-05
 **Autor:** equipo Colmena (a partir de bug report ADP 2026-06-04)
-**Estado:** propuesta — pendiente review usuario
+**Estado:** implementado en branch `claude/affectionate-agnesi-488291` (commits `f9f7242`..`189c3f7`)
 **Tipo:** bugfix de motor + defense-in-depth en `llm_call`
 
 ---

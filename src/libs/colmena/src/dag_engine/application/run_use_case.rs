@@ -6,7 +6,7 @@ use crate::dag_engine::domain::graph::{Edge, Graph};
 use crate::dag_engine::domain::node::NodeInputs;
 
 use serde_json::{json, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use crate::dag_engine::domain::state::{DagRunState, DagRunStatus, DagStateRepository};
@@ -263,7 +263,7 @@ impl DagRunUseCase {
             // to gate `__colmena_resume_answer` injection.
             //
             // Spec: docs/superpowers/specs/2026-06-05-suspend-resume-answer-routing-fix-design.md §4.1
-            let resuming_node_ids: std::collections::HashSet<String> =
+            let resuming_node_ids: HashSet<String> =
                 Self::compute_resuming_node_ids(&all_outputs, &resume_answer);
 
             if !global_shared_state.is_object() {
@@ -758,11 +758,11 @@ impl DagRunUseCase {
     /// `docs/superpowers/specs/2026-06-05-suspend-resume-answer-routing-fix-design.md`
     /// §4.1.1.
     fn compute_resuming_node_ids(
-        all_outputs: &std::collections::HashMap<String, Value>,
+        all_outputs: &HashMap<String, Value>,
         resume_answer: &Option<String>,
-    ) -> std::collections::HashSet<String> {
+    ) -> HashSet<String> {
         if resume_answer.is_none() {
-            return std::collections::HashSet::new();
+            return HashSet::new();
         }
         all_outputs
             .iter()
