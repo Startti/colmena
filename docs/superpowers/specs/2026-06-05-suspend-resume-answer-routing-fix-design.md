@@ -316,9 +316,10 @@ En `src/libs/colmena/src/dag_engine/application/run_use_case.rs` (módulo `tests
 2. **`resuming_node_ids_is_empty_for_fresh_run`** — sin `resume_answer`, el set queda vacío incluso si `all_outputs` tiene un SUSPENDED histórico.
 3. **`resuming_node_ids_includes_nested_suspended_outputs`** — output del estilo `{ "result": { "__colmena_status": "SUSPENDED" } }` (caso orchestrator wrap) entra al set vía `find_status_by_key` recursivo.
 
-En `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs` (módulo `tests` inline):
-
-4. **`resume_branch_falls_through_when_no_pending_tool_call`** — mockear `conversation_repo` para devolver una conversation sin pending tool, llamar al nodo con `__colmena_resume_answer` set y un `prompt` válido, assert que NO se lanza error y que se sigue al path de `agent_service.run`.
+**Cobertura del guard de `llm.rs` §4.2.1 — nota de pragmatismo:** un unit test directo del fallthrough requeriría construir `LlmNode` con un `ConversationRepositoryFactory` y un `Weak<dyn NodeRegistryPort>` mockeados, y luego forzar una situación que el engine fix de §4.1 vuelve inalcanzable en operación normal. La inversión no se justifica. La cobertura efectiva del guard es:
+- **Code review** del bloque (revisión humana del PR).
+- **Observabilidad**: el `tracing::warn!` con `target: "colmena::llm_node"` aparece en Cloud Logging si alguna vez se dispara → alerta accionable inmediata.
+- **Test indirecto**: si en el futuro alguien rompe el engine gate (§4.1) y olvida actualizar este guard, el integration test §7.2 ítem 5 vuelve a fallar con la misma firma original. El guard mismo no se testea aislado.
 
 ### 7.2 Integration tests con grafos JSON
 
