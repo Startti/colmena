@@ -1,0 +1,61 @@
+{
+  "comment": "Demo HITL realista: el LLM redacta un email, suspend muestra el draft al humano y pide aprobación, router decide enviar o cancelar según la respuesta libre.",
+  "nodes": {
+    "request": {
+      "type": "mock_input",
+      "config": {
+        "input_data": "Redactame un email breve a Juan García agradeciéndole por la reunión de ayer y proponiendo una llamada de seguimiento la próxima semana."
+      }
+    },
+    "draft": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "system_message": "Redactá emails profesionales en español rioplatense, máximo 6 líneas, con asunto. Devolvé solo el email (sin comentarios).",
+        "stream": false
+      }
+    },
+    "review": {
+      "type": "suspend",
+      "config": {
+        "id": "review_email",
+        "question": "Revisá el email arriba. ¿Lo envío como está, lo cancelás, o sugerís cambios?",
+        "question_type": "open"
+      }
+    },
+    "decide": {
+      "type": "router",
+      "config": {
+        "mode": "extract_and_route",
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "schema": {
+          "intent": {
+            "type": "string",
+            "required": true,
+            "description": "approve si el usuario lo aprueba o pide enviar; reject si lo cancela o rechaza; revise si pide cambios."
+          }
+        },
+        "branches": [
+          { "name": "approve", "when": { "field": "intent", "equals": "approve" } },
+          { "name": "reject",  "when": { "field": "intent", "equals": "reject"  } },
+          { "name": "revise",  "when": { "field": "intent", "equals": "revise"  } }
+        ]
+      }
+    },
+    "send":   { "type": "log", "config": { "prefix": "📤 EMAIL ENVIADO:" } },
+    "cancel": { "type": "log", "config": { "prefix": "🛑 EMAIL CANCELADO:" } },
+    "revise": { "type": "log", "config": { "prefix": "✏️  REVISIÓN PEDIDA:" } }
+  },
+  "edges": [
+    { "from": "request",                "to": "draft" },
+    { "from": "draft.result",           "to": "review" },
+    { "from": "review.answer_received", "to": "decide.input" },
+    { "from": "decide.approve",         "to": "send" },
+    { "from": "decide.reject",          "to": "cancel" },
+    { "from": "decide.revise",          "to": "revise" }
+  ]
+}
