@@ -7,6 +7,7 @@ pub mod crdt_doc_tools;
 pub mod crdt_summary;
 pub mod describe_tool;
 pub mod document_tools;
+pub mod gsheets_tools;
 pub mod lazy_tools_catalog;
 pub mod load_attachment_tool;
 pub mod load_skill_tool;
@@ -202,6 +203,21 @@ pub use crdt_doc_import_sheet::{
 pub use recall_history::{
     dispatch_recall_history, tool_recall_history, RecallHistoryArgs,
     TOOL_RECALL_HISTORY as RECALL_HISTORY_TOOL,
+};
+
+pub use gsheets_tools::{
+    tool_add_sheet as gsheets_tool_add_sheet,
+    tool_create_from_xlsx as gsheets_tool_create_from_xlsx,
+    tool_create_spreadsheet as gsheets_tool_create_spreadsheet,
+    tool_delete_sheet as gsheets_tool_delete_sheet, tool_export_xlsx as gsheets_tool_export_xlsx,
+    tool_list_sheets as gsheets_tool_list_sheets, tool_read as gsheets_tool_read,
+    tool_set_cell as gsheets_tool_set_cell, tool_set_range as gsheets_tool_set_range,
+    TOOL_ADD_SHEET as GSHEETS_ADD_SHEET_TOOL,
+    TOOL_CREATE_FROM_XLSX as GSHEETS_CREATE_FROM_XLSX_TOOL,
+    TOOL_CREATE_SPREADSHEET as GSHEETS_CREATE_SPREADSHEET_TOOL,
+    TOOL_DELETE_SHEET as GSHEETS_DELETE_SHEET_TOOL, TOOL_EXPORT_XLSX as GSHEETS_EXPORT_XLSX_TOOL,
+    TOOL_LIST_SHEETS as GSHEETS_LIST_SHEETS_TOOL, TOOL_READ as GSHEETS_READ_TOOL,
+    TOOL_SET_CELL as GSHEETS_SET_CELL_TOOL, TOOL_SET_RANGE as GSHEETS_SET_RANGE_TOOL,
 };
 
 #[cfg(test)]
