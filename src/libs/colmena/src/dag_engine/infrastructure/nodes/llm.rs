@@ -2000,7 +2000,7 @@ impl ExecutableNode for LlmNode {
                 if lazy_tool_loading {
                     catalog.push(CatalogEntry {
                         name: td.name.clone(),
-                        summary: summary_for_catalog(None, &td.description),
+                        summary: summary_for_catalog(td.summary.as_deref(), &td.description),
                     });
                 }
                 tools.push(td);
@@ -2100,7 +2100,7 @@ impl ExecutableNode for LlmNode {
                 if lazy_tool_loading {
                     catalog.push(CatalogEntry {
                         name: td.name.clone(),
-                        summary: summary_for_catalog(None, &td.description),
+                        summary: summary_for_catalog(td.summary.as_deref(), &td.description),
                     });
                 }
                 tools.push(td);

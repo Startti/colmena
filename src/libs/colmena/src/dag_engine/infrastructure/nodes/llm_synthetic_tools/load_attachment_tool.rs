@@ -82,6 +82,7 @@ pub fn build_load_attachment_tool_definition(catalog: &[ConversationAttachment])
     ToolDefinition {
         name: LOAD_ATTACHMENT_TOOL_NAME.to_string(),
         description,
+        summary: None,
         parameters: ToolParameters {
             schema_type: "object".to_string(),
             properties,

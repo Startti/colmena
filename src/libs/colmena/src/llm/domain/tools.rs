@@ -36,6 +36,13 @@ pub struct ToolDefinition {
     /// Human-readable description of what the tool does
     pub description: String,
 
+    /// Short (≤ 200 char) one-line summary surfaced in lazy-tool-loading
+    /// catalogs. When `None`, the catalog falls back to a truncated
+    /// `description`. Every synthetic tool MUST set this; DAG nodes used as
+    /// tools may omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+
     /// JSON Schema for the tool's parameters
     pub parameters: ToolParameters,
 
@@ -54,9 +61,16 @@ impl ToolDefinition {
         Self {
             name,
             description,
+            summary: None,
             parameters,
             input_schema_override: None,
         }
+    }
+
+    /// Builder: attach a one-line summary for lazy catalogs.
+    pub fn with_summary(mut self, summary: String) -> Self {
+        self.summary = Some(summary);
+        self
     }
 
     /// Builder: attach a raw JSON Schema that providers send verbatim.
@@ -439,6 +453,18 @@ mod tests {
 
         assert_eq!(json["type"], "array");
         assert_eq!(json["items"]["type"], "string");
+    }
+
+    #[test]
+    fn with_summary_sets_field_and_chains() {
+        let td = ToolDefinition::new(
+            "demo".to_string(),
+            "Does a demo thing".to_string(),
+            ToolParameters::new(),
+        )
+        .with_summary("Run a demo".to_string());
+        assert_eq!(td.summary.as_deref(), Some("Run a demo"));
+        assert_eq!(td.name, "demo");
     }
 
     #[test]

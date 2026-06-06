@@ -449,6 +449,7 @@ impl DagToolExecutor {
             return ToolDefinition {
                 name: effective_name.to_string(),
                 description: tool_config.description.clone(),
+                summary: None,
                 parameters: ToolParameters {
                     schema_type: "object".to_string(),
                     properties: parsed.llm_properties,
@@ -464,6 +465,7 @@ impl DagToolExecutor {
                 return ToolDefinition {
                     name: effective_name.to_string(),
                     description: tool_config.description.clone(),
+                    summary: None,
                     parameters: params,
                     input_schema_override: None,
                 };
@@ -505,6 +507,7 @@ impl DagToolExecutor {
                         .unwrap_or("No description available")
                         .to_string()
                 },
+                summary: None,
                 parameters: ToolParameters {
                     schema_type: "object".to_string(),
                     properties,
@@ -573,6 +576,7 @@ impl DagToolExecutor {
         ToolDefinition {
             name: effective_name.to_string(),
             description,
+            summary: None,
             parameters: ToolParameters {
                 schema_type: "object".to_string(),
                 properties: exposed_properties,
@@ -1400,6 +1404,7 @@ impl ToolExecutor for DagToolExecutor {
                     tools.push(crate::llm::domain::ToolDefinition {
                         name: format!("{}__{}", name, sub.name),
                         description: sub.description,
+                        summary: None,
                         parameters: crate::llm::domain::ToolParameters {
                             schema_type: "object".to_string(),
                             properties: sub.properties,
@@ -1453,6 +1458,7 @@ impl ToolExecutor for DagToolExecutor {
                         tools.push(crate::llm::domain::ToolDefinition {
                             name: format!("{}__{}", name, sub.name),
                             description: sub.description,
+                            summary: None,
                             parameters: crate::llm::domain::ToolParameters {
                                 schema_type: "object".to_string(),
                                 properties: sub.properties,
@@ -1515,6 +1521,7 @@ impl ToolExecutor for DagToolExecutor {
                     .description()
                     .unwrap_or(&format!("Execute node: {}", name))
                     .to_string(),
+                summary: None,
                 parameters: ToolParameters {
                     schema_type: "object".to_string(),
                     properties,

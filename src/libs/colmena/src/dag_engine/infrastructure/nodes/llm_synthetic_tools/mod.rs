@@ -37,9 +37,23 @@ pub(super) fn build_synthetic_tool<T: JsonSchema>(name: &str, description: &str)
     ToolDefinition {
         name: name.to_string(),
         description: description.to_string(),
+        summary: None,
         parameters: ToolParameters::new(),
         input_schema_override: Some(schema_json),
     }
+}
+
+/// Like [`build_synthetic_tool`], but additionally attaches a one-line
+/// `summary` (≤ 200 chars) used by `lazy_tool_loading` catalogs. Every
+/// synthetic tool registered in colmena MUST go through this builder so
+/// the `every_synthetic_tool_has_summary` test passes at CI time.
+#[allow(dead_code)]
+pub(super) fn build_synthetic_tool_with_summary<T: JsonSchema>(
+    name: &str,
+    description: &str,
+    summary: &str,
+) -> ToolDefinition {
+    build_synthetic_tool::<T>(name, description).with_summary(summary.to_string())
 }
 
 /// Walk a JSON Schema and normalize shapes that some LLM providers reject:
@@ -306,6 +320,37 @@ pub use gsheets_tools::{
     TOOL_LIST_SHEETS as GSHEETS_LIST_SHEETS_TOOL, TOOL_READ as GSHEETS_READ_TOOL,
     TOOL_SET_CELL as GSHEETS_SET_CELL_TOOL, TOOL_SET_RANGE as GSHEETS_SET_RANGE_TOOL,
 };
+
+#[cfg(test)]
+mod synthetic_builder_tests {
+    use super::*;
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    #[allow(dead_code)]
+    struct FakeArgs {
+        pub x: String,
+    }
+
+    #[test]
+    fn build_synthetic_tool_with_summary_sets_summary() {
+        let td = build_synthetic_tool_with_summary::<FakeArgs>(
+            "fake_tool",
+            "A fake tool used only in tests",
+            "Run a fake operation",
+        );
+        assert_eq!(td.name, "fake_tool");
+        assert_eq!(td.summary.as_deref(), Some("Run a fake operation"));
+        assert!(td.input_schema_override.is_some());
+    }
+
+    #[test]
+    fn build_synthetic_tool_without_summary_is_none() {
+        let td = build_synthetic_tool::<FakeArgs>("fake_tool", "A fake tool");
+        assert!(td.summary.is_none());
+    }
+}
 
 #[cfg(test)]
 mod sanitize_tests {

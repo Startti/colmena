@@ -55,6 +55,7 @@ Skills:\n{}",
     ToolDefinition {
         name: LOAD_SKILL_TOOL_NAME.to_string(),
         description,
+        summary: None,
         parameters: ToolParameters {
             schema_type: "object".to_string(),
             properties,
