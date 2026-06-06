@@ -53,58 +53,100 @@ pub(crate) fn filter_enabled_tools(
     enabled_tools_config: Option<&Value>,
     configured_aliases: &std::collections::HashSet<String>,
 ) -> Vec<crate::llm::domain::ToolDefinition> {
-    let is_auto_enabled = |tool_name: &str| -> bool {
-        configured_aliases.iter().any(|alias| {
-            tool_name == alias.as_str() || tool_name.starts_with(&format!("{}__", alias))
-        })
+    use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::find_package;
+
+    // PASS 1 — parse user input into raw_includes, raw_excludes, wildcard.
+    // `configured_aliases` (from tool_configurations) are seeded into
+    // raw_includes so they are auto-enabled without needing to appear in
+    // `enabled_tools`.
+    let mut raw_includes: Vec<String> = configured_aliases.iter().cloned().collect();
+    let mut raw_excludes: Vec<String> = Vec::new();
+    let mut wildcard_all = false;
+
+    let parse_entry = |s: &str,
+                       raw_includes: &mut Vec<String>,
+                       raw_excludes: &mut Vec<String>,
+                       wildcard_all: &mut bool| {
+        if s == "*" {
+            *wildcard_all = true;
+        } else if let Some(stripped) = s.strip_prefix('!') {
+            if stripped.is_empty() {
+                eprintln!("filter_enabled_tools: empty exclusion entry '!' ignored");
+            } else {
+                raw_excludes.push(stripped.to_string());
+            }
+        } else if !raw_includes.iter().any(|n| n == s) {
+            raw_includes.push(s.to_string());
+        }
     };
 
-    let mut enabled_names: Vec<String> = all_tools
-        .iter()
-        .filter(|t| is_auto_enabled(&t.name))
-        .map(|t| t.name.clone())
-        .collect();
-
-    let mut wildcard_all = false;
     if let Some(enabled) = enabled_tools_config {
-        if let Some(value) = enabled.as_str() {
-            if value == "*" {
-                wildcard_all = true;
-            } else if !enabled_names.iter().any(|n| n == value) {
-                enabled_names.push(value.to_string());
-            }
-        } else if let Some(tool_names) = enabled.as_array() {
-            for v in tool_names {
-                if let Some(name) = v.as_str() {
-                    if !enabled_names.iter().any(|n| n == name) {
-                        enabled_names.push(name.to_string());
-                    }
+        if let Some(arr) = enabled.as_array() {
+            for v in arr {
+                if let Some(s) = v.as_str() {
+                    parse_entry(s, &mut raw_includes, &mut raw_excludes, &mut wildcard_all);
                 }
+            }
+        } else if let Some(s) = enabled.as_str() {
+            parse_entry(s, &mut raw_includes, &mut raw_excludes, &mut wildcard_all);
+        }
+    }
+
+    // PASS 2 — expand package aliases on both sides.
+    //
+    // Each entry in raw_includes / raw_excludes is checked against the
+    // TOOLKIT_PACKAGES registry. If it's a known package, it expands to the
+    // package's tool list; otherwise it's kept as-is (exact name or
+    // `{alias}__` toolkit prefix — see back-compat note below).
+    let expand = |name: &str| -> Vec<String> {
+        if let Some(pkg) = find_package(name) {
+            pkg.tools.iter().map(|t| t.to_string()).collect()
+        } else {
+            vec![name.to_string()]
+        }
+    };
+
+    let mut final_includes: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for n in &raw_includes {
+        for expanded in expand(n) {
+            final_includes.insert(expanded);
+        }
+    }
+
+    let mut final_excludes: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for n in &raw_excludes {
+        for expanded in expand(n) {
+            final_excludes.insert(expanded);
+        }
+    }
+
+    // Back-compat: include any tool whose name matches `{alias}__` for any
+    // alias in raw_includes (covers api_explorer-style toolkits that use
+    // the double-underscore prefix convention instead of TOOLKIT_PACKAGES).
+    for alias in &raw_includes {
+        let prefix = format!("{}__", alias);
+        for tool in &all_tools {
+            if tool.name.starts_with(&prefix) {
+                final_includes.insert(tool.name.clone());
             }
         }
     }
 
-    if wildcard_all {
-        return all_tools;
-    }
-
-    // Each entry in `enabled_names` is treated as an alias: it matches a
-    // catalog tool by EXACT equality OR by the toolkit prefix rule
-    // (`tool_name.starts_with(format!("{alias}__"))`). This lets a user write
-    // `enabled_tools: ["api_explorer"]` and have every `api_explorer__*`
-    // sub-tool exposed without listing each one — the same expansion rule
-    // `tool_configurations` already applies. Full sub-tool names
-    // (`api_explorer__load_spec`) still match via the exact-equality branch,
-    // so there is no back-compat break.
-    let is_enabled = |tool_name: &str| -> bool {
-        enabled_names.iter().any(|alias| {
-            tool_name == alias.as_str() || tool_name.starts_with(&format!("{}__", alias))
-        })
-    };
-
+    // PASS 3 — filter: apply set-difference (includes - excludes).
+    // Wildcard short-circuits the includes check but exclusions still apply.
     all_tools
         .into_iter()
-        .filter(|t| is_enabled(&t.name))
+        .filter(|t| {
+            if final_excludes.contains(&t.name) {
+                return false;
+            }
+            if wildcard_all {
+                return true;
+            }
+            final_includes.contains(&t.name)
+        })
         .collect()
 }
 
@@ -4143,6 +4185,187 @@ mod filter_enabled_tools_tests {
         let out = filter_enabled_tools(api_explorer_catalog(), Some(&enabled), &configured);
 
         assert!(out.is_empty(), "expected empty result, got {:?}", out);
+    }
+
+    fn build_fake_catalog(names: &[&str]) -> Vec<crate::llm::domain::ToolDefinition> {
+        use crate::llm::domain::tools::{ToolDefinition, ToolParameters};
+        names
+            .iter()
+            .map(|n| {
+                ToolDefinition::new(
+                    n.to_string(),
+                    format!("description of {}", n),
+                    ToolParameters::new(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn package_alias_expands_to_all_tools() {
+        let all_tools = build_fake_catalog(&[
+            "gsheets_create_spreadsheet",
+            "gsheets_create_from_xlsx",
+            "gsheets_export_xlsx",
+            "gsheets_list_sheets",
+            "gsheets_add_sheet",
+            "gsheets_delete_sheet",
+            "gsheets_read",
+            "gsheets_set_cell",
+            "gsheets_set_range",
+            "gsheets_run_python",
+            "tavily_web",
+        ]);
+        let enabled = json!(["gsheets"]);
+        let configured = std::collections::HashSet::new();
+        let filtered = super::filter_enabled_tools(all_tools, Some(&enabled), &configured);
+        assert_eq!(filtered.len(), 10, "gsheets alias must expand to 10 tools");
+        assert!(filtered.iter().all(|t| t.name.starts_with("gsheets_")));
+    }
+
+    #[test]
+    fn package_plus_individual_tool_works() {
+        let all_tools = build_fake_catalog(&[
+            "gsheets_read",
+            "gsheets_set_cell",
+            "gsheets_create_spreadsheet",
+            "gsheets_create_from_xlsx",
+            "gsheets_export_xlsx",
+            "gsheets_list_sheets",
+            "gsheets_add_sheet",
+            "gsheets_delete_sheet",
+            "gsheets_set_range",
+            "gsheets_run_python",
+            "tavily_web",
+        ]);
+        let enabled = json!(["gsheets", "tavily_web"]);
+        let filtered = super::filter_enabled_tools(
+            all_tools,
+            Some(&enabled),
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(filtered.len(), 11);
+    }
+
+    #[test]
+    fn exclusion_removes_tool_from_package() {
+        let all_tools = build_fake_catalog(&[
+            "gsheets_read",
+            "gsheets_delete_sheet",
+            "gsheets_list_sheets",
+            "gsheets_add_sheet",
+            "gsheets_set_cell",
+            "gsheets_set_range",
+            "gsheets_create_spreadsheet",
+            "gsheets_create_from_xlsx",
+            "gsheets_export_xlsx",
+            "gsheets_run_python",
+        ]);
+        let enabled = json!(["gsheets", "!gsheets_delete_sheet"]);
+        let filtered = super::filter_enabled_tools(
+            all_tools,
+            Some(&enabled),
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(filtered.len(), 9);
+        assert!(!filtered.iter().any(|t| t.name == "gsheets_delete_sheet"));
+    }
+
+    #[test]
+    fn exclusion_order_independent() {
+        let all_tools = build_fake_catalog(&[
+            "gsheets_read",
+            "gsheets_delete_sheet",
+            "gsheets_list_sheets",
+            "gsheets_add_sheet",
+            "gsheets_set_cell",
+            "gsheets_set_range",
+            "gsheets_create_spreadsheet",
+            "gsheets_create_from_xlsx",
+            "gsheets_export_xlsx",
+            "gsheets_run_python",
+        ]);
+        let order_a = json!(["gsheets", "!gsheets_read"]);
+        let order_b = json!(["!gsheets_read", "gsheets"]);
+        let configured = std::collections::HashSet::new();
+        let names_a: std::collections::HashSet<String> =
+            super::filter_enabled_tools(all_tools.clone(), Some(&order_a), &configured)
+                .into_iter()
+                .map(|t| t.name)
+                .collect();
+        let names_b: std::collections::HashSet<String> =
+            super::filter_enabled_tools(all_tools, Some(&order_b), &configured)
+                .into_iter()
+                .map(|t| t.name)
+                .collect();
+        assert_eq!(names_a, names_b, "exclusion order must not matter");
+    }
+
+    #[test]
+    fn exclusion_of_package_removes_all_its_tools() {
+        let all_tools = build_fake_catalog(&[
+            "gsheets_read",
+            "gsheets_set_cell",
+            "tavily_web",
+            "current_time",
+            "gsheets_create_spreadsheet",
+            "gsheets_create_from_xlsx",
+            "gsheets_export_xlsx",
+            "gsheets_list_sheets",
+            "gsheets_add_sheet",
+            "gsheets_delete_sheet",
+            "gsheets_set_range",
+            "gsheets_run_python",
+        ]);
+        let enabled = json!(["*", "!gsheets"]);
+        let filtered = super::filter_enabled_tools(
+            all_tools,
+            Some(&enabled),
+            &std::collections::HashSet::new(),
+        );
+        let names: std::collections::HashSet<String> =
+            filtered.into_iter().map(|t| t.name).collect();
+        assert!(!names.iter().any(|n| n.starts_with("gsheets_")));
+        assert!(names.contains("tavily_web"));
+        assert!(names.contains("current_time"));
+    }
+
+    #[test]
+    fn unknown_alias_silently_ignored() {
+        let all_tools = build_fake_catalog(&["gsheets_read", "tavily_web"]);
+        let enabled = json!(["gsheetz"]);
+        let filtered = super::filter_enabled_tools(
+            all_tools,
+            Some(&enabled),
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(filtered.len(), 0, "unknown alias produces empty result, no panic");
+    }
+
+    #[test]
+    fn exact_tool_name_match_still_works_unchanged() {
+        let all_tools = build_fake_catalog(&["gsheets_read", "tavily_web"]);
+        let enabled = json!(["gsheets_read"]);
+        let filtered = super::filter_enabled_tools(
+            all_tools,
+            Some(&enabled),
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "gsheets_read");
+    }
+
+    #[test]
+    fn empty_exclusion_logged_and_ignored() {
+        let all_tools = build_fake_catalog(&["gsheets_read", "tavily_web"]);
+        let enabled = json!(["gsheets_read", "!"]);
+        let filtered = super::filter_enabled_tools(
+            all_tools,
+            Some(&enabled),
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "gsheets_read");
     }
 }
 
