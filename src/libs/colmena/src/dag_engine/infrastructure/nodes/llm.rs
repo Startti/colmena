@@ -106,16 +106,14 @@ pub(crate) fn filter_enabled_tools(
         }
     };
 
-    let mut final_includes: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut final_includes: std::collections::HashSet<String> = std::collections::HashSet::new();
     for n in &raw_includes {
         for expanded in expand(n) {
             final_includes.insert(expanded);
         }
     }
 
-    let mut final_excludes: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut final_excludes: std::collections::HashSet<String> = std::collections::HashSet::new();
     for n in &raw_excludes {
         for expanded in expand(n) {
             final_excludes.insert(expanded);
@@ -4339,7 +4337,11 @@ mod filter_enabled_tools_tests {
             Some(&enabled),
             &std::collections::HashSet::new(),
         );
-        assert_eq!(filtered.len(), 0, "unknown alias produces empty result, no panic");
+        assert_eq!(
+            filtered.len(),
+            0,
+            "unknown alias produces empty result, no panic"
+        );
     }
 
     #[test]

@@ -394,7 +394,9 @@ mod summary_coverage_tests {
 
         // load_skill — 1 tool; pass an empty-catalog repository
         let repo: Arc<dyn crate::skills::domain::SkillRepository> = Arc::new(EmptySkillRepo);
-        tools.push(super::load_skill_tool::build_load_skill_tool_definition(&repo));
+        tools.push(super::load_skill_tool::build_load_skill_tool_definition(
+            &repo,
+        ));
 
         tools
     }
@@ -550,7 +552,10 @@ mod sanitize_tests {
             }
         });
         sanitize_schema_for_llm_providers(&mut v);
-        assert!(v.get("definitions").is_none(), "definitions must be dropped");
+        assert!(
+            v.get("definitions").is_none(),
+            "definitions must be dropped"
+        );
         assert!(
             v["properties"]["bindings"]["items"].get("$ref").is_none(),
             "$ref must be inlined"

@@ -19,24 +19,22 @@ pub struct ToolkitPackage {
 }
 
 /// The registry. New packages append here as a single struct literal.
-pub static TOOLKIT_PACKAGES: &[ToolkitPackage] = &[
-    ToolkitPackage {
-        alias: "gsheets",
-        description: "Read, write, and analyze Google Sheets workbooks (10 tools)",
-        tools: &[
-            "gsheets_create_spreadsheet",
-            "gsheets_create_from_xlsx",
-            "gsheets_export_xlsx",
-            "gsheets_list_sheets",
-            "gsheets_add_sheet",
-            "gsheets_delete_sheet",
-            "gsheets_read",
-            "gsheets_set_cell",
-            "gsheets_set_range",
-            "gsheets_run_python",
-        ],
-    },
-];
+pub static TOOLKIT_PACKAGES: &[ToolkitPackage] = &[ToolkitPackage {
+    alias: "gsheets",
+    description: "Read, write, and analyze Google Sheets workbooks (10 tools)",
+    tools: &[
+        "gsheets_create_spreadsheet",
+        "gsheets_create_from_xlsx",
+        "gsheets_export_xlsx",
+        "gsheets_list_sheets",
+        "gsheets_add_sheet",
+        "gsheets_delete_sheet",
+        "gsheets_read",
+        "gsheets_set_cell",
+        "gsheets_set_range",
+        "gsheets_run_python",
+    ],
+}];
 
 /// Linear-scan lookup. The registry is small (≪ 50 entries) so a HashMap
 /// would be over-engineering.
