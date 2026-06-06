@@ -5,6 +5,7 @@ pub mod gsheets;
 pub mod llm;
 pub mod skills;
 pub mod storage;
+pub mod text;
 pub mod web;
 
 /// Print a debug/verbose message. No-op unless verbose mode is enabled via
