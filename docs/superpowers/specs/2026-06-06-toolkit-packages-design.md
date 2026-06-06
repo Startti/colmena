@@ -12,9 +12,11 @@
 Two related ergonomic improvements to the agent-tool integration:
 
 1. **Toolkit packages** — replace verbose tool lists in `enabled_tools` with a single alias that expands to a curated set of tools. Generalize beyond today's `api_explorer__*` prefix-rule so any future toolkit (gsheets, slack, browser, github, …) follows one convention.
-2. **Tool summaries for lazy loading** — every gsheets synthetic tool gains a one-line `summary` so that when an agent uses `lazy_tool_loading: true`, the LLM can choose tools competently before paying the token cost of full schemas.
+2. **Tool summaries for lazy loading — every synthetic tool** — all built-in Rust synthetic tools (gsheets, crdt_doc, document, api_explorer, describe_tool, load_skill, load_attachment, recall_history, etc.) gain a one-line `summary`. When an agent uses `lazy_tool_loading: true`, the LLM can choose tools competently before paying the token cost of full schemas. Enforced in CI: any synthetic tool registered without a summary fails the build.
 
-Both are zero-break-change additions.
+**DAG nodes used as tools** (via `tool_configurations`) are explicitly out of scope. Their descriptions are user-configured per-agent and dynamic (a `python_script` can be "analyze CSV" or "parse JSON" depending on the agent), so a fixed Rust-side summary does not fit. They keep relying on their user-supplied `description` for lazy operation.
+
+Both items are zero-break-change additions.
 
 ## 2. Non-goals
 
@@ -99,13 +101,24 @@ Same function in `llm.rs:51`, extended with two new behaviors:
 
 The existing `__` prefix-rule and exact-name match continue to work as before. The `configured_aliases` set (from `tool_configurations`) still auto-enables matching tools — unchanged.
 
-### 5.3 Tool summaries
+### 5.3 Tool summaries — all synthetic tools
 
-Every gsheets tool builder (`tool_create_spreadsheet`, `tool_read`, etc. in `gsheets_tools.rs`, plus `tool_gsheets_run_python` in `gsheets_run_python.rs`) gains a one-line `summary` passed alongside the long description.
+Every Rust-side synthetic tool builder gains a one-line `summary` passed alongside the long description. Coverage is exhaustive across every module under `llm_synthetic_tools/`.
 
-**Precondition check during implementation**: confirm `ToolDefinition` already supports a `summary` field. If not, add one (`Option<String>`, default None) and wire it through to the lazy-loading catalog. The lazy-loading reader (`llm_synthetic_tools/lazy_tools_catalog.rs` per CLAUDE.md) already expects this metadata.
+**Precondition check during implementation**: confirm `ToolDefinition` already supports a `summary` field, and that `build_synthetic_tool` accepts it (likely needs a small signature extension or a sibling `build_synthetic_tool_with_summary`). If not, add `summary: Option<String>` to `ToolDefinition` and wire it through to the lazy-loading catalog. The lazy-loading reader (`llm_synthetic_tools/lazy_tools_catalog.rs` per CLAUDE.md) already expects this metadata for the progressive-reveal flow.
 
-Summaries follow the canonical 10-20 word format used by other lazy-aware tools:
+**Audit step**: as the first sub-task, enumerate every `tool_*()` builder + every `build_*_tool()` function across:
+- `gsheets_tools.rs` and `gsheets_run_python.rs`
+- `crdt_doc_tools.rs`, `crdt_doc_run_python.rs`, `crdt_doc_list_sheets_of.rs`, `crdt_doc_import_sheet.rs`
+- `document_tools.rs`
+- `api_explorer/` sub-tools (5)
+- `describe_tool.rs`, `load_skill.rs`, `load_attachment.rs`
+- `recall_history.rs`
+- any other module exporting a `pub fn build_*_tool` or `pub fn tool_*`
+
+Produce a checklist of every name (expected total ~35-40 tools) and write a summary for each before moving on. Each summary follows the canonical 10-25 word format.
+
+Reference table of summaries for the gsheets surface (other packages get equivalent treatment during implementation):
 
 | Tool | Summary |
 |---|---|
@@ -119,6 +132,10 @@ Summaries follow the canonical 10-20 word format used by other lazy-aware tools:
 | `gsheets_set_cell` | Write one value or formula into a single cell |
 | `gsheets_set_range` | Write a 2-D values array starting at a given address |
 | `gsheets_run_python` | Run sandboxed pandas analysis over sheet ranges loaded directly by the dispatcher (rows never pass through the LLM) |
+
+Summaries for the other ~25-30 tools (crdt_doc, document, api_explorer, helpers) are produced inline during E-T15b; they are not pre-listed here to avoid spec drift if any are renamed before the audit.
+
+**CI enforcement**: a single integration-level test iterates the full synthetic-tool catalog (the same catalog the lazy-loading reader consumes) and asserts every entry has `summary.is_some()` and `10 <= summary.len() <= 200`. The test lives in `llm_synthetic_tools/mod.rs` next to the sanitizer tests. **No tool can be added in the future without a summary** — the build refuses to ship.
 
 ## 6. Syntax for `enabled_tools`
 
@@ -263,7 +280,7 @@ No existing graph in `tests/graphs/` or in the ADP repo needs to change.
 
 ### 10.4 Summary metadata tests
 
-16. `every_gsheets_tool_has_summary` — iterate registered gsheets tool defs, assert `summary.is_some()` and length is between 10 and 200 chars.
+16. `every_synthetic_tool_has_summary` — iterate the full synthetic-tool catalog (every `tool_*()` builder + every `build_*_tool()` across `llm_synthetic_tools/`), assert each registered `ToolDefinition.summary` is `Some(s)` with `10 <= s.len() <= 200`. Replaces a gsheets-only test with universal coverage: any new synthetic tool added in the future without a summary fails the build.
 
 ## 11. Docs
 
@@ -281,13 +298,23 @@ No existing graph in `tests/graphs/` or in the ADP repo needs to change.
 
 | ID | Title | Estimate | Notes |
 |---|---|---:|---|
-| **E-T15** | Add `summary` to the 10 gsheets tool builders | 30 min | Standalone, no dependencies on E-T16. Includes the `every_gsheets_tool_has_summary` test. |
+| **E-T15a** | Audit — enumerate every synthetic tool builder across `llm_synthetic_tools/`; produce a checklist with current state (has summary? what's the description first-line?) | 30 min | Output is a markdown table committed alongside the implementation PR. Confirms the ~35-40 estimate. |
+| **E-T15b** | Add `summary` field to `ToolDefinition` (if missing) + `build_synthetic_tool` signature; pass through to lazy catalog | 30 min | Pre-req for E-T15c. Touches `llm/domain/tools.rs` and `llm_synthetic_tools/mod.rs`. |
+| **E-T15c** | Write a `summary` string for every synthetic tool builder identified in E-T15a | 1.5 h | Distributed across gsheets (10), crdt_doc (~10), document (7), api_explorer (5), helpers (~5). Single PR. |
+| **E-T15d** | CI test `every_synthetic_tool_has_summary` in `llm_synthetic_tools/mod.rs` | 30 min | The build refuses new tools without summary. |
 | **E-T16a** | New `toolkit_packages.rs` module + registry + unit tests (1, 2, 3) | 1 h | No changes to `llm.rs`; purely additive module. |
 | **E-T16b** | Extend `filter_enabled_tools` with package expansion + exclusion + tests 4–14 | 1.5 h | Touches `llm.rs`. Keeps existing `__` prefix-rule. |
-| **E-T16c** | E2E smoke graph + smoke test 15 | 30 min | Lives in `tests/graphs/agents/gsheets_package_smoke.json`. |
-| **E-T16d** | Docs sweep (developer guide, node_as_tools_reference, CHANGELOG, BACKLOG, dev guide index) | 1 h | All edits are additive. |
+| **E-T16c** | E2E smoke graph + smoke test 15 | 30 min | `tests/graphs/agents/gsheets_package_smoke.json`. |
+| **E-T16d** | Docs sweep (developer guide §39, new `40_toolkit_packages.md`, `29_lazy_tool_loading.md` mention, `node_as_tools_reference.json`, CHANGELOG, BACKLOG, dev guide index) | 1 h | All edits are additive. |
 
-Total estimate: **~4.5h** via subagent-driven development. E-T15 can run in parallel with E-T16a/b/c.
+Total estimate: **~7 h** via subagent-driven development.
+
+**Parallelization**: E-T15a is sequential (needs to run first to inform E-T15c). E-T15b → E-T15c → E-T15d are sequential. E-T16a/b/c can run in parallel with the E-T15 chain. E-T16d depends on E-T15c (docs reference the summaries).
+
+**Order suggestion**:
+1. E-T15a (audit, gates everything else)
+2. Parallel: [E-T15b → E-T15c → E-T15d] AND [E-T16a → E-T16b → E-T16c]
+3. E-T16d (docs final sweep covering both tracks)
 
 ## 13. Future enhancements (BACKLOG)
 
@@ -301,8 +328,10 @@ Total estimate: **~4.5h** via subagent-driven development. E-T15 can run in para
 
 - ✅ Placeholders: none.
 - ✅ Internal consistency: the algorithm in §7 matches the syntax in §6 and the edge cases in §8.
-- ✅ Scope: focused — one spec, one implementation cycle (E-T15 + E-T16).
+- ✅ Scope: focused — one spec, one implementation cycle (E-T15a-d + E-T16a-d).
 - ✅ Ambiguity: §8 disambiguates every edge case explicitly. The "exact tool match beats package" rule is called out.
 - ✅ Naming convention: the only load-bearing rule (no `_` in package aliases) is enforced by test in §10.1.
 - ✅ Back-compat: §9 is the contract — no existing graph or downstream consumer breaks.
 - ✅ Open-source rule: §3 explicitly forbids ADP-specific package entries.
+- ✅ Summary coverage: §5.3 + §10.4 — every synthetic tool gets a summary; DAG nodes explicitly out of scope and justified in §1.
+- ✅ CI enforcement: future synthetic tools without a summary fail the build (§10.4 + §12 E-T15d).
