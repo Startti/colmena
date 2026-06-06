@@ -13,6 +13,7 @@ pub mod lazy_tools_catalog;
 pub mod load_attachment_tool;
 pub mod load_skill_tool;
 pub mod recall_history;
+pub mod toolkit_packages;
 
 // ── Shared schema helpers ────────────────────────────────────────────────────
 //
@@ -253,6 +254,8 @@ pub use document_tools::{
 pub use lazy_tools_catalog::{
     build_describe_tool_definition, reconstruct_discovered_set, summary_for_catalog, CatalogEntry,
 };
+
+pub use toolkit_packages::{find_package, ToolkitPackage, TOOLKIT_PACKAGES};
 
 pub use load_attachment_tool::{
     build_load_attachment_tool_definition, dispatch_load_attachment, ATTACHMENTS_SYSTEM_PRELUDE,
