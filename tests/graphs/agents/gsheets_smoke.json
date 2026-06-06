@@ -1,0 +1,40 @@
+{
+  "_comment": "Subsistema E smoke — Google Sheets. The agent creates a spreadsheet, adds a tab, seeds 5 numbers, writes a SUM formula, reads back both evaluated value and formula text. Requires GOOGLE_APPLICATION_CREDENTIALS env. Run: `set -a; source .env; set +a; cargo run --bin dag_engine -- run tests/graphs/agents/gsheets_smoke.json --agent-session-id e_smoke_$(date +%s) --include-extra-info`",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/e-smoke",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Run a Google Sheets smoke:\n1. Create a new spreadsheet titled 'Colmena E Smoke <UTC timestamp>'. Capture its spreadsheet_id and url.\n2. Add a tab named 'Numbers'.\n3. Use set_range starting at A1 with values_2d=[[10],[20],[30],[40],[50]].\n4. Set B1 to formula =SUM(A1:A5).\n5. Read B1 with value_render='UNFORMATTED_VALUE' — confirm it's 150.\n6. Read B1 with value_render='FORMULA' — confirm it's '=SUM(A1:A5)'.\n7. Final report (under 200 words): the spreadsheet url + the value/formula you read."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 15,
+        "lazy_tool_loading": true,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "You are an assistant exercising the Google Sheets tool surface. Use gsheets_* tools. Report what you observed at each step (cell counts, formula text, evaluated values).",
+        "enabled_tools": [
+          "gsheets_create_spreadsheet",
+          "gsheets_add_sheet",
+          "gsheets_set_cell",
+          "gsheets_set_range",
+          "gsheets_read"
+        ]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}
