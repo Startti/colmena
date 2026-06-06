@@ -66,12 +66,13 @@ pub struct GsheetsBinding {
 // ── Tool builder ─────────────────────────────────────────────────────
 
 pub fn tool_gsheets_run_python() -> ToolDefinition {
-    super::build_synthetic_tool::<GsheetsRunPythonArgs>(
+    super::build_synthetic_tool_with_summary::<GsheetsRunPythonArgs>(
         TOOL_GSHEETS_RUN_PYTHON,
         "Run sandboxed Python (pandas/numpy/scipy.stats) over data loaded directly \
          from Google Sheets. Each `bindings` entry becomes a Python global (a list \
          of dicts you can pass to pd.DataFrame). Rows NEVER pass through the LLM — \
          only the final `output`. Use this for any analysis over more than ~50 rows.",
+        "Run sandboxed pandas analysis over sheet ranges loaded directly by the dispatcher (rows never pass through the LLM)",
     )
 }
 
@@ -457,5 +458,20 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("duplicate"));
+    }
+
+    #[test]
+    fn tool_def_has_summary() {
+        let td = tool_gsheets_run_python();
+        assert!(
+            td.summary.is_some(),
+            "gsheets_run_python must declare a summary for lazy_tool_loading"
+        );
+        let s = td.summary.unwrap();
+        assert!(
+            s.len() >= 10 && s.len() <= 200,
+            "summary length out of bounds: {}",
+            s.len()
+        );
     }
 }
