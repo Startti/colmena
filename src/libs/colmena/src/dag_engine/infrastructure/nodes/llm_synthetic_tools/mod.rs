@@ -325,17 +325,18 @@ pub use gsheets_tools::{
 };
 
 #[cfg(test)]
-mod summary_coverage_tests {
-    //! Enforces that EVERY synthetic tool registered in colmena declares a
-    //! `summary` between 10 and 200 chars. The build refuses to ship if a
-    //! new tool is added without one.
+mod text_coverage_tests {
+    //! Enforces that EVERY synthetic tool registered in colmena has an
+    //! entry in text/tools/*.yaml and that no YAML entry is orphaned. The
+    //! build refuses to ship if either invariant breaks.
     //!
-    //! `describe_tool` is exempt: it is constructed dynamically per turn by
-    //! `lazy_tools_catalog::build_describe_tool_definition` and does not go
-    //! through the synthetic-tool builders covered here.
+    //! `describe_tool` is exempt — it is constructed dynamically per turn
+    //! by `lazy_tools_catalog::build_describe_tool_definition` and does
+    //! not go through the synthetic-tool builders covered here.
 
     use crate::llm::domain::tools::ToolDefinition;
     use crate::skills::domain::{Skill, SkillCatalogEntry, SkillError, SkillReference};
+    use crate::text;
     use async_trait::async_trait;
     use std::sync::Arc;
 
@@ -402,38 +403,58 @@ mod summary_coverage_tests {
     }
 
     #[test]
-    fn every_synthetic_tool_has_summary() {
+    fn every_registered_tool_has_text_entry() {
         let tools = all_synthetic_tools();
-        let mut missing: Vec<String> = Vec::new();
-        let mut out_of_bounds: Vec<(String, usize)> = Vec::new();
-
         for td in &tools {
-            match td.summary.as_deref() {
-                None => missing.push(td.name.clone()),
-                Some(s) => {
-                    let len = s.chars().count();
-                    if !(10..=200).contains(&len) {
-                        out_of_bounds.push((td.name.clone(), len));
-                    }
-                }
-            }
+            let s = text::tool_summary(&td.name);
+            let d = text::tool_description(&td.name);
+            let len = s.chars().count();
+            assert!(
+                (10..=200).contains(&len),
+                "summary for '{}' out of bounds (len={})",
+                td.name,
+                len,
+            );
+            assert!(!d.is_empty(), "description for '{}' is empty", td.name);
         }
-
-        assert!(
-            missing.is_empty(),
-            "These synthetic tools are missing a summary: {:?}. \
-             Add one via build_synthetic_tool_with_summary.",
-            missing
-        );
-        assert!(
-            out_of_bounds.is_empty(),
-            "These synthetic tools have summaries outside the 10..=200 char range: {:?}",
-            out_of_bounds
-        );
         assert!(
             !tools.is_empty(),
-            "all_synthetic_tools() returned 0 entries — wiring bug"
+            "all_synthetic_tools() returned 0 entries — wiring bug",
         );
+    }
+
+    #[test]
+    fn no_orphan_yaml_entries() {
+        let registered: std::collections::HashSet<String> = all_synthetic_tools()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        let orphans: Vec<&'static str> = text::all_tool_names()
+            .into_iter()
+            .filter(|name| !registered.contains(*name))
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "Orphan YAML entries (no matching registered builder): {:?}",
+            orphans,
+        );
+    }
+
+    #[test]
+    fn tool_def_summary_matches_yaml() {
+        // ToolDefinition.summary is set by the builder, which (after E-T17c-f)
+        // reads from the YAML. This test verifies they stay in sync, catching
+        // a regression where someone reverts a builder to an inline literal.
+        for td in all_synthetic_tools() {
+            let yaml_summary = text::tool_summary(&td.name);
+            assert_eq!(
+                td.summary.as_deref(),
+                Some(yaml_summary),
+                "ToolDefinition.summary for '{}' diverges from text/tools/*.yaml — \
+                 likely a builder was hand-edited",
+                td.name,
+            );
+        }
     }
 }
 
