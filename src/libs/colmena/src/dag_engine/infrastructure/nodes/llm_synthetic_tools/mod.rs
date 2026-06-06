@@ -456,6 +456,39 @@ mod text_coverage_tests {
             );
         }
     }
+
+    #[test]
+    fn index_doc_covers_all_registered_tools() {
+        // Embed the doc at compile time so the test is portable.
+        // Path: from mod.rs → up to repo root → docs/developer_guide/41_builtin_tools_index.md
+        // mod.rs is at src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mod.rs
+        //   = 8 directories under repo root
+        const INDEX_DOC: &str = include_str!(
+            "../../../../../../../../docs/developer_guide/41_builtin_tools_index.md"
+        );
+
+        let registered: Vec<String> = all_synthetic_tools()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+
+        let mut missing: Vec<String> = Vec::new();
+        for name in &registered {
+            // Each tool name should appear at least once as a backtick-wrapped
+            // token in the doc (the table convention `| \`tool_name\` | ...`).
+            let needle = format!("`{}`", name);
+            if !INDEX_DOC.contains(&needle) {
+                missing.push(name.clone());
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "These registered tools are missing from \
+             docs/developer_guide/41_builtin_tools_index.md: {:?}",
+            missing,
+        );
+    }
 }
 
 #[cfg(test)]
