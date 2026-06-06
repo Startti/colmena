@@ -15,6 +15,11 @@ pub use super::crdt_doc_context::CrdtDocsContext;
 
 pub const TOOL_RUN_PYTHON: &str = "crdt_doc_run_python";
 
+const CRDT_PY_PRELUDE: &str =
+    include_str!("../../../../../text/prompts/python_sandbox/crdt_doc_run_python_prelude.md");
+const CRDT_PY_POSTLUDE: &str =
+    include_str!("../../../../../text/prompts/python_sandbox/crdt_doc_run_python_postlude.md");
+
 /// Caps that apply to the response sent back to the LLM.
 const OUTPUT_BYTE_CAP: usize = 10 * 1024;
 const STDOUT_BYTE_CAP: usize = 10 * 1024;
@@ -287,36 +292,7 @@ pub async fn dispatch_crdt_doc_run_python(
 // ── helpers ──────────────────────────────────────────────────────────────
 
 fn wrap_user_code(user_code: &str) -> String {
-    let prelude = r#"# === colmena auto-prelude (do not modify) ===
-import pandas as pd
-import numpy as np
-from scipy import stats
-
-dfs = {k: pd.DataFrame(v) for k, v in _dfs_raw.items()}
-del _dfs_raw
-
-# === user code starts here ===
-"#;
-    let postlude = r#"
-# === user code ends ===
-
-# === colmena auto-postlude ===
-__col_user_output = output if 'output' in dir() else None
-__col_sheet_records = None
-__col_sheet_cols = None
-if 'output_sheet' in dir() and output_sheet is not None:
-    import pandas as _pd
-    if isinstance(output_sheet, _pd.DataFrame):
-        __col_sheet_records = output_sheet.to_dict('records')
-        __col_sheet_cols = list(output_sheet.columns)
-
-output = {
-    'user_output': __col_user_output,
-    'sheet_records': __col_sheet_records,
-    'sheet_cols': __col_sheet_cols,
-}
-"#;
-    format!("{prelude}{user_code}{postlude}")
+    format!("{CRDT_PY_PRELUDE}{user_code}{CRDT_PY_POSTLUDE}")
 }
 
 fn truncate(s: &str, cap: usize) -> String {

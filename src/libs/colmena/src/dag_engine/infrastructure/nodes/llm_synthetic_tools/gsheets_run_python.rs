@@ -26,6 +26,11 @@ use super::gsheets_tools::error_to_json;
 
 pub const TOOL_GSHEETS_RUN_PYTHON: &str = "gsheets_run_python";
 
+const GSHEETS_PY_PRELUDE: &str =
+    include_str!("../../../../../text/prompts/python_sandbox/gsheets_run_python_prelude.md");
+const GSHEETS_PY_POSTLUDE: &str =
+    include_str!("../../../../../text/prompts/python_sandbox/gsheets_run_python_postlude.md");
+
 /// Caps that apply to the response sent back to the LLM.
 const OUTPUT_BYTE_CAP: usize = 10 * 1024;
 const STDOUT_BYTE_CAP: usize = 10 * 1024;
@@ -248,23 +253,7 @@ pub async fn dispatch_gsheets_run_python_with_client(
 /// `pd.DataFrame(...)` for each binding — the LLM picks the shape it
 /// wants (DataFrame, dict-of-lists, raw list of dicts).
 fn wrap_user_code(user_code: &str) -> String {
-    let prelude = r#"# === colmena auto-prelude (do not modify) ===
-import pandas as pd
-import numpy as np
-from scipy import stats
-
-# Each binding is already bound as `<var>` (a list of {col: val} dicts).
-# `_gsheets_loaded_columns` is a dict of {var: [col, ...]} for reference.
-
-# === user code starts here ===
-"#;
-    let postlude = r#"
-# === user code ends ===
-
-# === colmena auto-postlude ===
-output = output if 'output' in dir() else None
-"#;
-    format!("{prelude}{user_code}{postlude}")
+    format!("{GSHEETS_PY_PRELUDE}{user_code}{GSHEETS_PY_POSTLUDE}")
 }
 
 /// Pull column names off the first record when `as_records=true`. If

@@ -15,26 +15,8 @@ pub const LOAD_ATTACHMENT_TOOL_NAME: &str = "load_attachment";
 /// exist in this conversation and that it should use `load_attachment` proactively
 /// when the user references uploaded content. Graph authors should NOT have to
 /// duplicate these instructions in their own `system_message`.
-pub const ATTACHMENTS_SYSTEM_PRELUDE: &str = "## Conversation Attachments\n\
-This conversation has one or more documents attached to it. They are listed in \
-the catalog below (and in the description of the `load_attachment` tool), each \
-with a `document_id`, label, mime type, and size.\n\n\
-You will NOT see document content automatically — the catalog only advertises \
-which documents exist. To read a document's content, you must call \
-load_attachment(document_id). To forward a document to a downstream tool (for \
-example `http_request` multipart) without reading it yourself, pass the string \
-\"$attachment:<document_id>\" in that tool's args.\n\n\
-load_attachment results are ephemeral: the document content is available only \
-for the turn in which you invoked the tool. Future turns will see a marker \
-confirming the call happened, but not the content itself. Call load_attachment \
-again if you need to re-read the document.\n\n\
-Rules:\n\
-- If the user asks about any uploaded document, call `load_attachment` with the \
-matching `document_id` before answering — never guess at the contents.\n\
-- Do not list, paraphrase, or summarise the attachments unless the user asks.\n\
-- One `document_id` per call. Call the tool again if you need a second document.\n\
-- If the user's question does not depend on any attachment, answer normally — \
-do NOT call `load_attachment` preemptively.";
+pub const ATTACHMENTS_SYSTEM_PRELUDE: &str =
+    include_str!("../../../../../text/prompts/attachments_system_prelude.md");
 
 /// Build the `ToolDefinition` for `load_attachment`. The catalog is a snapshot
 /// taken at the start of `llm_call.execute`. The caller is responsible for

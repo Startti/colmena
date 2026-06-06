@@ -22,7 +22,8 @@ use std::sync::Arc;
 /// provide one — lets `tool_configurations` for secure_suspend stay as terse as
 /// `{ "name": "ask_secret", "node_type": "secure_suspend" }` without needing
 /// any custom system_message instructions.
-pub const SECURE_SUSPEND_TOOL_DESCRIPTION: &str = "Pregunta al usuario por uno o más secretos en una SOLA llamada y los almacena cifrados, devolviendo handles opacos. Llamada: pasa un argumento `secrets` que es un ARRAY de objetos, cada uno con AMBOS campos `question` (string — la pregunta que verá el usuario) y `name` (string — slug en minúsculas [a-z][a-z0-9_]{2,63} que identifica al secreto; debe ser único dentro de esta llamada). Retorna: un mapa `{<name>: \"<sv_<name>_<random>>\"}` con un handle opaco por cada secreto. NUNCA verás los valores reales — solo los handles. Pega los handles tal cual en argumentos de tools subsiguientes que requieran ese secreto; el motor los sustituirá por los valores reales antes de ejecutar la tool y los volverá a enmascarar antes de devolverte la respuesta.";
+pub const SECURE_SUSPEND_TOOL_DESCRIPTION: &str =
+    include_str!("../../../../text/prompts/secure_suspend_tool_description.md");
 
 /// Auto-fill canonical `description` and `node_schema` on a tool entry whose
 /// `node_type` is `secure_suspend`. Idempotent: only fills fields the user did
