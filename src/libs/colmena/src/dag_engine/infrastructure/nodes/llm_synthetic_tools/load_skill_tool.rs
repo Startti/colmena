@@ -29,9 +29,8 @@ pub fn build_load_skill_tool_definition(repository: &Arc<dyn SkillRepository>) -
     };
 
     let description = format!(
-        "Load a knowledge skill on demand. Call BEFORE responding when relevant. \
-Pass `reference` to load a specific sub-document listed in a skill's index.\n\n\
-Skills:\n{}",
+        "{}{}",
+        crate::text::tool_description(LOAD_SKILL_TOOL_NAME),
         catalog_lines.join("\n")
     );
 
@@ -55,7 +54,7 @@ Skills:\n{}",
     ToolDefinition {
         name: LOAD_SKILL_TOOL_NAME.to_string(),
         description,
-        summary: Some("Load a markdown skill bundle into the conversation; reveals built-in or user-provided guidance on demand".to_string()),
+        summary: Some(crate::text::tool_summary(LOAD_SKILL_TOOL_NAME).to_string()),
         parameters: ToolParameters {
             schema_type: "object".to_string(),
             properties,

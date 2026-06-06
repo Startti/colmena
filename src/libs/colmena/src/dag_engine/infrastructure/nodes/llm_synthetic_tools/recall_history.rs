@@ -34,12 +34,11 @@ pub struct RecallHistoryArgs {
 }
 
 pub fn tool_recall_history() -> ToolDefinition {
+    use crate::text;
     super::build_synthetic_tool_with_summary::<RecallHistoryArgs>(
         TOOL_RECALL_HISTORY,
-        "Re-read the FULL original content of one past message by its turn \
-         index (the [T<n>] in the Conversation summary). Use sparingly — \
-         each call re-loads that message into your context.",
-        "Re-read the original content of one past message by its turn index",
+        text::tool_description(TOOL_RECALL_HISTORY),
+        text::tool_summary(TOOL_RECALL_HISTORY),
     )
 }
 
