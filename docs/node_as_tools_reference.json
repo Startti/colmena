@@ -1266,6 +1266,238 @@
       ]
     },
 
+    "gsheets": {
+      "summary": "Synthetic LLM tools for Google Sheets (subsystem E v1). 9 tools that mirror the crdt_doc_* shape so the same skills/agent prompts work against native Google Spreadsheets. Auto-registered when an llm_call's `enabled_tools` includes `gsheets`. Auth via Service Account JSON (GOOGLE_APPLICATION_CREDENTIALS) or Application Default Credentials — no per-graph config needed. Formulas are evaluated server-side by Google (USER_ENTERED valueInputOption). UX aliases carried forward from D-T16: `address`↔`addr`, `start`↔`start_addr`, `values`↔`values_2d`, `name`↔`sheet`. Single-A1 ranges auto-expanded (`\"C1\"` → `\"C1:C1\"`). 7 of 9 tools fully wired in v1; the xlsx pair (`gsheets_create_from_xlsx`, `gsheets_export_xlsx`) is published but errors at runtime — see BACKLOG E-T7b. See docs/developer_guide/39_gsheets.md.",
+      "synthetic_tools": [
+        "gsheets_create_spreadsheet", "gsheets_create_from_xlsx", "gsheets_export_xlsx",
+        "gsheets_list_sheets", "gsheets_add_sheet", "gsheets_delete_sheet",
+        "gsheets_read", "gsheets_set_cell", "gsheets_set_range"
+      ],
+      "how_exposed": "Add `\"gsheets\"` to llm_call.config.enabled_tools (flag-only activation, like api_explorer). No tool_configurations entry required. Auth resolves at first call via GOOGLE_APPLICATION_CREDENTIALS env var or ADC.",
+      "lifecycle": "Each call makes one or more HTTPS requests to sheets.googleapis.com / drive.googleapis.com. Tokens cached 50 min. Auto-retry on 429 / 5xx with exponential backoff.",
+      "examples": {
+        "llm_call_with_gsheets": {
+          "description": "llm_call node configured to expose all 9 gsheets tools.",
+          "config_block": {
+            "type": "llm_call",
+            "config": {
+              "provider": "google",
+              "model": "gemini-2.5-flash",
+              "api_key": "${GEMINI_API_KEY}",
+              "prompt": "Read sheet 'Sales' from spreadsheet 1AbC...XyZ and add a Total column.",
+              "enabled_tools": ["gsheets"]
+            }
+          }
+        }
+      },
+      "tool_descriptions": {
+        "gsheets_create_spreadsheet": {
+          "name": "gsheets_create_spreadsheet",
+          "description": "Create a new empty Google Spreadsheet with the given title. Returns {spreadsheet_id, url} you can use in subsequent calls.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "title": { "type": "string", "required": true, "description": "Display title for the new spreadsheet." }
+            },
+            "required": ["title"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "spreadsheet_id": { "type": "string", "description": "Google-assigned spreadsheet ID (use in all subsequent calls)." },
+              "url": { "type": "string", "description": "Human-friendly URL (https://docs.google.com/spreadsheets/d/<id>/edit)." }
+            }
+          }
+        },
+        "gsheets_create_from_xlsx": {
+          "name": "gsheets_create_from_xlsx",
+          "description": "Upload an .xlsx attachment as a NATIVE Google Spreadsheet (auto-conversion via Drive API). attachment_id refers to a file already present in the run's attachment store. Returns {spreadsheet_id, url, sheets[]} with the converted tabs. DEFERRED — calls error at runtime in v1; see BACKLOG E-T7b.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "attachment_id": { "type": "string", "required": true, "description": "ID of an .xlsx attachment registered in the run." },
+              "title": { "type": "string", "required": true, "description": "Display title for the new spreadsheet." }
+            },
+            "required": ["attachment_id", "title"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "spreadsheet_id": { "type": "string" },
+              "url": { "type": "string" },
+              "sheets": { "type": "array", "items": { "type": "object" } }
+            }
+          }
+        },
+        "gsheets_export_xlsx": {
+          "name": "gsheets_export_xlsx",
+          "description": "Download a Google Spreadsheet as .xlsx and register it as an attachment. Returns {attachment_id}. DEFERRED — calls error at runtime in v1; see BACKLOG E-T7b.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "spreadsheet_id": { "type": "string", "required": true }
+            },
+            "required": ["spreadsheet_id"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "attachment_id": { "type": "string", "description": "ID of the newly registered .xlsx attachment." }
+            }
+          }
+        },
+        "gsheets_list_sheets": {
+          "name": "gsheets_list_sheets",
+          "description": "List the tabs (sheets) inside a Google Spreadsheet. Returns {sheets: [{sheet_id, title, index, row_count, col_count}]}.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "spreadsheet_id": { "type": "string", "required": true }
+            },
+            "required": ["spreadsheet_id"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "sheets": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "sheet_id": { "type": "integer", "description": "Numeric Google sheet id (stringified for tool use in delete_sheet)." },
+                    "title": { "type": "string" },
+                    "index": { "type": "integer" },
+                    "row_count": { "type": "integer" },
+                    "col_count": { "type": "integer" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "gsheets_add_sheet": {
+          "name": "gsheets_add_sheet",
+          "description": "Add a new tab (sheet) to an existing Google Spreadsheet. Returns {sheet_id, title}.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "spreadsheet_id": { "type": "string", "required": true },
+              "name": { "type": "string", "required": true, "description": "Title for the new tab. Alias: `sheet`." }
+            },
+            "required": ["spreadsheet_id", "name"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "sheet_id": { "type": "integer" },
+              "title": { "type": "string" }
+            }
+          }
+        },
+        "gsheets_delete_sheet": {
+          "name": "gsheets_delete_sheet",
+          "description": "Delete a tab from a Google Spreadsheet. `sheet` accepts either the human title or a stringified numeric sheet_id.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "spreadsheet_id": { "type": "string", "required": true },
+              "sheet": { "type": "string", "required": true, "description": "Tab title OR stringified numeric sheet_id. Alias: `name`." }
+            },
+            "required": ["spreadsheet_id", "sheet"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "ok": { "type": "boolean" }
+            }
+          }
+        },
+        "gsheets_read": {
+          "name": "gsheets_read",
+          "description": "Read cells from a tab. Defaults: value_render=UNFORMATTED_VALUE (pandas-friendly scalars), as_records=false (2D array). Set value_render='FORMULA' to read formula text instead of evaluated values. Set as_records=true to use the first row as headers and return [{col: val, ...}].",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "spreadsheet_id": { "type": "string", "required": true },
+              "sheet": { "type": "string", "required": true, "description": "Tab title. Alias: `name`." },
+              "range": { "type": "string", "required": false, "description": "Optional A1 range scoped to this sheet (e.g. 'A1:D10'). Single-cell `\"C1\"` auto-expanded to `\"C1:C1\"`. Omit to read the whole tab." },
+              "value_render": { "type": "string", "enum": ["FORMULA", "UNFORMATTED_VALUE", "FORMATTED_VALUE"], "required": false, "description": "How Google should serialize cell values. Default UNFORMATTED_VALUE." },
+              "as_records": { "type": "boolean", "required": false, "default": false, "description": "When true, first row becomes column headers and the body becomes [{col: val}] records — convenient for pandas DataFrame construction." }
+            },
+            "required": ["spreadsheet_id", "sheet"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "ok": { "type": "boolean" },
+              "sheet": { "type": "string" },
+              "range": { "type": "string", "description": "Echo of the resolved A1 range Google returned." },
+              "values": { "type": "array", "description": "2D row-major array when as_records=false; array of {col:val} objects when as_records=true." }
+            }
+          }
+        },
+        "gsheets_set_cell": {
+          "name": "gsheets_set_cell",
+          "description": "Write a single cell. Strings starting with `=` are evaluated by Google as formulas (USER_ENTERED valueInputOption). Cascading recalc happens server-side automatically.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "spreadsheet_id": { "type": "string", "required": true },
+              "sheet": { "type": "string", "required": true, "description": "Tab title. Alias: `name`." },
+              "addr": { "type": "string", "required": true, "description": "Cell address in A1 notation (e.g. 'A1', 'B5'). Alias: `address`." },
+              "value": { "type": ["string", "number", "boolean", "null"], "required": true, "description": "Value to write. Strings starting with `=` are evaluated by Google as formulas." }
+            },
+            "required": ["spreadsheet_id", "sheet", "addr", "value"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "ok": { "type": "boolean" }
+            }
+          }
+        },
+        "gsheets_set_range": {
+          "name": "gsheets_set_range",
+          "description": "Bulk-write a rectangular block of cells starting at start_addr. values_2d is a row-major 2D array. Strings starting with `=` are evaluated by Google as formulas.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "spreadsheet_id": { "type": "string", "required": true },
+              "sheet": { "type": "string", "required": true, "description": "Tab title. Alias: `name`." },
+              "start_addr": { "type": "string", "required": true, "description": "Top-left cell in A1 notation (e.g. 'A1'). Alias: `start`." },
+              "values_2d": {
+                "type": "array",
+                "items": { "type": "array", "items": { "type": ["string", "number", "boolean", "null"] } },
+                "required": true,
+                "description": "Row-major 2D array. Each inner array is one row. Alias: `values`. Strings starting with `=` are evaluated by Google as formulas."
+              }
+            },
+            "required": ["spreadsheet_id", "sheet", "start_addr", "values_2d"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "ok": { "type": "boolean" },
+              "updated_cells": { "type": "integer", "description": "Number of cells Google reported as updated." }
+            }
+          }
+        }
+      },
+      "special_behaviors": [
+        "Flag-only activation: `enabled_tools: [\"gsheets\"]` exposes all 9 tools. No tool_configurations entry needed.",
+        "Auth resolves automatically: GOOGLE_APPLICATION_CREDENTIALS (Service Account JSON path) takes precedence; otherwise ADC via gcloud auth application-default login or GCP metadata server.",
+        "Service Account email must be shared (Edit access) on each spreadsheet the agent touches.",
+        "Formulas are evaluated SERVER-SIDE by Google. Write `\"=SUM(A1:A10)\"` and read back with value_render='UNFORMATTED_VALUE' to get the computed number, or value_render='FORMULA' to get the text.",
+        "UX aliases carried forward from D-T16: `address`↔`addr`, `start`↔`start_addr`, `values`↔`values_2d`, `name`↔`sheet`. Single-A1 ranges auto-expanded (`\"C1\"` → `\"C1:C1\"`).",
+        "Scopes default to spreadsheets + drive.file; override via COLMENA_GSHEETS_SCOPES (comma-separated short names or full URLs).",
+        "Auto-retry on 429 / 5xx with exponential backoff (1s/2s/4s by default; configurable via retry_base_delay in tests).",
+        "gsheets_create_from_xlsx and gsheets_export_xlsx are DEFERRED in v1 — tool defs are published but calls error at runtime. See BACKLOG E-T7b."
+      ],
+      "reference_graphs": [
+        "tests/graphs/agents/gsheets_smoke.json"
+      ]
+    },
+
     "math_nodes": {
       "summary": "Arithmetic nodes (add, subtract, multiply, divide, exponential) can be used as tools when the LLM needs to perform calculations on values it already knows. Expose 'a' and 'b' as LLM parameters.",
       "node_types": ["add", "subtract", "multiply", "divide", "exponential"],

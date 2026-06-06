@@ -415,6 +415,37 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
 
 ---
 
+## Subsystem E v1.1 (Google Sheets)
+
+- [ ] **E-T7b — xlsx attachment plumbing** (deferred from E-T7). The 2 xlsx
+  dispatchers (`gsheets_create_from_xlsx`, `gsheets_export_xlsx`) need
+  attachment-byte fetcher AND register-bytes-as-attachment path. Neither
+  exists today as a tool-dispatcher-accessible helper. Either thread an
+  attachment fetcher/registrar into `DagToolExecutor`, OR add a new
+  sentinel mechanism so the LLM loop handles attachment I/O on the
+  dispatcher's behalf. Tool definitions are already published in
+  `enabled_tools` so once the plumbing exists, agents see no API change.
+- [ ] **`gsheets_list_spreadsheets()`** — Drive discovery scoped to a
+  shared folder. Needs `drive.metadata.readonly` scope and a
+  folder-filter mechanism so the agent doesn't see the whole Drive.
+- [ ] **OAuth user-scoped auth** — act on behalf of a specific human
+  user. Likely a new `SheetsAuthProvider` trait so ADP (or any
+  downstream consumer) can plug in its OAuth flow.
+- [ ] **Cell formatting** — colors, borders, column widths via
+  `batchUpdate` + `repeatCell`/`updateBorders`.
+- [ ] **Charts** via `batchUpdate.addChart`.
+- [ ] **Conditional formatting** via `batchUpdate.addConditionalFormatRule`.
+- [ ] **Data validation (dropdowns)** via `batchUpdate.setDataValidation`.
+- [ ] **Permissions / sharing tools** via `drive.permissions.*`.
+- [ ] **Revisions / undo** via Drive Revisions API.
+- [ ] **Webhook subscriptions** for push notifications on sheet changes.
+- [ ] **Per-call credential overrides** — a graph could provide a different
+  SA for different spreadsheets, useful for multi-tenant scenarios.
+- [ ] **Apps Script execution** from colmena (a single new tool calling
+  `scripts.run`).
+
+---
+
 ## Items resueltos recientemente
 
 El último item — `data:` (base64 inline) auto-summary v2 — se resolvió el 2026-05-18 (ver `docs/CHANGELOG_2026-05.md` → "Inline data: auto-summary (v2)"). Los detalles de la resolución viven en la git history (commits `cc924a3`, `a3053cd`).

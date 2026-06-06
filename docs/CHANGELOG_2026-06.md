@@ -215,3 +215,37 @@ correcto y funciona 100% sin browser; la fix vive en el frontend de ADP. Ver
 BACKLOG → "Univer ↔ yrs formula round-trip".
 
 **Estado.** D-T1..D-T16 done.
+
+---
+
+### E — Google Sheets integration (subsystem E, v1)
+
+- **9 synthetic LLM tools** mirroring `crdt_doc_*` shape: create
+  spreadsheet, create_from_xlsx, export_xlsx, list_sheets, add_sheet,
+  delete_sheet, read, set_cell, set_range. Tool descriptions are
+  deliberately parallel so skills transfer with find-and-replace.
+- **Hexagonal layout** at `src/libs/colmena/src/gsheets/`: `SheetsClient`
+  trait in domain, `GoogleSheetsHttpClient` REST adapter in
+  infrastructure. Tests mock the trait; integration tests `#[ignore]`-gated
+  behind `GOOGLE_APPLICATION_CREDENTIALS` + `COLMENA_GSHEETS_TEST_SPREADSHEET_ID`.
+- **Auth via existing `yup-oauth2`** — Service Account JSON via
+  `GOOGLE_APPLICATION_CREDENTIALS` or Application Default Credentials.
+  Same pattern as `image_generation.rs`. **Zero new dependencies.**
+- **Formulas evaluated by Google** — write a `"=SUM(...)"` string and
+  read back via `value_render: "UNFORMATTED_VALUE"` (computed) or
+  `"FORMULA"` (text). No client-side formula engine here.
+- **Auto-retry on 429 / 5xx** with exponential backoff (1s/2s/4s
+  production, 50ms/100ms/200ms in tests via configurable
+  `retry_base_delay`).
+- **UX aliases** carried forward from D-T16: `address`/`addr`,
+  `start`/`start_addr`, `values`/`values_2d`, `name`/`sheet`.
+- **Skill `gsheets-cross-sheet-analysis`** — mirror of F's CRDT skill,
+  6 pattern references.
+- **No OAuth user-scoped flow in v1.** Deferred to v1.1 so ADP (or any
+  downstream) can build it on top.
+- **xlsx upload/export deferred to E-T7b** — tool definitions published
+  but require attachment-byte plumbing that doesn't exist yet. The other
+  7 tools are fully wired and functional.
+
+Refs: spec `docs/superpowers/specs/2026-06-05-google-sheets-design.md`,
+plan `docs/superpowers/plans/2026-06-05-google-sheets.md`.
