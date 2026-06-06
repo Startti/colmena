@@ -7,7 +7,7 @@
         "path": "/e-smoke",
         "method": "POST",
         "test_payload": {
-          "prompt": "Run a Google Sheets smoke:\n1. Create a new spreadsheet titled 'Colmena E Smoke <UTC timestamp>'. Capture its spreadsheet_id and url.\n2. Add a tab named 'Numbers'.\n3. Use set_range starting at A1 with values_2d=[[10],[20],[30],[40],[50]].\n4. Set B1 to formula =SUM(A1:A5).\n5. Read B1 with value_render='UNFORMATTED_VALUE' — confirm it's 150.\n6. Read B1 with value_render='FORMULA' — confirm it's '=SUM(A1:A5)'.\n7. Final report (under 200 words): the spreadsheet url + the value/formula you read."
+          "prompt": "Run a Google Sheets smoke. Use ONLY these exact tool names (with the gsheets_ prefix):\n\n1. Call gsheets_create_spreadsheet({title: 'Colmena E Smoke <UTC timestamp>'}). Capture spreadsheet_id and url from the response.\n2. Call gsheets_add_sheet({spreadsheet_id, name: 'Numbers'}).\n3. Call gsheets_set_range({spreadsheet_id, sheet: 'Numbers', start_addr: 'A1', values_2d: [[10],[20],[30],[40],[50]]}).\n4. Call gsheets_set_cell({spreadsheet_id, sheet: 'Numbers', addr: 'B1', value: '=SUM(A1:A5)'}).\n5. Call gsheets_read({spreadsheet_id, sheet: 'Numbers', range: 'B1', value_render: 'UNFORMATTED_VALUE'}). Confirm the value is 150.\n6. Call gsheets_read({spreadsheet_id, sheet: 'Numbers', range: 'B1', value_render: 'FORMULA'}). Confirm the value is '=SUM(A1:A5)'.\n7. Final report (under 200 words): the spreadsheet url + the value/formula you read."
         }
       }
     },
@@ -19,9 +19,9 @@
         "model": "gemini-2.5-flash",
         "stream": false,
         "max_iterations": 15,
-        "lazy_tool_loading": true,
+        "lazy_tool_loading": false,
         "connection_url": "${DATABASE_URL}",
-        "system_message": "You are an assistant exercising the Google Sheets tool surface. Use gsheets_* tools. Report what you observed at each step (cell counts, formula text, evaluated values).",
+        "system_message": "You are an assistant exercising the Google Sheets tool surface. Use ONLY the exact tool names provided in your tool schemas (they all start with gsheets_). Do NOT invent tool names or drop the prefix. Report what you observed at each step (cell counts, formula text, evaluated values).",
         "enabled_tools": [
           "gsheets_create_spreadsheet",
           "gsheets_add_sheet",
