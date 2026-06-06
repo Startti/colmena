@@ -723,6 +723,35 @@ impl DagRunUseCase {
         }
     }
 
+    /// Compute the set of node ids whose persisted output has
+    /// `__colmena_status: "SUSPENDED"` (recursive search via
+    /// `find_status_by_key`). Returns an empty set when `resume_answer`
+    /// is `None` — there's no run to resume, so nothing to inject into.
+    ///
+    /// See spec
+    /// `docs/superpowers/specs/2026-06-05-suspend-resume-answer-routing-fix-design.md`
+    /// §4.1.1.
+    fn compute_resuming_node_ids(
+        all_outputs: &std::collections::HashMap<String, Value>,
+        resume_answer: &Option<String>,
+    ) -> std::collections::HashSet<String> {
+        if resume_answer.is_none() {
+            return std::collections::HashSet::new();
+        }
+        all_outputs
+            .iter()
+            .filter_map(|(nid, out)| {
+                if Self::find_status_by_key(out, "__colmena_status")
+                    == Some("SUSPENDED".to_string())
+                {
+                    Some(nid.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     fn find_status_by_key(val: &Value, key: &str) -> Option<String> {
         if let Some(obj) = val.as_object() {
             if let Some(status) = obj.get(key).and_then(|v| v.as_str()) {
@@ -1004,5 +1033,77 @@ impl SubGraphExecutorPort for DagRunUseCase {
         } else {
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod resuming_node_ids_tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    #[test]
+    fn empty_when_resume_answer_is_none() {
+        let mut all = HashMap::new();
+        all.insert(
+            "n1".to_string(),
+            json!({ "__colmena_status": "SUSPENDED" }),
+        );
+        let set = DagRunUseCase::compute_resuming_node_ids(&all, &None);
+        assert!(set.is_empty(), "fresh run must yield empty set");
+    }
+
+    #[test]
+    fn includes_only_suspended_nodes() {
+        let mut all = HashMap::new();
+        all.insert(
+            "suspended_one".to_string(),
+            json!({ "__colmena_status": "SUSPENDED", "question": "x" }),
+        );
+        all.insert(
+            "ran_fine".to_string(),
+            json!({ "output": 42 }),
+        );
+        all.insert(
+            "another_suspend".to_string(),
+            json!({ "__colmena_status": "SUSPENDED" }),
+        );
+        let set = DagRunUseCase::compute_resuming_node_ids(
+            &all,
+            &Some("anything".to_string()),
+        );
+        assert_eq!(set.len(), 2);
+        assert!(set.contains("suspended_one"));
+        assert!(set.contains("another_suspend"));
+        assert!(!set.contains("ran_fine"));
+    }
+
+    #[test]
+    fn finds_suspended_in_nested_output() {
+        // Mirrors the orchestrator/subgraph wrap case where the SUSPENDED
+        // marker is nested inside the parent's output structure.
+        let mut all = HashMap::new();
+        all.insert(
+            "wrapper".to_string(),
+            json!({
+                "result": { "__colmena_status": "SUSPENDED" },
+                "meta": { "child": "inner_node" }
+            }),
+        );
+        let set = DagRunUseCase::compute_resuming_node_ids(
+            &all,
+            &Some("ans".to_string()),
+        );
+        assert!(set.contains("wrapper"));
+    }
+
+    #[test]
+    fn empty_all_outputs_yields_empty_set() {
+        let all: HashMap<String, serde_json::Value> = HashMap::new();
+        let set = DagRunUseCase::compute_resuming_node_ids(
+            &all,
+            &Some("ans".to_string()),
+        );
+        assert!(set.is_empty());
     }
 }
