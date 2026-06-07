@@ -46,15 +46,46 @@ gsheets_set_range:
 gsheets_run_python:
   summary: Run sandboxed pandas analysis over sheet ranges loaded directly by the dispatcher (rows never pass through the LLM)
   description: |
-    Run sandboxed Python (pandas/numpy/scipy.stats) over data loaded directly from Google Sheets. Each `bindings` entry becomes a Python global (a list of dicts you can pass to pd.DataFrame). Rows NEVER pass through the LLM — only the final `output`. Use this for any analysis over more than ~50 rows.
+    Run sandboxed Python (pandas/numpy/scipy.stats) over data loaded directly from Google Sheets. Rows NEVER pass through the LLM — only the final `output`. Use this for any analysis over more than ~50 rows.
 
-    For results that belong in the spreadsheet (not the conversation),
-    assign `output_sheets = {"<tab_name>": <DataFrame>, ...}` in your code
-    and pass `write_to_spreadsheet: "<spreadsheet_id>"` as an arg. The
-    dispatcher creates one new tab per dict entry; the LLM only receives
-    metadata `{name, resolved_name, sheet_id, n_rows, n_cols}` per tab,
-    never the row contents. Name collisions auto-suffix " (2)", " (3)".
+    ## Arguments
 
-    For more patterns and pitfalls, load the `gsheets-table-exploration`
-    skill (single-table inspection) or `gsheets-cross-sheet-analysis`
-    skill (joins, comparisons).
+    - `bindings`: ARRAY of objects (NOT a dict, NOT a string). Each object has `var` (Python variable name), `spreadsheet_id`, `sheet`, optional `range`. The dispatcher fetches each binding in parallel.
+    - `code`: Python source string. Each binding's `var` becomes a Python global holding a list of dicts (the sheet's rows). Build DataFrames inside the code with `pd.DataFrame(<var>)`.
+    - `write_to_spreadsheet` (optional string): Spreadsheet ID where new tabs go when the code assigns `output_sheets`.
+
+    ## Example call (copy this EXACT shape)
+
+    ```json
+    {
+      "bindings": [
+        {"var": "products", "spreadsheet_id": "1abc...", "sheet": "products"},
+        {"var": "sales",    "spreadsheet_id": "1xyz...", "sheet": "sales"}
+      ],
+      "code": "import pandas as pd\nprods = pd.DataFrame(products)\nsold  = pd.DataFrame(sales)\nmerged = sold.merge(prods, on='product_id', how='left')\noutput = {'rows': len(merged)}",
+      "write_to_spreadsheet": "1xyz..."
+    }
+    ```
+
+    ⚠️ Common LLM mistake: passing `bindings` as a dict like `{"products": "...", "sales": "..."}`. That FAILS validation with `invalid type: map, expected a sequence`. Always use an ARRAY of objects with explicit `var`, `spreadsheet_id`, `sheet` keys.
+
+    ## Multi-sheet write-back (large results stay out of the LLM)
+
+    To write multiple result tables as new tabs, assign a Python dict `output_sheets` IN YOUR CODE (this is NOT a tool argument — it's a global your code sets) and pass `write_to_spreadsheet` AS A TOOL ARG. Example code:
+
+    ```python
+    import pandas as pd
+    p = pd.DataFrame(products)
+    s = pd.DataFrame(sales)
+    enriched = s.merge(p, on='product_id', how='left')
+    output_sheets = {
+        'Ventas Enriquecidas': enriched,
+        'Resumen por Categoría': enriched.groupby('category')['total'].sum().reset_index(),
+        'Resumen por Región':    enriched.groupby('region')['total'].sum().reset_index(),
+    }
+    output = {'tabs_written': 3}
+    ```
+
+    The dispatcher creates one new tab per dict entry; the LLM receives only metadata `{name, resolved_name, sheet_id, n_rows, n_cols}` per tab, never row contents. Name collisions auto-suffix " (2)", " (3)".
+
+    For more patterns and pitfalls, load the `gsheets-table-exploration` skill (single-table inspection) or `gsheets-cross-sheet-analysis` skill (joins, comparisons).
