@@ -408,3 +408,112 @@ fn truncate_json(v: &serde_json::Value, cap: usize) -> (serde_json::Value, bool)
         )
     }
 }
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crdt_documents::{ArtifactId, CrdtDocumentsRuntime};
+    use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::crdt_doc_tools::{
+        execute_add_sheet, execute_list_sheets, execute_set_range, AddSheetArgs, SetRangeArgs,
+    };
+    use serde_json::json;
+    use std::sync::Arc;
+
+    async fn make_runtime() -> Arc<CrdtDocumentsRuntime> {
+        let tmp = std::env::temp_dir().join(format!("crdt_py_{}", ulid::Ulid::new()));
+        let cfg = json!({ "storage_root": tmp.to_str().unwrap() });
+        Arc::new(CrdtDocumentsRuntime::from_config(&cfg).await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn multi_sheet_output_sheets_writes_three_new_tabs() {
+        // Ensure the Python interpreter is ready (same pattern as python_node tests).
+        pyo3::prepare_freethreaded_python();
+
+        // Build in-memory runtime + artifact with one sheet "src" (3 rows).
+        let rt = make_runtime().await;
+        let id = ArtifactId::new();
+        let _ = rt.registry.get_or_create(&id, "workbook");
+        let ctx = CrdtDocsContext::new_local(rt, id, Some("test_session".to_string()));
+
+        // Add the "src" sheet and seed header + 2 data rows.
+        let add_result = execute_add_sheet(&ctx, AddSheetArgs { name: "src".into() }).await;
+        let sheet_id = add_result["sheet_id"].as_str().unwrap().to_string();
+        execute_set_range(
+            &ctx,
+            SetRangeArgs {
+                sheet_id: sheet_id.clone(),
+                start_addr: "A1".into(),
+                values_2d: vec![
+                    vec![json!("k"), json!("v")],
+                    vec![json!("a"), json!("1")],
+                    vec![json!("b"), json!("2")],
+                ],
+            },
+        )
+        .await;
+
+        let args = RunPythonArgs {
+            sheet_ids: vec![sheet_id.clone()],
+            code: format!(
+                r#"
+import pandas as pd
+df = pd.DataFrame(dfs["{sid}"])
+output_sheets = {{
+    "tab_one":   df.head(1),
+    "tab_two":   df.tail(1),
+    "tab_three": df,
+}}
+output = {{"done": True}}
+"#,
+                sid = sheet_id
+            ),
+            write_to_sheet: None,
+        };
+        let result = execute_run_python(&ctx, args).await;
+
+        // Skip gracefully if pandas is not installed in this test environment.
+        if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+            if err.contains("No module named 'pandas'") {
+                eprintln!("SKIPPED (no pandas in test env): {err}");
+                return;
+            }
+        }
+
+        // The response must include 3 wrote_sheets entries.
+        let wrote = result
+            .get("wrote_sheets")
+            .and_then(|v| v.as_array())
+            .unwrap_or_else(|| {
+                panic!(
+                    "wrote_sheets should be an array; full result: {}",
+                    serde_json::to_string_pretty(&result).unwrap_or_default()
+                )
+            });
+        assert_eq!(
+            wrote.len(),
+            3,
+            "expected 3 wrote_sheets entries, got {}; result: {}",
+            wrote.len(),
+            serde_json::to_string_pretty(&result).unwrap_or_default()
+        );
+
+        // Verify the 3 new sheets actually exist in the runtime.
+        let list_result = execute_list_sheets(&ctx);
+        let sheets = list_result["sheets"].as_array().expect("sheets array");
+        let names: std::collections::HashSet<String> = sheets
+            .iter()
+            .filter_map(|s| s["name"].as_str().map(String::from))
+            .collect();
+        for needle in &["tab_one", "tab_two", "tab_three"] {
+            assert!(
+                names.contains(*needle),
+                "missing sheet '{}'; sheets present: {:?}",
+                needle,
+                names
+            );
+        }
+    }
+}
