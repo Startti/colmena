@@ -14,6 +14,7 @@ For context on skills design and authoring, see
 |---|---|---|
 | `crdt-doc-cross-sheet-analysis` | Patterns for comparing two CRDT sheets, joining/enriching, transforming rows based on conditions from another sheet. | [SKILL.md](../../src/libs/colmena/skills/crdt-doc-cross-sheet-analysis/SKILL.md) |
 | `crdt-doc-formulas` | Excel-style formulas in a CRDT spreadsheet — the `{v,f,fs}` cell schema, `include_formulas=true`, `needs_browser` warning handling. | [SKILL.md](../../src/libs/colmena/skills/crdt-doc-formulas/SKILL.md) |
+| `crdt-doc-table-exploration` | Single-table patterns for CRDT documents — inspect schema first, top-N via nlargest, filters via query, type coercion, multi-tab output. | [link](../../src/libs/colmena/skills/crdt-doc-table-exploration/SKILL.md) |
 | `crdt-doc-run-python` | Calling the `crdt_doc_run_python` tool — DataFrame shape rules, output protocol, type quirks, debugging. | [SKILL.md](../../src/libs/colmena/skills/crdt-doc-run-python/SKILL.md) |
 | `expense-analysis` | Analyzing expense data — categories, vendor rollups, period comparisons. | [SKILL.md](../../src/libs/colmena/skills/expense-analysis/SKILL.md) |
 | `gsheets-cross-sheet-analysis` | Same cross-sheet patterns as `crdt-doc-cross-sheet-analysis`, but via Google Sheets `gsheets_*` tools. | [SKILL.md](../../src/libs/colmena/skills/gsheets-cross-sheet-analysis/SKILL.md) |
