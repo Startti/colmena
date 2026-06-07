@@ -146,10 +146,11 @@ fn write_sheet(
         ));
     }
 
-    // Write headers to row 1.
+    // Write headers to row 1. SetCellOutcome carries warnings + recalc counts
+    // we discard here; the Python binding has no caller surface for them.
     for (col_idx, col_name) in columns.iter().enumerate() {
         let addr = format!("{}{}", col_letter(col_idx as u32), 1);
-        crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
+        let _ = crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
             &entry.doc,
             sheet_id,
             &addr,
@@ -161,7 +162,7 @@ fn write_sheet(
         for (col_idx, py_val) in row.iter().enumerate() {
             let addr = format!("{}{}", col_letter(col_idx as u32), row_idx + 2);
             let value = pyobj_to_json(py, py_val)?;
-            crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
+            let _ = crate::crdt_documents::tool_executor::apply_set_cell_in_proc(
                 &entry.doc, sheet_id, &addr, &value,
             );
         }
