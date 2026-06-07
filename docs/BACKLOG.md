@@ -841,25 +841,18 @@ guides the LLM more.
 
 ---
 
-## HTML preset `image_gen_then_edit_openai_dev` roto post Plan B (2026-05-25)
+## ~~HTML preset `image_gen_then_edit_openai_dev` roto post Plan B (2026-05-25)~~ — RESUELTO 2026-06-07
 
-- **Origen:** E2E verification — Phase 2.4 del runbook `verifying_deployed_worker.md` (2026-06-07). El preset HTML define un chain `gen → edit` con el edge `gen.output.images.0.url → edit.source_url`. Pero la migración Plan B shipped el 2026-05-25 **eliminó el field `url`** del payload de respuesta de `image_generation` y `image_edit` — solo queda `document_id`. El edge queda apuntando a un field inexistente.
-- **Problema:** cuando se ejecuta el preset, el trigger corre pero los nodos `gen` y `edit` NO se ejecutan porque la resolución del edge da `null` y el DAG bloquea silenciosamente. El run termina con un `finish` que solo contiene `trigger: {}` — sin error event, sin warning, sin nada que indique el problema.
-- **Impacto:** el preset es engañoso: cualquiera que lo use ve "completó OK" pero sin output real. Cualquier test de regresión que use este preset sigue dando verde aunque la chain esté rota.
-- **Workaround actual:** no usar el preset. Para validar chain gen→edit manualmente, hacer 2 jobs separados pasando el `document_id` del primero como argumento al segundo. Pero `image_edit` necesita un URL en `source_url`, no un `document_id` — habría que pre-resolver el `document_id` a un signed URL vía `/api/attachments/<doc_id>/url`.
-- **Por qué está parqueado:** preset HTML no es de prod — es testing/demos. El bug es de UX del playground, no de runtime. Tiene 2 fixes posibles y ninguno es urgente.
-- **Fix propuesto (2 opciones):**
-  - **Opción A — Restaurar el `url` en el payload de respuesta de image_generation** (pero firmando-on-demand, no almacenándolo crudo). Esto rompe el contrato Plan B que dice "el LLM solo ve `document_id`". Probable rechazado.
-  - **Opción B — Cambiar el preset HTML** para que sea un agente LLM que recibe `document_id` y llama a un tool `resolve_attachment_url` para obtener un URL firmado y luego invoca image_edit. Esto refleja cómo un agente real haría el chain post-Plan B. Más fiel al flow productivo.
-- **Acceptance criteria (opción B):**
-  - El preset corre `gen → resolve_url → edit` y devuelve una imagen editada.
-  - Documentado en el HTML como ejemplo de chain post-Plan B.
-- **Estimación:** ~1 hora para diseñar el nuevo preset + agregar al HTML. No requiere cambios en Rust.
-- **Cuándo retomar:** cuando se quiera demostrar el chain de multimedia en una demo o cuando alguien reporte que el preset no funciona.
-- **Referencias:**
-  - SSE evidencia: `/tmp/colmena_e2e/2.4_gen_then_edit.sse` (efímero).
-  - HTML preset: `apps/service/ia/platform/test_stream_cloud.html` → `PRESET_DAGS.image_gen_then_edit_openai_dev`.
-  - Plan B migration notes: [`docs/superpowers/specs/2026-05-25-plan-b-adp-migration-notes.md`](superpowers/specs/2026-05-25-plan-b-adp-migration-notes.md).
+**Resolución (2026-06-07, ADP commit en `feat/fix-image-gen-edit-preset`):** Reemplazado en ADP `test_stream_cloud.html` por el preset `image_edit_from_web_url` que valida `image_edit` end-to-end usando una URL pública estable de Wikimedia como `source_url`, sin intentar chain desde `generate_image`. Adicionalmente las descripciones de `generate_image`, `speak_text` y `edit_image` del preset `multimedia_agent_dev` se corrigieron para reflejar el shape real post Plan B (solo `document_id`, sin `url` ni `attachment_id`) y advierten explícitamente que `edit_image.source_url` no acepta document_ids ni `$attachment:` placeholders.
+
+**Trabajo futuro relacionado (no parqueado acá, abrir nueva entrada cuando se necesite):** si se requiere demostrar chain `generate_image → edit_image` end-to-end en una demo, hay 2 caminos:
+- **Camino A — Extender `image_edit.fetch_image()`** en colmena para que acepte `$attachment:<document_id>` y resuelva via attachment registry. Requiere cambios en Rust + tests. ~2-4h.
+- **Camino B — Preset HTML con `resolve_attachment_url` tool** vía `http_request` a `/api/attachments/<id>/url` con cookie auth. Solo cambia el playground, no toca Rust. ~1h. Requiere ADP_SESSION_TOKEN en el panel de credenciales.
+
+Conservado para referencia histórica:
+- **Origen:** E2E verification — Phase 2.4 del runbook `verifying_deployed_worker.md` (2026-06-07). El preset HTML definía un chain `gen → edit` con el edge `gen.output.images.0.url → edit.source_url`. Pero la migración Plan B shipped el 2026-05-25 eliminó el field `url` del payload de respuesta de `image_generation` y `image_edit` — solo queda `document_id`. El edge quedaba apuntando a un field inexistente.
+- **Síntoma observado:** el trigger corría pero los nodos `gen` y `edit` NO se ejecutaban porque la resolución del edge daba `null` y el DAG bloqueaba silenciosamente. El run terminaba con un `finish` que solo contenía `trigger: {}` — sin error event, sin warning.
+- **Referencias originales:** SSE `/tmp/colmena_e2e/2.4_gen_then_edit.sse` (efímero); Plan B migration: [`docs/superpowers/specs/2026-05-25-plan-b-adp-migration-notes.md`](superpowers/specs/2026-05-25-plan-b-adp-migration-notes.md).
 
 ---
 
