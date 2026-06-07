@@ -724,33 +724,31 @@ guides the LLM more.
 
 ---
 
-## Lazy tool loading — OpenAI message-order regression al cerrar el turn
+## ~~Lazy tool loading — OpenAI message-order regression al cerrar el turn~~ — RESUELTO 2026-06-07
 
-- **Origen:** E2E verification del worker desplegado (Cloud Run dev) — Phase 1.2 del runbook `verifying_deployed_worker.md` (2026-06-07). El graph `lazy_tools` con `provider: openai`, `lazy_tool_loading: true`, 3 tools (`current_time` eager, `add` y `multiply` lazy) ejecutó las 5 tool calls correctamente: `current_time() → describe_tool(multiply) → describe_tool(add) → add(25,17)=42 → multiply(42,3)=126`. Cinco `tool-output-available` events sin error. Pero al cerrar el turn (la llamada final al LLM para sintetizar la respuesta) OpenAI rechazó la historia con `invalid_request_error`.
-- **Problema:** error textual del provider:
-  ```
-  Invalid parameter: messages with role 'tool' must be a response
-  to a preceeding message with 'tool_calls'.
-  param: messages.[2].role
-  ```
-  El error indica que **mensaje #2 en la historia enviada es role=tool sin un assistant con `tool_calls` antes**. La hipótesis es que `describe_tool` (synthetic tool de colmena) inyecta un mensaje role=tool **sin haber generado un assistant.tool_calls previo en la historia que se persiste/restaura**. En modo eager el problema no ocurre porque cada tool call sí genera el par {assistant.tool_calls, tool.response} naturalmente. En modo lazy, `describe_tool` parece bypasear el par.
-- **Workaround actual:** desactivar `lazy_tool_loading: true` para agentes OpenAI. Eager tool loading (`enabled_tools: [...]`) sigue funcionando 100% — Phase 1.1 lo confirma (`add` + `multiply` end-to-end). Lazy loading sigue funcionando para Gemini/google según las pruebas previas del feature shipped 2026-05-29 (`developer_guide/29_lazy_tool_loading.md`).
-- **Por qué está parqueado:** alcance limitado a OpenAI + lazy. Anthropic no probado todavía. La feature de lazy loading en sí está OK para Gemini; el bug es en cómo el OpenAI adapter persiste/serializa la historia cuando `describe_tool` aparece. La urgencia depende de si ADP planea usar OpenAI con lazy en producción.
-- **Fix propuesto:** tres pasos:
-  1. Reproducir local con un unit test: el adapter OpenAI con historial que incluya `describe_tool` antes de un tool real, verificar el cuerpo del request `messages[]` que arma `openai_adapter.rs`. Confirmar que mensaje #2 (el `describe_tool` result) NO tiene su correspondiente assistant.tool_calls en mensaje #1.
-  2. Inspeccionar dónde colmena ensambla la conversación cuando `lazy_tool_loading=true`: probablemente en `llm/application/lazy_loader.rs` o en el path donde se intercala el output de `describe_tool` con el flujo principal del agente.
-  3. Decidir si la fix es (a) hacer que `describe_tool` aparezca como un assistant.tool_calls + tool.response par sintético, igualando lo que OpenAI espera; o (b) saltar `describe_tool` del array `messages[]` que se manda a OpenAI (que el LLM no la "vea" en su propia historia — solo en su current-turn context). La opción (a) es la más fiel; (b) es la más simple y segura.
-- **Acceptance criteria:**
-  - Integration test que reejecuta el graph `lazy_tools` con `provider: openai` y completa sin error.
-  - Unit test del OpenAI adapter que toma una historia con `describe_tool` + tool real y verifica que el body de request cumple el invariante "tool role messages must follow tool_calls".
-  - Phase 1.2 del E2E runbook (`verifying_deployed_worker.md`) pasa green.
-- **Estimación:** ~3-4 horas. Reproducir local (~1h), fix (~30-90min según opción), tests (~1h).
-- **Cuándo retomar:** si ADP planea usar OpenAI con lazy en prod, ASAP. Si solo usa Gemini con lazy (default actual), parqueable.
-- **Referencias:**
-  - SSE evidencia: `/tmp/colmena_e2e/1.2_lazy_tools.sse` (post mortem local del 2026-06-07; archivo efímero — re-generable con el preset `lazy_tools` del HTML `apps/service/ia/platform/test_stream_cloud.html`).
-  - Doc del feature original: [`docs/developer_guide/29_lazy_tool_loading.md`](developer_guide/29_lazy_tool_loading.md).
-  - Runbook E2E: [`/Users/danielgarcia/startti/adp/apps/service/ia/platform/docs/deployment/verifying_deployed_worker.md`](#phase-1) Phase 1.2.
-  - HTML preset (input para reproducir): preset `lazy_tools` en `apps/service/ia/platform/test_stream_cloud.html`.
+**Root cause real (encontrado 2026-06-07):** NO era un problema del OpenAI adapter ni del flujo synthetic-tool de colmena. El bug estaba en **`compact_history_to_summary`** en [`src/libs/colmena/src/llm/application/agent_service.rs:745`](../src/libs/colmena/src/llm/application/agent_service.rs:745). La compactación dividía la historia en `keep_first / middle / keep_recent` para optimizar tokens, pero la frontera entre `middle` (que se reemplaza por un summary) y `kept_recent` (que se mantiene verbatim) **podía caer dentro de una secuencia `{assistant.tool_calls, tool, tool, ...}`**. Como resultado, el `assistant` quedaba en `middle` (summarizado y descartado), pero sus `tool` responses quedaban en `kept_recent` — **tool messages huérfanos** sin assistant.tool_calls precedente, lo que OpenAI rechaza con `'messages with role 'tool' must be a response to a preceding message with 'tool_calls''`.
+
+El issue es ÉL MISMO que motiva [el hallazgo #3 (OpenAI Responses API `input_text` invalid en synthetic-tool path)](#openai-responses-api--input_text-invalid-en-synthetic-tool-path). El shape malformado golpea ambos endpoints OpenAI (Chat Completions + Responses) con errores distintos pero misma raíz.
+
+**Fix shipped:** en `compact_history_to_summary`, antes de slicear, walk `middle_end` backwards while `messages[middle_end].role() == Tool`. Esto pulls todas las tool messages contiguas Y su `assistant.tool_calls` precedente al `kept_recent`, preservando el par invariante requerido por OpenAI Chat Completions y Responses API.
+
+```rust
+// Before slicing, ensure the boundary doesn't fall mid-tool-sequence.
+let mut middle_end = initial_middle_end;
+while middle_end > keep_first && matches!(messages[middle_end].role(), MessageRole::Tool) {
+    middle_end -= 1;
+}
+```
+
+**Test regresivo agregado** (`summary_never_orphans_tool_message_after_compaction`): reproduce el escenario exacto del E2E Phase 1.2 — assistant con 5 parallel tool_calls + 5 tool responses, keep_first=2, keep_recent=5. Sin el fix, deja 5 tool messages huérfanos en kept_recent. Con el fix, el assistant se pulla al kept_recent y la invariante se mantiene. Test escanea cada Tool message en el output y verifica que tenga un Assistant con tool_calls precedente. Suite full pasa (1467 tests, 0 failures).
+
+**Por qué la hipótesis original era incorrecta:** miré el código de `describe_tool` (synthetic tool en `dag_engine/infrastructure/dag_tool_executor.rs:633`) y confirmé que se ejecuta como tool normal — produce un par `{assistant.tool_calls, tool}` natural. El bug NO es en la inyección, sino en la compactación posterior. Misma compactación afecta a Gemini pero Gemini es más permisivo y no rechaza, solo degrada en calidad de respuesta (la pareja rota se ignora).
+
+**Conservado para referencia histórica:**
+- **Origen:** E2E verification del worker desplegado (Cloud Run dev) — Phase 1.2 del runbook `verifying_deployed_worker.md` (2026-06-07). El graph `lazy_tools` con `provider: openai`, `lazy_tool_loading: true`, 3 tools (`current_time` eager, `add` y `multiply` lazy) ejecutó las 5 tool calls correctamente: `current_time() → describe_tool(multiply) → describe_tool(add) → add(25,17)=42 → multiply(42,3)=126`. Cinco `tool-output-available` events sin error. Pero al cerrar el turn OpenAI rechazó la historia con `invalid_request_error: messages.[2].role`.
+- **Síntoma observado:** error del provider `'messages with role 'tool' must be a response to a preceding message with 'tool_calls'. param: messages.[2].role'`.
+- **Hipótesis original (descartada):** synthetic tools de colmena (`describe_tool`, `load_attachment`) inyectaban tool messages sin assistant.tool_calls precedente. Lectura del código confirmó que NO — el flujo es correcto. El bug emergía sólo después de compactación.
+- **Referencias originales:** SSE `/tmp/colmena_e2e/1.2_lazy_tools.sse` (efímero); Runbook E2E Phase 1.2.
 
 ---
 
@@ -780,36 +778,26 @@ guides the LLM more.
 
 ---
 
-## OpenAI Responses API — `input_text` invalid en synthetic-tool path
+## ~~OpenAI Responses API — `input_text` invalid en synthetic-tool path~~ — RESUELTO 2026-06-07
 
-- **Origen:** E2E verification — Phase 3.1 (`pdf_analyst_base64`) y Phase 4.1 (`sql_products_readonly`) del runbook `verifying_deployed_worker.md` (2026-06-07). Es una variante del bug ya registrado para Chat Completions ("lazy_tools OpenAI regression"), pero golpea la Responses API que es el path nuevo de OpenAI.
-- **Problema:** error textual del provider tras un round-trip que involucra synthetic tools de colmena (`load_attachment`, `describe_tool`, etc.):
+**Misma raíz que el entry de Chat Completions arriba.** El bug NO estaba en el adapter OpenAI ni en cómo se serializan los synthetic tools — estaba en `compact_history_to_summary` ([`agent_service.rs:745`](../src/libs/colmena/src/llm/application/agent_service.rs:745)) dejando `tool` messages huérfanos en `kept_recent` cuando la frontera de compactación caía dentro de una secuencia `{assistant.tool_calls, tool, tool, ...}`. La historia malformada (tool sin assistant.tool_calls precedente) hacía que el OpenAI Responses adapter intentara serializar el primer tool message con el content-type incorrecto, disparando `Invalid value: 'input_text'. Supported values: 'output_text', 'refusal'`. El síntoma era distinto al de Chat Completions pero la causa raíz era la misma.
+
+**Fix shipped:** ver entrada hermana arriba ("Lazy tool loading — OpenAI message-order regression"). La compactación ahora preserva el par `{assistant.tool_calls, tool*}` intacto al evitar splittear la frontera dentro de la secuencia. Cubre simultáneamente:
+- Phase 1.2 (`lazy_tools` con OpenAI Chat Completions)
+- Phase 3.1 (`pdf_analyst_base64` con OpenAI Responses API + `load_attachment`)
+- Phase 4.1 (`sql_products_readonly` con OpenAI + muchas SQL queries acumulando historia)
+
+**Test regresivo:** `summary_never_orphans_tool_message_after_compaction` en `agent_service.rs:tests`.
+
+**Conservado para referencia histórica:**
+- **Origen:** E2E verification — Phase 3.1 (`pdf_analyst_base64`) y Phase 4.1 (`sql_products_readonly`) del runbook `verifying_deployed_worker.md` (2026-06-07).
+- **Síntoma observado:**
   ```
   Invalid value: 'input_text'. Supported values are: 'output_text' and 'refusal'.
   param: input[2].content[0]
   ```
-  El OpenAI Responses API tiene un schema diferente a Chat Completions: para mensajes que NO son user-input, `content[0].type` debe ser `output_text` (para assistant outputs) o `refusal` (para rechazos). El adapter colmena está mandando `input_text` cuando reinyecta el resultado del synthetic tool en la historia.
-- **Hipótesis técnica:** cuando un synthetic tool retorna (e.g. `load_attachment` devuelve `{document_id, status: "loaded"}` como marker ephemeral), el adapter OpenAI Responses lo serializa como `{role: "tool", content: [{type: "input_text", text: ...}]}` cuando debería ser `{role: "tool", content: [{type: "output_text", text: ...}]}` o el equivalente correcto del Responses API. Misma raíz que el bug de Chat Completions ("lazy_tools regression") — ambos: el adapter no respeta el invariante de message-shape de OpenAI en presencia de synthetic tools.
-- **Workaround actual:**
-  - Para `pdf_analyst_base64` (Phase 3.1): usar provider Gemini en vez de OpenAI. Plan B autoinject funciona limpio con Gemini (probado en Phase 3.3).
-  - Para `sql_products_readonly` (Phase 4.1): el SQL node ejecuta correctamente, pero el LLM hace muchas queries en cascada y eventualmente acumula una historia que rompe. Workaround: prompt más estricto que limite # de queries, o cambiar a Gemini.
-- **Por qué está parqueado:** mismo análisis que el bug de Chat Completions — depende de si ADP usa OpenAI en producción con Responses API. Si solo Gemini en prod, parqueable. Si OpenAI sí — bloqueante.
-- **Fix propuesto:** un solo fix probable cubre ambos bugs (Chat Completions + Responses):
-  1. Localizar el OpenAI adapter (`src/libs/colmena/src/llm/infrastructure/openai_adapter.rs` o similar). Identificar el path donde se serializa la respuesta de un synthetic tool en el message array.
-  2. Para Chat Completions: garantizar que cada `role:tool` tenga un `role:assistant.tool_calls` precedente que lo referencia por ID.
-  3. Para Responses API: garantizar que el `type` de `content[i]` sea el correcto según el role del mensaje (assistant → `output_text`, user → `input_text`).
-  4. Unit tests del adapter con historias que incluyan synthetic tools (load_attachment, describe_tool) y verificar que los bodies de request cumplen los invariantes de ambos endpoints.
-- **Acceptance criteria:**
-  - Phase 3.1 (`pdf_analyst_base64`) pasa con provider=openai.
-  - Phase 1.2 (`lazy_tools`) pasa con provider=openai (mismo fix).
-  - Phase 4.1 (`sql_products_readonly`) NO crashea por message-shape después de N tool calls.
-- **Estimación:** ~4-6 horas. Cubre ambos endpoints OpenAI (Chat + Responses) y los 2 bugs de message-shape simultáneamente.
-- **Cuándo retomar:** ASAP si ADP usa OpenAI en prod. Si solo Gemini, posponer hasta que un cliente pida OpenAI.
-- **Referencias:**
-  - SSE evidencia: `/tmp/colmena_e2e/3.1_pdf.sse` y `/tmp/colmena_e2e/4.1_sql_readonly.sse` (efímeros).
-  - Bug pareja (Chat Completions): ver entrada "Lazy tool loading — OpenAI message-order regression al cerrar el turn" arriba.
-  - Runbook E2E: Phase 3.1 y 4.1 en [`verifying_deployed_worker.md`](#phase-3).
-  - OpenAI Responses API docs: <https://platform.openai.com/docs/api-reference/responses>.
+- **Hipótesis original (descartada):** el adapter OpenAI Responses serializaba mal los content types cuando había synthetic tools en la historia. Lectura del código confirmó que el adapter es correcto; el bug emergía sólo después de compactación que dejaba tool messages huérfanos.
+- **Referencias originales:** SSE `/tmp/colmena_e2e/3.1_pdf.sse` y `/tmp/colmena_e2e/4.1_sql_readonly.sse` (efímeros); OpenAI Responses API docs: <https://platform.openai.com/docs/api-reference/responses>.
 
 ---
 
