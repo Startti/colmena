@@ -263,17 +263,98 @@ pub async fn execute_run_python(ctx: &CrdtDocsContext, args: RunPythonArgs) -> s
         }
     }
 
-    // 8. Truncate user output JSON if too large.
+    // 8. Multi-sheet path: if the script set `output_sheets = {name: df, ...}`,
+    //    write each entry as a new sheet in the current artifact. The legacy
+    //    single-sheet path above (output_sheet + write_to_sheet) is unchanged.
+    let mut wrote_sheets_response = serde_json::Value::Null;
+    if let Some(sheets_value) = wrapped_output.get("output_sheets") {
+        if !sheets_value.is_null() {
+            if let Some(map) = sheets_value.as_object() {
+                let mut results: Vec<serde_json::Value> = Vec::new();
+                for (raw_name, entry) in map {
+                    let records_arr = entry.get("records").and_then(|v| v.as_array());
+                    let cols_arr = entry.get("cols").and_then(|v| v.as_array());
+                    let (Some(records_arr), Some(cols_arr)) = (records_arr, cols_arr) else {
+                        results.push(serde_json::json!({
+                            "name": raw_name,
+                            "error": "entry missing records or cols",
+                        }));
+                        continue;
+                    };
+                    let cols: Vec<String> = cols_arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect();
+                    let records: Vec<serde_json::Map<String, serde_json::Value>> = records_arr
+                        .iter()
+                        .filter_map(|v| v.as_object().cloned())
+                        .collect();
+                    match write_records_as_new_sheet(&doc, raw_name, &cols, &records) {
+                        Ok(wr) => {
+                            ctx.mark_dirty();
+                            let origin = ctx
+                                .session_id()
+                                .map(|s| format!("agent:{s}"))
+                                .unwrap_or_else(|| "agent:llm".to_string());
+                            let event_id = ctx
+                                .backend()
+                                .record_event(
+                                    crate::crdt_documents::change_tracker_store::NewEvent {
+                                        artifact_id: ctx.artifact_id().clone(),
+                                        sheet_id: Some(wr.sheet_id.clone()),
+                                        origin,
+                                        summary: format!(
+                                            "wrote {} rows via run_python to new sheet '{}'",
+                                            wr.n_rows, wr.resolved_name
+                                        ),
+                                    },
+                                )
+                                .await
+                                .unwrap_or(0);
+                            ctx.record_event_id(event_id);
+                            results.push(serde_json::json!({
+                                "name": wr.resolved_name,
+                                "sheet_id": wr.sheet_id,
+                                "n_rows": wr.n_rows,
+                                "n_cols": wr.n_cols,
+                                "truncated_at": wr.truncated_at,
+                                "cells_recalculated": wr.cells_recalculated,
+                                "warnings": serde_json::to_value(&wr.warnings)
+                                    .unwrap_or(serde_json::Value::Array(vec![])),
+                            }));
+                        }
+                        Err(e) => {
+                            results.push(serde_json::json!({
+                                "name": raw_name,
+                                "error": format!("write_records_as_new_sheet failed: {e}"),
+                            }));
+                        }
+                    }
+                }
+                wrote_sheets_response = serde_json::Value::Array(results);
+            }
+        }
+    }
+
+    // 9. Truncate user output JSON if too large.
     let (user_output_capped, output_truncated) = truncate_json(&user_output, OUTPUT_BYTE_CAP);
 
     let mut response = serde_json::json!({
         "output": user_output_capped,
         "wrote_sheet": wrote_sheet_response,
+        "wrote_sheets": wrote_sheets_response,
         "stdout": truncate(&helper_result.stdout, STDOUT_BYTE_CAP),
         "error": serde_json::Value::Null,
     });
     if output_truncated {
         response["_output_truncated"] = serde_json::json!(true);
+    }
+    // Surface a warning if BOTH single + multi paths produced writes.
+    if !wrote_sheet_response.is_null() && !wrote_sheets_response.is_null() {
+        response["_warning"] = serde_json::json!(
+            "Both 'output_sheet' (legacy) and 'output_sheets' were set; both \
+             were written. Prefer 'output_sheets' for new code."
+        );
     }
     response
 }
