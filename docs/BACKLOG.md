@@ -516,6 +516,24 @@ El último item — `data:` (base64 inline) auto-summary v2 — se resolvió el 
 
 ---
 
+## E-T20 / E-T21 follow-ups (multi-sheet & exploration skills)
+
+- **Format options per output_sheet** — opt-in `header_style`,
+  `column_widths`, `freeze_top_row` accompanying each entry in
+  `output_sheets`. Today the dispatcher writes raw values only.
+- **Diff-aware sheet write** — opt-in arg to overwrite an existing tab
+  instead of creating a suffixed one. The current "create-new-with-suffix"
+  default is safe; the opt-in makes destructive writes explicit.
+- **Auto-naming for unnamed DataFrames** — if a DataFrame appears in
+  `output_sheets` under a `None` or numeric key, the dispatcher assigns
+  `Untitled (1)`, `Untitled (2)`. Today the script must name every
+  entry.
+- **Direct hyperlink to new tab in response** — `wrote_sheets[i].url`
+  pointing to `https://docs.google.com/spreadsheets/d/<id>/edit#gid=<sheet_id>`
+  for quick user navigation.
+
+---
+
 ## Cómo agregar un item a este backlog
 
 Cada entrada debe tener:

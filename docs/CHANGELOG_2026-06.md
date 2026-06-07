@@ -398,3 +398,29 @@ Files:
   skill folder containing a `SKILL.md` is missing from the index.
 
 **Estado.** done.
+
+---
+
+## 9. E-T20 — pandas multi-sheet write-back
+
+- **E-T20 shipped 2026-06-06** — pandas multi-sheet write-back.
+  `gsheets_run_python` gains a `write_to_spreadsheet` arg and both
+  `gsheets_run_python` + `crdt_doc_run_python` recognise an
+  `output_sheets = {name: DataFrame, ...}` global in the user code. The
+  dispatcher creates one new tab per entry (auto-suffix on collision)
+  and returns metadata-only `wrote_sheets: [...]` to the LLM. Row
+  contents NEVER pass through the LLM. Existing `output_sheet` +
+  `write_to_sheet` single-sheet path preserved for back-compat.
+
+---
+
+## 10. E-T21 — Two new table-exploration skills
+
+- **E-T21 shipped 2026-06-06** — two new skills under
+  `src/libs/colmena/skills/`:
+  `gsheets-table-exploration` and `crdt-doc-table-exploration`. Each
+  bundles `SKILL.md` + 6 references covering inspect-first, top-N via
+  `nlargest`, filter+query, group+aggregate, type coercion, and output
+  shaping (with multi-tab write-back). Tool descriptions in
+  `text/tools/{gsheets,crdt_doc}.yaml` updated to point at the new
+  skills.
