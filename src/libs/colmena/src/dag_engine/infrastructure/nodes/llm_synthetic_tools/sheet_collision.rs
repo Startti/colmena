@@ -10,12 +10,13 @@ use serde::{Deserialize, Serialize};
 
 /// What the dispatcher does when a target tab already exists.
 /// Configurable per-tool via `fixed_config.on_existing_sheet`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CollisionPolicy {
     /// Default. Dispatcher returns a structured `SheetExists` error
     /// without writing anything. LLM must explicitly choose
     /// `update_in_place`, `overwrite`, or rename.
+    #[default]
     Fail,
     /// Legacy behavior — write as `"Name (2)"` silently.
     AutoSuffix,
@@ -24,23 +25,17 @@ pub enum CollisionPolicy {
     Overwrite,
 }
 
-impl Default for CollisionPolicy {
-    fn default() -> Self {
-        Self::Fail
-    }
-}
-
 /// Parse the operator-supplied policy string. Unknown values yield a
-/// clear error listing valid options.
+/// clear error listing valid options. Implemented as a thin wrapper
+/// over `serde::Deserialize` so the variant list stays single-sourced
+/// to the enum definition.
 pub fn parse_policy(s: &str) -> Result<CollisionPolicy, String> {
-    match s {
-        "fail" => Ok(CollisionPolicy::Fail),
-        "auto_suffix" => Ok(CollisionPolicy::AutoSuffix),
-        "overwrite" => Ok(CollisionPolicy::Overwrite),
-        other => Err(format!(
-            "unknown on_existing_sheet value '{other}'; valid: fail, auto_suffix, overwrite"
-        )),
-    }
+    let quoted = format!(r#""{s}""#);
+    serde_json::from_str::<CollisionPolicy>(&quoted).map_err(|_| {
+        format!(
+            "unknown on_existing_sheet value '{s}'; valid: fail, auto_suffix, overwrite"
+        )
+    })
 }
 
 /// Metadata about an existing tab that the LLM tried to write to.
