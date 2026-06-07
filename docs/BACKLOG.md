@@ -547,3 +547,31 @@ Cada entrada debe tener:
 - **Estimación** — orden de magnitud (LOC, días, dependencias nuevas).
 - **Cuándo retomar** — un trigger concreto, no "cuando haya tiempo".
 - **Referencias** — links a docs/specs/plans existentes.
+
+## gsheets_run_python — UX aliases for bindings + output_sheets
+
+**Trigger**: when re-running the multi-sheet demo and the LLM still
+hallucinates field names. Demo on 2026-06-06 showed Gemini-2.5-pro
+calling `gsheets_run_python` with `binding_name` instead of `var` and
+`sheet_name` instead of `sheet`, and passing `output_sheets` as a tool
+arg instead of a code-level variable. Schema is correct, description
+now has an explicit example, but Gemini paraphrases the schema and gets
+field names wrong.
+
+**Fix**: at the dispatcher, accept synonym field names BEFORE deserializing:
+- `var` ↔ `binding_name` ↔ `name`
+- `sheet` ↔ `sheet_name`
+- Silently drop `output_sheets` if it appears as a tool arg (with a warning that
+  it's a code-level variable, not an arg)
+
+Same pattern as E-T6 (UX aliases on other gsheets tool args:
+`address` ↔ `addr`, `start` ↔ `start_addr`, `values` ↔ `values_2d`,
+`name` ↔ `sheet`).
+
+~30 LOC in `gsheets_run_python.rs` dispatcher's args parser. Add 3-4
+wiremock tests verifying each alias maps correctly.
+
+Also: same UX aliases for `crdt_doc_run_python` bindings (currently
+`sheet_ids: [String]` — could accept `sheets`, `sheet_names` as
+synonyms). Less critical there because the legacy single-sheet path
+guides the LLM more.
