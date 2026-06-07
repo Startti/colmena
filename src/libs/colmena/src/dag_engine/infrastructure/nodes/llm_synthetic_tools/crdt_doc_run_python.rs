@@ -11,6 +11,9 @@ use crate::text;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use super::diff_writer::diff_records;
+use super::sheet_collision::{build_sheet_exists_error, parse_policy, CollisionPolicy, TabMeta};
+
 pub use super::crdt_doc_context::CrdtDocsContext;
 
 pub const TOOL_RUN_PYTHON: &str = "crdt_doc_run_python";
@@ -42,6 +45,10 @@ pub struct RunPythonArgs {
     /// Name collisions append " (2)", " (3)" etc.
     #[serde(default)]
     pub write_to_sheet: Option<String>,
+    /// Operator-supplied collision policy. Default `fail`. Wired via
+    /// `fixed_config.on_existing_sheet`. Accepted: fail, auto_suffix, overwrite.
+    #[serde(default, alias = "on_existing_sheet")]
+    pub on_existing_sheet: Option<String>,
 }
 
 /// Build the [`ToolDefinition`] for `crdt_doc_run_python`.
@@ -263,76 +270,41 @@ pub async fn execute_run_python(ctx: &CrdtDocsContext, args: RunPythonArgs) -> s
         }
     }
 
-    // 8. Multi-sheet path: if the script set `output_sheets = {name: df, ...}`,
-    //    write each entry as a new sheet in the current artifact. The legacy
-    //    single-sheet path above (output_sheet + write_to_sheet) is unchanged.
+    // 8. Multi-sheet path with mode dispatch (replace / overwrite / update_in_place).
     let mut wrote_sheets_response = serde_json::Value::Null;
     if let Some(sheets_value) = wrapped_output.get("output_sheets") {
         if !sheets_value.is_null() {
-            if let Some(map) = sheets_value.as_object() {
-                let mut results: Vec<serde_json::Value> = Vec::new();
-                for (raw_name, entry) in map {
-                    let records_arr = entry.get("records").and_then(|v| v.as_array());
-                    let cols_arr = entry.get("cols").and_then(|v| v.as_array());
-                    let (Some(records_arr), Some(cols_arr)) = (records_arr, cols_arr) else {
-                        results.push(serde_json::json!({
-                            "name": raw_name,
-                            "error": "entry missing records or cols",
-                        }));
-                        continue;
-                    };
-                    let cols: Vec<String> = cols_arr
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect();
-                    let records: Vec<serde_json::Map<String, serde_json::Value>> = records_arr
-                        .iter()
-                        .filter_map(|v| v.as_object().cloned())
-                        .collect();
-                    match write_records_as_new_sheet(&doc, raw_name, &cols, &records) {
-                        Ok(wr) => {
-                            ctx.mark_dirty();
-                            let origin = ctx
-                                .session_id()
-                                .map(|s| format!("agent:{s}"))
-                                .unwrap_or_else(|| "agent:llm".to_string());
-                            let event_id = ctx
-                                .backend()
-                                .record_event(
-                                    crate::crdt_documents::change_tracker_store::NewEvent {
-                                        artifact_id: ctx.artifact_id().clone(),
-                                        sheet_id: Some(wr.sheet_id.clone()),
-                                        origin,
-                                        summary: format!(
-                                            "wrote {} rows via run_python to new sheet '{}'",
-                                            wr.n_rows, wr.resolved_name
-                                        ),
-                                    },
-                                )
-                                .await
-                                .unwrap_or(0);
-                            ctx.record_event_id(event_id);
-                            results.push(serde_json::json!({
-                                "name": wr.resolved_name,
-                                "sheet_id": wr.sheet_id,
-                                "n_rows": wr.n_rows,
-                                "n_cols": wr.n_cols,
-                                "truncated_at": wr.truncated_at,
-                                "cells_recalculated": wr.cells_recalculated,
-                                "warnings": serde_json::to_value(&wr.warnings)
-                                    .unwrap_or(serde_json::Value::Array(vec![])),
-                            }));
-                        }
-                        Err(e) => {
-                            results.push(serde_json::json!({
-                                "name": raw_name,
-                                "error": format!("write_records_as_new_sheet failed: {e}"),
-                            }));
-                        }
-                    }
+            let policy: CollisionPolicy = args
+                .on_existing_sheet
+                .as_deref()
+                .map(parse_policy)
+                .transpose()
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let map = sheets_value.as_object().cloned().unwrap_or_default();
+            let mut results: Vec<serde_json::Value> = Vec::new();
+            for (raw_name, entry) in map {
+                if let Some(err) = entry.get("_postlude_error").and_then(|v| v.as_str()) {
+                    results.push(serde_json::json!({"name": raw_name, "error": err}));
+                    continue;
                 }
-                wrote_sheets_response = serde_json::Value::Array(results);
+                let mode = entry
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("replace");
+                let result = match mode {
+                    "update_in_place" => crdt_update_in_place(&doc, ctx, &raw_name, &entry).await,
+                    "overwrite" => crdt_overwrite(&doc, ctx, &raw_name, &entry).await,
+                    "replace" => crdt_replace(&doc, ctx, &raw_name, &entry, policy).await,
+                    other => serde_json::json!({
+                        "name": raw_name,
+                        "error": format!("unknown mode '{other}'; valid: replace, update_in_place, overwrite"),
+                    }),
+                };
+                results.push(result);
             }
+            wrote_sheets_response = serde_json::Value::Array(results);
         }
     }
 
@@ -367,6 +339,297 @@ pub async fn dispatch_crdt_doc_run_python(
     match serde_json::from_value::<RunPythonArgs>(args) {
         Ok(a) => execute_run_python(ctx, a).await,
         Err(e) => serde_json::json!({ "error": format!("invalid_args: {e}") }),
+    }
+}
+
+// ── crdt helpers for the modes ───────────────────────────────────────────
+
+/// Look up tab metadata in the CRDT projection. Returns:
+/// - (sheet_id, TabMeta) when the named sheet exists with non-empty cells.
+/// - (sheet_id, TabMeta { columns: [], n_rows: 0, n_cols: 0 }) when the sheet
+///   exists but has no cells yet.
+/// - None when no sheet with that name exists.
+fn crdt_lookup_tab_by_name(doc: &yrs::Doc, name: &str) -> Option<(String, TabMeta)> {
+    use crate::crdt_documents::build_sheet_records;
+    let proj = crate::crdt_documents::projection::project(doc);
+    let sheets = proj["sheets"].as_array().cloned().unwrap_or_default();
+    let sid = sheets
+        .into_iter()
+        .find(|s| s["name"].as_str() == Some(name))
+        .and_then(|s| s["id"].as_str().map(String::from))?;
+    let recs = build_sheet_records(doc, &sid).ok()?;
+    let meta = TabMeta {
+        n_rows: recs.records.len() as u64,
+        n_cols: recs.columns.len() as u64,
+        columns: recs.columns,
+    };
+    Some((sid, meta))
+}
+
+async fn crdt_replace(
+    doc: &yrs::Doc,
+    ctx: &CrdtDocsContext,
+    raw_name: &str,
+    entry: &serde_json::Value,
+    policy: CollisionPolicy,
+) -> serde_json::Value {
+    if let Some((_sid, meta)) = crdt_lookup_tab_by_name(doc, raw_name) {
+        match policy {
+            CollisionPolicy::Fail => {
+                return build_sheet_exists_error(raw_name, None, &meta);
+            }
+            CollisionPolicy::Overwrite => {
+                return crdt_write_full(doc, ctx, raw_name, raw_name, entry).await;
+            }
+            CollisionPolicy::AutoSuffix => {
+                // Start at 2: raw_name itself is known to collide (we just
+                // hit `Some(meta)` above). First candidate is "raw_name (2)".
+                for attempt in 2i32..=10 {
+                    let candidate = format!("{raw_name} ({attempt})");
+                    if crdt_lookup_tab_by_name(doc, &candidate).is_none() {
+                        return crdt_write_full(doc, ctx, raw_name, &candidate, entry).await;
+                    }
+                }
+                return serde_json::json!({
+                    "name": raw_name,
+                    "error": "auto_suffix: all 10 name attempts already exist",
+                });
+            }
+        }
+    }
+    crdt_write_full(doc, ctx, raw_name, raw_name, entry).await
+}
+
+async fn crdt_overwrite(
+    doc: &yrs::Doc,
+    ctx: &CrdtDocsContext,
+    raw_name: &str,
+    entry: &serde_json::Value,
+) -> serde_json::Value {
+    if let Some((_sid, meta)) = crdt_lookup_tab_by_name(doc, raw_name) {
+        let input_cols: Vec<String> = entry
+            .get("df_cols")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|c| c.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let allow = entry
+            .get("allow_schema_change")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let mismatch = {
+            use std::collections::HashSet;
+            let sa: HashSet<&String> = meta.columns.iter().collect();
+            let sb: HashSet<&String> = input_cols.iter().collect();
+            sa != sb
+        };
+        if mismatch && !allow {
+            return serde_json::json!({
+                "name": raw_name,
+                "error": "SchemaChange",
+                "current_columns": meta.columns,
+                "input_columns": input_cols,
+                "message": format!(
+                    "Overwriting '{raw_name}' would change its schema: current {:?} → new {:?}. \
+                     RECOMMENDED: use a different tab name. To proceed anyway, add \
+                     'allow_schema_change: true' to the spec dict.",
+                    meta.columns, input_cols
+                ),
+            });
+        }
+    }
+    crdt_write_full(doc, ctx, raw_name, raw_name, entry).await
+}
+
+async fn crdt_update_in_place(
+    doc: &yrs::Doc,
+    ctx: &CrdtDocsContext,
+    raw_name: &str,
+    entry: &serde_json::Value,
+) -> serde_json::Value {
+    use crate::crdt_documents::build_sheet_records;
+    use crate::crdt_documents::tool_executor::apply_set_cell_in_proc;
+    let Some(key) = entry.get("key").and_then(|v| v.as_str()) else {
+        return serde_json::json!({"tab": raw_name, "error": "update_in_place requires `key` field"});
+    };
+    let Some((sheet_id, _meta)) = crdt_lookup_tab_by_name(doc, raw_name) else {
+        return serde_json::json!({
+            "name": raw_name,
+            "error": "UpdateRequiresExistingTab",
+            "message": format!("update_in_place needs sheet '{raw_name}' to exist; use mode=replace to create it."),
+        });
+    };
+    let recs = match build_sheet_records(doc, &sheet_id) {
+        Ok(r) => r,
+        Err(e) => return serde_json::json!({"tab": raw_name, "error": format!("read failed: {e}")}),
+    };
+    let current_records = recs.records;
+    let header_cols = recs.columns;
+    let new_records: Vec<serde_json::Map<String, serde_json::Value>> = entry
+        .get("df_records")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|r| r.as_object().cloned()).collect())
+        .unwrap_or_default();
+    let restrict: Option<Vec<String>> = entry.get("columns").and_then(|v| v.as_array()).map(|a| {
+        a.iter()
+            .filter_map(|c| c.as_str().map(String::from))
+            .collect()
+    });
+    let strict = entry
+        .get("strict_match")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let diff = match diff_records(
+        &current_records,
+        &new_records,
+        key,
+        restrict.as_deref(),
+        strict,
+        raw_name,
+    ) {
+        Ok(d) => d,
+        Err(e) => return e.to_json(),
+    };
+    // Build index: key_value (string) → 1-based row in the Y.Doc cells map.
+    // build_sheet_records emits records in row order, so row N (1-based, header is row 1)
+    // for record index i is i + 2.
+    let mut key_to_row: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (i, r) in current_records.iter().enumerate() {
+        if let Some(k) = r.get(key).and_then(|v| match v {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            serde_json::Value::Bool(b) => Some(b.to_string()),
+            _ => None,
+        }) {
+            key_to_row.insert(k, i + 2);
+        }
+    }
+    let mut col_to_index: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (i, c) in header_cols.iter().enumerate() {
+        col_to_index.insert(c.clone(), i);
+    }
+    let mut cells_written = 0usize;
+    for chg in &diff.changes {
+        let (Some(&row), Some(&col_idx)) = (
+            key_to_row.get(&chg.key_value),
+            col_to_index.get(&chg.column),
+        ) else {
+            continue;
+        };
+        let addr = {
+            let mut col = String::new();
+            let mut n = col_idx;
+            loop {
+                col.insert(0, (b'A' + (n % 26) as u8) as char);
+                n /= 26;
+                if n == 0 {
+                    break;
+                }
+                n -= 1;
+            }
+            format!("{col}{row}")
+        };
+        let _ = apply_set_cell_in_proc(doc, &sheet_id, &addr, &chg.new_value);
+        cells_written += 1;
+    }
+    if cells_written > 0 {
+        ctx.mark_dirty();
+        let origin = ctx
+            .session_id()
+            .map(|s| format!("agent:{s}"))
+            .unwrap_or_else(|| "agent:llm".to_string());
+        let event_id = ctx
+            .backend()
+            .record_event(crate::crdt_documents::change_tracker_store::NewEvent {
+                artifact_id: ctx.artifact_id().clone(),
+                sheet_id: Some(sheet_id.clone()),
+                origin,
+                summary: format!(
+                    "update_in_place: patched {} cell(s) across {} row(s) in '{raw_name}'",
+                    cells_written, diff.rows_changed
+                ),
+            })
+            .await
+            .unwrap_or(0);
+        ctx.record_event_id(event_id);
+    }
+    serde_json::json!({
+        "tab": raw_name,
+        "sheet_id": sheet_id,
+        "mode": "update_in_place",
+        "changes": {
+            "rows": diff.rows_changed,
+            "cells": cells_written,
+            "columns": diff.columns_touched,
+        },
+        "unchanged": {"rows": diff.rows_unchanged},
+        "skipped": {
+            "rows_not_in_target": diff.rows_skipped_not_in_target,
+            "rows_null_key": diff.rows_skipped_null_key,
+        },
+    })
+}
+
+async fn crdt_write_full(
+    doc: &yrs::Doc,
+    ctx: &CrdtDocsContext,
+    raw_name: &str,
+    write_name: &str,
+    entry: &serde_json::Value,
+) -> serde_json::Value {
+    use crate::crdt_documents::write_records_as_new_sheet;
+    let records: Vec<serde_json::Map<String, serde_json::Value>> = entry
+        .get("df_records")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|r| r.as_object().cloned()).collect())
+        .unwrap_or_default();
+    let cols: Vec<String> = entry
+        .get("df_cols")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| c.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    match write_records_as_new_sheet(doc, write_name, &cols, &records) {
+        Ok(wr) => {
+            ctx.mark_dirty();
+            let origin = ctx
+                .session_id()
+                .map(|s| format!("agent:{s}"))
+                .unwrap_or_else(|| "agent:llm".to_string());
+            let event_id = ctx
+                .backend()
+                .record_event(crate::crdt_documents::change_tracker_store::NewEvent {
+                    artifact_id: ctx.artifact_id().clone(),
+                    sheet_id: Some(wr.sheet_id.clone()),
+                    origin,
+                    summary: format!(
+                        "wrote {} rows via run_python to sheet '{}'",
+                        wr.n_rows, wr.resolved_name
+                    ),
+                })
+                .await
+                .unwrap_or(0);
+            ctx.record_event_id(event_id);
+            serde_json::json!({
+                "name": raw_name,
+                "resolved_name": wr.resolved_name,
+                "sheet_id": wr.sheet_id,
+                "n_rows": wr.n_rows,
+                "n_cols": wr.n_cols,
+            })
+        }
+        Err(e) => serde_json::json!({
+            "name": raw_name,
+            "error": format!("write_records_as_new_sheet failed: {e}"),
+        }),
     }
 }
 
@@ -471,6 +734,7 @@ output = {{"done": True}}
                 sid = sheet_id
             ),
             write_to_sheet: None,
+            on_existing_sheet: None,
         };
         let result = execute_run_python(&ctx, args).await;
 
@@ -515,5 +779,71 @@ output = {{"done": True}}
                 names
             );
         }
+    }
+
+    #[tokio::test]
+    async fn update_in_place_patches_only_changed_cells_in_crdt() {
+        pyo3::prepare_freethreaded_python();
+        let rt = make_runtime().await;
+        let id = ArtifactId::new();
+        let _ = rt.registry.get_or_create(&id, "workbook");
+        let ctx = CrdtDocsContext::new_local(rt, id, Some("test_session".to_string()));
+
+        let add = execute_add_sheet(
+            &ctx,
+            AddSheetArgs {
+                name: "Sales".into(),
+            },
+        )
+        .await;
+        let sheet_id = add["sheet_id"].as_str().unwrap().to_string();
+        execute_set_range(
+            &ctx,
+            SetRangeArgs {
+                sheet_id: sheet_id.clone(),
+                start_addr: "A1".into(),
+                values_2d: vec![
+                    vec![json!("id"), json!("price")],
+                    vec![json!("a"), json!(10)],
+                    vec![json!("b"), json!(20)],
+                    vec![json!("c"), json!(30)],
+                ],
+            },
+        )
+        .await;
+
+        let args = RunPythonArgs {
+            sheet_ids: vec![sheet_id.clone()],
+            code: format!(
+                r#"
+import pandas as pd
+df = pd.DataFrame(dfs["{sid}"])
+df.loc[df['id'] == 'b', 'price'] = 99
+output_sheets = {{
+    'Sales': {{'mode': 'update_in_place', 'df': df, 'key': 'id'}},
+}}
+output = {{}}
+"#,
+                sid = sheet_id
+            ),
+            write_to_sheet: None,
+            on_existing_sheet: None,
+        };
+        let result = execute_run_python(&ctx, args).await;
+
+        if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+            if err.contains("No module named 'pandas'") {
+                eprintln!("SKIPPED (no pandas): {err}");
+                return;
+            }
+        }
+        let wrote = result["wrote_sheets"]
+            .as_array()
+            .expect("wrote_sheets array");
+        assert_eq!(wrote.len(), 1);
+        let entry = &wrote[0];
+        assert_eq!(entry["mode"], "update_in_place");
+        // Only the 'b' row changed → 1 cell.
+        assert_eq!(entry["changes"]["cells"], 1);
     }
 }

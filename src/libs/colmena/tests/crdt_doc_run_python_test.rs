@@ -71,6 +71,7 @@ output = totals.to_dict()
 "#
         ),
         write_to_sheet: None,
+        on_existing_sheet: None,
     };
     let result = execute_run_python(&ctx, args).await;
     assert!(
@@ -102,6 +103,7 @@ output = "summary written"
 "#
         ),
         write_to_sheet: Some("Summary".to_string()),
+        on_existing_sheet: None,
     };
     let result = execute_run_python(&ctx, args).await;
     assert!(
@@ -145,6 +147,7 @@ async fn run_python_error_response_includes_loaded_sheet_columns() {
         // Reference a column that does not exist → KeyError.
         code: format!(r#"df = dfs["{sheet_id}"]; output = df["NonExistentCol"].sum()"#),
         write_to_sheet: None,
+        on_existing_sheet: None,
     };
     let result = execute_run_python(&ctx, args).await;
     assert!(
@@ -189,6 +192,7 @@ output = "ok"
 "#
         ),
         write_to_sheet: Some("Summary".to_string()),
+        on_existing_sheet: None,
     };
     let result = execute_run_python(&ctx, args).await;
     assert!(

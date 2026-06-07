@@ -110,6 +110,7 @@ output = m['_status'].value_counts().to_dict()
             sheet_ids: vec![sid_q3.clone(), cloned_sid.clone()],
             code,
             write_to_sheet: Some("Diff Q3 vs Q4".to_string()),
+            on_existing_sheet: None,
         },
     )
     .await;
