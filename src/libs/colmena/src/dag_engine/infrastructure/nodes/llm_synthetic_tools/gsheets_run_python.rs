@@ -635,4 +635,211 @@ mod tests {
             s.len()
         );
     }
+
+    // ── multi-sheet write-back tests ──────────────────────────────────────
+
+    /// Happy path: script sets `output_sheets` with 3 DataFrames and
+    /// `write_to_spreadsheet` is supplied → 3 add_sheet + 3 set_range
+    /// calls, `wrote_sheets` has 3 entries, no `error`.
+    #[tokio::test]
+    async fn multi_sheet_write_back_three_tabs() {
+        pyo3::prepare_freethreaded_python();
+
+        let server = MockServer::start().await;
+        let client =
+            GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
+        client.token_test_seed("fake-bearer-token").await;
+
+        // Binding: Products tab on spreadsheet "ws_w".
+        Mock::given(method("GET"))
+            .and(path_regex(r"/ws_w/values/Products"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "range": "Products!A1:B3",
+                "majorDimension": "ROWS",
+                "values": [
+                    ["sku", "qty"],
+                    ["a-1", 10],
+                    ["a-2", 20],
+                ],
+            })))
+            .mount(&server)
+            .await;
+
+        // add_sheet (batchUpdate POST) calls — one per output tab.
+        // No .expect() because the pandas-skip path exits before these
+        // mocks are exercised; the assertion below checks the count instead.
+        Mock::given(method("POST"))
+            .and(path_regex(r"/ws_w:batchUpdate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "replies": [{"addSheet": {"properties": {"sheetId": 1, "title": "Top10"}}}]
+            })))
+            .mount(&server)
+            .await;
+
+        // set_range (values PUT) calls — one per output tab.
+        Mock::given(method("PUT"))
+            .and(path_regex(r"/ws_w/values/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "updatedRange": "Top10!A1:B2",
+                "updatedCells": 4,
+            })))
+            .mount(&server)
+            .await;
+
+        let args = serde_json::json!({
+            "bindings": [{"var": "products", "spreadsheet_id": "ws_w", "sheet": "Products"}],
+            "code": "\
+import pandas as pd\n\
+df = pd.DataFrame(products)\n\
+output_sheets = {\n\
+    'Top10':   df.head(1),\n\
+    'Bottom5': df.tail(1),\n\
+    'All':     df,\n\
+}\n\
+output = {'tabs_written': 3}\n\
+",
+            "write_to_spreadsheet": "ws_w"
+        });
+
+        let client: Arc<dyn SheetsClient> = Arc::new(client);
+        let res =
+            dispatch_gsheets_run_python_with_client(client, args).await;
+
+        // Skip if pandas not installed in this test environment.
+        if let Some(err) = res.get("error").and_then(|v| v.as_str()) {
+            if err.contains("No module named 'pandas'") {
+                eprintln!("SKIPPED (no pandas in test env): {err}");
+                return;
+            }
+            panic!("unexpected error: {res}");
+        }
+
+        let wrote = res
+            .get("wrote_sheets")
+            .and_then(|v| v.as_array())
+            .expect("wrote_sheets should be an array");
+        assert_eq!(
+            wrote.len(),
+            3,
+            "expected 3 wrote_sheets entries, got {}; full response: {res}",
+            wrote.len()
+        );
+        // Each entry must have name + resolved_name (not an error entry).
+        for entry in wrote {
+            assert!(
+                entry.get("resolved_name").is_some(),
+                "entry missing resolved_name: {entry}"
+            );
+            assert!(
+                entry.get("error").is_none(),
+                "unexpected error in wrote_sheets entry: {entry}"
+            );
+        }
+    }
+
+    /// Collision retry: first add_sheet call returns 400 "already exists";
+    /// dispatcher retries with " (2)" suffix and succeeds. The
+    /// `wrote_sheets` entry must carry both `name` and `resolved_name`.
+    #[tokio::test]
+    async fn multi_sheet_collision_retries_with_suffix() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::Respond;
+
+        pyo3::prepare_freethreaded_python();
+
+        let server = MockServer::start().await;
+        let client =
+            GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
+        client.token_test_seed("fake-bearer-token").await;
+
+        // Binding: Whatever tab on spreadsheet "ws_c".
+        Mock::given(method("GET"))
+            .and(path_regex(r"/ws_c/values/Whatever"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "range": "Whatever!A1:B2",
+                "majorDimension": "ROWS",
+                "values": [
+                    ["id", "val"],
+                    [1, 99],
+                ],
+            })))
+            .mount(&server)
+            .await;
+
+        // First POST returns 400 "already exists"; second returns 200.
+        struct AddSheetResponder(AtomicUsize);
+        impl Respond for AddSheetResponder {
+            fn respond(&self, _req: &wiremock::Request) -> wiremock::ResponseTemplate {
+                let attempt = self.0.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    wiremock::ResponseTemplate::new(400).set_body_string(
+                        r#"{"error":{"code":400,"message":"A sheet with the name \"Existing\" already exists. Please enter another name."}}"#,
+                    )
+                } else {
+                    wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "replies": [{"addSheet": {"properties": {"sheetId": 7777, "title": "Existing (2)"}}}]
+                    }))
+                }
+            }
+        }
+
+        // No .expect() — pandas-skip path exits before these mocks fire;
+        // the assertions below verify the collision-retry contract instead.
+        Mock::given(method("POST"))
+            .and(path_regex(r"/ws_c:batchUpdate"))
+            .respond_with(AddSheetResponder(AtomicUsize::new(0)))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("PUT"))
+            .and(path_regex(r"/ws_c/values/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "updatedRange": "Existing (2)!A1:B2",
+                "updatedCells": 4,
+            })))
+            .mount(&server)
+            .await;
+
+        let args = serde_json::json!({
+            "bindings": [{"var": "x", "spreadsheet_id": "ws_c", "sheet": "Whatever"}],
+            "code": "\
+import pandas as pd\n\
+df = pd.DataFrame(x)\n\
+output_sheets = {'Existing': df}\n\
+output = {}\n\
+",
+            "write_to_spreadsheet": "ws_c"
+        });
+
+        let client: Arc<dyn SheetsClient> = Arc::new(client);
+        let res =
+            dispatch_gsheets_run_python_with_client(client, args).await;
+
+        // Skip if pandas not installed in this test environment.
+        if let Some(err) = res.get("error").and_then(|v| v.as_str()) {
+            if err.contains("No module named 'pandas'") {
+                eprintln!("SKIPPED (no pandas in test env): {err}");
+                return;
+            }
+            panic!("unexpected error: {res}");
+        }
+
+        let wrote = res
+            .get("wrote_sheets")
+            .and_then(|v| v.as_array())
+            .expect("wrote_sheets should be an array");
+        assert_eq!(wrote.len(), 1, "expected 1 wrote_sheets entry; full response: {res}");
+
+        let entry = &wrote[0];
+        assert_eq!(entry["name"], "Existing", "name mismatch: {entry}");
+        assert_eq!(
+            entry["resolved_name"],
+            "Existing (2)",
+            "resolved_name mismatch: {entry}"
+        );
+        assert!(
+            entry.get("error").is_none(),
+            "unexpected error in wrote_sheets entry: {entry}"
+        );
+    }
 }
