@@ -22,7 +22,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use std::sync::Arc;
 
+use super::diff_writer::diff_records;
 use super::gsheets_tools::error_to_json;
+use super::sheet_collision::{build_sheet_exists_error, parse_policy, CollisionPolicy, TabMeta};
 
 pub const TOOL_GSHEETS_RUN_PYTHON: &str = "gsheets_run_python";
 
@@ -69,6 +71,12 @@ pub struct GsheetsRunPythonArgs {
     /// `_warning` in the response so the LLM learns the correct usage.
     #[serde(default)]
     pub output_sheets: Option<serde_json::Value>,
+
+    /// Operator-supplied collision policy. Default `fail`. Wired via
+    /// `fixed_config.on_existing_sheet`. Accepted values: `fail`,
+    /// `auto_suffix`, `overwrite`.
+    #[serde(default, alias = "on_existing_sheet")]
+    pub on_existing_sheet: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -364,7 +372,17 @@ pub async fn dispatch_gsheets_run_python_with_client(
         output_sheets_value.filter(|v| !v.is_null()),
     ) {
         let spreadsheet_id = crate::gsheets::domain::SpreadsheetId(target_id.to_string());
-        let results = write_output_sheets(&client, &spreadsheet_id, sheets_value).await;
+        let policy = parsed
+            .on_existing_sheet
+            .as_deref()
+            .map(parse_policy)
+            .transpose()
+            .unwrap_or_else(|e| {
+                eprintln!("[gsheets] invalid on_existing_sheet, defaulting to fail: {e}");
+                None
+            })
+            .unwrap_or_default();
+        let results = write_output_sheets(&client, &spreadsheet_id, sheets_value, policy).await;
         wrote_sheets_response = serde_json::Value::Array(results);
     }
 
@@ -418,126 +436,407 @@ pub async fn dispatch_gsheets_run_python_with_client(
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-/// Write each `(name, DataFrame)` entry from `output_sheets` as a new tab
-/// in the target spreadsheet. Returns one metadata entry per write (success
-/// or error). On name collision, retries with " (2)" ... " (10)".
+/// Dispatch each normalized `output_sheets` entry by mode. Returns one
+/// metadata entry per attempted write.
 async fn write_output_sheets(
     client: &Arc<dyn SheetsClient>,
     spreadsheet_id: &SpreadsheetId,
     output_sheets: &serde_json::Value,
+    policy: CollisionPolicy,
 ) -> Vec<serde_json::Value> {
-    use crate::gsheets::domain::CellValue;
-    use crate::gsheets::domain::SheetsError;
-
     let Some(map) = output_sheets.as_object() else {
         return Vec::new();
     };
     let mut results: Vec<serde_json::Value> = Vec::new();
     for (raw_name, entry) in map {
-        let records = entry.get("records").and_then(|v| v.as_array());
-        let cols = entry.get("cols").and_then(|v| v.as_array());
-        let (Some(records), Some(cols)) = (records, cols) else {
-            results.push(serde_json::json!({
-                "name": raw_name,
-                "error": "entry missing records or cols",
-            }));
+        // Surface postlude-side errors as-is.
+        if let Some(err) = entry.get("_postlude_error").and_then(|v| v.as_str()) {
+            results.push(serde_json::json!({"name": raw_name, "error": err}));
             continue;
-        };
-
-        // Resolve a non-conflicting name: try raw_name, then "name (2)" ... "name (10)".
-        let mut resolved_name: Option<String> = None;
-        let mut sheet_id: Option<i64> = None;
-        for attempt in 1i32..=10 {
-            let candidate = if attempt == 1 {
-                raw_name.clone()
-            } else {
-                format!("{raw_name} ({attempt})")
-            };
-            match client.add_sheet(spreadsheet_id, &candidate).await {
-                Ok(meta) => {
-                    resolved_name = Some(candidate);
-                    sheet_id = Some(meta.sheet_id.0);
-                    break;
-                }
-                Err(SheetsError::Http(msg)) if msg.to_lowercase().contains("already exists") => {
-                    continue;
-                }
-                Err(e) => {
-                    results.push(serde_json::json!({
-                        "name": raw_name,
-                        "error": format!("add_sheet failed: {e}"),
-                    }));
-                    break;
-                }
-            }
         }
-        let (Some(resolved_name), Some(sheet_id)) = (resolved_name, sheet_id) else {
-            // All 10 attempts collided or an error broke the loop early (already pushed).
-            if !results
-                .iter()
-                .any(|r| r.get("name") == Some(&serde_json::Value::String(raw_name.clone())))
-            {
-                results.push(serde_json::json!({
-                    "name": raw_name,
-                    "error": "could not create tab: all 10 name attempts already exist",
-                }));
+        let mode = entry
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("replace");
+        match mode {
+            "update_in_place" => {
+                results.push(do_update_in_place(client, spreadsheet_id, raw_name, entry).await);
             }
-            continue;
-        };
-
-        // Build matrix: header row + body rows.
-        let header_row: Vec<CellValue> = cols
-            .iter()
-            .map(|c| CellValue::String(c.as_str().unwrap_or("").to_string()))
-            .collect();
-        let mut matrix: Vec<Vec<CellValue>> = vec![header_row];
-        for rec in records {
-            let Some(obj) = rec.as_object() else {
-                continue;
-            };
-            let row: Vec<CellValue> = cols
-                .iter()
-                .map(|c| {
-                    let key = c.as_str().unwrap_or("");
-                    match obj.get(key) {
-                        Some(serde_json::Value::Null) | None => CellValue::Null,
-                        Some(serde_json::Value::Bool(b)) => CellValue::Bool(*b),
-                        Some(serde_json::Value::Number(n)) => {
-                            n.as_f64().map(CellValue::Number).unwrap_or(CellValue::Null)
-                        }
-                        Some(serde_json::Value::String(s)) => CellValue::String(s.clone()),
-                        Some(other) => CellValue::String(other.to_string()),
-                    }
-                })
-                .collect();
-            matrix.push(row);
-        }
-        let n_rows = matrix.len();
-        let n_cols = cols.len();
-
-        match client
-            .set_range(spreadsheet_id, &resolved_name, "A1", matrix)
-            .await
-        {
-            Ok(_) => {
-                results.push(serde_json::json!({
-                    "name": raw_name,
-                    "resolved_name": resolved_name,
-                    "sheet_id": sheet_id,
-                    "n_rows": n_rows,
-                    "n_cols": n_cols,
-                }));
+            "overwrite" => {
+                results.push(do_overwrite(client, spreadsheet_id, raw_name, entry).await);
             }
-            Err(e) => {
+            "replace" => {
+                results.push(do_replace(client, spreadsheet_id, raw_name, entry, policy).await);
+            }
+            other => {
                 results.push(serde_json::json!({
                     "name": raw_name,
-                    "resolved_name": resolved_name,
-                    "error": format!("set_range failed: {e}"),
+                    "error": format!("unknown mode '{other}'; valid: replace, update_in_place, overwrite"),
                 }));
             }
         }
     }
     results
+}
+
+/// Mode `replace`: create tab and write full DataFrame. Apply policy on collision.
+async fn do_replace(
+    client: &Arc<dyn SheetsClient>,
+    spreadsheet_id: &SpreadsheetId,
+    raw_name: &str,
+    entry: &serde_json::Value,
+    policy: CollisionPolicy,
+) -> serde_json::Value {
+    let exists = match fetch_tab_meta(client, spreadsheet_id, raw_name).await {
+        Ok(opt) => opt,
+        Err(e) => {
+            return serde_json::json!({
+                "name": raw_name,
+                "error": format!("metadata fetch failed: {e}"),
+            });
+        }
+    };
+    if let Some(meta) = exists {
+        match policy {
+            CollisionPolicy::Fail => {
+                return build_sheet_exists_error(raw_name, Some(&spreadsheet_id.0), &meta);
+            }
+            CollisionPolicy::Overwrite => {
+                // Use the existing tab name as-is (Sheets API set_range on
+                // existing tab replaces contents from A1 down).
+                return write_full_df(client, spreadsheet_id, raw_name, raw_name, entry).await;
+            }
+            CollisionPolicy::AutoSuffix => {
+                // Find a free suffixed name and create it.
+                for attempt in 2i32..=10 {
+                    let candidate = format!("{raw_name} ({attempt})");
+                    match client.add_sheet(spreadsheet_id, &candidate).await {
+                        Ok(_) => {
+                            return write_full_df(
+                                client,
+                                spreadsheet_id,
+                                raw_name,
+                                &candidate,
+                                entry,
+                            )
+                            .await;
+                        }
+                        Err(crate::gsheets::domain::SheetsError::Http(msg))
+                            if msg.to_lowercase().contains("already exists") =>
+                        {
+                            continue;
+                        }
+                        Err(e) => {
+                            return serde_json::json!({
+                                "name": raw_name,
+                                "error": format!("add_sheet failed: {e}"),
+                            });
+                        }
+                    }
+                }
+                return serde_json::json!({
+                    "name": raw_name,
+                    "error": "auto_suffix: all 10 name attempts already exist",
+                });
+            }
+        }
+    }
+    // Doesn't exist — create + write.
+    match client.add_sheet(spreadsheet_id, raw_name).await {
+        Ok(_) => write_full_df(client, spreadsheet_id, raw_name, raw_name, entry).await,
+        Err(e) => serde_json::json!({
+            "name": raw_name,
+            "error": format!("add_sheet failed: {e}"),
+        }),
+    }
+}
+
+/// Mode `overwrite`: replace contents of existing tab. Creates if absent.
+async fn do_overwrite(
+    client: &Arc<dyn SheetsClient>,
+    spreadsheet_id: &SpreadsheetId,
+    raw_name: &str,
+    entry: &serde_json::Value,
+) -> serde_json::Value {
+    // Schema-change guard: if the tab exists and its columns differ from
+    // the input's columns, reject unless allow_schema_change=true.
+    if let Ok(Some(meta)) = fetch_tab_meta(client, spreadsheet_id, raw_name).await {
+        let input_cols: Vec<String> = entry
+            .get("df_cols")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|c| c.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let allow = entry
+            .get("allow_schema_change")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let mismatch = !columns_match(&meta.columns, &input_cols);
+        if mismatch && !allow {
+            return serde_json::json!({
+                "name": raw_name,
+                "error": "SchemaChange",
+                "current_columns": meta.columns,
+                "input_columns": input_cols,
+                "message": format!(
+                    "Overwriting '{raw_name}' would change its schema: current {:?} → new {:?}. \
+                     This is likely a mistake. RECOMMENDED: use a different tab name. To proceed \
+                     anyway, add 'allow_schema_change: true' to the spec dict.",
+                    meta.columns, input_cols
+                ),
+            });
+        }
+    }
+    write_full_df(client, spreadsheet_id, raw_name, raw_name, entry).await
+}
+
+/// Mode `update_in_place`: diff and apply only changed cells.
+async fn do_update_in_place(
+    client: &Arc<dyn SheetsClient>,
+    spreadsheet_id: &SpreadsheetId,
+    raw_name: &str,
+    entry: &serde_json::Value,
+) -> serde_json::Value {
+    let Some(key) = entry.get("key").and_then(|v| v.as_str()) else {
+        return serde_json::json!({
+            "name": raw_name,
+            "error": "update_in_place requires `key` field in the spec dict",
+        });
+    };
+    let restrict: Option<Vec<String>> = entry.get("columns").and_then(|v| v.as_array()).map(|a| {
+        a.iter()
+            .filter_map(|c| c.as_str().map(String::from))
+            .collect()
+    });
+    let strict = entry
+        .get("strict_match")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let new_records: Vec<serde_json::Map<String, serde_json::Value>> = entry
+        .get("df_records")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|r| r.as_object().cloned()).collect())
+        .unwrap_or_default();
+
+    // Fetch current rows AND header column order from the tab.
+    let read = match client
+        .read_range(
+            spreadsheet_id,
+            raw_name,
+            None,
+            ReadOptions {
+                value_render: crate::gsheets::domain::ValueRenderOption::UnformattedValue,
+                as_records: true,
+            },
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(crate::gsheets::domain::SheetsError::SheetNotFound(_)) => {
+            return serde_json::json!({
+                "name": raw_name,
+                "error": "UpdateRequiresExistingTab",
+                "message": format!(
+                    "update_in_place needs the tab '{raw_name}' to exist. Use mode=replace to create it."
+                ),
+            });
+        }
+        Err(e) => {
+            return serde_json::json!({
+                "name": raw_name,
+                "error": format!("read failed: {e}"),
+            });
+        }
+    };
+    let current_records: Vec<serde_json::Map<String, serde_json::Value>> = match read.values {
+        serde_json::Value::Array(a) => a
+            .into_iter()
+            .filter_map(|v| match v {
+                serde_json::Value::Object(o) => Some(o),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    // Header order (for A1 mapping) — re-read header row directly so column order is preserved.
+    let header_read = match client
+        .read_range(
+            spreadsheet_id,
+            raw_name,
+            Some("A1:Z1"),
+            ReadOptions {
+                value_render: crate::gsheets::domain::ValueRenderOption::UnformattedValue,
+                as_records: false,
+            },
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return serde_json::json!({
+                "name": raw_name,
+                "error": format!("header read failed: {e}"),
+            });
+        }
+    };
+    let header_cols: Vec<String> = match header_read.values {
+        serde_json::Value::Array(rows) => rows
+            .first()
+            .and_then(|r| r.as_array())
+            .map(|cells| {
+                cells
+                    .iter()
+                    .map(|c| c.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+
+    let diff = match diff_records(
+        &current_records,
+        &new_records,
+        key,
+        restrict.as_deref(),
+        strict,
+        raw_name,
+    ) {
+        Ok(d) => d,
+        Err(e) => return e.to_json(),
+    };
+
+    // Map key_value → row index (1-based, row 1 is header → first data is row 2).
+    let mut key_to_row: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (i, r) in current_records.iter().enumerate() {
+        if let Some(k) = r.get(key).and_then(|v| match v {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            serde_json::Value::Bool(b) => Some(b.to_string()),
+            _ => None,
+        }) {
+            key_to_row.insert(k, i + 2);
+        }
+    }
+    let mut col_to_index: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (i, c) in header_cols.iter().enumerate() {
+        col_to_index.insert(c.clone(), i);
+    }
+
+    let mut cell_updates: Vec<(String, crate::gsheets::domain::CellValue)> = Vec::new();
+    for chg in &diff.changes {
+        let (Some(row), Some(col_idx)) = (
+            key_to_row.get(&chg.key_value),
+            col_to_index.get(&chg.column),
+        ) else {
+            continue;
+        };
+        let addr = a1_addr(*col_idx, *row);
+        cell_updates.push((
+            addr,
+            crate::gsheets::domain::CellValue::from_json(&chg.new_value),
+        ));
+    }
+
+    let cells_to_write = cell_updates.len();
+    if cells_to_write == 0 {
+        return serde_json::json!({
+            "tab": raw_name,
+            "mode": "update_in_place",
+            "changes": {"rows": 0, "cells": 0, "columns": diff.columns_touched},
+            "unchanged": {"rows": diff.rows_unchanged},
+            "skipped": {
+                "rows_not_in_target": diff.rows_skipped_not_in_target,
+                "rows_null_key": diff.rows_skipped_null_key,
+            },
+        });
+    }
+
+    match client
+        .batch_update_cells(spreadsheet_id, raw_name, cell_updates)
+        .await
+    {
+        Ok(_) => serde_json::json!({
+            "tab": raw_name,
+            "mode": "update_in_place",
+            "changes": {
+                "rows": diff.rows_changed,
+                "cells": cells_to_write,
+                "columns": diff.columns_touched,
+            },
+            "unchanged": {"rows": diff.rows_unchanged},
+            "skipped": {
+                "rows_not_in_target": diff.rows_skipped_not_in_target,
+                "rows_null_key": diff.rows_skipped_null_key,
+            },
+        }),
+        Err(e) => serde_json::json!({
+            "name": raw_name,
+            "error": format!("batch_update_cells failed: {e}"),
+        }),
+    }
+}
+
+/// Common DataFrame write — used by `replace`, `overwrite`, and the
+/// auto_suffix paths. `name` is what gets written to. `raw_name` is what
+/// the LLM asked for (for response labeling).
+async fn write_full_df(
+    client: &Arc<dyn SheetsClient>,
+    spreadsheet_id: &SpreadsheetId,
+    raw_name: &str,
+    name: &str,
+    entry: &serde_json::Value,
+) -> serde_json::Value {
+    use crate::gsheets::domain::CellValue;
+    let records = entry.get("df_records").and_then(|v| v.as_array());
+    let cols = entry.get("df_cols").and_then(|v| v.as_array());
+    let (Some(records), Some(cols)) = (records, cols) else {
+        return serde_json::json!({
+            "name": raw_name,
+            "error": "entry missing df_records or df_cols",
+        });
+    };
+    let header_row: Vec<CellValue> = cols
+        .iter()
+        .map(|c| CellValue::String(c.as_str().unwrap_or("").to_string()))
+        .collect();
+    let mut matrix: Vec<Vec<CellValue>> = vec![header_row];
+    for rec in records {
+        let Some(obj) = rec.as_object() else { continue };
+        let row: Vec<CellValue> = cols
+            .iter()
+            .map(|c| {
+                let key = c.as_str().unwrap_or("");
+                CellValue::from_json(obj.get(key).unwrap_or(&serde_json::Value::Null))
+            })
+            .collect();
+        matrix.push(row);
+    }
+    let n_rows = matrix.len();
+    let n_cols = cols.len();
+    match client.set_range(spreadsheet_id, name, "A1", matrix).await {
+        Ok(_) => serde_json::json!({
+            "name": raw_name,
+            "resolved_name": name,
+            "n_rows": n_rows,
+            "n_cols": n_cols,
+        }),
+        Err(e) => serde_json::json!({
+            "name": raw_name,
+            "resolved_name": name,
+            "error": format!("set_range failed: {e}"),
+        }),
+    }
+}
+
+fn columns_match(a: &[String], b: &[String]) -> bool {
+    let sa: std::collections::HashSet<&String> = a.iter().collect();
+    let sb: std::collections::HashSet<&String> = b.iter().collect();
+    sa == sb
 }
 
 /// Wrap user code with the standard prelude (imports) and postlude
@@ -592,6 +891,65 @@ fn truncate_json(v: &serde_json::Value, cap: usize) -> (serde_json::Value, bool)
             true,
         )
     }
+}
+
+/// Fetch lightweight metadata for the target tab: row/col count from
+/// list_sheets + column names from the header row.
+async fn fetch_tab_meta(
+    client: &Arc<dyn SheetsClient>,
+    spreadsheet_id: &SpreadsheetId,
+    tab: &str,
+) -> Result<Option<TabMeta>, crate::gsheets::domain::SheetsError> {
+    let sheets = client.list_sheets(spreadsheet_id).await?;
+    let Some(meta) = sheets.into_iter().find(|s| s.title == tab) else {
+        return Ok(None);
+    };
+    // Header row (A1:Z1) — small read, gives us real column names.
+    let read = client
+        .read_range(
+            spreadsheet_id,
+            tab,
+            Some("A1:Z1"),
+            ReadOptions {
+                value_render: crate::gsheets::domain::ValueRenderOption::UnformattedValue,
+                as_records: false,
+            },
+        )
+        .await?;
+    let columns: Vec<String> = match read.values {
+        serde_json::Value::Array(rows) => rows
+            .first()
+            .and_then(|r| r.as_array())
+            .map(|cells| {
+                cells
+                    .iter()
+                    .map(|c| c.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    Ok(Some(TabMeta {
+        n_rows: meta.row_count as u64,
+        n_cols: meta.col_count as u64,
+        columns,
+    }))
+}
+
+/// Convert column letter+row index to A1 string for `batch_update_cells`.
+/// `row_index` is 1-based, where row 1 is the header.
+fn a1_addr(col_index: usize, row_index: usize) -> String {
+    let mut col = String::new();
+    let mut n = col_index;
+    loop {
+        col.insert(0, (b'A' + (n % 26) as u8) as char);
+        n /= 26;
+        if n == 0 {
+            break;
+        }
+        n -= 1;
+    }
+    format!("{col}{row_index}")
 }
 
 #[cfg(test)]
@@ -1079,5 +1437,261 @@ mod tests {
             entry.get("error").is_none(),
             "unexpected error in wrote_sheets entry: {entry}"
         );
+    }
+
+    // ── update_in_place mode tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn update_in_place_writes_only_changed_cells() {
+        pyo3::prepare_freethreaded_python();
+
+        let server = wiremock::MockServer::start().await;
+        let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
+        client.token_test_seed("fake-token").await;
+
+        // (a) read_range mock — returns current "Sales" with 3 rows.
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(r"/ss_u/values/Sales"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "range": "Sales!A1:C4",
+                    "majorDimension": "ROWS",
+                    "values": [
+                        ["id", "price"],
+                        ["a",  10],
+                        ["b",  20],
+                        ["c",  30],
+                    ],
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        // (b) list_sheets mock — "Sales" tab exists.
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(r"/ss_u\?"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "sheets": [{
+                        "properties": {
+                            "sheetId": 1, "title": "Sales", "index": 0,
+                            "gridProperties": {"rowCount": 4, "columnCount": 2}
+                        }
+                    }]
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        // (c) batchUpdate (cells) mock — one call with 2 cell updates
+        //     (rows b & c, column price). No .expect() because the
+        //     pandas-skip path exits before this mock is exercised.
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path_regex(r"/ss_u/values:batchUpdate"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "totalUpdatedCells": 2,
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        let args = serde_json::json!({
+            "bindings": [{"var": "sales", "spreadsheet_id": "ss_u", "sheet": "Sales"}],
+            "code": "\
+        import pandas as pd\n\
+        df = pd.DataFrame(sales)\n\
+        df.loc[df['id'].isin(['b','c']), 'price'] = 99\n\
+        output_sheets = {'Sales': {'mode': 'update_in_place', 'df': df, 'key': 'id'}}\n\
+        output = {}\n\
+        ",
+            "write_to_spreadsheet": "ss_u"
+        });
+
+        let client: Arc<dyn SheetsClient> = Arc::new(client);
+        let res = dispatch_gsheets_run_python_with_client(client, args).await;
+
+        if let Some(err) = res.get("error").and_then(|v| v.as_str()) {
+            if err.contains("No module named 'pandas'") {
+                eprintln!("SKIPPED (no pandas): {err}");
+                return;
+            }
+            panic!("unexpected error: {res}");
+        }
+        let wrote = res
+            .get("wrote_sheets")
+            .and_then(|v| v.as_array())
+            .expect("wrote_sheets must be array");
+        assert_eq!(wrote.len(), 1, "expected 1 wrote_sheets entry; got: {res}");
+        let entry = &wrote[0];
+        assert_eq!(entry["mode"], "update_in_place");
+        assert_eq!(entry["changes"]["rows"], 2);
+        assert_eq!(entry["changes"]["cells"], 2);
+        assert_eq!(entry["unchanged"]["rows"], 1);
+    }
+
+    #[tokio::test]
+    async fn replace_mode_default_fail_returns_sheet_exists() {
+        pyo3::prepare_freethreaded_python();
+
+        let server = wiremock::MockServer::start().await;
+        let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
+        client.token_test_seed("fake-token").await;
+
+        // list_sheets — "Existing" already there.
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(r"/ss_f\?"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "sheets": [{
+                        "properties": {
+                            "sheetId": 7, "title": "Existing", "index": 0,
+                            "gridProperties": {"rowCount": 100, "columnCount": 3}
+                        }
+                    }]
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        // read_range (for header columns) — used by fail-error builder.
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(r"/ss_f/values/Existing"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "range": "Existing!A1:Z1",
+                    "majorDimension": "ROWS",
+                    "values": [["a","b","c"]],
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        // NO batchUpdate, NO add_sheet, NO set_range calls expected.
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let args = serde_json::json!({
+            "bindings": [{"var": "x", "spreadsheet_id": "ss_f", "sheet": "Existing"}],
+            "code": "\
+        import pandas as pd\n\
+        df = pd.DataFrame(x)\n\
+        output_sheets = {'Existing': df}\n\
+        output = {}\n\
+        ",
+            "write_to_spreadsheet": "ss_f"
+        });
+
+        let client: Arc<dyn SheetsClient> = Arc::new(client);
+        let res = dispatch_gsheets_run_python_with_client(client, args).await;
+
+        if let Some(err) = res.get("error").and_then(|v| v.as_str()) {
+            if err.contains("No module named 'pandas'") {
+                eprintln!("SKIPPED (no pandas): {err}");
+                return;
+            }
+        }
+        let wrote = res
+            .get("wrote_sheets")
+            .and_then(|v| v.as_array())
+            .expect("wrote_sheets must be array");
+        assert_eq!(wrote.len(), 1);
+        assert_eq!(wrote[0]["error"], "SheetExists");
+        let advice = wrote[0]["advice"].as_str().unwrap();
+        assert!(advice.contains("Existing"));
+    }
+
+    #[tokio::test]
+    async fn auto_suffix_policy_preserves_old_behavior() {
+        // With fixed_config.on_existing_sheet="auto_suffix", colliding
+        // "Existing" should write to "Existing (2)" silently — same as
+        // pre-spec behavior.
+        pyo3::prepare_freethreaded_python();
+
+        let server = wiremock::MockServer::start().await;
+        let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
+        client.token_test_seed("fake-token").await;
+
+        // Binding read — provides the Python var `x` to the sandbox.
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(r"/ss_a/values/Existing"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "range": "Existing!A1:B2",
+                    "majorDimension": "ROWS",
+                    "values": [
+                        ["id", "val"],
+                        [1, 99],
+                    ],
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        // list_sheets — "Existing" already there (triggers collision check).
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(r"/ss_a\?"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "sheets": [{"properties": {"sheetId": 1, "title": "Existing", "index": 0,
+                        "gridProperties": {"rowCount": 1, "columnCount": 1}}}]
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        // Header read (A1:Z1) — needed by fetch_tab_meta to get column names.
+        // The path_regex for /ss_a/values/Existing above matches both the
+        // binding read and the header read; wiremock uses the first matching
+        // mock so this is OK — both return the same rows/header shape.
+
+        // add_sheet for "Existing (2)".
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path_regex(r"/ss_a:batchUpdate"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "replies": [{"addSheet": {"properties": {"sheetId": 9, "title": "Existing (2)"}}}]
+            })))
+            .mount(&server)
+            .await;
+
+        // set_range write to "Existing (2)".
+        wiremock::Mock::given(wiremock::matchers::method("PUT"))
+            .and(wiremock::matchers::path_regex(r"/ss_a/values/"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "updatedRange": "Existing (2)!A1:B2",
+                    "updatedCells": 4,
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        let args = serde_json::json!({
+            "bindings": [{"var": "x", "spreadsheet_id": "ss_a", "sheet": "Existing"}],
+            "code": "\
+        import pandas as pd\n\
+        df = pd.DataFrame(x)\n\
+        output_sheets = {'Existing': df}\n\
+        output = {}\n\
+        ",
+            "write_to_spreadsheet": "ss_a",
+            "on_existing_sheet": "auto_suffix"
+        });
+
+        let client: Arc<dyn SheetsClient> = Arc::new(client);
+        let res = dispatch_gsheets_run_python_with_client(client, args).await;
+
+        if let Some(err) = res.get("error").and_then(|v| v.as_str()) {
+            if err.contains("No module named 'pandas'") {
+                eprintln!("SKIPPED (no pandas): {err}");
+                return;
+            }
+            panic!("unexpected error: {res}");
+        }
+        let wrote = res["wrote_sheets"].as_array().expect("array");
+        assert_eq!(wrote[0]["resolved_name"], "Existing (2)");
     }
 }
