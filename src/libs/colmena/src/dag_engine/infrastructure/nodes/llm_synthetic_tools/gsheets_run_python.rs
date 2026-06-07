@@ -52,6 +52,15 @@ pub struct GsheetsRunPythonArgs {
     /// under its `var` name. Define `output` (any JSON-serializable
     /// value) — that is what the LLM sees.
     pub code: String,
+
+    /// Optional target spreadsheet for `output_sheets` returned by the script.
+    /// When set AND the script assigns `output_sheets = {name: DataFrame, ...}`,
+    /// the dispatcher creates one new tab per entry and writes the DataFrame
+    /// as a values matrix (header row + body). If the name already exists,
+    /// the dispatcher appends " (2)", " (3)", etc. (capped at 10 attempts).
+    /// When omitted, any `output_sheets` produced by the script is ignored.
+    #[serde(default)]
+    pub write_to_spreadsheet: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -233,20 +242,185 @@ pub async fn dispatch_gsheets_run_python_with_client(
         }
     };
 
-    let user_output = helper_result.output.unwrap_or(serde_json::Value::Null);
+    // The postlude wraps all globals into {"user_output": ..., "output_sheets": ...}.
+    let wrapped_output = helper_result.output.unwrap_or(serde_json::Value::Null);
+
+    // Extract the user-facing `output` global (the "user_output" key in the
+    // postlude-wrapped object).
+    let user_output = wrapped_output
+        .get("user_output")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    // Multi-sheet write-back: if the script set `output_sheets` AND the args
+    // supplied `write_to_spreadsheet`, write each entry as a new tab.
+    let output_sheets_value = wrapped_output.get("output_sheets");
+
+    let has_target = parsed.write_to_spreadsheet.is_some();
+    let has_sheets = output_sheets_value
+        .map(|v| !v.is_null())
+        .unwrap_or(false);
+
+    let mut wrote_sheets_response = serde_json::Value::Null;
+    if let (Some(target_id), Some(sheets_value)) = (
+        parsed.write_to_spreadsheet.as_deref(),
+        output_sheets_value.filter(|v| !v.is_null()),
+    ) {
+        let spreadsheet_id = crate::gsheets::domain::SpreadsheetId(target_id.to_string());
+        let results = write_output_sheets(&client, &spreadsheet_id, sheets_value).await;
+        wrote_sheets_response = serde_json::Value::Array(results);
+    }
+
+    // Warning when args + globals are misconfigured
+    let warning: Option<&'static str> = match (has_target, has_sheets) {
+        (true, false) => Some(
+            "write_to_spreadsheet was set but the script did not assign \
+             `output_sheets = {...}`; nothing was written.",
+        ),
+        (false, true) => Some(
+            "Script assigned `output_sheets` but no `write_to_spreadsheet` arg \
+             was provided; the result was discarded.",
+        ),
+        _ => None,
+    };
+
     let (user_output_capped, output_truncated) = truncate_json(&user_output, OUTPUT_BYTE_CAP);
     let mut response = serde_json::json!({
         "output": user_output_capped,
         "stdout": truncate(&helper_result.stdout, STDOUT_BYTE_CAP),
         "error": serde_json::Value::Null,
+        "wrote_sheets": wrote_sheets_response,
     });
     if output_truncated {
         response["_output_truncated"] = serde_json::json!(true);
+    }
+    if let Some(w) = warning {
+        response["_warning"] = serde_json::Value::String(w.to_string());
     }
     response
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
+
+/// Write each `(name, DataFrame)` entry from `output_sheets` as a new tab
+/// in the target spreadsheet. Returns one metadata entry per write (success
+/// or error). On name collision, retries with " (2)" ... " (10)".
+async fn write_output_sheets(
+    client: &Arc<dyn SheetsClient>,
+    spreadsheet_id: &SpreadsheetId,
+    output_sheets: &serde_json::Value,
+) -> Vec<serde_json::Value> {
+    use crate::gsheets::domain::CellValue;
+    use crate::gsheets::domain::SheetsError;
+
+    let Some(map) = output_sheets.as_object() else {
+        return Vec::new();
+    };
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    for (raw_name, entry) in map {
+        let records = entry.get("records").and_then(|v| v.as_array());
+        let cols = entry.get("cols").and_then(|v| v.as_array());
+        let (Some(records), Some(cols)) = (records, cols) else {
+            results.push(serde_json::json!({
+                "name": raw_name,
+                "error": "entry missing records or cols",
+            }));
+            continue;
+        };
+
+        // Resolve a non-conflicting name: try raw_name, then "name (2)" ... "name (10)".
+        let mut resolved_name: Option<String> = None;
+        let mut sheet_id: Option<i64> = None;
+        for attempt in 1i32..=10 {
+            let candidate = if attempt == 1 {
+                raw_name.clone()
+            } else {
+                format!("{raw_name} ({attempt})")
+            };
+            match client.add_sheet(spreadsheet_id, &candidate).await {
+                Ok(meta) => {
+                    resolved_name = Some(candidate);
+                    sheet_id = Some(meta.sheet_id.0);
+                    break;
+                }
+                Err(SheetsError::Http(msg)) if msg.to_lowercase().contains("already exists") => {
+                    continue;
+                }
+                Err(e) => {
+                    results.push(serde_json::json!({
+                        "name": raw_name,
+                        "error": format!("add_sheet failed: {e}"),
+                    }));
+                    break;
+                }
+            }
+        }
+        let (Some(resolved_name), Some(sheet_id)) = (resolved_name, sheet_id) else {
+            // All 10 attempts collided or an error broke the loop early (already pushed).
+            if !results.iter().any(|r| r.get("name") == Some(&serde_json::Value::String(raw_name.clone()))) {
+                results.push(serde_json::json!({
+                    "name": raw_name,
+                    "error": "could not create tab: all 10 name attempts already exist",
+                }));
+            }
+            continue;
+        };
+
+        // Build matrix: header row + body rows.
+        let header_row: Vec<CellValue> = cols
+            .iter()
+            .map(|c| CellValue::String(c.as_str().unwrap_or("").to_string()))
+            .collect();
+        let mut matrix: Vec<Vec<CellValue>> = vec![header_row];
+        for rec in records {
+            let Some(obj) = rec.as_object() else {
+                continue;
+            };
+            let row: Vec<CellValue> = cols
+                .iter()
+                .map(|c| {
+                    let key = c.as_str().unwrap_or("");
+                    match obj.get(key) {
+                        Some(serde_json::Value::Null) | None => CellValue::Null,
+                        Some(serde_json::Value::Bool(b)) => CellValue::Bool(*b),
+                        Some(serde_json::Value::Number(n)) => n
+                            .as_f64()
+                            .map(CellValue::Number)
+                            .unwrap_or(CellValue::Null),
+                        Some(serde_json::Value::String(s)) => CellValue::String(s.clone()),
+                        Some(other) => CellValue::String(other.to_string()),
+                    }
+                })
+                .collect();
+            matrix.push(row);
+        }
+        let n_rows = matrix.len();
+        let n_cols = cols.len();
+
+        match client
+            .set_range(spreadsheet_id, &resolved_name, "A1", matrix)
+            .await
+        {
+            Ok(_) => {
+                results.push(serde_json::json!({
+                    "name": raw_name,
+                    "resolved_name": resolved_name,
+                    "sheet_id": sheet_id,
+                    "n_rows": n_rows,
+                    "n_cols": n_cols,
+                }));
+            }
+            Err(e) => {
+                results.push(serde_json::json!({
+                    "name": raw_name,
+                    "resolved_name": resolved_name,
+                    "error": format!("set_range failed: {e}"),
+                }));
+            }
+        }
+    }
+    results
+}
 
 /// Wrap user code with the standard prelude (imports) and postlude
 /// (collect `output`). Unlike `crdt_doc_run_python` we do NOT auto-build
