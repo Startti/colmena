@@ -17,6 +17,7 @@ For context on skills design and authoring, see
 | `crdt-doc-run-python` | Calling the `crdt_doc_run_python` tool — DataFrame shape rules, output protocol, type quirks, debugging. | [SKILL.md](../../src/libs/colmena/skills/crdt-doc-run-python/SKILL.md) |
 | `expense-analysis` | Analyzing expense data — categories, vendor rollups, period comparisons. | [SKILL.md](../../src/libs/colmena/skills/expense-analysis/SKILL.md) |
 | `gsheets-cross-sheet-analysis` | Same cross-sheet patterns as `crdt-doc-cross-sheet-analysis`, but via Google Sheets `gsheets_*` tools. | [SKILL.md](../../src/libs/colmena/skills/gsheets-cross-sheet-analysis/SKILL.md) |
+| `gsheets-table-exploration` | Single-table patterns for Google Sheets — inspect schema first, top-N via nlargest, filters via query, type coercion, multi-tab output. | [link](../../src/libs/colmena/skills/gsheets-table-exploration/SKILL.md) |
 | `python-expert` | Modern Python (3.11+) — typing, async, dataclasses, stdlib internals. Not for general programming questions. | [SKILL.md](../../src/libs/colmena/skills/python-expert/SKILL.md) |
 | `sales-analysis` | Analyzing sales data — common tables, KPIs, pitfalls. | [SKILL.md](../../src/libs/colmena/skills/sales-analysis/SKILL.md) |
 | `sql-optimizer` | Writing, reviewing, or optimizing SQL — performance, indexes, joins, query plans. Not for ORM-specific questions. | [SKILL.md](../../src/libs/colmena/skills/sql-optimizer/SKILL.md) |
