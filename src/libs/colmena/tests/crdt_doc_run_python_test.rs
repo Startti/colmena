@@ -1,7 +1,7 @@
 //! End-to-end test for `crdt_doc_run_python` tool. Exercises:
 //! - Reading a sheet's data as a pandas DataFrame.
 //! - Computing aggregations server-side and returning to LLM.
-//! - Writing a DataFrame back as a new sheet.
+//! - Writing a DataFrame back as a new sheet (via `output_sheets`).
 //! - Name collision resolution.
 //!
 //! These tests are #[ignore] because they require pandas + numpy + scipy
@@ -70,7 +70,6 @@ totals = df.groupby('Region')['Sales'].sum()
 output = totals.to_dict()
 "#
         ),
-        write_to_sheet: None,
         on_existing_sheet: None,
     };
     let result = execute_run_python(&ctx, args).await;
@@ -84,25 +83,25 @@ output = totals.to_dict()
     // pandas aggregations preserve the float type.
     assert_eq!(totals["North"], json!(300.0));
     assert_eq!(totals["South"], json!(150.0));
-    assert!(result["wrote_sheet"].is_null());
+    // No write requested — wrote_sheets should be null.
+    assert!(result["wrote_sheets"].is_null());
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[tokio::test]
 #[ignore = "requires pandas+numpy in system Python"]
-async fn run_python_write_to_sheet_creates_new_sheet() {
+async fn run_python_output_sheets_creates_new_sheet() {
     let (ctx, _aid, runtime, tmp, sheet_id) = make_test_ctx().await;
 
     let args = RunPythonArgs {
         sheet_ids: vec![sheet_id.clone()],
         code: format!(
             r#"df = dfs["{sheet_id}"]
-output_sheet = df.groupby('Region')['Sales'].sum().reset_index()
+output_sheets = {{"Summary": df.groupby('Region')['Sales'].sum().reset_index()}}
 output = "summary written"
 "#
         ),
-        write_to_sheet: Some("Summary".to_string()),
         on_existing_sheet: None,
     };
     let result = execute_run_python(&ctx, args).await;
@@ -111,14 +110,18 @@ output = "summary written"
         "got error: {:?}",
         result["error"]
     );
-    let wrote = &result["wrote_sheet"];
-    assert_eq!(wrote["name"], "Summary");
-    assert_eq!(wrote["n_rows"], 2);
-    assert_eq!(wrote["n_cols"], 2);
+    let wrote = result["wrote_sheets"]
+        .as_array()
+        .expect("wrote_sheets array");
+    assert_eq!(wrote.len(), 1);
+    let entry = &wrote[0];
+    assert_eq!(entry["name"], "Summary");
+    assert_eq!(entry["n_rows"], 2);
+    assert_eq!(entry["n_cols"], 2);
 
     // Verify the new sheet exists in the runtime's projection.
-    let entry = runtime.registry.get(ctx.artifact_id()).unwrap();
-    let proj = colmena::crdt_documents::projection::project(&entry.doc);
+    let entry_doc = runtime.registry.get(ctx.artifact_id()).unwrap();
+    let proj = colmena::crdt_documents::projection::project(&entry_doc.doc);
     let sheets = proj["sheets"].as_array().unwrap();
     let summary = sheets
         .iter()
@@ -146,7 +149,6 @@ async fn run_python_error_response_includes_loaded_sheet_columns() {
         sheet_ids: vec![sheet_id.clone()],
         // Reference a column that does not exist → KeyError.
         code: format!(r#"df = dfs["{sheet_id}"]; output = df["NonExistentCol"].sum()"#),
-        write_to_sheet: None,
         on_existing_sheet: None,
     };
     let result = execute_run_python(&ctx, args).await;
@@ -177,22 +179,21 @@ async fn run_python_error_response_includes_loaded_sheet_columns() {
 
 #[tokio::test]
 #[ignore = "requires pandas+numpy in system Python"]
-async fn run_python_name_collision_appends_suffix() {
+async fn run_python_output_sheets_collision_auto_suffix() {
     let (ctx, _aid, runtime, tmp, sheet_id) = make_test_ctx().await;
-    // Pre-create a sheet named "Summary" so the run_python writeback hits a collision.
-    let entry = runtime.registry.get(ctx.artifact_id()).unwrap();
-    let _ = apply_add_sheet(&entry.doc, "Summary");
+    // Pre-create a sheet named "Summary" so the output_sheets writeback hits a collision.
+    let entry_doc = runtime.registry.get(ctx.artifact_id()).unwrap();
+    let _ = apply_add_sheet(&entry_doc.doc, "Summary");
 
     let args = RunPythonArgs {
         sheet_ids: vec![sheet_id.clone()],
         code: format!(
             r#"df = dfs["{sheet_id}"]
-output_sheet = df.head(1)
+output_sheets = {{"Summary": df.head(1)}}
 output = "ok"
 "#
         ),
-        write_to_sheet: Some("Summary".to_string()),
-        on_existing_sheet: None,
+        on_existing_sheet: Some("auto_suffix".to_string()),
     };
     let result = execute_run_python(&ctx, args).await;
     assert!(
@@ -200,7 +201,11 @@ output = "ok"
         "got error: {:?}",
         result["error"]
     );
-    assert_eq!(result["wrote_sheet"]["name"], "Summary (2)");
+    let wrote = result["wrote_sheets"]
+        .as_array()
+        .expect("wrote_sheets array");
+    assert_eq!(wrote.len(), 1);
+    assert_eq!(wrote[0]["resolved_name"], "Summary (2)");
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

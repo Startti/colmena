@@ -4,7 +4,7 @@
 //!   - Spec: docs/superpowers/specs/2026-06-03-crdt-pandas-integration-design.md
 //!   - Plan: docs/superpowers/plans/2026-06-03-crdt-pandas-integration.md (C-T5)
 
-use crate::crdt_documents::{build_records_for_sheets, write_records_as_new_sheet, RecordsError};
+use crate::crdt_documents::{build_records_for_sheets, RecordsError};
 use crate::dag_engine::infrastructure::nodes::python_node::execute_sandboxed_helper;
 use crate::llm::domain::tools::ToolDefinition;
 use crate::text;
@@ -27,7 +27,6 @@ const CRDT_PY_POSTLUDE: &str =
 const OUTPUT_BYTE_CAP: usize = 10 * 1024;
 const STDOUT_BYTE_CAP: usize = 10 * 1024;
 const ERROR_BYTE_CAP: usize = 10 * 1024;
-const PREVIEW_ROWS_IN_WROTE_SHEET: usize = 5;
 /// Sandbox timeout for code execution (v1 hardcoded — see BACKLOG for
 /// configurable path).
 const CODE_TIMEOUT_SECS: u64 = 30;
@@ -38,13 +37,10 @@ pub struct RunPythonArgs {
     /// `dfs[<sheet_id>]`. At least one required.
     pub sheet_ids: Vec<String>,
     /// Python code to execute. Must define `output` (any JSON-serializable
-    /// value) and/or `output_sheet` (a pandas DataFrame). Has access to
+    /// value) and/or `output_sheets` (a dict of names → DataFrames; supports
+    /// replace/overwrite/update_in_place modes via spec dict). Has access to
     /// `pandas as pd`, `numpy as np`, `scipy.stats as stats`.
     pub code: String,
-    /// If set, `output_sheet` is written as a new sheet with this name.
-    /// Name collisions append " (2)", " (3)" etc.
-    #[serde(default)]
-    pub write_to_sheet: Option<String>,
     /// Operator-supplied collision policy. Default `fail`. Wired via
     /// `fixed_config.on_existing_sheet`. Accepted: fail, auto_suffix, overwrite.
     #[serde(default, alias = "on_existing_sheet")]
@@ -62,7 +58,7 @@ pub fn tool_run_python() -> ToolDefinition {
 
 /// Execute `run_python` against the runtime: extract records from the
 /// requested sheets, run the user's wrapped code in the sandbox, and
-/// optionally persist `output_sheet` as a new sheet.
+/// optionally persist `output_sheets` entries to Y.Doc tabs.
 pub async fn execute_run_python(ctx: &CrdtDocsContext, args: RunPythonArgs) -> serde_json::Value {
     // 1. Validate args.
     if args.sheet_ids.is_empty() {
@@ -138,7 +134,6 @@ pub async fn execute_run_python(ctx: &CrdtDocsContext, args: RunPythonArgs) -> s
         Ok(Ok(Err(e))) => {
             return serde_json::json!({
                 "output": serde_json::Value::Null,
-                "wrote_sheet": serde_json::Value::Null,
                 "stdout": "",
                 "error": truncate(&e, ERROR_BYTE_CAP),
                 "loaded_sheet_columns": loaded_sheet_columns,
@@ -158,119 +153,14 @@ pub async fn execute_run_python(ctx: &CrdtDocsContext, args: RunPythonArgs) -> s
         }
     };
 
-    // 6. Unpack the wrapped output: postlude packs three fields into `output`.
+    // 6. Unpack the wrapped output: postlude packs two fields into `output`.
     let wrapped_output = helper_result.output.unwrap_or(serde_json::Value::Null);
     let user_output = wrapped_output
         .get("user_output")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-    let sheet_records = wrapped_output
-        .get("sheet_records")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let sheet_cols = wrapped_output
-        .get("sheet_cols")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
 
-    // 7. If `write_to_sheet` was set AND `output_sheet` was a DataFrame,
-    //    write to Y.Doc.
-    let mut wrote_sheet_response = serde_json::Value::Null;
-    if let Some(target_name) = args.write_to_sheet.as_deref() {
-        if let (Some(records_arr), Some(cols_arr)) =
-            (sheet_records.as_array(), sheet_cols.as_array())
-        {
-            let cols: Vec<String> = cols_arr
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect();
-            let records: Vec<serde_json::Map<String, serde_json::Value>> = records_arr
-                .iter()
-                .filter_map(|v| v.as_object().cloned())
-                .collect();
-            match write_records_as_new_sheet(&doc, target_name, &cols, &records) {
-                Ok(wr) => {
-                    let preview: Vec<&serde_json::Map<String, serde_json::Value>> =
-                        records.iter().take(PREVIEW_ROWS_IN_WROTE_SHEET).collect();
-                    wrote_sheet_response = serde_json::json!({
-                        "sheet_id": wr.sheet_id,
-                        "name": wr.resolved_name,
-                        "n_rows": wr.n_rows,
-                        "n_cols": wr.n_cols,
-                        "preview": preview,
-                        "truncated_at": wr.truncated_at,
-                        // D-T8: surface the recalc count so the agent can
-                        // see whether dependent formulas refreshed as a
-                        // side effect of the write (always 0 in the
-                        // new-sheet path since the sheet was just created,
-                        // but the field is part of the contract).
-                        "cells_recalculated": wr.cells_recalculated,
-                        // D-T8: per-cell warnings (NeedsBrowser, EvalError,
-                        // Cycle, ParseError) bubbled up from
-                        // `apply_set_cell_in_proc`. Always empty for the
-                        // new-sheet path today, but the field is part of
-                        // the contract so future in-place writers route
-                        // through the same response shape.
-                        "warnings": serde_json::to_value(&wr.warnings)
-                            .unwrap_or(serde_json::Value::Array(vec![])),
-                    });
-                    ctx.mark_dirty();
-                    let origin = ctx
-                        .session_id()
-                        .map(|s| format!("agent:{s}"))
-                        .unwrap_or_else(|| "agent:llm".to_string());
-                    let event_id = ctx
-                        .backend()
-                        .record_event(crate::crdt_documents::change_tracker_store::NewEvent {
-                            artifact_id: ctx.artifact_id().clone(),
-                            sheet_id: Some(wr.sheet_id.clone()),
-                            origin: origin.clone(),
-                            summary: format!(
-                                "wrote {} rows via run_python to new sheet '{}'",
-                                wr.n_rows, wr.resolved_name
-                            ),
-                        })
-                        .await
-                        .unwrap_or(0);
-                    ctx.record_event_id(event_id);
-
-                    // D-T8: emit `formula_replaced_by_literal` events for any
-                    // cells whose formula was overwritten with a literal. In
-                    // the new-sheet path `formula_replacements` is always
-                    // empty (the sheet was just created and had no prior
-                    // formulas), so this loop is a no-op today. Kept here so
-                    // that future in-place writers exercising
-                    // `apply_records_to_doc` route through the same event-
-                    // emission path with no caller changes.
-                    for repl in &wr.formula_replacements {
-                        let _ = ctx
-                            .backend()
-                            .record_event(crate::crdt_documents::change_tracker_store::NewEvent {
-                                artifact_id: ctx.artifact_id().clone(),
-                                sheet_id: Some(repl.sheet.clone()),
-                                origin: origin.clone(),
-                                summary: format!(
-                                    "formula_replaced_by_literal: {}!{} (was '{}')",
-                                    repl.sheet, repl.addr, repl.prior_formula
-                                ),
-                            })
-                            .await;
-                    }
-                }
-                Err(e) => {
-                    return serde_json::json!({
-                        "output": user_output,
-                        "wrote_sheet": serde_json::Value::Null,
-                        "stdout": truncate(&helper_result.stdout, STDOUT_BYTE_CAP),
-                        "error": format!("write_to_sheet failed: {e}"),
-                        "loaded_sheet_columns": loaded_sheet_columns,
-                    });
-                }
-            }
-        }
-    }
-
-    // 8. Multi-sheet path with mode dispatch (replace / overwrite / update_in_place).
+    // 7. Multi-sheet path with mode dispatch (replace / overwrite / update_in_place).
     let mut wrote_sheets_response = serde_json::Value::Null;
     if let Some(sheets_value) = wrapped_output.get("output_sheets") {
         if !sheets_value.is_null() {
@@ -308,25 +198,17 @@ pub async fn execute_run_python(ctx: &CrdtDocsContext, args: RunPythonArgs) -> s
         }
     }
 
-    // 9. Truncate user output JSON if too large.
+    // 8. Truncate user output JSON if too large.
     let (user_output_capped, output_truncated) = truncate_json(&user_output, OUTPUT_BYTE_CAP);
 
     let mut response = serde_json::json!({
         "output": user_output_capped,
-        "wrote_sheet": wrote_sheet_response,
         "wrote_sheets": wrote_sheets_response,
         "stdout": truncate(&helper_result.stdout, STDOUT_BYTE_CAP),
         "error": serde_json::Value::Null,
     });
     if output_truncated {
         response["_output_truncated"] = serde_json::json!(true);
-    }
-    // Surface a warning if BOTH single + multi paths produced writes.
-    if !wrote_sheet_response.is_null() && !wrote_sheets_response.is_null() {
-        response["_warning"] = serde_json::json!(
-            "Both 'output_sheet' (legacy) and 'output_sheets' were set; both \
-             were written. Prefer 'output_sheets' for new code."
-        );
     }
     response
 }
@@ -733,7 +615,6 @@ output = {{"done": True}}
 "#,
                 sid = sheet_id
             ),
-            write_to_sheet: None,
             on_existing_sheet: None,
         };
         let result = execute_run_python(&ctx, args).await;
@@ -826,7 +707,6 @@ output = {{}}
 "#,
                 sid = sheet_id
             ),
-            write_to_sheet: None,
             on_existing_sheet: None,
         };
         let result = execute_run_python(&ctx, args).await;

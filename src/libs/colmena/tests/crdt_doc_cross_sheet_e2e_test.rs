@@ -98,7 +98,8 @@ async fn cross_sheet_row_diff_via_clone_plus_run_python() {
 a, b = dfs["{sid_q3}"], dfs["{cloned}"]
 m = a.merge(b, on='SKU', how='outer', suffixes=('_q3','_q4'), indicator=True)
 m['_status'] = m['_merge'].map({{'left_only':'only_in_Q3','right_only':'only_in_Q4','both':'present_in_both'}})
-output_sheet = m.drop(columns='_merge')
+diff_df = m.drop(columns='_merge')
+output_sheets = {{"Diff Q3 vs Q4": diff_df}}
 output = m['_status'].value_counts().to_dict()
 "#,
         sid_q3 = sid_q3,
@@ -109,7 +110,6 @@ output = m['_status'].value_counts().to_dict()
         RunPythonArgs {
             sheet_ids: vec![sid_q3.clone(), cloned_sid.clone()],
             code,
-            write_to_sheet: Some("Diff Q3 vs Q4".to_string()),
             on_existing_sheet: None,
         },
     )
@@ -130,9 +130,9 @@ output = m['_status'].value_counts().to_dict()
     let proj = colmena::crdt_documents::projection::project(&entry_q3.doc);
     assert_eq!(proj["sheets"].as_array().unwrap().len(), 3);
 
-    // 6. Two events recorded for Q3: import + write_to_sheet. We use the same
-    //    audit-listing API as the F-T2 unit test (events_since with the same
-    //    signature: artifact_id, after_id, since_ts, origin_filter, limit).
+    // 6. Two events recorded for Q3: import + output_sheets write. We use the
+    //    same audit-listing API as the F-T2 unit test (events_since with the
+    //    same signature: artifact_id, after_id, since_ts, origin_filter, limit).
     let events = ctx
         .backend()
         .events_since(&aid_q3, 0, None, None, 10)

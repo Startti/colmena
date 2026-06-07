@@ -41,7 +41,6 @@ async fn sandbox_rejects_requests_import() {
     let args = RunPythonArgs {
         sheet_ids: vec![sid],
         code: "import requests\noutput = 1".to_string(),
-        write_to_sheet: None,
         on_existing_sheet: None,
     };
     let result = execute_run_python(&ctx, args).await;
@@ -60,7 +59,6 @@ async fn sandbox_rejects_open_call() {
     let args = RunPythonArgs {
         sheet_ids: vec![sid],
         code: "f = open('/etc/passwd', 'r')\noutput = f.read()".to_string(),
-        write_to_sheet: None,
         on_existing_sheet: None,
     };
     let result = execute_run_python(&ctx, args).await;
@@ -79,7 +77,6 @@ async fn sandbox_allows_numpy_computation() {
     let args = RunPythonArgs {
         sheet_ids: vec![sid],
         code: "import numpy as np\noutput = int(np.array([1,2,3]).sum())".to_string(),
-        write_to_sheet: None,
         on_existing_sheet: None,
     };
     let result = execute_run_python(&ctx, args).await;
@@ -103,7 +100,6 @@ result = stats.describe([1,2,3,4,5])
 output = {"mean": float(result.mean), "n": int(result.nobs)}
 "#
         .to_string(),
-        write_to_sheet: None,
         on_existing_sheet: None,
     };
     let result = execute_run_python(&ctx, args).await;
