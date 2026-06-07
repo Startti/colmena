@@ -307,3 +307,21 @@ For overrides (custom alias, `expose_sub_tools` filtering, `cache_ttl_seconds`, 
   Designed to run as Cloud Scheduler → Cloud Run Job. Requires host application
   to expose `<base>/internal/gcs/delete` endpoint. See
   [`docs/developer_guide/36_attachment_gc.md`](docs/developer_guide/36_attachment_gc.md).
+- **Sheets write safety shipped 2026-06-07** — `gsheets_run_python` and
+  `crdt_doc_run_python` gain a collision policy (`on_existing_sheet`, default
+  `fail` → returns structured `SheetExists` error with `current_state` +
+  `advice` + `valid_next_moves`; opt back into legacy `auto_suffix` or
+  destructive `overwrite` via `fixed_config`) and a new `update_in_place`
+  mode in `output_sheets` that diff-writes only changed cells (one
+  `batchUpdate` for gsheets, per-cell ops for crdt). New shared modules
+  `sheet_collision.rs` (policy + envelope) and `diff_writer.rs` (pure
+  records-diff with strict duplicate-key + column-mismatch validations).
+  **BREAKING:** legacy `write_to_sheet` arg + `output_sheet` (singular)
+  Python global removed from `crdt_doc_run_python` (ADP confirmed clean);
+  3 in-repo test graphs migrated. Default collision behavior changed from
+  silent `auto_suffix` to `fail` — existing graphs that depended on it must
+  set `on_existing_sheet: "auto_suffix"` explicitly. 1388 unit tests pass;
+  P1 (collision fail) + P2 (update_in_place dispatch + zero-change safety
+  guard) verified live against real Google Sheets. See
+  [`docs/superpowers/specs/2026-06-06-sheets-write-safety-design.md`](docs/superpowers/specs/2026-06-06-sheets-write-safety-design.md)
+  and CHANGELOG §11.

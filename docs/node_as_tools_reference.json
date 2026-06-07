@@ -1438,14 +1438,14 @@
         },
         "gsheets_run_python": {
           "name": "gsheets_run_python",
-          "description": "Run sandboxed Python (pandas/numpy/scipy.stats) over data loaded directly from Google Sheets. Each `bindings` entry becomes a Python global (a list of dicts you can pass to pd.DataFrame). Rows NEVER pass through the LLM — only the final `output`. PREFERRED for any analysis over more than ~50 rows.",
+          "description": "Run sandboxed Python (pandas/numpy/scipy.stats) over data loaded directly from Google Sheets. Each `bindings` entry becomes a Python global (a list of dicts you can pass to pd.DataFrame). Rows NEVER pass through the LLM — only the final `output`. PREFERRED for any analysis over more than ~50 rows. The code can also assign `output_sheets = {name: DataFrame | spec_dict}` to write results back as new tabs or patch existing ones (three modes: replace / update_in_place / overwrite — see write-back section below).",
           "input_schema": {
             "type": "object",
             "properties": {
               "bindings": {
                 "type": "array",
                 "required": true,
-                "description": "Spreadsheet ranges to load. Each binding becomes a Python global under the name `var`. Bindings are fetched IN PARALLEL.",
+                "description": "Spreadsheet ranges to load. Each binding becomes a Python global under the name `var`. Bindings are fetched IN PARALLEL. Aliases on each entry: `var` ↔ `binding_name` ↔ `name`; `sheet` ↔ `sheet_name`.",
                 "items": {
                   "type": "object",
                   "properties": {
@@ -1457,7 +1457,9 @@
                   "required": ["var", "spreadsheet_id", "sheet"]
                 }
               },
-              "code": { "type": "string", "required": true, "description": "Python code. Access pandas as `pd`, numpy as `np`, scipy.stats as `stats`, plus each binding under its `var` name. Define `output` (JSON-serializable)." }
+              "code": { "type": "string", "required": true, "description": "Python code. Access pandas as `pd`, numpy as `np`, scipy.stats as `stats`, plus each binding under its `var` name. Define `output` (JSON-serializable) and/or `output_sheets = {name: DataFrame, ...}` to write back. Entries in `output_sheets` can be a bare DataFrame (mode=replace) or a spec dict `{mode: 'update_in_place'|'overwrite', df, key, columns?, strict_match?, allow_schema_change?}`." },
+              "write_to_spreadsheet": { "type": "string", "required": false, "description": "Target spreadsheet for any `output_sheets` your code assigns. When omitted, `output_sheets` is ignored with a warning." },
+              "on_existing_sheet": { "type": "string", "required": false, "description": "Operator-level collision policy. Default `fail` → when a tab named in output_sheets already exists (replace mode), the dispatcher returns a structured `SheetExists` error with metadata + suggested next moves; nothing is written. Set `auto_suffix` for the legacy ' (2)' silent-rename behavior, or `overwrite` to clobber. Typically wired via fixed_config — the LLM doesn't set this directly." }
             },
             "required": ["bindings", "code"]
           },
@@ -1467,7 +1469,8 @@
               "output":          { "description": "Whatever `output` was set to in the code. Capped at 10 KB JSON; oversize replaced with a truncated string." },
               "stdout":          { "type": "string", "description": "Captured stdout (10 KB cap)." },
               "error":           { "type": ["string", "null"], "description": "Null on success; sandbox/python error message otherwise." },
-              "loaded_columns":  { "type": "object", "description": "On error only — `{<var>: [col, ...]}` from the first record of each binding. Lets the LLM self-correct without re-fetching." }
+              "loaded_columns":  { "type": "object", "description": "On error only — `{<var>: [col, ...]}` from the first record of each binding. Lets the LLM self-correct without re-fetching." },
+              "wrote_sheets":    { "type": ["array", "null"], "description": "When `output_sheets` was assigned and `write_to_spreadsheet` was provided: one entry per attempted tab. Success entries vary by mode — `{name, resolved_name, sheet_id, n_rows, n_cols}` for replace/overwrite/auto_suffix; `{tab, mode: 'update_in_place', changes: {rows, cells, columns}, unchanged: {rows}, skipped: {rows_not_in_target, rows_null_key}}` for update_in_place. Error entries include `error` (SheetExists / SchemaChange / ColumnMismatch / DuplicateKeyInTarget / DuplicateKeyInInput / KeyColumnMissing / StrictMatchFailed / UpdateRequiresExistingTab) + structured metadata for the LLM to self-correct without re-fetching." }
             }
           }
         },

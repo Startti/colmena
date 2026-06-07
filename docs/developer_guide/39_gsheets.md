@@ -101,15 +101,103 @@ Mirrors `crdt_doc_run_python` (subsystem C, §5.6) — same prelude,
 postlude, output / stdout / error caps (10 KB each), and 30-second
 timeout. Differences vs the CRDT cousin:
 
-- No `write_to_sheet` mode in v1 — write-back is still `gsheets_set_range`
-  invoked separately.
 - Each binding's records list is bound directly under the user-chosen
   `var` (the LLM calls `pd.DataFrame(<var>)` itself). The CRDT tool
   auto-builds `dfs[<sheet_id>]` because there's no per-binding name.
 - Errors carry `loaded_columns: {<var>: [...]}` so the LLM can fix a
   `KeyError` without re-fetching.
 
+Write-back is via `output_sheets = {name: DataFrame | spec_dict}` (see
+next section).
+
 Source: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_run_python.rs`.
+
+## Write safety: collision policy + `update_in_place` (shipped 2026-06-07)
+
+`output_sheets` accepts a dict whose values are either a bare DataFrame
+(mode = `replace`, default) or a spec dict with one of three modes:
+
+| Mode | When to use | What gets written |
+|---|---|---|
+| `replace` (default) | Create a brand-new tab | Full DataFrame; collision policy applies if tab exists |
+| `update_in_place` | Patch SOME rows in an existing tab | Cell-level diff via single `batchUpdate` — only changed cells |
+| `overwrite` | Replace an existing tab entirely | Full DataFrame; schema-change guard rejects unless `allow_schema_change: true` |
+
+### Example — `update_in_place` (the one that saves cells)
+
+```python
+import pandas as pd
+sales = pd.DataFrame(sales_records)
+mask = sales['category'] == 'Electronics'
+sales.loc[mask, 'price'] = sales.loc[mask, 'price'] * 0.9  # 10% discount
+
+output_sheets = {
+    'Sales': {
+        'mode': 'update_in_place',
+        'df': sales,
+        'key': 'product_id',
+        'columns': ['price'],   # optional — only patch this column
+    }
+}
+```
+
+For 47 changed rows in a 1000-row sheet, this issues **one** HTTPS
+round-trip with 47 cell updates, leaving 953 rows + 11 columns untouched.
+
+### Collision policy
+
+When `replace` mode targets an existing tab, the operator-supplied
+`on_existing_sheet` setting (wired via `fixed_config.on_existing_sheet`,
+default `fail`) decides:
+
+| Policy | Behavior |
+|---|---|
+| `fail` (default) | Dispatcher cuts before writing, returns structured `SheetExists` error with `current_state` (n_rows, n_cols, columns), `advice`, and `valid_next_moves` (rename / update_in_place / overwrite). Forces the LLM to make an explicit choice. |
+| `auto_suffix` | Writes to `"Name (2)"` silently (legacy pre-2026-06-07 default). |
+| `overwrite` | Replaces the tab without asking (assumes operator owns the risk). |
+
+The error envelope the LLM sees on `fail`:
+
+```json
+{
+  "error": "SheetExists",
+  "tab": "Sales",
+  "spreadsheet_id": "1xyz...",
+  "current_state": {
+    "n_rows": 4998, "n_cols": 12,
+    "columns": ["sale_id","date","product_id","name","category","quantity","list_price","sale_price","revenue","margin","region","channel"]
+  },
+  "advice": "The tab 'Sales' already exists with data. Recommended: use a different name (e.g., 'Sales_analysis'). If you must touch the existing tab, choose update_in_place (patch specific rows) or overwrite (replace everything — destructive).",
+  "valid_next_moves": [
+    {"action": "rename", "example_code": "output_sheets = {'Sales_review': df}"},
+    {"action": "update_in_place", "example_code": "output_sheets = {'Sales': {'mode':'update_in_place','df':df,'key':'<unique_col>'}}"},
+    {"action": "overwrite", "example_code": "output_sheets = {'Sales': {'mode':'overwrite','df':df}}"}
+  ]
+}
+```
+
+### Validations enforced before any write
+
+| Check | Triggers when | Error code |
+|---|---|---|
+| Key column missing | `key` not in current or new df | `KeyColumnMissing` |
+| Duplicate keys in target | Target has 2+ rows with the same `key` value | `DuplicateKeyInTarget` |
+| Duplicate keys in input | Input df has 2+ rows with the same `key` value | `DuplicateKeyInInput` |
+| Column mismatch | Input df has extra columns not in target (rejects unless `mode=overwrite` with `allow_schema_change: true`) | `ColumnMismatch` / `SchemaChange` |
+| Strict match | `strict_match: true` and any input row's key isn't in target | `StrictMatchFailed` |
+
+### Shared modules
+
+- `dag_engine/infrastructure/nodes/llm_synthetic_tools/sheet_collision.rs` — `CollisionPolicy` enum (Fail/AutoSuffix/Overwrite, default Fail) + `parse_policy` + `build_sheet_exists_error`.
+- `dag_engine/infrastructure/nodes/llm_synthetic_tools/diff_writer.rs` — pure records diff with NaN-safe equality + the 6 validation variants above. Used by both `gsheets_run_python` and `crdt_doc_run_python` for the `update_in_place` mode.
+- `SheetsClient::batch_update_cells(id, sheet, Vec<(A1, CellValue)>)` — new trait method that issues one `spreadsheets.values:batchUpdate` request for N cell-level writes.
+
+### Migration notes
+
+- The legacy `output_sheet` (singular) Python global + `write_to_sheet` arg in `crdt_doc_run_python` have been **removed** — code that used them must switch to `output_sheets = {name: df}`.
+- Default collision behavior changed from silent `auto_suffix` to `fail`. Existing graphs that depended on it must set `fixed_config.on_existing_sheet: "auto_suffix"` explicitly.
+
+See [`docs/superpowers/specs/2026-06-06-sheets-write-safety-design.md`](../superpowers/specs/2026-06-06-sheets-write-safety-design.md) for the full design.
 
 ## Hexagonal layout
 

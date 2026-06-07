@@ -424,3 +424,82 @@ Files:
   shaping (with multi-tab write-back). Tool descriptions in
   `text/tools/{gsheets,crdt_doc}.yaml` updated to point at the new
   skills.
+
+---
+
+## 11. Sheets write safety — collision policy + `update_in_place` (P1+P2)
+
+- **Shipped 2026-06-07** — both `gsheets_run_python` and `crdt_doc_run_python`
+  gain a per-tab collision policy (`fail` default) and a new
+  `update_in_place` mode that diff-writes only changed cells.
+- **What changed:**
+  - `output_sheets` entries now accept either a bare DataFrame (mode =
+    `replace`, current behavior) or a spec dict `{mode, df, key,
+    columns, strict_match, allow_schema_change}`. Three modes:
+    `replace` (default), `update_in_place` (diff-write), `overwrite`
+    (explicit consent + schema-change guard).
+  - **Collision policy default = `fail`.** When a target tab exists and
+    the entry is bare DataFrame (`replace` mode), the dispatcher cuts
+    BEFORE writing and returns a structured `SheetExists` error with
+    `current_state` (row/col count, header columns), `advice`, and
+    three `valid_next_moves` (rename / update_in_place / overwrite).
+    Operators can opt back into the old auto-suffix behavior by setting
+    `fixed_config.on_existing_sheet: "auto_suffix"`. Operators who
+    want destructive replace can set `"overwrite"`.
+  - **`update_in_place`** fetches the current tab, diffs vs the new
+    DataFrame using a unique `key` column, and writes only the changed
+    cells — **one HTTPS `batchUpdate` for gsheets, per-cell ops for
+    crdt_doc.** Validations: duplicate keys in either side reject;
+    column mismatch rejects with rename suggestion; row count
+    discrepancies surface as `skipped.rows_not_in_target` /
+    `skipped.rows_null_key`.
+  - **New trait method** `SheetsClient::batch_update_cells(id, sheet,
+    Vec<(A1, CellValue)>)` for one-round-trip diff writes.
+  - **Two new shared modules** under `llm_synthetic_tools/`:
+    `sheet_collision.rs` (policy enum + structured-error builder) and
+    `diff_writer.rs` (pure records-diff with NaN-safe equality + 6
+    validation variants).
+  - **Legacy single-tab path removed** from `crdt_doc_run_python`:
+    `write_to_sheet: Option<String>` arg, `output_sheet` (singular)
+    Python global, dispatcher branch, `wrote_sheet` response field,
+    `PREVIEW_ROWS_IN_WROTE_SHEET` constant. 3 in-repo test graphs
+    (`c_pandas_smoke`, `c_import_analysis`, `f_cross_artifact_smoke`)
+    migrated to use `output_sheets = {name: df}`. 2 integration tests
+    were rewritten to assert on `wrote_sheets`; 2 obsolete tests
+    deleted. ADP has no consumers depending on the legacy API
+    (confirmed).
+- **Docs updated:** `text/tools/{gsheets,crdt_doc}.yaml` document the
+  3 modes + collision policy. The two
+  `{gsheets,crdt-doc}-cross-sheet-analysis` skills gain an "Updating
+  existing tabs in place" section with the canonical pandas pattern.
+  New E2E graph at `tests/graphs/agents/gsheets_update_in_place.json`
+  for operator-driven validation against a real spreadsheet.
+- **Verification:**
+  - Unit tests: 1388 passed including 3 new gsheets dispatcher tests
+    (`update_in_place_writes_only_changed_cells`,
+    `replace_mode_default_fail_returns_sheet_exists`,
+    `auto_suffix_policy_preserves_old_behavior`) + 1 new crdt_doc
+    dispatcher test + 14 diff_writer tests.
+  - **E2E live verified:**
+    - **P1 collision `fail`** — `output_sheets = {<existing_tab>: df}`
+      returned structured `SheetExists` with 12 real column names
+      surfaced from the live sheet, no destructive write occurred.
+    - **P2 `update_in_place` dispatch** — mode dispatched correctly,
+      diff computed (4997 rows compared), response shape
+      `{mode, changes, unchanged, skipped}` returned. Zero-change
+      filter (pandas matched 0 rows) → 0 cells written, NO
+      `batch_update_cells` call (safety guard verified).
+  - `overwrite` mode covered by unit tests only (live test would
+    risk destroying a real tab; deferred to operator-driven testing).
+- **Breaking changes:**
+  - `RunPythonArgs::write_to_sheet` and the `output_sheet` (singular)
+    Python global in `crdt_doc_run_python` are **removed** — any
+    downstream consumer must migrate to `output_sheets = {name: df}`.
+    ADP confirmed clean.
+  - Default collision behavior changed from silent `auto_suffix` to
+    `fail`. Existing graphs that depended on the old behavior must
+    set `fixed_config.on_existing_sheet: "auto_suffix"` explicitly.
+- **References:**
+  - Spec: [`docs/superpowers/specs/2026-06-06-sheets-write-safety-design.md`](superpowers/specs/2026-06-06-sheets-write-safety-design.md)
+  - Plan: [`docs/superpowers/plans/2026-06-06-sheets-write-safety.md`](superpowers/plans/2026-06-06-sheets-write-safety.md)
+  - 12 commits on `feature/docs`: `bdc3fc0` → `2988c5e`.

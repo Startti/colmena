@@ -575,3 +575,149 @@ Also: same UX aliases for `crdt_doc_run_python` bindings (currently
 `sheet_ids: [String]` — could accept `sheets`, `sheet_names` as
 synonyms). Less critical there because the legacy single-sheet path
 guides the LLM more.
+
+---
+
+## Sheets write safety v1.1 — `overwrite` mode E2E coverage
+
+- **Origen:** P1+P2 shipped 2026-06-07. Las 3 modos (`replace` /
+  `update_in_place` / `overwrite`) tienen unit tests pero solo
+  `replace` (collision `fail`) y `update_in_place` se verificaron
+  contra Google Sheets real durante el sweep final. `overwrite`
+  no se probó live porque haría falta destruir un tab existente
+  con datos para verificar el path.
+- **Problema:** un bug latente en el branch overwrite (e.g.
+  `do_overwrite` con `fetch_tab_meta` error swallowing o
+  schema-change guard mal computado) solo aparecería en producción
+  cuando un operador explícitamente opt-in a `mode: "overwrite"`
+  o `fixed_config.on_existing_sheet: "overwrite"`.
+- **Workaround actual:** el unit test `do_overwrite` cubre el path.
+  Operadores que activen overwrite deben hacer una prueba manual
+  inicial contra un tab desechable antes de wire-up en producción.
+- **Por qué está parqueado:** riesgo bajo — el path es estrechamente
+  análogo a `replace` (mismo write_full_df helper). El schema-change
+  guard tiene unit test específico.
+- **Fix propuesto:** crear `tests/graphs/agents/gsheets_overwrite_e2e.json`
+  que (a) crea un sheet nuevo via gsheets_create_spreadsheet (requiere
+  fix de auth/scopes — ver siguiente entry), (b) seedea data, (c)
+  ejecuta `output_sheets = {tab: {mode: "overwrite", df: df2}}` con
+  schema compatible, (d) verifica que escribe correctamente, (e)
+  ejecuta con schema cambiado sin `allow_schema_change` y verifica
+  que devuelve `SchemaChange` error.
+- **Cuándo retomar:** la próxima vez que un operador real configure
+  `on_existing_sheet: "overwrite"` y reporte comportamiento raro. O
+  como parte del próximo sprint de QA gsheets.
+- **Referencias:**
+  - [Spec](superpowers/specs/2026-06-06-sheets-write-safety-design.md) §1+§3
+  - Plan T5 → `do_overwrite` impl: `gsheets_run_python.rs:537-585`
+
+---
+
+## Sheets write safety v1.1 — append / upsert / delete_where modes
+
+- **Origen:** spec sheets-write-safety 2026-06-06 explícitamente excluyó
+  estos modos del v1 (sección "Non-goals"). Sólo `replace` /
+  `update_in_place` / `overwrite` shipped.
+- **Trigger para retomar:** cuando un agente real encuentre un caso de
+  uso donde los 3 modos actuales no alcanzan:
+  - `append`: pegar N filas nuevas al final de una tab existente sin
+    leer/regenerar las anteriores (use case: log incremental, time-series).
+  - `upsert`: update si match por `key`, insert si no — un híbrido entre
+    `update_in_place` y `append` (use case: sync periódico desde una
+    fuente externa).
+  - `delete_where`: borrar filas que cumplen una condición (use case:
+    purge de records expirados/obsoletos).
+- **Estado actual:** un agente que necesita `append` hoy debe (a) leer
+  con `gsheets_read`, (b) construir el df nuevo con head appended, (c)
+  `output_sheets = {tab: {mode: "overwrite", df: combined}}` con
+  `allow_schema_change: false`. Funciona pero re-escribe la tab completa
+  — el caso exacto que `append` resolvería con 1 round-trip.
+- **Fix propuesto:** extender el postlude para que el spec dict acepte
+  `mode: "append" | "upsert" | "delete_where"`, agregar 3 helpers en
+  el dispatcher (`do_append` / `do_upsert` / `do_delete_where`) que
+  use `batch_update_cells` (append: append rows at end-of-range;
+  upsert: hybrid; delete_where: clear cells in matching rows).
+  Mirror en `crdt_doc_run_python`.
+- **Cuándo retomar:** cuando un caso de uso real lo justifique. Hasta
+  entonces, el workaround vía overwrite es aceptable para volúmenes
+  bajos.
+
+---
+
+## Sheets write safety v1.1 — surface `last_modified` in SheetExists error
+
+- **Origen:** spec sheets-write-safety §1 mencionaba `last_modified:
+  "2026-06-04T10:23:00Z"` en el ejemplo del envelope `SheetExists`.
+  El shipped envelope incluye `n_rows`, `n_cols`, `columns` pero
+  NO `last_modified` — se difirió porque requiere una llamada extra
+  a la Drive API.
+- **Problema:** sin `last_modified`, el LLM (y la persona leyendo
+  su reporte) no puede distinguir entre "este tab tiene data fresca,
+  cuidado" vs "este tab es del año pasado, probablemente sea seguro
+  overwrite". Solo ve `n_rows: 4998` que no dice si esas filas son
+  recientes.
+- **Workaround actual:** el LLM puede llamar `gsheets_list_sheets`
+  (que no devuelve `modifiedTime`) o leer el primer/último row para
+  inferir la antigüedad de la data. Heurístico y caro.
+- **Fix propuesto:** en `fetch_tab_meta`, agregar una llamada Drive
+  API `files.get(<spreadsheet_id>, fields=modifiedTime)` y surfacearlo
+  en `current_state.last_modified`. Requiere el scope
+  `https://www.googleapis.com/auth/drive.metadata.readonly` (la SA ya
+  lo tiene). Costo: 1 HTTPS adicional cuando hay colisión — ~80ms.
+- **Cuándo retomar:** si los operadores reportan que el LLM toma
+  decisiones erradas con frecuencia (e.g. sobrescribe data fresca
+  pensando que era vieja).
+- **Estimación:** ~30 LOC en `fetch_tab_meta` + 1 unit test mock
+  Drive API + actualizar la doc del envelope en
+  `sheet_collision.rs::build_sheet_exists_error`. ~15 minutos.
+
+---
+
+## Sheets write safety v1.1 — gsheets_create_spreadsheet permission scope
+
+- **Origen:** durante E2E testing del feature shipped 2026-06-07
+  descubrimos que la SA `colmena-sheets-tester@startti-dev.iam.
+  gserviceaccount.com` no puede llamar a `gsheets_create_spreadsheet`
+  — devuelve `permission_denied`. Tiene scope `sheets` pero no `drive`
+  (que es lo que requiere `spreadsheets.create`).
+- **Problema:** los E2E graphs que necesitan crear un sheet fresh
+  (e.g. el deferred `overwrite` E2E) no son viables con esta SA.
+  Tampoco lo es el patrón canónico "agente crea su propia hoja de
+  trabajo desde cero".
+- **Workaround actual:** el operador crea la planilla manualmente y
+  la comparte con la SA antes de cualquier graph que la use. Los
+  demos pre-existentes usan este patrón (Products + Sales sheets
+  pre-creados por el operador).
+- **Fix propuesto:** agregar el scope `drive.file` (no el full `drive`
+  — solo crea archivos que la SA dueña) a la SA. O crear una SA
+  separada para operaciones de Drive y rotar por feature flag. O,
+  alternativa más limpia, documentar que `gsheets_create_spreadsheet`
+  requiere un scope adicional y dejar que los operadores lo activen
+  por SA.
+- **Cuándo retomar:** cuando un usuario o agente real lo requiera.
+  Bajo ASAP — bloquea ciertos workflows de auto-bootstrap.
+
+---
+
+## Sheets write safety v1.1 — diff_writer 26-column header limit
+
+- **Origen:** durante E2E del feature shipped 2026-06-07,
+  `fetch_tab_meta` y `do_update_in_place` leen el header row vía
+  `read_range(..., Some("A1:Z1"), ...)` — hardcodea 26 columnas.
+- **Problema:** sheets con más de 26 columnas (eso pasa — el demo
+  prior tenía 12 pero algunas hojas reales superan los 50+) van a
+  tener el header truncado. El diff funciona OK porque solo compara
+  columnas que aparecen en ambos lados, pero la `current_state.columns`
+  del envelope `SheetExists` mostrará solo las primeras 26 y el LLM
+  decide con info incompleta.
+- **Workaround actual:** el LLM puede llamar `gsheets_read` con un
+  rango más amplio (e.g. `A1:ZZ1`) manualmente. No automático.
+- **Fix propuesto:** cambiar el hardcode `A1:Z1` por un range
+  computado: leer `list_sheets` → `meta.col_count` → construir el
+  range A1-style hasta esa columna (e.g. col_count=50 → `A1:AX1`).
+  Helper `col_index_to_a1(n)` ya existe (es el `a1_addr` con row=1).
+- **Cuándo retomar:** la próxima vez que se observe truncado de header
+  en logs de producción, o como parte de un sweep general de gsheets
+  ergonomics.
+- **Estimación:** ~10 LOC en `fetch_tab_meta` + 1 unit test que mockea
+  un sheet con 30+ columnas. ~10 minutos.
