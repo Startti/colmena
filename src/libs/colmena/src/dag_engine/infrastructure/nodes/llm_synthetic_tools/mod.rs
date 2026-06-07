@@ -488,6 +488,48 @@ mod text_coverage_tests {
             missing,
         );
     }
+
+    #[test]
+    fn index_doc_covers_all_registered_skills() {
+        // Embed the skills-index doc via include_str! so the test is portable.
+        // Path: from mod.rs at
+        //   src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mod.rs
+        // go up 8 levels to repo root, then into docs/developer_guide/.
+        const INDEX_DOC: &str = include_str!(
+            "../../../../../../../../docs/developer_guide/42_builtin_skills_index.md"
+        );
+
+        let skills_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills");
+
+        let mut missing: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&skills_dir).expect("can read skills dir") {
+            let entry = entry.expect("can read dir entry");
+            if !entry.file_type().expect("file_type").is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            // _placeholder exists only for include_dir!'s empty-folder contract.
+            if name == "_placeholder" {
+                continue;
+            }
+            // Only folders that actually contain a SKILL.md count as registered skills.
+            if !entry.path().join("SKILL.md").exists() {
+                continue;
+            }
+            let needle = format!("`{}`", name);
+            if !INDEX_DOC.contains(&needle) {
+                missing.push(name);
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "These registered skills are missing from \
+             docs/developer_guide/42_builtin_skills_index.md: {:?}",
+            missing,
+        );
+    }
 }
 
 #[cfg(test)]
