@@ -101,7 +101,11 @@ mod tests {
         // Suffix is 8 hex chars after the last underscore.
         let img_suffix = img.rsplit('_').next().unwrap();
         let audio_suffix = audio.rsplit('_').next().unwrap();
-        assert_eq!(img_suffix.len(), 8, "expected 8-char uuid suffix, got {img_suffix:?}");
+        assert_eq!(
+            img_suffix.len(),
+            8,
+            "expected 8-char uuid suffix, got {img_suffix:?}"
+        );
         assert_eq!(audio_suffix.len(), 8);
         assert!(img_suffix.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(audio_suffix.chars().all(|c| c.is_ascii_hexdigit()));
@@ -159,7 +163,10 @@ mod tests {
             "chat-attachments/sess_xyz/image_0.png",
             "img",
         );
-        assert_ne!(a, b, "two calls with identical args must produce distinct IDs");
+        assert_ne!(
+            a, b,
+            "two calls with identical args must produce distinct IDs"
+        );
         assert!(a.starts_with("img_image_0_"));
         assert!(b.starts_with("img_image_0_"));
     }
