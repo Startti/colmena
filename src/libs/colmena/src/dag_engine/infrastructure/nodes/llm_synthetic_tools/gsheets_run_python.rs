@@ -46,6 +46,7 @@ pub struct GsheetsRunPythonArgs {
     /// Spreadsheet ranges to load. Each binding becomes a Python global
     /// (a list of `{col: val}` dicts) under the name given by `var`.
     /// At least one entry required. Bindings are fetched IN PARALLEL.
+    #[serde(deserialize_with = "deserialize_bindings_flexible")]
     pub bindings: Vec<GsheetsBinding>,
     /// Python code. Has access to `pandas as pd`, `numpy as np`,
     /// `scipy.stats as stats`, plus each binding's records list bound
@@ -88,6 +89,96 @@ pub struct GsheetsBinding {
     /// Optional A1 range (e.g. "A1:H5001"). Omit to read the entire tab.
     #[serde(default)]
     pub range: Option<String>,
+}
+
+// ── Flexible bindings deserializer ───────────────────────────────────
+
+/// Custom deserializer for `bindings` that accepts either:
+///
+/// 1. The canonical array form:
+///    `[{"var":"products","spreadsheet_id":"abc","sheet":"products"}, ...]`
+///
+/// 2. An object whose VALUES are binding-shaped objects (treat the
+///    key as `var`):
+///    `{"products": {"spreadsheet_id":"abc","sheet_name":"products"}, ...}`
+///
+/// LLMs (Gemini-2.5-pro in particular) frequently emit form 2 despite
+/// the schema declaring `Vec<GsheetsBinding>`. This deserializer
+/// tolerates both shapes so the demo doesn't burn 10+ turns
+/// retrying. Form 3 (values are bare strings — ambiguous sheet name)
+/// is rejected with a clear "specify sheet too" error.
+fn deserialize_bindings_flexible<'de, D>(
+    deserializer: D,
+) -> Result<Vec<GsheetsBinding>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, MapAccess, SeqAccess, Visitor};
+    use std::fmt;
+
+    struct BindingsVisitor;
+
+    impl<'de> Visitor<'de> for BindingsVisitor {
+        type Value = Vec<GsheetsBinding>;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("an array of bindings or an object whose values are bindings")
+        }
+
+        // Canonical array form
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut out: Vec<GsheetsBinding> = Vec::new();
+            while let Some(elem) = seq.next_element::<GsheetsBinding>()? {
+                out.push(elem);
+            }
+            Ok(out)
+        }
+
+        // LLM-hallucinated dict form
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut out: Vec<GsheetsBinding> = Vec::new();
+            while let Some((key, value)) =
+                map.next_entry::<String, serde_json::Value>()?
+            {
+                match value {
+                    // Form 2: value is binding-shaped object. Merge in `var` from key.
+                    serde_json::Value::Object(mut obj) => {
+                        obj.insert(
+                            "var".to_string(),
+                            serde_json::Value::String(key.clone()),
+                        );
+                        let binding: GsheetsBinding =
+                            serde_json::from_value(serde_json::Value::Object(obj))
+                                .map_err(de::Error::custom)?;
+                        out.push(binding);
+                    }
+                    // Form 3: value is just a string. Ambiguous — reject.
+                    serde_json::Value::String(_) => {
+                        return Err(de::Error::custom(format!(
+                            "`bindings` entry '{key}' is a bare string; \
+                             cannot determine sheet name. Use the array form: \
+                             [{{\"var\":\"{key}\",\"spreadsheet_id\":\"...\",\"sheet\":\"...\"}}]"
+                        )));
+                    }
+                    _ => {
+                        return Err(de::Error::custom(format!(
+                            "`bindings` entry '{key}' has unexpected value type; \
+                             expected an object with spreadsheet_id + sheet"
+                        )));
+                    }
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_any(BindingsVisitor)
 }
 
 // ── Tool builder ─────────────────────────────────────────────────────
@@ -724,6 +815,74 @@ mod tests {
             "summary length out of bounds: {}",
             s.len()
         );
+    }
+
+    // ── E-T22b: flexible bindings deserializer tests ──────────────────────
+
+    #[test]
+    fn bindings_canonical_array_form_works() {
+        let json = serde_json::json!({
+            "bindings": [
+                {"var": "products", "spreadsheet_id": "abc", "sheet": "products"},
+                {"var": "sales", "spreadsheet_id": "xyz", "sheet": "sales"}
+            ],
+            "code": "output = {}"
+        });
+        let parsed: GsheetsRunPythonArgs = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.bindings.len(), 2);
+        assert_eq!(parsed.bindings[0].var, "products");
+        assert_eq!(parsed.bindings[1].var, "sales");
+    }
+
+    #[test]
+    fn bindings_dict_form_accepted_with_objects() {
+        let json = serde_json::json!({
+            "bindings": {
+                "products": {"spreadsheet_id": "abc", "sheet": "products"},
+                "sales":    {"spreadsheet_id": "xyz", "sheet_name": "sales"}
+            },
+            "code": "output = {}"
+        });
+        let parsed: GsheetsRunPythonArgs =
+            serde_json::from_value(json).expect("dict form must parse");
+        assert_eq!(parsed.bindings.len(), 2);
+        let names: std::collections::HashSet<String> =
+            parsed.bindings.iter().map(|b| b.var.clone()).collect();
+        assert!(names.contains("products"));
+        assert!(names.contains("sales"));
+    }
+
+    #[test]
+    fn bindings_dict_with_string_value_rejected() {
+        let json = serde_json::json!({
+            "bindings": {
+                "products": "abc"
+            },
+            "code": "output = {}"
+        });
+        let err = serde_json::from_value::<GsheetsRunPythonArgs>(json).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("bare string") || msg.contains("cannot determine sheet"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn bindings_dict_form_works_with_binding_name_alias() {
+        // Combined test: dict form + the `binding_name` alias inside each value
+        let json = serde_json::json!({
+            "bindings": {
+                "products": {"spreadsheet_id": "abc", "sheet_name": "products"}
+            },
+            "code": "output = {}"
+        });
+        let parsed: GsheetsRunPythonArgs =
+            serde_json::from_value(json).expect("must parse");
+        assert_eq!(parsed.bindings.len(), 1);
+        assert_eq!(parsed.bindings[0].var, "products");
+        assert_eq!(parsed.bindings[0].sheet, "products");
+        assert_eq!(parsed.bindings[0].spreadsheet_id, "abc");
     }
 
     // ── multi-sheet write-back tests ──────────────────────────────────────
