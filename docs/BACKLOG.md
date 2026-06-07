@@ -752,29 +752,27 @@ while middle_end > keep_first && matches!(messages[middle_end].role(), MessageRo
 
 ---
 
-## Conversational memory cross-node — verificar política y documentar
+## ~~Conversational memory cross-node — verificar política y documentar~~ — RESUELTO 2026-06-07 (BY DESIGN)
 
-- **Origen:** E2E verification del worker desplegado — Phase 1.4 del runbook `verifying_deployed_worker.md` (2026-06-07). El graph `gemini_orchestrator` define dos `llm_call` nodes (`step_1` y `step_2`) con el mismo `agent_session_id` y un edge `step_1 → step_2`. step_1 hizo `add(123,456)=579` y respondió "Hello Daniel! 123 + 456 = 579. I will remember your name." step_2 con prompt "What is my name? Also, multiply the previous result by 2." respondió "Hello! It's nice to meet you" — **no recordó "Daniel" y no multiplicó**.
-- **Problema:** dos hipótesis a verificar:
-  1. **By-design**: la memoria conversacional (`llm_node_history`) keya por `(agent_session_id, node_id)`. Como `node_id` difiere entre step_1 y step_2, step_2 abre una conversación NUEVA y no ve la historia de step_1. Si esto es correcto, el behavior es correcto pero el preset `gemini_orchestrator` en el HTML playground es engañoso (sugiere que va a probar memoria cross-node y no la prueba).
-  2. **Regresión**: la memoria DEBE ser keyada por `agent_session_id` solo, y el filtrado por `node_id` introduce aislamiento accidental. Si esto es correcto, hay un bug en la query del repo.
-  - El campo `step_2.extra_info.usage.prompt_tokens=311` corrobora la hipótesis 1: con memoria cargada esperaríamos ~700+ tokens (system + step_1 turn + step_2 prompt). 311 tokens es solo system + step_2 prompt.
-- **Workaround actual:** si querés que step_2 vea lo que pasó en step_1, ponerlo explícitamente en el prompt (via edge data-flow `step_1.result → step_2.prompt`) en vez de depender de memoria conversacional persistida.
-- **Por qué está parqueado:** depende de cuál hipótesis sea cierta. Si #1, no es un bug — solo hay que documentar la semántica y opcionalmente renombrar el preset HTML o cambiar el prompt para que el test sea válido (ej. dos turnos sobre el mismo node_id). Si #2, hay que arreglar la query del repo.
-- **Fix propuesto:**
-  1. Leer [`src/libs/colmena/src/llm/domain/memory.rs`](src/libs/colmena/src/llm/domain/memory.rs) (`ConversationKey`, `ConversationRepository::get_by_id`) y la implementación postgres (`postgres_conversation_repository.rs`) para confirmar el behavior. Spec en [`docs/dds/MODULO_LLM_DISEÑO.md`](dds/MODULO_LLM_DISEÑO.md) si existe.
-  2. Si by-design: agregar una nota en `docs/developer_guide/15_memory_guide.md` aclarando que la memoria es per-`(agent_session, node_id)` por default, y documentar cómo conseguir memoria compartida cross-node (probable: edge data-flow, o algún parámetro `share_memory_with_node_ids` aún no implementado).
-  3. Si regresión: arreglar la query y agregar un integration test que crea dos `llm_call` nodes con el mismo `agent_session_id` y verifica que step_2 ve la historia de step_1.
-- **Acceptance criteria:**
-  - Doc clarificada (si by-design) o test integration verde (si fix).
-  - El preset `gemini_orchestrator` del HTML playground sigue siendo útil — adaptado al behavior correcto.
-- **Estimación:** ~2 horas para verificar + decidir + escribir doc o fix.
-- **Cuándo retomar:** baja prioridad standalone, pero quien tome el caso debe responder primero a "¿es por design o bug?" antes de cualquier cambio. Posible trigger: un usuario ADP reporta que conversaciones multi-step no recuerdan info de pasos anteriores.
-- **Referencias:**
-  - SSE evidencia: `/tmp/colmena_e2e/1.4_gemini_orch_v2.sse` (efímero).
-  - Memoria conversational: [`src/libs/colmena/src/llm/domain/memory.rs`](src/libs/colmena/src/llm/domain/memory.rs:19-46) — `ConversationKey { session_id, agent_session_id, node_id }`.
-  - Runbook E2E: Phase 1.4 en [`verifying_deployed_worker.md`](#phase-1).
-  - Doc actual: [`docs/developer_guide/15_memory_guide.md`](developer_guide/15_memory_guide.md).
+**Verdict (2026-06-07):** El aislamiento por nodo es **intencional, no regresión**. La llave compuesta `(agent_session_id, node_id)` se introdujo deliberadamente en abril 2026 para fixear el **silent `llm_node_history` collision** que ocurría cuando 2+ `llm_call` nodes compartían un mismo agent y se pisaban las histories. La migración [`20260428000002_llm_history_agent_and_node.sql`](../src/libs/colmena/migrations/postgres/20260428000002_llm_history_agent_and_node.sql) agregó `node_id` como segunda mitad de la PK justamente para eliminar ese bug.
+
+**Evidencia clave (Explore agent + lectura directa del código):**
+- `ConversationKey { session_id, agent_session_id, node_id }` en [`src/libs/colmena/src/llm/domain/memory.rs:19-46`](../src/libs/colmena/src/llm/domain/memory.rs:19-46).
+- `WHERE agent_session_id = $1 AND node_id = $2` en [`postgres_conversation_repository.rs:26`](../src/libs/colmena/src/llm/infrastructure/persistence/postgres_conversation_repository.rs:26).
+- Spec del fix original (donde "collision" se nombra explícitamente como el bug que se arregla): [`docs/superpowers/plans/2026-04-28-agent-session-id.md`](superpowers/plans/2026-04-28-agent-session-id.md) §3.2.
+
+**Resolución implementada:**
+1. **Doc**: nueva sección "🧱 Aislamiento por nodo — memoria NO compartida entre llm_call distintos" en [`docs/developer_guide/15_memory_guide.md`](developer_guide/15_memory_guide.md) explicando:
+   - Por qué la memoria está aislada (historia del collision bug)
+   - El comportamiento observable (prompt_tokens bajo en step_2 confirma que no carga history de step_1)
+   - 3 opciones para compartir información entre nodos: **edge data-flow** (recomendado), reutilizar el mismo `node_id` en runs sucesivos, o el patrón **orchestrator/planner**
+   - 2 anti-patterns con sus consecuencias
+2. **HTML playground**: comment del preset `gemini_orchestrator` actualizado para reflejar que NO testea memoria cross-node (porque no la puede testear) — el preset valida orquestación de step_1 → step_2 vía data-flow, no memoria persistente compartida.
+
+**Conservado para referencia histórica:**
+- **Origen:** E2E verification del worker desplegado — Phase 1.4 del runbook `verifying_deployed_worker.md` (2026-06-07). El graph `gemini_orchestrator` define dos `llm_call` nodes con el mismo `agent_session_id` y un edge `step_1 → step_2`. step_1 dijo "Hello Daniel! 123 + 456 = 579. I will remember your name." step_2 respondió "Hello! It's nice to meet you" con `prompt_tokens=311` — confirma que NO cargó la history de step_1.
+- **Síntoma observable:** `step_2.extra_info.usage.prompt_tokens=311` (sólo system + prompt; con history cargada esperaríamos ~700+ tokens).
+- **Referencias originales:** SSE `/tmp/colmena_e2e/1.4_gemini_orch_v2.sse` (efímero); Runbook E2E Phase 1.4.
 
 ---
 
