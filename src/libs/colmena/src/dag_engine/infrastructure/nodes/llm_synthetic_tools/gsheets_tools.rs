@@ -519,6 +519,14 @@ mod tests {
         ) -> Result<SetRangeResponse, SheetsError> {
             Err(SheetsError::Internal("not used".into()))
         }
+        async fn batch_update_cells(
+            &self,
+            _id: &SpreadsheetId,
+            _s: &str,
+            _u: Vec<(String, CellValue)>,
+        ) -> Result<SetRangeResponse, SheetsError> {
+            Err(SheetsError::Internal("not used".into()))
+        }
     }
 
     #[tokio::test]

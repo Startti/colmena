@@ -107,9 +107,7 @@ pub struct GsheetsBinding {
 /// tolerates both shapes so the demo doesn't burn 10+ turns
 /// retrying. Form 3 (values are bare strings — ambiguous sheet name)
 /// is rejected with a clear "specify sheet too" error.
-fn deserialize_bindings_flexible<'de, D>(
-    deserializer: D,
-) -> Result<Vec<GsheetsBinding>, D::Error>
+fn deserialize_bindings_flexible<'de, D>(deserializer: D) -> Result<Vec<GsheetsBinding>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -143,16 +141,11 @@ where
             A: MapAccess<'de>,
         {
             let mut out: Vec<GsheetsBinding> = Vec::new();
-            while let Some((key, value)) =
-                map.next_entry::<String, serde_json::Value>()?
-            {
+            while let Some((key, value)) = map.next_entry::<String, serde_json::Value>()? {
                 match value {
                     // Form 2: value is binding-shaped object. Merge in `var` from key.
                     serde_json::Value::Object(mut obj) => {
-                        obj.insert(
-                            "var".to_string(),
-                            serde_json::Value::String(key.clone()),
-                        );
+                        obj.insert("var".to_string(), serde_json::Value::String(key.clone()));
                         let binding: GsheetsBinding =
                             serde_json::from_value(serde_json::Value::Object(obj))
                                 .map_err(de::Error::custom)?;
@@ -363,9 +356,7 @@ pub async fn dispatch_gsheets_run_python_with_client(
     let output_sheets_value = wrapped_output.get("output_sheets");
 
     let has_target = parsed.write_to_spreadsheet.is_some();
-    let has_sheets = output_sheets_value
-        .map(|v| !v.is_null())
-        .unwrap_or(false);
+    let has_sheets = output_sheets_value.map(|v| !v.is_null()).unwrap_or(false);
 
     let mut wrote_sheets_response = serde_json::Value::Null;
     if let (Some(target_id), Some(sheets_value)) = (
@@ -482,7 +473,10 @@ async fn write_output_sheets(
         }
         let (Some(resolved_name), Some(sheet_id)) = (resolved_name, sheet_id) else {
             // All 10 attempts collided or an error broke the loop early (already pushed).
-            if !results.iter().any(|r| r.get("name") == Some(&serde_json::Value::String(raw_name.clone()))) {
+            if !results
+                .iter()
+                .any(|r| r.get("name") == Some(&serde_json::Value::String(raw_name.clone())))
+            {
                 results.push(serde_json::json!({
                     "name": raw_name,
                     "error": "could not create tab: all 10 name attempts already exist",
@@ -508,10 +502,9 @@ async fn write_output_sheets(
                     match obj.get(key) {
                         Some(serde_json::Value::Null) | None => CellValue::Null,
                         Some(serde_json::Value::Bool(b)) => CellValue::Bool(*b),
-                        Some(serde_json::Value::Number(n)) => n
-                            .as_f64()
-                            .map(CellValue::Number)
-                            .unwrap_or(CellValue::Null),
+                        Some(serde_json::Value::Number(n)) => {
+                            n.as_f64().map(CellValue::Number).unwrap_or(CellValue::Null)
+                        }
                         Some(serde_json::Value::String(s)) => CellValue::String(s.clone()),
                         Some(other) => CellValue::String(other.to_string()),
                     }
@@ -755,8 +748,7 @@ mod tests {
             "spreadsheet_id": "abc",
             "sheet_name": "products"
         });
-        let parsed: GsheetsBinding =
-            serde_json::from_value(json).expect("must parse with aliases");
+        let parsed: GsheetsBinding = serde_json::from_value(json).expect("must parse with aliases");
         assert_eq!(parsed.var, "products");
         assert_eq!(parsed.sheet, "products");
     }
@@ -797,8 +789,7 @@ mod tests {
             "code": "output = {}",
             "output_sheets": {"source": "LAST_EXPRESSION"}
         });
-        let parsed: GsheetsRunPythonArgs =
-            serde_json::from_value(json).expect("args must parse");
+        let parsed: GsheetsRunPythonArgs = serde_json::from_value(json).expect("args must parse");
         assert!(parsed.output_sheets.is_some());
     }
 
@@ -877,8 +868,7 @@ mod tests {
             },
             "code": "output = {}"
         });
-        let parsed: GsheetsRunPythonArgs =
-            serde_json::from_value(json).expect("must parse");
+        let parsed: GsheetsRunPythonArgs = serde_json::from_value(json).expect("must parse");
         assert_eq!(parsed.bindings.len(), 1);
         assert_eq!(parsed.bindings[0].var, "products");
         assert_eq!(parsed.bindings[0].sheet, "products");
@@ -895,8 +885,7 @@ mod tests {
         pyo3::prepare_freethreaded_python();
 
         let server = MockServer::start().await;
-        let client =
-            GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
+        let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
         client.token_test_seed("fake-bearer-token").await;
 
         // Binding: Products tab on spreadsheet "ws_w".
@@ -938,21 +927,20 @@ mod tests {
         let args = serde_json::json!({
             "bindings": [{"var": "products", "spreadsheet_id": "ws_w", "sheet": "Products"}],
             "code": "\
-import pandas as pd\n\
-df = pd.DataFrame(products)\n\
-output_sheets = {\n\
-    'Top10':   df.head(1),\n\
-    'Bottom5': df.tail(1),\n\
-    'All':     df,\n\
-}\n\
-output = {'tabs_written': 3}\n\
-",
+        import pandas as pd\n\
+        df = pd.DataFrame(products)\n\
+        output_sheets = {\n\
+        'Top10':   df.head(1),\n\
+        'Bottom5': df.tail(1),\n\
+        'All':     df,\n\
+        }\n\
+        output = {'tabs_written': 3}\n\
+        ",
             "write_to_spreadsheet": "ws_w"
         });
 
         let client: Arc<dyn SheetsClient> = Arc::new(client);
-        let res =
-            dispatch_gsheets_run_python_with_client(client, args).await;
+        let res = dispatch_gsheets_run_python_with_client(client, args).await;
 
         // Skip if pandas not installed in this test environment.
         if let Some(err) = res.get("error").and_then(|v| v.as_str()) {
@@ -997,8 +985,7 @@ output = {'tabs_written': 3}\n\
         pyo3::prepare_freethreaded_python();
 
         let server = MockServer::start().await;
-        let client =
-            GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
+        let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
         client.token_test_seed("fake-bearer-token").await;
 
         // Binding: Whatever tab on spreadsheet "ws_c".
@@ -1052,17 +1039,16 @@ output = {'tabs_written': 3}\n\
         let args = serde_json::json!({
             "bindings": [{"var": "x", "spreadsheet_id": "ws_c", "sheet": "Whatever"}],
             "code": "\
-import pandas as pd\n\
-df = pd.DataFrame(x)\n\
-output_sheets = {'Existing': df}\n\
-output = {}\n\
-",
+        import pandas as pd\n\
+        df = pd.DataFrame(x)\n\
+        output_sheets = {'Existing': df}\n\
+        output = {}\n\
+        ",
             "write_to_spreadsheet": "ws_c"
         });
 
         let client: Arc<dyn SheetsClient> = Arc::new(client);
-        let res =
-            dispatch_gsheets_run_python_with_client(client, args).await;
+        let res = dispatch_gsheets_run_python_with_client(client, args).await;
 
         // Skip if pandas not installed in this test environment.
         if let Some(err) = res.get("error").and_then(|v| v.as_str()) {
@@ -1077,13 +1063,16 @@ output = {}\n\
             .get("wrote_sheets")
             .and_then(|v| v.as_array())
             .expect("wrote_sheets should be an array");
-        assert_eq!(wrote.len(), 1, "expected 1 wrote_sheets entry; full response: {res}");
+        assert_eq!(
+            wrote.len(),
+            1,
+            "expected 1 wrote_sheets entry; full response: {res}"
+        );
 
         let entry = &wrote[0];
         assert_eq!(entry["name"], "Existing", "name mismatch: {entry}");
         assert_eq!(
-            entry["resolved_name"],
-            "Existing (2)",
+            entry["resolved_name"], "Existing (2)",
             "resolved_name mismatch: {entry}"
         );
         assert!(

@@ -111,7 +111,12 @@ impl DiffError {
                      (examples: {examples:?}). Each row must be uniquely identified."
                 ),
             }),
-            Self::ColumnMismatch { target_columns, input_columns, extra, tab } => serde_json::json!({
+            Self::ColumnMismatch {
+                target_columns,
+                input_columns,
+                extra,
+                tab,
+            } => serde_json::json!({
                 "error": "ColumnMismatch",
                 "tab": tab,
                 "target_columns": target_columns,
@@ -305,11 +310,7 @@ fn column_set(records: &[Map<String, Value>]) -> Vec<String> {
 }
 
 /// Return up to `n` duplicate key examples found in records.
-fn duplicate_examples(
-    records: &[Map<String, Value>],
-    key: &str,
-    n: usize,
-) -> Vec<String> {
+fn duplicate_examples(records: &[Map<String, Value>], key: &str, n: usize) -> Vec<String> {
     let mut counts: HashMap<String, usize> = HashMap::new();
     for r in records {
         if let Some(k) = r.get(key).and_then(key_to_string) {
@@ -375,9 +376,9 @@ mod tests {
             rec(&[("id", json!("c")), ("price", json!(30))]),
         ];
         let new = vec![
-            rec(&[("id", json!("a")), ("price", json!(10))]),  // no change
-            rec(&[("id", json!("b")), ("price", json!(99))]),  // changed
-            rec(&[("id", json!("c")), ("price", json!(99))]),  // changed
+            rec(&[("id", json!("a")), ("price", json!(10))]), // no change
+            rec(&[("id", json!("b")), ("price", json!(99))]), // changed
+            rec(&[("id", json!("c")), ("price", json!(99))]), // changed
         ];
         let r = diff_records(&current, &new, "id", None, false, "Sales").unwrap();
         assert_eq!(r.changes.len(), 2);
@@ -525,7 +526,10 @@ mod tests {
             eprintln!("SKIPPED: serde_json refuses NaN serialization in this build");
             return;
         }
-        assert!(values_equal(&nan_val, &nan_val), "NaN should compare equal to itself");
+        assert!(
+            values_equal(&nan_val, &nan_val),
+            "NaN should compare equal to itself"
+        );
     }
 
     #[test]

@@ -55,4 +55,14 @@ pub trait SheetsClient: Send + Sync {
         start_addr: &str,
         values_2d: Vec<Vec<CellValue>>,
     ) -> Result<SetRangeResponse, SheetsError>;
+
+    /// Apply N cell-level writes in one HTTPS round-trip via
+    /// `spreadsheets.values.batchUpdate`. Each `(addr, value)` tuple is
+    /// an A1-addressed cell on `sheet`. Returns total cells updated.
+    async fn batch_update_cells(
+        &self,
+        id: &SpreadsheetId,
+        sheet: &str,
+        updates: Vec<(String, CellValue)>,
+    ) -> Result<SetRangeResponse, SheetsError>;
 }

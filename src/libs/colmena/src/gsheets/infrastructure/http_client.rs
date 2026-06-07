@@ -614,6 +614,45 @@ impl SheetsClient for GoogleSheetsHttpClient {
         let _ = self.post_json(&url, body).await?;
         Ok(())
     }
+
+    async fn batch_update_cells(
+        &self,
+        id: &SpreadsheetId,
+        sheet: &str,
+        updates: Vec<(String, CellValue)>,
+    ) -> Result<SetRangeResponse, SheetsError> {
+        if updates.is_empty() {
+            return Ok(SetRangeResponse {
+                updated_cells: 0,
+                updated_range: String::new(),
+            });
+        }
+        let n_updates = updates.len();
+        let value_ranges: Vec<Value> = updates
+            .into_iter()
+            .map(|(addr, val)| {
+                serde_json::json!({
+                    "range": format!("{}!{addr}", quote_sheet_for_range(sheet)),
+                    "majorDimension": "ROWS",
+                    "values": [[val.to_json()]],
+                })
+            })
+            .collect();
+        let body = serde_json::json!({
+            "valueInputOption": "USER_ENTERED",
+            "data": value_ranges,
+        });
+        let url = format!("{}/{}/values:batchUpdate", self.sheets_base, id.0);
+        let resp = self.post_json(&url, body).await?;
+        let updated = resp
+            .get("totalUpdatedCells")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        Ok(SetRangeResponse {
+            updated_cells: updated,
+            updated_range: format!("{n_updates} cells in {sheet}"),
+        })
+    }
 }
 
 /// Wrap a sheet name in single quotes if it contains anything other
@@ -798,6 +837,53 @@ mod tests {
             .expect("set_range ok");
         assert_eq!(result.updated_cells, 4);
         assert_eq!(result.updated_range, "Sheet1!A1:B2");
+    }
+
+    #[tokio::test]
+    async fn batch_update_cells_posts_value_ranges() {
+        let server = wiremock::MockServer::start().await;
+        let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
+        client.token_test_seed("fake-token").await;
+
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path_regex(r"/ss_b/values:batchUpdate"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "totalUpdatedCells": 3,
+                    "responses": [
+                        {"updatedRange": "Sheet1!B5"},
+                        {"updatedRange": "Sheet1!B6"},
+                        {"updatedRange": "Sheet1!B7"},
+                    ]
+                })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let updates = vec![
+            (
+                "B5".to_string(),
+                crate::gsheets::domain::CellValue::Number(99.0),
+            ),
+            (
+                "B6".to_string(),
+                crate::gsheets::domain::CellValue::Number(99.0),
+            ),
+            (
+                "B7".to_string(),
+                crate::gsheets::domain::CellValue::Number(99.0),
+            ),
+        ];
+        let resp = client
+            .batch_update_cells(
+                &crate::gsheets::domain::SpreadsheetId("ss_b".to_string()),
+                "Sheet1",
+                updates,
+            )
+            .await
+            .expect("batch_update_cells must succeed");
+        assert_eq!(resp.updated_cells, 3);
     }
 
     #[tokio::test]

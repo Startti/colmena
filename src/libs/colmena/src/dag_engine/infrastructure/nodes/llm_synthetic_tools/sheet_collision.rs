@@ -32,9 +32,7 @@ pub enum CollisionPolicy {
 pub fn parse_policy(s: &str) -> Result<CollisionPolicy, String> {
     let quoted = format!(r#""{s}""#);
     serde_json::from_str::<CollisionPolicy>(&quoted).map_err(|_| {
-        format!(
-            "unknown on_existing_sheet value '{s}'; valid: fail, auto_suffix, overwrite"
-        )
+        format!("unknown on_existing_sheet value '{s}'; valid: fail, auto_suffix, overwrite")
     })
 }
 
