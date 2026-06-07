@@ -59,9 +59,11 @@ pub struct GsheetsRunPythonArgs {
     /// Optional target spreadsheet for `output_sheets` returned by the script.
     /// When set AND the script assigns `output_sheets = {name: DataFrame, ...}`,
     /// the dispatcher creates one new tab per entry and writes the DataFrame
-    /// as a values matrix (header row + body). If the name already exists,
-    /// the dispatcher appends " (2)", " (3)", etc. (capped at 10 attempts).
-    /// When omitted, any `output_sheets` produced by the script is ignored.
+    /// as a values matrix (header row + body). Collision behavior on existing
+    /// tabs is controlled by `on_existing_sheet` (default: `fail` — returns a
+    /// structured `SheetExists` error; set to `auto_suffix` for the legacy
+    /// " (N)" behavior, or `overwrite` to clobber). When `write_to_spreadsheet`
+    /// is omitted, any `output_sheets` produced by the script is ignored.
     #[serde(default)]
     pub write_to_spreadsheet: Option<String>,
 
@@ -507,7 +509,8 @@ async fn do_replace(
                 return write_full_df(client, spreadsheet_id, raw_name, raw_name, entry).await;
             }
             CollisionPolicy::AutoSuffix => {
-                // Find a free suffixed name and create it.
+                // Start at 2: raw_name itself is already known to collide (we just
+                // hit `Some(meta)` above). First candidate is "raw_name (2)".
                 for attempt in 2i32..=10 {
                     let candidate = format!("{raw_name} ({attempt})");
                     match client.add_sheet(spreadsheet_id, &candidate).await {
@@ -560,34 +563,45 @@ async fn do_overwrite(
 ) -> serde_json::Value {
     // Schema-change guard: if the tab exists and its columns differ from
     // the input's columns, reject unless allow_schema_change=true.
-    if let Ok(Some(meta)) = fetch_tab_meta(client, spreadsheet_id, raw_name).await {
-        let input_cols: Vec<String> = entry
-            .get("df_cols")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|c| c.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let allow = entry
-            .get("allow_schema_change")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let mismatch = !columns_match(&meta.columns, &input_cols);
-        if mismatch && !allow {
+    match fetch_tab_meta(client, spreadsheet_id, raw_name).await {
+        Err(e) => {
             return serde_json::json!({
                 "name": raw_name,
-                "error": "SchemaChange",
-                "current_columns": meta.columns,
-                "input_columns": input_cols,
-                "message": format!(
-                    "Overwriting '{raw_name}' would change its schema: current {:?} → new {:?}. \
-                     This is likely a mistake. RECOMMENDED: use a different tab name. To proceed \
-                     anyway, add 'allow_schema_change: true' to the spec dict.",
-                    meta.columns, input_cols
-                ),
+                "error": format!("metadata fetch failed: {e}"),
             });
+        }
+        Ok(None) => {
+            // Tab doesn't exist — fall through to write_full_df below.
+        }
+        Ok(Some(meta)) => {
+            let input_cols: Vec<String> = entry
+                .get("df_cols")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|c| c.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let allow = entry
+                .get("allow_schema_change")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let mismatch = !columns_match(&meta.columns, &input_cols);
+            if mismatch && !allow {
+                return serde_json::json!({
+                    "name": raw_name,
+                    "error": "SchemaChange",
+                    "current_columns": meta.columns,
+                    "input_columns": input_cols,
+                    "message": format!(
+                        "Overwriting '{raw_name}' would change its schema: current {:?} → new {:?}. \
+                         This is likely a mistake. RECOMMENDED: use a different tab name. To proceed \
+                         anyway, add 'allow_schema_change: true' to the spec dict.",
+                        meta.columns, input_cols
+                    ),
+                });
+            }
         }
     }
     write_full_df(client, spreadsheet_id, raw_name, raw_name, entry).await
@@ -602,7 +616,7 @@ async fn do_update_in_place(
 ) -> serde_json::Value {
     let Some(key) = entry.get("key").and_then(|v| v.as_str()) else {
         return serde_json::json!({
-            "name": raw_name,
+            "tab": raw_name,
             "error": "update_in_place requires `key` field in the spec dict",
         });
     };
@@ -646,7 +660,7 @@ async fn do_update_in_place(
         }
         Err(e) => {
             return serde_json::json!({
-                "name": raw_name,
+                "tab": raw_name,
                 "error": format!("read failed: {e}"),
             });
         }
@@ -677,7 +691,7 @@ async fn do_update_in_place(
         Ok(r) => r,
         Err(e) => {
             return serde_json::json!({
-                "name": raw_name,
+                "tab": raw_name,
                 "error": format!("header read failed: {e}"),
             });
         }
@@ -775,7 +789,7 @@ async fn do_update_in_place(
             },
         }),
         Err(e) => serde_json::json!({
-            "name": raw_name,
+            "tab": raw_name,
             "error": format!("batch_update_cells failed: {e}"),
         }),
     }
@@ -833,6 +847,10 @@ async fn write_full_df(
     }
 }
 
+/// Returns true if two column lists name the same set. Order-insensitive
+/// (Sheets column order is not part of the schema contract) and
+/// duplicate-insensitive (HashSet semantics). Used by the overwrite
+/// schema-change guard.
 fn columns_match(a: &[String], b: &[String]) -> bool {
     let sa: std::collections::HashSet<&String> = a.iter().collect();
     let sb: std::collections::HashSet<&String> = b.iter().collect();
@@ -1467,23 +1485,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        // (b) list_sheets mock — "Sales" tab exists.
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path_regex(r"/ss_u\?"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "sheets": [{
-                        "properties": {
-                            "sheetId": 1, "title": "Sales", "index": 0,
-                            "gridProperties": {"rowCount": 4, "columnCount": 2}
-                        }
-                    }]
-                })),
-            )
-            .mount(&server)
-            .await;
-
-        // (c) batchUpdate (cells) mock — one call with 2 cell updates
+        // (b) batchUpdate (cells) mock — one call with 2 cell updates
         //     (rows b & c, column price). No .expect() because the
         //     pandas-skip path exits before this mock is exercised.
         wiremock::Mock::given(wiremock::matchers::method("POST"))
