@@ -813,31 +813,24 @@ guides the LLM more.
 
 ---
 
-## `document_id` collision entre image_generation providers
+## ~~`document_id` collision entre image_generation providers~~ — RESUELTO 2026-06-07
 
-- **Origen:** E2E verification — Phase 2 del runbook `verifying_deployed_worker.md` (2026-06-07). Tests 2.1 (Vertex Imagen 4) y 2.3 (OpenAI gpt-image-1) corrieron secuencialmente con el mismo `agent_session_id`. Ambos devolvieron `document_id: "img_image_0_ge0png"` — idénticos. El segundo upsert sobrescribió la fila del primero en `conversation_attachments`. Solo queda 1 row en DB para 2 generaciones distintas (Vertex perdida, OpenAI ganadora).
-- **Problema:** el `document_id` no es único entre providers/runs. La estructura `img_image_<N>_<hash>png` sugiere que `<N>` es el índice (0 si solo 1 imagen) y `<hash>` es derivado de algo NO único (¿prompt? ¿provider+model+timestamp con baja granularidad?). Cuando dos generaciones distintas producen el mismo hash, hay colisión silenciosa.
-- **Impacto operacional:**
-  - Si un usuario genera dos imágenes en rápida sucesión, una se pierde de su catálogo.
-  - El garbage collector (`attachment_gc`) podría borrar la "vieja" (Vertex) basándose en el `last_used_at` de la "nueva" (OpenAI).
-  - El blob en GCS sigue existiendo (el path probablemente sí es único), pero la fila DB pierde el link a la primera generación.
-- **Workaround actual:** evitar generar múltiples imágenes en la misma sesión sin diferenciar prompts significativamente. No es real workaround — es evitación.
-- **Por qué está parqueado:** poco frecuente en producción (los usuarios típicamente esperan a ver una imagen antes de pedir otra). Pero detrás del catalog hay un invariante roto: `(agent_session_id, document_id)` debería ser unique key. El fix es chico una vez localizado el generador del ID.
-- **Fix propuesto:**
-  1. Localizar el generador del `document_id` para imagen y audio. Probable en `src/libs/colmena/src/dag_engine/infrastructure/nodes/multimedia/image_generation.rs` y `tts.rs`.
-  2. Cambiar de `img_image_<idx>_<hash6>png` a `img_<random_uuid_short>_<idx>` (8-12 chars de UUID). Usar `uuid::Uuid::new_v4().simple()` truncado.
-  3. Agregar un unique constraint en `conversation_attachments(agent_session_id, document_id)` en una migración Prisma del ADP (no del colmena schema).
-  4. Test: generar 2 imágenes con el mismo prompt+modelo en el mismo session, verificar IDs distintos.
-- **Acceptance criteria:**
-  - 2 generaciones con el mismo prompt+modelo en la misma session devuelven `document_id` distintos.
-  - Ambas filas persisten en `conversation_attachments`.
-  - El unique constraint en DB previene colisiones futuras.
-- **Estimación:** ~1-2 horas. Fix chico, los tests son baratos.
-- **Cuándo retomar:** ASAP si un usuario reporta "perdí mi imagen". Si no, posponer pero documentar el invariante roto en `docs/developer_guide/32_multimedia_generation.md`.
-- **Referencias:**
-  - SSE evidencia: `/tmp/colmena_e2e/2.1_image_gen_v2.sse` y `/tmp/colmena_e2e/2.3_image_gen_openai_v2.sse` (efímeros).
-  - DB query usada para confirmar: `SELECT agent_session_id, document_id, provider FROM conversation_attachments WHERE registered_at > NOW() - INTERVAL '5 minutes';` — 2 rows entran, 2 deben quedar, solo 1 queda.
-  - Doc del feature: [`docs/developer_guide/32_multimedia_generation.md`](developer_guide/32_multimedia_generation.md).
+**Root cause (encontrado 2026-06-07):** la implementación de `build_document_id` en [`src/libs/colmena/src/dag_engine/infrastructure/nodes/util/attachment_id.rs`](../src/libs/colmena/src/dag_engine/infrastructure/nodes/util/attachment_id.rs) usaba `storage_key_suffix(storage_key)` = "los últimos 6 chars alfanuméricos del storage_key" como suffix del ID. Cuando los storage_keys terminaban con la extensión del archivo (ej. `chat-attachments/sess_xyz/image_0.png`), los últimos 6 chars alfanuméricos eran dominados por la parte fija del filename (`image0png` → `ge0png`), no por la parte única del storage_key. Dos providers con mismo filename (`image_0.png`) producían siempre el mismo suffix `ge0png` → mismo `document_id` → segundo INSERT pisaba el primero en `conversation_attachments`.
+
+**Fix shipped:** reemplazado el `storage_key_suffix(storage_key)` por `Uuid::new_v4().simple().to_string()[..8]` (8 chars hex). Garantiza unicidad incluso con argumentos idénticos (mismo filename + mismo storage_key + mismo prompt). El argumento `storage_key` queda en la signature por backward compat pero pasa a ser unused (`_storage_key`).
+
+**Tests agregados:**
+- `strips_known_extensions_and_appends_uuid_suffix` — valida shape correcto + suffix hex de 8 chars
+- `avoids_collision_between_same_filename_and_same_storage_key` — **test regresivo** que reproduce el escenario exacto del bug y verifica que ahora produce IDs distintos
+- `avoids_collision_across_many_rapid_calls` — stress test: 1000 generaciones con mismos args, todos los IDs deben ser únicos
+- Tests originales (`avoids_collision_between_same_filename_different_keys`, `sanitize_trims_trailing_underscores`, `file_ext_handles_image_and_audio`) siguen pasando
+
+**Decisión deliberada — NO se agregó unique constraint en Prisma:** el fix en colmena (IDs únicos por construcción) resuelve el problema en la fuente. Un unique constraint defensivo en `conversation_attachments(agent_session_id, document_id)` quedaría como belt-and-suspenders pero requiere migration en ADP. Si en el futuro alguien quiere esa capa extra de seguridad, abrir nueva entrada BACKLOG. Por ahora: trust the fix.
+
+**Conservado para referencia histórica:**
+- **Síntoma observado:** E2E Phase 2 (Vertex Imagen 4) + Phase 2.3 (OpenAI gpt-image-1) corrieron secuencialmente con el mismo `agent_session_id`. Ambos devolvieron `document_id: "img_image_0_ge0png"` — idénticos. El segundo upsert sobrescribió la fila del primero en `conversation_attachments`.
+- **Impacto operacional medido:** rare en producción (usuarios típicamente esperan ver una imagen antes de pedir otra), pero data loss real cuando ocurre. El blob en GCS sigue existiendo, pero la fila DB pierde el link a la primera generación.
+- **Referencias originales:** SSE `/tmp/colmena_e2e/2.1_image_gen_v2.sse` y `/tmp/colmena_e2e/2.3_image_gen_openai_v2.sse` (efímeros); Runbook E2E Phase 2.
 
 ---
 
