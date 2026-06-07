@@ -774,9 +774,7 @@ fn compact_history_to_summary(
     // regression al cerrar el turn" and "OpenAI Responses API — input_text
     // invalid en synthetic-tool path" for the diagnosis trail.
     let mut middle_end = initial_middle_end;
-    while middle_end > keep_first
-        && matches!(messages[middle_end].role(), MessageRole::Tool)
-    {
+    while middle_end > keep_first && matches!(messages[middle_end].role(), MessageRole::Tool) {
         middle_end -= 1;
     }
     if middle_end <= keep_first {
