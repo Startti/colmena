@@ -721,3 +721,181 @@ guides the LLM more.
   ergonomics.
 - **Estimación:** ~10 LOC en `fetch_tab_meta` + 1 unit test que mockea
   un sheet con 30+ columnas. ~10 minutos.
+
+---
+
+## Lazy tool loading — OpenAI message-order regression al cerrar el turn
+
+- **Origen:** E2E verification del worker desplegado (Cloud Run dev) — Phase 1.2 del runbook `verifying_deployed_worker.md` (2026-06-07). El graph `lazy_tools` con `provider: openai`, `lazy_tool_loading: true`, 3 tools (`current_time` eager, `add` y `multiply` lazy) ejecutó las 5 tool calls correctamente: `current_time() → describe_tool(multiply) → describe_tool(add) → add(25,17)=42 → multiply(42,3)=126`. Cinco `tool-output-available` events sin error. Pero al cerrar el turn (la llamada final al LLM para sintetizar la respuesta) OpenAI rechazó la historia con `invalid_request_error`.
+- **Problema:** error textual del provider:
+  ```
+  Invalid parameter: messages with role 'tool' must be a response
+  to a preceeding message with 'tool_calls'.
+  param: messages.[2].role
+  ```
+  El error indica que **mensaje #2 en la historia enviada es role=tool sin un assistant con `tool_calls` antes**. La hipótesis es que `describe_tool` (synthetic tool de colmena) inyecta un mensaje role=tool **sin haber generado un assistant.tool_calls previo en la historia que se persiste/restaura**. En modo eager el problema no ocurre porque cada tool call sí genera el par {assistant.tool_calls, tool.response} naturalmente. En modo lazy, `describe_tool` parece bypasear el par.
+- **Workaround actual:** desactivar `lazy_tool_loading: true` para agentes OpenAI. Eager tool loading (`enabled_tools: [...]`) sigue funcionando 100% — Phase 1.1 lo confirma (`add` + `multiply` end-to-end). Lazy loading sigue funcionando para Gemini/google según las pruebas previas del feature shipped 2026-05-29 (`developer_guide/29_lazy_tool_loading.md`).
+- **Por qué está parqueado:** alcance limitado a OpenAI + lazy. Anthropic no probado todavía. La feature de lazy loading en sí está OK para Gemini; el bug es en cómo el OpenAI adapter persiste/serializa la historia cuando `describe_tool` aparece. La urgencia depende de si ADP planea usar OpenAI con lazy en producción.
+- **Fix propuesto:** tres pasos:
+  1. Reproducir local con un unit test: el adapter OpenAI con historial que incluya `describe_tool` antes de un tool real, verificar el cuerpo del request `messages[]` que arma `openai_adapter.rs`. Confirmar que mensaje #2 (el `describe_tool` result) NO tiene su correspondiente assistant.tool_calls en mensaje #1.
+  2. Inspeccionar dónde colmena ensambla la conversación cuando `lazy_tool_loading=true`: probablemente en `llm/application/lazy_loader.rs` o en el path donde se intercala el output de `describe_tool` con el flujo principal del agente.
+  3. Decidir si la fix es (a) hacer que `describe_tool` aparezca como un assistant.tool_calls + tool.response par sintético, igualando lo que OpenAI espera; o (b) saltar `describe_tool` del array `messages[]` que se manda a OpenAI (que el LLM no la "vea" en su propia historia — solo en su current-turn context). La opción (a) es la más fiel; (b) es la más simple y segura.
+- **Acceptance criteria:**
+  - Integration test que reejecuta el graph `lazy_tools` con `provider: openai` y completa sin error.
+  - Unit test del OpenAI adapter que toma una historia con `describe_tool` + tool real y verifica que el body de request cumple el invariante "tool role messages must follow tool_calls".
+  - Phase 1.2 del E2E runbook (`verifying_deployed_worker.md`) pasa green.
+- **Estimación:** ~3-4 horas. Reproducir local (~1h), fix (~30-90min según opción), tests (~1h).
+- **Cuándo retomar:** si ADP planea usar OpenAI con lazy en prod, ASAP. Si solo usa Gemini con lazy (default actual), parqueable.
+- **Referencias:**
+  - SSE evidencia: `/tmp/colmena_e2e/1.2_lazy_tools.sse` (post mortem local del 2026-06-07; archivo efímero — re-generable con el preset `lazy_tools` del HTML `apps/service/ia/platform/test_stream_cloud.html`).
+  - Doc del feature original: [`docs/developer_guide/29_lazy_tool_loading.md`](developer_guide/29_lazy_tool_loading.md).
+  - Runbook E2E: [`/Users/danielgarcia/startti/adp/apps/service/ia/platform/docs/deployment/verifying_deployed_worker.md`](#phase-1) Phase 1.2.
+  - HTML preset (input para reproducir): preset `lazy_tools` en `apps/service/ia/platform/test_stream_cloud.html`.
+
+---
+
+## Conversational memory cross-node — verificar política y documentar
+
+- **Origen:** E2E verification del worker desplegado — Phase 1.4 del runbook `verifying_deployed_worker.md` (2026-06-07). El graph `gemini_orchestrator` define dos `llm_call` nodes (`step_1` y `step_2`) con el mismo `agent_session_id` y un edge `step_1 → step_2`. step_1 hizo `add(123,456)=579` y respondió "Hello Daniel! 123 + 456 = 579. I will remember your name." step_2 con prompt "What is my name? Also, multiply the previous result by 2." respondió "Hello! It's nice to meet you" — **no recordó "Daniel" y no multiplicó**.
+- **Problema:** dos hipótesis a verificar:
+  1. **By-design**: la memoria conversacional (`llm_node_history`) keya por `(agent_session_id, node_id)`. Como `node_id` difiere entre step_1 y step_2, step_2 abre una conversación NUEVA y no ve la historia de step_1. Si esto es correcto, el behavior es correcto pero el preset `gemini_orchestrator` en el HTML playground es engañoso (sugiere que va a probar memoria cross-node y no la prueba).
+  2. **Regresión**: la memoria DEBE ser keyada por `agent_session_id` solo, y el filtrado por `node_id` introduce aislamiento accidental. Si esto es correcto, hay un bug en la query del repo.
+  - El campo `step_2.extra_info.usage.prompt_tokens=311` corrobora la hipótesis 1: con memoria cargada esperaríamos ~700+ tokens (system + step_1 turn + step_2 prompt). 311 tokens es solo system + step_2 prompt.
+- **Workaround actual:** si querés que step_2 vea lo que pasó en step_1, ponerlo explícitamente en el prompt (via edge data-flow `step_1.result → step_2.prompt`) en vez de depender de memoria conversacional persistida.
+- **Por qué está parqueado:** depende de cuál hipótesis sea cierta. Si #1, no es un bug — solo hay que documentar la semántica y opcionalmente renombrar el preset HTML o cambiar el prompt para que el test sea válido (ej. dos turnos sobre el mismo node_id). Si #2, hay que arreglar la query del repo.
+- **Fix propuesto:**
+  1. Leer [`src/libs/colmena/src/llm/domain/memory.rs`](src/libs/colmena/src/llm/domain/memory.rs) (`ConversationKey`, `ConversationRepository::get_by_id`) y la implementación postgres (`postgres_conversation_repository.rs`) para confirmar el behavior. Spec en [`docs/dds/MODULO_LLM_DISEÑO.md`](dds/MODULO_LLM_DISEÑO.md) si existe.
+  2. Si by-design: agregar una nota en `docs/developer_guide/15_memory_guide.md` aclarando que la memoria es per-`(agent_session, node_id)` por default, y documentar cómo conseguir memoria compartida cross-node (probable: edge data-flow, o algún parámetro `share_memory_with_node_ids` aún no implementado).
+  3. Si regresión: arreglar la query y agregar un integration test que crea dos `llm_call` nodes con el mismo `agent_session_id` y verifica que step_2 ve la historia de step_1.
+- **Acceptance criteria:**
+  - Doc clarificada (si by-design) o test integration verde (si fix).
+  - El preset `gemini_orchestrator` del HTML playground sigue siendo útil — adaptado al behavior correcto.
+- **Estimación:** ~2 horas para verificar + decidir + escribir doc o fix.
+- **Cuándo retomar:** baja prioridad standalone, pero quien tome el caso debe responder primero a "¿es por design o bug?" antes de cualquier cambio. Posible trigger: un usuario ADP reporta que conversaciones multi-step no recuerdan info de pasos anteriores.
+- **Referencias:**
+  - SSE evidencia: `/tmp/colmena_e2e/1.4_gemini_orch_v2.sse` (efímero).
+  - Memoria conversational: [`src/libs/colmena/src/llm/domain/memory.rs`](src/libs/colmena/src/llm/domain/memory.rs:19-46) — `ConversationKey { session_id, agent_session_id, node_id }`.
+  - Runbook E2E: Phase 1.4 en [`verifying_deployed_worker.md`](#phase-1).
+  - Doc actual: [`docs/developer_guide/15_memory_guide.md`](developer_guide/15_memory_guide.md).
+
+---
+
+## OpenAI Responses API — `input_text` invalid en synthetic-tool path
+
+- **Origen:** E2E verification — Phase 3.1 (`pdf_analyst_base64`) y Phase 4.1 (`sql_products_readonly`) del runbook `verifying_deployed_worker.md` (2026-06-07). Es una variante del bug ya registrado para Chat Completions ("lazy_tools OpenAI regression"), pero golpea la Responses API que es el path nuevo de OpenAI.
+- **Problema:** error textual del provider tras un round-trip que involucra synthetic tools de colmena (`load_attachment`, `describe_tool`, etc.):
+  ```
+  Invalid value: 'input_text'. Supported values are: 'output_text' and 'refusal'.
+  param: input[2].content[0]
+  ```
+  El OpenAI Responses API tiene un schema diferente a Chat Completions: para mensajes que NO son user-input, `content[0].type` debe ser `output_text` (para assistant outputs) o `refusal` (para rechazos). El adapter colmena está mandando `input_text` cuando reinyecta el resultado del synthetic tool en la historia.
+- **Hipótesis técnica:** cuando un synthetic tool retorna (e.g. `load_attachment` devuelve `{document_id, status: "loaded"}` como marker ephemeral), el adapter OpenAI Responses lo serializa como `{role: "tool", content: [{type: "input_text", text: ...}]}` cuando debería ser `{role: "tool", content: [{type: "output_text", text: ...}]}` o el equivalente correcto del Responses API. Misma raíz que el bug de Chat Completions ("lazy_tools regression") — ambos: el adapter no respeta el invariante de message-shape de OpenAI en presencia de synthetic tools.
+- **Workaround actual:**
+  - Para `pdf_analyst_base64` (Phase 3.1): usar provider Gemini en vez de OpenAI. Plan B autoinject funciona limpio con Gemini (probado en Phase 3.3).
+  - Para `sql_products_readonly` (Phase 4.1): el SQL node ejecuta correctamente, pero el LLM hace muchas queries en cascada y eventualmente acumula una historia que rompe. Workaround: prompt más estricto que limite # de queries, o cambiar a Gemini.
+- **Por qué está parqueado:** mismo análisis que el bug de Chat Completions — depende de si ADP usa OpenAI en producción con Responses API. Si solo Gemini en prod, parqueable. Si OpenAI sí — bloqueante.
+- **Fix propuesto:** un solo fix probable cubre ambos bugs (Chat Completions + Responses):
+  1. Localizar el OpenAI adapter (`src/libs/colmena/src/llm/infrastructure/openai_adapter.rs` o similar). Identificar el path donde se serializa la respuesta de un synthetic tool en el message array.
+  2. Para Chat Completions: garantizar que cada `role:tool` tenga un `role:assistant.tool_calls` precedente que lo referencia por ID.
+  3. Para Responses API: garantizar que el `type` de `content[i]` sea el correcto según el role del mensaje (assistant → `output_text`, user → `input_text`).
+  4. Unit tests del adapter con historias que incluyan synthetic tools (load_attachment, describe_tool) y verificar que los bodies de request cumplen los invariantes de ambos endpoints.
+- **Acceptance criteria:**
+  - Phase 3.1 (`pdf_analyst_base64`) pasa con provider=openai.
+  - Phase 1.2 (`lazy_tools`) pasa con provider=openai (mismo fix).
+  - Phase 4.1 (`sql_products_readonly`) NO crashea por message-shape después de N tool calls.
+- **Estimación:** ~4-6 horas. Cubre ambos endpoints OpenAI (Chat + Responses) y los 2 bugs de message-shape simultáneamente.
+- **Cuándo retomar:** ASAP si ADP usa OpenAI en prod. Si solo Gemini, posponer hasta que un cliente pida OpenAI.
+- **Referencias:**
+  - SSE evidencia: `/tmp/colmena_e2e/3.1_pdf.sse` y `/tmp/colmena_e2e/4.1_sql_readonly.sse` (efímeros).
+  - Bug pareja (Chat Completions): ver entrada "Lazy tool loading — OpenAI message-order regression al cerrar el turn" arriba.
+  - Runbook E2E: Phase 3.1 y 4.1 en [`verifying_deployed_worker.md`](#phase-3).
+  - OpenAI Responses API docs: <https://platform.openai.com/docs/api-reference/responses>.
+
+---
+
+## `document_id` collision entre image_generation providers
+
+- **Origen:** E2E verification — Phase 2 del runbook `verifying_deployed_worker.md` (2026-06-07). Tests 2.1 (Vertex Imagen 4) y 2.3 (OpenAI gpt-image-1) corrieron secuencialmente con el mismo `agent_session_id`. Ambos devolvieron `document_id: "img_image_0_ge0png"` — idénticos. El segundo upsert sobrescribió la fila del primero en `conversation_attachments`. Solo queda 1 row en DB para 2 generaciones distintas (Vertex perdida, OpenAI ganadora).
+- **Problema:** el `document_id` no es único entre providers/runs. La estructura `img_image_<N>_<hash>png` sugiere que `<N>` es el índice (0 si solo 1 imagen) y `<hash>` es derivado de algo NO único (¿prompt? ¿provider+model+timestamp con baja granularidad?). Cuando dos generaciones distintas producen el mismo hash, hay colisión silenciosa.
+- **Impacto operacional:**
+  - Si un usuario genera dos imágenes en rápida sucesión, una se pierde de su catálogo.
+  - El garbage collector (`attachment_gc`) podría borrar la "vieja" (Vertex) basándose en el `last_used_at` de la "nueva" (OpenAI).
+  - El blob en GCS sigue existiendo (el path probablemente sí es único), pero la fila DB pierde el link a la primera generación.
+- **Workaround actual:** evitar generar múltiples imágenes en la misma sesión sin diferenciar prompts significativamente. No es real workaround — es evitación.
+- **Por qué está parqueado:** poco frecuente en producción (los usuarios típicamente esperan a ver una imagen antes de pedir otra). Pero detrás del catalog hay un invariante roto: `(agent_session_id, document_id)` debería ser unique key. El fix es chico una vez localizado el generador del ID.
+- **Fix propuesto:**
+  1. Localizar el generador del `document_id` para imagen y audio. Probable en `src/libs/colmena/src/dag_engine/infrastructure/nodes/multimedia/image_generation.rs` y `tts.rs`.
+  2. Cambiar de `img_image_<idx>_<hash6>png` a `img_<random_uuid_short>_<idx>` (8-12 chars de UUID). Usar `uuid::Uuid::new_v4().simple()` truncado.
+  3. Agregar un unique constraint en `conversation_attachments(agent_session_id, document_id)` en una migración Prisma del ADP (no del colmena schema).
+  4. Test: generar 2 imágenes con el mismo prompt+modelo en el mismo session, verificar IDs distintos.
+- **Acceptance criteria:**
+  - 2 generaciones con el mismo prompt+modelo en la misma session devuelven `document_id` distintos.
+  - Ambas filas persisten en `conversation_attachments`.
+  - El unique constraint en DB previene colisiones futuras.
+- **Estimación:** ~1-2 horas. Fix chico, los tests son baratos.
+- **Cuándo retomar:** ASAP si un usuario reporta "perdí mi imagen". Si no, posponer pero documentar el invariante roto en `docs/developer_guide/32_multimedia_generation.md`.
+- **Referencias:**
+  - SSE evidencia: `/tmp/colmena_e2e/2.1_image_gen_v2.sse` y `/tmp/colmena_e2e/2.3_image_gen_openai_v2.sse` (efímeros).
+  - DB query usada para confirmar: `SELECT agent_session_id, document_id, provider FROM conversation_attachments WHERE registered_at > NOW() - INTERVAL '5 minutes';` — 2 rows entran, 2 deben quedar, solo 1 queda.
+  - Doc del feature: [`docs/developer_guide/32_multimedia_generation.md`](developer_guide/32_multimedia_generation.md).
+
+---
+
+## HTML preset `image_gen_then_edit_openai_dev` roto post Plan B (2026-05-25)
+
+- **Origen:** E2E verification — Phase 2.4 del runbook `verifying_deployed_worker.md` (2026-06-07). El preset HTML define un chain `gen → edit` con el edge `gen.output.images.0.url → edit.source_url`. Pero la migración Plan B shipped el 2026-05-25 **eliminó el field `url`** del payload de respuesta de `image_generation` y `image_edit` — solo queda `document_id`. El edge queda apuntando a un field inexistente.
+- **Problema:** cuando se ejecuta el preset, el trigger corre pero los nodos `gen` y `edit` NO se ejecutan porque la resolución del edge da `null` y el DAG bloquea silenciosamente. El run termina con un `finish` que solo contiene `trigger: {}` — sin error event, sin warning, sin nada que indique el problema.
+- **Impacto:** el preset es engañoso: cualquiera que lo use ve "completó OK" pero sin output real. Cualquier test de regresión que use este preset sigue dando verde aunque la chain esté rota.
+- **Workaround actual:** no usar el preset. Para validar chain gen→edit manualmente, hacer 2 jobs separados pasando el `document_id` del primero como argumento al segundo. Pero `image_edit` necesita un URL en `source_url`, no un `document_id` — habría que pre-resolver el `document_id` a un signed URL vía `/api/attachments/<doc_id>/url`.
+- **Por qué está parqueado:** preset HTML no es de prod — es testing/demos. El bug es de UX del playground, no de runtime. Tiene 2 fixes posibles y ninguno es urgente.
+- **Fix propuesto (2 opciones):**
+  - **Opción A — Restaurar el `url` en el payload de respuesta de image_generation** (pero firmando-on-demand, no almacenándolo crudo). Esto rompe el contrato Plan B que dice "el LLM solo ve `document_id`". Probable rechazado.
+  - **Opción B — Cambiar el preset HTML** para que sea un agente LLM que recibe `document_id` y llama a un tool `resolve_attachment_url` para obtener un URL firmado y luego invoca image_edit. Esto refleja cómo un agente real haría el chain post-Plan B. Más fiel al flow productivo.
+- **Acceptance criteria (opción B):**
+  - El preset corre `gen → resolve_url → edit` y devuelve una imagen editada.
+  - Documentado en el HTML como ejemplo de chain post-Plan B.
+- **Estimación:** ~1 hora para diseñar el nuevo preset + agregar al HTML. No requiere cambios en Rust.
+- **Cuándo retomar:** cuando se quiera demostrar el chain de multimedia en una demo o cuando alguien reporte que el preset no funciona.
+- **Referencias:**
+  - SSE evidencia: `/tmp/colmena_e2e/2.4_gen_then_edit.sse` (efímero).
+  - HTML preset: `apps/service/ia/platform/test_stream_cloud.html` → `PRESET_DAGS.image_gen_then_edit_openai_dev`.
+  - Plan B migration notes: [`docs/superpowers/specs/2026-05-25-plan-b-adp-migration-notes.md`](superpowers/specs/2026-05-25-plan-b-adp-migration-notes.md).
+
+---
+
+## CRÍTICO — `gsheets_run_python` y `crdt_doc_run_python` rotos en dev: pandas no instalado en worker image
+
+- **Origen:** E2E verification — Phase 6 (sheets-write-safety) del runbook `verifying_deployed_worker.md` (2026-06-07). Intento de ejecutar B1 (`gsheets_create_new`) contra el worker dev en Cloud Run. El dispatcher cargó las bindings correctamente desde el sheet real (1F7AsFx4yW4uVnJRaRWwpzQuSNvruqGohI2B2NRygT-Y), confirmó permisos del SA, pero falla en la ejecución del Python con `ModuleNotFoundError: No module named 'pandas'`.
+- **Problema:** la imagen Docker del worker desplegado en Cloud Run dev **no tiene pandas instalado**. El sandbox lo lista como import permitido (`Allowed imports: collections, datetime, decimal, functools, itertools, json, math, numpy, pandas, re, scipy, statistics, string`) — pero el runtime real no lo tiene. La causa probable es que el dispatcher pre-importa `pandas as pd` antes del código del usuario (es uno de los globals que documenta como disponible: "Has access to `pandas as pd`, `numpy as np`, `scipy.stats as stats`"). Ese pre-import falla con ModuleNotFoundError, abortando el run antes de que el código del usuario ejecute. Confirmado: incluso un script que solo importa numpy falla porque la inicialización de pandas pasa primero.
+- **Bloqueante:** sí. Bloquea TODOS los tests de Phase 6 (sheets-write-safety) y cualquier uso de `gsheets_run_python` o `crdt_doc_run_python` contra el worker dev. Es el feature más reciente shipped al worker (2026-06-07 / PR #86) y aparentemente la imagen Docker no incluye la dependencia.
+- **Hipótesis técnica:**
+  - El `Dockerfile.deps` del worker probablemente no instala pandas+scipy+numpy. Quizás el dispatcher requiere una imagen Python especializada distinta a la del worker normal.
+  - O hay un `pip install pandas` que está en el Cargo.toml de colmena pero no se incluyó al construir la imagen Docker del worker.
+  - O la imagen base cambió y el `apt-get install python3-pandas` quedó stale.
+- **Verificación rápida:** correr cualquier graph que use `gsheets_run_python` o `crdt_doc_run_python`. Si el output tiene `error: "Python execution error: ModuleNotFoundError: No module named 'pandas'"`, el bug está activo.
+- **Workaround actual:** ninguno desde el lado del agente — el dispatcher exige pandas. Los operadores que necesitan pandas-based gsheets deben usar `cargo run` local (donde el `.venv` sí tiene pandas) en vez del worker desplegado.
+- **Por qué urgente:** sheets-write-safety es un feature recién shipped (2026-06-07 colmena develop merge PR #86). El BACKLOG ya tiene varias entradas de mejoras incrementales (v1.1) que asumen el feature funciona — pero el feature está roto en dev y nadie se dio cuenta porque no hay E2E automatizado. Riesgo grande de que llegue así a prod si nadie lo testea antes.
+- **Fix propuesto:** dos pasos:
+  1. Identificar qué imagen Docker usa Cloud Run para `colmena-worker`. Probable: `apps/service/ia/platform/Dockerfile.deps` o un Dockerfile relacionado. Verificar si tiene `RUN pip install pandas numpy scipy` o `RUN apt-get install -y python3-pandas`. Si NO lo tiene, agregar.
+  2. Rebuild + redeploy del worker. Re-correr Phase 6 (B1-B5) para confirmar que pandas ahora carga.
+- **Acceptance criteria:**
+  - Phase 6.B1 (`gsheets_create_new`) corre verde: nueva tab creada con 3 filas via pandas.
+  - Phase 6.B2 (`gsheets_collision_fail`) devuelve el envelope `SheetExists` correctamente.
+  - Phase 6.B3 (`gsheets_collision_auto_suffix`) crea `Sheet1 (N)`.
+  - Phase 6.B4 (`gsheets_update_in_place`) reporta cells_changed > 0 y solo escribe celdas con diff.
+  - Phase 6.B5 (`gsheets_multi_sheet`) crea 3 nuevas tabs en una llamada.
+  - Un smoke test que importa pandas y reporta versión devuelve éxito desde el worker dev.
+- **Estimación:** ~1-2 horas para encontrar el Dockerfile, agregar la dep, rebuild, redeploy, re-validar. El fix en sí es de 1-2 líneas.
+- **Cuándo retomar:** ASAP. Bloquea un feature recién shipped y un capítulo entero del E2E runbook. Posible trigger: cuando alguien (operador o cliente) intente usar gsheets-pandas en dev y vea que rompe.
+- **Referencias:**
+  - SSE evidencia: `/tmp/colmena_e2e/B1.sse`, `/tmp/colmena_e2e/B2.sse`, `/tmp/colmena_e2e/B3.sse`, `/tmp/colmena_e2e/sanity_numpy.sse` (efímeros).
+  - Tool output ejemplo:
+    ```json
+    {"output":null,"stdout":"","error":"Python execution error: ModuleNotFoundError: No module named 'pandas'","loaded_columns":{"products":["product_id","sku","name","category","cost","price","stock"]}}
+    ```
+    Nota: `loaded_columns` confirma que bindings + permisos del SA funcionan. La falla es 100% del runtime Python.
+  - Spec del feature: [`docs/superpowers/specs/2026-06-06-sheets-write-safety-design.md`](superpowers/specs/2026-06-06-sheets-write-safety-design.md).
+  - Documentación del dispatcher: [`src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_run_python.rs`](src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_run_python.rs) — el doc comment al inicio del struct `GsheetsRunPythonArgs.code` dice "Has access to `pandas as pd`, `numpy as np`, `scipy.stats as stats`".
+  - Worker Dockerfile en ADP: `/Users/danielgarcia/startti/adp/apps/service/ia/platform/Dockerfile.deps` (a verificar).
+  - Cloud Run service: `colmena-worker` en `us-central1`, SA `adp-backend-sa-develop@startti-dev.iam.gserviceaccount.com`.
+  - Runbook E2E: Phase 6 en [`verifying_deployed_worker.md`](#phase-6).
