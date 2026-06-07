@@ -48,6 +48,20 @@ crdt_doc_run_python:
   description: |
     Run sandboxed Python (pandas/numpy/scipy.stats) over requested sheets as `dfs[sheet_id]`. Define `output` and/or `output_sheet`; pass `write_to_sheet` to persist. Load skill crdt-doc-run-python for the shape/output/debug contract.
 
+    For results that belong in the document (not the conversation),
+    assign `output_sheets = {"<tab_name>": <DataFrame>, ...}` in your code.
+    The dispatcher creates one new tab per dict entry in the current
+    artifact; the LLM only receives metadata
+    `{name, resolved_name, sheet_id, n_rows, n_cols}` per tab.
+
+    The legacy single-sheet path (`output_sheet = <df>` +
+    `write_to_sheet: "<name>"`) still works for back-compat but new code
+    should use `output_sheets`.
+
+    For more patterns and pitfalls, load the `crdt-doc-table-exploration`
+    skill (single-table inspection) or `crdt-doc-cross-sheet-analysis`
+    skill (joins, comparisons).
+
 crdt_doc_import_sheet:
   summary: Clone a sheet from another CRDT artifact into the current one
   description: |

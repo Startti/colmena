@@ -47,3 +47,14 @@ gsheets_run_python:
   summary: Run sandboxed pandas analysis over sheet ranges loaded directly by the dispatcher (rows never pass through the LLM)
   description: |
     Run sandboxed Python (pandas/numpy/scipy.stats) over data loaded directly from Google Sheets. Each `bindings` entry becomes a Python global (a list of dicts you can pass to pd.DataFrame). Rows NEVER pass through the LLM — only the final `output`. Use this for any analysis over more than ~50 rows.
+
+    For results that belong in the spreadsheet (not the conversation),
+    assign `output_sheets = {"<tab_name>": <DataFrame>, ...}` in your code
+    and pass `write_to_spreadsheet: "<spreadsheet_id>"` as an arg. The
+    dispatcher creates one new tab per dict entry; the LLM only receives
+    metadata `{name, resolved_name, sheet_id, n_rows, n_cols}` per tab,
+    never the row contents. Name collisions auto-suffix " (2)", " (3)".
+
+    For more patterns and pitfalls, load the `gsheets-table-exploration`
+    skill (single-table inspection) or `gsheets-cross-sheet-analysis`
+    skill (joins, comparisons).
