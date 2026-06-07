@@ -212,6 +212,79 @@ Los grafos existentes no requieren cambios.
 
 ---
 
+## 🧱 Aislamiento por nodo — memoria NO compartida entre llm_call distintos
+
+**Importante:** la memoria conversacional de un `llm_call` está aislada **por nodo**, incluso cuando varios nodos comparten el mismo `agent_session_id`. La llave compuesta `(agent_session_id, node_id)` (o `(session_id, node_id)` cuando no hay agent) significa que cada nodo abre su propio thread y NO ve la historia de otros nodos `llm_call` en el mismo grafo o run.
+
+### Por qué es así
+
+Históricamente la memoria se keaba SOLO por `agent_session_id`. Cuando un grafo tenía 2+ `llm_call` nodes con el mismo agent (típico en orchestrators), todos escribían sobre el mismo thread y se pisaban entre sí — un **collision silenciosa**. El bug es trivial de reproducir: nodo A le decía a Gemini "soy Juan", nodo B le preguntaba "¿quién soy?" y dependiendo del orden de escritura recibía respuestas inconsistentes o errores tipo "no me dijiste tu nombre".
+
+La migración [`20260428000002_llm_history_agent_and_node.sql`](../../src/libs/colmena/migrations/postgres/20260428000002_llm_history_agent_and_node.sql) agregó `node_id` como segunda mitad de la llave compuesta para **eliminar la collision**. Spec completa: [`docs/superpowers/plans/2026-04-28-agent-session-id.md`](../superpowers/plans/2026-04-28-agent-session-id.md) §3.2.
+
+### Comportamiento observable
+
+Dado este grafo:
+
+```json
+{
+  "nodes": {
+    "step_1": { "type": "llm_call", "config": { ..., "prompt": "Mi nombre es Daniel. ¿Hola?" } },
+    "step_2": { "type": "llm_call", "config": { ..., "prompt": "¿Cuál es mi nombre?" } }
+  },
+  "edges": [{ "from": "step_1", "to": "step_2" }]
+}
+```
+
+Aunque ambos compartan `agent_session_id`, `step_2` responderá *"No me dijiste tu nombre"* — no porque la memoria esté rota, sino porque `step_2.node_id != step_1.node_id` y la historia de step_1 vive en otro thread. Si mirás los tokens consumidos por `step_2`, verás un `prompt_tokens` bajo (~300) porque solo carga su propio history (vacío en el primer turn) + el system message + el prompt.
+
+### Cómo compartir información entre nodos `llm_call`
+
+**Opción 1 — Edge data-flow (recomendado, idiomático):**
+
+Pasá el output del nodo previo como parte del prompt del siguiente, vía edge:
+
+```json
+{
+  "nodes": {
+    "step_1": {
+      "type": "llm_call",
+      "config": {
+        "system_message": "Sos un detective. Recordá lo que el usuario te diga.",
+        "prompt": "Mi nombre es Daniel y mi perro se llama Toby."
+      }
+    },
+    "step_2": {
+      "type": "llm_call",
+      "config": {
+        "system_message": "Sos el mismo detective. El interlocutor te acaba de decir esto:\n\n${prev_turn}\n\nResponde a su siguiente mensaje.",
+        "prompt": "¿Cómo se llama mi perro?"
+      }
+    }
+  },
+  "edges": [
+    { "from": "step_1.result", "to": "step_2.config.prev_turn" }
+  ]
+}
+```
+
+El operador del DAG controla qué información cruza entre nodos. El LLM de `step_2` ve el contenido inyectado en su system message como contexto inicial, sin recurrir a memoria persistida.
+
+**Opción 2 — Reutilizar el mismo `node_id`:**
+
+Si querés que dos turnos compartan thread (caso típico de un chat multi-mensaje), modelalos como **el mismo nodo ejecutado en runs sucesivos** con el mismo `agent_session_id`. Los grafos en [`tests/graphs/memory/`](../../tests/graphs/memory/) usan este patrón: `agent_chat_say.json` y `agent_chat_ask.json` son DOS grafos distintos cuyo único `llm_call` tiene el mismo `node_id`. Ejecutados con `--agent-session-id chat_alice`, el segundo ve lo que el primero escribió.
+
+**Opción 3 — Orchestrator/Planner pattern:**
+
+Para flows complejos con múltiples agentes especializados, el nodo [`orchestrator`](19_nested_agents_and_subgraphs.md) modela esto explícitamente: cada child agent corre en su propio subgrafo, y el orchestrator coordina pasando outputs como inputs. NO depende de memoria conversational compartida — la composición es explícita.
+
+### Anti-patterns
+
+- ❌ **Esperar que dos `llm_call` con distintos `node_id` compartan historia** porque tienen el mismo `agent_session_id`. No la comparten — es comportamiento deliberado.
+- ❌ **Forzar el mismo `node_id` en dos nodos distintos del mismo grafo** para sortear el aislamiento. El engine te lo permite, pero las escrituras intercaladas vuelven a producir el collision original. Si necesitás compartir, usá una de las 3 opciones de arriba.
+
+---
+
 ## 💡 Tips
 
 - **SQLite**: Perfecto para desarrollo y testing
