@@ -383,3 +383,18 @@ Files:
   lists every built-in synthetic tool (31 total) with its summary and
   detailed-doc link. CI test (`index_doc_covers_all_registered_tools`)
   refuses to ship if a new tool is added without an index entry.
+
+---
+
+## 8. Built-in skills index (E-T19)
+
+- **E-T19 shipped 2026-06-06** — built-in skills index. New
+  [`docs/developer_guide/42_builtin_skills_index.md`](developer_guide/42_builtin_skills_index.md)
+  lists every Rust-native skill (8 today) with a one-line description and
+  a link to its `SKILL.md`.
+  [`src/libs/colmena/skills/README.md`](../src/libs/colmena/skills/README.md)
+  upgraded with contributor-side navigation + add-a-skill recipe. New CI
+  test (`index_doc_covers_all_registered_skills`) refuses to ship if a
+  skill folder containing a `SKILL.md` is missing from the index.
+
+**Estado.** done.

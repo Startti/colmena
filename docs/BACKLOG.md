@@ -497,6 +497,25 @@ El último item — `data:` (base64 inline) auto-summary v2 — se resolvió el 
 
 ---
 
+---
+
+## Auto-generate `42_builtin_skills_index.md`
+
+- **Origen:** E-T19 shipped (2026-06-06). El index actual se curó manualmente. Oportunidad de automatizar.
+- **Problema:** cada vez que se añade un nuevo built-in skill folder con `SKILL.md`, hay que actualizar `docs/developer_guide/42_builtin_skills_index.md` manualmente. El CI test (`index_doc_covers_all_registered_skills`) rechaza el ship si falta un entry, pero no auto-lo-genera.
+- **Workaround actual:** developer edita el markdown a mano.
+- **Por qué está parqueado:** E-T19 prioriza ship del index con contenido correcto. Auto-gen es optimización, no bloqueante.
+- **Fix propuesto:** leer cada `SKILL.md` frontmatter (name + description) y emitir el markdown table. Mismo shape que la deferida auto-gen para `41_builtin_tools_index.md`.
+- **Acceptance criteria:**
+  - Build step genera `42_builtin_skills_index.md` desde `src/libs/colmena/skills/*/SKILL.md` (8 hoy).
+  - CI test (`index_doc_covers_all_registered_skills`) se reduce a "tabla tiene todos los skills" (trivial post-auto-gen).
+  - Index es la single source of truth — fallback a manual edit es imposible.
+- **Estimación:** ~2-4 horas. Script en bash/python/rust que parsa frontmatter. Alterna como build.rs hook.
+- **Cuándo retomar:** cuando se agregue el skill #9, o cuando el chore de update manuals sea frecuente (próx 2-3 meses).
+- **Referencias:** E-T17 text centralization, E-T18 tools index, E-T19 skills index.
+
+---
+
 ## Cómo agregar un item a este backlog
 
 Cada entrada debe tener:
