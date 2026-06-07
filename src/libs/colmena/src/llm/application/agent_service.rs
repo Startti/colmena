@@ -754,7 +754,29 @@ fn compact_history_to_summary(
     if total < need {
         return messages.to_vec();
     }
-    let middle_end = total.saturating_sub(keep_recent);
+    let initial_middle_end = total.saturating_sub(keep_recent);
+    if initial_middle_end <= keep_first {
+        return messages.to_vec();
+    }
+
+    // 2026-06-07 fix: prevent splitting in the middle of an
+    // `assistant(tool_calls) + tool` response sequence. The original logic
+    // could push `assistant(tool_calls)` into `middle` (summarized away) and
+    // leave the matching `tool` responses in `kept_recent` — producing an
+    // orphaned tool sequence that OpenAI rejects with "messages with role
+    // 'tool' must be a response to a preceding message with 'tool_calls'".
+    //
+    // Walk `middle_end` backwards while it points to a Tool message; this
+    // pulls all the contiguous tool responses AND their preceding
+    // assistant(tool_calls) message into `kept_recent`, preserving the pair
+    // invariant required by both Chat Completions and Responses APIs.
+    // See colmena BACKLOG entries "Lazy tool loading — OpenAI message-order
+    // regression al cerrar el turn" and "OpenAI Responses API — input_text
+    // invalid en synthetic-tool path" for the diagnosis trail.
+    let mut middle_end = initial_middle_end;
+    while middle_end > keep_first && matches!(messages[middle_end].role(), MessageRole::Tool) {
+        middle_end -= 1;
+    }
     if middle_end <= keep_first {
         return messages.to_vec();
     }
@@ -1222,6 +1244,81 @@ mod tests {
         // Earliest middle msgs should NOT be in the summary
         assert!(!summary.contains("[T2]"));
         assert!(!summary.contains("[T5]"));
+    }
+
+    #[test]
+    #[allow(clippy::vec_init_then_push)]
+    fn summary_never_orphans_tool_message_after_compaction() {
+        // REGRESSION TEST (2026-06-07): the original implementation could leave
+        // orphaned `tool` messages at the start of `kept_recent` when the
+        // boundary fell inside an {assistant.tool_calls, tool, tool, ...}
+        // sequence. OpenAI Chat Completions rejected with "messages with role
+        // 'tool' must be a response to a preceding message with 'tool_calls'";
+        // OpenAI Responses API rejected with content-type mismatch. Both were
+        // caused by the same orphaning behavior in compact_history_to_summary.
+        //
+        // Construct the exact lazy_tools scenario observed in E2E Phase 1.2:
+        // 1 assistant message with 5 parallel tool_calls, followed by 5 tool
+        // responses. With keep_first=2, keep_recent=5, the boundary falls
+        // BETWEEN the assistant (which would be summarized) and the tools
+        // (which would land in kept_recent, orphaned).
+        let mut msgs = Vec::new();
+        msgs.push(LlmMessage::user("the prompt".to_string()).unwrap());
+        msgs.push(LlmMessage::system("system prelude".to_string()).unwrap());
+        // 1 assistant with 5 parallel tool_calls (would land at index 2)
+        msgs.push(
+            LlmMessage::assistant_with_tool_calls(
+                String::new(),
+                vec![
+                    tool_call("c1", "current_time", "{}"),
+                    tool_call("c2", "describe_tool", "{\"name\":\"multiply\"}"),
+                    tool_call("c3", "describe_tool", "{\"name\":\"add\"}"),
+                    tool_call("c4", "add", "{\"a\":25,\"b\":17}"),
+                    tool_call("c5", "multiply", "{\"a\":42,\"b\":3}"),
+                ],
+            )
+            .unwrap(),
+        );
+        // 5 tool responses (indices 3-7)
+        for (id, payload) in [
+            ("c1", "{\"now\":\"2026-06-07T...\"}"),
+            ("c2", "{\"description\":\"...\"}"),
+            ("c3", "{\"description\":\"...\"}"),
+            ("c4", "{\"output\":42}"),
+            ("c5", "{\"output\":126}"),
+        ] {
+            msgs.push(LlmMessage::tool(id.to_string(), payload.to_string()).unwrap());
+        }
+        assert_eq!(msgs.len(), 8);
+
+        let out = compact_history_to_summary(&msgs, 2, 5, 100, 180);
+
+        // The fix should pull the assistant message INTO kept_recent (so it
+        // precedes its tool responses), preserving the pair invariant.
+        // Walk the output and verify: every Tool message has an Assistant
+        // with tool_calls before it (possibly with intermediate tools).
+        for (i, msg) in out.iter().enumerate() {
+            if matches!(msg.role(), MessageRole::Tool) {
+                // Find the preceding non-Tool message.
+                let mut j = i;
+                while j > 0 && matches!(out[j - 1].role(), MessageRole::Tool) {
+                    j -= 1;
+                }
+                assert!(
+                    j > 0,
+                    "tool message at index {i} has no preceding non-Tool message; \
+                     this would trigger OpenAI rejection"
+                );
+                let preceding = &out[j - 1];
+                assert!(
+                    matches!(preceding.role(), MessageRole::Assistant)
+                        && preceding.tool_calls().is_some(),
+                    "tool message at index {i} is preceded by a {:?} (not assistant.tool_calls); \
+                     this is the orphaned-tool bug this test protects against",
+                    preceding.role()
+                );
+            }
+        }
     }
 
     #[test]
