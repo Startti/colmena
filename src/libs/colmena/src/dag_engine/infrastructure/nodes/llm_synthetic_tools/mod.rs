@@ -495,12 +495,10 @@ mod text_coverage_tests {
         // Path: from mod.rs at
         //   src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mod.rs
         // go up 8 levels to repo root, then into docs/developer_guide/.
-        const INDEX_DOC: &str = include_str!(
-            "../../../../../../../../docs/developer_guide/42_builtin_skills_index.md"
-        );
+        const INDEX_DOC: &str =
+            include_str!("../../../../../../../../docs/developer_guide/42_builtin_skills_index.md");
 
-        let skills_dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills");
+        let skills_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills");
 
         let mut missing: Vec<String> = Vec::new();
         for entry in std::fs::read_dir(&skills_dir).expect("can read skills dir") {
