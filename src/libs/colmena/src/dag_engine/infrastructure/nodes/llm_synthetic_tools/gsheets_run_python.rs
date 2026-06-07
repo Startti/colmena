@@ -61,17 +61,29 @@ pub struct GsheetsRunPythonArgs {
     /// When omitted, any `output_sheets` produced by the script is ignored.
     #[serde(default)]
     pub write_to_spreadsheet: Option<String>,
+
+    /// LLM-tolerance shim: some models pass `output_sheets` here, but
+    /// `output_sheets` is actually a Python-global variable the code
+    /// assigns. We accept any value here and discard it, emitting a
+    /// `_warning` in the response so the LLM learns the correct usage.
+    #[serde(default)]
+    pub output_sheets: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GsheetsBinding {
     /// Python variable name to bind the records to (e.g. "products",
     /// "sales"). Must be a non-empty identifier-shaped string.
+    /// Accepts UX aliases `binding_name` and `name` because LLMs (especially
+    /// Gemini-2.5-pro) often hallucinate these alternate field names instead
+    /// of `var`.
+    #[serde(alias = "binding_name", alias = "name")]
     pub var: String,
     /// Spreadsheet ID (the chunk between `/d/` and `/edit` in the
     /// Google Sheets URL).
     pub spreadsheet_id: String,
-    /// Tab name (e.g. "Sheet1", "Hoja 1").
+    /// Tab name (e.g. "Sheet1", "Hoja 1"). Accepts UX alias `sheet_name`.
+    #[serde(alias = "sheet_name")]
     pub sheet: String,
     /// Optional A1 range (e.g. "A1:H5001"). Omit to read the entire tab.
     #[serde(default)]
@@ -118,6 +130,9 @@ pub async fn dispatch_gsheets_run_python_with_client(
             });
         }
     };
+    // Capture early whether the LLM mistakenly passed `output_sheets` as a
+    // tool arg (it is a Python-global the code assigns, not a tool param).
+    let output_sheets_arg_provided = parsed.output_sheets.is_some();
     if parsed.bindings.is_empty() {
         return serde_json::json!({
             "error": "invalid_args",
@@ -272,7 +287,7 @@ pub async fn dispatch_gsheets_run_python_with_client(
     }
 
     // Warning when args + globals are misconfigured
-    let warning: Option<&'static str> = match (has_target, has_sheets) {
+    let config_warning: Option<&'static str> = match (has_target, has_sheets) {
         (true, false) => Some(
             "write_to_spreadsheet was set but the script did not assign \
              `output_sheets = {...}`; nothing was written.",
@@ -282,6 +297,25 @@ pub async fn dispatch_gsheets_run_python_with_client(
              was provided; the result was discarded.",
         ),
         _ => None,
+    };
+
+    // Warn if the LLM mistakenly passed `output_sheets` as a tool arg.
+    let arg_warning: Option<&'static str> = if output_sheets_arg_provided {
+        Some(
+            "You passed `output_sheets` as a tool argument; it was ignored. \
+             `output_sheets` is a Python global your CODE assigns (e.g. \
+             `output_sheets = {'tab1': df1}` inside the code string).",
+        )
+    } else {
+        None
+    };
+
+    // Merge both warnings into one string when both are present.
+    let final_warning: Option<String> = match (config_warning, arg_warning) {
+        (Some(a), Some(b)) => Some(format!("{a} | {b}")),
+        (Some(a), None) => Some(a.to_string()),
+        (None, Some(b)) => Some(b.to_string()),
+        (None, None) => None,
     };
 
     let (user_output_capped, output_truncated) = truncate_json(&user_output, OUTPUT_BYTE_CAP);
@@ -294,8 +328,8 @@ pub async fn dispatch_gsheets_run_python_with_client(
     if output_truncated {
         response["_output_truncated"] = serde_json::json!(true);
     }
-    if let Some(w) = warning {
-        response["_warning"] = serde_json::Value::String(w.to_string());
+    if let Some(w) = final_warning {
+        response["_warning"] = serde_json::Value::String(w);
     }
     response
 }
@@ -619,6 +653,62 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("duplicate"));
+    }
+
+    // ── UX alias tests (E-T22) ────────────────────────────────────────────
+
+    #[test]
+    fn binding_accepts_binding_name_alias() {
+        let json = serde_json::json!({
+            "binding_name": "products",
+            "spreadsheet_id": "abc",
+            "sheet_name": "products"
+        });
+        let parsed: GsheetsBinding =
+            serde_json::from_value(json).expect("must parse with aliases");
+        assert_eq!(parsed.var, "products");
+        assert_eq!(parsed.sheet, "products");
+    }
+
+    #[test]
+    fn binding_accepts_name_alias() {
+        let json = serde_json::json!({
+            "name": "sales",
+            "spreadsheet_id": "xyz",
+            "sheet": "Sales"
+        });
+        let parsed: GsheetsBinding =
+            serde_json::from_value(json).expect("must parse with `name` alias");
+        assert_eq!(parsed.var, "sales");
+    }
+
+    #[test]
+    fn binding_canonical_var_still_works() {
+        let json = serde_json::json!({
+            "var": "x",
+            "spreadsheet_id": "abc",
+            "sheet": "Sheet1"
+        });
+        let parsed: GsheetsBinding =
+            serde_json::from_value(json).expect("canonical names still work");
+        assert_eq!(parsed.var, "x");
+        assert_eq!(parsed.sheet, "Sheet1");
+    }
+
+    #[test]
+    fn args_accept_output_sheets_as_tool_arg_silently() {
+        // The LLM mistakenly passes `output_sheets` as a tool arg. The args
+        // struct must deserialize without erroring; the dispatcher response
+        // surfaces a warning (verified by a separate dispatcher integration
+        // test in the wiremock suite if desired).
+        let json = serde_json::json!({
+            "bindings": [{"var": "x", "spreadsheet_id": "a", "sheet": "S"}],
+            "code": "output = {}",
+            "output_sheets": {"source": "LAST_EXPRESSION"}
+        });
+        let parsed: GsheetsRunPythonArgs =
+            serde_json::from_value(json).expect("args must parse");
+        assert!(parsed.output_sheets.is_some());
     }
 
     #[test]
