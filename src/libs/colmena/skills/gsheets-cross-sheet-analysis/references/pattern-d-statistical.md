@@ -38,13 +38,13 @@ for c in numeric_cols:
         't_stat':   t,           'p_value':  p,
         'sig':      bool(p < 0.05),
     })
-output_sheet = pd.DataFrame(rows)
+result = pd.DataFrame(rows)
 output = f"{sum(r['sig'] for r in rows)} columns with p<0.05 (significant drift)"
 ```
 
 ## Output
 
-- `output_sheet` columns: `column, mean_A, mean_B, std_A, std_B, median_A, median_B, t_stat, p_value, sig`.
+- `result` columns: `column, mean_A, mean_B, std_A, std_B, median_A, median_B, t_stat, p_value, sig`.
 - Write back via `gsheets_set_range` if the user wants a persistent report.
 
 **Gotchas:**

@@ -3,7 +3,7 @@ Translate the user's natural language to crdt_doc_* tools — they don't know to
 1. DISCOVER: `crdt_doc_list_sheets` + `crdt_doc_list_my_artifacts`. If the user names other workbooks, `crdt_doc_list_sheets_of` each.
 2. LOAD skills lazily by reference. Before pandas: `load_skill('crdt-doc-run-python')`. For compare/join/enrich: `load_skill('crdt-doc-cross-sheet-analysis')`. Then load the specific reference (e.g. `pattern-b-row-diff`) — not the whole skill.
 3. CLARIFY only what's needed for correctness (key column, output destination). Never ask about tool/sheet IDs.
-4. PERSIST tabular results via `write_to_sheet`. Short summaries in chat.
+4. PERSIST tabular results via `output_sheets = {name: df}` in run_python code. Short summaries in chat.
 5. NAME sheets in the user's language ("Diferencias Q3 vs Q4", not "Output 1").
 6. CROSS-ARTIFACT: `list_sheets_of` → `import_sheet` (clones to current) → `run_python`. Don't ask permission to import — just do it and report.
 

@@ -27,13 +27,13 @@ diff = a[common_cols].compare(
 )
 # DataFrame.compare returns a MultiIndex on columns — flatten for sheet storage
 diff.columns = [f"{c}_{side}" for c, side in diff.columns]
-output_sheet = diff.reset_index(names='row_index')
+result = diff.reset_index(names='row_index')
 output = f"{len(diff)} cells changed across {len(common_cols)} columns"
 ```
 
 ## Output
 
-- `output_sheet` columns: `row_index, <colname>_self, <colname>_other, ...` for each column with at least one differing value.
-- Write back as 2D array: `[output_sheet.columns.tolist()] + output_sheet.values.tolist()` via `gsheets_set_range({spreadsheet_id, sheet, start_addr: "A1", values_2d: <2d>})`.
+- `result` columns: `row_index, <colname>_self, <colname>_other, ...` for each column with at least one differing value.
+- Write back as 2D array: `[result.columns.tolist()] + result.values.tolist()` via `gsheets_set_range({spreadsheet_id, sheet, start_addr: "A1", values_2d: <2d>})`.
 
 **Anti-tip:** if shapes differ (one has extra rows), `DataFrame.compare` raises. In that case use Pattern B (row-diff by key) instead.

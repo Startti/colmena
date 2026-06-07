@@ -20,16 +20,17 @@ ventas.loc[mask, 'Descuento'] = (
 ventas['PrecioFinal'] = ventas['Precio'] - ventas['Descuento']
 
 # Drop the rule columns from the final output (they were a means to an end)
-output_sheet = ventas.drop(columns=['MinQty', 'DiscountPct'])
+result = ventas.drop(columns=['MinQty', 'DiscountPct'])
+output_sheets = {'Transformed': result}
 output = f"Applied discounts to {int(mask.sum())}/{len(ventas)} rows"
 ```
 
-**Output_sheet columns:** primary columns + the new derived columns (e.g. `Descuento`, `PrecioFinal`). Rule columns dropped to keep the result clean.
+**Result columns:** primary columns + the new derived columns (e.g. `Descuento`, `PrecioFinal`). Rule columns dropped to keep the result clean.
 
 **Pattern:**
 1. Merge the rules in via the matching join key.
 2. Compute a boolean `mask` per row using the rule columns.
 3. Assign new column values conditionally with `df.loc[mask, 'new_col'] = ...`.
-4. Drop the rule columns from `output_sheet`.
+4. Drop the rule columns from `result`.
 
 **Gotcha:** if the rule lookup misses (no matching region), the rule columns become NaN; the mask gets evaluated as False for those rows (no transform applied). Decide if that's the behavior you want or if you should error / use a default.

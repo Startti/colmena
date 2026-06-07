@@ -25,7 +25,7 @@ Compare, join, enrich and transform data across sheets that may live in differen
 1. `crdt_doc_list_my_artifacts` — discover artifacts in your session.
 2. `crdt_doc_list_sheets_of({artifact_id})` — peek at the other artifact's sheets without cloning.
 3. `crdt_doc_import_sheet({source_artifact_id, source_sheet_id})` — clone the sheet into the current artifact.
-4. `crdt_doc_run_python({sheet_ids: [original, cloned], code, write_to_sheet})` — do the analysis.
+4. `crdt_doc_run_python({sheet_ids: [original, cloned], code})` — do the analysis. Inside the code, assign `output_sheets = {<tab_name>: <DataFrame>}` to persist results as new tabs.
 
 Before importing, call `crdt_doc_list_sheets` on the current artifact — the sheet may already be cloned from a previous turn.
 
@@ -43,6 +43,44 @@ Decide ONE pattern based on what the user is asking for. Then `load_skill('crdt-
 | "aplicale las reglas de", "calculá descuentos según" | `pattern-f-conditional-transform` |
 
 For multi-output requests ("comparalas y enriquecé"), load multiple references in sequence — one `run_python` call per pattern.
+
+## Updating existing tabs in place
+
+When you want to change values for SOME rows in an existing tab WITHOUT
+re-uploading the whole tab, use `update_in_place`. Example: change the
+price of all electronics in a 1000-row Sales tab.
+
+```python
+import pandas as pd
+sales = pd.DataFrame(sales_records)
+mask = sales['category'] == 'Electronics'
+sales.loc[mask, 'price'] = sales.loc[mask, 'price'] * 0.9  # 10% discount
+
+output_sheets = {
+    'Sales': {
+        'mode': 'update_in_place',
+        'df': sales,
+        'key': 'product_id',
+        'columns': ['price'],  # only patch this column
+    }
+}
+output = {'updated_rows': int(mask.sum())}
+```
+
+The dispatcher computes the diff vs the live artifact and writes ONLY the
+changed cells via per-cell ops — your 47-row change is 47 cell writes,
+not 12000.
+
+**Rules:**
+- `key` must be a column with unique values (duplicates in either side reject).
+- `columns` is optional — omit to patch all common columns.
+- If your DataFrame has rows not in the tab, they're silently skipped
+  (set `strict_match: True` to reject instead).
+- If you want to CREATE a new tab, use the simple form `output_sheets = {name: df}`.
+
+**Avoid:**
+- Don't use `update_in_place` to ADD new rows (it only patches existing
+  ones). Use `mode: 'overwrite'` or write a fresh tab via the bare-DataFrame form.
 
 ## Anti-patterns
 

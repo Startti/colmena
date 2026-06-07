@@ -26,11 +26,12 @@ for c in numeric_cols:
         't_stat':   t,           'p_value':  p,
         'sig':      bool(p < 0.05),
     })
-output_sheet = pd.DataFrame(rows)
+result = pd.DataFrame(rows)
+output_sheets = {'Statistical Comparison': result}
 output = f"{sum(r['sig'] for r in rows)} columns with p<0.05 (significant drift)"
 ```
 
-**Output_sheet columns:** `column, mean_A, mean_B, std_A, std_B, median_A, median_B, t_stat, p_value, sig`.
+**Result columns:** `column, mean_A, mean_B, std_A, std_B, median_A, median_B, t_stat, p_value, sig`.
 
 **Gotchas:**
 - Columns with `<2` non-null values per side are silently skipped (t-test undefined).

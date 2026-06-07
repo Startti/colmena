@@ -22,7 +22,7 @@ b = pd.DataFrame(records_b)
 cols_a, cols_b = set(a.columns), set(b.columns)
 all_cols = sorted(cols_a | cols_b)
 
-output_sheet = pd.DataFrame([{
+result = pd.DataFrame([{
     'column':  c,
     'in_A':    c in cols_a,
     'in_B':    c in cols_b,
@@ -39,7 +39,7 @@ output = {
 
 ## Output
 
-- `output_sheet` columns: `column, in_A, in_B, dtype_A, dtype_B` — one row per distinct column across both sheets.
+- `result` columns: `column, in_A, in_B, dtype_A, dtype_B` — one row per distinct column across both sheets.
 - Optionally write back via `gsheets_set_range`; the `output` dict alone often suffices for the chat reply.
 
 **Use case:** if the user's broader ask is "compare these reports" but the schemas don't match, run THIS first and surface the structural mismatch in chat before doing a value-level diff.

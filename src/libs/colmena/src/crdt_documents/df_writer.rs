@@ -1,4 +1,4 @@
-//! Convert records-style data (output_sheet from `crdt_doc_run_python`)
+//! Convert records-style data (`output_sheets` from `crdt_doc_run_python`)
 //! into Y.Doc sheet writes. Owns sheet creation, name collision
 //! resolution, and per-cell writes via `apply_set_cell_in_proc`.
 //!

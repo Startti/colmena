@@ -31,7 +31,7 @@ enriched = primary.merge(
 
 # Report unmatched keys so the user can decide if it matters.
 unmatched = enriched[enriched['Category'].isna()]
-output_sheet = enriched
+result = enriched
 output = {
     'rows_enriched':    len(enriched) - len(unmatched),
     'unmatched_count':  len(unmatched),
@@ -41,7 +41,7 @@ output = {
 
 ## Output
 
-- `output_sheet` columns: original primary columns + the columns brought from the lookup. Rows with no match in the lookup have NaN in the new columns.
+- `result` columns: original primary columns + the columns brought from the lookup. Rows with no match in the lookup have NaN in the new columns.
 - Write back via `gsheets_set_range({spreadsheet_id, sheet, start_addr: "A1", values_2d: [headers] + rows})`. If the destination tab does not exist, create it first with `gsheets_add_sheet`.
 
 **Variants:**

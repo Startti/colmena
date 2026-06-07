@@ -17,9 +17,9 @@ use super::crdt_doc_context::CrdtDocsContext;
 /// Operating manual injected into the system_message whenever a
 /// `crdt_documents` config block is present. Designed so a user who
 /// only says "compará los dos Q y mostrame diferencias" — no tool
-/// names, no `write_to_sheet`, no "patrón B" — still gets the right
-/// behavior. Skills are loaded lazily by reference to avoid bloating
-/// every turn with full pattern catalogs.
+/// names, no "patrón B" — still gets the right behavior. Skills are
+/// loaded lazily by reference to avoid bloating every turn with full
+/// pattern catalogs.
 pub const CRDT_SPREADSHEET_PROTOCOL_PRELUDE: &str =
     include_str!("../../../../../text/prompts/crdt_spreadsheet_protocol.md");
 

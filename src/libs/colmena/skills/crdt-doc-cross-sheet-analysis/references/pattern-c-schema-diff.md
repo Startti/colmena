@@ -10,7 +10,7 @@ a, b = dfs[sid_a], dfs[sid_b]
 cols_a, cols_b = set(a.columns), set(b.columns)
 all_cols = sorted(cols_a | cols_b)
 
-output_sheet = pd.DataFrame([{
+result = pd.DataFrame([{
     'column':  c,
     'in_A':    c in cols_a,
     'in_B':    c in cols_b,
@@ -18,6 +18,7 @@ output_sheet = pd.DataFrame([{
     'dtype_B': str(b[c].dtype) if c in cols_b else None,
 } for c in all_cols])
 
+output_sheets = {'Schema Diff': result}
 output = {
     'only_in_A': sorted(cols_a - cols_b),
     'only_in_B': sorted(cols_b - cols_a),
@@ -25,6 +26,6 @@ output = {
 }
 ```
 
-**Output_sheet columns:** `column, in_A, in_B, dtype_A, dtype_B` — one row per distinct column across both sheets.
+**Result columns:** `column, in_A, in_B, dtype_A, dtype_B` — one row per distinct column across both sheets.
 
 **Use case:** if the user's broader ask is "compare these reports" but the schemas don't match, run THIS first and surface the structural mismatch in chat before doing a value-level diff.

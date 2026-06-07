@@ -18,10 +18,11 @@ diff = a[common_cols].compare(
 )
 # DataFrame.compare returns a MultiIndex on columns — flatten for sheet storage
 diff.columns = [f"{c}_{side}" for c, side in diff.columns]
-output_sheet = diff.reset_index(names='row_index')
+result = diff.reset_index(names='row_index')
+output_sheets = {'Cell Diff': result}
 output = f"{len(diff)} cells changed across {len(common_cols)} columns"
 ```
 
-**Output_sheet columns:** `row_index, <colname>_self, <colname>_other, ...` for each column with at least one differing value.
+**Result columns:** `row_index, <colname>_self, <colname>_other, ...` for each column with at least one differing value.
 
 **Anti-tip:** if shapes differ (one has extra rows), `DataFrame.compare` raises. In that case use Pattern B (row-diff by key) instead.

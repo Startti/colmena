@@ -49,13 +49,13 @@ merged.loc[merged['_status'] == 'present_in_both', '_status'] = merged.apply(
     lambda r: 'changed' if diff_mask(r) else 'unchanged',
     axis=1,
 )
-output_sheet = merged.drop(columns='_merge')
+result = merged.drop(columns='_merge')
 output = merged['_status'].value_counts().to_dict()
 ```
 
 ## Output
 
-- `output_sheet` columns: the key column + every non-key column suffixed with `_a` / `_b` + a `_status` column.
+- `result` columns: the key column + every non-key column suffixed with `_a` / `_b` + a `_status` column.
 - Write back via `gsheets_set_range({spreadsheet_id, sheet, start_addr: "A1", values_2d: [headers] + rows})`.
 
 **Tip:** replace `'SKU'` with the actual key column the user mentioned ("Producto", "ID", "email", etc).

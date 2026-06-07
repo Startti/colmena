@@ -88,4 +88,38 @@ gsheets_run_python:
 
     The dispatcher creates one new tab per dict entry; the LLM receives only metadata `{name, resolved_name, sheet_id, n_rows, n_cols}` per tab, never row contents. Name collisions auto-suffix " (2)", " (3)".
 
+    ## Output modes (replace / update_in_place / overwrite)
+
+    Each entry in `output_sheets` can be either a bare DataFrame (mode
+    defaults to `replace`) OR a spec dict:
+
+    ```python
+    # Mode 1 — replace (default; tab must not exist or policy applies)
+    output_sheets = {'NewTab': df}
+
+    # Mode 2 — update_in_place (patch specific cells, never overwrites a full tab)
+    output_sheets = {
+        'Sales': {
+            'mode': 'update_in_place',
+            'df': df_modified,
+            'key': 'product_id',          # column identifying rows
+            'columns': ['price'],         # optional — only patch these columns
+        }
+    }
+
+    # Mode 3 — overwrite (replace existing tab; explicit consent)
+    output_sheets = {'Sales': {'mode': 'overwrite', 'df': df}}
+    ```
+
+    **Collision policy.** By default, if a tab named in `output_sheets`
+    already exists, the tool fails with a `SheetExists` error returning
+    metadata (row/col count, columns) and three suggested next moves
+    (rename, update_in_place, overwrite). Operators can opt back into
+    silent auto-suffix by setting `fixed_config.on_existing_sheet:
+    "auto_suffix"` on the tool config.
+
+    ⚠️ For 47 row updates in a 1000-row tab, `update_in_place` is the
+    correct choice — it writes only the 47 changed cells via a single
+    batchUpdate, instead of replacing 12K cells.
+
     For more patterns and pitfalls, load the `gsheets-table-exploration` skill (single-table inspection) or `gsheets-cross-sheet-analysis` skill (joins, comparisons).

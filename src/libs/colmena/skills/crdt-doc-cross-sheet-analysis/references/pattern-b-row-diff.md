@@ -40,11 +40,12 @@ merged.loc[merged['_status'] == 'present_in_both', '_status'] = merged.apply(
     lambda r: 'changed' if diff_mask(r) else 'unchanged',
     axis=1,
 )
-output_sheet = merged.drop(columns='_merge')
+result = merged.drop(columns='_merge')
+output_sheets = {'Row Diff': result}
 output = merged['_status'].value_counts().to_dict()
 ```
 
-**Output_sheet columns:** the key column + every non-key column suffixed with `_a` / `_b` + a `_status` column.
+**Result columns:** the key column + every non-key column suffixed with `_a` / `_b` + a `_status` column.
 
 **Tip:** replace `'SKU'` with the actual key column the user mentioned ("Producto", "ID", "email", etc).
 

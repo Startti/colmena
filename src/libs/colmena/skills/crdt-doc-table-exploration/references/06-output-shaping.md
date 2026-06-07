@@ -57,13 +57,6 @@ The dispatcher creates 3 new tabs. The LLM only receives metadata
 (`name`, `resolved_name`, `sheet_id`, `n_rows`, `n_cols`) per tab. The
 row contents NEVER pass through your context.
 
-## Back-compat: the legacy single-sheet path
-
-The older path with `output_sheet = <df>` + `write_to_sheet: "<name>"`
-still works for one tab at a time. New code should use `output_sheets`
-(the dict form) — it supports N tabs, the dispatcher prefers it when
-both paths are set, and a `_warning` surfaces in that case.
-
 ## Naming new tabs
 
 If a tab name already exists in the current artifact, the dispatcher

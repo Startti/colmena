@@ -96,6 +96,44 @@ via prior tool results) and threads them per call. There is no
 If both sheets live in the same spreadsheet, you still pass
 `spreadsheet_id` on every call and only vary the `sheet` (tab title).
 
+## Updating existing tabs in place
+
+When you want to change values for SOME rows in an existing tab WITHOUT
+re-uploading the whole tab, use `update_in_place`. Example: change the
+price of all electronics in a 1000-row Sales tab.
+
+```python
+import pandas as pd
+sales = pd.DataFrame(sales_records)
+mask = sales['category'] == 'Electronics'
+sales.loc[mask, 'price'] = sales.loc[mask, 'price'] * 0.9  # 10% discount
+
+output_sheets = {
+    'Sales': {
+        'mode': 'update_in_place',
+        'df': sales,
+        'key': 'product_id',
+        'columns': ['price'],  # only patch this column
+    }
+}
+output = {'updated_rows': int(mask.sum())}
+```
+
+The dispatcher computes the diff vs the live tab and writes ONLY the
+changed cells via one batchUpdate — your 47-row change is 47 cell writes,
+not 12000.
+
+**Rules:**
+- `key` must be a column with unique values (duplicates in either side reject).
+- `columns` is optional — omit to patch all common columns.
+- If your DataFrame has rows not in the tab, they're silently skipped
+  (set `strict_match: True` to reject instead).
+- If you want to CREATE a new tab, use the simple form `output_sheets = {name: df}`.
+
+**Avoid:**
+- Don't use `update_in_place` to ADD new rows (it only patches existing
+  ones). Use `mode: 'overwrite'` or write a fresh tab via the bare-DataFrame form.
+
 ## Anti-patterns
 
 - ❌ Calling `gsheets_read` without `as_records: true` when you intend

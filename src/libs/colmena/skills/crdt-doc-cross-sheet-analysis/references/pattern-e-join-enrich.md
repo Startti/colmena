@@ -17,7 +17,7 @@ enriched = primary.merge(
 
 # Report unmatched keys so the user can decide if it matters.
 unmatched = enriched[enriched['Category'].isna()]
-output_sheet = enriched
+output_sheets = {'Enriched': enriched}
 output = {
     'rows_enriched':    len(enriched) - len(unmatched),
     'unmatched_count':  len(unmatched),
@@ -25,7 +25,7 @@ output = {
 }
 ```
 
-**Output_sheet columns:** original primary columns + the columns brought from the lookup. Rows with no match in the lookup have NaN in the new columns.
+**Result columns:** original primary columns + the columns brought from the lookup. Rows with no match in the lookup have NaN in the new columns.
 
 **Variants:**
 - For "intersect only" semantics (drop unmatched), use `how='inner'`.

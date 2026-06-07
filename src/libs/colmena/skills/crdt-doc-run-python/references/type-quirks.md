@@ -50,7 +50,7 @@ merged.loc[mask, '_status'] = 'changed'                  # now safe
 
 ## Boolean serialization
 
-`True`/`False` in pandas are fine in `output_sheet`, but if you put them in `output` and they end up as numpy `bool_` (from a boolean Series), serialization may fail. Cast explicitly:
+`True`/`False` in pandas are fine in `output_sheets` DataFrames, but if you put them in `output` and they end up as numpy `bool_` (from a boolean Series), serialization may fail. Cast explicitly:
 
 ```python
 output = {'is_match': bool(mask.any())}   # not just mask.any()

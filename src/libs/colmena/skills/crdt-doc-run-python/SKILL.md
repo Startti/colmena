@@ -5,7 +5,7 @@ references:
   - name: dataframe-shape
     description: HOW the dispatcher projects sheets into pandas DataFrames. Critical reading — Y.Doc row 1 ALWAYS becomes columns, which means imported xlsx with a title row in A1 need explicit header promotion. Load this before writing any pandas code that references columns by name.
   - name: output-protocol
-    description: How to set `output` and `output_sheet`, how `write_to_sheet` works, name collision behaviour. Load when you need to return data or persist a derived sheet.
+    description: How to set `output` and `output_sheets = {name: df}`, collision policy, mode options (replace / update_in_place / overwrite). Load when you need to return data or persist a derived sheet.
   - name: type-quirks
     description: Y.Doc serializes all numbers as f64; NaN handling; mixed-type columns. Load if you hit unexpected dtype issues or your numeric comparisons fail.
   - name: debugging-keyerror
@@ -49,4 +49,4 @@ For most cross-sheet work you'll load `dataframe-shape` once and the pattern-spe
 - ❌ Reading the whole sheet with `crdt_doc_read` "to plan" your code. Use `A1:D5` for shape; let `run_python` handle the rest.
 - ❌ Retrying the same `df.iloc[N]` with different N hoping it works. Read `loaded_sheet_columns` from the error first (see `debugging-keyerror`).
 - ❌ Hardcoding column positions (`df.iloc[:, 2]`) when you have names (`df['Precio']`).
-- ❌ Returning the full DataFrame as `output` for inspection. Use `output_sheet` (persisted) or `df.head().to_dict('records')` (small).
+- ❌ Returning the full DataFrame as `output` for inspection. Use `output_sheets = {name: df}` (persisted) or `df.head().to_dict('records')` (small).
