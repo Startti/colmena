@@ -125,6 +125,7 @@ After calling describe_tool, the revealed tool will appear in your available too
     ToolDefinition {
         name: super::DESCRIBE_TOOL_NAME.to_string(),
         description,
+        summary: None,
         parameters: ToolParameters {
             schema_type: "object".to_string(),
             properties,

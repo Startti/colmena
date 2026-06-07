@@ -1,0 +1,98 @@
+crdt_doc_list_sheets:
+  summary: List every tab (sheet) inside the current CRDT document artifact
+  description: |
+    List the sheets in the current CRDT document. Returns id + name for each sheet.
+
+crdt_doc_list_sheets_of:
+  summary: List tabs inside a specific CRDT artifact by ID
+  description: |
+    Peek at another artifact's sheets (cross-artifact). Use before crdt_doc_import_sheet.
+
+crdt_doc_read:
+  summary: Read a cell range from the current CRDT document; supports include_formulas for round-trip
+  description: |
+    Read cell values from a sheet. Returns a flat map of A1 addresses to values (scalars — pandas-friendly). Optionally restricts to a range. Pass include_formulas:true to get {v, f?, fs?} per cell (useful for inspecting or auditing formulas).
+
+crdt_doc_set_cell:
+  summary: Write a value or formula into one cell of the current CRDT document
+  description: |
+    Set a single cell. Value may be string, number, boolean, or null (null deletes).
+
+crdt_doc_set_range:
+  summary: Write a 2-D values array into the current CRDT document starting at an address
+  description: |
+    Bulk set a rectangular range starting at start_addr. values_2d is a row-major 2D array.
+
+crdt_doc_add_sheet:
+  summary: Create a new tab inside the current CRDT document
+  description: |
+    Append a new sheet with the given name. Returns the generated sheet_id.
+
+crdt_doc_get_recent_changes:
+  summary: List recent CRDT change events since the agent's cursor
+  description: |
+    Recent events on the document (excludes the agent's own mutations). Pass artifact_id to audit a different artifact than the ctx's pinned one.
+
+crdt_doc_list_my_artifacts:
+  summary: List CRDT artifacts owned by or shared with the current session
+  description: |
+    List CRDT workbooks accessible to this session.
+
+crdt_doc_create_artifact:
+  summary: Create a new empty CRDT spreadsheet artifact
+  description: |
+    Create a new CRDT workbook for this session. Returns artifact_id.
+
+crdt_doc_run_python:
+  summary: Run sandboxed pandas analysis over CRDT sheets without loading rows through the LLM
+  description: |
+    Run sandboxed Python (pandas/numpy/scipy.stats) over requested sheets as `dfs[sheet_id]`. Define `output` and/or `output_sheets = {name: df}` (multi-tab; supports replace/overwrite/update_in_place modes via spec dict). Load skill crdt-doc-run-python for the shape/output/debug contract.
+
+    For results that belong in the document (not the conversation),
+    assign `output_sheets = {"<tab_name>": <DataFrame>, ...}` in your code.
+    The dispatcher creates one new tab per dict entry in the current
+    artifact; the LLM only receives metadata
+    `{name, resolved_name, sheet_id, n_rows, n_cols}` per tab.
+
+    ## Output modes (replace / update_in_place / overwrite)
+
+    Each entry in `output_sheets` can be either a bare DataFrame (mode
+    defaults to `replace`) OR a spec dict:
+
+    ```python
+    # Mode 1 — replace (default; tab must not exist or policy applies)
+    output_sheets = {'NewTab': df}
+
+    # Mode 2 — update_in_place (patch specific cells, never overwrites a full tab)
+    output_sheets = {
+        'Sales': {
+            'mode': 'update_in_place',
+            'df': df_modified,
+            'key': 'product_id',          # column identifying rows
+            'columns': ['price'],         # optional — only patch these columns
+        }
+    }
+
+    # Mode 3 — overwrite (replace existing tab; explicit consent)
+    output_sheets = {'Sales': {'mode': 'overwrite', 'df': df}}
+    ```
+
+    **Collision policy.** By default, if a tab named in `output_sheets`
+    already exists, the tool fails with a `SheetExists` error returning
+    metadata (row/col count, columns) and three suggested next moves
+    (rename, update_in_place, overwrite). Operators can opt back into
+    silent auto-suffix by setting `fixed_config.on_existing_sheet:
+    "auto_suffix"` on the tool config.
+
+    ⚠️ For 47 row updates in a 1000-row tab, `update_in_place` is the
+    correct choice — it writes only the 47 changed cells via per-cell ops,
+    instead of replacing 12K cells.
+
+    For more patterns and pitfalls, load the `crdt-doc-table-exploration`
+    skill (single-table inspection) or `crdt-doc-cross-sheet-analysis`
+    skill (joins, comparisons).
+
+crdt_doc_import_sheet:
+  summary: Clone a sheet from another CRDT artifact into the current one
+  description: |
+    Clone a sheet from another artifact into the current one (snapshot, not a live link). Use after crdt_doc_list_sheets_of.

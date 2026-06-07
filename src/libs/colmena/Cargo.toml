@@ -49,6 +49,9 @@ async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.9"
 
+# Formula engine (D-T1 spike onwards)
+formualizer = "0.6"
+
 # UUID generation
 uuid = { version = "1.0", features = ["v4", "serde"] }
 
@@ -71,14 +74,17 @@ bytes = "1.0"
 
 # --- NEW FOR MILESTONE 2 ---
 # Web Framework
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
+yrs = { version = "0.26", features = ["sync"] }
+y-sync = "0.4"
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 # Tracing/Logging (Optional but recommended for servers)
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
 # Database
 sqlparser = { version = "0.62", features = ["visitor"] }
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "sqlite", "uuid", "chrono", "macros"] }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "sqlite", "any", "uuid", "chrono", "macros"] }
 async-stream = "0.3.6"
 base64 = "0.22.1"
 
@@ -106,9 +112,12 @@ include_dir = "0.7"
 pdf-extract = "0.7"
 rust_xlsxwriter = "0.77"
 docx-rs = "0.4"
+calamine = "0.24"
 schemars = { version = "0.8", features = ["chrono", "uuid1", "preserve_order"] }
 ulid = "1"
 maud = "0.26"
+
+parking_lot = "0.12"
 
 # Documents feature — GCS backend (optional, gated on `gcs` feature)
 google-cloud-storage = { version = "1", optional = true }
@@ -121,6 +130,9 @@ rust_socketio = { version = "0.6", features = ["async"] }
 # token (caches inside the Authenticator). Reads service account from the
 # standard `GOOGLE_APPLICATION_CREDENTIALS` env var.
 yup-oauth2 = "11"
+
+# URL percent-encoding for Sheets API range params (Sheet1!A1:B2 → Sheet1%21A1%3AB2).
+urlencoding = "2"
 
 [features]
 default = []
@@ -139,8 +151,8 @@ serde_json = { version = "1.0", features = ["preserve_order"] }
 derivative = "2.2"
 tempfile = "3.10"
 serial_test = "3"
-calamine = "0.24"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tower = { version = "0.5", features = ["util"] }
 
 # Treat all warnings as errors for this crate so local builds match CI strictness.
 # Scoped to our crate only (does not affect dependencies).

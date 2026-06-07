@@ -1,0 +1,806 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Documents CRDT Spike</title>
+  <style>
+    html, body { margin: 0; height: 100%; font-family: sans-serif; }
+    #toolbar { padding: 8px; background: #f0f0f0; border-bottom: 1px solid #ddd; }
+    #univer { width: 100%; height: calc(100% - 50px); }
+    code { background: #fff; padding: 2px 4px; }
+  </style>
+  <link rel="stylesheet"
+    href="https://unpkg.com/@univerjs/design@0.2.10/lib/index.css" />
+  <link rel="stylesheet"
+    href="https://unpkg.com/@univerjs/ui@0.2.10/lib/index.css" />
+  <link rel="stylesheet"
+    href="https://unpkg.com/@univerjs/docs-ui@0.2.10/lib/index.css" />
+  <link rel="stylesheet"
+    href="https://unpkg.com/@univerjs/sheets-ui@0.2.10/lib/index.css" />
+  <link rel="stylesheet"
+    href="https://unpkg.com/@univerjs/sheets-formula@0.2.10/lib/index.css" />
+
+  <!-- Import map: tell the browser how to resolve bare specifiers like "yjs".
+       Required because y-websocket@1.5.4 is loaded with ?external=yjs, which
+       makes esm.sh emit `import "yjs"` inside its bundle so y-websocket
+       shares OUR yjs instance (instead of bundling its own copy). Without
+       this map the browser throws:
+         Failed to resolve module specifier "yjs"
+       and the whole module aborts. -->
+  <script type="importmap">
+  {
+    "imports": {
+      "yjs": "https://esm.sh/yjs@13.6.18"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="toolbar">
+    Artifact: <code id="artifact">spike-doc</code>
+    | WS: <code id="ws-status">connecting&hellip;</code>
+    | Tab id: <code id="tab"></code>
+    | <button id="import-xlsx" type="button" disabled>Import .xlsx&hellip;</button>
+    | <button id="import-fixture" type="button" disabled title="Import the legacy spike fixture (for quick demos)">spike fixture</button>
+    <input id="import-file-input" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style="display:none">
+  </div>
+  <div id="univer"></div>
+
+  <script type="module">
+    import * as Y from "yjs";
+    import { WebsocketProvider } from "https://esm.sh/y-websocket@1.5.4?external=yjs";
+
+    const artifact = new URLSearchParams(location.search).get("artifact")
+      || "spike-doc";
+    document.getElementById("artifact").textContent = artifact;
+    document.getElementById("tab").textContent =
+      Math.random().toString(36).slice(2, 8);
+
+    const wsBase = location.host;
+    const ydoc = new Y.Doc();
+    const provider = new WebsocketProvider(
+      `ws://${wsBase}/yjs`, artifact, ydoc, { params: {} });
+    provider.on("status", e => {
+      document.getElementById("ws-status").textContent = e.status;
+    });
+
+    // -------------------------------------------------------------------------
+    // Y.Doc workbook structure
+    //
+    //   ydoc.getMap("workbook")
+    //     .get("sheets")       -> Y.Array of Y.Map entries
+    //       [0].get("id")      -> string
+    //       [0].get("name")    -> string
+    //       [0].get("cells")   -> Y.Map<addr, Y.Map<"v", value>>
+    //
+    // Bridge Univer <-> Y.Doc:
+    //   Outbound: on Univer cell-mutation commands, write changed cells into
+    //             ydoc.getMap("workbook").get("sheets")[i].get("cells").
+    //   Inbound:  on Y.Doc cell-map observe events, apply back to Univer via
+    //             the command bus.
+    //
+    // For R1.2 measurement we need at minimum: a POST to /spike/agent-op
+    // shows up as a cell change in the inbound observer (logged to DevTools
+    // console), proving the WS round-trip works without a Univer collab backend.
+    // The outbound bridge (Univer -> Y.Doc) is intentionally stubbed here
+    // pending command-id discovery in DevTools at first live run.
+    // -------------------------------------------------------------------------
+    //
+    // NOTE: we do NOT seed the Y.Doc here. Seeding before `provider.sync`
+    // races with the server's state: if the server already has a sheet and
+    // we push a duplicate locally before sync arrives, the merged Y.Array
+    // ends up with two sheets and Univer's initial state becomes
+    // unpredictable (sometimes our sheet, sometimes the server's, sometimes
+    // an inconsistent split). The grid then renders flakily — sometimes OK,
+    // sometimes blank.
+    //
+    // All Y.Doc bootstrap (ensure-sheets-array, seed-empty-sheet, attach
+    // observers) is deferred to the `provider.once("sync", ...)` callback
+    // below, after Univer is mounted with a STATIC empty workbook.
+
+    const wb = ydoc.getMap("workbook");
+
+    // -------------------------------------------------------------------------
+    // Univer bootstrap
+    //
+    // R1.2 test: Univer loaded WITHOUT @univerjs/collaboration-client.
+    // The collaboration-client normally negotiates a Univer-specific handshake
+    // with a Univer backend.  We deliberately omit it and wire only plain
+    // y-websocket.  If Univer pulls the collab client transitively and tries
+    // that handshake anyway, the operator records R1.2 = NO-GO.
+    //
+    // Note: In Univer 0.2.x, `createUniver` was removed from @univerjs/core.
+    // The correct API is `new Univer({...})` + `univer.registerPlugin(...)`.
+    // -------------------------------------------------------------------------
+    import { Univer, LocaleType, ICommandService, IUniverInstanceService } from
+      "https://esm.sh/@univerjs/core@0.2.10";
+    import { defaultTheme } from
+      "https://esm.sh/@univerjs/design@0.2.10";
+
+    // Locale dictionaries — required by LocaleService in Univer 0.2.x.
+    // Each plugin ships its own locale keys; we merge them into one dict.
+    // Loaded via fetch() instead of import-assert (deprecated syntax, not supported in all browsers).
+    const enUSLocale = await (async () => {
+      const [sheetsUI, ui, docsUI, sheetsFormula] = await Promise.all([
+        fetch("https://esm.sh/@univerjs/sheets-ui@0.2.10/lib/locale/en-US.json").then(r => r.json()),
+        fetch("https://esm.sh/@univerjs/ui@0.2.10/lib/locale/en-US.json").then(r => r.json()),
+        fetch("https://esm.sh/@univerjs/docs-ui@0.2.10/lib/locale/en-US.json").then(r => r.json()),
+        fetch("https://esm.sh/@univerjs/sheets-formula@0.2.10/lib/locale/en-US.json").then(r => r.json()),
+      ]);
+      return { ...sheetsUI, ...ui, ...docsUI, ...sheetsFormula };
+    })();
+    import { UniverDocsPlugin } from
+      "https://esm.sh/@univerjs/docs@0.2.10";
+    import { UniverDocsUIPlugin } from
+      "https://esm.sh/@univerjs/docs-ui@0.2.10";
+    import { UniverFormulaEnginePlugin } from
+      "https://esm.sh/@univerjs/engine-formula@0.2.10";
+    import { UniverRenderEnginePlugin } from
+      "https://esm.sh/@univerjs/engine-render@0.2.10";
+    import { UniverSheetsPlugin } from
+      "https://esm.sh/@univerjs/sheets@0.2.10";
+    import { UniverSheetsFormulaPlugin } from
+      "https://esm.sh/@univerjs/sheets-formula@0.2.10";
+    import { UniverSheetsUIPlugin } from
+      "https://esm.sh/@univerjs/sheets-ui@0.2.10";
+    import { UniverUIPlugin } from
+      "https://esm.sh/@univerjs/ui@0.2.10";
+
+    const univer = new Univer({
+      theme: defaultTheme,
+      locale: LocaleType.EN_US,
+      locales: {
+        [LocaleType.EN_US]: enUSLocale,
+      },
+    });
+    univer.registerPlugin(UniverRenderEnginePlugin);
+    univer.registerPlugin(UniverFormulaEnginePlugin);
+    univer.registerPlugin(UniverUIPlugin, { container: "univer" });
+    univer.registerPlugin(UniverDocsPlugin);
+    univer.registerPlugin(UniverDocsUIPlugin);
+    univer.registerPlugin(UniverSheetsPlugin);
+    univer.registerPlugin(UniverSheetsUIPlugin);
+    univer.registerPlugin(UniverSheetsFormulaPlugin);
+
+    // NOTE (v1 multi-sheet): we no longer createUnit BEFORE sync. The canvas
+    // stays empty until provider.once("sync") fires, at which point we build
+    // the initialState from the live Y.Doc sheets list and call createUnit
+    // exactly once with the real sheet IDs. This unblocks workbooks imported
+    // via POST /documents/:id/import that contain multiple sheets with
+    // server-generated `sh_<ulid>` ids.
+
+    // -------------------------------------------------------------------------
+    // Command / mutation IDs — discovered from @univerjs/sheets@0.2.10 CJS
+    // bundle inspection (unpkg.com).  The mutation fires on every state change
+    // (including those triggered by the higher-level command), so it is the
+    // correct level to listen at for the outbound bridge.  We dispatch the
+    // same mutation from the inbound bridge so we don't create undo entries.
+    // -------------------------------------------------------------------------
+    const SET_RANGE_VALUES_MUTATION_ID = "sheet.mutation.set-range-values";
+
+    // Sheet-structure mutation IDs (Univer 0.2.10 defaults).
+    // If any of these is wrong, the universal `sheet.mutation.*` diagnostic
+    // log below will surface the actual id in DevTools so we can adjust.
+    const INSERT_SHEET_MUTATION_ID = "sheet.mutation.insert-sheet";
+    const REMOVE_SHEET_MUTATION_ID = "sheet.mutation.remove-sheet";
+    // Confirmed via browser smoke (Univer 0.2.10): the bare id is the
+    // one CommandService recognises. We keep the prefix for the
+    // outbound matcher so any future patch that renames to
+    // `-mutation` still gets caught.
+    const SET_WORKSHEET_NAME_MUTATION_ID =
+      "sheet.mutation.set-worksheet-name";
+    const SET_WORKSHEET_NAME_MUTATION_PREFIX =
+      "sheet.mutation.set-worksheet-name";
+
+    // -------------------------------------------------------------------------
+    // Helper: zero-based column index → A1-style column letter(s)
+    //   0 → "A", 1 → "B", ..., 25 → "Z", 26 → "AA", ...
+    // -------------------------------------------------------------------------
+    function colNumberToA1(col) {
+      let s = "";
+      let n = col;
+      do {
+        s = String.fromCharCode(65 + (n % 26)) + s;
+        n = Math.floor(n / 26) - 1;
+      } while (n >= 0);
+      return s;
+    }
+
+    // -------------------------------------------------------------------------
+    // Feedback-loop guard
+    //
+    // When the inbound bridge (Y.Doc → Univer) dispatches a mutation, Univer's
+    // command bus fires onCommandExecuted, which would re-trigger the outbound
+    // bridge (Univer → Y.Doc) and create an infinite loop.
+    //
+    // We suppress this by setting `applyingFromYDoc = true` around every
+    // inbound dispatch.  The outbound subscriber is a no-op while this flag is
+    // set.  The flag is synchronously reset in the `finally` block so normal
+    // user edits are never silenced.
+    // -------------------------------------------------------------------------
+    let applyingFromYDoc = false;
+
+    // Parser used by every observer below: "A1" -> { row: 0, col: 0 } (multi-char OK).
+    function parseAddr(addr) {
+      const match = addr.match(/^([A-Z]+)(\d+)$/);
+      if (!match) return null;
+      const rowIdx = parseInt(match[2], 10) - 1;
+      let colIdx = 0;
+      for (let i = 0; i < match[1].length; i++) {
+        colIdx = colIdx * 26 + (match[1].charCodeAt(i) - 64);
+      }
+      return { row: rowIdx, col: colIdx - 1 };
+    }
+
+    provider.once("sync", () => {
+      console.log("[provider] sync complete — bootstrapping Y.Doc workbook");
+
+      if (!wb.has("sheets")) {
+        wb.set("sheets", new Y.Array());
+      }
+      const sheetsArr = wb.get("sheets");
+
+      if (sheetsArr.length === 0) {
+        ydoc.transact(() => {
+          const sheet = new Y.Map();
+          sheet.set("id", "s1");
+          sheet.set("name", "Hoja1");
+          sheet.set("cells", new Y.Map());
+          sheetsArr.push([sheet]);
+        });
+        console.log("[provider] seeded empty sheet s1");
+      } else {
+        console.log("[provider] using existing sheets from server",
+          sheetsArr.length);
+      }
+
+      // -----------------------------------------------------------------
+      // Enumerate ALL sheets from the Y.Doc (v1 multi-sheet).
+      // -----------------------------------------------------------------
+      const allSheets = [];
+      for (let i = 0; i < sheetsArr.length; i++) {
+        const s = sheetsArr.get(i);
+        allSheets.push({
+          id: s.get("id"),
+          name: s.get("name"),
+          cellsMap: s.get("cells"),
+          sheetMap: s,
+        });
+      }
+
+      // -----------------------------------------------------------------
+      // Mount Univer with real sheet ids/names from the Y.Doc.
+      // -----------------------------------------------------------------
+      const sheetData = {};
+      const sheetOrder = [];
+      for (const s of allSheets) {
+        sheetOrder.push(s.id);
+        sheetData[s.id] = {
+          id: s.id,
+          name: s.name,
+          cellData: {},
+          // Univer is a virtualized grid — large rowCount has negligible
+          // memory cost (cells only allocate when written). Bumped from 100
+          // so imported xlsx with thousands of rows render fully.
+          rowCount: 50000,
+          columnCount: 26,
+        };
+      }
+      univer.createUnit(2, {
+        id: artifact,
+        sheetOrder,
+        sheets: sheetData,
+      });
+      console.log("[provider] mounted", allSheets.length, "sheet(s):",
+        allSheets.map((s) => s.name).join(", "));
+
+      // Retrieve services from Univer's DI container.
+      // ICommandService  = createIdentifier("anywhere.command-service")
+      // IUniverInstanceService = createIdentifier("univer.current")
+      const injector = univer.__getInjector();
+      const commandService = injector.get(ICommandService);
+      const instanceService = injector.get(IUniverInstanceService);
+
+      // -----------------------------------------------------------------
+      // Helpers — defined here because they close over `applyingFromYDoc`
+      // and the Univer services we just resolved from DI.
+      //
+      // mountSheetObserver: wires Y.Doc cell mutations + parent name
+      // changes for a single sheet → Univer commands.
+      // replayCells:        on initial join (or after inbound insert),
+      // dispatch every existing cell value to the canvas in one mutation.
+      // -----------------------------------------------------------------
+      function mountSheetObserver(sheetEntry) {
+        const sheetId = sheetEntry.id;
+        const cellsMap = sheetEntry.cellsMap;
+        const sheetMap = sheetEntry.sheetMap;
+
+        cellsMap.observeDeep((events) => {
+          if (applyingFromYDoc) return;
+          const cellValue = {};
+          for (const ev of events) {
+            if (!(ev instanceof Y.YMapEvent)) continue;
+            for (const [key, change] of ev.changes.keys.entries()) {
+              if (change.action === "delete") continue;
+
+              // Resolve address: top-level set vs nested set on child Y.Map.
+              let addr;
+              if (ev.target === cellsMap) {
+                addr = key;
+              } else {
+                addr = null;
+                for (const [a, m] of cellsMap.entries()) {
+                  if (m === ev.target) { addr = a; break; }
+                }
+              }
+              if (!addr) continue;
+
+              const cellMap = cellsMap.get(addr);
+              if (!cellMap) continue;
+              const parsed = parseAddr(addr);
+              if (!parsed) continue;
+
+              cellValue[parsed.row] = cellValue[parsed.row] || {};
+              const cellOut = { v: cellMap.get("v") };
+              const fText = cellMap.get("f");
+              if (fText !== undefined && fText !== null && fText !== "") {
+                cellOut.f = fText;
+              }
+              const fsTag = cellMap.get("fs");
+              if (fsTag !== undefined && fsTag !== null && fsTag !== "") {
+                cellOut.fs = fsTag;
+              }
+              cellValue[parsed.row][parsed.col] = cellOut;
+            }
+          }
+          if (Object.keys(cellValue).length === 0) return;
+
+          const workbook = instanceService.getCurrentUnitForType(2);
+          if (!workbook) {
+            console.warn("[yjs -> univer] no active workbook; skipping");
+            return;
+          }
+          const unitId = workbook.getUnitId();
+
+          console.log("[yjs -> univer] applying to canvas",
+            { sheet: sheetEntry.name, cellValue });
+
+          applyingFromYDoc = true;
+          try {
+            commandService.syncExecuteCommand(SET_RANGE_VALUES_MUTATION_ID, {
+              unitId,
+              subUnitId: sheetId,
+              cellValue,
+            });
+          } finally {
+            applyingFromYDoc = false;
+          }
+        });
+
+        // Inbound rename: another peer renamed this sheet via Y.Map.set("name").
+        if (sheetMap) {
+          sheetMap.observe((ev) => {
+            if (applyingFromYDoc) return;
+            if (!ev.changes.keys.has("name")) return;
+            const newName = sheetMap.get("name");
+            if (sheetEntry.name === newName) return;
+            sheetEntry.name = newName;
+            const workbook = instanceService.getCurrentUnitForType(2);
+            if (!workbook) return;
+            const unitId = workbook.getUnitId();
+            applyingFromYDoc = true;
+            try {
+              commandService.syncExecuteCommand(
+                SET_WORKSHEET_NAME_MUTATION_ID,
+                { unitId, subUnitId: sheetId, name: newName });
+              console.log("[yjs -> univer] sheet renamed",
+                { id: sheetId, name: newName });
+            } catch (e) {
+              console.error("[yjs -> univer] rename dispatch failed",
+                e, { sheetId, newName });
+            } finally {
+              applyingFromYDoc = false;
+            }
+          });
+        }
+      }
+
+      function replayCells(sheetEntry) {
+        const cellsMap = sheetEntry.cellsMap;
+        if (cellsMap.size === 0) return;
+        const replayCellValue = {};
+        for (const [addr, cellMap] of cellsMap.entries()) {
+          if (!(cellMap instanceof Y.Map)) continue;
+          const parsed = parseAddr(addr);
+          if (!parsed) continue;
+          replayCellValue[parsed.row] = replayCellValue[parsed.row] || {};
+          const cellOut = { v: cellMap.get("v") };
+          const fText = cellMap.get("f");
+          if (fText !== undefined && fText !== null && fText !== "") {
+            cellOut.f = fText;
+          }
+          const fsTag = cellMap.get("fs");
+          if (fsTag !== undefined && fsTag !== null && fsTag !== "") {
+            cellOut.fs = fsTag;
+          }
+          replayCellValue[parsed.row][parsed.col] = cellOut;
+        }
+        if (Object.keys(replayCellValue).length === 0) return;
+        const workbook = instanceService.getCurrentUnitForType(2);
+        if (!workbook) return;
+        const unitId = workbook.getUnitId();
+        applyingFromYDoc = true;
+        try {
+          commandService.syncExecuteCommand(SET_RANGE_VALUES_MUTATION_ID, {
+            unitId,
+            subUnitId: sheetEntry.id,
+            cellValue: replayCellValue,
+          });
+        } finally {
+          applyingFromYDoc = false;
+        }
+        console.log("[initial render] replayed",
+          Object.keys(replayCellValue).length, "rows on sheet",
+          sheetEntry.name);
+      }
+
+      // Initial: wire every sheet already in Y.Doc and replay its cells.
+      for (const sheetEntry of allSheets) {
+        mountSheetObserver(sheetEntry);
+        replayCells(sheetEntry);
+      }
+
+      // -----------------------------------------------------------------
+      // Sheet-structure inbound bridge: Y.Doc sheets[] → Univer.
+      //
+      // Fires when another peer (or the agent via crdt_doc_add_sheet)
+      // pushes a new sheet Y.Map into the array. We register the cell
+      // observer, then dispatch Univer's insert-sheet-mutation so the
+      // tab appears in the UI.
+      //
+      // Idempotency: if `allSheets` already has this id we skip — that
+      // means we just inserted it ourselves via the outbound handler
+      // and this event is our own echo.
+      //
+      // Deletes: not implemented in v1 (Univer's "delete sheet" UI flow
+      // can be added later — see BACKLOG entry).
+      // -----------------------------------------------------------------
+      sheetsArr.observe((event) => {
+        if (applyingFromYDoc) return;
+        let cursor = 0;
+        for (const delta of event.changes.delta) {
+          if (delta.retain !== undefined) {
+            cursor += delta.retain;
+          } else if (delta.insert !== undefined) {
+            for (const item of delta.insert) {
+              if (!(item instanceof Y.Map)) { cursor++; continue; }
+              const id = item.get("id");
+              const name = item.get("name") || "Sheet";
+              const cellsMap = item.get("cells");
+              if (!id || !cellsMap) { cursor++; continue; }
+              if (allSheets.find((s) => s.id === id)) {
+                cursor++;
+                continue;
+              }
+              const entry = { id, name, cellsMap, sheetMap: item };
+              allSheets.push(entry);
+              mountSheetObserver(entry);
+              const workbook = instanceService.getCurrentUnitForType(2);
+              if (workbook) {
+                const unitId = workbook.getUnitId();
+                applyingFromYDoc = true;
+                try {
+                  commandService.syncExecuteCommand(
+                    INSERT_SHEET_MUTATION_ID, {
+                      unitId,
+                      index: cursor,
+                      sheet: {
+                        id,
+                        name,
+                        cellData: {},
+                        // Match the rowCount used at initial mount above
+                        // so dynamically-inserted sheets show full data.
+                        rowCount: 50000,
+                        columnCount: 26,
+                      },
+                    });
+                  console.log("[yjs -> univer] sheet inserted",
+                    { id, name, index: cursor });
+                } catch (e) {
+                  console.error("[yjs -> univer] insert-sheet failed", e);
+                } finally {
+                  applyingFromYDoc = false;
+                }
+              }
+              replayCells(entry);
+              cursor++;
+            }
+          } else if (delta.delete !== undefined) {
+            console.warn("[yjs -> univer] sheet delete at cursor", cursor,
+              "delta:", delta.delete, "(not implemented in v1)");
+          }
+        }
+      });
+
+      // -----------------------------------------------------------------
+      // Outbound bridge: Univer → Y.Doc, routed by cmd.params.subUnitId.
+      // One subscription handles every sheet because cmd.params.subUnitId
+      // tells us which sheet was edited.
+      // -----------------------------------------------------------------
+      commandService.onCommandExecuted((cmd) => {
+        if (applyingFromYDoc) return;
+        if (cmd.id !== SET_RANGE_VALUES_MUTATION_ID) return;
+
+        const params = cmd.params;
+        if (!params || !params.cellValue || !params.subUnitId) return;
+
+        const targetSheet = allSheets.find((s) => s.id === params.subUnitId);
+        if (!targetSheet) {
+          console.warn("[univer -> yjs] no matching sheet for subUnitId",
+            params.subUnitId);
+          return;
+        }
+        const cellsMap = targetSheet.cellsMap;
+
+        ydoc.transact(() => {
+          for (const [rowStr, cols] of Object.entries(params.cellValue)) {
+            const row = Number(rowStr);
+            for (const [colStr, cellPayload] of Object.entries(cols)) {
+              const col = Number(colStr);
+              const addr = colNumberToA1(col) + String(row + 1);
+              const v = cellPayload?.v ?? null;
+              const f = cellPayload?.f;
+
+              let cellMap = cellsMap.get(addr);
+              if (!cellMap) {
+                cellMap = new Y.Map();
+                cellsMap.set(addr, cellMap);
+              }
+              cellMap.set("v", v);
+              cellMap.set("t", typeof v === "number" ? "n"
+                          : typeof v === "boolean" ? "b" : "s");
+
+              // D-T14: round-trip the formula text. If Univer evaluated a formula
+              // client-side, persist both the formula and a frontend-source tag so
+              // the backend skill can tell it came from the browser (vs `fs:"be"`
+              // when the backend evaluator wrote it).
+              if (typeof f === "string" && f.length > 0) {
+                cellMap.set("f", f);
+                cellMap.set("fs", "fe");
+              } else {
+                // Literal write — clear any prior formula on this cell.
+                if (cellMap.has("f")) cellMap.delete("f");
+                if (cellMap.has("fs")) cellMap.delete("fs");
+              }
+            }
+          }
+        });
+
+        console.log("[univer -> yjs] cells written on", targetSheet.name,
+          params.cellValue);
+      });
+
+      // -----------------------------------------------------------------
+      // Sheet-structure outbound bridge: Univer → Y.Doc.
+      //
+      // Listens for Univer sheet lifecycle mutations and mirrors them
+      // onto the Y.Doc sheets array. Mutation IDs are best-guess for
+      // Univer 0.2.10 — the universal `sheet.mutation.*` diagnostic log
+      // below surfaces any unknown id in DevTools so we can correct.
+      //
+      // The feedback loop (outbound → echo via sheetsArr.observe →
+      // inbound dispatch) is broken at the inbound side: it checks
+      // `allSheets.find((s) => s.id === id)` and skips if we've already
+      // registered the sheet locally, which we do synchronously here.
+      // -----------------------------------------------------------------
+      commandService.onCommandExecuted((cmd) => {
+        if (applyingFromYDoc) return;
+        if (cmd.id === SET_RANGE_VALUES_MUTATION_ID) return; // handled above
+
+        // Diagnostic: log every sheet-level mutation we observe so
+        // unknown ids show up in DevTools while we validate against
+        // Univer's actual 0.2.10 mutation registry.
+        if (typeof cmd.id === "string" &&
+            cmd.id.startsWith("sheet.mutation.")) {
+          console.log("[univer cmd]", cmd.id, cmd.params);
+        }
+
+        if (cmd.id === INSERT_SHEET_MUTATION_ID) {
+          const p = cmd.params;
+          if (!p || !p.sheet) {
+            console.warn("[univer -> yjs] insert-sheet missing params.sheet",
+              p);
+            return;
+          }
+          const id = p.sheet.id;
+          const name = p.sheet.name || "Sheet";
+          if (!id) {
+            console.warn("[univer -> yjs] insert-sheet missing sheet.id", p);
+            return;
+          }
+          if (allSheets.find((s) => s.id === id)) {
+            // Echo of an inbound dispatch — skip.
+            return;
+          }
+          const index = (typeof p.index === "number")
+            ? p.index : sheetsArr.length;
+          let newCellsMap;
+          let newSheetMap;
+          ydoc.transact(() => {
+            newSheetMap = new Y.Map();
+            newSheetMap.set("id", id);
+            newSheetMap.set("name", name);
+            newCellsMap = new Y.Map();
+            newSheetMap.set("cells", newCellsMap);
+            sheetsArr.insert(index, [newSheetMap]);
+          });
+          const entry = {
+            id, name,
+            cellsMap: newCellsMap,
+            sheetMap: newSheetMap,
+          };
+          allSheets.push(entry);
+          mountSheetObserver(entry);
+          console.log("[univer -> yjs] sheet inserted",
+            { id, name, index });
+          return;
+        }
+
+        if (cmd.id === REMOVE_SHEET_MUTATION_ID) {
+          const subUnitId = cmd.params && cmd.params.subUnitId;
+          if (!subUnitId) return;
+          let yIdx = -1;
+          for (let i = 0; i < sheetsArr.length; i++) {
+            if (sheetsArr.get(i).get("id") === subUnitId) {
+              yIdx = i; break;
+            }
+          }
+          if (yIdx < 0) return;
+          ydoc.transact(() => { sheetsArr.delete(yIdx, 1); });
+          const aIdx = allSheets.findIndex((s) => s.id === subUnitId);
+          if (aIdx >= 0) allSheets.splice(aIdx, 1);
+          console.log("[univer -> yjs] sheet removed", subUnitId);
+          return;
+        }
+
+        if (typeof cmd.id === "string" &&
+            cmd.id.startsWith(SET_WORKSHEET_NAME_MUTATION_PREFIX)) {
+          const p = cmd.params || {};
+          const subUnitId = p.subUnitId;
+          // Univer's rename mutation has been seen with the new name under
+          // `name` or `sheetName` depending on patch level — accept both.
+          const name = typeof p.name === "string"
+            ? p.name
+            : (typeof p.sheetName === "string" ? p.sheetName : null);
+          if (!subUnitId || !name) {
+            console.warn("[univer -> yjs] rename missing subUnitId/name",
+              { id: cmd.id, params: p });
+            return;
+          }
+          for (let i = 0; i < sheetsArr.length; i++) {
+            const s = sheetsArr.get(i);
+            if (s.get("id") === subUnitId) {
+              ydoc.transact(() => { s.set("name", name); });
+              const target = allSheets.find((e) => e.id === subUnitId);
+              if (target) target.name = name;
+              console.log("[univer -> yjs] sheet renamed",
+                { id: cmd.id, subUnitId, name });
+              return;
+            }
+          }
+          return;
+        }
+      });
+
+      // -----------------------------------------------------------------
+      // xlsx import — two flavors
+      //
+      //  1) Primary button "Import .xlsx…" → opens an OS file picker, then
+      //     POSTs the chosen file to /documents/:artifact/import. The server
+      //     parses with rust_xlsxwriter and writes ALL sheets into the Y.Doc
+      //     in one transaction. WS propagates the delta to every connected
+      //     peer (including this tab) — Univer renders the new data live.
+      //
+      //  2) Secondary button "spike fixture" → keeps the legacy in-browser
+      //     SheetJS import of /spike.xlsx so the smoke graph
+      //     llm_agent_smoke_ws_peer.json (and other docs that demo against
+      //     the fixture) continue to work. Single-sheet, first-sheet-only.
+      //
+      // The historical button label "Import /spike.xlsx" with the hardcoded
+      // fetch path was a footgun for first-time users (they thought they were
+      // importing their own file). The new layout makes the user's file the
+      // default action, and the fixture is opt-in for demos.
+      // -----------------------------------------------------------------
+      const importBtn = document.getElementById("import-xlsx");
+      const fixtureBtn = document.getElementById("import-fixture");
+      const fileInput = document.getElementById("import-file-input");
+      importBtn.disabled = false;
+      fixtureBtn.disabled = false;
+
+      // Primary path — file picker → server-side import
+      importBtn.addEventListener("click", () => fileInput.click());
+      fileInput.addEventListener("change", async () => {
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) return;
+        importBtn.disabled = true;
+        importBtn.textContent = `Uploading ${file.name}…`;
+        try {
+          const resp = await fetch(`/documents/${encodeURIComponent(artifact)}/import`, {
+            method: "POST",
+            headers: { "Content-Type": "application/octet-stream" },
+            body: file,
+          });
+          if (!resp.ok) {
+            const text = await resp.text();
+            throw new Error(`HTTP ${resp.status}: ${text}`);
+          }
+          const stats = await resp.json();
+          importBtn.textContent =
+            `Imported ${stats.cells_imported} cells across ${stats.sheets_imported} sheet(s) ✓`;
+          console.log("[xlsx import → REST]", stats);
+        } catch (e) {
+          importBtn.textContent = "Import failed";
+          console.error("[xlsx import → REST] failed:", e);
+        } finally {
+          importBtn.disabled = false;
+          fileInput.value = ""; // allow re-picking the same file
+        }
+      });
+
+      // Legacy fixture path — in-browser SheetJS write to first sheet
+      fixtureBtn.addEventListener("click", async () => {
+        fixtureBtn.disabled = true;
+        fixtureBtn.textContent = "Importing fixture…";
+        try {
+          const XLSX = await import("https://esm.sh/xlsx@0.18.5");
+          const resp = await fetch("/spike.xlsx");
+          if (!resp.ok) throw new Error("fetch /spike.xlsx: HTTP " + resp.status);
+          const buf = await resp.arrayBuffer();
+          const wb = XLSX.read(buf, { type: "array" });
+          const firstSheetName = wb.SheetNames[0];
+          const ws = wb.Sheets[firstSheetName];
+
+          // v1: import writes to the FIRST sheet of the current Y.Doc.
+          const firstCellsMap = allSheets[0].cellsMap;
+          const range = XLSX.utils.decode_range(ws["!ref"] || "A1:A1");
+          let count = 0;
+          ydoc.transact(() => {
+            for (let R = range.s.r; R <= range.e.r; ++R) {
+              for (let C = range.s.c; C <= range.e.c; ++C) {
+                const addr = XLSX.utils.encode_cell({ r: R, c: C });
+                const cell = ws[addr];
+                if (!cell) continue;
+                const v = cell.v;
+                if (v === undefined || v === null) continue;
+                let cellMap = firstCellsMap.get(addr);
+                if (!cellMap) {
+                  cellMap = new Y.Map();
+                  firstCellsMap.set(addr, cellMap);
+                }
+                cellMap.set("v", v);
+                cellMap.set("t",
+                  typeof v === "number" ? "n" :
+                  typeof v === "boolean" ? "b" : "s");
+                count++;
+              }
+            }
+          });
+          fixtureBtn.textContent = `Fixture: ${count} cells ✓`;
+          console.log("[xlsx fixture]", count, "cells written to Y.Doc");
+        } catch (e) {
+          fixtureBtn.textContent = "Fixture import failed";
+          console.error("[xlsx fixture] failed:", e);
+        } finally {
+          fixtureBtn.disabled = false;
+        }
+      });
+
+      // Expose for DevTools inspection.
+      window.spikeSheets = sheetsArr;
+      window.allSheets = allSheets;
+    });
+
+    window.univer = univer; // Expose for DevTools inspection
+  </script>
+</body>
+</html>

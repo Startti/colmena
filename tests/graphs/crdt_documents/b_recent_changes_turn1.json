@@ -1,0 +1,34 @@
+{
+  "_comment": "Subsistema B smoke — TURN 1. Agente crea un workbook inicial. Después de este turn, vos editás manualmente celdas en el browser y corrés turn2 con el MISMO --agent-session-id. Turn 2 debería mostrar que el agente vio tus ediciones.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/b-smoke-t1",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Hi. This is our first turn together on this workbook. Please: (1) add a sheet named 'Inventory' if it doesn't exist; (2) write a 2-row table at A1 with columns Product, Qty (use 'Apple' Qty=10 and 'Pear' Qty=20). Then briefly report what you did."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "system_message": "You are a spreadsheet assistant. The user has a workbook open in their browser. Use the crdt_doc_* tools to manipulate it. Report briefly what you did at the end.",
+        "crdt_documents": {
+          "artifact_id": "$DYNAMIC:artifact_id",
+          "ws_url": "ws://127.0.0.1:8090/yjs"
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent",   "to": "log" }
+  ]
+}

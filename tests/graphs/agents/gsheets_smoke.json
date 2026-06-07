@@ -1,0 +1,40 @@
+{
+  "_comment": "Subsistema E smoke — Google Sheets. The agent creates a spreadsheet, adds a tab, seeds 5 numbers, writes a SUM formula, reads back both evaluated value and formula text. Requires GOOGLE_APPLICATION_CREDENTIALS env. Run: `set -a; source .env; set +a; cargo run --bin dag_engine -- run tests/graphs/agents/gsheets_smoke.json --agent-session-id e_smoke_$(date +%s) --include-extra-info`",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/e-smoke",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Run a Google Sheets smoke. Use ONLY these exact tool names (with the gsheets_ prefix):\n\n1. Call gsheets_create_spreadsheet({title: 'Colmena E Smoke <UTC timestamp>'}). Capture spreadsheet_id and url from the response.\n2. Call gsheets_add_sheet({spreadsheet_id, name: 'Numbers'}).\n3. Call gsheets_set_range({spreadsheet_id, sheet: 'Numbers', start_addr: 'A1', values_2d: [[10],[20],[30],[40],[50]]}).\n4. Call gsheets_set_cell({spreadsheet_id, sheet: 'Numbers', addr: 'B1', value: '=SUM(A1:A5)'}).\n5. Call gsheets_read({spreadsheet_id, sheet: 'Numbers', range: 'B1', value_render: 'UNFORMATTED_VALUE'}). Confirm the value is 150.\n6. Call gsheets_read({spreadsheet_id, sheet: 'Numbers', range: 'B1', value_render: 'FORMULA'}). Confirm the value is '=SUM(A1:A5)'.\n7. Final report (under 200 words): the spreadsheet url + the value/formula you read."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 15,
+        "lazy_tool_loading": false,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "You are an assistant exercising the Google Sheets tool surface. Use ONLY the exact tool names provided in your tool schemas (they all start with gsheets_). Do NOT invent tool names or drop the prefix. Report what you observed at each step (cell counts, formula text, evaluated values).",
+        "enabled_tools": [
+          "gsheets_create_spreadsheet",
+          "gsheets_add_sheet",
+          "gsheets_set_cell",
+          "gsheets_set_range",
+          "gsheets_read"
+        ]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}

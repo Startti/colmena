@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Minimal WS test — Documents CRDT Spike</title>
+  <style>
+    html, body { margin: 0; padding: 16px; font-family: ui-monospace, monospace; }
+    h1 { font-size: 16px; margin: 0 0 12px; }
+    #toolbar { background: #f0f0f0; padding: 8px; margin-bottom: 12px; border-radius: 4px; }
+    code { background: #fff; padding: 2px 4px; border-radius: 2px; }
+    label { display: block; margin: 16px 0 4px; font-weight: bold; }
+    #a1 {
+      width: 100%; padding: 8px; font-size: 16px;
+      border: 1px solid #888; border-radius: 4px; box-sizing: border-box;
+    }
+    #log {
+      margin-top: 16px; padding: 8px; background: #fafafa;
+      border: 1px solid #ddd; border-radius: 4px; font-size: 12px;
+      max-height: 200px; overflow-y: auto; white-space: pre-wrap;
+    }
+    .ok { color: #060; }
+    .err { color: #c00; }
+  </style>
+</head>
+<body>
+  <h1>Minimal WS test (no Univer)</h1>
+  <div id="toolbar">
+    Artifact: <code id="artifact">test</code>
+    | WS: <code id="ws-status">initializing…</code>
+    | Tab: <code id="tab"></code>
+  </div>
+
+  <p>Two-tab test: open this URL in two tabs and type into A1 below.
+  The other tab should reflect the change within ~1s. Also try
+  <code>spike-agent ws ... --addr A1 --value "from-agent"</code>.</p>
+
+  <label for="a1">Cell A1 (sheet s1):</label>
+  <input id="a1" type="text" placeholder="type here…" />
+
+  <div id="log"></div>
+
+  <script type="module">
+    const log = (msg, cls) => {
+      const el = document.getElementById("log");
+      const line = document.createElement("div");
+      if (cls) line.className = cls;
+      line.textContent = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
+      el.appendChild(line);
+      el.scrollTop = el.scrollHeight;
+    };
+
+    log("loading yjs + y-websocket from esm.sh…");
+
+    let Y, WebsocketProvider;
+    try {
+      Y = await import("https://esm.sh/yjs@13.6.18");
+      ({ WebsocketProvider } = await import("https://esm.sh/y-websocket@1.5.4"));
+      log("modules loaded ok", "ok");
+    } catch (e) {
+      log("FAILED to load modules: " + e.message, "err");
+      throw e;
+    }
+
+    const artifact = new URLSearchParams(location.search).get("artifact") || "test";
+    document.getElementById("artifact").textContent = artifact;
+    document.getElementById("tab").textContent =
+      Math.random().toString(36).slice(2, 6);
+
+    const ydoc = new Y.Doc();
+    const wsBase = location.host;
+    const wsUrl = `ws://${wsBase}/yjs`;
+    log(`connecting to ${wsUrl}/${artifact} …`);
+
+    const provider = new WebsocketProvider(wsUrl, artifact, ydoc, { params: {} });
+    provider.on("status", e => {
+      document.getElementById("ws-status").textContent = e.status;
+      log("status: " + e.status, e.status === "connected" ? "ok" : null);
+    });
+    provider.on("sync", isSynced => {
+      log("sync event: synced=" + isSynced, isSynced ? "ok" : null);
+    });
+    provider.on("connection-error", err => {
+      log("connection-error: " + (err?.message || err), "err");
+    });
+
+    // Set up the Y.Doc shape: workbook > sheets[0] > {id, name, cells}.
+    const wb = ydoc.getMap("workbook");
+    let sheet, cells;
+
+    function ensureSheet() {
+      if (!wb.has("sheets")) wb.set("sheets", new Y.Array());
+      const sheetsArr = wb.get("sheets");
+      if (sheetsArr.length === 0) {
+        ydoc.transact(() => {
+          const s = new Y.Map();
+          s.set("id", "s1");
+          s.set("name", "Hoja1");
+          s.set("cells", new Y.Map());
+          sheetsArr.push([s]);
+        });
+      }
+      sheet = sheetsArr.get(0);
+      cells = sheet.get("cells");
+    }
+
+    // Wait for first sync before seeding, so we don't race other tabs.
+    provider.once("sync", () => {
+      ensureSheet();
+      log("sheet ready, attaching bindings", "ok");
+
+      // Inbound: when A1's `v` changes in the Y.Doc, update the input.
+      const reflectA1 = () => {
+        const cellA1 = cells.get("A1");
+        const v = cellA1 ? cellA1.get("v") : "";
+        const inp = document.getElementById("a1");
+        if (inp.value !== v) {
+          inp.value = v ?? "";
+          log("← inbound A1=" + JSON.stringify(v));
+        }
+      };
+      reflectA1();
+
+      cells.observeDeep(() => reflectA1());
+
+      // Outbound: on every input event, write A1 into the Y.Map.
+      document.getElementById("a1").addEventListener("input", e => {
+        const val = e.target.value;
+        ydoc.transact(() => {
+          let cellA1 = cells.get("A1");
+          if (!cellA1) {
+            cellA1 = new Y.Map();
+            cells.set("A1", cellA1);
+          }
+          cellA1.set("v", val);
+          cellA1.set("t", "s");
+        });
+        log("→ outbound A1=" + JSON.stringify(val));
+      });
+    });
+
+    window.__spike = { Y, ydoc, provider };
+    log("ready — window.__spike available for DevTools", "ok");
+  </script>
+</body>
+</html>

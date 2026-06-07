@@ -19,7 +19,8 @@ use crate::documents::application::rollback::{RollbackInput, RollbackUseCase};
 use crate::documents::domain::ids::{ArtifactId, ArtifactKind, SessionId, VersionId};
 use crate::documents::domain::patch::{Patch, PatchSource};
 use crate::documents::domain::SessionArtifactIndex;
-use crate::llm::domain::tools::{ToolDefinition, ToolParameters};
+use crate::llm::domain::tools::ToolDefinition;
+use crate::text;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
@@ -135,128 +136,59 @@ pub struct DocumentRollbackArgs {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct DocumentListMyArtifactsArgs {}
 
-/// Generate a `crate::llm::domain::tools::ToolDefinition` whose JSON Schema is
-/// the schemars-derived schema (carried via `input_schema_override`). The
-/// structured `parameters` field is left empty because LLM providers consume
-/// the override verbatim when present.
-fn build_synthetic_tool<T: JsonSchema>(name: &str, description: &str) -> ToolDefinition {
-    let schema = schemars::schema_for!(T);
-    let mut schema_json =
-        serde_json::to_value(schema).expect("schemars schema must serialize to JSON Value");
-    sanitize_schema_for_llm_providers(&mut schema_json);
-    ToolDefinition {
-        name: name.to_string(),
-        description: description.to_string(),
-        parameters: ToolParameters::new(),
-        input_schema_override: Some(schema_json),
-    }
-}
-
-/// Walk a JSON Schema and normalize shapes that some LLM providers (notably
-/// OpenAI) reject:
-///
-/// 1. Boolean schemas at `items` / `additionalProperties` positions are
-///    replaced with `{}` (schemars emits `true` for opaque types like
-///    `serde_json::Value`, but OpenAI requires an object schema there).
-/// 2. Any `{"type": "object"}` without a `properties` field gets an empty
-///    `properties: {}` injected (OpenAI requires `properties` to be present
-///    even on schemas that take no parameters).
-fn sanitize_schema_for_llm_providers(value: &mut serde_json::Value) {
-    use serde_json::Value;
-    match value {
-        Value::Object(map) => {
-            for key in ["items", "additionalProperties"] {
-                if let Some(v) = map.get_mut(key) {
-                    if v.is_boolean() {
-                        *v = Value::Object(serde_json::Map::new());
-                    }
-                }
-            }
-            let is_object_schema = map
-                .get("type")
-                .and_then(|t| t.as_str())
-                .map(|t| t == "object")
-                .unwrap_or(false);
-            if is_object_schema && !map.contains_key("properties") {
-                map.insert(
-                    "properties".to_string(),
-                    Value::Object(serde_json::Map::new()),
-                );
-            }
-            for (_, v) in map.iter_mut() {
-                sanitize_schema_for_llm_providers(v);
-            }
-        }
-        Value::Array(arr) => {
-            for v in arr.iter_mut() {
-                sanitize_schema_for_llm_providers(v);
-            }
-        }
-        _ => {}
-    }
-}
-
 pub fn build_document_create_tool() -> ToolDefinition {
-    build_synthetic_tool::<DocumentCreateArgs>(
+    super::build_synthetic_tool_with_summary::<DocumentCreateArgs>(
         DOCUMENT_CREATE_TOOL,
-        "Create a new document artifact (Excel or Word). Returns the \
-         artifact_id and initial version. Use for any new document task.",
+        text::tool_description(DOCUMENT_CREATE_TOOL),
+        text::tool_summary(DOCUMENT_CREATE_TOOL),
     )
 }
 
 pub fn build_document_apply_patch_tool() -> ToolDefinition {
-    build_synthetic_tool::<DocumentApplyPatchArgs>(
+    super::build_synthetic_tool_with_summary::<DocumentApplyPatchArgs>(
         DOCUMENT_APPLY_PATCH_TOOL,
-        "Apply a patch (list of ops) to an existing document atomically. \
-         If the base_version is stale, the server auto-rebases when ops \
-         don't conflict. On conflict, returns a VersionConflict with \
-         structured details.",
+        text::tool_description(DOCUMENT_APPLY_PATCH_TOOL),
+        text::tool_summary(DOCUMENT_APPLY_PATCH_TOOL),
     )
 }
 
 pub fn build_document_read_tool() -> ToolDefinition {
-    build_synthetic_tool::<DocumentReadArgs>(
+    super::build_synthetic_tool_with_summary::<DocumentReadArgs>(
         DOCUMENT_READ_TOOL,
-        "Read the IR of a document at a given version (or current). \
-         Use `slice` to fetch only specific sheets, blocks or cell ranges \
-         when the document is large.",
+        text::tool_description(DOCUMENT_READ_TOOL),
+        text::tool_summary(DOCUMENT_READ_TOOL),
     )
 }
 
 pub fn build_document_get_head_tool() -> ToolDefinition {
-    build_synthetic_tool::<DocumentGetHeadArgs>(
+    super::build_synthetic_tool_with_summary::<DocumentGetHeadArgs>(
         DOCUMENT_GET_HEAD_TOOL,
-        "Get the current HEAD of an artifact. Optionally pass \
-         `since_version` to receive a natural-language narration of \
-         every user edit between that version and HEAD — useful before \
-         applying a new patch to ensure you operate on fresh state.",
+        text::tool_description(DOCUMENT_GET_HEAD_TOOL),
+        text::tool_summary(DOCUMENT_GET_HEAD_TOOL),
     )
 }
 
 pub fn build_document_list_versions_tool() -> ToolDefinition {
-    build_synthetic_tool::<DocumentListVersionsArgs>(
+    super::build_synthetic_tool_with_summary::<DocumentListVersionsArgs>(
         DOCUMENT_LIST_VERSIONS_TOOL,
-        "List the versions retained for an artifact, most recent \
-         first, with timestamps, source (agent/user) and per-version \
-         summary. Use as a precursor to `document_rollback`.",
+        text::tool_description(DOCUMENT_LIST_VERSIONS_TOOL),
+        text::tool_summary(DOCUMENT_LIST_VERSIONS_TOOL),
     )
 }
 
 pub fn build_document_rollback_tool() -> ToolDefinition {
-    build_synthetic_tool::<DocumentRollbackArgs>(
+    super::build_synthetic_tool_with_summary::<DocumentRollbackArgs>(
         DOCUMENT_ROLLBACK_TOOL,
-        "Roll back an artifact to a previous version. The target's \
-         IR is copied to a new HEAD; full history is preserved (this \
-         is not a destructive operation).",
+        text::tool_description(DOCUMENT_ROLLBACK_TOOL),
+        text::tool_summary(DOCUMENT_ROLLBACK_TOOL),
     )
 }
 
 pub fn build_document_list_my_artifacts_tool() -> ToolDefinition {
-    build_synthetic_tool::<DocumentListMyArtifactsArgs>(
+    super::build_synthetic_tool_with_summary::<DocumentListMyArtifactsArgs>(
         DOCUMENT_LIST_MY_ARTIFACTS_TOOL,
-        "List every artifact that belongs to the current session. \
-         Returns id, kind, label, current version and last update for \
-         each. Takes no parameters: the session is resolved server-side.",
+        text::tool_description(DOCUMENT_LIST_MY_ARTIFACTS_TOOL),
+        text::tool_summary(DOCUMENT_LIST_MY_ARTIFACTS_TOOL),
     )
 }
 
@@ -279,101 +211,8 @@ pub fn build_all_document_tools() -> Vec<ToolDefinition> {
 /// describe the request, not the mechanics. Kept terse on purpose: schemars
 /// already provides per-parameter docs in each tool definition; this prelude
 /// covers concepts and workflows that span multiple tools.
-pub const DOCUMENTS_SYSTEM_PRELUDE: &str = r##"## Document Artifacts
-
-You can author and edit document artifacts (Excel workbooks and Word
-documents) through the `document_*` tools below. Each artifact is versioned
-and immutable: every change produces a new `version_id`. Always use these
-tools — never invent file content yourself.
-
-### Tools at a glance
-- `document_create` — create a new artifact. `kind` is "excel" or "word".
-  Omit `initial_ir` to start from an empty workbook/document; the server
-  fills the envelope automatically. Returns `artifact_id` + `version_id`
-  (always "v1").
-- `document_apply_patch` — atomically apply a list of typed `ops` to an
-  existing artifact. Requires `base_version` (the version you based your
-  patch on). Returns the new `version_id` plus a `diff_summary` (a list of
-  natural-language strings, one per op).
-- `document_read` — read the IR at a version (or HEAD). Pass `slice` to
-  fetch only the parts you need on large documents.
-- `document_get_head` — fetch HEAD + a narration of every user edit since
-  `since_version`. Use this BEFORE applying a patch when the user has been
-  editing concurrently.
-- `document_list_versions` — list retained versions, newest first.
-- `document_rollback` — non-destructive rollback to an earlier version.
-- `document_list_my_artifacts` — list every artifact in the current
-  session.
-
-### Standard workflow
-1. **Create** with `document_create`. For most requests, omit `initial_ir`
-   and shape the document via patches in step 2 — it is simpler and avoids
-   schema mistakes.
-2. **Patch** with `document_apply_patch`. Pass `base_version` = the latest
-   `version_id` you know. Each patch is a list of typed ops applied
-   atomically; if any op fails, none are applied.
-3. **Read or report** the result. Use `document_read` to verify state, then
-   tell the user the `artifact_id` and a brief description of what changed.
-
-### Versioning and conflicts
-- `base_version` is required on every patch. Use the most recent
-  `version_id` you have seen.
-- If the server's HEAD has moved AND your ops conflict with intervening
-  user edits, the tool returns `{"error":"VersionConflict","current_version":"...","conflicts":[...]}`.
-  When this happens: call `document_get_head(artifact_id, since_version=YOUR_BASE)`
-  to read the user-edit narration, reformulate your ops on top of the new
-  HEAD, and retry.
-- Non-conflicting changes are auto-rebased server-side; you do not need to
-  retry in that case.
-
-### Excel ops (most common)
-All Excel ops require a stable `sheet_id` (NOT the display name). When you
-add a new sheet, the server generates the id and returns it inside
-`diff_summary` (e.g. `"Added sheet 'Ventas' (id: sheet_01...)"`).
-
-**Important — never use a newly-added sheet in the same patch.** Apply
-`add_sheet` first, read the generated id from `diff_summary`, then apply
-`set_cell` (or other cell-level ops) in a follow-up patch using that id.
-Do not invent sheet ids like "sheet_01" — they will fail with "sheet not
-found".
-- `set_cell { sheet_id, address, value }` — A1-style address. `value` is
-  any JSON scalar. Prefix `=` for formulas. Optional `value_type`,
-  `format`, `style_ref`.
-- `set_range { sheet_id, range, values }` — bulk write a rectangular
-  region; `values` is row-major 2D array.
-- `clear_range`, `insert_row`, `delete_row`, `insert_column`,
-  `delete_column`.
-- `add_sheet { name, at_index? }`, `rename_sheet`, `delete_sheet`,
-  `reorder_sheets { order: [sheet_id, ...] }`.
-- `create_table`, `resize_table`, `delete_table` for named tables.
-- `set_column_width`, `define_style` for presentation.
-
-### Word ops (most common)
-Blocks and runs are addressed by stable IDs. The server assigns IDs for
-new content; check `diff_summary` after each patch.
-- `insert_block { before? | after? | (omit both to append), block }` —
-  `block` is a tagged JSON object (paragraph, heading, list, table,
-  image, page_break).
-- `replace_block`, `delete_block`, `move_block`, `set_heading_level`.
-- Runs (text spans inside paragraphs/headings):
-  `replace_run_text { block_id, run_id, new_text }`,
-  `set_run_style { block_id, run_id, style_patch }`,
-  `insert_run`, `delete_run`.
-- Lists: `insert_list_item`, `replace_list_item`, `delete_list_item`.
-- Tables: `insert_table_row`, `delete_table_row`, `update_table_cell`.
-
-### Rollback workflow
-1. `document_list_versions(artifact_id)` to find the version to revert to.
-2. `document_rollback(artifact_id, to_version)` — copies the target IR to
-   a new HEAD. History is preserved; this is not destructive.
-
-### Practical rules
-- Prefer narrow patches over rewriting the whole document. Patch only the
-  cells/blocks the user asked to change.
-- Always call a `document_read` (or trust the freshly returned `version_id`)
-  before reporting "done" to the user.
-- Report the `artifact_id` so the user can reference the artifact in
-  follow-up requests."##;
+pub const DOCUMENTS_SYSTEM_PRELUDE: &str =
+    include_str!("../../../../../text/prompts/documents_system_prelude.md");
 
 pub struct DocumentToolsContext {
     pub create: Arc<CreateDocumentUseCase>,

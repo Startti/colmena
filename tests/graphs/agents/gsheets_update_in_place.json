@@ -1,0 +1,33 @@
+{
+  "_comment": "E2E (manual): agent uses gsheets_run_python with mode=update_in_place to apply a 10% discount only to 'Electronics' rows of an existing 'Sales' tab. Asserts that only changed cells are written. Requires GOOGLE_APPLICATION_CREDENTIALS + a writable spreadsheet with a 'Sales' tab pre-seeded with product_id, category, price columns. Operator should replace the spreadsheet ID below with their own writable sheet, or set up the Sales tab first via gsheets_run_python with mode=replace. Manual run: set -a; source .env; set +a; export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json; cargo run --release --bin dag_engine -- run tests/graphs/agents/gsheets_update_in_place.json --agent-session-id e2e_update_$(date +%s) > /tmp/colmena_e2e/gsheets_update_in_place.sse 2>&1",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/gsheets-update-in-place",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Use spreadsheet 1F7AsFx4yW4uVnJRaRWwpzQuSNvruqGohI2B2NRygT-Y. On the 'Sales' tab (which has product_id, category, price columns), apply a 10% discount to all products whose category is 'Electronics'. Use gsheets_run_python with output_sheets in update_in_place mode (key=product_id, columns=['price']) so only the changed cells are written — never re-upload the whole tab. Report cells_changed."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 10,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "You are a data analyst. Use gsheets_run_python with output_sheets in update_in_place mode (see the gsheets-cross-sheet-analysis skill). Do NOT read and re-upload rows; you want a diff-write — the dispatcher does the actual cell-by-cell patch.",
+        "enabled_tools": ["gsheets", "load_skill"]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}

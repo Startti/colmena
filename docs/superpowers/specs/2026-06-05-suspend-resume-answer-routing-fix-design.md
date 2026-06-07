@@ -422,7 +422,7 @@ Ambos commits son independientes y revertibles por separado. El cambio del engin
 ## 11. Referencias
 
 - Bug report ADP 2026-06-04 (en el chat de brainstorm que originó este spec).
-- [`docs/developer_guide/38_suspend_node.md`](../../developer_guide/38_suspend_node.md) — comportamiento canónico del nodo `suspend`.
+- [`docs/developer_guide/44_suspend_node.md`](../../developer_guide/44_suspend_node.md) — comportamiento canónico del nodo `suspend`.
 - [`docs/superpowers/specs/2026-05-08-suspend-qa-response-format-design.md`](2026-05-08-suspend-qa-response-format-design.md) — formato Q/A.
 - [`docs/developer_guide/19_nested_agents_and_subgraphs.md`](../../developer_guide/19_nested_agents_and_subgraphs.md) — propagación HITL.
 - [`docs/developer_guide/20_orchestrator_architecture.md`](../../developer_guide/20_orchestrator_architecture.md) — orchestrator + HITL.

@@ -1,5 +1,5 @@
 {
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Complete configuration reference for all Colmena DAG Engine node types. Each node type documents its config fields, input ports, output ports, defaults, valid values, and validation rules.",
 
   "common_node_properties": {
@@ -381,7 +381,7 @@
         { "path": "tests/graphs/advanced/test_suspend.json", "what_it_exercises": "Approval gate variant between input and log." },
         { "path": "tests/graphs/advanced/nested_orchestrators_suspend.json", "what_it_exercises": "2 nested orchestrators with suspend in the deepest agent (3-level cascade)." }
       ],
-      "documentation": "docs/developer_guide/38_suspend_node.md",
+      "documentation": "docs/developer_guide/44_suspend_node.md",
       "related_nodes": ["secure_suspend", "loop_controller", "subgraph", "orchestrator", "router"]
     },
 
@@ -1613,6 +1613,58 @@
           "default": null,
           "description": "The UUID of the task to update in the task memory database. Required when 'write_to_memory' is true. Supports '{{variable}}' template syntax to resolve the task ID dynamically from inputs (e.g., '{{task_id}}'). The node writes its LLM response as the task's result in the database.",
           "example": "{{task_id}}"
+        },
+        "crdt_documents": {
+          "type": "object",
+          "required": false,
+          "default": null,
+          "description": "Optional. When present, the LLM gets v1 synthetic tools for the CRDT documents feature (real-time collaborative xlsx workbooks): crdt_doc_list_sheets, crdt_doc_read, crdt_doc_set_cell, crdt_doc_set_range, crdt_doc_add_sheet, crdt_doc_get_recent_changes (subsystem B), crdt_doc_run_python (subsystem C), crdt_doc_list_sheets_of and crdt_doc_import_sheet (subsystem F — cross-sheet/cross-artifact analysis). Subsystem D (formulas v1) adds server-side Excel-style formula evaluation: values starting with '=' in set_cell/set_range are parsed and evaluated by formualizer with intra-sheet eager recalc; set_cell/set_range return cells_recalculated + structured warnings (needs_browser, eval_error, cycle, parse_error); crdt_doc_read accepts include_formulas to expose {v, f, fs}; crdt_doc_list_sheets returns formula_count per sheet. The artifact_id is required and the LLM never sees it. Three operating modes (descending priority): (1) `ws_url` set → WsPeer mode, the agent opens a WS peer to a remote CRDT documents service (production split topology). (2) `ws_url` omitted, process-wide singleton installed → shared in-process runtime (monolithic deploy / dev convenience via crdt-yws-graph). (3) neither → local autonomous mode, fresh runtime per call backed by `storage_*` fields (plain `dag_engine run`, no live server). Per-tool LLM schemas live in docs/node_as_tools_reference.json under crdt_documents.tool_descriptions.",
+          "properties": {
+            "artifact_id": {
+              "type": "string",
+              "required": true,
+              "description": "Required. The artifact this llm_call mutates. Format: art_<26-char-ULID>. Static or $DYNAMIC. The LLM never sees it."
+            },
+            "ws_url": {
+              "type": "string",
+              "required": false,
+              "description": "Recommended for production. WebSocket URL to a running CRDT documents service (e.g. 'ws://crdt-service:8090/yjs'). When set, the agent connects as a peer: maintains a local Y.Doc replica synced via Yjs sync v1, propagates mutations to the server which fans them out to browsers and other agents. Disables local storage_* fields (server owns persistence). On WS connect failure the node fails fast — auto-reconnect is deferred to v1.1.",
+              "example": "ws://127.0.0.1:8090/yjs"
+            },
+            "storage_backend": {
+              "type": "string",
+              "enum": ["localfs", "gcs"],
+              "default": "localfs",
+              "description": "Storage backend for local mode (ignored when ws_url is set). 'localfs' stores under storage_root, 'gcs' uploads to a Google Cloud Storage bucket."
+            },
+            "storage_root": {
+              "type": "string",
+              "default": ".colmena/crdt_documents",
+              "description": "Filesystem root for localfs backend. Ignored when storage_backend='gcs' or when ws_url is set."
+            },
+            "gcs_bucket": {
+              "type": "string",
+              "required": false,
+              "description": "Required if storage_backend='gcs'. The GCS bucket name where document snapshots are uploaded (e.g. 'my-colmena-docs'). Ignored when ws_url is set."
+            },
+            "gcs_prefix": {
+              "type": "string",
+              "default": "colmena/crdt_documents",
+              "description": "Object key prefix in GCS. Ignored when storage_backend='localfs' or when ws_url is set."
+            }
+          },
+          "required": ["artifact_id"],
+          "examples": {
+            "ws_peer_production": {
+              "artifact_id": "art_abc123def456ghi789jkl012mn",
+              "ws_url": "ws://crdt-service.internal:8090/yjs"
+            },
+            "local_autonomous": {
+              "artifact_id": "art_abc123def456ghi789jkl012mn",
+              "storage_backend": "localfs",
+              "storage_root": ".colmena/crdt_documents"
+            }
+          }
         }
       },
       "input_ports": {

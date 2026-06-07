@@ -1,0 +1,211 @@
+//! End-to-end test for `crdt_doc_run_python` tool. Exercises:
+//! - Reading a sheet's data as a pandas DataFrame.
+//! - Computing aggregations server-side and returning to LLM.
+//! - Writing a DataFrame back as a new sheet (via `output_sheets`).
+//! - Name collision resolution.
+//!
+//! These tests are #[ignore] because they require pandas + numpy + scipy
+//! installed in the system Python that PyO3 links against. Install in the
+//! project venv:
+//!   .venv/bin/pip install pandas numpy scipy
+//! Then run with: cargo test --test crdt_doc_run_python_test -- --ignored
+
+use colmena::crdt_documents::{
+    tool_executor::{apply_add_sheet, apply_set_cell_in_proc},
+    ArtifactId, CrdtDocumentsRuntime,
+};
+use colmena::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
+    crdt_doc_context::CrdtDocsContext,
+    crdt_doc_run_python::{execute_run_python, RunPythonArgs},
+};
+use serde_json::json;
+use std::sync::Arc;
+
+async fn make_test_ctx() -> (
+    CrdtDocsContext,
+    ArtifactId,
+    Arc<CrdtDocumentsRuntime>,
+    std::path::PathBuf,
+    String, // inventory sheet_id
+) {
+    let tmp = std::env::temp_dir().join(format!("rp_test_{}", ulid::Ulid::new()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let cfg = json!({
+        "storage_backend": "localfs",
+        "storage_root": tmp.to_str().unwrap(),
+    });
+    let runtime = Arc::new(CrdtDocumentsRuntime::from_config(&cfg).await.unwrap());
+    let aid = ArtifactId::new();
+    let entry = runtime.registry.get_or_create(&aid, "test");
+
+    // Seed Inventory with sample data: 4 rows of (Region, Sales).
+    let sheet_id = apply_add_sheet(&entry.doc, "Inventory");
+    let _ = apply_set_cell_in_proc(&entry.doc, &sheet_id, "A1", &json!("Region"));
+    let _ = apply_set_cell_in_proc(&entry.doc, &sheet_id, "B1", &json!("Sales"));
+    let _ = apply_set_cell_in_proc(&entry.doc, &sheet_id, "A2", &json!("North"));
+    let _ = apply_set_cell_in_proc(&entry.doc, &sheet_id, "B2", &json!(100));
+    let _ = apply_set_cell_in_proc(&entry.doc, &sheet_id, "A3", &json!("North"));
+    let _ = apply_set_cell_in_proc(&entry.doc, &sheet_id, "B3", &json!(200));
+    let _ = apply_set_cell_in_proc(&entry.doc, &sheet_id, "A4", &json!("South"));
+    let _ = apply_set_cell_in_proc(&entry.doc, &sheet_id, "B4", &json!(150));
+
+    let ctx = CrdtDocsContext::new_local(
+        runtime.clone(),
+        aid.clone(),
+        Some("test_session".to_string()),
+    );
+    (ctx, aid, runtime, tmp, sheet_id)
+}
+
+#[tokio::test]
+#[ignore = "requires pandas+numpy in system Python — install with .venv/bin/pip install pandas numpy scipy"]
+async fn run_python_aggregation_returns_output_to_llm() {
+    let (ctx, _aid, _rt, tmp, sheet_id) = make_test_ctx().await;
+
+    let args = RunPythonArgs {
+        sheet_ids: vec![sheet_id.clone()],
+        code: format!(
+            r#"df = dfs["{sheet_id}"]
+totals = df.groupby('Region')['Sales'].sum()
+output = totals.to_dict()
+"#
+        ),
+        on_existing_sheet: None,
+    };
+    let result = execute_run_python(&ctx, args).await;
+    assert!(
+        result["error"].is_null(),
+        "got error: {:?}",
+        result["error"]
+    );
+    let totals = result["output"].as_object().expect("output is object");
+    // Note: Y.Doc serializes numbers as f64, so 300 round-trips as 300.0.
+    // pandas aggregations preserve the float type.
+    assert_eq!(totals["North"], json!(300.0));
+    assert_eq!(totals["South"], json!(150.0));
+    // No write requested — wrote_sheets should be null.
+    assert!(result["wrote_sheets"].is_null());
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+#[ignore = "requires pandas+numpy in system Python"]
+async fn run_python_output_sheets_creates_new_sheet() {
+    let (ctx, _aid, runtime, tmp, sheet_id) = make_test_ctx().await;
+
+    let args = RunPythonArgs {
+        sheet_ids: vec![sheet_id.clone()],
+        code: format!(
+            r#"df = dfs["{sheet_id}"]
+output_sheets = {{"Summary": df.groupby('Region')['Sales'].sum().reset_index()}}
+output = "summary written"
+"#
+        ),
+        on_existing_sheet: None,
+    };
+    let result = execute_run_python(&ctx, args).await;
+    assert!(
+        result["error"].is_null(),
+        "got error: {:?}",
+        result["error"]
+    );
+    let wrote = result["wrote_sheets"]
+        .as_array()
+        .expect("wrote_sheets array");
+    assert_eq!(wrote.len(), 1);
+    let entry = &wrote[0];
+    assert_eq!(entry["name"], "Summary");
+    assert_eq!(entry["n_rows"], 2);
+    assert_eq!(entry["n_cols"], 2);
+
+    // Verify the new sheet exists in the runtime's projection.
+    let entry_doc = runtime.registry.get(ctx.artifact_id()).unwrap();
+    let proj = colmena::crdt_documents::projection::project(&entry_doc.doc);
+    let sheets = proj["sheets"].as_array().unwrap();
+    let summary = sheets
+        .iter()
+        .find(|s| s["name"] == "Summary")
+        .expect("Summary sheet exists");
+    // Headers written to row 1.
+    assert_eq!(summary["cells"]["A1"], json!("Region"));
+    assert_eq!(summary["cells"]["B1"], json!("Sales"));
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+#[ignore = "requires pandas+numpy in system Python"]
+async fn run_python_error_response_includes_loaded_sheet_columns() {
+    // Debt fix: when user code raises a KeyError (or any exception), the response
+    // must include the actual columns of every loaded sheet so the LLM can
+    // self-correct in ONE turn instead of looping with the same bad assumption.
+    // This is exactly the pattern that bit us during the C smoke with an
+    // imported xlsx that had a title row in A1: the agent kept retrying
+    // `df.iloc[1]` for headers instead of inspecting `df.columns`.
+    let (ctx, _aid, _rt, tmp, sheet_id) = make_test_ctx().await;
+
+    let args = RunPythonArgs {
+        sheet_ids: vec![sheet_id.clone()],
+        // Reference a column that does not exist → KeyError.
+        code: format!(r#"df = dfs["{sheet_id}"]; output = df["NonExistentCol"].sum()"#),
+        on_existing_sheet: None,
+    };
+    let result = execute_run_python(&ctx, args).await;
+    assert!(
+        result["error"].is_string(),
+        "expected error string, got: {:?}",
+        result["error"]
+    );
+    let loaded = &result["loaded_sheet_columns"];
+    assert!(
+        loaded.is_object(),
+        "expected loaded_sheet_columns object, got: {loaded:?}"
+    );
+    let cols = loaded[&sheet_id].as_array().expect("columns array");
+    let col_names: Vec<&str> = cols.iter().filter_map(|v| v.as_str()).collect();
+    // Inventory was seeded with Region + Sales in row 1, so those should be the columns.
+    assert!(
+        col_names.contains(&"Region"),
+        "expected Region in {col_names:?}"
+    );
+    assert!(
+        col_names.contains(&"Sales"),
+        "expected Sales in {col_names:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+#[ignore = "requires pandas+numpy in system Python"]
+async fn run_python_output_sheets_collision_auto_suffix() {
+    let (ctx, _aid, runtime, tmp, sheet_id) = make_test_ctx().await;
+    // Pre-create a sheet named "Summary" so the output_sheets writeback hits a collision.
+    let entry_doc = runtime.registry.get(ctx.artifact_id()).unwrap();
+    let _ = apply_add_sheet(&entry_doc.doc, "Summary");
+
+    let args = RunPythonArgs {
+        sheet_ids: vec![sheet_id.clone()],
+        code: format!(
+            r#"df = dfs["{sheet_id}"]
+output_sheets = {{"Summary": df.head(1)}}
+output = "ok"
+"#
+        ),
+        on_existing_sheet: Some("auto_suffix".to_string()),
+    };
+    let result = execute_run_python(&ctx, args).await;
+    assert!(
+        result["error"].is_null(),
+        "got error: {:?}",
+        result["error"]
+    );
+    let wrote = result["wrote_sheets"]
+        .as_array()
+        .expect("wrote_sheets array");
+    assert_eq!(wrote.len(), 1);
+    assert_eq!(wrote[0]["resolved_name"], "Summary (2)");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

@@ -79,6 +79,10 @@ pub struct DagToolExecutor {
     documents_context: Option<
         Arc<crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::DocumentToolsContext>,
     >,
+    /// Per-call context for the v1 CRDT documents synthetic tools. Populated
+    /// via `with_crdt_documents()` from the llm_call node.
+    crdt_docs_context:
+        Option<Arc<crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::CrdtDocsContext>>,
     /// Snapshot of `ToolConfiguration` entries available for `describe_tool`
     /// to look up. When `Some(...)`, the executor intercepts `describe_tool`
     /// calls and dispatches against this slice; absent → describe_tool falls
@@ -91,6 +95,13 @@ pub struct DagToolExecutor {
     /// registry handle stays in the llm_call node; we only need the catalog
     /// here so dispatch can succeed without an extra dependency.
     attachment_catalog: Option<Vec<crate::llm::domain::ConversationAttachment>>,
+    /// F-T15: per-call wiring for the `recall_history` synthetic tool.
+    /// When both fields are populated, the executor intercepts `recall_history`
+    /// tool calls and reads the persisted conversation directly. When either is
+    /// `None`, recall_history returns an error (gives a clear signal to the
+    /// caller that the feature isn't wired in this run).
+    conversation_repository: Option<Arc<dyn crate::llm::domain::ConversationRepository>>,
+    conversation_key: Option<crate::llm::domain::ConversationKey>,
     /// Per-string size cap applied to tool results before they are returned
     /// to the LLM. Strings whose byte length exceeds this value are replaced
     /// with `[truncated: original_size=N bytes]`. Defaults to
@@ -169,11 +180,26 @@ impl DagToolExecutor {
             skill_repository: None,
             skill_observer: None,
             documents_context: None,
+            crdt_docs_context: None,
             describe_tool_lookup: None,
             describe_tool_observer: None,
             attachment_catalog: None,
+            conversation_repository: None,
+            conversation_key: None,
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_STRING_BYTES,
         }
+    }
+
+    /// F-T15: wire the conversation repository so `recall_history(turn=N)`
+    /// can dispatch by reading the persisted history directly.
+    pub fn with_conversation_history(
+        mut self,
+        repo: Arc<dyn crate::llm::domain::ConversationRepository>,
+        key: crate::llm::domain::ConversationKey,
+    ) -> Self {
+        self.conversation_repository = Some(repo);
+        self.conversation_key = Some(key);
+        self
     }
 
     /// Builder: override the per-string cap applied to tool results.
@@ -237,6 +263,16 @@ impl DagToolExecutor {
         >,
     ) -> Self {
         self.documents_context = Some(ctx);
+        self
+    }
+
+    /// Attach a `CrdtDocsContext` so the five `crdt_doc_*` synthetic tool
+    /// calls dispatch to the v1 crdt_documents runtime.
+    pub fn with_crdt_documents(
+        mut self,
+        ctx: Arc<crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::CrdtDocsContext>,
+    ) -> Self {
+        self.crdt_docs_context = Some(ctx);
         self
     }
 
@@ -413,6 +449,7 @@ impl DagToolExecutor {
             return ToolDefinition {
                 name: effective_name.to_string(),
                 description: tool_config.description.clone(),
+                summary: None,
                 parameters: ToolParameters {
                     schema_type: "object".to_string(),
                     properties: parsed.llm_properties,
@@ -428,6 +465,7 @@ impl DagToolExecutor {
                 return ToolDefinition {
                     name: effective_name.to_string(),
                     description: tool_config.description.clone(),
+                    summary: None,
                     parameters: params,
                     input_schema_override: None,
                 };
@@ -469,6 +507,7 @@ impl DagToolExecutor {
                         .unwrap_or("No description available")
                         .to_string()
                 },
+                summary: None,
                 parameters: ToolParameters {
                     schema_type: "object".to_string(),
                     properties,
@@ -537,6 +576,7 @@ impl DagToolExecutor {
         ToolDefinition {
             name: effective_name.to_string(),
             description,
+            summary: None,
             parameters: ToolParameters {
                 schema_type: "object".to_string(),
                 properties: exposed_properties,
@@ -673,6 +713,206 @@ impl DagToolExecutor {
                     error: None,
                 });
             }
+        }
+
+        // --- Synthetic CRDT documents tools (crdt_doc_*) ---
+        if let Some(ctx) = self.crdt_docs_context.as_ref() {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
+                dispatch_crdt_doc_add_sheet, dispatch_crdt_doc_create_artifact,
+                dispatch_crdt_doc_get_recent_changes, dispatch_crdt_doc_import_sheet,
+                dispatch_crdt_doc_list_my_artifacts, dispatch_crdt_doc_list_sheets,
+                dispatch_crdt_doc_list_sheets_of, dispatch_crdt_doc_read,
+                dispatch_crdt_doc_run_python, dispatch_crdt_doc_set_cell,
+                dispatch_crdt_doc_set_range, CRDT_DOC_ADD_SHEET_TOOL,
+                CRDT_DOC_CREATE_ARTIFACT_TOOL, CRDT_DOC_GET_RECENT_CHANGES_TOOL,
+                CRDT_DOC_IMPORT_SHEET_TOOL, CRDT_DOC_LIST_MY_ARTIFACTS_TOOL,
+                CRDT_DOC_LIST_SHEETS_OF_TOOL, CRDT_DOC_LIST_SHEETS_TOOL, CRDT_DOC_READ_TOOL,
+                CRDT_DOC_RUN_PYTHON_TOOL, CRDT_DOC_SET_CELL_TOOL, CRDT_DOC_SET_RANGE_TOOL,
+            };
+
+            let name = tool_call.function.name.as_str();
+            let is_crdt_tool = matches!(
+                name,
+                n if n == CRDT_DOC_LIST_SHEETS_TOOL
+                    || n == CRDT_DOC_LIST_SHEETS_OF_TOOL
+                    || n == CRDT_DOC_IMPORT_SHEET_TOOL
+                    || n == CRDT_DOC_READ_TOOL
+                    || n == CRDT_DOC_SET_CELL_TOOL
+                    || n == CRDT_DOC_SET_RANGE_TOOL
+                    || n == CRDT_DOC_ADD_SHEET_TOOL
+                    || n == CRDT_DOC_GET_RECENT_CHANGES_TOOL
+                    || n == CRDT_DOC_LIST_MY_ARTIFACTS_TOOL
+                    || n == CRDT_DOC_CREATE_ARTIFACT_TOOL
+                    || n == CRDT_DOC_RUN_PYTHON_TOOL
+            );
+
+            if is_crdt_tool {
+                let args: serde_json::Value = if tool_call.function.arguments.trim().is_empty() {
+                    serde_json::json!({})
+                } else {
+                    serde_json::from_str(&tool_call.function.arguments).map_err(|e| {
+                        LlmError::InvalidToolCall {
+                            reason: format!("Failed to parse arguments for tool {}: {}", name, e),
+                        }
+                    })?
+                };
+
+                let result = match name {
+                    n if n == CRDT_DOC_LIST_SHEETS_TOOL => {
+                        dispatch_crdt_doc_list_sheets(ctx, args).await
+                    }
+                    n if n == CRDT_DOC_LIST_SHEETS_OF_TOOL => {
+                        dispatch_crdt_doc_list_sheets_of(ctx, args).await
+                    }
+                    n if n == CRDT_DOC_IMPORT_SHEET_TOOL => {
+                        dispatch_crdt_doc_import_sheet(ctx, args).await
+                    }
+                    n if n == CRDT_DOC_READ_TOOL => dispatch_crdt_doc_read(ctx, args).await,
+                    n if n == CRDT_DOC_SET_CELL_TOOL => dispatch_crdt_doc_set_cell(ctx, args).await,
+                    n if n == CRDT_DOC_SET_RANGE_TOOL => {
+                        dispatch_crdt_doc_set_range(ctx, args).await
+                    }
+                    n if n == CRDT_DOC_ADD_SHEET_TOOL => {
+                        dispatch_crdt_doc_add_sheet(ctx, args).await
+                    }
+                    n if n == CRDT_DOC_LIST_MY_ARTIFACTS_TOOL => {
+                        dispatch_crdt_doc_list_my_artifacts(ctx, args).await
+                    }
+                    n if n == CRDT_DOC_CREATE_ARTIFACT_TOOL => {
+                        dispatch_crdt_doc_create_artifact(ctx, args).await
+                    }
+                    n if n == CRDT_DOC_RUN_PYTHON_TOOL => {
+                        dispatch_crdt_doc_run_python(ctx, args).await
+                    }
+                    _ => dispatch_crdt_doc_get_recent_changes(ctx, args).await,
+                };
+
+                let success =
+                    !matches!(&result, serde_json::Value::Object(m) if m.contains_key("error"));
+                return Ok(crate::llm::domain::ToolResult {
+                    tool_call_id: tool_call.id.clone(),
+                    output: result.to_string(),
+                    success,
+                    error: None,
+                });
+            }
+        }
+
+        // --- E-T7: Synthetic Google Sheets tools (gsheets_*) ---
+        // These dispatchers are self-contained — they build their own
+        // SheetsClient from environment/config and need no executor context.
+        // The xlsx pair (gsheets_create_from_xlsx, gsheets_export_xlsx) is
+        // DEFERRED to E-T7b because they require attachment-byte plumbing
+        // that does not yet exist in the executor: `load_attachment` here
+        // only emits a sentinel and the actual bytes are fetched higher up
+        // in the LLM loop; there is no symmetric "register bytes as a new
+        // attachment" path either. Adding both would require threading an
+        // attachment fetcher + registrar through DagToolExecutor — out of
+        // scope for E-T7 (router wiring) and tracked separately.
+        {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
+                dispatch_gsheets_add_sheet, dispatch_gsheets_create_spreadsheet,
+                dispatch_gsheets_delete_sheet, dispatch_gsheets_list_sheets, dispatch_gsheets_read,
+                dispatch_gsheets_run_python, dispatch_gsheets_set_cell, dispatch_gsheets_set_range,
+                GSHEETS_ADD_SHEET_TOOL, GSHEETS_CREATE_SPREADSHEET_TOOL, GSHEETS_DELETE_SHEET_TOOL,
+                GSHEETS_LIST_SHEETS_TOOL, GSHEETS_READ_TOOL, GSHEETS_SET_CELL_TOOL,
+                GSHEETS_SET_RANGE_TOOL, TOOL_GSHEETS_RUN_PYTHON,
+            };
+
+            let name = tool_call.function.name.as_str();
+            let is_gsheets_tool = matches!(
+                name,
+                n if n == GSHEETS_CREATE_SPREADSHEET_TOOL
+                    || n == GSHEETS_LIST_SHEETS_TOOL
+                    || n == GSHEETS_ADD_SHEET_TOOL
+                    || n == GSHEETS_DELETE_SHEET_TOOL
+                    || n == GSHEETS_READ_TOOL
+                    || n == GSHEETS_SET_CELL_TOOL
+                    || n == GSHEETS_SET_RANGE_TOOL
+                    || n == TOOL_GSHEETS_RUN_PYTHON
+            );
+
+            if is_gsheets_tool {
+                let args: serde_json::Value = if tool_call.function.arguments.trim().is_empty() {
+                    serde_json::json!({})
+                } else {
+                    serde_json::from_str(&tool_call.function.arguments).map_err(|e| {
+                        LlmError::InvalidToolCall {
+                            reason: format!("Failed to parse arguments for tool {}: {}", name, e),
+                        }
+                    })?
+                };
+
+                let result = match name {
+                    n if n == GSHEETS_CREATE_SPREADSHEET_TOOL => {
+                        dispatch_gsheets_create_spreadsheet(args).await
+                    }
+                    n if n == GSHEETS_LIST_SHEETS_TOOL => dispatch_gsheets_list_sheets(args).await,
+                    n if n == GSHEETS_ADD_SHEET_TOOL => dispatch_gsheets_add_sheet(args).await,
+                    n if n == GSHEETS_DELETE_SHEET_TOOL => {
+                        dispatch_gsheets_delete_sheet(args).await
+                    }
+                    n if n == GSHEETS_READ_TOOL => dispatch_gsheets_read(args).await,
+                    n if n == GSHEETS_SET_CELL_TOOL => dispatch_gsheets_set_cell(args).await,
+                    n if n == GSHEETS_SET_RANGE_TOOL => dispatch_gsheets_set_range(args).await,
+                    n if n == TOOL_GSHEETS_RUN_PYTHON => dispatch_gsheets_run_python(args).await,
+                    other => serde_json::json!({
+                        "error": "unknown_gsheets_tool",
+                        "message": format!("router matched gsheets prefix but no dispatch arm for `{other}` — this is a bug in dag_tool_executor"),
+                    }),
+                };
+
+                let success =
+                    !matches!(&result, serde_json::Value::Object(m) if m.contains_key("error"));
+                return Ok(crate::llm::domain::ToolResult {
+                    tool_call_id: tool_call.id.clone(),
+                    output: result.to_string(),
+                    success,
+                    error: None,
+                });
+            }
+        }
+
+        // --- F-T15: recall_history synthetic tool ---
+        // Active whenever a conversation_repository + conversation_key are wired.
+        // Independent of crdt_docs — useful for any LLM node with persistent memory.
+        if tool_call.function.name
+            == crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::RECALL_HISTORY_TOOL
+        {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::dispatch_recall_history;
+            let (Some(repo), Some(key)) = (
+                self.conversation_repository.as_ref(),
+                self.conversation_key.as_ref(),
+            ) else {
+                return Ok(crate::llm::domain::ToolResult {
+                    tool_call_id: tool_call.id.clone(),
+                    output: serde_json::json!({
+                        "error": "recall_history_not_wired",
+                        "hint": "This LLM node was constructed without conversation history access."
+                    })
+                    .to_string(),
+                    success: false,
+                    error: None,
+                });
+            };
+            let args: serde_json::Value = if tool_call.function.arguments.trim().is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(&tool_call.function.arguments).map_err(|e| {
+                    LlmError::InvalidToolCall {
+                        reason: format!("Failed to parse recall_history arguments: {e}"),
+                    }
+                })?
+            };
+            let result = dispatch_recall_history(repo, key, args).await;
+            let success =
+                !matches!(&result, serde_json::Value::Object(m) if m.contains_key("error"));
+            return Ok(crate::llm::domain::ToolResult {
+                tool_call_id: tool_call.id.clone(),
+                output: result.to_string(),
+                success,
+                error: None,
+            });
         }
 
         // --- Toolkit dispatch: names of the form "<alias>__<sub_tool>" ---
@@ -1164,6 +1404,7 @@ impl ToolExecutor for DagToolExecutor {
                     tools.push(crate::llm::domain::ToolDefinition {
                         name: format!("{}__{}", name, sub.name),
                         description: sub.description,
+                        summary: None,
                         parameters: crate::llm::domain::ToolParameters {
                             schema_type: "object".to_string(),
                             properties: sub.properties,
@@ -1217,6 +1458,7 @@ impl ToolExecutor for DagToolExecutor {
                         tools.push(crate::llm::domain::ToolDefinition {
                             name: format!("{}__{}", name, sub.name),
                             description: sub.description,
+                            summary: None,
                             parameters: crate::llm::domain::ToolParameters {
                                 schema_type: "object".to_string(),
                                 properties: sub.properties,
@@ -1279,6 +1521,7 @@ impl ToolExecutor for DagToolExecutor {
                     .description()
                     .unwrap_or(&format!("Execute node: {}", name))
                     .to_string(),
+                summary: None,
                 parameters: ToolParameters {
                     schema_type: "object".to_string(),
                     properties,

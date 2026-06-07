@@ -1,0 +1,48 @@
+{
+  "_comment": "D-T10 interactive demo — Agent builds a Q1 Sales spreadsheet with formulas, user watches LIVE in browser via Univer. Launch with: cargo run --bin dag_engine -- crdt-yws-graph tests/graphs/crdt_documents/d_formulas_interactive_demo.json --seed-artifact-id art_01HQXKDF0RM5HASEDEM8V6789D --wait-before-graph 30 --agent-session-id agent_demo_$(date +%s). Then open http://127.0.0.1:8090/?artifact=art_01HQXKDF0RM5HASEDEM8V6789D in your browser within 30s. After the graph completes, the server stays up — manually edit cells in Univer and they sync live with the agent's view.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/d-formulas-demo",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Build a Q1 2026 Sales analysis spreadsheet step by step. Narrate each step BEFORE you make the tool call so the human watching the browser sees what's about to happen.\n\nSTEPS:\n\n1. Ensure a sheet named 'Ventas Q1' exists. Use crdt_doc_list_sheets; if it's missing, crdt_doc_add_sheet(name='Ventas Q1').\n\n2. Write the header row using crdt_doc_set_range starting at A1 with values=[['Producto','Cantidad','Precio Unit','Subtotal']]. Use a single batch call.\n\n3. Write 4 product rows starting at A2 using crdt_doc_set_range with start='A2' and values=[['Laptop',10,1200,null],['Mouse',50,25,null],['Teclado',30,80,null],['Monitor',15,350,null]]. (We will fill Subtotal with formulas next.)\n\n4. Now write the Subtotal formulas: crdt_doc_set_range with start='D2' and values=[['=B2*C2'],['=B3*C3'],['=B4*C4'],['=B5*C5']]. Report cells_recalculated and any warnings.\n\n5. Add a grand total label at A7: crdt_doc_set_cell(addr='A7', value='TOTAL').\n\n6. Add the grand total formula at D7: crdt_doc_set_cell(addr='D7', value='=SUM(D2:D5)'). Report the evaluated value (should be 26,150) and cells_recalculated.\n\n7. Now demonstrate cascade recalc: change Cantidad of Laptop from 10 to 25 by setting B2 to 25. Report cells_recalculated and the new TOTAL (should jump because Subtotal D2 + grand total D7 both refresh).\n\n8. Read the sheet back with crdt_doc_read(sheet='Ventas Q1', include_formulas=true). Confirm Subtotal cells and D7 came back as {v, f, fs:'be'} objects, and report 1-2 representative cells.\n\n9. Final report (under 200 words): summarize what you built, the cascade behavior you observed, and any warnings. Mention that the human watching can NOW manually edit any cell in Univer and the formula cells will auto-recalculate live.",
+          "max_steps": 30
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 30,
+        "lazy_tool_loading": true,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "You are a spreadsheet assistant building a Q1 2026 Sales analysis for a human who is WATCHING the browser live. Be deliberate and narrate each step in plain prose BEFORE you call a tool so the human can follow the action. Use the crdt_doc_* tools. Inspect tool response payloads (cells_recalculated, warnings, fs values) and report what you saw. Load the crdt-doc-formulas skill and its references before writing formulas.",
+        "skills": {
+          "builtin": ["crdt-doc-formulas"]
+        },
+        "enabled_tools": [
+          "crdt_doc_list_sheets",
+          "crdt_doc_add_sheet",
+          "crdt_doc_set_cell",
+          "crdt_doc_set_range",
+          "crdt_doc_read",
+          "crdt_doc_create_artifact"
+        ],
+        "crdt_documents": {
+          "artifact_id": "art_01HQXKDF0RM5HASEDEM8V6789D"
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent",   "to": "log" }
+  ]
+}

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use super::util::extract_with_schema::{extract_with_schema, ExtractInput};
 use super::util::inline_schema::inline_to_json_schema;
 
-const DEFAULT_SYSTEM_MSG: &str = include_str!("prompts/extraction_system.md");
+const DEFAULT_SYSTEM_MSG: &str = include_str!("../../../../text/prompts/extraction_system.md");
 
 pub struct OutputParserNode;
 

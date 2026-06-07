@@ -1,0 +1,37 @@
+{
+  "_comment": "Subsistema C — análisis sin leer todo el excel. Probás: (1) importar un xlsx via el botón del canvas; (2) este grafo, donde el agente descubre las hojas, samplea solo 5 filas para entender la estructura (incluyendo título + headers desfasados), y delega el análisis completo al sandbox pandas. Verificás en browser que aparezcan dos hojas nuevas: 'Items bajo $10' y 'Histograma Cantidades'.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/c-import-analysis",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Analyze the imported sales report and create two derived sheets.\n\nSTEPS:\n1. Call crdt_doc_list_sheets to discover what sheets exist.\n2. Pick the sheet that has the sales data (the only one). Call crdt_doc_read on it with range='A1:D5' to confirm the structure.\n\nDATA SHAPE — READ CAREFULLY (this is non-obvious):\n- Y.Doc row 1 contains only the TITLE 'Reporte Q3 2026' in A1 (B1/C1/D1 are empty).\n- Y.Doc row 2 contains the REAL headers: Producto, Cantidad, Precio, Total.\n- Y.Doc rows 3+ are SKU data.\n\nWhen the dispatcher converts the sheet to a pandas DataFrame, it ALWAYS uses Y.Doc row 1 as column names. So inside run_python you will see:\n  df.columns  →  ['Reporte Q3 2026', 'col_B', 'col_C', 'col_D']   # empty cells filled with col_<letter>\n  df.iloc[0]  →  {'Reporte Q3 2026': 'Producto', 'col_B': 'Cantidad', 'col_C': 'Precio', 'col_D': 'Total'}  ← these are the REAL headers\n  df.iloc[1]  →  {'Reporte Q3 2026': 'SKU-0001', 'col_B': 12.0, 'col_C': 7.66, 'col_D': None}  ← first data row\n\nSo your pandas code MUST start with this EXACT pattern (copy verbatim, no improvising):\n  df = dfs['<sheet_id>']\n  df.columns = df.iloc[0].tolist()   # promote the REAL header row (iloc[0], NOT iloc[1]) to column names\n  df = df.iloc[1:].reset_index(drop=True)   # drop that header row from the data\n  df['Precio'] = pd.to_numeric(df['Precio'], errors='coerce')\n  df['Cantidad'] = pd.to_numeric(df['Cantidad'], errors='coerce')\n\nIf you EVER get a KeyError, your FIRST debugging step must be to call run_python with `print(list(df.columns))` and `print(df.head(3))` to inspect what the dispatcher actually gave you. Do NOT retry the same iloc index hoping it works.\n\nTASK A — items con Precio menor a $10:\n4. After the boilerplate above, filter `df[df['Precio'] < 10]`. Assign `output_sheets = {'Items bajo $10': filtered_df[['Producto','Cantidad','Precio']]}` so the dispatcher creates the tab. Set `output` to a message with the count.\n\nTASK B — histograma de Cantidades:\n5. Second run_python call. Same boilerplate. Compute `hist = df.groupby('Cantidad').size().reset_index(name='n_skus').sort_values('Cantidad')` and assign `output_sheets = {'Histograma Cantidades': hist}`. Set `output` to a message with the count of unique Cantidades.\n\nEFFICIENCY RULES:\n- crdt_doc_read range max A1:D5 (already covered).\n- Do not pass full data through your context — run_python handles it server-side.\n\n6. Briefly report to the user what you found and the names of the new sheets you created."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "system_message": "You are a spreadsheet data analyst with CRDT document tools and a Python sandbox (pandas/numpy/scipy.stats) via crdt_doc_run_python.\n\nKEY DISCIPLINE — minimize context usage:\n- Always start with crdt_doc_list_sheets to discover what's available.\n- Use crdt_doc_read with SMALL ranges (3-5 rows) ONLY to understand structure.\n- Delegate full-data analysis to crdt_doc_run_python — it runs server-side on the full sheet without passing rows through your context.\n\nWhen you see crdt_doc_run_python in your tool list, IMMEDIATELY call load_skill('crdt-doc-run-python') before writing any pandas code — it explains the DataFrame shape contract (Y.Doc row 1 → pandas columns) and how to handle imported xlsx with title rows. This saves you from the off-by-one error that otherwise loops 8+ retries.\n\nWhen the user asks for derived tables, persist them by assigning `output_sheets = {<tab_name>: <DataFrame>}` inside the run_python code — the dispatcher creates one tab per dict entry.",
+        "skills": {
+          "builtin": ["crdt-doc-run-python"]
+        },
+        "crdt_documents": {
+          "artifact_id": "$DYNAMIC:artifact_id",
+          "ws_url": "ws://127.0.0.1:8090/yjs"
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent",   "to": "log" }
+  ]
+}

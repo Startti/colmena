@@ -1,0 +1,34 @@
+{
+  "_comment": "Variante del smoke graph que ejerce el modo WS-peer (V2). El agente NO usa storage local — se conecta como peer al CRDT documents server vía WS y opera sobre una réplica Y.Doc local que sincroniza con el server. Reemplaza $DYNAMIC:artifact_id antes de correr; el server debe estar arriba en ws_url. Ejecutar con: cargo run --bin dag_engine -- run <este_graph>",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/crdt-smoke-ws",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "I just created a new spreadsheet. Please: 1) add a sheet named 'Inventory', 2) write a 3-row table with columns Product, Qty, Price (use 'Apple' with Qty=10 Price=2.5, 'Pear' with Qty=20 Price=3.0). 3) Read the sheet back to confirm. Report what you did."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "system_message": "You are a spreadsheet assistant. The user has a workbook open in their browser. Use the crdt_doc_* tools to manipulate it. Always read after writing to confirm. Report briefly what you did at the end.",
+        "crdt_documents": {
+          "artifact_id": "$DYNAMIC:artifact_id",
+          "ws_url": "ws://127.0.0.1:8090/yjs"
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent",   "to": "log" }
+  ]
+}

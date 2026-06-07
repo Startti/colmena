@@ -21,7 +21,7 @@
 | Create | `src/libs/colmena/tests/suspend_resume_routing.rs` | End-to-end integration test using `ScriptedAdapter`. Two tests: ADP repro + cascade. |
 | Modify | `src/libs/colmena/src/dag_engine/application/run_use_case.rs` | Add helper `compute_resuming_node_ids` (associated fn) + gate the injection at line 377. Add inline `#[cfg(test)]` unit tests for the helper. |
 | Modify | `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs` | Replace `.ok_or(...)?` at line 1802 with `match` + fallthrough + `tracing::warn!`. |
-| Modify | `docs/developer_guide/38_suspend_node.md` | Cross-link to the spec under "Referencias cruzadas". |
+| Modify | `docs/developer_guide/44_suspend_node.md` | Cross-link to the spec under "Referencias cruzadas". |
 | Modify | `docs/CHANGELOG_2026-05.md` (or create `CHANGELOG_2026-06.md` if absent) | One-line entry describing the fix. |
 
 ---
@@ -833,12 +833,12 @@ Expected: all `#[ignore]`-gated tests PASS (or are appropriately skipped when an
 ## Task 7: Documentation cross-link + CHANGELOG
 
 **Files:**
-- Modify: `docs/developer_guide/38_suspend_node.md`
+- Modify: `docs/developer_guide/44_suspend_node.md`
 - Modify or Create: `docs/CHANGELOG_2026-06.md`
 
 - [ ] **Step 7.1: Add cross-link in the suspend developer guide**
 
-Find the "Referencias cruzadas" section in `docs/developer_guide/38_suspend_node.md` (near the bottom, section 9). Add this bullet (preserving Spanish convention):
+Find the "Referencias cruzadas" section in `docs/developer_guide/44_suspend_node.md` (near the bottom, section 9). Add this bullet (preserving Spanish convention):
 
 ```markdown
 - **Fix de ruteo de `resume_answer`**: [`docs/superpowers/specs/2026-06-05-suspend-resume-answer-routing-fix-design.md`](../superpowers/specs/2026-06-05-suspend-resume-answer-routing-fix-design.md) — el engine inyecta `__colmena_resume_answer` solo en nodos que estaban SUSPENDED en el snapshot persistido.
@@ -877,11 +877,11 @@ If it EXISTS, append the same entries under a new `## 2026-06-05` heading (or un
 - [ ] **Step 7.3: Commit docs**
 
 ```bash
-git add docs/developer_guide/38_suspend_node.md docs/CHANGELOG_2026-06.md
+git add docs/developer_guide/44_suspend_node.md docs/CHANGELOG_2026-06.md
 git commit -m "$(cat <<'EOF'
 docs(suspend): cross-link the resume_answer routing fix spec + CHANGELOG
 
-Adds a "Referencias cruzadas" entry in 38_suspend_node.md pointing
+Adds a "Referencias cruzadas" entry in 44_suspend_node.md pointing
 at the routing-fix design doc, and a CHANGELOG entry under June 5.
 EOF
 )"

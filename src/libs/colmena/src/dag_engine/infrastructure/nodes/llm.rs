@@ -12,12 +12,14 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
 
+use crate::crdt_documents::{ArtifactId, CrdtDocumentsRuntime};
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
-    build_all_document_tools, build_describe_tool_definition, build_load_skill_tool_definition,
-    reconstruct_discovered_set, summary_for_catalog, CatalogEntry, DescribeToolDispatchResult,
-    DocumentToolsContext, ATTACHMENTS_SYSTEM_PRELUDE, DOCUMENTS_SYSTEM_PRELUDE,
+    build_all_crdt_doc_tools, build_all_document_tools, build_describe_tool_definition,
+    build_load_skill_tool_definition, reconstruct_discovered_set, summary_for_catalog,
+    CatalogEntry, CrdtDocsContext, DescribeToolDispatchResult, DocumentToolsContext,
+    ATTACHMENTS_SYSTEM_PRELUDE, DOCUMENTS_SYSTEM_PRELUDE,
 };
 use crate::documents::application::DocumentRuntime;
 use crate::documents::domain::ids::SessionId as DocSessionId;
@@ -32,7 +34,7 @@ use std::sync::Weak;
 /// Default system message used when the user has not provided one. Instructs the
 /// model to stay grounded in the context it has received and avoid fabricating
 /// specific facts that are not present in the conversation.
-const LLM_DEFAULT_SYSTEM: &str = include_str!("prompts/llm_default_system.md");
+const LLM_DEFAULT_SYSTEM: &str = include_str!("../../../../text/prompts/llm_default_system.md");
 
 /// Filter the catalog of available tools down to the set the LLM should see.
 ///
@@ -51,58 +53,98 @@ pub(crate) fn filter_enabled_tools(
     enabled_tools_config: Option<&Value>,
     configured_aliases: &std::collections::HashSet<String>,
 ) -> Vec<crate::llm::domain::ToolDefinition> {
-    let is_auto_enabled = |tool_name: &str| -> bool {
-        configured_aliases.iter().any(|alias| {
-            tool_name == alias.as_str() || tool_name.starts_with(&format!("{}__", alias))
-        })
+    use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::find_package;
+
+    // PASS 1 — parse user input into raw_includes, raw_excludes, wildcard.
+    // `configured_aliases` (from tool_configurations) are seeded into
+    // raw_includes so they are auto-enabled without needing to appear in
+    // `enabled_tools`.
+    let mut raw_includes: Vec<String> = configured_aliases.iter().cloned().collect();
+    let mut raw_excludes: Vec<String> = Vec::new();
+    let mut wildcard_all = false;
+
+    let parse_entry = |s: &str,
+                       raw_includes: &mut Vec<String>,
+                       raw_excludes: &mut Vec<String>,
+                       wildcard_all: &mut bool| {
+        if s == "*" {
+            *wildcard_all = true;
+        } else if let Some(stripped) = s.strip_prefix('!') {
+            if stripped.is_empty() {
+                eprintln!("filter_enabled_tools: empty exclusion entry '!' ignored");
+            } else {
+                raw_excludes.push(stripped.to_string());
+            }
+        } else if !raw_includes.iter().any(|n| n == s) {
+            raw_includes.push(s.to_string());
+        }
     };
 
-    let mut enabled_names: Vec<String> = all_tools
-        .iter()
-        .filter(|t| is_auto_enabled(&t.name))
-        .map(|t| t.name.clone())
-        .collect();
-
-    let mut wildcard_all = false;
     if let Some(enabled) = enabled_tools_config {
-        if let Some(value) = enabled.as_str() {
-            if value == "*" {
-                wildcard_all = true;
-            } else if !enabled_names.iter().any(|n| n == value) {
-                enabled_names.push(value.to_string());
-            }
-        } else if let Some(tool_names) = enabled.as_array() {
-            for v in tool_names {
-                if let Some(name) = v.as_str() {
-                    if !enabled_names.iter().any(|n| n == name) {
-                        enabled_names.push(name.to_string());
-                    }
+        if let Some(arr) = enabled.as_array() {
+            for v in arr {
+                if let Some(s) = v.as_str() {
+                    parse_entry(s, &mut raw_includes, &mut raw_excludes, &mut wildcard_all);
                 }
+            }
+        } else if let Some(s) = enabled.as_str() {
+            parse_entry(s, &mut raw_includes, &mut raw_excludes, &mut wildcard_all);
+        }
+    }
+
+    // PASS 2 — expand package aliases on both sides.
+    //
+    // Each entry in raw_includes / raw_excludes is checked against the
+    // TOOLKIT_PACKAGES registry. If it's a known package, it expands to the
+    // package's tool list; otherwise it's kept as-is (exact name or
+    // `{alias}__` toolkit prefix — see back-compat note below).
+    let expand = |name: &str| -> Vec<String> {
+        if let Some(pkg) = find_package(name) {
+            pkg.tools.iter().map(|t| t.to_string()).collect()
+        } else {
+            vec![name.to_string()]
+        }
+    };
+
+    let mut final_includes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for n in &raw_includes {
+        for expanded in expand(n) {
+            final_includes.insert(expanded);
+        }
+    }
+
+    let mut final_excludes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for n in &raw_excludes {
+        for expanded in expand(n) {
+            final_excludes.insert(expanded);
+        }
+    }
+
+    // Back-compat: include any tool whose name matches `{alias}__` for any
+    // alias in raw_includes (covers api_explorer-style toolkits that use
+    // the double-underscore prefix convention instead of TOOLKIT_PACKAGES).
+    for alias in &raw_includes {
+        let prefix = format!("{}__", alias);
+        for tool in &all_tools {
+            if tool.name.starts_with(&prefix) {
+                final_includes.insert(tool.name.clone());
             }
         }
     }
 
-    if wildcard_all {
-        return all_tools;
-    }
-
-    // Each entry in `enabled_names` is treated as an alias: it matches a
-    // catalog tool by EXACT equality OR by the toolkit prefix rule
-    // (`tool_name.starts_with(format!("{alias}__"))`). This lets a user write
-    // `enabled_tools: ["api_explorer"]` and have every `api_explorer__*`
-    // sub-tool exposed without listing each one — the same expansion rule
-    // `tool_configurations` already applies. Full sub-tool names
-    // (`api_explorer__load_spec`) still match via the exact-equality branch,
-    // so there is no back-compat break.
-    let is_enabled = |tool_name: &str| -> bool {
-        enabled_names.iter().any(|alias| {
-            tool_name == alias.as_str() || tool_name.starts_with(&format!("{}__", alias))
-        })
-    };
-
+    // PASS 3 — filter: apply set-difference (includes - excludes).
+    // Wildcard short-circuits the includes check but exclusions still apply.
     all_tools
         .into_iter()
-        .filter(|t| is_enabled(&t.name))
+        .filter(|t| {
+            if final_excludes.contains(&t.name) {
+                return false;
+            }
+            if wildcard_all {
+                return true;
+            }
+            final_includes.contains(&t.name)
+        })
         .collect()
 }
 
@@ -1537,11 +1579,11 @@ impl ExecutableNode for LlmNode {
         let mut catalog: Vec<CatalogEntry> = Vec::new();
         let mut lookup_for_describe: Vec<ToolConfiguration> = Vec::new();
         if lazy_tool_loading {
-            if tool_configurations.is_empty() {
-                colmena_log!(
-                    "WARN: lazy_tool_loading: true but tool_configurations is empty — feature will no-op."
-                );
-            }
+            // NOTE: F-T14 step A3 expanded lazy's coverage to synthetic
+            // crdt_doc_* tools, so a fully-empty catalog now only happens when
+            // there are no tool_configurations AND no crdt_documents context.
+            // We check for that case AFTER both sources have populated the
+            // catalog (below, near the crdt_doc_* registration block).
             for cfg in tool_configurations.values() {
                 if cfg.eager {
                     continue;
@@ -1595,6 +1637,99 @@ impl ExecutableNode for LlmNode {
                     return Err(format!("invalid `documents` config on llm node: {e}").into());
                 }
             },
+            None => None,
+        };
+
+        // Build crdt_documents context if the LLM node was configured with a
+        // `crdt_documents` block. The five v1 synthetic tools are exposed and
+        // dispatched through the runtime built here. artifact_id MUST be in the
+        // config (LLM never sets it); session_id is not relevant for the v1 CRDT
+        // tools since the registry is per-artifact, not per-session.
+        //
+        // For WsPeer mode, we also need to retain the peer handle so we can
+        // shutdown the WS cleanly at end-of-execute (flush pending updates
+        // before closing the socket). The context only holds `Arc<Doc>` +
+        // `Arc<AtomicBool>` cloned from the peer; ownership of the peer
+        // itself lives in this option.
+        let mut crdt_ws_peer_for_shutdown: Option<crate::crdt_documents::WsPeerArtifact> = None;
+        let crdt_docs_context: Option<Arc<CrdtDocsContext>> = match inputs
+            .get("crdt_documents")
+            .cloned()
+            .or_else(|| config.get("crdt_documents").cloned())
+        {
+            Some(crdt_cfg) => {
+                let artifact_id_str = crdt_cfg
+                    .get("artifact_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| -> Box<dyn Error + Send + Sync> {
+                        "crdt_documents config requires `artifact_id`".into()
+                    })?;
+                let artifact_id: ArtifactId = artifact_id_str.parse().map_err(|_| -> Box<dyn Error + Send + Sync> {
+                    "crdt_documents config has invalid `artifact_id` (expected art_<26-char-ULID>)".into()
+                })?;
+                // Mode selection (descending priority):
+                //
+                // 1. `ws_url` present in config → WsPeer mode. The agent
+                //    opens a WS peer connection to a remote CRDT documents
+                //    service. The agent's worker is stateless; the
+                //    service holds the authoritative Y.Doc.
+                // 2. No `ws_url`, process-wide singleton installed (e.g.
+                //    `crdt-yws-graph` subcommand, future ADP worker
+                //    bootstrap that colocates server + executor) → Local
+                //    mode using the singleton runtime. Mutations are
+                //    visible live to any browser connected to that
+                //    server because they share the same Arc<Doc>.
+                // 3. Neither → Local mode with a freshly-built runtime
+                //    (plain `dag_engine run`, autonomous CLI). No live
+                //    server is involved; persistence is to disk only.
+                if let Some(ws_url) = crdt_cfg.get("ws_url").and_then(Value::as_str) {
+                    match crate::crdt_documents::WsPeerArtifact::connect(
+                        ws_url,
+                        artifact_id.clone(),
+                        "agent",
+                        agent_session_id_str.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(peer) => {
+                            let http_base = ws_url_to_http_base(ws_url);
+                            let ctx = CrdtDocsContext::new_ws_peer(
+                                &peer,
+                                agent_session_id_str.clone(),
+                                http_base,
+                            );
+                            crdt_ws_peer_for_shutdown = Some(peer);
+                            Some(Arc::new(ctx))
+                        }
+                        Err(e) => {
+                            return Err(
+                                format!("crdt_documents ws_peer connect failed: {e}").into()
+                            );
+                        }
+                    }
+                } else {
+                    let runtime_arc = if let Some(shared) =
+                        crate::crdt_documents::process_runtime::get_global()
+                    {
+                        shared
+                    } else {
+                        match CrdtDocumentsRuntime::from_config(&crdt_cfg).await {
+                            Ok(rt) => Arc::new(rt),
+                            Err(e) => {
+                                return Err(format!(
+                                    "invalid `crdt_documents` config on llm node: {e}"
+                                )
+                                .into());
+                            }
+                        }
+                    };
+                    Some(Arc::new(CrdtDocsContext::new_local(
+                        runtime_arc,
+                        artifact_id,
+                        agent_session_id_str.clone(),
+                    )))
+                }
+            }
             None => None,
         };
 
@@ -1655,8 +1790,24 @@ impl ExecutableNode for LlmNode {
                 Vec::new()
             };
 
+        // F-T15 — resolve the ConversationRepository EARLIER (it's used both
+        // here for the executor's recall_history wiring AND later by
+        // AgentService for its history operations). Falls back to an in-memory
+        // repo when the operator hasn't configured persistent memory; either
+        // way recall_history works for the duration of the run.
+        let conversation_repo: Arc<dyn crate::llm::domain::ConversationRepository> =
+            match repo_instance.clone() {
+                Some(repo) => repo,
+                None => {
+                    use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
+                    Arc::new(InMemoryConversationRepository::new())
+                }
+            };
+
         let tool_executor = {
             let mut executor = DagToolExecutor::new(registry, tool_configurations);
+            executor = executor
+                .with_conversation_history(conversation_repo.clone(), conversation_key.clone());
             // Per-llm_call override of the tool-result string cap. Inputs win
             // over config so a graph can dynamically widen the cap when it
             // expects a large legitimate payload (e.g. a long document body).
@@ -1678,6 +1829,9 @@ impl ExecutableNode for LlmNode {
             executor = executor.with_agent_session_id(agent_session_id_str.clone());
             if let Some(ctx) = documents_context.clone() {
                 executor = executor.with_documents(ctx);
+            }
+            if let Some(ctx) = crdt_docs_context.clone() {
+                executor = executor.with_crdt_documents(ctx);
             }
             // ---- Step 5: Wire attachment catalog into executor ----------------------
             if !attachment_catalog.is_empty() {
@@ -1772,21 +1926,10 @@ impl ExecutableNode for LlmNode {
         // Let's use the repo_instance if available. If not, we create a temporary one?
         // Or we modify AgentService to make repo optional? No.
 
-        // Let's assume for this phase that we use the provided repo or fail if tools are needed but no repo?
-        // But AgentService is the *only* way we call LLM now (according to plan).
-        // So we need a repo.
-
-        let conversation_repo: Arc<dyn crate::llm::domain::ConversationRepository> =
-            match repo_instance {
-                Some(repo) => repo,
-                None => {
-                    // Fallback to a lightweight in-memory repository
-                    // This allows stateless LLM calls without requiring database connections
-                    use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
-                    Arc::new(InMemoryConversationRepository::new())
-                }
-            };
-
+        // `conversation_repo` was resolved earlier (~line 1753) so the
+        // tool_executor could wire it for the recall_history dispatch. Reuse
+        // the same Arc here for AgentService — both must read/write to the
+        // same backing store.
         let agent_service = AgentService::new(llm_repo_arc, conversation_repo.clone());
 
         // Resume path — when re-entered with `__colmena_resume_answer`, the
@@ -1904,6 +2047,127 @@ impl ExecutableNode for LlmNode {
             }
         }
 
+        // When the LLM node has a `crdt_documents` config, expose the synthetic
+        // crdt_doc_* tools. The executor was already wired with the matching
+        // CrdtDocsContext above so dispatches succeed.
+        //
+        // F-T14 step A3 — when `lazy_tool_loading: true` is also set, register
+        // each crdt_doc_* tool as a CatalogEntry so the existing lazy mechanism
+        // hides their full schemas until the agent calls describe_tool(name).
+        // load_skill is always eager — it's the entry point for skill discovery
+        // and small enough to carry every iteration.
+        if crdt_docs_context.is_some() {
+            for td in build_all_crdt_doc_tools() {
+                if lazy_tool_loading {
+                    catalog.push(CatalogEntry {
+                        name: td.name.clone(),
+                        summary: summary_for_catalog(td.summary.as_deref(), &td.description),
+                    });
+                }
+                tools.push(td);
+            }
+        }
+
+        // F-T15 — expose recall_history synthetic tool whenever the LLM node
+        // has persisted memory (which it always does — repo_instance defaults
+        // to InMemoryConversationRepository even without explicit memory
+        // config). The executor wiring below pairs it with conversation_repo
+        // + conversation_key so the dispatch can read the persisted history.
+        // Always eager: it's small and complements the rolling-summary block.
+        {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::tool_recall_history;
+            tools.push(tool_recall_history());
+        }
+
+        // E-T8 — expose the 9 synthetic Google Sheets tools (gsheets_*) when
+        // their names appear in `enabled_tools` (or `enabled_tools: "*"`).
+        // Unlike crdt_doc_* / document_* tools, gsheets has no per-node
+        // context object — credentials are sourced from process-level env
+        // (ADC or `GOOGLE_APPLICATION_CREDENTIALS`), so the only opt-in signal
+        // is the user listing them under `enabled_tools`.
+        //
+        // ALL 9 tool DEFINITIONS are published (for schema discovery), even
+        // though E-T7 only wired 7 dispatchers in `dag_tool_executor`. The
+        // xlsx pair (`gsheets_create_from_xlsx`, `gsheets_export_xlsx`) will
+        // surface a router-level error on invocation until E-T7b lands —
+        // their schemas are still useful for the agent to plan against.
+        //
+        // Honors `lazy_tool_loading`: when enabled, each gsheets tool is
+        // also registered as a `CatalogEntry` so its full schema stays hidden
+        // until the agent calls `describe_tool(name)` — same pattern as the
+        // crdt_doc_* block above.
+        {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
+                gsheets_tool_add_sheet, gsheets_tool_create_from_xlsx,
+                gsheets_tool_create_spreadsheet, gsheets_tool_delete_sheet,
+                gsheets_tool_export_xlsx, gsheets_tool_list_sheets, gsheets_tool_read,
+                gsheets_tool_run_python, gsheets_tool_set_cell, gsheets_tool_set_range,
+                GSHEETS_ADD_SHEET_TOOL, GSHEETS_CREATE_FROM_XLSX_TOOL,
+                GSHEETS_CREATE_SPREADSHEET_TOOL, GSHEETS_DELETE_SHEET_TOOL,
+                GSHEETS_EXPORT_XLSX_TOOL, GSHEETS_LIST_SHEETS_TOOL, GSHEETS_READ_TOOL,
+                GSHEETS_SET_CELL_TOOL, GSHEETS_SET_RANGE_TOOL, TOOL_GSHEETS_RUN_PYTHON,
+            };
+
+            // Determine which gsheets tools the user opted into. `"*"` enables
+            // all 10; an array enables each named entry; a single string enables
+            // one. Anything else (or absent config) leaves gsheets disabled.
+            let wants: std::collections::HashSet<&str> = match enabled_tools_config {
+                Some(Value::String(s)) if s == "*" => [
+                    GSHEETS_CREATE_SPREADSHEET_TOOL,
+                    GSHEETS_CREATE_FROM_XLSX_TOOL,
+                    GSHEETS_EXPORT_XLSX_TOOL,
+                    GSHEETS_LIST_SHEETS_TOOL,
+                    GSHEETS_ADD_SHEET_TOOL,
+                    GSHEETS_DELETE_SHEET_TOOL,
+                    GSHEETS_READ_TOOL,
+                    GSHEETS_SET_CELL_TOOL,
+                    GSHEETS_SET_RANGE_TOOL,
+                    TOOL_GSHEETS_RUN_PYTHON,
+                ]
+                .into_iter()
+                .collect(),
+                Some(Value::String(s)) => std::iter::once(s.as_str()).collect(),
+                Some(Value::Array(arr)) => arr.iter().filter_map(|v| v.as_str()).collect(),
+                _ => std::collections::HashSet::new(),
+            };
+
+            let gsheets_entries: [(&str, fn() -> crate::llm::domain::ToolDefinition); 10] = [
+                (
+                    GSHEETS_CREATE_SPREADSHEET_TOOL,
+                    gsheets_tool_create_spreadsheet,
+                ),
+                (GSHEETS_CREATE_FROM_XLSX_TOOL, gsheets_tool_create_from_xlsx),
+                (GSHEETS_EXPORT_XLSX_TOOL, gsheets_tool_export_xlsx),
+                (GSHEETS_LIST_SHEETS_TOOL, gsheets_tool_list_sheets),
+                (GSHEETS_ADD_SHEET_TOOL, gsheets_tool_add_sheet),
+                (GSHEETS_DELETE_SHEET_TOOL, gsheets_tool_delete_sheet),
+                (GSHEETS_READ_TOOL, gsheets_tool_read),
+                (GSHEETS_SET_CELL_TOOL, gsheets_tool_set_cell),
+                (GSHEETS_SET_RANGE_TOOL, gsheets_tool_set_range),
+                (TOOL_GSHEETS_RUN_PYTHON, gsheets_tool_run_python),
+            ];
+
+            for (name, builder) in gsheets_entries {
+                // Skip if the user did not opt in, OR if a `tool_configurations`
+                // entry / earlier `filter_enabled_tools` pass already added it
+                // (dedup by tool name keeps the catalog single-valued).
+                if !wants.contains(name) {
+                    continue;
+                }
+                if tools.iter().any(|t| t.name == name) {
+                    continue;
+                }
+                let td = builder();
+                if lazy_tool_loading {
+                    catalog.push(CatalogEntry {
+                        name: td.name.clone(),
+                        summary: summary_for_catalog(td.summary.as_deref(), &td.description),
+                    });
+                }
+                tools.push(td);
+            }
+        }
+
         // 2.2 Build the final system message. We assemble up to three sections,
         // each emitted only when relevant:
         //   - the user-provided `system_message` (if any),
@@ -1930,6 +2194,25 @@ impl ExecutableNode for LlmNode {
                 .unwrap_or("es-CO");
             let context_block = format_temporal_context_block(tz_str, loc_str, locale_str);
             sections.push(context_block);
+            // CRDT recent-changes auto-context. Append after the temporal
+            // block so the order is: temporal → workbook-changes → user
+            // instructions → tool rules. The helper returns `None` when
+            // there is no session_id, no cursor delta, or no events.
+            if let Some(ctx) = crdt_docs_context.as_ref() {
+                use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
+                    build_recent_changes_block, CRDT_SPREADSHEET_PROTOCOL_PRELUDE,
+                };
+                if let Some(block) = build_recent_changes_block(ctx.as_ref()).await {
+                    sections.push(block);
+                }
+                // CRDT spreadsheet operating manual. Auto-injected so users
+                // can speak naturally ("compará Q3 y Q4") without naming
+                // tools or patterns. ~150 tokens fixed cost; pays back via
+                // fewer iterations on naive prompts. Skills are still
+                // loaded lazily-by-reference for the heavy detail.
+                sections.push(CRDT_SPREADSHEET_PROTOCOL_PRELUDE.to_string());
+                let _ = ctx; // already used above
+            }
             if let Some(sys_msg) = system_message {
                 sections.push(sys_msg.to_string());
             }
@@ -1968,9 +2251,11 @@ impl ExecutableNode for LlmNode {
                     .map(|t| format!("- {}", t.name))
                     .collect();
                 if !tool_names.is_empty() {
+                    // Tools list goes via tools[] JSON; we only nudge usage policy here.
+                    // Trimmed from a 4-bullet ~600-char block to a single line for F-T14.
                     sections.push(format!(
-                        "## Tool Use Instructions\nYou have access to the following tools:\n{}\n\nRules:\n- ALWAYS use the available tools to answer questions that require real or live data. Never answer from your own knowledge when a tool can provide the data.\n- Call the most relevant tool before responding. Do not skip tool calls.\n- If a tool call fails, report the error clearly instead of guessing an answer.\n- Only respond without a tool call when the user's request is purely conversational and no tool is needed.",
-                        tool_names.join("\n")
+                        "## Tools\nAvailable: {}.\nPrefer tools over guessing. Report errors clearly.",
+                        tool_names.iter().map(|t| t.trim_start_matches("- ")).collect::<Vec<_>>().join(", ")
                     ));
                 }
             }
@@ -2448,6 +2733,48 @@ impl ExecutableNode for LlmNode {
             "extra_info": extra_info
         });
 
+        // CRDT cleanup per mode:
+        //   - Local + locally-owned runtime: drain snapshot writers so the
+        //     last mutations land on disk before the tokio runtime tears
+        //     down (writers are detached tokio::spawn tasks).
+        //   - Local + singleton runtime: skip — the singleton is owned by
+        //     the host process and must outlive this call.
+        //   - WsPeer: flush pending outbound updates and close the socket
+        //     cleanly. Without this, the last few CRDT updates queued in
+        //     the channel might not reach the server before the host
+        //     process exits.
+        // Advance the agent's cursor for this artifact so the NEXT turn's
+        // auto-summary block omits events we already saw during this turn.
+        // `max_event_id_observed` is updated by every tool dispatcher after
+        // `backend.record_event()`. We persist it via the same backend so
+        // both Local and WsPeer modes work. Errors are deliberately
+        // swallowed — failing to update the cursor means the next turn
+        // re-shows old events, which is annoying but not fatal.
+        if let Some(ctx) = crdt_docs_context.as_ref() {
+            if let Some(sid) = ctx.session_id() {
+                let max = ctx.max_event_id_observed();
+                if max > 0 {
+                    let _ = ctx
+                        .backend()
+                        .upsert_cursor(sid, ctx.artifact_id(), max)
+                        .await;
+                }
+            }
+        }
+        if let Some(ctx) = crdt_docs_context.as_ref() {
+            if let CrdtDocsContext::Local { runtime, .. } = ctx.as_ref() {
+                let is_shared = crate::crdt_documents::process_runtime::get_global()
+                    .as_ref()
+                    .is_some_and(|shared| Arc::ptr_eq(shared, runtime));
+                if !is_shared {
+                    runtime.shutdown().await;
+                }
+            }
+        }
+        if let Some(mut peer) = crdt_ws_peer_for_shutdown.take() {
+            peer.shutdown().await;
+        }
+
         Ok(final_output)
     }
 
@@ -2550,6 +2877,25 @@ fn list_skill_dirs_sync(path: &str) -> Result<Vec<String>, std::io::Error> {
         }
     }
     Ok(out)
+}
+
+/// Derive the HTTP base URL for the CRDT documents REST API from a
+/// `ws_url` like `ws://host:port/yjs` → `http://host:port`. Mirrors
+/// the conventional pairing (WS at `/yjs`, REST at the root) used by
+/// `crdt_documents::server`. Conservative: if the input doesn't start
+/// with `ws://` or `wss://`, return it unchanged and let the agent
+/// surface HTTP errors when the backend is used.
+fn ws_url_to_http_base(ws_url: &str) -> String {
+    let http = if let Some(rest) = ws_url.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else if let Some(rest) = ws_url.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else {
+        ws_url.to_string()
+    };
+    http.trim_end_matches("/yjs")
+        .trim_end_matches('/')
+        .to_string()
 }
 
 /// Returns the SQLite `connection_url` if the node config declares one
@@ -3858,6 +4204,191 @@ mod filter_enabled_tools_tests {
         let out = filter_enabled_tools(api_explorer_catalog(), Some(&enabled), &configured);
 
         assert!(out.is_empty(), "expected empty result, got {:?}", out);
+    }
+
+    fn build_fake_catalog(names: &[&str]) -> Vec<crate::llm::domain::ToolDefinition> {
+        use crate::llm::domain::tools::{ToolDefinition, ToolParameters};
+        names
+            .iter()
+            .map(|n| {
+                ToolDefinition::new(
+                    n.to_string(),
+                    format!("description of {}", n),
+                    ToolParameters::new(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn package_alias_expands_to_all_tools() {
+        let all_tools = build_fake_catalog(&[
+            "gsheets_create_spreadsheet",
+            "gsheets_create_from_xlsx",
+            "gsheets_export_xlsx",
+            "gsheets_list_sheets",
+            "gsheets_add_sheet",
+            "gsheets_delete_sheet",
+            "gsheets_read",
+            "gsheets_set_cell",
+            "gsheets_set_range",
+            "gsheets_run_python",
+            "tavily_web",
+        ]);
+        let enabled = json!(["gsheets"]);
+        let configured = std::collections::HashSet::new();
+        let filtered = super::filter_enabled_tools(all_tools, Some(&enabled), &configured);
+        assert_eq!(filtered.len(), 10, "gsheets alias must expand to 10 tools");
+        assert!(filtered.iter().all(|t| t.name.starts_with("gsheets_")));
+    }
+
+    #[test]
+    fn package_plus_individual_tool_works() {
+        let all_tools = build_fake_catalog(&[
+            "gsheets_read",
+            "gsheets_set_cell",
+            "gsheets_create_spreadsheet",
+            "gsheets_create_from_xlsx",
+            "gsheets_export_xlsx",
+            "gsheets_list_sheets",
+            "gsheets_add_sheet",
+            "gsheets_delete_sheet",
+            "gsheets_set_range",
+            "gsheets_run_python",
+            "tavily_web",
+        ]);
+        let enabled = json!(["gsheets", "tavily_web"]);
+        let filtered = super::filter_enabled_tools(
+            all_tools,
+            Some(&enabled),
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(filtered.len(), 11);
+    }
+
+    #[test]
+    fn exclusion_removes_tool_from_package() {
+        let all_tools = build_fake_catalog(&[
+            "gsheets_read",
+            "gsheets_delete_sheet",
+            "gsheets_list_sheets",
+            "gsheets_add_sheet",
+            "gsheets_set_cell",
+            "gsheets_set_range",
+            "gsheets_create_spreadsheet",
+            "gsheets_create_from_xlsx",
+            "gsheets_export_xlsx",
+            "gsheets_run_python",
+        ]);
+        let enabled = json!(["gsheets", "!gsheets_delete_sheet"]);
+        let filtered = super::filter_enabled_tools(
+            all_tools,
+            Some(&enabled),
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(filtered.len(), 9);
+        assert!(!filtered.iter().any(|t| t.name == "gsheets_delete_sheet"));
+    }
+
+    #[test]
+    fn exclusion_order_independent() {
+        let all_tools = build_fake_catalog(&[
+            "gsheets_read",
+            "gsheets_delete_sheet",
+            "gsheets_list_sheets",
+            "gsheets_add_sheet",
+            "gsheets_set_cell",
+            "gsheets_set_range",
+            "gsheets_create_spreadsheet",
+            "gsheets_create_from_xlsx",
+            "gsheets_export_xlsx",
+            "gsheets_run_python",
+        ]);
+        let order_a = json!(["gsheets", "!gsheets_read"]);
+        let order_b = json!(["!gsheets_read", "gsheets"]);
+        let configured = std::collections::HashSet::new();
+        let names_a: std::collections::HashSet<String> =
+            super::filter_enabled_tools(all_tools.clone(), Some(&order_a), &configured)
+                .into_iter()
+                .map(|t| t.name)
+                .collect();
+        let names_b: std::collections::HashSet<String> =
+            super::filter_enabled_tools(all_tools, Some(&order_b), &configured)
+                .into_iter()
+                .map(|t| t.name)
+                .collect();
+        assert_eq!(names_a, names_b, "exclusion order must not matter");
+    }
+
+    #[test]
+    fn exclusion_of_package_removes_all_its_tools() {
+        let all_tools = build_fake_catalog(&[
+            "gsheets_read",
+            "gsheets_set_cell",
+            "tavily_web",
+            "current_time",
+            "gsheets_create_spreadsheet",
+            "gsheets_create_from_xlsx",
+            "gsheets_export_xlsx",
+            "gsheets_list_sheets",
+            "gsheets_add_sheet",
+            "gsheets_delete_sheet",
+            "gsheets_set_range",
+            "gsheets_run_python",
+        ]);
+        let enabled = json!(["*", "!gsheets"]);
+        let filtered = super::filter_enabled_tools(
+            all_tools,
+            Some(&enabled),
+            &std::collections::HashSet::new(),
+        );
+        let names: std::collections::HashSet<String> =
+            filtered.into_iter().map(|t| t.name).collect();
+        assert!(!names.iter().any(|n| n.starts_with("gsheets_")));
+        assert!(names.contains("tavily_web"));
+        assert!(names.contains("current_time"));
+    }
+
+    #[test]
+    fn unknown_alias_silently_ignored() {
+        let all_tools = build_fake_catalog(&["gsheets_read", "tavily_web"]);
+        let enabled = json!(["gsheetz"]);
+        let filtered = super::filter_enabled_tools(
+            all_tools,
+            Some(&enabled),
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(
+            filtered.len(),
+            0,
+            "unknown alias produces empty result, no panic"
+        );
+    }
+
+    #[test]
+    fn exact_tool_name_match_still_works_unchanged() {
+        let all_tools = build_fake_catalog(&["gsheets_read", "tavily_web"]);
+        let enabled = json!(["gsheets_read"]);
+        let filtered = super::filter_enabled_tools(
+            all_tools,
+            Some(&enabled),
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "gsheets_read");
+    }
+
+    #[test]
+    fn empty_exclusion_logged_and_ignored() {
+        let all_tools = build_fake_catalog(&["gsheets_read", "tavily_web"]);
+        let enabled = json!(["gsheets_read", "!"]);
+        let filtered = super::filter_enabled_tools(
+            all_tools,
+            Some(&enabled),
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "gsheets_read");
     }
 }
 

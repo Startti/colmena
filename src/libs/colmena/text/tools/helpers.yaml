@@ -1,0 +1,15 @@
+load_skill:
+  summary: Load a markdown skill bundle into the conversation; reveals built-in or user-provided guidance on demand
+  description: |
+    Load a knowledge skill on demand. Call BEFORE responding when relevant. Pass `reference` to load a specific sub-document listed in a skill's index.
+
+    Skills:
+
+load_attachment:
+  summary: Materialize a registered attachment's content (with auto-summary for large files) into the conversation
+  description: "Load a document that has been attached to this conversation. Use this when you need to inspect the contents of a previously uploaded file. Each load attempt is a separate call; pass exactly one document_id per call.\n\n"
+
+recall_history:
+  summary: Re-read the original content of one past message by its turn index
+  description: |
+    Re-read the FULL original content of one past message by its turn index (the [T<n>] in the Conversation summary). Use sparingly — each call re-loads that message into your context.

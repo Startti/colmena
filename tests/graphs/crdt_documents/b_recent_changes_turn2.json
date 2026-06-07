@@ -1,0 +1,34 @@
+{
+  "_comment": "Subsistema B smoke — TURN 2. Mismo agent_session_id que turn1. El prompt asks specifically about changes — si el auto-summary funciona, el agente verá las ediciones que hiciste en el browser entre turnos y las mencionará SIN llamar tools de discovery.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/b-smoke-t2",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "I'm back. Before doing anything, briefly tell me: have you noticed any changes to the workbook since our last turn? If yes, summarize what changed and who made the changes (peer:browser = human, agent:X = another agent). Do NOT call get_recent_changes — answer purely from the context you already have. After that, add a new row to Inventory: 'Banana' Qty=15."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "system_message": "You are a spreadsheet assistant. The user has a workbook open in their browser. Use the crdt_doc_* tools to manipulate it. When the user asks about recent changes, answer from the auto-injected context block (do not call get_recent_changes unless explicitly told to).",
+        "crdt_documents": {
+          "artifact_id": "$DYNAMIC:artifact_id",
+          "ws_url": "ws://127.0.0.1:8090/yjs"
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent",   "to": "log" }
+  ]
+}

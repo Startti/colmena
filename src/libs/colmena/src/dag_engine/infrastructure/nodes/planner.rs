@@ -48,7 +48,7 @@ fn default_planner_schema() -> Value {
 }
 
 /// The default built-in system message included in every PlannerNode call.
-const DEFAULT_PLANNER_SYSTEM_MSG: &str = include_str!("prompts/planner_system.md");
+const DEFAULT_PLANNER_SYSTEM_MSG: &str = include_str!("../../../../text/prompts/planner_system.md");
 
 pub struct PlannerNode {
     task_memory_repo: Option<Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>>,

@@ -59,3 +59,4 @@ Desktop.ini
 *.swp
 *.swo
 *~
+.venv.py39.bak/
