@@ -196,8 +196,8 @@ fn pyobj_to_json(py: Python<'_>, obj: &PyObject) -> PyResult<serde_json::Value> 
     if bound.is_none() {
         return Ok(serde_json::Value::Null);
     }
-    if let Ok(s) = bound.extract::<&str>() {
-        return Ok(serde_json::Value::String(s.to_string()));
+    if let Ok(s) = bound.extract::<String>() {
+        return Ok(serde_json::Value::String(s));
     }
     if let Ok(b) = bound.extract::<bool>() {
         return Ok(serde_json::Value::Bool(b));
