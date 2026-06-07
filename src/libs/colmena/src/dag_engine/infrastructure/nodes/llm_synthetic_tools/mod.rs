@@ -6,6 +6,7 @@ pub mod crdt_doc_run_python;
 pub mod crdt_doc_tools;
 pub mod crdt_summary;
 pub mod describe_tool;
+pub mod diff_writer;
 pub mod document_tools;
 pub mod gsheets_run_python;
 pub mod gsheets_tools;
@@ -13,6 +14,7 @@ pub mod lazy_tools_catalog;
 pub mod load_attachment_tool;
 pub mod load_skill_tool;
 pub mod recall_history;
+pub mod sheet_collision;
 pub mod toolkit_packages;
 
 // ── Shared schema helpers ────────────────────────────────────────────────────
