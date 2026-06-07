@@ -318,7 +318,71 @@
       "resume_answer_format": {
         "format": "Q[<id>]: <question echo>\nA[<id>]: <answer>",
         "description": "Operators (or LLMs) write the answer using Q[<id>]:/A[<id>]: prefixes anchored at line start. The <id> is the config.id of this suspend node. Multi-line answers are preserved between A[<id>]: and the next prefix or end of input. The question echo is for human readability; the parser does not validate it. For choice questions, options are UX suggestions — any free-text answer is accepted. Format is canonical and shared with `secure_suspend`."
-      }
+      },
+      "examples": {
+        "minimal_open": {
+          "description": "Minimal suspend: free-text approval gate between an input and a log.",
+          "graph": {
+            "nodes": {
+              "start": { "type": "input", "config": { "msg": "Procesando..." } },
+              "approval": {
+                "type": "suspend",
+                "config": { "id": "approval", "question": "¿Aprobás continuar?" }
+              },
+              "finish": { "type": "log" }
+            },
+            "edges": [
+              { "from": "start", "to": "approval" },
+              { "from": "approval", "to": "finish" }
+            ]
+          },
+          "resume_answer": "Q[approval]: ¿Aprobás continuar?\nA[approval]: sí"
+        },
+        "choice_with_options": {
+          "description": "Choice question with UX hint options. Free-text answers are still accepted — options are not a whitelist.",
+          "graph": {
+            "nodes": {
+              "pick_env": {
+                "type": "suspend",
+                "config": {
+                  "id": "pick_env",
+                  "question": "¿A qué entorno hacemos deploy?",
+                  "question_type": "choice",
+                  "options": ["staging", "production", "rollback"]
+                }
+              }
+            }
+          },
+          "resume_answer": "Q[pick_env]: ¿A qué entorno hacemos deploy?\nA[pick_env]: production"
+        },
+        "dynamic_question_from_upstream": {
+          "description": "Question generated upstream and injected via edge into the suspend node's `question` input port. Edge value overrides config.question; config.id is unchanged.",
+          "graph": {
+            "nodes": {
+              "build_q": {
+                "type": "python_script",
+                "config": { "code": "output = {'question': f'¿Aprobás la orden {order_id}?'}" }
+              },
+              "approval": {
+                "type": "suspend",
+                "config": { "id": "approval", "question": "Default question (overridden)" }
+              }
+            },
+            "edges": [
+              { "from": "build_q.question", "to": "approval.question" }
+            ]
+          },
+          "resume_answer": "Q[approval]: <ignored echo>\nA[approval]: sí"
+        }
+      },
+      "test_graphs": [
+        { "path": "tests/graphs/basic/test_suspend_manual.json", "what_it_exercises": "Minimal suspend between mock_input and log — smoke test." },
+        { "path": "tests/graphs/basic/suspend_in_subgraph.json", "what_it_exercises": "suspend nested in a subgraph; SUSPENDED bubbles up to parent." },
+        { "path": "tests/graphs/advanced/test_suspend.json", "what_it_exercises": "Approval gate variant between input and log." },
+        { "path": "tests/graphs/advanced/nested_orchestrators_suspend.json", "what_it_exercises": "2 nested orchestrators with suspend in the deepest agent (3-level cascade)." }
+      ],
+      "documentation": "docs/developer_guide/44_suspend_node.md",
+      "related_nodes": ["secure_suspend", "loop_controller", "subgraph", "orchestrator", "router"]
     },
 
     "loop_controller": {

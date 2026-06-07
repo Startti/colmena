@@ -1,3 +1,4 @@
+
 # Cambios recientes — 2026-06
 
 > **Generado:** 2026-06-03 (subsystem B landed)
@@ -503,3 +504,83 @@ Files:
   - Spec: [`docs/superpowers/specs/2026-06-06-sheets-write-safety-design.md`](superpowers/specs/2026-06-06-sheets-write-safety-design.md)
   - Plan: [`docs/superpowers/plans/2026-06-06-sheets-write-safety.md`](superpowers/plans/2026-06-06-sheets-write-safety.md)
   - 12 commits on `feature/docs`: `bdc3fc0` → `2988c5e`.
+
+---
+
+## 12. Suspend `resume_answer` routing fix (Approach B) — from develop
+
+- **Shipped 2026-06-05** (merged into feature/docs via 2026-06-07).
+- **Origin:** reported by ADP 2026-06-04 during HITL testing.
+- **Bug fixed:** `dag_engine` stopped injecting `__colmena_resume_answer`
+  into nodes that were NOT suspended in the persisted snapshot. Fixes
+  the error `llm_call resume: no pending tool call found in
+  conversation history` when a fresh `llm_call` is downstream of a
+  `suspend`, plus the `suspend → suspend` cascade that was failing
+  with `missing answer`. No public API change.
+- **What changed:**
+  - New helper `DagRunUseCase::compute_resuming_node_ids(all_outputs,
+    resume_answer)` returns the `HashSet<String>` of node IDs whose
+    persisted output carries `__colmena_status: "SUSPENDED"`
+    (recursively, so orchestrator/subgraph wrap is honored).
+  - In the main loop of `DagRunUseCase::run`, the set is snapshotted
+    at run start. The `inputs.insert("__colmena_resume_answer", ...)`
+    line is now gated by `if resuming_node_ids.contains(&node_id)`.
+  - `llm.rs`: defensive fallthrough. When `resume_answer` is set but
+    `find_pending_tool_call` returns `None`, log `warn!` and fall
+    through to the fresh-run path instead of erroring with
+    `.ok_or(...)?`. Belt-and-suspenders complement to the engine fix.
+  - 4 unit tests in `resuming_node_ids_tests` mod + integration test
+    `tests/suspend_resume_routing.rs`.
+- **References:**
+  - Spec: [`docs/superpowers/specs/2026-06-05-suspend-resume-answer-routing-fix-design.md`](superpowers/specs/2026-06-05-suspend-resume-answer-routing-fix-design.md)
+  - Plan: [`docs/superpowers/plans/2026-06-05-suspend-resume-answer-routing-fix.md`](superpowers/plans/2026-06-05-suspend-resume-answer-routing-fix.md)
+  - Develop commits: `8eab740`, `af87e4f`, `f9f7242`, `f674204`, `14d466e`.
+
+---
+
+## 13. Gemini non-object tool response wrapping — from develop
+
+- **Shipped 2026-06-01** (merged into feature/docs via 2026-06-07).
+- **Bug fixed:** Gemini's `functionResponse.response` field is typed as
+  `google.protobuf.Struct` and only accepts JSON objects. The previous
+  adapter only wrapped tool content in `{result: ...}` when JSON parse
+  failed. If a tool returned a valid JSON scalar (`output = 5040`,
+  `output = [1,2,3]`, `output = true`, `output = null`), Gemini
+  silently rejected it with `400 INVALID_ARGUMENT` — observable as a
+  Gemini agent dying after one turn with empty result, 0 completion
+  tokens, no error event in the SSE stream.
+- **What changed:**
+  - `gemini_adapter.rs::adapt_messages`: the wrap logic is now a
+    `match` covering all three cases:
+    - `Ok(v) if v.is_object()` → pass through unchanged.
+    - `Ok(v)` (any other valid JSON) → wrap as `{result: v}`.
+    - `Err(_)` (free-form string) → wrap as `{result: <string>}`.
+  - Objects pass through unchanged so callers that already return
+    dicts keep their keys (no double-wrapping).
+  - Regression tests covering scalar number, scalar string, array,
+    bool, null.
+- **Audit:** OpenAI and Anthropic adapters audited clean — they pass
+  tool content as opaque strings, never as raw JSON values.
+- **ADP impact:** wire-format change between Colmena and the Gemini
+  REST API only; never crosses the SSE boundary that ADP consumes.
+- **Verified end-to-end** against the live Gemini API with a
+  `python_script` tool returning `output = 5040`: Gemini now correctly
+  responds "The output is 5040." where it previously went mute.
+- **References:**
+  - Plan: [`docs/superpowers/plans/2026-06-01-gemini-scalar-tool-response-fix.md`](superpowers/plans/2026-06-01-gemini-scalar-tool-response-fix.md)
+  - Develop commits: `b6412a6`, `d99e975`.
+
+---
+
+## 14. HITL email approval demo graph — from develop
+
+- **Shipped 2026-06-06** (merged into feature/docs via 2026-06-07).
+- **What changed:** new graph at
+  [`tests/graphs/basic/suspend_email_approval_demo.json`](../tests/graphs/basic/suspend_email_approval_demo.json)
+  demonstrating `suspend` + `router` for a HITL approval workflow.
+  Companion to subsystem 12 (suspend resume_answer routing fix) —
+  validates the fix via a realistic graph.
+- **Also lands:** `tests/graphs/basic/suspend_cascade.json` and
+  `tests/graphs/basic/suspend_then_llm_resume.json` — canonical
+  smoke graphs that the integration test runs against.
+- **References:** develop commit `772c9f3`.
