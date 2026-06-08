@@ -21,7 +21,7 @@ pip install -e ".[dev]"     # Instala dependencias de desarrollo
 1.  **Fork y Branch**: Crea una rama desde `develop`.
     *   `feature/nombre-funcionalidad`
     *   `fix/descripcion-bug`
-2.  **Conventional Commits**: Es obligatorio seguir el estándar de [Git Hooks y Commits](./09_git_hooks.md). El CI/CD depende de esto para el versionado.
+2.  **Conventional Commits**: Es obligatorio seguir el estándar de [Git Hooks y Commits](./08a_git_hooks.md). El CI/CD depende de esto para el versionado.
 3.  **Calidad de Código**:
     *   **Rust**: Ejecuta `cargo fmt --all` y `cargo clippy -- -D warnings`.
     *   **Python**: Usamos `black` para formato y `ruff` para linting.

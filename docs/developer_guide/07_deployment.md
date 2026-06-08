@@ -56,7 +56,7 @@ El proyecto utiliza workflows automatizados en `.github/workflows/`:
 1.  **`ci-develop.yml`**: Ejecuta tests y linting en cada pull request a `develop`.
 2.  **`ci-staging.yml`**: Pruebas de integración exhaustivas antes de pasar a `main`.
 3.  **`cd-main.yml`**: Orquestador principal de despliegue que realiza:
-    *   **Versionado Automático**: Basado en [Conventional Commits](./09_git_hooks.md).
+    *   **Versionado Automático**: Basado en [Conventional Commits](./08a_git_hooks.md).
     *   **Publicación en PyPI**: Genera wheels para Linux, macOS y Windows.
     *   **Publicación en NPM**: Genera bindings para el ecosistema Node.js.
     *   **GitHub Release**: Crea una release con el changelog generado automáticamente.

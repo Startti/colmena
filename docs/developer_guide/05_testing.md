@@ -311,4 +311,4 @@ Los tests de Python están en `python/tests/` y se ejecutan con:
 .venv/bin/pytest python/ -v
 ```
 
-CI los corre en el matrix de versiones Python 3.8 → 3.12 después de los tests de Rust. Ver [`06_estructura_testing_python.md`](./06_estructura_testing_python.md) para más detalle.
+CI los corre en el matrix de versiones Python 3.8 → 3.12 después de los tests de Rust. Ver [`05a_python_testing.md`](./05a_python_testing.md) para más detalle.

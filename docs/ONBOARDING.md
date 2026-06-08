@@ -151,7 +151,8 @@ Complete Paths 1–3 first — otherwise the architecture references below will 
 8. **[`CLAUDE.md`](../CLAUDE.md)** — skim the conventions sections
    Repo conventions used for AI-assisted contributions; also a useful "current style" reference for humans. Pay attention to the architecture rules, testing conventions, and the `node_schema+fixed` vs `fixed_config` table.
 
-> **Note:** `docs/CODEBASE_TOUR.md` (module-by-module walkthrough, ~30 min) is being authored in T30 and will be linked here once it lands.
+9. **[`docs/CODEBASE_TOUR.md`](./CODEBASE_TOUR.md)** — module-by-module walkthrough (~30 min)
+   Hand-rail of the repo's directory structure, key types per module, and how modules connect. Use it after the architecture overview if you want a guided tour before diving into a specific subsystem.
 
 ---
 

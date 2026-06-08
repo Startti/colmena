@@ -1,52 +1,101 @@
-# 👩‍💻 Guía del Desarrollador - Colmena
+# 👩‍💻 Guía del Desarrollador — Colmena
 
 Esta guía está dirigida a desarrolladores que quieren contribuir, extender o entender en profundidad el funcionamiento de Colmena.
 
-## 📋 Tabla de Contenidos
+Las secciones están organizadas por **tema**, no por orden numérico. Los prefijos numéricos en los nombres de archivo se mantienen por compatibilidad con enlaces existentes, pero la navegación recomendada es la que sigue.
 
-Esta guía se ha dividido en varias secciones para facilitar su consulta.
+---
 
-1.  [**Arquitectura del Proyecto**](./developer_guide/01_architecture.md): Principios de diseño, estructura de directorios y flujo de datos.
-2.  [**Configuración del Entorno**](./developer_guide/02_environment_setup.md): Cómo instalar las herramientas y configurar tu editor.
-3.  [**Convenciones de Código**](./developer_guide/03_coding_conventions.md): Estándares de nombrado, documentación y manejo de errores.
-4.  [**Añadir Nuevos Proveedores**](./developer_guide/04_adding_providers.md): Tutorial paso a paso para extender la librería.
-5.  [**Testing**](./developer_guide/05_testing.md): Estrategia de tests, patrones de mocking y comandos útiles.
-6.  [**Estructura de Testing en Python**](./developer_guide/06_estructura_testing_python.md): Organización y ejecución de la suite de tests Python.
-7.  [**Performance y Optimización**](./developer_guide/06_performance.md): Consejos para medir y mejorar el rendimiento.
-8.  [**Deployment y Distribución**](./developer_guide/07_deployment.md): Proceso de build, CI/CD y publicación.
-9.  [**Cómo Contribuir**](./developer_guide/08_contributing.md): Guía para el proceso de Pull Requests y revisiones de código.
-10. [**Git Hooks**](./developer_guide/09_git_hooks.md): Configuración de Husky y pre-commit hooks.
-11. [**Uso de Herramientas**](./developer_guide/09_tool_calling.md): Configuración y uso de Tool Calling en el DAG.
-12. [**CI/CD Guide**](./developer_guide/10_cicd_guide.md): Detalles del pipeline de integración y despliegue continuo.
-13. [**Branch Protection Rules**](./developer_guide/11_branch_protection_rules.md): Reglas de protección de ramas y flujo de trabajo de Git.
-14. [**Guía del Motor DAG**](./developer_guide/12_dag_engine_guide.md): Detalles técnicos sobre el funcionamiento del motor de grafos.
-15. [**Secure Values y Estrategia de Seguridad**](./developer_guide/13_security_strategy.md): Diseño y manejo de secretos AES-256-GCM. Incluye estrategias por env var, hashing automático de respuestas HTTP, recolección interactiva vía `secure_suspend` (LLM tool o nodo top-level), inyección automática en `inputs` y `config`, y lookup por `agent_session_id` para flujos cross-session (canvas-builder).
-16. [**Deep Dive: Nodo LLM**](./developer_guide/14_llm_deep_dive.md): Parámetros avanzados y capacidades de los modelos de lenguaje.
-17. [**Guía de Memoria y Persistencia**](./developer_guide/15_memory_guide.md): Configuración de SQLite y PostgreSQL para agentes con memoria.
-18. [**Flujo de Datos y Conexiones**](./developer_guide/16_data_flow_guide.md): Detalles sobre cómo se pasan y transforman los datos entre nodos.
-19. [**Referencia Técnica**](./developer_guide/17_technical_reference.md): Esquemas JSON y tipos de datos del sistema.
-20. [**Troubleshooting y Errores Comunes**](./developer_guide/18_troubleshooting.md): Guía para resolver fallos típicos en el engine y bindings.
-21. [**Agentes Anidados y Sub-Grafos**](./developer_guide/19_nested_agents_and_subgraphs.md): El nodo `subgraph`, aislamiento de sesión, propagación HITL y composición modular de agentes.
-22. [**Arquitectura del Orchestrator**](./developer_guide/20_orchestrator_architecture.md): Guía completa del nodo `orchestrator`: fases, bridge tasks, HITL suspend/resume, critic feedback loop y replanning dinámico.
-23. [**Nodo Socket.IO**](./developer_guide/21_socketio_node.md): El nodo `socketio_request`: conexión a servidores Socket.IO, emisión de eventos, modos ack y wait-event, autenticación por cookies y ejemplos de uso como herramienta LLM.
-24. [**Flujo de Ejecución de Tools**](./developer_guide/22_tool_execution_flow.md): Ciclo completo de una tool call LLM — desde `node_schema` hasta la ejecución final del nodo HTTP o Socket.IO, incluyendo parsing, merge de valores fijos con argumentos del LLM, y resolución de variables.
-25. [**Nodo SQL Query**](./developer_guide/23_sql_node.md): El nodo `sql_query`: ejecución de consultas PostgreSQL con control granular de permisos (presets + deny), validación híbrida (reglas estáticas + critic LLM opcional), sandbox schema para funciones, inyección de contexto de BD en tool descriptions, multi-tenant RLS, y reuso de pools vía el `PgPoolRegistry` compartido del `ColmenaEngine`.
-26. [**Skills**](./developer_guide/24_skills.md): Paquetes de conocimiento en markdown cargados bajo demanda por el nodo LLM vía el tool sintético `load_skill`. Skills built-in (compiladas con `include_dir!`) y skills del usuario (paths con allowed-dirs whitelist); catálogo inyectado en la descripción del tool; eventos `skill_loaded` en SSE y `skills_used` en el summary final.
-27. [**Nodos Web**](./developer_guide/25_web_nodes.md): Introducción al runtime de nodos toolkit (`tavily_client`, `api_explorer`, `browser`): expansión de sub-tools, despacho vía `__sub_tool` e integración con `llm_call`. Esqueleto; los specs A/C/B poblan cada sub-sección. Incluye **subida de archivos por multipart** (`http_request` con `Content-Type: multipart/form-data`): interpretación de body fields, streaming de URLs y attachments, límites configurables y ejemplo canónico de KB upload.
-28. [**Nodo Python Script**](./developer_guide/26_python_node.md): El nodo `python_script`: ejecución de código Python (PyO3) con inyección de inputs como variables, convención `output`, stripping de markdown ```python```, sandbox `restricted` (AST whitelist + banned builtins + timeout), modelo de threading (`spawn_blocking` + GIL), reserved keys (`code`, `sandbox_mode`, `sandbox_timeout_secs`), patrones como herramienta LLM (código fijo vs. LLM-genera-código) y troubleshooting.
-29. [**Librería de Documentos**](./developer_guide/27_documents_library.md): `DocumentRuntime` y los nodos `document_create`/`document_edit`/`document_read`: gestión de Office (Excel/Word) con IR JSON como source of truth, patches atómicos versionados, storage pluggable (`localfs` / GCS con CAS), renderizado on-demand vía `rust_xlsxwriter` y `docx-rs`, aislamiento por sesión, y exposición al LLM como 7 tools sintéticos (`document_create`, `document_apply_patch`, `document_read`, `document_get_head`, `document_list_versions`, `document_rollback`, `document_list_my_artifacts`).
-30. [**Archivos grandes vía Files API**](./developer_guide/28_large_files_api.md): Cómo el nodo `llm_call` maneja archivos adjuntos: schema `id`+`url`+`data`+`path`, threshold de 30 MB del emisor, pipe streaming end-to-end (download GCS → upload provider sin bufferizar), cache persistido en Postgres por `(document_id, provider)`, estrategias por proveedor (URL passthrough en imágenes Anthropic+OpenAI, Files API + `file_id` en PDFs, resumable upload de Gemini), trazabilidad con `COLMENA_VERBOSE=1` y límites de producto observados.
-31. [**SSE Events Reference**](./sse_events_reference.md): Referencia completa de todos los eventos que el motor DAG emite sobre el stream SSE: ciclo de vida de nodos, texto (start/delta/end), herramientas, razonamiento, thinking del orchestrator, eventos de subgrafo con prefijo `subgraph-`, skill-loaded, usage-summary y finish.
-32. [**Lazy Tool Loading**](./developer_guide/29_lazy_tool_loading.md): Carga progresiva del schema de tools en `llm_call` vía el tool sintético `describe_tool`. Catálogo ligero `name + summary` inyectado en la descripción del tool; reveal on-demand; `discovered_set` reconstruido del historial; soporte para tools `eager: true` siempre-presentes; eventos `tool-described` en SSE y `tools_discovered` en el summary final.
-33. [**Load Attachment**](./developer_guide/31_load_attachment.md): Documentos on-demand dentro del loop LLM. El LLM ve un catálogo de archivos disponibles en la sesión (scoped por `agent_session_id`) y decide por turno entre **leer** (`load_attachment(document_id)`, contenido efímero D7) o **reenviar sin leer** (`"$attachment:<document_id>"` en args de `http_request` — bytes streameados directo al endpoint, cero tokens de contenido; ideal para subir docs gigantes a un KB sin que el LLM los lea). Flag `attachments_enabled` (default `true`) controla si el nodo expone la tool; **auto-inyección de la mecánica baseline** (prelude `ATTACHMENTS_SYSTEM_PRELUDE` con texto verbatim + catálogo + tool sintética) — el `system_message` del graph author queda libre para la POLÍTICA (cuándo leer vs reenviar), no para repetir la mecánica; orden de ensamblado del system message documentado; `last_used_at` tocado en ambas vías de resolución (D10, fix `e3322ec`); recuperación silenciosa por expiración (Gemini 48h); table `conversation_attachments` y estrategias de source (`signed_url`/`path`/`inline`). **Auto-summary:** cuando `files[]` no trae `description`, el motor genera una descripción de 1 línea con el cheap-tier del provider (Flash/4o-mini/Haiku) en paralelo con el answer call (`tokio::join!` + `JoinSet`); 5 nuevos config fields (`summary_enabled`, `summary_max_chars`, `summary_model`, `summary_timeout_secs`, `summary_max_output_chars`); ~$0.0003 por doc en Gemini Flash; best-effort (failures dejan `description = null`).
-34. [**Database Schema**](./developer_guide/30_database_schema.md): Referencia de las tablas Postgres usadas por el motor (`secure_value_mappings`, `llm_node_history`, `dag_runs`). Patrón compartido `agent_session_id`-first / `session_id`-fallback que habilita continuidad cross-session, queries de operación útiles, y referencias a las migraciones.
-35. [**Temporal & Geographic Context**](./developer_guide/35_temporal_geographic_context.md): Inyección automática de fecha/hora/ubicación/idioma al `system_message` de cada `llm_call`. Tres campos opcionales al root del graph JSON (`timezone` IANA, `location` free-text, `locale` BCP 47) propagan a todos los nodos via `__colmena_*` y el LLM node los renderiza como bloque `## Temporal & Geographic Context` con ISO 8601 (canonical) + human echo + `Timezone/Location/Locale` lines. Defaults: `America/Bogota` / `Bogotá, Colombia` / `es-CO`. Incluye diagrama detallado del pipeline (JSON → struct → inputs → helper → bloque → system message → request al provider), comportamiento ante input inválido, y v1 limitations (timestamp se congela al primer turno).
-36. [**Multimedia Generation**](./developer_guide/32_multimedia_generation.md): Pipeline completo de generación de media (imágenes y audio) + unificación de artifacts. Tres nodos nuevos (`image_generation`: OpenAI gpt-image-1 + Google Vertex Imagen 4; `image_edit`: OpenAI gpt-image-1 multipart; `tts`: OpenAI / ElevenLabs / Google Gemini TTS). Sistema de storage abstraído por trait con 3 adapters (`LocalCache` in-memory para CI, `LocalHttp` axum-on-127.0.0.1 para dev con symmetría URL vs prod, `HttpCallback` para prod (worker pide signed PUT URL a la host application, sube directo a GCS, devuelve signed read URL)). Outputs auto-registrados en `AttachmentRegistry` con `provider: Generated` → `load_attachment` cross-provider lazy upload los hace consumibles desde cualquier provider. `$attachment:<key>` placeholder en `http_request` resuelve a `data:` URI antes del POST (LLM nunca ve bytes). Universal binary scrubber en `DagToolExecutor` impide que echo-responses (httpbin, etc) saturen el contexto. `COLMENA_LOCAL=true|false` env guard rail con startup logging.
-37. [**Attachment GC**](./developer_guide/36_attachment_gc.md): Binario standalone (`attachment_gc`) que limpia filas TTL'd de `conversation_attachments` y sus blobs en `OutputStorageRepository`. Config via env (`COLMENA_ATTACHMENT_TTL_DAYS` default 7, `COLMENA_ATTACHMENT_GC_BATCH_SIZE` default 100) + CLI flags (`--ttl-days`, `--batch-size`, `--dry-run`). Pipeline: storage.delete primero (si falla, preserva la fila para reintento) → registry.delete después. Diseñado para Cloud Scheduler → Cloud Run Job (recipe completa con `gcloud run jobs create` + `gcloud scheduler jobs create`). Requiere endpoint `<base>/internal/gcs/delete` en la host application. Logs estructurados con target `colmena::attachment_gc` y eventos `gc.start`/`gc.end`/`gc.batch.*`/`gc.storage_delete_failed`. Sin rollback — operacional, idempotente.
-38. [**Router & Output Parser**](./developer_guide/37_router_and_output_parser.md): Dos nodos nuevos para casos recurrentes que antes obligaban a chainear nodos genéricos. `output_parser`: wrapper liviano de `information_extraction` con UX para encadenar después de un `llm_call` (single `input` port, schema inline-required, hard-error en empty input). `router`: bifurcación declarativa entre N ramas nombradas, dos modos (`llm_direct` = LLM elige por nombre desde descripciones; `extract_and_route` = LLM extrae JSON + DSL `when` rules con `equals`/`in`/`gt`/`matches`/`exists`/`all`/`any`/`not` + dotted paths). Cada rama puede declarar opcionalmente un `subgraph` inline que se ejecuta antes de emitir por el port. Sin rama default — fail-fast embebe el JSON extraído en el error para diagnóstico. Always-on `__decision` output port para audit trails. Comparten el motor de extracción con `information_extraction` vía `nodes/util/extract_with_schema`.
-39. [**CRDT Documents (v1)**](./developer_guide/38_crdt_documents.md): Workbooks Excel colaborativos en tiempo real sobre `yrs::Doc`. Múltiples humanos + agentes LLM + scripts Python editan simultáneamente con sync vía WebSocket Yjs v1, persistencia snapshot en disco (cada 5s tick + on shutdown), ingesta/exportación de `.xlsx` (calamine in, rust_xlsxwriter out). Expone 6 synthetic tools al LLM (`crdt_doc_list_sheets`, `crdt_doc_read`, `crdt_doc_set_cell`, `crdt_doc_set_range`, `crdt_doc_add_sheet`, `crdt_doc_get_recent_changes`) vía bloque `crdt_documents` en config de `llm_call`. PyO3 bindings (`colmena.documents`) + wrapper `python/colmena_documents/__init__.py` con helpers pandas (read/write_sheet aceptan DataFrames). Frontend integrado con Univer 0.2.10 sobre CDN. ChangeTracker buffer (1000 events/artifact) para narration de diffs. **Coexiste con `documents` (§27)** que sirve flujos one-shot LLM-driven sin tiempo real. **v1 scope: solo Excel + solo valores celulares** — formato visual (fills, fonts, merges) y fórmulas calculadas server-side en [BACKLOG.md](../BACKLOG.md) como v1.1.
-40. [**Toolkit packages**](./developer_guide/40_toolkit_packages.md): Toolkit packages: enable many tools with one alias; exclusion syntax.
-41. [**Built-in Tools Index**](./developer_guide/41_builtin_tools_index.md): Every Rust-native LLM tool with summary and link to detailed docs.
-42. [**Built-in Skills Index**](./developer_guide/42_builtin_skills_index.md): Every built-in skill with one-line description + link to its SKILL.md.
-43. [**Sheets local (CRDT) vs Google Sheets**](./developer_guide/43_sheets_local_vs_gsheets.md): Guía de orientación que compara los dos subsistemas de spreadsheets (CRDT local en `yrs::Doc` vs Google Sheets API): cuándo elegir cuál, el tool surface paralelo de cada uno (10 + 10 synthetic tools), la API de write-back unificada `output_sheets = {name: df | spec_dict}` con los 3 modos (replace/update_in_place/overwrite) y la collision policy compartida (vía módulos shared `sheet_collision.rs` + `diff_writer.rs`). Incluye catálogo de los grafos ejemplo en `tests/graphs/crdt_documents/` (B/C/D/F) y `tests/graphs/agents/gsheets_*` con descripción de qué demuestra cada uno y comandos de ejecución. Patrones canónicos comparados side-by-side (análisis pandas sin pasar filas por el LLM; escribir nuevas tabs derivadas; parchear celdas existentes via `update_in_place`; cruzar dos workbooks distintos). Coexistencia: un mismo `llm_call` puede activar ambos toolsets simultáneamente.
-44. [**Nodo `suspend` (Human-in-the-Loop)**](./developer_guide/44_suspend_node.md): Guía dedicada del nodo `suspend`: modelo mental (mismo nodo se ejecuta 2 veces — primero emite `__colmena_status: SUSPENDED` + `questions[]`, el engine persiste el snapshot en `dag_runs` y termina el stream con `finishReason: suspended`; luego el cliente reinvoca con `--agent-session-id` estable + `--answer` en formato Q/A line-anchored, el engine inyecta `__colmena_resume_answer` y el nodo emite `answer_received`). Cubre config (`id` requerido, `question`, `question_type: open|choice`, `options` como hint UX no whitelist), puertos default (`question` / `answer_received`), formato Q/A canónico compartido con `secure_suspend`, diagrama Mermaid de estados, 6 patrones canónicos (gate de aprobación, routing condicional sobre la respuesta vía `router`, cascada multi-suspend order-independent, suspend dentro de `subgraph` que burbujea al padre, suspend en `orchestrator` anidado, pregunta dinámica desde upstream), referencias a los 4 grafos de prueba existentes con comandos de run/resume usando `--agent-session-id`, troubleshooting de los 7 fallos típicos (`config.id is required`, `invalid id`, `missing answer`, `Session not found`, etc.) y referencias cruzadas a `secure_suspend`, HITL en subgrafos/orchestrators y persistencia en `dag_runs`. Incluye el **fix de routing del resume_answer** (Approach B, shipped 2026-06-05): el engine ahora gatea la inyección de `__colmena_resume_answer` por el SUSPENDED set computado al inicio del run.
+## 1. Empezar aquí
+
+- [**ONBOARDING**](./ONBOARDING.md) — Camino guiado de 0 → primer DAG corriendo (≈30 min).
+- [**Codebase Tour**](./CODEBASE_TOUR.md) — Recorrido módulo a módulo del repo (≈30 min).
+- [**Configuración del Entorno**](./developer_guide/02_environment_setup.md) — Toolchain, editor, dependencias.
+- [**Convenciones de Código**](./developer_guide/03_coding_conventions.md) — Estilo, nombrado, manejo de errores.
+
+## 2. Arquitectura
+
+- [**Architecture Overview**](./developer_guide/00_architecture_overview.md) — Vista de alto nivel: módulos, capas, dependencias.
+- [**Arquitectura Hexagonal**](./developer_guide/01_architecture.md) — Principios Ports & Adapters, estructura de capas, flujo de datos.
+- [**Motor DAG**](./developer_guide/12_dag_engine_guide.md) — Cómo el motor parsea, planifica y ejecuta grafos.
+- [**Flujo de Datos y Conexiones**](./developer_guide/16_data_flow_guide.md) — Cómo se pasan y transforman los datos entre nodos (ports default, `$ref`, `${ENV}`, edge resolution).
+- [**Referencia Técnica**](./developer_guide/17_technical_reference.md) — Esquemas JSON y tipos de datos del sistema.
+- [**Flujo de Ejecución de Tools**](./developer_guide/22_tool_execution_flow.md) — Ciclo completo de una tool call LLM (de `node_schema` a la ejecución del nodo backing).
+
+## 3. Calidad: testing, performance, troubleshooting
+
+- [**Testing**](./developer_guide/05_testing.md) — Estrategia, patrones de mocking, comandos (cargo test --verbose vs --lib, `#[ignore]`, deny-warnings).
+- [**Testing en Python**](./developer_guide/05a_python_testing.md) — Organización y ejecución de la suite de tests Python.
+- [**Performance**](./developer_guide/06a_performance.md) — Cómo medir y optimizar.
+- [**Troubleshooting**](./developer_guide/18_troubleshooting.md) — Errores frecuentes del engine y bindings, con causas y fixes.
+
+## 4. Contribuir, CI/CD, deploy
+
+- [**Cómo Contribuir**](./developer_guide/08_contributing.md) — Pull requests, revisiones, branching.
+- [**Git Hooks**](./developer_guide/08a_git_hooks.md) — Husky, pre-commit, hooks locales.
+- [**CI/CD Guide**](./developer_guide/10_cicd_guide.md) — Pipeline de integración y despliegue continuo.
+- [**Branch Protection**](./developer_guide/11_branch_protection_rules.md) — Reglas de protección de ramas y flujo de trabajo.
+- [**Deployment**](./developer_guide/07_deployment.md) — Proceso de build y publicación.
+
+## 5. LLM y agentes
+
+- [**Añadir Proveedores LLM**](./developer_guide/04_adding_providers.md) — Tutorial paso a paso para extender el módulo LLM.
+- [**Nodo LLM Deep Dive**](./developer_guide/14_llm_deep_dive.md) — Parámetros avanzados, capacidades, configuración exhaustiva.
+- [**Tool Calling**](./developer_guide/09_tool_calling.md) — Configuración y uso de tool calling en el DAG.
+- [**Lazy Tool Loading**](./developer_guide/29_lazy_tool_loading.md) — Catálogo ligero + `describe_tool` para revelar schemas on-demand.
+- [**Load Attachment**](./developer_guide/31_load_attachment.md) — Documentos on-demand dentro del loop LLM (`load_attachment`, `$attachment:<key>`).
+- [**Skills**](./developer_guide/24_skills.md) — Paquetes de conocimiento markdown cargados via `load_skill`.
+- [**Temporal & Geographic Context**](./developer_guide/35_temporal_geographic_context.md) — Inyección automática de fecha/hora/ubicación/locale al `system_message`.
+- [**Subgrafos y agentes anidados**](./developer_guide/19_nested_agents_and_subgraphs.md) — El nodo `subgraph`, aislamiento de sesión, propagación HITL.
+- [**Arquitectura del Orchestrator**](./developer_guide/20_orchestrator_architecture.md) — Fases, bridge tasks, HITL suspend/resume, critic feedback, replanning.
+
+## 6. Seguridad
+
+- [**Estrategia de Seguridad / Secure Values**](./developer_guide/13_security_strategy.md) — AES-256-GCM, `secure_suspend`, masking outbound, sliding TTL, `SECURE_VALUES_KEY` (fail-fast).
+
+## 7. Persistencia y datos
+
+- [**Database Schema**](./developer_guide/30_database_schema.md) — Tablas Postgres, migraciones, índices, patrón `agent_session_id`-first.
+- [**Memoria y Persistencia**](./developer_guide/15_memory_guide.md) — SQLite y PostgreSQL para agentes con memoria conversacional.
+- [**Librería de Documentos**](./developer_guide/27_documents_library.md) — `DocumentRuntime`, `document_*` nodos, IR JSON como source of truth.
+- [**Archivos grandes via Files API**](./developer_guide/28_large_files_api.md) — Streaming, cache `provider_file_cache`, estrategias por proveedor.
+- [**Attachment GC**](./developer_guide/36_attachment_gc.md) — Binario `attachment_gc` que limpia `conversation_attachments` y blobs TTL'd.
+
+## 8. Nodos
+
+- [**Nodo Socket.IO**](./developer_guide/21_socketio_node.md) — `socketio_request`: ack, wait-event, autenticación.
+- [**Nodo SQL Query**](./developer_guide/23_sql_node.md) — Permisos granulares, validación AST + critic opcional, sandbox, RLS, auto-creación de schemas.
+- [**Nodos Web**](./developer_guide/25_web_nodes.md) — `http_request` (incluye multipart streaming), `tavily_client`, `api_explorer`, `browser`.
+- [**Nodo Python Script**](./developer_guide/26_python_node.md) — `python_script`: PyO3, sandbox `restricted`, threading.
+- [**Multimedia Generation**](./developer_guide/32_multimedia_generation.md) — `image_generation`, `image_edit`, `tts`; storage abstracto con 3 adapters.
+- [**Router & Output Parser**](./developer_guide/37_router_and_output_parser.md) — `router` (LLM direct vs extract+rules) y `output_parser` (extracción tipada post-LLM).
+- [**CRDT Documents**](./developer_guide/38_crdt_documents.md) — Workbooks colaborativos en tiempo real sobre `yrs::Doc`.
+- [**Google Sheets**](./developer_guide/39_gsheets.md) — Integración con la Sheets API; lectura/escritura desde grafos.
+- [**Sheets local (CRDT) vs Google Sheets**](./developer_guide/43_sheets_local_vs_gsheets.md) — Comparativa, cuándo elegir cada uno, API write-back unificada.
+- [**Nodo Suspend (HITL)**](./developer_guide/44_suspend_node.md) — `suspend` / `secure_suspend`, formato Q/A, resume, patrones canónicos.
+
+## 9. Tools y skills (catálogos y referencias)
+
+- [**Toolkit Packages**](./developer_guide/40_toolkit_packages.md) — Activar muchas tools con un alias; sintaxis de exclusión.
+- [**Built-in Tools Index**](./developer_guide/41_builtin_tools_index.md) — Cada tool LLM Rust-native con summary y link a su doc detallada.
+- [**Built-in Skills Index**](./developer_guide/42_builtin_skills_index.md) — Cada SKILL.md compilada en el binary, con descripción y link.
+
+## 10. Reference de eventos y configuración
+
+- [**SSE Events Reference**](./sse_events_reference.md) — Todos los eventos que el motor DAG emite sobre el stream SSE.
+- [**Node Configurations (JSON canon)**](./node_configurations.json) — Schema canónico de cada nodo (campos, tipos, defaults).
+- [**Node as Tools Reference (JSON)**](./node_as_tools_reference.json) — Cómo configurar nodos como tools LLM (`tool_configurations`, `node_schema`, `expose_sub_tools`, ejemplos por tipo).
+- [**Node Ports Reference**](./agent_context/node_ports_reference.md) — Puertos default (`default_input`/`default_output`) y outputs por tipo de nodo.
+
+## 11. Diseño (DDS) y backlog
+
+- [**Arquitectura Hexagonal** (DD)](./dds/ARQUITECTURA_HEXAGONAL_GUIA.md) — Diseño Ports & Adapters.
+- [**DAG Engine** (DD)](./dds/DAG_ENGINE_DISEÑO.md) — Diseño del motor de grafos.
+- [**Secure Values** (DD)](./dds/SECURE_VALUES_DISEÑO.md) — Diseño de la encriptación de secretos.
+- [**Variable Resolution** (DD)](./dds/VARIABLE_RESOLUTION_DISEÑO.md) — Diseño de resolución de `$ref`, `${ENV}`, `$DYNAMIC`.
+- [**BACKLOG**](./BACKLOG.md) — Items pendientes y descartados.
+- [**CHANGELOG 2026-05**](./CHANGELOG_2026-05.md), [**CHANGELOG 2026-06**](./CHANGELOG_2026-06.md) — Historial reciente de cambios.
+
+---
+
+> **Mantenimiento:** Cuando agregues una nueva guía, añadila a la sección temática correspondiente arriba. No es necesario respetar la secuencia numérica de los nombres de archivo — los números son legacy.

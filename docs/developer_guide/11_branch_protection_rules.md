@@ -440,7 +440,7 @@ If you have existing classic branch protection rules:
 ## Related Documentation
 
 - [CI/CD Guide](./10_cicd_guide.md)
-- [Git Hooks Guide](./09_git_hooks.md)
+- [Git Hooks Guide](./08a_git_hooks.md)
 - [Contributing Guide](./08_contributing.md)
 
 ---

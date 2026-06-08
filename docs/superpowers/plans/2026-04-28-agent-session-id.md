@@ -76,7 +76,7 @@
 | 23 | API | Update `api.rs` HTTP `X-Agent-Session-Id` header + body field, extend `run_dag` |
 | 24 | Bindings | Forward optional `agent_session_id` in node + python bindings |
 | 25 | Tests | End-to-end integration tests covering lifecycle branches |
-| 26 | Docs | Update `database_schema.md`, `15_memory_guide.md`, `19_nested_agents_and_subgraphs.md` |
+| 26 | Docs | Update `30_database_schema.md`, `15_memory_guide.md`, `19_nested_agents_and_subgraphs.md` |
 
 ---
 
@@ -2645,7 +2645,7 @@ git commit -m "test(engine): lifecycle integration tests for agent_session_id"
 - Modify: `docs/developer_guide/15_memory_guide.md`
 - Modify: `docs/developer_guide/19_nested_agents_and_subgraphs.md`
 
-- [ ] **Step 1: `database_schema.md` — document new columns**
+- [ ] **Step 1: `30_database_schema.md` — document new columns**
 
 Find the `dag_runs` section. Add two rows to the column table for `agent_session_id` (VARCHAR(255), YES, "Chat handle…") and `parent_session_id` (VARCHAR(255), YES, "Immediate parent run…"). Add new indexes to the indexes list.
 
