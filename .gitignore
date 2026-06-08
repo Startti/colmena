@@ -39,6 +39,10 @@ dist/
 .worktrees/
 colmena_memory.db
 
+# Runtime data created by the engine at graph-execution time
+# (CRDT document snapshots, document library storage root, etc.)
+.colmena/
+
 # macOS
 .DS_Store
 **/.DS_Store
