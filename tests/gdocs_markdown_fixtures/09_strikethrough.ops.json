@@ -1,0 +1,37 @@
+{
+  "requests": [
+    {
+      "insertText": {
+        "location": {
+          "index": 1
+        },
+        "text": "A struck word.\n"
+      }
+    },
+    {
+      "updateParagraphStyle": {
+        "range": {
+          "startIndex": 1,
+          "endIndex": 16
+        },
+        "paragraphStyle": {
+          "namedStyleType": "NORMAL_TEXT"
+        },
+        "fields": "namedStyleType"
+      }
+    },
+    {
+      "updateTextStyle": {
+        "range": {
+          "startIndex": 3,
+          "endIndex": 9
+        },
+        "textStyle": {
+          "strikethrough": true
+        },
+        "fields": "strikethrough"
+      }
+    }
+  ],
+  "lossy": []
+}

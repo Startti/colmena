@@ -751,6 +751,7 @@ dependencies = [
  "once_cell",
  "parking_lot",
  "pdf-extract",
+ "pulldown-cmark",
  "pyo3",
  "pyo3-asyncio-0-21",
  "pythonize",
@@ -3468,6 +3469,17 @@ checksum = "645dbe486e346d9b5de3ef16ede18c26e6c70ad97418f4874b8b1889d6e761ea"
 dependencies = [
  "ar_archive_writer",
  "cc",
+]
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76979bea66e7875e7509c4ec5300112b316af87fa7a252ca91c448b32dfe3993"
+dependencies = [
+ "bitflags 2.11.1",
+ "memchr",
+ "unicase",
 ]
 
 [[package]]

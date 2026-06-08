@@ -1,0 +1,30 @@
+{
+  "requests": [
+    {
+      "insertText": {
+        "location": {
+          "index": 1
+        },
+        "text": "Body text.\n"
+      }
+    },
+    {
+      "updateParagraphStyle": {
+        "range": {
+          "startIndex": 1,
+          "endIndex": 12
+        },
+        "paragraphStyle": {
+          "namedStyleType": "NORMAL_TEXT"
+        },
+        "fields": "namedStyleType"
+      }
+    }
+  ],
+  "lossy": [
+    {
+      "element_type": "footnote",
+      "original_markdown": "[^1]"
+    }
+  ]
+}

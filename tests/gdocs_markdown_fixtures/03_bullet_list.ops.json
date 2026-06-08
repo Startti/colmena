@@ -1,0 +1,92 @@
+{
+  "requests": [
+    {
+      "insertText": {
+        "location": {
+          "index": 1
+        },
+        "text": "alpha\n"
+      }
+    },
+    {
+      "updateParagraphStyle": {
+        "range": {
+          "startIndex": 1,
+          "endIndex": 7
+        },
+        "paragraphStyle": {
+          "namedStyleType": "NORMAL_TEXT"
+        },
+        "fields": "namedStyleType"
+      }
+    },
+    {
+      "createParagraphBullets": {
+        "range": {
+          "startIndex": 1,
+          "endIndex": 7
+        },
+        "bulletPreset": "BULLET_DISC_CIRCLE_SQUARE"
+      }
+    },
+    {
+      "insertText": {
+        "location": {
+          "index": 7
+        },
+        "text": "beta\n"
+      }
+    },
+    {
+      "updateParagraphStyle": {
+        "range": {
+          "startIndex": 7,
+          "endIndex": 12
+        },
+        "paragraphStyle": {
+          "namedStyleType": "NORMAL_TEXT"
+        },
+        "fields": "namedStyleType"
+      }
+    },
+    {
+      "createParagraphBullets": {
+        "range": {
+          "startIndex": 7,
+          "endIndex": 12
+        },
+        "bulletPreset": "BULLET_DISC_CIRCLE_SQUARE"
+      }
+    },
+    {
+      "insertText": {
+        "location": {
+          "index": 12
+        },
+        "text": "gamma\n"
+      }
+    },
+    {
+      "updateParagraphStyle": {
+        "range": {
+          "startIndex": 12,
+          "endIndex": 18
+        },
+        "paragraphStyle": {
+          "namedStyleType": "NORMAL_TEXT"
+        },
+        "fields": "namedStyleType"
+      }
+    },
+    {
+      "createParagraphBullets": {
+        "range": {
+          "startIndex": 12,
+          "endIndex": 18
+        },
+        "bulletPreset": "BULLET_DISC_CIRCLE_SQUARE"
+      }
+    }
+  ],
+  "lossy": []
+}

@@ -1,0 +1,45 @@
+{
+  "requests": [
+    {
+      "insertText": {
+        "location": {
+          "index": 1
+        },
+        "text": "Título\n"
+      }
+    },
+    {
+      "updateParagraphStyle": {
+        "range": {
+          "startIndex": 1,
+          "endIndex": 8
+        },
+        "paragraphStyle": {
+          "namedStyleType": "HEADING_1"
+        },
+        "fields": "namedStyleType"
+      }
+    },
+    {
+      "insertText": {
+        "location": {
+          "index": 8
+        },
+        "text": "Texto del párrafo.\n"
+      }
+    },
+    {
+      "updateParagraphStyle": {
+        "range": {
+          "startIndex": 8,
+          "endIndex": 27
+        },
+        "paragraphStyle": {
+          "namedStyleType": "NORMAL_TEXT"
+        },
+        "fields": "namedStyleType"
+      }
+    }
+  ],
+  "lossy": []
+}

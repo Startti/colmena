@@ -1,0 +1,63 @@
+{
+  "requests": [
+    {
+      "insertText": {
+        "location": {
+          "index": 1
+        },
+        "text": "A bold and italic word, then a link.\n"
+      }
+    },
+    {
+      "updateParagraphStyle": {
+        "range": {
+          "startIndex": 1,
+          "endIndex": 38
+        },
+        "paragraphStyle": {
+          "namedStyleType": "NORMAL_TEXT"
+        },
+        "fields": "namedStyleType"
+      }
+    },
+    {
+      "updateTextStyle": {
+        "range": {
+          "startIndex": 3,
+          "endIndex": 7
+        },
+        "textStyle": {
+          "bold": true
+        },
+        "fields": "bold"
+      }
+    },
+    {
+      "updateTextStyle": {
+        "range": {
+          "startIndex": 12,
+          "endIndex": 18
+        },
+        "textStyle": {
+          "italic": true
+        },
+        "fields": "italic"
+      }
+    },
+    {
+      "updateTextStyle": {
+        "range": {
+          "startIndex": 32,
+          "endIndex": 36
+        },
+        "textStyle": {
+          "link": {
+            "url": "https://example.com"
+          }
+        },
+        "fields": "link"
+      }
+    }
+  ],
+  "lossy": []
+}

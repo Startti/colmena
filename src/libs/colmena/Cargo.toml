@@ -137,6 +137,9 @@ urlencoding = "2"
 # Text diffing (gdocs co-edit guard — paragraph-level diff).
 similar = "2"
 
+# Markdown parsing (gdocs markdown → batchUpdate ops converter).
+pulldown-cmark = { version = "0.10", default-features = false }
+
 [features]
 default = []
 python = ["pyo3-asyncio-0-21"]

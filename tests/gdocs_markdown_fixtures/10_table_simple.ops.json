@@ -1,0 +1,86 @@
+{
+  "requests": [
+    {
+      "insertTable": {
+        "location": {
+          "index": 1
+        },
+        "rows": 3,
+        "columns": 2
+      }
+    },
+    {
+      "insertText": {
+        "tableCellLocation": {
+          "tableStartLocation": {
+            "index": 1
+          },
+          "rowIndex": 0,
+          "columnIndex": 0
+        },
+        "text": "H1"
+      }
+    },
+    {
+      "insertText": {
+        "tableCellLocation": {
+          "tableStartLocation": {
+            "index": 1
+          },
+          "rowIndex": 0,
+          "columnIndex": 1
+        },
+        "text": "H2"
+      }
+    },
+    {
+      "insertText": {
+        "tableCellLocation": {
+          "tableStartLocation": {
+            "index": 1
+          },
+          "rowIndex": 1,
+          "columnIndex": 0
+        },
+        "text": "a"
+      }
+    },
+    {
+      "insertText": {
+        "tableCellLocation": {
+          "tableStartLocation": {
+            "index": 1
+          },
+          "rowIndex": 1,
+          "columnIndex": 1
+        },
+        "text": "b"
+      }
+    },
+    {
+      "insertText": {
+        "tableCellLocation": {
+          "tableStartLocation": {
+            "index": 1
+          },
+          "rowIndex": 2,
+          "columnIndex": 0
+        },
+        "text": "c"
+      }
+    },
+    {
+      "insertText": {
+        "tableCellLocation": {
+          "tableStartLocation": {
+            "index": 1
+          },
+          "rowIndex": 2,
+          "columnIndex": 1
+        },
+        "text": "d"
+      }
+    }
+  ],
+  "lossy": []
+}

@@ -13,6 +13,7 @@ pub mod gsheets_tools;
 pub mod lazy_tools_catalog;
 pub mod load_attachment_tool;
 pub mod load_skill_tool;
+pub mod markdown_to_docs_ops;
 pub mod recall_history;
 pub mod sheet_collision;
 pub mod toolkit_packages;

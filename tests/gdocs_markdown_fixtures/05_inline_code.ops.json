@@ -1,0 +1,39 @@
+{
+  "requests": [
+    {
+      "insertText": {
+        "location": {
+          "index": 1
+        },
+        "text": "Use fn main() to start.\n"
+      }
+    },
+    {
+      "updateParagraphStyle": {
+        "range": {
+          "startIndex": 1,
+          "endIndex": 25
+        },
+        "paragraphStyle": {
+          "namedStyleType": "NORMAL_TEXT"
+        },
+        "fields": "namedStyleType"
+      }
+    },
+    {
+      "updateTextStyle": {
+        "range": {
+          "startIndex": 5,
+          "endIndex": 14
+        },
+        "textStyle": {
+          "weightedFontFamily": {
+            "fontFamily": "Roboto Mono"
+          }
+        },
+        "fields": "weightedFontFamily"
+      }
+    }
+  ],
+  "lossy": []
+}
