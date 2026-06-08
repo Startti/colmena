@@ -35,10 +35,25 @@ src/libs/colmena/src/
 │   ├── domain/             — OutputStorageRepository trait, StorageError
 │   └── infrastructure/     — LocalCache, LocalHttp, HttpCallback adapters
 │
-├── documents/              — Word/Excel document library
+├── documents/              — Word/Excel document library (one-shot, IR-based)
 │   ├── domain/             — IR (Intermediate Representation), patch, ports
 │   ├── application/        — DocumentRuntime, use cases (apply_patch, create, read…)
 │   └── infrastructure/     — renderers (xlsx, docx), storage (local/GCS), validators
+│
+├── crdt_documents/         — collaborative real-time workbooks over `yrs::Doc` (flat layout — not hexagonal)
+│   ├── runtime.rs          — central CRDT runtime + per-doc actors
+│   ├── crdt_backend.rs     — `yrs::Doc` storage adapter
+│   ├── yjs_protocol.rs     — Yjs WebSocket v1 protocol (sync + awareness)
+│   ├── ws_peer.rs / server.rs — `axum` WebSocket server endpoint
+│   ├── xlsx_import.rs / xlsx_export.rs — calamine in, rust_xlsxwriter out
+│   ├── snapshot_writer.rs  — persistence tick (5s + on shutdown)
+│   ├── change_tracker.rs   — ring buffer of per-artifact change events for narration
+│   ├── tool_executor.rs    — backing for the 6 `crdt_doc_*` LLM synthetic tools
+│   └── ...                 — formula_engine, projection, df_writer, narration, etc.
+│
+├── gsheets/                — Google Sheets API integration (read + diff-write)
+│   ├── domain/             — sheet handle, spec, errors, ports
+│   └── infrastructure/     — http_client (Sheets v4), batchUpdate, OAuth via yup_oauth2
 │
 ├── web/                    — web/HTTP toolkit nodes (api_explorer, tavily_client)
 │   ├── domain/             — ApiSpecPort, SearchPort, SessionRegistry, errors
@@ -127,11 +142,11 @@ The core of the system. Everything that takes a `graph.json`, resolves its topol
 
 | File | Node type(s) | Notes |
 |------|-------------|-------|
-| `math.rs` | `add`, `subtract`, `multiply`, `divide` | Simplest nodes — good copy template |
-| `trigger.rs` | `trigger` | Entry point for graph execution |
+| `math.rs` | `add`, `subtract`, `multiply`, `divide`, `exponential` | Simplest nodes — good copy template |
+| `trigger.rs` | `trigger`, `trigger_webhook` | Entry points for graph execution |
 | `input.rs` | `input` | Injects the `inject_payload` value |
-| `output.rs` | `output` | Passes through final output |
-| `debug.rs` | `debug` | Logs inputs and passes through |
+| `output.rs` | `output` | Marks the terminal node of a graph/subgraph |
+| `debug.rs` | `log`, `mock_input` | `log`: logs inputs and passes through; `mock_input`: emits its raw config as the root data object (test fixture) |
 | `current_time.rs` | `current_time` | ISO 8601 timestamp node |
 | `llm.rs` | `llm_call` | Full LLM node: builds AgentService, wires tools, synthetic tools, skills, lazy loading |
 | `http.rs` | `http_request` | HTTP client, multipart, `$attachment:` placeholder |
@@ -146,16 +161,30 @@ The core of the system. Everything that takes a `graph.json`, resolves its topol
 | `secure_suspend.rs` | `secure_suspend` | Like suspend but collects secrets (never logs them) |
 | `subgraph.rs` | `subgraph` | Recursively runs a nested graph |
 | `extraction.rs` | `extraction` | Structured data extraction via LLM |
+| `output_parser.rs` | `output_parser` | Lightweight wrapper around `extraction` for the common "parse last LLM message into typed JSON" pattern |
+| `router/` | `router` | Declarative branching: `llm_direct` (LLM picks branch by name) or `extract_and_route` (LLM extracts JSON + `when` DSL rules); always-on `__decision` audit port |
 | `loop_controller.rs` | `loop_controller` | DAG looping primitive |
 | `task_memory_writer.rs` | `task_memory_writer` | Writes to `DagTaskMemoryRepository` |
 | `image_generation.rs` | `image_generation` | OpenAI / Vertex Imagen 4 image synthesis |
 | `image_edit.rs` | `image_edit` | OpenAI image edit (multipart) |
 | `tts.rs` | `tts` | TTS via OpenAI / ElevenLabs / Google Gemini |
-| `api_explorer.rs` | `api_explorer` | OpenAPI toolkit (5 sub-tools) |
-| `tavily_client.rs` | `tavily_client` | Web search toolkit |
-| `echo_toolkit.rs` | `echo_toolkit` | Dev/testing toolkit |
+| `api_explorer.rs` | `api_explorer` | OpenAPI toolkit (5 sub-tools); registered as toolkit |
+| `tavily_client.rs` | `tavily_client` | Web search toolkit; registered as toolkit |
 | `document_nodes.rs` | `document_create`, `document_edit`, `document_read` | Office document nodes |
 | `qa_response_parser.rs` | (shared) | Parses the ID-keyed `Q[id]: A[id]:` resume format |
+
+**Test-only fixtures** (intentionally **not** registered in `HashMapNodeRegistry`; used only by unit tests that construct them directly or via `register_toolkit_node`):
+
+| File | Purpose |
+|------|---------|
+| `echo_toolkit.rs` | Stub `ToolkitNode` exposing `echo` and `double` sub-tools so the toolkit dispatcher (`__sub_tool`) can be exercised without depending on `tavily_client`/`api_explorer`. Do **not** reference `"type": "echo_toolkit"` from a graph JSON — it will fail with "node type not found". |
+
+**Supporting modules** (no node type — shared utilities used by the nodes above):
+
+| Path | Purpose |
+|------|---------|
+| `util/` | Shared helpers: `extract_with_schema` (used by `extraction`, `output_parser`, `router`), `inline_schema`, `attachment_id` |
+| `llm_synthetic_tools/` | Built-in LLM tools injected by `llm_call`: `describe_tool`, `document_tools`, `crdt_doc_tools`, `gsheets_tools`, `crdt_summary` |
 
 **Key files to know:**
 
