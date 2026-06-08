@@ -134,6 +134,9 @@ yup-oauth2 = "11"
 # URL percent-encoding for Sheets API range params (Sheet1!A1:B2 → Sheet1%21A1%3AB2).
 urlencoding = "2"
 
+# Text diffing (gdocs co-edit guard — paragraph-level diff).
+similar = "2"
+
 [features]
 default = []
 python = ["pyo3-asyncio-0-21"]
