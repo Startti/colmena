@@ -257,6 +257,77 @@ fn paragraph_text_and_range(
     (trimmed, start, end)
 }
 
+/// Recursively flatten Google's nested `tabs[].childTabs[]` structure
+/// into a single `Vec<TabMeta>` in pre-order, with `index` reflecting
+/// the position in that flat sequence.
+fn walk_tabs(
+    arr: &[serde_json::Value],
+    parent: Option<TabId>,
+    out: &mut Vec<TabMeta>,
+    idx: &mut u32,
+) {
+    for t in arr {
+        let props = t
+            .get("tabProperties")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let tab_id = TabId(
+            props
+                .get("tabId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        );
+        let title = props
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        out.push(TabMeta {
+            tab_id: tab_id.clone(),
+            title,
+            index: *idx,
+            parent_tab_id: parent.clone(),
+        });
+        *idx += 1;
+        if let Some(children) = t.get("childTabs").and_then(|v| v.as_array()) {
+            walk_tabs(children, Some(tab_id), out, idx);
+        }
+    }
+}
+
+/// Map a (segment-relative) UTF-16 index range to a 1-based paragraph
+/// range against the FIRST tab of the snapshot. Multi-tab named ranges
+/// are out of scope for v1 — operators can call `read_outline` to
+/// inspect named ranges across tabs.
+fn map_index_range_to_paragraphs(snap: &DocumentSnapshot, s: u32, e: u32) -> (u32, u32) {
+    let mut ps = 0u32;
+    let mut pe = 0u32;
+    if let Some(tab) = snap.tabs.first() {
+        for p in &tab.paragraphs {
+            if ps == 0 && p.start_index <= s && s < p.end_index {
+                ps = p.n;
+            }
+            if p.start_index < e && e <= p.end_index {
+                pe = p.n;
+                break;
+            }
+        }
+    }
+    if ps == 0 {
+        ps = snap
+            .tabs
+            .first()
+            .and_then(|t| t.paragraphs.first())
+            .map(|p| p.n)
+            .unwrap_or(1);
+    }
+    if pe == 0 {
+        pe = ps;
+    }
+    (ps, pe)
+}
+
 // ── DocsClient impl ────────────────────────────────────────────────
 //
 // Only `get` is real in Task 9. Every other trait method has a
@@ -327,29 +398,129 @@ impl DocsClient for GoogleDocsHttpClient {
 
     async fn read_as_markdown(
         &self,
-        _id: &DocumentId,
-        _tab_id: Option<&TabId>,
+        id: &DocumentId,
+        tab_id: Option<&TabId>,
     ) -> Result<String, DocsError> {
-        todo!("filled by Task 11")
+        // Drive export → text/markdown. v1 returns the full export; tab
+        // slicing is deferred (Drive's export joins all tabs). When the
+        // caller wants a single tab's content, the application layer can
+        // intersect against the snapshot from `get`.
+        let _ = tab_id;
+        let url = format!(
+            "{}/files/{}/export?mimeType=text/markdown",
+            self.base_drive, id.0
+        );
+        let resp = self
+            .send_with_retry(|c, t| c.request(Method::GET, &url).bearer_auth(t))
+            .await?;
+        let resp = self
+            .map_status(resp, &format!("export markdown {}", id.0))
+            .await?;
+        resp.text()
+            .await
+            .map_err(|e| DocsError::Http(format!("export text: {e}")))
     }
 
     async fn read_outline(
         &self,
-        _id: &DocumentId,
-        _tab_id: Option<&TabId>,
+        id: &DocumentId,
+        tab_id: Option<&TabId>,
     ) -> Result<Vec<OutlineEntry>, DocsError> {
-        todo!("filled by Task 11")
+        let snap = self.get(id).await?;
+        let mut out = Vec::new();
+        for tab in &snap.tabs {
+            if let Some(want) = tab_id {
+                if tab.tab_id.as_ref() != Some(want) {
+                    continue;
+                }
+            }
+            for p in &tab.paragraphs {
+                let preview: String = p.text.chars().take(80).collect();
+                out.push(OutlineEntry {
+                    paragraph: p.n,
+                    tab_id: tab.tab_id.clone(),
+                    kind: p.kind,
+                    text_preview: preview,
+                });
+            }
+        }
+        Ok(out)
     }
 
     async fn list_named_ranges(
         &self,
-        _id: &DocumentId,
+        id: &DocumentId,
     ) -> Result<Vec<NamedRangeMeta>, DocsError> {
-        todo!("filled by Task 11")
+        // Need the snapshot to map index-ranges to paragraph numbers.
+        let snap = self.get(id).await?;
+        // Drive's `documents.get` with `fields=namedRanges` gives just the
+        // named-range payload without the body content — cheaper than
+        // re-fetching the full tree.
+        let url = format!("{}/documents/{}?fields=namedRanges", self.base_docs, id.0);
+        let resp = self
+            .send_with_retry(|c, t| c.request(Method::GET, &url).bearer_auth(t))
+            .await?;
+        let resp = self
+            .map_status(resp, &format!("named_ranges {}", id.0))
+            .await?;
+        let j: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| DocsError::Http(format!("named_ranges json: {e}")))?;
+        let mut out = Vec::new();
+        if let Some(map) = j.get("namedRanges").and_then(|v| v.as_object()) {
+            for (name, group) in map {
+                if let Some(ranges) = group.get("namedRanges").and_then(|v| v.as_array()) {
+                    for r in ranges {
+                        let id_s = r
+                            .get("namedRangeId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let nr = r
+                            .get("ranges")
+                            .and_then(|v| v.as_array())
+                            .and_then(|a| a.first())
+                            .cloned()
+                            .unwrap_or_default();
+                        let start =
+                            nr.get("startIndex").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                        let end = nr.get("endIndex").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                        let (ps, pe) = map_index_range_to_paragraphs(&snap, start, end);
+                        out.push(NamedRangeMeta {
+                            named_range_id: id_s,
+                            name: name.clone(),
+                            paragraph_start: ps,
+                            paragraph_end: pe,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
-    async fn list_tabs(&self, _id: &DocumentId) -> Result<Vec<TabMeta>, DocsError> {
-        todo!("filled by Task 11")
+    async fn list_tabs(&self, id: &DocumentId) -> Result<Vec<TabMeta>, DocsError> {
+        let url = format!(
+            "{}/documents/{}?includeTabsContent=false",
+            self.base_docs, id.0
+        );
+        let resp = self
+            .send_with_retry(|c, t| c.request(Method::GET, &url).bearer_auth(t))
+            .await?;
+        let resp = self
+            .map_status(resp, &format!("list_tabs {}", id.0))
+            .await?;
+        let j: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| DocsError::Http(format!("list_tabs json: {e}")))?;
+        let mut out = Vec::new();
+        let mut idx: u32 = 0;
+        if let Some(arr) = j.get("tabs").and_then(|v| v.as_array()) {
+            walk_tabs(arr, None, &mut out, &mut idx);
+        }
+        Ok(out)
     }
 
     async fn list_revisions_since(
@@ -698,5 +869,90 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(txt, "Hello\nworld\n");
+    }
+
+    #[tokio::test]
+    async fn read_as_markdown_returns_export() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/files/doc1/export"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("# Hello\n\nWorld\n"))
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+        client.tokens.set_token_for_test("fake".to_string()).await;
+        let md = client
+            .read_as_markdown(&DocumentId("doc1".into()), None)
+            .await
+            .unwrap();
+        assert!(md.contains("Hello"));
+    }
+
+    #[tokio::test]
+    async fn read_outline_filters_by_tab() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/docs/documents/doc1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "title": "t", "revisionId": "r",
+                "tabs": [
+                    {"tabProperties": {"tabId": "t1", "title": "A"},
+                     "documentTab": {"body": {"content": [
+                        {"startIndex": 1, "endIndex": 5,
+                         "paragraph": {"elements": [{"textRun": {"content": "in A\n"}}],
+                                       "paragraphStyle": {"namedStyleType": "HEADING_1"}}}
+                     ]}}},
+                    {"tabProperties": {"tabId": "t2", "title": "B"},
+                     "documentTab": {"body": {"content": [
+                        {"startIndex": 1, "endIndex": 5,
+                         "paragraph": {"elements": [{"textRun": {"content": "in B\n"}}]}}
+                     ]}}}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+        client.tokens.set_token_for_test("fake".to_string()).await;
+        let only_a = client
+            .read_outline(&DocumentId("doc1".into()), Some(&TabId("t1".into())))
+            .await
+            .unwrap();
+        assert_eq!(only_a.len(), 1);
+        assert_eq!(only_a[0].kind, ParagraphKind::Heading1);
+        assert_eq!(only_a[0].text_preview, "in A");
+
+        let all = client
+            .read_outline(&DocumentId("doc1".into()), None)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_tabs_flattens_child_tabs() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/docs/documents/doc1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "title": "t", "revisionId": "r",
+                "tabs": [
+                    {"tabProperties": {"tabId": "t1", "title": "Top1"},
+                     "childTabs": [
+                        {"tabProperties": {"tabId": "t1a", "title": "Top1.A"}}
+                     ]},
+                    {"tabProperties": {"tabId": "t2", "title": "Top2"}}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+        client.tokens.set_token_for_test("fake".to_string()).await;
+        let tabs = client.list_tabs(&DocumentId("doc1".into())).await.unwrap();
+        assert_eq!(tabs.len(), 3);
+        assert_eq!(tabs[0].tab_id.0, "t1");
+        assert!(tabs[0].parent_tab_id.is_none());
+        assert_eq!(tabs[1].tab_id.0, "t1a");
+        assert_eq!(tabs[1].parent_tab_id.as_ref().unwrap().0, "t1");
+        assert_eq!(tabs[2].tab_id.0, "t2");
     }
 }
