@@ -1,8 +1,10 @@
 //! Domain layer — port + value types + errors. No infra deps.
 //!
-//! Submodules (`errors`, `traits`) and additional re-exports
-//! (`DocsError`, `DocsClient`) are added by Tasks 3-4.
+//! Submodules (`traits`) and additional re-exports (`DocsClient`) are
+//! added by Task 4.
 
+pub mod errors;
 pub mod types;
 
+pub use errors::DocsError;
 pub use types::*;
