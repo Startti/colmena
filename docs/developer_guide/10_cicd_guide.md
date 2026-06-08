@@ -613,5 +613,4 @@ Para preguntas o problemas con el flujo de CI/CD:
 
 ---
 
-**Última actualización**: 2025-10-04
-**Versión del documento**: 1.0.0
+**Última actualización**: ver `git log -1 docs/developer_guide/10_cicd_guide.md`

@@ -104,7 +104,13 @@ Level 3 (Default): Environment variables o valores por defecto
 
 #### `skills` (on-demand knowledge loading)
 
-The LLM node supports an optional `skills` config field that exposes built-in and/or user-provided markdown skill packages via a synthetic `load_skill` tool. The LLM decides at runtime which skills to activate. See [24_skills.md](24_skills.md) for the full guide.
+The LLM node exposes built-in and/or user-provided markdown skill packages via a synthetic `load_skill` tool. The LLM decides at runtime which skills to activate. There are **three** independent config fields, all optional and combinable (the engine de-duplicates by skill name):
+
+- `skills: ["name1", "name2", …]` — flat list of skill names (built-in or already-discovered). Read first.
+- `skills_path: "/abs/or/relative/dir"` — single parent directory; every immediate subdir that contains a `SKILL.md` becomes a skill. Read after `skills`.
+- `skills_paths: ["/dir1", "/dir2", …]` — array form of `skills_path` for multiple roots.
+
+Missing `skills_path` directory → hard error at graph load. Empty directory → no error, contributes nothing. See [24_skills.md](24_skills.md) for the full guide (auto-discovery, allowed-dirs whitelist, layered tool context, 64 KB cap).
 
 #### `lazy_tool_loading` (on-demand tool schemas)
 

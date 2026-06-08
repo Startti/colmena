@@ -580,6 +580,17 @@ nodeB executes(inputs={result: "data", ...})
 
 ---
 
+## 🔗 See also — flujos de datos adyacentes
+
+Esta guía cubre **edges entre nodos del DAG**. Otros mecanismos de propagación que viven en docs vecinos:
+
+- **`$DYNAMIC` placeholders** — sustitución de argumentos del LLM dentro de `tool_configurations.<name>.fixed_config`. No es un edge; es plumbing entre el LLM y el nodo backing de una tool. Documentado en [09_tool_calling.md](./09_tool_calling.md) y con detalle de implementación en [22_tool_execution_flow.md](./22_tool_execution_flow.md).
+- **`$ref` / resolución de variables** — diseño del resolver de variables (`${ENV}`, `${node.field}`, secure values). Ver [VARIABLE_RESOLUTION_DISEÑO](../dds/VARIABLE_RESOLUTION_DISEÑO.md).
+- **`$attachment:<key>`** — envío de adjuntos por referencia a endpoints HTTP sin que el LLM vea los bytes. Ver [31_load_attachment.md](./31_load_attachment.md).
+- **Secure values inyectadas en `inputs`/`config`** — el motor reemplaza placeholders `<sv_*>` justo antes de la ejecución del nodo. Ver [13_security_strategy.md](./13_security_strategy.md).
+
+---
+
 **Versión:** 1.0  
 **Fecha:** 2026-04-04  
 **Status:** ✅ Completo

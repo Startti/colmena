@@ -94,6 +94,7 @@ Emitido cuando el LLM llama a una herramienta.
 | `tool-input-delta` | `toolCallId`, `inputTextDelta` | Chunk de argumentos en streaming |
 | `tool-input-available` | `toolCallId`, `toolName`, `input` | Argumentos completos y parseados |
 | `tool-output-available` | `toolCallId`, `output` | Resultado de ejecutar la herramienta |
+| `tool-described` | `nodeId`, `toolCallId`, `toolName` | Emitido cuando una invocación de `describe_tool` resuelve y el motor revela el schema completo de una tool perezosa. Permite al frontend mostrar "Schema de `<toolName>` listo" sin esperar al `tool-output-available`. Detalles en [29_lazy_tool_loading.md](./developer_guide/29_lazy_tool_loading.md). |
 
 Secuencia completa:
 
@@ -103,6 +104,14 @@ Secuencia completa:
 { "type": "tool-input-delta",     "toolCallId": "call_abc", "inputTextDelta": ":\"Rust\"}" }
 { "type": "tool-input-available", "toolCallId": "call_abc", "toolName": "search", "input": { "q": "Rust" } }
 { "type": "tool-output-available","toolCallId": "call_abc", "output": { "results": [...] } }
+```
+
+Secuencia con lazy loading (`tool-described` antes del schema):
+
+```json
+{ "type": "tool-input-available", "toolCallId": "call_xyz", "toolName": "describe_tool", "input": { "name": "search_orders" } }
+{ "type": "tool-described",       "nodeId": "agent", "toolCallId": "call_xyz", "toolName": "search_orders" }
+{ "type": "tool-output-available","toolCallId": "call_xyz", "output": { "name": "search_orders", "schema": { ... } } }
 ```
 
 ---
