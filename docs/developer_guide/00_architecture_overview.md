@@ -10,7 +10,7 @@ Colmena es una librería Rust-nativa de orquestación de agentes AI. Su núcleo 
 
 La arquitectura sigue el patrón **Hexagonal (Ports & Adapters)**: el dominio no depende de infraestructura, y cada integración externa se encapsula detrás de un trait.
 
-- Crate: `colmena_dag_engine` v0.3.0 (ver `src/libs/colmena/Cargo.toml` línea 3)
+- Crate: `colmena_dag_engine` v0.4.0 (ver `src/libs/colmena/Cargo.toml` línea 3)
 - Módulo Python: `colmena` (ver `pyproject.toml` → `tool.maturin.module-name`)
 - Repositorio: https://github.com/Startti/colmena
 

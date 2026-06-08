@@ -3,7 +3,7 @@
 ## Project Identity
 - Rust-native AI agent orchestration library with Python (PyO3) and TypeScript (napi-rs) bindings
 - **Hexagonal Architecture** (Ports & Adapters): domain / application / infrastructure layers
-- Version: 0.3.0 (alpha) — Phases 1-6 and 9 complete, Phase 7 (testing) and 8 (docs) pending
+- Version: 0.4.0 (alpha) — Phases 1-6 and 9 complete, Phase 7 (testing) and 8 (docs) pending
 - Repository: https://github.com/Startti/colmena
 
 ## Key Directories

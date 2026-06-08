@@ -87,7 +87,7 @@ Colmena sigue **SemVer (Semantic Versioning 2.0.0)**. El CI/CD automatiza los ca
 
 ```toml
 # Cargo.toml / pyproject.toml / package.json
-version = "0.3.0"    # MAJOR.MINOR.PATCH (matches current src/libs/colmena/Cargo.toml)
+version = "0.4.0"    # MAJOR.MINOR.PATCH (matches current src/libs/colmena/Cargo.toml)
 ```
 
 *   **PATCH**: `fix: ...` o `perf: ...` (No rompe API, corrige errores).
