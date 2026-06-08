@@ -1,6 +1,6 @@
 use crate::llm::domain::{
     FileSource, FunctionCall, LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream,
-    LlmStreamChunk, LlmStreamPart, LlmUsage, ToolCall, ToolCallChunk,
+    LlmStreamChunk, LlmStreamPart, LlmUsage, MessageRole, ToolCall, ToolCallChunk,
 };
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -647,53 +647,106 @@ impl OpenAiAdapter {
         &self,
         request: &LlmRequest,
     ) -> Result<serde_json::Value, LlmError> {
-        let mut input_msgs = Vec::with_capacity(request.messages().len());
+        // OpenAI Responses API has a different `input` schema than Chat
+        // Completions. Each LlmMessage maps to one or more `input` items
+        // depending on its role and whether it carries tool calls:
+        //
+        // - System/User: { role, content: [{type:"input_text",text}, ...files] }
+        // - Assistant with text (no tool_calls):
+        //     { role:"assistant", content: [{type:"output_text",text}] }
+        // - Assistant with tool_calls:
+        //     - If has text: { role:"assistant", content: [{type:"output_text",text}] }
+        //     - For each tool_call: { type:"function_call", call_id, name, arguments }
+        // - Tool (function output):
+        //     { type:"function_call_output", call_id, output }
+        //
+        // The 2026-06-07 fix replaced the previous one-shape-fits-all loop
+        // that always used `input_text` for content (which OpenAI rejected
+        // for assistant messages with "Invalid value: 'input_text'. Supported
+        // values are: 'output_text' and 'refusal'.") and dropped tool_calls
+        // entirely. See colmena BACKLOG entry "OpenAI Responses API serialization".
+        let mut input_items: Vec<serde_json::Value> = Vec::new();
         for msg in request.messages() {
-            let mut content_arr = vec![json!({
-                "type": "input_text",
-                "text": msg.content()
-            })];
+            match msg.role() {
+                MessageRole::Tool => {
+                    let call_id = msg.tool_call_id().unwrap_or_default();
+                    input_items.push(json!({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": msg.content(),
+                    }));
+                }
+                MessageRole::Assistant => {
+                    let text = msg.content();
+                    if !text.is_empty() {
+                        input_items.push(json!({
+                            "role": "assistant",
+                            "content": [{
+                                "type": "output_text",
+                                "text": text,
+                            }]
+                        }));
+                    }
+                    if let Some(tcs) = msg.tool_calls() {
+                        for tc in tcs {
+                            input_items.push(json!({
+                                "type": "function_call",
+                                "call_id": tc.id,
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            }));
+                        }
+                    }
+                }
+                MessageRole::System | MessageRole::User => {
+                    let mut content_arr = vec![json!({
+                        "type": "input_text",
+                        "text": msg.content()
+                    })];
 
-            if let Some(files) = msg.files() {
-                use base64::{engine::general_purpose::STANDARD, Engine as _};
-                for file in files {
-                    let file_part = match &file.source {
-                        FileSource::InlineBytes { bytes } => {
-                            let b64 = STANDARD.encode(bytes);
-                            let data_uri = format!("data:{};base64,{}", file.mime_type, b64);
-                            json!({
-                                "type": "input_file",
-                                "filename": file.filename,
-                                "file_data": data_uri,
-                            })
+                    if let Some(files) = msg.files() {
+                        use base64::{engine::general_purpose::STANDARD, Engine as _};
+                        for file in files {
+                            let file_part = match &file.source {
+                                FileSource::InlineBytes { bytes } => {
+                                    let b64 = STANDARD.encode(bytes);
+                                    let data_uri =
+                                        format!("data:{};base64,{}", file.mime_type, b64);
+                                    json!({
+                                        "type": "input_file",
+                                        "filename": file.filename,
+                                        "file_data": data_uri,
+                                    })
+                                }
+                                FileSource::Uploaded(r) => json!({
+                                    "type": "input_file",
+                                    "file_id": r.provider_file_id,
+                                }),
+                                FileSource::SignedUrl(_) => {
+                                    return Err(LlmError::InternalError {
+                                        message: format!(
+                                            "OpenAI responses adapter received unresolved SignedUrl for '{}'. \
+                                             LlmCallUseCase::resolve_files must run before reaching the adapter.",
+                                            file.filename
+                                        ),
+                                    });
+                                }
+                            };
+                            content_arr.push(file_part);
                         }
-                        FileSource::Uploaded(r) => json!({
-                            "type": "input_file",
-                            "file_id": r.provider_file_id,
-                        }),
-                        FileSource::SignedUrl(_) => {
-                            return Err(LlmError::InternalError {
-                                message: format!(
-                                    "OpenAI responses adapter received unresolved SignedUrl for '{}'. \
-                                     LlmCallUseCase::resolve_files must run before reaching the adapter.",
-                                    file.filename
-                                ),
-                            });
-                        }
-                    };
-                    content_arr.push(file_part);
+                    }
+
+                    input_items.push(json!({
+                        "role": msg.role().as_str(),
+                        "content": content_arr
+                    }));
                 }
             }
-
-            input_msgs.push(json!({
-                "role": msg.role().as_str(),
-                "content": content_arr
-            }));
         }
 
         let mut body = json!({
             "model": request.config().model(),
-            "input": input_msgs,
+            "input": input_items,
         });
 
         if let Some(temp) = request.config().temperature() {
@@ -1013,5 +1066,227 @@ mod tests {
             err,
             crate::llm::domain::LlmError::InternalError { .. }
         ));
+    }
+
+    // ── Responses API role-aware serialization (2026-06-07 fix) ─────────
+    //
+    // These tests cover the bug observed in E2E Phase 3.1 where
+    // pdf_analyst_base64 + load_attachment failed with
+    // `'Invalid value: 'input_text'. Supported values are: 'output_text'
+    // and 'refusal'.'` because the original builder hardcoded
+    // `type: "input_text"` for all messages, and dropped tool_calls.
+
+    #[test]
+    fn responses_serializes_assistant_text_as_output_text() {
+        use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind};
+        let user = LlmMessage::user("Hi there".into()).unwrap();
+        let assistant = LlmMessage::assistant("Hello, how can I help?".into()).unwrap();
+        let provider =
+            LlmProvider::new(ProviderKind::OpenAi, "k".into(), Some("gpt-5".into())).unwrap();
+        let config = LlmConfig::new(provider);
+        // Force Responses API by attaching a non-image file to the user msg —
+        // we already cover that path elsewhere. For this test we focus on
+        // the assistant shape, so use a synthetic LlmRequest that bypasses
+        // is_responses_api_required and goes straight to the builder.
+        let request = LlmRequest::new(vec![user, assistant], config, false).unwrap();
+
+        let adapter = OpenAiAdapter::new();
+        let body = adapter.build_responses_request_body(&request).unwrap();
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 2);
+
+        // [0] user with input_text
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"][0]["type"], "input_text");
+        assert_eq!(input[0]["content"][0]["text"], "Hi there");
+
+        // [1] assistant with output_text — the bug case
+        assert_eq!(input[1]["role"], "assistant");
+        assert_eq!(
+            input[1]["content"][0]["type"], "output_text",
+            "assistant content must use output_text, NOT input_text"
+        );
+        assert_eq!(input[1]["content"][0]["text"], "Hello, how can I help?");
+    }
+
+    #[test]
+    fn responses_serializes_assistant_tool_calls_as_function_call_entries() {
+        use crate::llm::domain::{
+            FunctionCall, LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind, ToolCall,
+        };
+        let user = LlmMessage::user("Load my doc".into()).unwrap();
+        let tool_call = ToolCall {
+            id: "call_xyz123".into(),
+            call_type: "function".into(),
+            function: FunctionCall {
+                name: "load_attachment".into(),
+                arguments: r#"{"document_id":"att_abc"}"#.into(),
+            },
+            response: None,
+        };
+        let assistant =
+            LlmMessage::assistant_with_tool_calls(String::new(), vec![tool_call]).unwrap();
+        let provider =
+            LlmProvider::new(ProviderKind::OpenAi, "k".into(), Some("gpt-5".into())).unwrap();
+        let config = LlmConfig::new(provider);
+        let request = LlmRequest::new(vec![user, assistant], config, false).unwrap();
+
+        let adapter = OpenAiAdapter::new();
+        let body = adapter.build_responses_request_body(&request).unwrap();
+        let input = body["input"].as_array().unwrap();
+
+        // Expect: user message + function_call entry (no assistant message
+        // because content was empty — only the tool_call exists)
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[1]["call_id"], "call_xyz123");
+        assert_eq!(input[1]["name"], "load_attachment");
+        assert_eq!(input[1]["arguments"], r#"{"document_id":"att_abc"}"#);
+    }
+
+    #[test]
+    fn responses_serializes_tool_response_as_function_call_output() {
+        use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind};
+        let user = LlmMessage::user("Q".into()).unwrap();
+        let tool = LlmMessage::tool(
+            "call_xyz123".into(),
+            r#"{"document_id":"att_abc","status":"loaded"}"#.into(),
+        )
+        .unwrap();
+        let provider =
+            LlmProvider::new(ProviderKind::OpenAi, "k".into(), Some("gpt-5".into())).unwrap();
+        let config = LlmConfig::new(provider);
+        let request = LlmRequest::new(vec![user, tool], config, false).unwrap();
+
+        let adapter = OpenAiAdapter::new();
+        let body = adapter.build_responses_request_body(&request).unwrap();
+        let input = body["input"].as_array().unwrap();
+
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["role"], "user");
+        // Tool message becomes function_call_output (top-level item, no role)
+        assert_eq!(input[1]["type"], "function_call_output");
+        assert_eq!(input[1]["call_id"], "call_xyz123");
+        assert!(input[1]["output"].as_str().unwrap().contains("document_id"));
+        assert!(input[1].get("role").is_none() || input[1]["role"].is_null());
+    }
+
+    #[test]
+    fn responses_serializes_full_load_attachment_sequence_correctly() {
+        // END-TO-END regression test for the exact failure scenario observed
+        // in E2E Phase 3.1: PDF inline → assistant calls load_attachment →
+        // tool returns ack → synthetic user with the doc content → next LLM
+        // turn must accept this without `input_text` rejection.
+        use crate::llm::domain::{
+            FileData, FileSource, FunctionCall, LlmConfig, LlmMessage, LlmProvider, LlmRequest,
+            ProviderKind, ToolCall,
+        };
+        let pdf = FileData {
+            document_id: Some("doc-1".into()),
+            mime_type: "application/pdf".into(),
+            filename: "poem.pdf".into(),
+            size_hint: None,
+            source: FileSource::InlineBytes {
+                bytes: vec![0x25, 0x50, 0x44, 0x46], // "%PDF"
+            },
+            retained_inline_bytes: None,
+        };
+        let system = LlmMessage::system("You are a helpful analyst.".into()).unwrap();
+        let user_with_pdf =
+            LlmMessage::user_with_files("Read this".into(), vec![pdf.clone()]).unwrap();
+        let assistant = LlmMessage::assistant_with_tool_calls(
+            String::new(),
+            vec![ToolCall {
+                id: "call_load".into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "load_attachment".into(),
+                    arguments: r#"{"document_id":"att_pdf_1"}"#.into(),
+                },
+                response: None,
+            }],
+        )
+        .unwrap();
+        let tool_result = LlmMessage::tool(
+            "call_load".into(),
+            r#"{"document_id":"att_pdf_1","status":"loaded"}"#.into(),
+        )
+        .unwrap();
+        let synthetic_user = LlmMessage::user_with_files(
+            "[Attachment requested by the model: att_pdf_1]".into(),
+            vec![pdf],
+        )
+        .unwrap();
+
+        let provider =
+            LlmProvider::new(ProviderKind::OpenAi, "k".into(), Some("gpt-5".into())).unwrap();
+        let config = LlmConfig::new(provider);
+        let request = LlmRequest::new(
+            vec![
+                system,
+                user_with_pdf,
+                assistant,
+                tool_result,
+                synthetic_user,
+            ],
+            config,
+            false,
+        )
+        .unwrap();
+
+        let adapter = OpenAiAdapter::new();
+        let body = adapter.build_responses_request_body(&request).unwrap();
+        let input = body["input"].as_array().unwrap();
+
+        // Expected sequence:
+        // [0] system
+        // [1] user(with pdf)
+        // [2] function_call (load_attachment)
+        // [3] function_call_output
+        // [4] user (synthetic with pdf again)
+        assert_eq!(input.len(), 5, "expected 5 input items, got {input:#?}");
+        assert_eq!(input[0]["role"], "system");
+        assert_eq!(input[0]["content"][0]["type"], "input_text");
+        assert_eq!(input[1]["role"], "user");
+        assert_eq!(input[1]["content"][0]["type"], "input_text");
+        // user has input_file too
+        let pdf_part = input[1]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["type"] == "input_file")
+            .expect("user[1] must have input_file");
+        assert_eq!(pdf_part["filename"], "poem.pdf");
+        // [2] function_call (NOT a regular message)
+        assert_eq!(input[2]["type"], "function_call");
+        assert_eq!(input[2]["call_id"], "call_load");
+        assert!(input[2].get("role").is_none() || input[2]["role"].is_null());
+        // [3] function_call_output
+        assert_eq!(input[3]["type"], "function_call_output");
+        assert_eq!(input[3]["call_id"], "call_load");
+        // [4] user (with pdf) — uses input_text
+        assert_eq!(input[4]["role"], "user");
+        assert_eq!(input[4]["content"][0]["type"], "input_text");
+
+        // CRITICAL: no item in the entire input has `type:"input_text"` for
+        // an assistant role, and no Tool message escaped without being
+        // converted to function_call_output. Both invariants prevent the
+        // OpenAI Responses API rejection observed in E2E Phase 3.1.
+        for item in input {
+            if item.get("role").and_then(|r| r.as_str()) == Some("assistant") {
+                let first_type = item["content"][0]["type"].as_str().unwrap_or("");
+                assert!(
+                    first_type == "output_text" || first_type == "refusal",
+                    "assistant content type must be output_text or refusal, got: {first_type}"
+                );
+            }
+            if item.get("role").and_then(|r| r.as_str()) == Some("tool") {
+                panic!(
+                    "Tool role must NOT appear as a top-level message; \
+                     it must be converted to function_call_output"
+                );
+            }
+        }
     }
 }
