@@ -15,8 +15,8 @@
 
 use crate::gdocs::domain::{
     BatchUpdateResult, CreateFromMarkdownResult, DocsClient, DocsError, DocumentId, DocumentMeta,
-    DocumentSnapshot, ExportFormat, NamedRangeMeta, OutlineEntry, ParagraphKind, ParagraphSnapshot,
-    RevisionId, RevisionMeta, Scope, ShareRole, TabId, TabMeta, TabSnapshot,
+    DocumentSnapshot, ExportFormat, LossyConversion, NamedRangeMeta, OutlineEntry, ParagraphKind,
+    ParagraphSnapshot, RevisionId, RevisionMeta, Scope, ShareRole, TabId, TabMeta, TabSnapshot,
 };
 use crate::gdocs::infrastructure::auth::TokenCache;
 use crate::gdocs::infrastructure::config::GDocsConfig;
@@ -39,7 +39,6 @@ pub struct GoogleDocsHttpClient {
     pub(crate) tokens: Arc<TokenCache>,
     base_docs: String,
     base_drive: String,
-    #[allow(dead_code)] // populated for Task 12 (resumable upload)
     base_drive_upld: String,
 }
 
@@ -328,6 +327,51 @@ fn map_index_range_to_paragraphs(snap: &DocumentSnapshot, s: u32, e: u32) -> (u3
     (ps, pe)
 }
 
+/// Compare input markdown vs Google's re-export and flag elements
+/// present in the input but absent in the export. Conservative — only
+/// flags well-known lossy elements (footnotes, image references, math).
+fn diff_markdown_for_lossy(orig: &str, after: &str) -> Vec<LossyConversion> {
+    let mut out = Vec::new();
+
+    // Footnotes: pattern [^id] in orig, gone in after.
+    if let Ok(re) = regex::Regex::new(r"\[\^([^\]]+)\]:?[^\n]*") {
+        for m in re.find_iter(orig) {
+            if !after.contains(m.as_str()) {
+                out.push(LossyConversion {
+                    element_type: "footnote".into(),
+                    original_markdown: m.as_str().chars().take(200).collect(),
+                });
+            }
+        }
+    }
+
+    // Image references: `![alt](url)`.
+    if let Ok(re) = regex::Regex::new(r"!\[[^\]]*\]\([^)]+\)") {
+        for m in re.find_iter(orig) {
+            if !after.contains(m.as_str()) {
+                out.push(LossyConversion {
+                    element_type: "image_reference".into(),
+                    original_markdown: m.as_str().chars().take(200).collect(),
+                });
+            }
+        }
+    }
+
+    // Math: `$...$` inline or `$$...$$` block (single-line).
+    if let Ok(re) = regex::Regex::new(r"\$\$?[^$\n]+\$\$?") {
+        for m in re.find_iter(orig) {
+            if !after.contains(m.as_str()) {
+                out.push(LossyConversion {
+                    element_type: "math_expression".into(),
+                    original_markdown: m.as_str().chars().take(200).collect(),
+                });
+            }
+        }
+    }
+
+    out
+}
+
 // ── DocsClient impl ────────────────────────────────────────────────
 //
 // Only `get` is real in Task 9. Every other trait method has a
@@ -355,45 +399,246 @@ impl DocsClient for GoogleDocsHttpClient {
 
     async fn create(
         &self,
-        _title: &str,
-        _parent_folder: Option<&str>,
+        title: &str,
+        parent_folder: Option<&str>,
     ) -> Result<DocumentMeta, DocsError> {
-        todo!("filled by Task 12")
+        // Step 1: create blank via Docs API.
+        let resp = self
+            .send_with_retry(|c, t| {
+                c.request(Method::POST, &format!("{}/documents", self.base_docs))
+                    .bearer_auth(t)
+                    .json(&serde_json::json!({ "title": title }))
+            })
+            .await?;
+        let resp = self.map_status(resp, "documents.create").await?;
+        let j: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| DocsError::Http(format!("create json: {e}")))?;
+        let doc_id = DocumentId(
+            j.get("documentId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| DocsError::Http("missing documentId".into()))?
+                .to_string(),
+        );
+
+        // Step 2: move to parent_folder (call arg overrides config).
+        let folder = parent_folder
+            .map(String::from)
+            .or_else(|| self.cfg.default_parent_folder.clone())
+            .ok_or(DocsError::NoParentFolder)?;
+        let url = format!(
+            "{}/files/{}?addParents={}&removeParents=root&fields=id,parents",
+            self.base_drive, doc_id.0, folder
+        );
+        let resp = self
+            .send_with_retry(|c, t| {
+                c.request(Method::PATCH, &url)
+                    .bearer_auth(t)
+                    .json(&serde_json::json!({}))
+            })
+            .await?;
+        self.map_status(resp, "files.update parent").await?;
+
+        // Step 3: fetch fresh snapshot for revision_id + url + tabs.
+        let snap = self.get(&doc_id).await?;
+        let tabs = self.list_tabs(&doc_id).await?;
+        Ok(DocumentMeta {
+            doc_id: snap.doc_id.clone(),
+            url: format!("https://docs.google.com/document/d/{}", snap.doc_id.0),
+            title: snap.title,
+            revision_id: snap.revision_id,
+            tabs,
+        })
     }
 
     async fn create_from_markdown(
         &self,
-        _title: &str,
-        _md: &str,
-        _parent_folder: Option<&str>,
+        title: &str,
+        md: &str,
+        parent_folder: Option<&str>,
     ) -> Result<CreateFromMarkdownResult, DocsError> {
-        todo!("filled by Task 12")
+        let folder = parent_folder
+            .map(String::from)
+            .or_else(|| self.cfg.default_parent_folder.clone())
+            .ok_or(DocsError::NoParentFolder)?;
+
+        let metadata = serde_json::json!({
+            "name": title,
+            "mimeType": "application/vnd.google-apps.document",
+            "parents": [folder],
+        });
+        let boundary = "colmena_gdocs_boundary";
+        let body = format!(
+            "--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{}\r\n\
+             --{boundary}\r\nContent-Type: text/markdown\r\n\r\n{md}\r\n\
+             --{boundary}--",
+            serde_json::to_string(&metadata).expect("valid metadata json")
+        );
+
+        let resp = self
+            .send_with_retry(|c, t| {
+                c.request(
+                    Method::POST,
+                    &format!("{}/files?uploadType=multipart", self.base_drive_upld),
+                )
+                .bearer_auth(t)
+                .header(
+                    "Content-Type",
+                    format!("multipart/related; boundary={boundary}"),
+                )
+                .body(body.clone())
+            })
+            .await?;
+        let resp = self
+            .map_status(resp, "create_from_markdown upload")
+            .await?;
+        let j: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| DocsError::Http(format!("upload json: {e}")))?;
+        let doc_id = DocumentId(
+            j.get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| DocsError::Http("missing id".into()))?
+                .to_string(),
+        );
+
+        // Re-export as markdown to detect lossy conversions.
+        let re_md = self
+            .read_as_markdown(&doc_id, None)
+            .await
+            .unwrap_or_default();
+        let lossy = diff_markdown_for_lossy(md, &re_md);
+
+        let snap = self.get(&doc_id).await?;
+        let outline = self.read_outline(&doc_id, None).await?;
+        let tabs = self.list_tabs(&doc_id).await?;
+        Ok(CreateFromMarkdownResult {
+            meta: DocumentMeta {
+                doc_id: snap.doc_id.clone(),
+                url: format!("https://docs.google.com/document/d/{}", snap.doc_id.0),
+                title: snap.title,
+                revision_id: snap.revision_id,
+                tabs,
+            },
+            outline_snapshot: outline,
+            lossy_conversions: lossy,
+        })
     }
 
     async fn create_from_docx(
         &self,
-        _title: &str,
-        _bytes: Vec<u8>,
-        _parent_folder: Option<&str>,
+        title: &str,
+        bytes: Vec<u8>,
+        parent_folder: Option<&str>,
     ) -> Result<DocumentMeta, DocsError> {
-        todo!("filled by Task 12")
+        let folder = parent_folder
+            .map(String::from)
+            .or_else(|| self.cfg.default_parent_folder.clone())
+            .ok_or(DocsError::NoParentFolder)?;
+
+        let metadata = serde_json::json!({
+            "name": title,
+            "mimeType": "application/vnd.google-apps.document",
+            "parents": [folder],
+        });
+        let boundary = "colmena_gdocs_boundary";
+        let metadata_part = format!(
+            "--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{}\r\n",
+            serde_json::to_string(&metadata).expect("valid metadata json")
+        );
+        let media_part_header = format!(
+            "--{boundary}\r\n\
+             Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document\r\n\r\n"
+        );
+        let trailer = format!("\r\n--{boundary}--");
+
+        let mut body = Vec::new();
+        body.extend_from_slice(metadata_part.as_bytes());
+        body.extend_from_slice(media_part_header.as_bytes());
+        body.extend_from_slice(&bytes);
+        body.extend_from_slice(trailer.as_bytes());
+
+        let resp = self
+            .send_with_retry(|c, t| {
+                c.request(
+                    Method::POST,
+                    &format!("{}/files?uploadType=multipart", self.base_drive_upld),
+                )
+                .bearer_auth(t)
+                .header(
+                    "Content-Type",
+                    format!("multipart/related; boundary={boundary}"),
+                )
+                .body(body.clone())
+            })
+            .await?;
+        let resp = self.map_status(resp, "create_from_docx upload").await?;
+        let j: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| DocsError::Http(format!("upload json: {e}")))?;
+        let doc_id = DocumentId(
+            j.get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| DocsError::Http("missing id".into()))?
+                .to_string(),
+        );
+        let snap = self.get(&doc_id).await?;
+        let tabs = self.list_tabs(&doc_id).await?;
+        Ok(DocumentMeta {
+            doc_id: snap.doc_id.clone(),
+            url: format!("https://docs.google.com/document/d/{}", snap.doc_id.0),
+            title: snap.title,
+            revision_id: snap.revision_id,
+            tabs,
+        })
     }
 
     async fn share(
         &self,
-        _id: &DocumentId,
-        _email: &str,
-        _role: ShareRole,
+        id: &DocumentId,
+        email: &str,
+        role: ShareRole,
     ) -> Result<(), DocsError> {
-        todo!("filled by Task 12")
+        let url = format!("{}/files/{}/permissions", self.base_drive, id.0);
+        let body = serde_json::json!({
+            "role": role.as_api_str(),
+            "type": "user",
+            "emailAddress": email,
+        });
+        let resp = self
+            .send_with_retry(|c, t| c.request(Method::POST, &url).bearer_auth(t).json(&body))
+            .await?;
+        self.map_status(resp, "permissions.create").await?;
+        Ok(())
     }
 
     async fn export(
         &self,
-        _id: &DocumentId,
-        _format: ExportFormat,
+        id: &DocumentId,
+        format: ExportFormat,
     ) -> Result<Vec<u8>, DocsError> {
-        todo!("filled by Task 12")
+        // Manually encode the MIME — / and + need percent-encoding.
+        // Safe for every MIME in `ExportFormat::mime()` (they only
+        // contain `/`, `+`, alphanumeric, `.`, `-`).
+        let encoded_mime = format.mime().replace('+', "%2B").replace('/', "%2F");
+        let url = format!(
+            "{}/files/{}/export?mimeType={}",
+            self.base_drive, id.0, encoded_mime
+        );
+        let resp = self
+            .send_with_retry(|c, t| c.request(Method::GET, &url).bearer_auth(t))
+            .await?;
+        let resp = self
+            .map_status(resp, &format!("export {} {}", id.0, format.mime()))
+            .await?;
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| DocsError::Http(format!("export bytes: {e}")))?;
+        Ok(bytes.to_vec())
     }
 
     async fn read_as_markdown(
@@ -657,20 +902,70 @@ impl DocsClient for GoogleDocsHttpClient {
 
     async fn add_tab(
         &self,
-        _id: &DocumentId,
-        _title: &str,
-        _after_tab: Option<&TabId>,
+        id: &DocumentId,
+        title: &str,
+        after_tab: Option<&TabId>,
     ) -> Result<TabMeta, DocsError> {
-        todo!("filled by Task 12")
+        // Pre-check: tab with this title already exists?
+        let existing = self.list_tabs(id).await?;
+        if existing.iter().any(|t| t.title == title) {
+            return Err(DocsError::TabExists(title.into()));
+        }
+
+        let mut props = serde_json::json!({ "title": title });
+        if let Some(after) = after_tab {
+            props["indexAfter"] = serde_json::json!(after.0);
+        }
+        let requests = vec![serde_json::json!({
+            "addDocumentTab": { "tabProperties": props }
+        })];
+        self.batch_update(id, requests, None).await?;
+
+        // The batchUpdate reply doesn't reliably echo the new tab id, so
+        // re-list and find the one with our title.
+        let after_list = self.list_tabs(id).await?;
+        after_list
+            .into_iter()
+            .find(|t| t.title == title)
+            .ok_or_else(|| DocsError::Internal("add_tab: new tab not found after list".into()))
     }
 
     async fn create_named_range(
         &self,
-        _id: &DocumentId,
-        _name: &str,
-        _scope: Scope,
+        id: &DocumentId,
+        name: &str,
+        scope: Scope,
     ) -> Result<NamedRangeMeta, DocsError> {
-        todo!("filled by Task 12")
+        // v1 supports Scope::Paragraph { n } at this trait level — other
+        // scopes must be resolved by the application layer first.
+        let n = match scope {
+            Scope::Paragraph { n } => n,
+            _ => {
+                return Err(DocsError::InvalidArgs(
+                    "create_named_range scope must be {kind:\"paragraph\", n: <N>}".into(),
+                ))
+            }
+        };
+        let snap = self.get(id).await?;
+        let p = snap
+            .tabs
+            .iter()
+            .flat_map(|t| t.paragraphs.iter())
+            .find(|p| p.n == n)
+            .ok_or_else(|| DocsError::InvalidArgs(format!("paragraph {n} not found")))?;
+        let requests = vec![serde_json::json!({
+            "createNamedRange": {
+                "name": name,
+                "range": {"startIndex": p.start_index, "endIndex": p.end_index}
+            }
+        })];
+        self.batch_update(id, requests, Some(&snap.revision_id))
+            .await?;
+        let listed = self.list_named_ranges(id).await?;
+        listed
+            .into_iter()
+            .find(|nr| nr.name == name)
+            .ok_or_else(|| DocsError::Internal("named_range not found after create".into()))
     }
 }
 
@@ -954,5 +1249,124 @@ mod tests {
         assert_eq!(tabs[1].tab_id.0, "t1a");
         assert_eq!(tabs[1].parent_tab_id.as_ref().unwrap().0, "t1");
         assert_eq!(tabs[2].tab_id.0, "t2");
+    }
+
+    #[tokio::test]
+    async fn create_uses_configured_parent_folder() {
+        let server = MockServer::start().await;
+        // 1) POST /docs/documents (create blank)
+        Mock::given(method("POST"))
+            .and(path("/docs/documents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "documentId": "new_doc"
+            })))
+            .mount(&server)
+            .await;
+        // 2) PATCH /drive/files/new_doc?addParents=...
+        Mock::given(method("PATCH"))
+            .and(path("/drive/files/new_doc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        // 3) GET /docs/documents/new_doc (snapshot + list_tabs)
+        Mock::given(method("GET"))
+            .and(path("/docs/documents/new_doc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "title": "Hello", "revisionId": "r1",
+                "body": {"content": []},
+                "tabs": []
+            })))
+            .mount(&server)
+            .await;
+
+        let mut cfg = test_cfg();
+        cfg.default_parent_folder = Some("folder123".into());
+        let base = server.uri();
+        let client = GoogleDocsHttpClient::with_base_urls(
+            &cfg,
+            format!("{}/docs", base),
+            format!("{}/drive", base),
+            format!("{}/upload", base),
+        )
+        .unwrap();
+        client.tokens.set_token_for_test("fake".to_string()).await;
+
+        let meta = client.create("Hello", None).await.unwrap();
+        assert_eq!(meta.doc_id.0, "new_doc");
+        assert!(meta.url.contains("new_doc"));
+    }
+
+    #[tokio::test]
+    async fn create_without_folder_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/docs/documents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "documentId": "new_doc"
+            })))
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+        client.tokens.set_token_for_test("fake".to_string()).await;
+        let err = client.create("Hello", None).await.unwrap_err();
+        assert!(matches!(err, DocsError::NoParentFolder));
+    }
+
+    #[tokio::test]
+    async fn share_posts_permission() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/drive/files/doc1/permissions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "perm1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+        client.tokens.set_token_for_test("fake".to_string()).await;
+        client
+            .share(
+                &DocumentId("doc1".into()),
+                "user@example.com",
+                ShareRole::Writer,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn export_returns_bytes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/files/doc1/export"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"%PDF-1.4 fake".to_vec()))
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+        client.tokens.set_token_for_test("fake".to_string()).await;
+        let bytes = client
+            .export(&DocumentId("doc1".into()), ExportFormat::Pdf)
+            .await
+            .unwrap();
+        assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[tokio::test]
+    async fn add_tab_fails_when_title_exists() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/docs/documents/doc1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "title": "T", "revisionId": "r",
+                "tabs": [{"tabProperties": {"tabId": "t1", "title": "Sales"}}]
+            })))
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+        client.tokens.set_token_for_test("fake".to_string()).await;
+        let err = client
+            .add_tab(&DocumentId("doc1".into()), "Sales", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DocsError::TabExists(_)));
     }
 }
