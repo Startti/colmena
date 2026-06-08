@@ -34,6 +34,7 @@ All files live under `src/libs/colmena/migrations/`.
 | `20260511000001_secure_values_24h_ttl.sql` | Sliding TTL bump: changes `secure_value_mappings.expires_at` default from `NOW() + 1 hour` to `NOW() + 24 hours` |
 | `20260513000001_conversation_attachments.sql` | Creates `conversation_attachments` (per-`agent_session_id` registry of files attached to a conversation; survives across runs) |
 | `20260525000001_attachment_uniform_resolution.sql` | Adds `storage_key`, `origin`, `last_used_at` to `conversation_attachments` + `idx_conv_attachments_session_used` |
+| `20260603000000_crdt_doc_changes.sql` | Creates the CRDT-documents change log: `crdt_doc_events`, `crdt_doc_session_cursors`, `crdt_doc_session_artifacts`, plus 3 indices. Backs the `crdt_doc_get_recent_changes` LLM tool and per-agent attachment list |
 
 ### SQLite (`migrations/sqlite/`)
 
@@ -45,12 +46,16 @@ All files live under `src/libs/colmena/migrations/`.
 | `20260428000001_llm_history_agent_and_node.sql` | Mirrors the Postgres llm-history migration: adds `agent_session_id`, `node_id`, and the two composite indices |
 | `20260513000001_conversation_attachments.sql` | SQLite mirror of the Postgres `conversation_attachments` table (TEXT/INTEGER-typed) |
 | `20260525000001_attachment_uniform_resolution.sql` | Mirrors the Postgres `storage_key`/`origin`/`last_used_at` extension on `conversation_attachments` |
+| `20260603000000_crdt_doc_changes.sql` | SQLite mirror of the CRDT change-log tables (TEXT/INTEGER-typed). Used when the CRDT runtime points at a SQLite backend in tests / local dev |
 
-> **SQLite scope**: SQLite is supported only for `llm_node_history` and
-> `dag_task_memory`. The DAG state machine (`dag_runs`, `dag_phase_summaries`,
-> `secure_value_mappings`) and the SQL sandbox tables are PostgreSQL-only —
-> features that depend on them (resume after suspend, secure values, the SQL
-> node's function registry) require a Postgres internal database.
+> **SQLite scope**: SQLite is supported for `llm_node_history`,
+> `dag_task_memory`, `conversation_attachments` and the CRDT change-log
+> tables (`crdt_doc_events`, `crdt_doc_session_cursors`,
+> `crdt_doc_session_artifacts`). The DAG state machine (`dag_runs`,
+> `dag_phase_summaries`, `secure_value_mappings`, `provider_file_cache`)
+> and the SQL sandbox tables are PostgreSQL-only — features that depend
+> on them (resume after suspend, secure values, the Files API cache,
+> the SQL node's function registry) require a Postgres internal database.
 
 ### Migration scope: where each set runs
 
@@ -366,6 +371,95 @@ There are no FK constraints between them — the link is by convention on
 
 ---
 
+### `crdt_doc_events`
+
+Per-artifact change log for the CRDT documents subsystem. Every mutation
+applied to a `yrs::Doc` workbook (cell write, range write, sheet add, etc.)
+records a one-line human-readable summary here so that LLM agents can ask
+"what happened in this workbook since I last looked?" via the
+`crdt_doc_get_recent_changes` synthetic tool. The CRDT engine itself stays
+in memory + on-disk snapshot; this table is the durable side-channel for
+narration.
+
+Migration: `20260603000000_crdt_doc_changes.sql`. Available on both
+PostgreSQL and SQLite (SQLite mirror uses `INTEGER PRIMARY KEY AUTOINCREMENT`
+instead of `BIGSERIAL`, and stores timestamps as ISO-8601 `TEXT`).
+
+| Column | Postgres type | SQLite type | Nullable | Default | Description |
+|--------|---------------|-------------|----------|---------|-------------|
+| `id` | `BIGSERIAL` | `INTEGER` (autoincrement) | NO | auto | Monotonic event id — used as the cursor checkpoint by `crdt_doc_session_cursors.last_event_id` |
+| `artifact_id` | `TEXT` | `TEXT` | NO | — | Workbook handle (CRDT doc id, ULID-shaped) |
+| `sheet_id` | `TEXT` | `TEXT` | YES | — | Sheet inside the workbook the event refers to. `NULL` for workbook-level events (e.g. `add_sheet`) |
+| `origin` | `TEXT` | `TEXT` | NO | — | Free-form attribution — typically `agent:<id>`, `user:<id>`, or `python:<script>` |
+| `summary` | `TEXT` | `TEXT` | NO | — | One-line narration produced by the `ChangeTracker` (e.g. `"Pricing: 2 changes by agent:orchestrator"`) |
+| `created_at` | `TIMESTAMPTZ` | `TEXT` | NO | `NOW()` / `CURRENT_TIMESTAMP` | Event wall-clock time |
+
+**Indexes**
+
+- `crdt_doc_events_lookup` on `(artifact_id, id)` — fetch the tail of events for one workbook in order
+- `crdt_doc_events_by_sheet` on `(artifact_id, sheet_id, id)` — same, scoped to a single sheet
+
+There are no FK constraints — the `artifact_id` is owned by the CRDT runtime,
+which may evict a workbook from disk; we keep the change log either way so a
+later session can re-import the workbook and still read its history.
+
+---
+
+### `crdt_doc_session_cursors`
+
+Per-`agent_session_id` bookmark into `crdt_doc_events`. Lets each agent ask
+for "events since I last checked" without re-emitting events it already
+narrated to the LLM.
+
+Migration: `20260603000000_crdt_doc_changes.sql`. Same shape on both backends
+(only the timestamp type differs).
+
+| Column | Postgres type | SQLite type | Nullable | Default | Description |
+|--------|---------------|-------------|----------|---------|-------------|
+| `agent_session_id` | `TEXT` | `TEXT` | NO | — | Stable agent handle (same identifier as everywhere else). Part of the composite PK |
+| `artifact_id` | `TEXT` | `TEXT` | NO | — | Workbook the cursor points at. Part of the PK |
+| `last_event_id` | `BIGINT` | `INTEGER` | NO | — | Last `crdt_doc_events.id` already shown to this agent. Next call returns events with id > this value |
+| `updated_at` | `TIMESTAMPTZ` | `TEXT` | NO | `NOW()` / `CURRENT_TIMESTAMP` | When the cursor was last advanced |
+
+**Constraints**
+
+- `PRIMARY KEY (agent_session_id, artifact_id)` — exactly one cursor per
+  agent-workbook pair. `INSERT … ON CONFLICT DO UPDATE` on advance.
+
+---
+
+### `crdt_doc_session_artifacts`
+
+Per-agent list of CRDT workbooks the agent has ever touched, sorted by
+recency. Backs the catalog the LLM sees when it asks "which workbooks do I
+have available?" and feeds the LRU eviction logic that keeps idle workbooks
+out of memory.
+
+Migration: `20260603000000_crdt_doc_changes.sql`. Same shape on both backends
+(timestamp type differs).
+
+| Column | Postgres type | SQLite type | Nullable | Default | Description |
+|--------|---------------|-------------|----------|---------|-------------|
+| `agent_session_id` | `TEXT` | `TEXT` | NO | — | Stable agent handle. Part of the composite PK |
+| `artifact_id` | `TEXT` | `TEXT` | NO | — | Workbook handle. Part of the PK |
+| `name` | `TEXT` | `TEXT` | NO | — | Display name shown to the LLM and the UI |
+| `created_at` | `TIMESTAMPTZ` | `TEXT` | NO | `NOW()` / `CURRENT_TIMESTAMP` | First time this agent saw the workbook |
+| `last_accessed_at` | `TIMESTAMPTZ` | `TEXT` | NO | `NOW()` / `CURRENT_TIMESTAMP` | Touched on every read/write. Drives the recency index |
+
+**Constraints**
+
+- `PRIMARY KEY (agent_session_id, artifact_id)` — one row per
+  agent-workbook pair, updated on every touch.
+
+**Indexes**
+
+- `crdt_doc_session_artifacts_recent_idx` on
+  `(agent_session_id, last_accessed_at DESC)` — list a single agent's
+  workbooks most-recent-first; used both by the catalog query and by the
+  LRU eviction sweep that closes idle workbooks.
+
+---
+
 ## SQL sandbox tables  *(PostgreSQL only, runtime-created)*
 
 These tables are **not** managed by `sqlx::migrate!()` — they are created
@@ -483,6 +577,12 @@ conversation_attachments ── standalone, per agent_session_id
                             keyed by (agent_session_id, document_id, provider)
                             convention-linked to provider_file_cache by
                             (document_id, provider); no FK
+
+crdt_doc_events            ── standalone, append-only per artifact_id
+crdt_doc_session_cursors   ──> crdt_doc_events  (cursors.last_event_id → events.id;
+                                                 convention only, no FK)
+crdt_doc_session_artifacts ── standalone, per (agent_session_id, artifact_id);
+                              convention-linked to events by artifact_id; no FK
 
 sandbox.function_registry  ── standalone, shared across sessions
 sandbox.query_feedback     ── standalone, scoped by session_id (column, no FK)
