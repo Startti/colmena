@@ -1,5 +1,14 @@
 # Secure Values in HTTP Nodes - Architecture & Design
 
+> ⚠️ **Historical design document.** This file describes the original (≈2026-04) design of the Secure Values feature. The implementation has evolved since then — `agent_session_id`-scoped lookups (2026-05-08), sliding 24-hour TTL with outbound masking (2026-05-11), and fail-fast on missing `SECURE_VALUES_KEY` (2026-06-07) all post-date the snippets below.
+>
+> **For current behavior, code, and operator guidance, consult:**
+> - [`docs/developer_guide/13_security_strategy.md`](../developer_guide/13_security_strategy.md) — runtime semantics, strategies, FAQ, the `SECURE_VALUES_KEY` requirement
+> - [`src/libs/colmena/src/dag_engine/infrastructure/persistence/postgres_secure_value_repository.rs`](../../src/libs/colmena/src/dag_engine/infrastructure/persistence/postgres_secure_value_repository.rs) — current source of truth
+> - [`docs/developer_guide/30_database_schema.md`](../developer_guide/30_database_schema.md#secure_value_mappings-postgresql-only) — current table schema
+>
+> Code snippets in this document are kept for archeological context only and should NOT be copied. In particular, anywhere this doc shows `.unwrap_or_default()` on `SECURE_VALUES_KEY` reflects the original aspirational design — the production code now hard-fails at startup if the env var is missing (commit `1e27039`, see [[feedback_secure_values_key_required]]).
+
 ## Executive Summary
 
 Implement a **Secure Values** system where HTTP nodes can mark their outputs as sensitive. When `secure: true`:

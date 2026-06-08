@@ -41,7 +41,7 @@
 | `src/libs/colmena/src/dag_engine/api.rs` | HTTP `X-Agent-Session-Id` header / body field; `run_dag` signature accepts agent id |
 | `src/libs/colmena/src/node_bindings/mod.rs` | Forward new arg to `run_dag` (or default `None`) |
 | `src/libs/colmena/src/python_bindings/mod.rs` | Forward new arg to `run_dag` (or default `None`) |
-| `docs/developer_guide/database_schema.md` | Document new columns and keying |
+| `docs/developer_guide/30_database_schema.md` | Document new columns and keying |
 | `docs/developer_guide/15_memory_guide.md` | Explain `agent_session_id` and per-node history |
 | `docs/developer_guide/19_nested_agents_and_subgraphs.md` | Note path-qualified node_id and parent_session_id |
 
@@ -2641,7 +2641,7 @@ git commit -m "test(engine): lifecycle integration tests for agent_session_id"
 ### Task 26: Update developer docs
 
 **Files:**
-- Modify: `docs/developer_guide/database_schema.md`
+- Modify: `docs/developer_guide/30_database_schema.md`
 - Modify: `docs/developer_guide/15_memory_guide.md`
 - Modify: `docs/developer_guide/19_nested_agents_and_subgraphs.md`
 
@@ -2676,7 +2676,7 @@ Add or update a section explaining:
 - [ ] **Step 4: Commit**
 
 ```bash
-git add docs/developer_guide/database_schema.md \
+git add docs/developer_guide/30_database_schema.md \
         docs/developer_guide/15_memory_guide.md \
         docs/developer_guide/19_nested_agents_and_subgraphs.md
 git commit -m "docs: document agent_session_id, path-qualified node_id, parent_session_id"

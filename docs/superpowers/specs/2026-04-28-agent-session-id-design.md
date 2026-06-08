@@ -330,7 +330,7 @@ Both aditive, idempotent, no backfill.
 5. Update `subgraph` node: write `parent_session_id` to `dag_runs`, use a fresh UUID for the child `session_id`, propagate the inherited `agent_session_id` and the extended path prefix.
 6. Add CLI/HTTP surface (`--agent-session-id`, `X-Agent-Session-Id` header / body field).
 7. Implement the lifecycle decision logic in `run_use_case.rs` (Section 4.1 branches 1–3) including the leaf-resolution query and the conflict check.
-8. Update docs (`docs/developer_guide/database_schema.md`, `15_memory_guide.md`, `19_nested_agents_and_subgraphs.md`).
+8. Update docs (`docs/developer_guide/30_database_schema.md`, `15_memory_guide.md`, `19_nested_agents_and_subgraphs.md`).
 
 ### 9.3 Test matrix
 
