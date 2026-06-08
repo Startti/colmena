@@ -2,14 +2,58 @@ use crate::dag_engine::domain::{error::DagError, secure_value_repository::Secure
 use async_trait::async_trait;
 use sqlx::{PgPool, Row};
 
-/// PostgreSQL implementation using pgcrypto for AES-256 encryption
+/// PostgreSQL implementation using pgcrypto for AES-256 encryption.
+///
+/// The pgcrypto symmetric encryption key is loaded from the `SECURE_VALUES_KEY`
+/// environment variable at construction time and stored in the struct. If the
+/// env var is not set, `new` panics — this is intentional: silently falling
+/// back to a hardcoded "default-key" (the pre-2026-06 behavior) defeats the
+/// entire secure-values feature, and the failure mode was invisible. Tests
+/// that need to construct the repository without an ambient env var should
+/// use [`PostgresSecureValueRepository::new_with_key`].
 pub struct PostgresSecureValueRepository {
     pool: PgPool,
+    encryption_key: String,
 }
 
 impl PostgresSecureValueRepository {
+    /// Construct a repository, loading the pgcrypto key from `SECURE_VALUES_KEY`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `SECURE_VALUES_KEY` environment variable is not set or is
+    /// empty. This is a fail-fast safety mechanism — the engine refuses to
+    /// start with secure-values enabled but no real encryption key. Operators
+    /// must export a value of at least 32 random characters in every
+    /// environment (dev, staging, prod) before instantiating the engine with
+    /// the Postgres secure-value backend.
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        let encryption_key = std::env::var("SECURE_VALUES_KEY").unwrap_or_default();
+        if encryption_key.is_empty() {
+            panic!(
+                "SECURE_VALUES_KEY is not set. The Postgres secure-value backend \
+                 refuses to start without a real pgcrypto key — silently using a \
+                 hardcoded default would let anyone with DB read access decrypt \
+                 every stored secret. Export a random string of at least 32 \
+                 characters in your environment (see \
+                 docs/developer_guide/13_security_strategy.md) and try again."
+            );
+        }
+        Self::new_with_key(pool, encryption_key)
+    }
+
+    /// Construct a repository with an explicit encryption key.
+    ///
+    /// Intended for tests that want a deterministic key without touching the
+    /// process environment, and for callers that already pull the key from a
+    /// secret manager (Vault, GCP Secret Manager, etc.) rather than env vars.
+    /// Production code paths should prefer [`Self::new`] so the fail-fast env
+    /// check is always exercised.
+    pub fn new_with_key(pool: PgPool, encryption_key: String) -> Self {
+        Self {
+            pool,
+            encryption_key,
+        }
     }
 
     /// Ensure pgcrypto extension is available (safety net for environments where
@@ -36,9 +80,6 @@ impl SecureValueRepository for PostgresSecureValueRepository {
         real_value: &str,
         field_name: &str,
     ) -> Result<(), DagError> {
-        let encryption_key =
-            std::env::var("SECURE_VALUES_KEY").unwrap_or_else(|_| "default-key".to_string());
-
         sqlx::query(
             r#"
             INSERT INTO secure_value_mappings
@@ -47,7 +88,7 @@ impl SecureValueRepository for PostgresSecureValueRepository {
             ON CONFLICT (session_id, hash_key) DO UPDATE SET
                 encrypted_value = EXCLUDED.encrypted_value,
                 agent_session_id = EXCLUDED.agent_session_id,
-                expires_at = NOW() + INTERVAL '1 hour'
+                expires_at = NOW() + INTERVAL '24 hours'
             "#,
         )
         .bind(session_id)
@@ -55,7 +96,7 @@ impl SecureValueRepository for PostgresSecureValueRepository {
         .bind(source_node_id)
         .bind(hash_key)
         .bind(real_value)
-        .bind(&encryption_key)
+        .bind(&self.encryption_key)
         .bind(field_name)
         .execute(&self.pool)
         .await
@@ -88,9 +129,6 @@ impl SecureValueRepository for PostgresSecureValueRepository {
         agent_session_id: Option<&str>,
         hash_key: &str,
     ) -> Result<Option<String>, DagError> {
-        let encryption_key =
-            std::env::var("SECURE_VALUES_KEY").unwrap_or_else(|_| "default-key".to_string());
-
         let row = if let Some(agent) = agent_session_id {
             sqlx::query(
                 r#"
@@ -102,7 +140,7 @@ impl SecureValueRepository for PostgresSecureValueRepository {
                 RETURNING pgp_sym_decrypt(encrypted_value, $1)::text AS decrypted
                 "#,
             )
-            .bind(&encryption_key)
+            .bind(&self.encryption_key)
             .bind(agent)
             .bind(hash_key)
             .fetch_optional(&self.pool)
@@ -118,7 +156,7 @@ impl SecureValueRepository for PostgresSecureValueRepository {
                 RETURNING pgp_sym_decrypt(encrypted_value, $1)::text AS decrypted
                 "#,
             )
-            .bind(&encryption_key)
+            .bind(&self.encryption_key)
             .bind(session_id)
             .bind(hash_key)
             .fetch_optional(&self.pool)
@@ -211,7 +249,8 @@ mod tests {
         use sqlx::postgres::PgPoolOptions;
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
         let pool = PgPoolOptions::new().connect(&url).await.unwrap();
-        let repo = PostgresSecureValueRepository::new(pool);
+        let repo =
+            PostgresSecureValueRepository::new_with_key(pool, "test-encryption-key".to_string());
         let exists = repo
             .exists("nonexistent_session_xyz", None, "<sv_nope>")
             .await
@@ -225,7 +264,8 @@ mod tests {
         use sqlx::postgres::PgPoolOptions;
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
         let pool = PgPoolOptions::new().connect(&url).await.unwrap();
-        let repo = PostgresSecureValueRepository::new(pool);
+        let repo =
+            PostgresSecureValueRepository::new_with_key(pool, "test-encryption-key".to_string());
         let unique_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -244,7 +284,8 @@ mod tests {
         use sqlx::postgres::PgPoolOptions;
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
         let pool = PgPoolOptions::new().connect(&url).await.unwrap();
-        let repo = PostgresSecureValueRepository::new(pool);
+        let repo =
+            PostgresSecureValueRepository::new_with_key(pool, "test-encryption-key".to_string());
 
         let session1 = format!(
             "xs_run1_{}",
@@ -308,7 +349,8 @@ mod tests {
         use sqlx::postgres::PgPoolOptions;
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
         let pool = PgPoolOptions::new().connect(&url).await.unwrap();
-        let repo = PostgresSecureValueRepository::new(pool);
+        let repo =
+            PostgresSecureValueRepository::new_with_key(pool, "test-encryption-key".to_string());
 
         let session1 = format!(
             "legacy_{}",
@@ -354,7 +396,10 @@ mod tests {
         dotenvy::dotenv().ok();
         let url = std::env::var("DATABASE_URL").unwrap();
         let pool = sqlx::PgPool::connect(&url).await.unwrap();
-        let repo = PostgresSecureValueRepository::new(pool.clone());
+        let repo = PostgresSecureValueRepository::new_with_key(
+            pool.clone(),
+            "test-encryption-key".to_string(),
+        );
 
         let session = format!("ttl_test_{}", uuid::Uuid::new_v4());
         repo.persist(
@@ -411,7 +456,10 @@ mod tests {
         dotenvy::dotenv().ok();
         let url = std::env::var("DATABASE_URL").unwrap();
         let pool = sqlx::PgPool::connect(&url).await.unwrap();
-        let repo = PostgresSecureValueRepository::new(pool.clone());
+        let repo = PostgresSecureValueRepository::new_with_key(
+            pool.clone(),
+            "test-encryption-key".to_string(),
+        );
 
         let session = format!("exists_expired_{}", uuid::Uuid::new_v4());
         repo.persist(
@@ -448,7 +496,10 @@ mod tests {
         dotenvy::dotenv().ok();
         let url = std::env::var("DATABASE_URL").unwrap();
         let pool = sqlx::PgPool::connect(&url).await.unwrap();
-        let repo = PostgresSecureValueRepository::new(pool.clone());
+        let repo = PostgresSecureValueRepository::new_with_key(
+            pool.clone(),
+            "test-encryption-key".to_string(),
+        );
 
         let session = format!("ttl_expired_{}", uuid::Uuid::new_v4());
         repo.persist(
@@ -485,7 +536,10 @@ mod tests {
         dotenvy::dotenv().ok();
         let url = std::env::var("DATABASE_URL").unwrap();
         let pool = sqlx::PgPool::connect(&url).await.unwrap();
-        let repo = PostgresSecureValueRepository::new(pool.clone());
+        let repo = PostgresSecureValueRepository::new_with_key(
+            pool.clone(),
+            "test-encryption-key".to_string(),
+        );
 
         let my_session = format!("sweep_a_{}", uuid::Uuid::new_v4());
         let other_session = format!("sweep_b_{}", uuid::Uuid::new_v4());
@@ -537,7 +591,10 @@ mod tests {
         dotenvy::dotenv().ok();
         let url = std::env::var("DATABASE_URL").unwrap();
         let pool = sqlx::PgPool::connect(&url).await.unwrap();
-        let repo = PostgresSecureValueRepository::new(pool.clone());
+        let repo = PostgresSecureValueRepository::new_with_key(
+            pool.clone(),
+            "test-encryption-key".to_string(),
+        );
 
         let my_agent = format!("agent_sweep_{}", uuid::Uuid::new_v4());
         let other_agent = format!("agent_other_{}", uuid::Uuid::new_v4());

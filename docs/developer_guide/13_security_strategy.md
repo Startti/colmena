@@ -896,6 +896,19 @@ A: Outside Colmena's scope. Manage via upstream service (Amadeus, OpenAI, etc.).
 **Q: Is `SECURE_VALUES_KEY` enough to encrypt credentials?**  
 A: For MVP yes (AES-256 via PostgreSQL pgcrypto). For high-security scenarios, integrate with Vault or AWS Secrets Manager (Phase 3).
 
+> ⚠️ **CRITICAL — `SECURE_VALUES_KEY` is mandatory.** Since 2026-06-07 the
+> Postgres secure-value backend **fails fast at startup** if the env var is
+> unset or empty. Prior to that, the code silently fell back to the
+> hardcoded string `"default-key"`, which let anyone with DB read access
+> decrypt every stored secret. Export a random string of at least 32
+> characters in **every** environment (dev, staging, prod) — typically via
+> your secret manager — before instantiating the engine. There is no
+> longer a way to "just try it" without a key.
+>
+> Tests that need to construct `PostgresSecureValueRepository` directly
+> (without an ambient env var) should use the
+> `new_with_key(pool, key)` constructor instead of `new(pool)`.
+
 ---
 
 ## Transport Security (TLS / SSL)
