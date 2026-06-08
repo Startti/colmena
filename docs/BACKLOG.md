@@ -776,16 +776,30 @@ while middle_end > keep_first && matches!(messages[middle_end].role(), MessageRo
 
 ---
 
-## ~~OpenAI Responses API — `input_text` invalid en synthetic-tool path~~ — RESUELTO 2026-06-07
+## ~~OpenAI Responses API — `input_text` invalid en synthetic-tool path~~ — RESUELTO 2026-06-07 (bug independiente, fix en PR #92)
 
-**Misma raíz que el entry de Chat Completions arriba.** El bug NO estaba en el adapter OpenAI ni en cómo se serializan los synthetic tools — estaba en `compact_history_to_summary` ([`agent_service.rs:745`](../src/libs/colmena/src/llm/application/agent_service.rs:745)) dejando `tool` messages huérfanos en `kept_recent` cuando la frontera de compactación caía dentro de una secuencia `{assistant.tool_calls, tool, tool, ...}`. La historia malformada (tool sin assistant.tool_calls precedente) hacía que el OpenAI Responses adapter intentara serializar el primer tool message con el content-type incorrecto, disparando `Invalid value: 'input_text'. Supported values: 'output_text', 'refusal'`. El síntoma era distinto al de Chat Completions pero la causa raíz era la misma.
+**Corrección importante (2026-06-07, post-redeploy verification):** la nota inicial de este entry decía que este bug compartía root cause con el de Chat Completions y se resolvía con el fix de compactación. **Eso fue incorrecto.** Al re-correr Phase 3.1 contra el worker desplegado con el fix de compaction (PR #91), el error `'Invalid value: input_text'` reapareció con sólo 5 mensajes en la historia — por debajo del threshold de compactación. El bug era **separado**, en `build_responses_request_body` de [`openai_adapter.rs`](../src/libs/colmena/src/llm/infrastructure/openai_adapter.rs), con 2 problemas distintos:
 
-**Fix shipped:** ver entrada hermana arriba ("Lazy tool loading — OpenAI message-order regression"). La compactación ahora preserva el par `{assistant.tool_calls, tool*}` intacto al evitar splittear la frontera dentro de la secuencia. Cubre simultáneamente:
-- Phase 1.2 (`lazy_tools` con OpenAI Chat Completions)
-- Phase 3.1 (`pdf_analyst_base64` con OpenAI Responses API + `load_attachment`)
-- Phase 4.1 (`sql_products_readonly` con OpenAI + muchas SQL queries acumulando historia)
+1. **Content type hardcoded `input_text` para TODO role.** OpenAI Responses API requiere `output_text` para mensajes de assistant; el adapter mandaba `input_text` y la API rechazaba.
+2. **Tool calls y tool responses serializados como mensajes** `{role, content}`. La Responses API los espera como items top-level distintos: `{type: "function_call", call_id, name, arguments}` para tool calls del assistant, y `{type: "function_call_output", call_id, output}` para tool responses. El código viejo los aplanaba como mensajes y, además, perdía los `tool_calls` del assistant entirely.
 
-**Test regresivo:** `summary_never_orphans_tool_message_after_compaction` en `agent_service.rs:tests`.
+**Fix shipped en PR [#92](https://github.com/Startti/colmena/pull/92):** rewrite del dispatch en `build_responses_request_body`:
+
+| LlmMessage role | Output Responses API |
+|---|---|
+| System / User | `{role, content: [{type:"input_text",text}, ...files]}` |
+| Assistant con tool_calls | (opcional `output_text` si hay texto) + un `{type:"function_call", call_id, name, arguments}` por cada tool call |
+| Assistant solo con texto | `{role:"assistant", content: [{type:"output_text",text}]}` |
+| Tool | `{type:"function_call_output", call_id, output}` (no role) |
+
+**4 unit tests agregados** en `openai_adapter.rs::tests`:
+- `responses_serializes_assistant_text_as_output_text`
+- `responses_serializes_assistant_tool_calls_as_function_call_entries`
+- `responses_serializes_tool_response_as_function_call_output`
+- `responses_serializes_full_load_attachment_sequence_correctly` — **regression test** que reproduce el escenario exacto de Phase 3.1 (system + user con PDF inline → assistant llama `load_attachment` → tool ack → synthetic user con file content) y valida que el shape JSON enviado a OpenAI Responses API es correcto. Incluye los invariantes: **no item con `assistant+input_text`, y no Tool role escapando como mensaje top-level**.
+
+**E2E verification (post-redeploy 2026-06-07):**
+- Phase 3.1 `pdf_analyst_base64` con OpenAI Responses API + `load_attachment` + Plan B catalog-driven: **PASS contra el deployed worker**. Con un PDF real de Avianca (12 KB, "Delayed Baggage Report"), el LLM extrajo datos verbatim: Report Number `MTYAV40108581`, Customer Name `GARCIA, DANIEL GUILLERMO`, fecha `May 13, 2026, 14:08`, código de reserva `AJTQ6V`, teléfono `3153678626`. SSE evidencia: `/tmp/colmena_e2e/PDF_real.sse` (efímero).
 
 **Conservado para referencia histórica:**
 - **Origen:** E2E verification — Phase 3.1 (`pdf_analyst_base64`) y Phase 4.1 (`sql_products_readonly`) del runbook `verifying_deployed_worker.md` (2026-06-07).
@@ -794,7 +808,7 @@ while middle_end > keep_first && matches!(messages[middle_end].role(), MessageRo
   Invalid value: 'input_text'. Supported values are: 'output_text' and 'refusal'.
   param: input[2].content[0]
   ```
-- **Hipótesis original (descartada):** el adapter OpenAI Responses serializaba mal los content types cuando había synthetic tools en la historia. Lectura del código confirmó que el adapter es correcto; el bug emergía sólo después de compactación que dejaba tool messages huérfanos.
+- **Hipótesis original (descartada):** la primera teoría fue que el bug compartía root cause con el de Chat Completions (compaction). Re-verificación post-redeploy desmintió esa hipótesis: el bug persistía incluso sin compaction. La causa real era el shape incorrecto del Responses API en el adapter.
 - **Referencias originales:** SSE `/tmp/colmena_e2e/3.1_pdf.sse` y `/tmp/colmena_e2e/4.1_sql_readonly.sse` (efímeros); OpenAI Responses API docs: <https://platform.openai.com/docs/api-reference/responses>.
 
 ---
