@@ -1788,7 +1788,20 @@ impl ExecutableNode for OrchestratorNode {
     }
 
     fn default_output(&self) -> Option<&str> {
-        Some("result")
+        // Orchestrator emits `{ all_tasks, final_response, extra_info }` (see the
+        // `OrchestratorSuspend::Done` payload around line 756). Implicit edges
+        // (`from: "<orchestrator_id>"` with no field qualifier) carry the
+        // human-facing text response. This matches the declared `schema()`
+        // below, `docs/agent_context/node_ports_reference.md`, and the SSE
+        // `node-end` event documented in `docs/sse_events_reference.md`.
+        //
+        // Historical note: prior to the 2026-06 doc audit this returned
+        // `Some("result")`, which silently fell back to the whole output
+        // object via the field-missing fallback in
+        // `run_use_case.rs::resolve_edge_value`. Downstream nodes that
+        // relied on receiving the full object should switch to an explicit
+        // `from: "<orchestrator_id>.all_tasks"` (or `.extra_info`) edge.
+        Some("final_response")
     }
 
     fn schema(&self) -> Value {
