@@ -62,6 +62,17 @@ impl TokenCache {
         let mut cache = self.cache.lock().await;
         *cache = None;
     }
+
+    /// Test-only: seed the cached token directly so wiremock-based
+    /// tests don't hit the real ADC endpoint.
+    #[cfg(test)]
+    pub(crate) async fn set_token_for_test(&self, value: String) {
+        let mut guard = self.cache.lock().await;
+        *guard = Some(CachedToken {
+            token: value,
+            expires_at: Instant::now() + TOKEN_TTL,
+        });
+    }
 }
 
 async fn acquire_token(scopes: &[&str]) -> Result<String, DocsError> {

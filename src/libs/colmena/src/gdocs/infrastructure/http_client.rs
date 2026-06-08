@@ -36,9 +36,8 @@ const PROD_BASE_DRIVE_UPLD: &str = "https://www.googleapis.com/upload/drive/v3";
 pub struct GoogleDocsHttpClient {
     cfg: GDocsConfig,
     http: Client,
-    tokens: Arc<TokenCache>,
+    pub(crate) tokens: Arc<TokenCache>,
     base_docs: String,
-    #[allow(dead_code)] // populated for Tasks 10-12 (drive endpoints)
     base_drive: String,
     #[allow(dead_code)] // populated for Task 12 (resumable upload)
     base_drive_upld: String,
@@ -92,7 +91,6 @@ impl GoogleDocsHttpClient {
 
     /// Send with retry on 429/5xx. The `build_req` closure rebuilds the
     /// request on each retry (so token refreshes apply).
-    #[allow(dead_code)] // used by `get` here; other methods land in T10-T12
     async fn send_with_retry(
         &self,
         build_req: impl Fn(&Client, &str) -> reqwest::RequestBuilder,
@@ -119,7 +117,6 @@ impl GoogleDocsHttpClient {
 
     /// Map a non-success `Response` to the matching `DocsError`. Reads
     /// the body for context.
-    #[allow(dead_code)] // used by `get`; other methods land in T10-T12
     pub(crate) async fn map_status(&self, r: Response, ctx: &str) -> Result<Response, DocsError> {
         if r.status().is_success() {
             return Ok(r);
@@ -357,27 +354,134 @@ impl DocsClient for GoogleDocsHttpClient {
 
     async fn list_revisions_since(
         &self,
-        _id: &DocumentId,
-        _since: &RevisionId,
+        id: &DocumentId,
+        since: &RevisionId,
     ) -> Result<Vec<RevisionMeta>, DocsError> {
-        todo!("filled by Task 10")
+        let url = format!(
+            "{}/files/{}/revisions?fields=revisions(id,modifiedTime,lastModifyingUser/emailAddress)",
+            self.base_drive, id.0
+        );
+        let resp = self
+            .send_with_retry(|c, t| c.request(Method::GET, &url).bearer_auth(t))
+            .await?;
+        let resp = self
+            .map_status(resp, &format!("revisions.list {}", id.0))
+            .await?;
+        let j: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| DocsError::Http(format!("revisions.list json: {e}")))?;
+        let arr = j
+            .get("revisions")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        // Drive returns revisions oldest→newest. Skip everything up to
+        // and including `since`; return everything strictly after.
+        let mut started = false;
+        let mut out = Vec::new();
+        for rev in arr {
+            let rid = rev
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !started {
+                if rid == since.0 {
+                    started = true;
+                }
+                continue;
+            }
+            let modified_time = rev
+                .get("modifiedTime")
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|d| d.with_timezone(&chrono::Utc))
+                .unwrap_or_else(chrono::Utc::now);
+            let modifying_user_email = rev
+                .pointer("/lastModifyingUser/emailAddress")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            out.push(RevisionMeta {
+                revision_id: RevisionId(rid),
+                modified_time,
+                modifying_user_email,
+            });
+        }
+        Ok(out)
     }
 
     async fn get_at_revision(
         &self,
-        _id: &DocumentId,
-        _revision: &RevisionId,
+        id: &DocumentId,
+        revision: &RevisionId,
     ) -> Result<String, DocsError> {
-        todo!("filled by Task 10")
+        // Drive `revisions.get` with media export to text/plain.
+        let url = format!(
+            "{}/files/{}/revisions/{}?alt=media",
+            self.base_drive, id.0, revision.0
+        );
+        let resp = self
+            .send_with_retry(|c, t| {
+                c.request(Method::GET, &url)
+                    .bearer_auth(t)
+                    .header("Accept", "text/plain")
+            })
+            .await?;
+        let resp = self
+            .map_status(resp, &format!("revisions.get {} @ {}", id.0, revision.0))
+            .await?;
+        resp.text()
+            .await
+            .map_err(|e| DocsError::Http(format!("revisions.get text: {e}")))
     }
 
     async fn batch_update(
         &self,
-        _id: &DocumentId,
-        _requests: Vec<serde_json::Value>,
-        _required_revision: Option<&RevisionId>,
+        id: &DocumentId,
+        requests: Vec<serde_json::Value>,
+        required_revision: Option<&RevisionId>,
     ) -> Result<BatchUpdateResult, DocsError> {
-        todo!("filled by Task 10")
+        let url = format!("{}/documents/{}:batchUpdate", self.base_docs, id.0);
+        let mut body = serde_json::json!({ "requests": requests });
+        if let Some(rev) = required_revision {
+            body["writeControl"] = serde_json::json!({ "requiredRevisionId": rev.0 });
+        }
+        let resp = self
+            .send_with_retry(|c, t| c.request(Method::POST, &url).bearer_auth(t).json(&body))
+            .await?;
+        let resp = self
+            .map_status(resp, &format!("batchUpdate {}", id.0))
+            .await?;
+        let j: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| DocsError::Http(format!("batchUpdate json: {e}")))?;
+
+        // Try to recover the new revisionId from the response. Google
+        // sometimes echoes it under writeControl.requiredRevisionId; if
+        // not, fall back to a fresh GET.
+        let echoed = j
+            .get("writeControl")
+            .and_then(|v| v.get("requiredRevisionId"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let revision_id_after = if echoed.is_empty() {
+            self.get(id).await?.revision_id
+        } else {
+            RevisionId(echoed)
+        };
+        let replies = j
+            .get("replies")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        Ok(BatchUpdateResult {
+            revision_id_after,
+            replies,
+        })
     }
 
     async fn add_tab(
@@ -487,5 +591,112 @@ mod tests {
         });
         let snap = parse_snapshot(&j, &DocumentId("d3".into())).unwrap();
         assert_eq!(snap.tabs[0].paragraphs[0].kind, ParagraphKind::ListItem);
+    }
+
+    use wiremock::matchers::{header_exists, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn test_cfg() -> GDocsConfig {
+        GDocsConfig {
+            credentials_path: None,
+            scopes: vec!["https://www.googleapis.com/auth/documents".to_string()],
+            default_parent_folder: None,
+            request_timeout: Duration::from_secs(5),
+            max_retries: 0,
+            revision_cache_ttl: Duration::from_secs(5),
+        }
+    }
+
+    fn client_for(server: &MockServer) -> GoogleDocsHttpClient {
+        let cfg = test_cfg();
+        let base = server.uri();
+        GoogleDocsHttpClient::with_base_urls(
+            &cfg,
+            format!("{}/docs", base),
+            format!("{}/drive", base),
+            format!("{}/upload", base),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn batch_update_uses_required_revision() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/docs/documents/doc1:batchUpdate"))
+            .and(header_exists("authorization"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "writeControl": {"requiredRevisionId": "rev_after"},
+                "replies": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        client.tokens.set_token_for_test("fake".to_string()).await;
+
+        let result = client
+            .batch_update(
+                &DocumentId("doc1".into()),
+                vec![json!({"insertText": {"location": {"index": 1}, "text": "hi"}})],
+                Some(&RevisionId("rev_before".into())),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.revision_id_after.0, "rev_after");
+    }
+
+    #[tokio::test]
+    async fn list_revisions_returns_only_after_since() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/files/doc1/revisions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "revisions": [
+                    {"id": "r1", "modifiedTime": "2026-06-08T10:00:00Z",
+                     "lastModifyingUser": {"emailAddress": "alice@example.com"}},
+                    {"id": "r2", "modifiedTime": "2026-06-08T11:00:00Z",
+                     "lastModifyingUser": {"emailAddress": "bob@example.com"}},
+                    {"id": "r3", "modifiedTime": "2026-06-08T12:00:00Z",
+                     "lastModifyingUser": {"emailAddress": "carol@example.com"}},
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        client.tokens.set_token_for_test("fake".to_string()).await;
+
+        let revs = client
+            .list_revisions_since(&DocumentId("doc1".into()), &RevisionId("r1".into()))
+            .await
+            .unwrap();
+        assert_eq!(revs.len(), 2);
+        assert_eq!(revs[0].revision_id.0, "r2");
+        assert_eq!(revs[1].revision_id.0, "r3");
+        assert_eq!(
+            revs[1].modifying_user_email.as_deref(),
+            Some("carol@example.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn get_at_revision_returns_text() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/files/doc1/revisions/rev_5"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("Hello\nworld\n"))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        client.tokens.set_token_for_test("fake".to_string()).await;
+
+        let txt = client
+            .get_at_revision(&DocumentId("doc1".into()), &RevisionId("rev_5".into()))
+            .await
+            .unwrap();
+        assert_eq!(txt, "Hello\nworld\n");
     }
 }
