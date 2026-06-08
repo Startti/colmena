@@ -347,7 +347,27 @@ impl ExecutableNode for SqlNode {
                     .get("api_key")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let api_key = Self::resolve_env_vars(api_key_raw).unwrap_or_default();
+                // Fail-fast at node initialization: a missing or empty
+                // `api_key` here used to silently produce an `LlmCriticAdapter`
+                // wrapping an empty string, which then exploded on the first
+                // guardrailed query as `InvalidApiKey`. Surface the
+                // misconfiguration at engine startup instead so it appears
+                // before any traffic is served.
+                let api_key = Self::resolve_env_vars(api_key_raw)
+                    .map_err(|e| format!(
+                        "sql node: guardrail_llm.api_key failed to resolve \
+                         (`{api_key_raw}`): {e}. Set guardrail_llm.api_key to a \
+                         non-empty literal or to an env-var placeholder like \
+                         ${{OPENAI_API_KEY}} that is set at startup."
+                    ))?;
+                if api_key.is_empty() {
+                    return Err(format!(
+                        "sql node: guardrail_llm.enabled = true but api_key \
+                         resolved to an empty string (raw value: `{api_key_raw}`). \
+                         Either disable guardrail_llm or provide a real key."
+                    )
+                    .into());
+                }
 
                 Some(Arc::new(LlmCriticAdapter::new(provider, model, api_key))
                     as Arc<
