@@ -189,7 +189,7 @@ pub async fn run(
     ctx.cache.invalidate(ctx.session_id, doc_id);
     let fresh = ctx.client.get(doc_id).await?;
     ctx.revisions
-        .put(ctx.session_id, doc_id, &fresh.revision_id)
+        .put_with_snapshot(ctx.session_id, doc_id, &fresh.revision_id, Some(&fresh))
         .await?;
     ctx.cache.put(ctx.session_id, doc_id, fresh.clone());
 
