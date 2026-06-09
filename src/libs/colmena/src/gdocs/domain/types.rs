@@ -170,6 +170,15 @@ pub struct HumanChange {
     pub preview: String,
     pub modified_time: chrono::DateTime<chrono::Utc>,
     pub modifying_user: Option<String>,
+    /// Tab where the change happened. `None` for single-tab docs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<TabId>,
+    /// Paragraph text before the change. `None` for `Insert`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_text: Option<String>,
+    /// Paragraph text after the change. `None` for `Delete`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_text: Option<String>,
 }
 
 /// A markdown element that could not be losslessly converted to Google
@@ -385,6 +394,43 @@ mod tests {
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         );
         assert_eq!(ExportFormat::Markdown.mime(), "text/markdown");
+    }
+
+    #[test]
+    fn human_change_serializes_new_fields() {
+        let c = HumanChange {
+            kind: HumanChangeKind::Modify,
+            paragraph: 4,
+            preview: "abc".into(),
+            modified_time: "2026-06-09T23:25:13Z".parse().unwrap(),
+            modifying_user: None,
+            tab_id: Some(TabId("t1".into())),
+            before_text: Some("a".into()),
+            after_text: Some("b".into()),
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["tab_id"], "t1");
+        assert_eq!(v["before_text"], "a");
+        assert_eq!(v["after_text"], "b");
+        assert_eq!(v["kind"], "modify");
+    }
+
+    #[test]
+    fn human_change_omits_new_fields_when_none() {
+        let c = HumanChange {
+            kind: HumanChangeKind::Modify,
+            paragraph: 4,
+            preview: "abc".into(),
+            modified_time: "2026-06-09T23:25:13Z".parse().unwrap(),
+            modifying_user: None,
+            tab_id: None,
+            before_text: None,
+            after_text: None,
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert!(v.get("tab_id").is_none());
+        assert!(v.get("before_text").is_none());
+        assert!(v.get("after_text").is_none());
     }
 
     #[test]
