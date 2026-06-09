@@ -1,21 +1,29 @@
-//! Co-edit safety pipeline. Runs before every edit:
-//! 1. Fetch the doc snapshot (cache or fresh).
-//! 2. Resolve the intended scope against that snapshot.
-//! 3. Compare the snapshot revision_id to what the agent last saw
-//!    (from postgres). If they match → proceed.
-//! 4. If they differ, fetch revisions in (known, current], filter
-//!    out the SA's own revisions → human_revisions.
-//! 5. If human_revisions is empty (all changes were ours) → proceed.
-//! 6. Otherwise compute paragraph-level diff between prior text
-//!    and current text, partition by overlap with the intended scope.
-//! 7. If anything overlaps → block with `HumanChangesPending`.
-//!    Else → proceed with soft_warnings (the outside-scope changes).
+//! Co-edit safety pipeline. Runs before every edit.
 //!
-//! See spec `docs/superpowers/specs/2026-06-08-google-docs-design.md` §8.
+//! Pipeline (v1.1, 2026-06-09):
+//! 1. Fetch the doc snapshot (5s cache or fresh `documents.get`).
+//! 2. Resolve the intended scope against that snapshot.
+//! 3. Read `(prior_revision, prior_snapshot)` from the `RevisionStore`.
+//!    - None → first contact: proceed without diffing.
+//!    - Equal revisions → no drift: proceed.
+//!    - Different revisions → drift; proceed to step 4.
+//! 4. If a `prior_snapshot` is available, run `paragraph_diff(prior,
+//!    current)` and partition the resulting [`HumanChange`]s by
+//!    `ResolvedScope::contains_paragraph`.
+//!    - Any overlap with scope → block with `HumanChangesPending`
+//!      populated.
+//!    - No overlap → proceed with `soft_warnings` (outside-scope
+//!      changes for the agent's awareness).
+//! 5. If the prior snapshot is missing (older instance, oversized doc,
+//!    or migration not applied), fall back to v1 behavior:
+//!    conservative block with empty change lists.
+//!
+//! See spec `docs/superpowers/specs/2026-06-09-gdocs-paragraph-diff-design.md`.
 
+use crate::gdocs::application::diff::paragraph_diff;
 use crate::gdocs::application::scope_resolver::{self, ResolvedScope};
 use crate::gdocs::domain::{
-    DocsClient, DocsError, DocumentId, DocumentSnapshot, HumanChange, RevisionMeta, Scope,
+    DocsClient, DocsError, DocumentId, DocumentSnapshot, HumanChange, Scope,
 };
 use crate::gdocs::infrastructure::outline_cache::OutlineCache;
 use crate::gdocs::infrastructure::revision_store::RevisionStore;
@@ -69,83 +77,105 @@ pub async fn run_guard(
     // 2. Scope resolution.
     let resolved_scope = scope_resolver::resolve(scope, &snapshot)?;
 
-    // 3. Compare revision ids.
+    // 3. Read prior revision + snapshot.
     //
-    // Note on the v1 design pivot (verified live 2026-06-09): the
-    // original spec assumed Drive's Revisions API would yield an
-    // edit-by-edit log we could filter by SA email and diff against the
-    // prior content. In practice, for Google-native Docs/Sheets/Slides
-    // the Drive Revisions API only returns NAMED versions, not
-    // individual edits — so `list_revisions_since` consistently returns
-    // an empty list and the guard never fires. Without per-edit
-    // attribution, we cannot show paragraph-level diffs in v1.
+    // v1 (2026-06-08) shipped with revisionId equality only — the guard
+    // knew SOMETHING changed but could not say WHAT, since Drive's
+    // Revisions API doesn't expose per-edit logs for Google-native docs.
     //
-    // The robust v1 safety guarantee instead: **if the doc's
-    // revisionId has moved since the agent's last write, block until
-    // the agent explicitly acknowledges**. This always catches human
-    // edits (every change advances revisionId). It cannot distinguish
-    // agent vs human, but in practice the agent itself updates the
-    // stored revision after every successful write, so any drift IS a
-    // human change.
+    // v1.1 (2026-06-09) augments the store with the post-write
+    // `DocumentSnapshot`. On drift we run a Myers diff (`paragraph_diff`)
+    // between the stored prior snapshot and the freshly-fetched current
+    // snapshot, then partition the resulting `HumanChange`s by overlap
+    // with the agent's intended scope:
+    //   - any overlap with scope → block with the populated lists
+    //   - no overlap, drift purely outside scope → proceed with
+    //     `soft_warnings` for the agent's awareness
     //
-    // Trade-off: the LLM doesn't see WHAT changed; only that something
-    // changed. The agent can call `read_outline` / `read_as_markdown`
-    // to inspect the current state before calling
-    // `acknowledge_human_changes`. Paragraph-level diffs return as
-    // v1.1 once Google exposes a fine-grained edit log (or we cache
-    // prior snapshots in postgres for delta computation).
-    let known = ctx.revisions.get(ctx.session_id, doc_id).await?;
-    let current = snapshot.revision_id.clone();
+    // When the prior snapshot is unavailable (older instance, oversized
+    // doc, or migration not applied), we fall back to v1 behavior —
+    // conservative block with empty lists.
+    let (known, prior_snap) = ctx
+        .revisions
+        .get_with_snapshot(ctx.session_id, doc_id)
+        .await?;
+    let current_rev = snapshot.revision_id.clone();
     match known {
-        Some(k) if k != current => {
-            // Doc revision moved while the agent had a known cursor.
-            // Treat as a human edit. The since timestamp is best-effort:
-            // we don't have a precise wall-clock for the human's edit,
-            // so we use the snapshot's "now" as the upper bound.
-            Err(DocsError::HumanChangesPending {
-                since: chrono::Utc::now(),
-                changes_overlapping_scope: vec![],
-                changes_outside_scope: vec![],
-            })
-        }
-        Some(_) | None => {
-            // Either revisions match, or this is first contact for
-            // this (session, doc). In both cases, proceed without
-            // blocking. The first-contact case stores the current
-            // revision below in the application use cases after each
-            // successful write.
+        None => {
+            // First contact for this (session, doc) — use case writes
+            // will persist the post-write snapshot.
             Ok(GuardOk {
                 snapshot,
                 resolved_scope,
                 soft_warnings: vec![],
             })
         }
+        Some(k) if k == current_rev => {
+            // No drift — proceed.
+            Ok(GuardOk {
+                snapshot,
+                resolved_scope,
+                soft_warnings: vec![],
+            })
+        }
+        Some(_) => match prior_snap {
+            // Drift + prior snapshot available → diff + partition.
+            Some(prior) => {
+                let changes = paragraph_diff(&prior, &snapshot);
+                let (overlap, outside) = partition_by_scope(changes, &resolved_scope);
+                if !overlap.is_empty() {
+                    Err(DocsError::HumanChangesPending {
+                        since: chrono::Utc::now(),
+                        changes_overlapping_scope: overlap,
+                        changes_outside_scope: outside,
+                    })
+                } else {
+                    Ok(GuardOk {
+                        snapshot,
+                        resolved_scope,
+                        soft_warnings: outside,
+                    })
+                }
+            }
+            // Drift but no prior snapshot — degraded v1 behavior:
+            // conservative block with empty lists. We can't prove the
+            // change is outside scope, so don't relax safety.
+            None => Err(DocsError::HumanChangesPending {
+                since: chrono::Utc::now(),
+                changes_overlapping_scope: vec![],
+                changes_outside_scope: vec![],
+            }),
+        },
     }
 }
 
-// Unused since v1 pivot — kept commented for v1.1 where Google may
-// expose per-edit revisions or we add postgres snapshot caching:
-//
-//   fn diff_to_paragraph_changes(prior, current, revs) -> Vec<HumanChange>
-//   fn merge_adjacent_to_modify(changes) -> Vec<HumanChange>
-//
-// Both relied on Drive's revisions.get to fetch text at a prior
-// revision_id. Since Drive Revisions doesn't list per-edit
-// revisions for native Google Docs, the prior text is never
-// available. The functions and their tests were removed.
+/// Split a list of human changes into `(overlapping_scope, outside_scope)`
+/// using the resolved scope's tab + paragraph range.
+fn partition_by_scope(
+    changes: Vec<HumanChange>,
+    scope: &ResolvedScope,
+) -> (Vec<HumanChange>, Vec<HumanChange>) {
+    let (mut overlap, mut outside) = (Vec::new(), Vec::new());
+    for c in changes {
+        if scope.contains_paragraph(c.tab_id.as_ref(), c.paragraph) {
+            overlap.push(c);
+        } else {
+            outside.push(c);
+        }
+    }
+    (overlap, outside)
+}
 
-#[allow(dead_code)]
-fn _suppress_warnings(_: RevisionMeta) {}
-
-// Note: full unit tests for this module live in Task 19 alongside the
-// `MockDocsClient`. We add a small smoke test here that exercises the
-// pure helpers without any I/O.
+// Unit tests for this module live alongside the `MockDocsClient`
+// (`gdocs::application::_test_helpers`). The v1.1 paragraph diff is
+// covered by tests below + the `paragraph_diff` test suite in
+// `gdocs::application::diff`.
 
 #[cfg(test)]
 mod guard_tests {
     use super::*;
     use crate::gdocs::application::_test_helpers::*;
-    use crate::gdocs::domain::{ParagraphKind, RevisionId};
+    use crate::gdocs::domain::{HumanChangeKind, ParagraphKind, RevisionId};
 
     fn expect_get_snapshot(
         client: &mut crate::gdocs::domain::traits::MockDocsClient,
@@ -244,5 +274,123 @@ mod guard_tests {
         };
         let ok = run_guard(&ctx, &doc_id(), &Scope::All).await.unwrap();
         assert_eq!(ok.snapshot.revision_id.0, "r1");
+    }
+
+    /// v1.1: drift + prior snapshot present + change overlaps scope →
+    /// block with populated `changes_overlapping_scope`.
+    #[tokio::test]
+    async fn guard_drift_with_snapshot_overlap_blocks_with_details() {
+        let mut rig = TestRig::new();
+        let prior = snap("r_old", vec![(1, ParagraphKind::Paragraph, "Hola", 1, 6)]);
+        let current = snap(
+            "r_new",
+            vec![(1, ParagraphKind::Paragraph, "Hola modificado", 1, 16)],
+        );
+        expect_get_snapshot(&mut rig.client, current);
+        rig.revisions
+            .put_with_snapshot("s1", &doc_id(), &RevisionId("r_old".into()), Some(&prior))
+            .await
+            .unwrap();
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let err = run_guard(&ctx, &doc_id(), &Scope::All).await.unwrap_err();
+        match err {
+            DocsError::HumanChangesPending {
+                changes_overlapping_scope,
+                changes_outside_scope,
+                ..
+            } => {
+                assert_eq!(changes_overlapping_scope.len(), 1);
+                assert_eq!(changes_overlapping_scope[0].kind, HumanChangeKind::Modify);
+                assert_eq!(
+                    changes_overlapping_scope[0].before_text.as_deref(),
+                    Some("Hola")
+                );
+                assert_eq!(
+                    changes_overlapping_scope[0].after_text.as_deref(),
+                    Some("Hola modificado")
+                );
+                assert!(changes_outside_scope.is_empty());
+            }
+            other => panic!("expected HumanChangesPending, got {:?}", other),
+        }
+    }
+
+    /// v1.1: drift + change is outside the requested scope → proceed
+    /// with the change reported as `soft_warnings`.
+    #[tokio::test]
+    async fn guard_drift_outside_scope_proceeds_with_soft_warnings() {
+        let mut rig = TestRig::new();
+        let prior = snap(
+            "r_old",
+            vec![
+                (1, ParagraphKind::Paragraph, "Hola", 1, 6),
+                (2, ParagraphKind::Paragraph, "Adios", 7, 13),
+            ],
+        );
+        let current = snap(
+            "r_new",
+            vec![
+                (1, ParagraphKind::Paragraph, "Hola", 1, 6),
+                (2, ParagraphKind::Paragraph, "Adios cambiado", 7, 23),
+            ],
+        );
+        expect_get_snapshot(&mut rig.client, current);
+        rig.revisions
+            .put_with_snapshot("s1", &doc_id(), &RevisionId("r_old".into()), Some(&prior))
+            .await
+            .unwrap();
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let ok = run_guard(&ctx, &doc_id(), &Scope::Paragraph { n: 1 })
+            .await
+            .unwrap();
+        assert_eq!(ok.soft_warnings.len(), 1);
+        assert_eq!(ok.soft_warnings[0].paragraph, 2);
+        assert_eq!(ok.soft_warnings[0].kind, HumanChangeKind::Modify);
+    }
+
+    /// v1.1 degraded path: drift but no prior snapshot stored → fall
+    /// back to v1 conservative block with empty lists.
+    #[tokio::test]
+    async fn guard_drift_without_snapshot_falls_back_to_v1() {
+        let mut rig = TestRig::new();
+        let current = snap("r_new", vec![(1, ParagraphKind::Paragraph, "Hola", 1, 6)]);
+        expect_get_snapshot(&mut rig.client, current);
+        // Persist revision only (no snapshot) — simulates an older v1
+        // session-state row.
+        rig.revisions
+            .put_with_snapshot("s1", &doc_id(), &RevisionId("r_old".into()), None)
+            .await
+            .unwrap();
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let err = run_guard(&ctx, &doc_id(), &Scope::All).await.unwrap_err();
+        match err {
+            DocsError::HumanChangesPending {
+                changes_overlapping_scope,
+                changes_outside_scope,
+                ..
+            } => {
+                assert!(changes_overlapping_scope.is_empty());
+                assert!(changes_outside_scope.is_empty());
+            }
+            other => panic!("expected HumanChangesPending, got {:?}", other),
+        }
     }
 }
