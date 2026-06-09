@@ -714,3 +714,71 @@ correcciones internas. La SA `colmena-sheets-tester` queda como SA de
 testing oficial para gdocs (mismo patrón que gsheets).
 
 **Estado.** done.
+
+---
+
+## 17. Google Docs co-edit guard v1.1 — paragraph-level human-change diff (2026-06-09)
+
+**Qué cambió.** Cuando el guard detecta drift (humano editó entre dos
+writes del agente), ahora devuelve una **lista concreta de cambios
+paragraph-level** — particionada por overlap con el scope intencionado:
+
+- `changes_overlapping_scope` (con `before_text` / `after_text` /
+  `tab_id` por cambio) → block con `human_changes_pending` poblado.
+- `changes_outside_scope` → el edit procede, con cambios listados como
+  `soft_warnings` para awareness del agente.
+
+Implementación: persistimos el `DocumentSnapshot` post-write en
+`gdocs_session_state.last_snapshot_json` (cap 1 MB; opt-out vía
+`COLMENA_GDOCS_MAX_SNAPSHOT_BYTES`) y corremos Myers diff via crate
+`similar`. Cero API calls extra — el snapshot que persistimos es el
+mismo que ya hidratamos para construir `EditResult.outline_snapshot`.
+
+Instancias sin la migración aplicada degradan grácilmente a v1
+behavior (`gdocs.snapshot.column_missing` warn al boot; listas vacías
+y block conservador en cada drift).
+
+**Por qué importa.** Antes de v1.1, el LLM recibía
+`human_changes_pending` con listas vacías y tenía que llamar
+`read_outline` / `read_as_markdown` para entender qué cambió — turn
+extra + tokens + comparación contra memoria potencialmente truncada.
+Ahora el contexto completo del cambio llega en el error mismo,
+incluido `before_text` y `after_text` por párrafo.
+
+**Documentación de referencia.**
+- Spec: [`docs/superpowers/specs/2026-06-09-gdocs-paragraph-diff-design.md`](superpowers/specs/2026-06-09-gdocs-paragraph-diff-design.md)
+- Plan: [`docs/superpowers/plans/2026-06-09-gdocs-paragraph-diff.md`](superpowers/plans/2026-06-09-gdocs-paragraph-diff.md)
+- Propuesta original (parking lot): [`docs/proposals/2026-06-09-gdocs-oauth-user-flow.md`](proposals/2026-06-09-gdocs-oauth-user-flow.md)
+- Dev guide §"Co-edit safety pipeline" reescrito:
+  [`docs/developer_guide/45_gdocs.md`](developer_guide/45_gdocs.md)
+
+**Cambios técnicos clave.**
+- Migration `20260609000000_gdocs_session_state_snapshot.sql` —
+  additive `ALTER TABLE ADD COLUMN IF NOT EXISTS
+  last_snapshot_json JSONB, last_snapshot_size_bytes INTEGER`.
+- `HumanChange` extendido con `tab_id`, `before_text`, `after_text`
+  (additive, `#[serde(skip_serializing_if = "Option::is_none")]`).
+- `ResolvedScope::contains_paragraph` helper para partition.
+- `gdocs/application/diff.rs` — `paragraph_diff` puro vía Myers
+  (`similar = "2"` ya estaba en `Cargo.toml`).
+- `RevisionStore` extendido con `get_with_snapshot` /
+  `put_with_snapshot` (legacy `get`/`put` son default shims, backward-compat).
+- `PostgresRevisionStore::new` ahora async, probea
+  `information_schema.columns` y degrada con warn si las columnas no
+  existen.
+- 8 use cases (`delete_text`, `style`, `replace_text`,
+  `replace_section` ×2, `named_range`, `insert`, `apply_edits`)
+  actualizados para pasar `Some(&fresh)` a `put_with_snapshot`.
+
+**Tests.** 1547 unit tests pasan (incluido 9 nuevos en
+`diff::tests` + 3 nuevos en `co_edit_guard::guard_tests`).
+ADP worker recompila clean contra esta colmena (verificado vía
+`cargo check`).
+
+**Impacto ADP.** Migration additive — instancia sin schema aplicado
+arranca con warn + funciona en modo degraded. **Pending del lado ADP:**
+agregar `lastSnapshotJson Json?` + `lastSnapshotSizeBytes Int?` al
+schema Prisma. Detalles en
+[`ADP_PRISMA_PENDING_TABLES.md`](../ADP_PRISMA_PENDING_TABLES.md) §5.
+
+**Estado.** done.

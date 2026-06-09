@@ -344,3 +344,17 @@ For overrides (custom alias, `expose_sub_tools` filtering, `cache_ttl_seconds`, 
   for `gdocs_create_from_docx` / `gdocs_export` → all v1.1
   (see BACKLOG "Subsystem G v1.1"). Purely additive — no breaking
   changes; ADP unaffected unless it opts in via `enabled_tools`.
+- **Subsystem G v1.1 paragraph diff shipped 2026-06-09** — co-edit guard
+  now returns paragraph-level `before_text`/`after_text` per
+  `HumanChange`, partitioned by scope overlap. Cambios fuera del scope
+  pasan como `soft_warnings` (no bloquean); cambios dentro del scope
+  bloquean con la lista poblada. Adds `last_snapshot_json` + 
+  `last_snapshot_size_bytes` to `gdocs_session_state` via migration
+  `20260609000000_gdocs_session_state_snapshot.sql`. 1 MB cap configurable
+  via `COLMENA_GDOCS_MAX_SNAPSHOT_BYTES`. Instancias sin migración
+  detectan ausencia de columnas vía `information_schema` y degradan a v1
+  behavior con warn al boot. Diff vía Myers (crate `similar`). ADP debe
+  agregar 2 columnas al schema Prisma — ver
+  [`ADP_PRISMA_PENDING_TABLES.md`](ADP_PRISMA_PENDING_TABLES.md) §5.
+  Spec en
+  [`docs/superpowers/specs/2026-06-09-gdocs-paragraph-diff-design.md`](docs/superpowers/specs/2026-06-09-gdocs-paragraph-diff-design.md).

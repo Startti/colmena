@@ -462,20 +462,18 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
   de refresh + `OAuthDocsClient` adapter alternativo), los archivos
   creados quedan owned directamente por el usuario. ~1-2 semanas dev.
   Misma raíz que la línea equivalente en Subsystem E v1.1.
-- [ ] **Paragraph-level human-change diff en `human_changes_pending`** —
-  el v1 pivotó a revisionId equality check porque `drive.revisions.list`
-  para Google Docs nativos no devuelve log per-edit, solo named versions.
-  Hoy el agente recibe solo "algo cambió" sin saber qué. Dos caminos
-  para v1.1:
-  - **Camino A (preferido):** colmena cachea snapshots prior en una
-    nueva tabla `gdocs_snapshot_cache(revision_id, document_id, snapshot_json)`
-    post-write. Cuando el guard detecta drift, hace `documents.get`
-    actual + lookup del snapshot anterior + diff párrafo-por-párrafo
-    usando `similar` crate. Storage cost: ~50-500 KB per revision per
-    doc, con TTL configurable. Cleanup via `attachment_gc` pattern.
-  - **Camino B (depende de Google):** si en el futuro Google expone
-    per-edit revisions para Docs nativos (hoy solo binary files),
-    revertir al diseño original §8 sin caching. Bajo control externo.
+- [x] ~~**Paragraph-level human-change diff en `human_changes_pending`**~~ —
+  **shipped 2026-06-09** vía Camino A. Snapshot cache extendido sobre
+  `gdocs_session_state` (no tabla nueva — additive ALTER TABLE con
+  `last_snapshot_json` JSONB + `last_snapshot_size_bytes` INTEGER).
+  Diff via Myers (crate `similar`) particionado por scope; cap 1 MB
+  configurable via `COLMENA_GDOCS_MAX_SNAPSHOT_BYTES`. Instancias sin
+  migración degradan a v1 behavior (`information_schema` check al
+  boot). Spec:
+  [`docs/superpowers/specs/2026-06-09-gdocs-paragraph-diff-design.md`](superpowers/specs/2026-06-09-gdocs-paragraph-diff-design.md).
+  CHANGELOG §17. Residuales para v1.2: detección solo-estilo, diff
+  intra-paragraph carácter-perfecto, atribución a usuario (sin Google
+  per-edit log → permanente null).
 - [ ] **`add_tab` markdown seeding** — hoy el arg `markdown` se acepta
   pero la response incluye `pending_markdown_seed: true` y el contenido
   no se aplica. Implementar: post-creación del tab, llamar el converter

@@ -250,3 +250,95 @@ operador: **solo `migrate deploy`. Nunca `migrate dev` ni `migrate reset`.**
 1. **Convención de naming de columnas mixta en ADP.** `ConversationAttachment` usa camelCase + `@map()`. `LlmNodeHistory` y `SecureValueMapping` usan snake_case directo en los nombres de campo de Prisma. Esta doc recomienda camelCase + `@map()` (la más moderna) para las 4 tablas nuevas, pero el operador puede preferir snake_case por consistencia con `LlmNodeHistory` — ambas son válidas a nivel SQL. **Decidir antes de crear el PR.**
 2. **Sin FK declarada a `AgentSession`.** Las migraciones de colmena no declaran FK, y `ConversationAttachment` tampoco la declara en Prisma. Si ADP quiere cascada `onDelete: Cascade` al borrar un AgentSession (consistente con `LlmNodeHistory.agentSession`), hay que agregarla manualmente — pero ojo: el event log `crdt_doc_events` NO tiene `agent_session_id`, solo `artifact_id`. Solo las 3 tablas restantes son candidatas a FK.
 3. **No hay rollback en la migration de CRDT.** Solo `gdocs_session_state` viene con bloque rollback comentado. Si ADP necesita rollback para la migration combinada, escribirlo a mano (DROP INDEX + DROP TABLE en orden inverso).
+
+---
+
+## 5. `gdocs_session_state` — v1.1 extension (2026-06-09)
+
+**Contexto.** Subsystem G v1.1 (paragraph-level human-change diff)
+extiende `gdocs_session_state` con dos columnas nullable para persistir
+el `DocumentSnapshot` post-write. Cuando el co-edit guard detecta drift,
+diff-ea el snapshot prior vs current → lista paragraph-level con
+`before_text`/`after_text` particionada por scope. Sin estas columnas,
+colmena degrada grácilmente a v1 behavior (block conservador con listas
+vacías), pero pierde la feature.
+
+### Raw SQL (idempotente, additive)
+
+```sql
+ALTER TABLE gdocs_session_state
+  ADD COLUMN IF NOT EXISTS last_snapshot_json       JSONB,
+  ADD COLUMN IF NOT EXISTS last_snapshot_size_bytes INTEGER;
+```
+
+Archivo: `src/libs/colmena/migrations/postgres/20260609000000_gdocs_session_state_snapshot.sql`
+
+### Update al schema Prisma
+
+En el `model GdocsSessionState` creado en §4, agregar:
+
+```prisma
+  lastSnapshotJson      Json?    @map("last_snapshot_json")
+  lastSnapshotSizeBytes Int?     @map("last_snapshot_size_bytes")
+```
+
+El modelo final queda:
+
+```prisma
+model GdocsSessionState {
+  agentSessionId        String   @map("agent_session_id")
+  documentId            String   @map("document_id")
+  lastRevisionId        String   @map("last_revision_id")
+  lastEditAt            DateTime @default(now()) @map("last_edit_at") @db.Timestamptz()
+  lastSnapshotJson      Json?    @map("last_snapshot_json")              // v1.1
+  lastSnapshotSizeBytes Int?     @map("last_snapshot_size_bytes")        // v1.1
+
+  @@id([agentSessionId, documentId])
+  @@index([lastEditAt], map: "gdocs_session_state_last_edit_at_idx")
+  @@map("gdocs_session_state")
+}
+```
+
+### Behavior cuando no está aplicada
+
+Colmena detecta la ausencia de la columna `last_snapshot_json` al boot
+via `information_schema.columns` y loguea **una sola vez**:
+
+```
+gdocs: last_snapshot_json column missing on gdocs_session_state;
+co-edit guard degrades to v1 (revisionId equality only).
+Apply migration 20260609000000_gdocs_session_state_snapshot.sql
+```
+
+No crash, no data loss, no breaking change para ADP. Las queries del
+adapter ramifican vía un flag `has_snapshot_col` para que las inserts
+no toquen las columnas inexistentes.
+
+### Cap de tamaño
+
+Constante `DEFAULT_MAX_SNAPSHOT_BYTES = 1_048_576` (1 MB). Override en
+runtime via `COLMENA_GDOCS_MAX_SNAPSHOT_BYTES`. Si un snapshot
+serializado supera el cap, se descarta (`NULL` en la columna JSONB) y
+ese `(session, doc)` específico funciona en modo degraded con warn
+`gdocs.snapshot.too_large`.
+
+### Aplicación recomendada en ADP
+
+Mismo flujo que §4 (`gdocs_session_state` base):
+
+1. Crear nueva migration:
+   `packages/database/prisma/migrations/<YYYYMMDDHHMMSS>_gdocs_session_state_snapshot/migration.sql`
+   con el SQL idempotente de arriba.
+2. Actualizar `model GdocsSessionState` en `schema.prisma`.
+3. `pnpm prisma migrate deploy` contra dev.
+4. Verificar que el worker recompila + boot-check confirma columnas
+   presentes (sin el warn).
+5. Cloud: `apps/service/ia/platform/deploy_gcp.sh` corre `migrate deploy`
+   en cada deploy.
+
+### Referencias
+
+- Spec: `docs/superpowers/specs/2026-06-09-gdocs-paragraph-diff-design.md`
+- Plan: `docs/superpowers/plans/2026-06-09-gdocs-paragraph-diff.md`
+- Dev guide: `docs/developer_guide/45_gdocs.md` §"Co-edit safety pipeline"
+- CHANGELOG: `docs/CHANGELOG_2026-06.md` §17
