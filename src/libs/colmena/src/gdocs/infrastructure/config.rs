@@ -44,9 +44,18 @@ impl GDocsConfig {
             .ok()
             .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
             .unwrap_or_else(|| {
+                // `drive.file` (per-file) is privacy-friendly in theory but
+                // only grants access to files the app CREATED or received
+                // via Drive Picker — NOT files a user shared with the SA
+                // via the "Share" button (those return
+                // `appNotAuthorizedToFile`). For colmena's realistic v1
+                // flow (user shares an existing doc with the SA), the SA
+                // must use `drive` to read/export shared files. Operators
+                // can downgrade to `drive.readonly` for read-only profiles
+                // or override entirely via COLMENA_GDOCS_SCOPES.
                 vec![
                     "https://www.googleapis.com/auth/documents".to_string(),
-                    "https://www.googleapis.com/auth/drive.file".to_string(),
+                    "https://www.googleapis.com/auth/drive".to_string(),
                 ]
             });
         let default_parent_folder = std::env::var("COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID").ok();

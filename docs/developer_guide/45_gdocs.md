@@ -145,6 +145,60 @@ Drive requiere un folder explícito para `gdocs_create*`. Dos formas:
 Sin ninguna de las dos, el dispatcher devuelve `no_parent_folder_configured`
 antes de pegarle al API.
 
+### ⚠️ Limitación clave de ownership en v1 — los `create_*` tools
+
+Cuando una SA sin Google Workspace crea un archivo en Drive, el archivo
+queda **owned por la SA**. Pero las SA tienen quota de almacenamiento
+**cero**, así que Drive lo rechaza inmediatamente con
+`storageQuotaExceeded` (HTTP 403).
+
+Esto NO es un bug de colmena — es una restricción del modelo de Google
+Drive. Compartir un folder con la SA le da permisos de escritura, pero
+no le presta tu quota.
+
+**Configuraciones donde `gdocs_create*` SÍ funciona:**
+
+| Setup | Cómo |
+|---|---|
+| **Shared Drive de Google Workspace** | Crear un Shared Drive en tu dominio Workspace, agregar la SA como Content Manager o Editor, usar el folder_id del Shared Drive como `parent_folder_id`. Los archivos los ownea el Shared Drive (el dominio), no la SA. |
+| **Domain-wide delegation** | Configurar DWD en el admin console + grantear los scopes a la SA. La SA impersona a un usuario real; los archivos los crea "como ese usuario". |
+
+**Configuraciones donde `gdocs_create*` NO funciona:**
+
+- Folder personal de Gmail (`@gmail.com`) compartido con la SA. La SA
+  puede leer/escribir el folder pero al crear adentro choca con
+  `storageQuotaExceeded`.
+- Folder personal de cuenta sin Workspace.
+
+### Patrón realista v1 — "user-creates-first"
+
+Para el caso de uso "cualquier usuario comparte un folder y el agente
+trabaja ahí", el patrón v1 robusto es:
+
+1. **El usuario crea el doc** en su propio Drive (un click en "Nuevo →
+   Documento").
+2. **Comparte con la SA** como Editor (o Editor del folder que lo
+   contiene).
+3. **Le pasa el `doc_id` al agente** por chat o como input del grafo.
+4. **El agente NUNCA llama `gdocs_create*`** — usa solo los 19 tools de
+   read / edit / style / append / tabs / export / share / named ranges
+   sobre el doc preexistente.
+
+En este patrón el doc queda owned por el usuario desde el día uno; la
+SA solo aporta sus permisos de Editor para modificarlo.
+
+### v1.1 — OAuth user-scoped flow
+
+Para que `gdocs_create*` funcione contra cualquier usuario sin Shared
+Drive, hace falta el **OAuth user-scoped flow**: el usuario hace consent
+de colmena vía OAuth (una sola vez), colmena guarda su refresh_token, y
+en lugar de la SA usa **el token del propio usuario** para esa sesión.
+Los archivos creados quedan owned por él directamente.
+
+Tracked en `docs/BACKLOG.md` § "Subsystem G v1.1". Es ~1-2 semanas de
+trabajo independiente de colmena (consent screen + token storage +
+ciclo de refresh + nuevo `OAuthDocsClient` adapter).
+
 ## Modelo content-addressed — errores tipados
 
 El servidor resuelve cada `find` / `anchor` haciendo una búsqueda textual
