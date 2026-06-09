@@ -62,6 +62,35 @@ For toolkit packages (`enabled_tools: ["gsheets"]` shortcut), see
 | `load_attachment` | Materialize a registered attachment's content (with auto-summary for large files) into the conversation | [§31](31_load_attachment.md) |
 | `recall_history` | Re-read the original content of one past message by its turn index | [§29](29_lazy_tool_loading.md) |
 
+## gdocs (22 tools)
+
+Detailed docs land in T23 (see [`docs/superpowers/specs/2026-06-08-google-docs-design.md`](../superpowers/specs/2026-06-08-google-docs-design.md) for the design spec).
+
+| Tool | Summary | Detailed docs |
+|---|---|---|
+| `gdocs_create` | Create an empty Google Doc and place it in a shared folder | (T23) |
+| `gdocs_create_from_markdown` | Create a new Google Doc from a markdown string (Drive does the conversion) | (T23) |
+| `gdocs_create_from_docx` | Upload a .docx attachment and convert it into a new Google Doc | (T23) |
+| `gdocs_share` | Grant a user reader / commenter / writer access to a Google Doc | (T23) |
+| `gdocs_export` | Export a Google Doc as docx / pdf / markdown / txt / rtf / epub / odt / html | (T23) |
+| `gdocs_list_tabs` | List every tab inside a multi-tab Google Doc | (T23) |
+| `gdocs_add_tab` | Create a new tab inside a Google Doc | (T23) |
+| `gdocs_read_as_markdown` | Export a Google Doc (or one tab) as markdown | (T23) |
+| `gdocs_read_outline` | Read the heading + paragraph-preview outline of a Google Doc | (T23) |
+| `gdocs_list_named_ranges` | List every named range declared in the Google Doc | (T23) |
+| `gdocs_replace_text` | Find and replace text (content-addressed, optionally scoped) | (T23) |
+| `gdocs_insert_after_text` | Insert markdown after a content-addressed anchor | (T23) |
+| `gdocs_insert_before_text` | Insert markdown before a content-addressed anchor | (T23) |
+| `gdocs_insert_between` | Insert markdown between two headings (or after a heading until EOF) | (T23) |
+| `gdocs_delete_text` | Delete one or more occurrences of text (scoped, content-addressed) | (T23) |
+| `gdocs_replace_section` | Replace everything between a heading and the next same-or-higher heading | (T23) |
+| `gdocs_append_markdown` | Append markdown at the end of a Google Doc (or a specific tab) | (T23) |
+| `gdocs_apply_edits` | Apply N sub-edits atomically (single batchUpdate, all-or-nothing) | (T23) |
+| `gdocs_style_text` | Apply a style patch (bold / italic / link / heading) to a found span | (T23) |
+| `gdocs_create_named_range` | Declare a named range over a paragraph for stable addressing | (T23) |
+| `gdocs_replace_named_range` | Overwrite the contents of a named range | (T23) |
+| `gdocs_acknowledge_human_changes` | Acknowledge concurrent human edits and reset the co-edit cursor | (T23) |
+
 ## Toolkit packages
 
 See [40_toolkit_packages.md](40_toolkit_packages.md). Today the only registered

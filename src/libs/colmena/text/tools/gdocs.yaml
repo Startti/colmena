@@ -1,0 +1,225 @@
+gdocs_create:
+  summary: Create an empty Google Doc and place it in a shared folder
+  description: |
+    Create a blank Google Doc with the given `title`. Requires either the
+    `parent_folder_id` argument or the operator's
+    `COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID` env var so Drive knows where
+    to place the new file. Returns `{doc_id, url, title, revision_id, tabs}`.
+
+    Errors: `no_parent_folder_configured`, `auth_failed`, `permission_denied`.
+
+gdocs_create_from_markdown:
+  summary: Create a new Google Doc from a markdown string (Drive does the conversion)
+  description: |
+    Create a Google Doc from a markdown string. Drive converts natively;
+    we re-export to markdown to detect elements that did not round-trip
+    cleanly (footnotes, math, tables in v1 are reported in
+    `lossy_conversions`). Returns the same shape as `gdocs_create` plus
+    `outline_snapshot` and `lossy_conversions`.
+
+    Errors: `no_parent_folder_configured`, `auth_failed`, `permission_denied`.
+
+gdocs_create_from_docx:
+  summary: Upload a .docx attachment and convert it into a new Google Doc
+  description: |
+    Convert a registered `.docx` attachment into a new Google Doc.
+    Attachment plumbing lands in T21 — until then this tool returns a
+    typed `not_yet_wired` envelope so the agent gets a structured signal.
+
+gdocs_share:
+  summary: Grant a user reader / commenter / writer access to a Google Doc
+  description: |
+    Share `doc_id` with `email` at `role` (`reader` | `commenter` | `writer`).
+    Wraps Drive's `permissions.create`.
+
+    Errors: `auth_failed`, `permission_denied`, `document_not_found`.
+
+gdocs_export:
+  summary: Export a Google Doc as docx / pdf / markdown / txt / rtf / epub / odt / html
+  description: |
+    Export `doc_id` in `format` (`docx` | `pdf` | `markdown` | `txt` |
+    `rtf` | `epub` | `odt` | `html`). Returns `{format, byte_len}` plus a
+    note that the attachment_id wrapper lands in T21 (router layer).
+
+    Errors: `invalid_args`, `document_not_found`, `auth_failed`.
+
+gdocs_list_tabs:
+  summary: List every tab inside a multi-tab Google Doc
+  description: |
+    Return every tab (`tab_id`, `title`, `index`, `parent_tab_id`) inside
+    the doc, including nested `childTabs`.
+
+    Errors: `document_not_found`, `auth_failed`.
+
+gdocs_add_tab:
+  summary: Create a new tab inside a Google Doc
+  description: |
+    Add a new tab named `title`. Optional `after_tab_id` places the new
+    tab after the given one (default: appends). Optional `markdown` is
+    acknowledged but seeding tab content is deferred to v1.1 — the
+    response includes `pending_markdown_seed: true` if you passed it.
+
+    Errors: `tab_exists` (when policy is `fail`), `document_not_found`.
+
+gdocs_read_as_markdown:
+  summary: Export a Google Doc (or one tab) as markdown
+  description: |
+    Use Drive's `files.export` to read the doc as `text/markdown`. When
+    `tab_id` is set, v1 still returns the full export; per-tab slicing
+    lands in v1.1.
+
+    Errors: `document_not_found`, `auth_failed`.
+
+gdocs_read_outline:
+  summary: Read the heading + paragraph-preview outline of a Google Doc
+  description: |
+    Return an array of `OutlineEntry` (paragraph number, kind, ~80 char
+    preview, tab_id). Built from a fresh `documents.get` so it always
+    reflects the latest revision.
+
+    Errors: `document_not_found`, `auth_failed`.
+
+gdocs_list_named_ranges:
+  summary: List every named range declared in the Google Doc
+  description: |
+    Return every `namedRange` in the doc with `{named_range_id, name,
+    paragraph_start, paragraph_end}`. Named ranges give the agent stable,
+    name-addressable spans that survive across edits.
+
+gdocs_replace_text:
+  summary: Find and replace text (content-addressed, optionally scoped)
+  description: |
+    Find every occurrence of `find` (within `scope`:
+    `{kind:"all"}` | `{kind:"paragraph", n:N}` |
+    `{kind:"under_heading", heading:"## X"}` |
+    `{kind:"between_headings", after:"## A", before:"## B"}` |
+    `{kind:"tab", tab_id:"…"}`) and replace it with `replace`. UTF-16
+    indices are resolved server-side; the LLM never computes offsets.
+
+    Optional:
+    - `case_sensitive` (bool, default false)
+    - `whole_word` (bool, default false; matches `\bfind\b`)
+    - `dry_run` (bool, default false) — preview without writing
+    - `confirm_many` (bool, default false) — required when ≥5 matches
+    - `occurrence` (int) — only the Nth match (1-based)
+    - `anchor` (str) — paragraph must also contain this text
+    - `mode` (`"direct"`) — v1 only
+
+    Errors: `confirm_many_matches`, `text_not_found`, `ambiguous_match`,
+    `human_changes_pending`, `scope_crosses_boundary`.
+
+gdocs_insert_after_text:
+  summary: Insert markdown after a content-addressed anchor
+  description: |
+    Locate `anchor` in the doc (optionally the `occurrence`-th match) and
+    insert `new_markdown` immediately after it. Markdown is converted to
+    Docs API requests via the same converter that powers
+    `gdocs_create_from_markdown`. V1 rejects markdown tables (use
+    `gdocs_insert_table` in v1.1).
+
+    Errors: `text_not_found`, `invalid_args` (table markdown),
+    `human_changes_pending`.
+
+gdocs_insert_before_text:
+  summary: Insert markdown before a content-addressed anchor
+  description: |
+    Mirror of `gdocs_insert_after_text` — insertion lands immediately
+    before the match. Same args and errors.
+
+gdocs_insert_between:
+  summary: Insert markdown between two headings (or after a heading until EOF)
+  description: |
+    Insert `new_markdown` between `after_heading` and `before_heading`.
+    `before_heading` omitted means EOF. The insertion goes at the first
+    paragraph after `after_heading`; existing content is pushed down.
+
+    Errors: `invalid_args` (heading not found, table markdown),
+    `human_changes_pending`.
+
+gdocs_delete_text:
+  summary: Delete one or more occurrences of text (scoped, content-addressed)
+  description: |
+    Delete every occurrence of `find` in `scope`. Same scope shapes,
+    `case_sensitive`/`whole_word`/`occurrence` semantics, and
+    `confirm_many` 5-match threshold as `gdocs_replace_text`.
+
+    Errors: `text_not_found`, `confirm_many_matches`,
+    `human_changes_pending`.
+
+gdocs_replace_section:
+  summary: Replace everything between a heading and the next same-or-higher heading
+  description: |
+    Find `heading` (e.g. `"## Resumen"`) and replace the paragraphs
+    between it and the next same-or-higher heading (or EOF) with
+    `new_markdown`. Tables in `new_markdown` are rejected with
+    `invalid_args` in v1.
+
+    Errors: `invalid_args` (heading not found / table markdown),
+    `human_changes_pending`.
+
+gdocs_append_markdown:
+  summary: Append markdown at the end of a Google Doc (or a specific tab)
+  description: |
+    Convert `markdown` to Docs API requests and append at end-of-segment
+    (whole doc or `tab_id` if provided). Returns the standard edit
+    envelope: `{changes, revision_id_after, outline_snapshot, lossy_conversions}`.
+
+    Errors: `invalid_args` (table markdown), `human_changes_pending`.
+
+gdocs_apply_edits:
+  summary: Apply N sub-edits atomically (single batchUpdate, all-or-nothing)
+  description: |
+    Apply a sequence of sub-edits in a single `batchUpdate` call. Each
+    entry of `edits[]` is a JSON object:
+
+    ```json
+    [
+      {"tool": "replace_text",     "find": "X", "replace": "Y", "scope": {"kind":"all"}},
+      {"tool": "insert_after_text","anchor": "Z", "new_markdown": "…"},
+      {"tool": "delete_text",      "find": "W", "scope": {"kind":"all"}}
+    ]
+    ```
+
+    The co-edit guard runs ONCE for `Scope::All`; if any sub-edit fails
+    resolution the whole compound is rejected before any write.
+
+    Errors: `invalid_args` (unknown sub-tool, empty list),
+    `text_not_found`, `human_changes_pending`.
+
+gdocs_style_text:
+  summary: Apply a style patch (bold / italic / link / heading) to a found span
+  description: |
+    Locate `find` in `scope` and apply `style` (any subset of `bold`,
+    `italic`, `underline`, `strikethrough`, `font_size_pt`, `foreground`,
+    `background`, `link`, `heading_level`). Character-level fields emit
+    `updateTextStyle`; `heading_level` emits `updateParagraphStyle` for
+    the whole containing paragraph.
+
+    Errors: `text_not_found`, `human_changes_pending`.
+
+gdocs_create_named_range:
+  summary: Declare a named range over a paragraph for stable addressing
+  description: |
+    Register a `namedRange` with the given `name` over `scope`. V1 of the
+    HTTP client only supports `{kind:"paragraph", n:N}`; the application
+    layer forwards other scopes for forward compatibility but Google's
+    API will return an error on non-paragraph scopes in v1.
+
+    Errors: `invalid_args`, `document_not_found`, `auth_failed`.
+
+gdocs_replace_named_range:
+  summary: Overwrite the contents of a named range
+  description: |
+    Find the named range by `name` and overwrite its contents with
+    `new_text` using `replaceNamedRangeContent`. Returns the standard
+    edit envelope.
+
+    Errors: `invalid_args` (range not found), `human_changes_pending`.
+
+gdocs_acknowledge_human_changes:
+  summary: Acknowledge concurrent human edits and reset the co-edit cursor
+  description: |
+    Fetch the current revision of `doc_id` and set the agent's stored
+    cursor to it. Use this after the co-edit guard returns
+    `human_changes_pending` and the agent has decided to proceed despite
+    overlapping human edits. Returns `{ok: true, revision_id_now}`.

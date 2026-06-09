@@ -21,6 +21,7 @@ const GSHEETS_YAML: &str = include_str!("../../text/tools/gsheets.yaml");
 const CRDT_DOC_YAML: &str = include_str!("../../text/tools/crdt_doc.yaml");
 const DOCUMENTS_YAML: &str = include_str!("../../text/tools/documents.yaml");
 const HELPERS_YAML: &str = include_str!("../../text/tools/helpers.yaml");
+const GDOCS_YAML: &str = include_str!("../../text/tools/gdocs.yaml");
 
 static TOOL_TEXTS: OnceLock<HashMap<String, ToolText>> = OnceLock::new();
 
@@ -34,6 +35,7 @@ fn load() -> &'static HashMap<String, ToolText> {
             ("crdt_doc", CRDT_DOC_YAML),
             ("documents", DOCUMENTS_YAML),
             ("helpers", HELPERS_YAML),
+            ("gdocs", GDOCS_YAML),
         ] {
             // Empty file ("{}") parses to an empty map; that's expected
             // before T2-T5 populate the registry.
