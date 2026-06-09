@@ -726,8 +726,16 @@ impl DocsClient for GoogleDocsHttpClient {
     }
 
     async fn list_tabs(&self, id: &DocumentId) -> Result<Vec<TabMeta>, DocsError> {
+        // Google's `documents.get?includeTabsContent=false` OMITS the
+        // `tabs` field entirely (verified live 2026-06-08), and explicit
+        // field masks like `tabs(tabProperties,childTabs)` hit
+        // `include_comments` validation rejection. Cleanest path:
+        // request the full doc with `includeTabsContent=true` (the
+        // default for our `get` impl) and walk the resulting raw JSON
+        // for tab metadata. Body content is ignored. Snapshot caching
+        // upstream amortises the payload cost.
         let url = format!(
-            "{}/documents/{}?includeTabsContent=false",
+            "{}/documents/{}?includeTabsContent=true",
             self.base_docs, id.0
         );
         let resp = self
