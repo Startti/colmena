@@ -1,0 +1,42 @@
+{
+  "_comment": "Phase 2 — verifica el co_edit_guard. Se asume que Phase 1 corrió + el usuario editó manualmente. El scope ahora es 'all' para detectar cambios en CUALQUIER tab (el usuario editó Tab 1, no la tab del agente — eso es OK, el guard debe disparar igual). CRÍTICO: mismo --agent-session-id que phase1.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/g-phase2",
+        "method": "POST",
+        "test_payload": {
+          "doc_id": "1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k",
+          "prompt": "Continuás trabajando en el doc del usuario (doc_id: 1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k). En Phase 1 dejaste un plan en una tab que se llama 'Plan Q3 CoEdit Demo'. ATENCIÓN: es probable que el USUARIO haya editado el doc manualmente en el medio. Colmena tiene un co-edit guard que detecta esos cambios y te los reporta antes de dejarte escribir.\n\nEjecutá esta secuencia EXACTA:\n\n1. gdocs_list_tabs({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k'}). Listame los tabs.\n\n2. gdocs_replace_text({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', find: 'FINAL', replace: 'APROBADO', scope: {kind: 'all'}, confirm_many: true}). NOTAR: scope 'all' = busca en todo el doc, no solo en una tab. confirm_many: true porque sabés que puede haber muchas ocurrencias.\\n\\nESPERÁ recibir un error human_changes_pending. ESO ES EL COMPORTAMIENTO CORRECTO. La respuesta incluye:\\n- since: cuándo el humano hizo los cambios\\n- changes_overlapping_scope: lista de cambios humanos que solapan con el scope solicitado, con paragraph, kind, preview, modifying_user\\n- changes_outside_scope: cambios fuera del scope (informativo)\\n- valid_next_moves: te dice que llames gdocs_acknowledge_human_changes\\n\\n3. CUANDO recibas human_changes_pending: PRIMERO reportá al usuario lo que cambió. Listame cada cambio con paragraph + preview + kind. NO retries el replace_text todavía.\\n\\n4. gdocs_acknowledge_human_changes({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k'}). Esto confirma que viste los cambios y mueve tu cursor de revision al actual. La respuesta trae revision_id_now.\\n\\n5. gdocs_replace_text con los mismos parámetros del paso 2. AHORA debería funcionar.\\n\\n6. gdocs_read_outline({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k'}). Esto trae outline de TODAS las tabs. Anotá si ves el Objetivo 4 que el usuario agregó.\\n\\n7. gdocs_insert_after_text({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', anchor: 'Reunión inicial el lunes.', new_markdown: '\\n\\n## Sincronización exitosa\\n\\nEl agente detectó los cambios manuales del usuario via co_edit_guard y los reconoció antes de continuar. Sistema funcionando correctamente.\\n'}).\n\n8. Reporte final (máximo 400 palabras): URL del doc, tab_ids vistos, qué pasó en cada paso. ESPECIALMENTE IMPORTANTE: si hubo human_changes_pending, INCLUÍ EXPLÍCITAMENTE la lista de cambios humanos detectados (paragraph + preview + kind para cada uno). Si NO hubo, anotalo. NO inventes nada. URL al final: https://docs.google.com/document/d/1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k/edit"
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 30,
+        "lazy_tool_loading": false,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "Eres un asistente continuando trabajo en un Google Doc compartido. Colmena tiene un co-edit guard que detecta ediciones humanas entre tus turnos. Si recibís 'human_changes_pending' en una respuesta de tool, NO es un fracaso — es el sistema protegiéndote. La respuesta trae detalles de qué cambió el humano. Tu trabajo es: mostrarle al usuario qué cambió en tu reporte, llamar gdocs_acknowledge_human_changes para confirmar que viste los cambios, y después continuar. Usá los nombres EXACTOS de las tools (todos empiezan con gdocs_). No inventes resultados — reportá literalmente lo que las tools devolvieron.",
+        "enabled_tools": [
+          "gdocs_list_tabs",
+          "gdocs_read_outline",
+          "gdocs_read_as_markdown",
+          "gdocs_replace_text",
+          "gdocs_insert_after_text",
+          "gdocs_acknowledge_human_changes"
+        ]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}

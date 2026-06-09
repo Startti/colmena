@@ -1,5 +1,5 @@
 {
-  "_comment": "Subsistema G smoke v2 — Google Docs. El usuario creó un doc vacío en su Drive y lo compartió con la SA como Editor. El agente PRIMERO popula contenido vía append_markdown, después ejerce read/replace/style/insert/export. add_tab se omite porque requiere multi-tab content support (limitación de Google Docs API en docs legacy). Run: `set -a; source .env; set +a; export GOOGLE_APPLICATION_CREDENTIALS=~/colmena-sa.json; cargo run --bin dag_engine -- run tests/graphs/agents/gdocs_smoke.json --agent-session-id g_smoke_$(date +%s) --include-extra-info`",
+  "_comment": "Subsistema G smoke v3 — Google Docs. El usuario crea un doc en SU Drive, lo comparte con la SA como Editor, y pasa el doc_id al agente. El agente popula contenido via append_markdown y después ejerce read/replace/style/insert/add_tab/list_tabs/export. NO usa create_* (requiere Workspace Shared Drive o OAuth user flow — v1.1). Run: `set -a; source .env; set +a; export GOOGLE_APPLICATION_CREDENTIALS=~/colmena-sa.json; cargo run --bin dag_engine -- run tests/graphs/agents/gdocs_smoke.json --agent-session-id g_smoke_$(date +%s) --include-extra-info`",
   "nodes": {
     "trigger": {
       "type": "trigger_webhook",
@@ -8,7 +8,7 @@
         "method": "POST",
         "test_payload": {
           "doc_id": "1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k",
-          "prompt": "El usuario te comparte un Google Doc para que validés la integración. El doc_id es `1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k`. Ya está compartido con la cuenta de servicio (Editor). El doc puede estar vacío — la primera tool del flujo agrega contenido.\n\nEjecutá esta secuencia EXACTA usando los nombres de tools tal cual (todos empiezan con gdocs_):\n\n1. gdocs_append_markdown({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', markdown: '# Reporte de prueba\\n\\nEste es el __PLACEHOLDER__ original que el agente va a reemplazar.\\n\\n## Detalles\\n\\nMás contexto sobre el reporte va acá.\\n\\n## Conclusiones\\n\\nUna sección para conclusiones.\\n'}). Esto inserta el contenido base al final del doc.\n\n2. gdocs_read_outline({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k'}). Anotá cuántos párrafos hay y cuántos son de tipo heading_1 o heading_2.\n\n3. gdocs_read_as_markdown({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k'}). Esto te trae el doc convertido a markdown. Anotá el primer encabezado que ves y un par de palabras del primer párrafo de texto normal.\n\n4. gdocs_replace_text({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', find: '__PLACEHOLDER__', replace: 'contenido reemplazado por el agente'}). Anotá cuántos cambios reportó.\n\n5. gdocs_style_text({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', find: 'Reporte de prueba', style: {bold: true, foreground: {r: 0.1, g: 0.4, b: 0.8}}, occurrence: 1}). Esto pone en negrita azul la primera ocurrencia.\n\n6. gdocs_insert_after_text({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', anchor: 'Conclusiones', new_markdown: '\\n\\nEsta sección fue agregada por el agente como parte del smoke test.\\n'}).\n\n7. gdocs_export({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', format: 'pdf'}). Anotá el byte_len y el note de la respuesta.\n\n8. Reporte final (máximo 300 palabras): Para cada uno de los 7 pasos describí en 1-2 oraciones qué hiciste, qué te devolvió la tool, y si fue exitoso o no. Si algo falló incluí el mensaje de error tal cual. NO inventes datos. Al final pegá la URL del doc para que el user pueda verlo: https://docs.google.com/document/d/1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k/edit"
+          "prompt": "El usuario te comparte un Google Doc para que validés la integración. El doc_id es `1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k`. Ya está compartido con la cuenta de servicio (Editor).\n\nEjecutá esta secuencia EXACTA usando los nombres de tools tal cual (todos empiezan con gdocs_):\n\n1. gdocs_append_markdown({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', markdown: '# Reporte v4\\n\\nEste es el TOKEN-VERIFY-2026 original que el agente va a reemplazar.\\n\\n## Detalles\\n\\nMás contexto sobre el reporte.\\n\\n## Conclusiones\\n\\nUna sección final.\\n'}). Inserta el contenido base al final del doc.\\n\\nIMPORTANTE: usé el string literal 'TOKEN-VERIFY-2026' (sin underscores) para evitar que la conversión markdown lo lea como bold.\n\n2. gdocs_read_outline({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k'}). Anotá cuántos párrafos hay y cuántos son heading_1/heading_2.\n\n3. gdocs_read_as_markdown({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k'}). Anotá el primer encabezado.\n\n4. gdocs_replace_text({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', find: 'TOKEN-VERIFY-2026', replace: 'CAMBIADO-POR-AGENTE'}). Anotá cuántos cambios.\n\n5. gdocs_style_text({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', find: 'Reporte v4', style: {bold: true, foreground: {r: 0.1, g: 0.4, b: 0.8}}, occurrence: 1}).\n\n6. gdocs_insert_after_text({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', anchor: 'Conclusiones', new_markdown: '\\n\\nEsta sección fue agregada por el agente.\\n'}).\n\n7. gdocs_list_tabs({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k'}). Listame los títulos de TODAS las tabs.\n\n8. gdocs_add_tab({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', title: 'Smoke Anexo v4'}). Agrega tab.\n\n9. gdocs_list_tabs({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k'}). Verificá que 'Smoke Anexo v4' aparezca.\n\n10. gdocs_export({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', format: 'pdf'}). Anotá byte_len.\n\n11. Reporte final (máximo 300 palabras): Para cada uno de los 10 pasos describí en 1-2 oraciones qué hiciste, qué te devolvió la tool, y si fue exitoso. Si algo falló incluí el error tal cual. NO inventes datos. Al final pegá la URL: https://docs.google.com/document/d/1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k/edit"
         }
       }
     },
@@ -19,10 +19,10 @@
         "api_key": "${GEMINI_API_KEY}",
         "model": "gemini-2.5-flash",
         "stream": false,
-        "max_iterations": 25,
+        "max_iterations": 30,
         "lazy_tool_loading": false,
         "connection_url": "${DATABASE_URL}",
-        "system_message": "Eres un asistente probando la integración de Google Docs en colmena. Usá ÚNICAMENTE los nombres de tools que aparecen en tus schemas (todos comienzan con gdocs_). No inventes nombres, no saques el prefijo. Si una tool falla, reportá el error estructurado tal cual te lo devuelve. Tu tarea es generar un reporte honesto: éxito o fallas detalladas.",
+        "system_message": "Eres un asistente probando la integración de Google Docs en colmena. Usá ÚNICAMENTE los nombres de tools que aparecen en tus schemas (todos comienzan con gdocs_). No inventes nombres ni tool calls — solo reportá lo que las tools realmente devolvieron. Si una tool falla, reportá el error estructurado tal cual.",
         "enabled_tools": [
           "gdocs_append_markdown",
           "gdocs_read_outline",
@@ -30,6 +30,8 @@
           "gdocs_replace_text",
           "gdocs_style_text",
           "gdocs_insert_after_text",
+          "gdocs_add_tab",
+          "gdocs_list_tabs",
           "gdocs_export"
         ]
       }

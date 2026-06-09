@@ -1,0 +1,43 @@
+{
+  "_comment": "Phase 1 del test de co-edit guard. El agente: (1) crea una tab nueva en el doc preexistente compartido con la SA; (2) appendea contenido extenso DENTRO de esa tab nueva; (3) hace varios edits content-addressed (replace_text con confirm_many threshold, style_text, insert_after_text); (4) deja el doc en un estado conocido para que el usuario haga un edit manual; (5) reporta el doc.url y los pasos hechos. CRÍTICO: correr con el mismo --agent-session-id que phase2. Ejemplo: `cargo run --bin dag_engine -- run tests/graphs/agents/gdocs_phase1_build.json --agent-session-id coedit_demo_001 --include-extra-info`.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/g-phase1",
+        "method": "POST",
+        "test_payload": {
+          "doc_id": "1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k",
+          "prompt": "Estás demostrando el flujo de gdocs en colmena. El usuario te comparte un Google Doc preexistente (doc_id: 1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k) ya compartido con la cuenta de servicio. Necesitás aislar el trabajo en una TAB NUEVA para no chocar con contenido previo.\n\nEjecutá esta secuencia EXACTA (las tools empiezan todas con gdocs_):\n\n1. gdocs_add_tab({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', title: 'Plan Q3 CoEdit Demo'}). La response trae meta.tab_id de la tab nueva. CAPTURALO — lo usás en TODAS las llamadas siguientes para mantenerte adentro de esa tab.\n\n2. gdocs_append_markdown({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', tab_id: '<NEW_TAB_ID>', markdown: '# Plan de proyecto Q3-2026\\n\\n## Resumen ejecutivo\\n\\nEste documento describe el plan de trabajo para el tercer trimestre. Estado actual: DRAFT.\\n\\n## Objetivos\\n\\n- Objetivo 1: Lanzar el módulo de reportes. Estado DRAFT.\\n- Objetivo 2: Migrar usuarios desde el sistema legacy. Estado DRAFT.\\n- Objetivo 3: Mejorar la performance del backend.\\n\\n## Cronograma\\n\\nLas fases planificadas son tres bloques de trabajo.\\n\\n## Equipo\\n\\nEl equipo está integrado por desarrolladores, diseñadores y product managers. Estado DRAFT.\\n\\n## Riesgos\\n\\nLos principales riesgos identificados son dependencias externas y complejidad técnica.\\n\\n## Próximos pasos\\n\\nReunión inicial el lunes.\\n'}). Reemplazá <NEW_TAB_ID> con el id que recibiste en el paso 1.\\n\\n3. gdocs_read_outline({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', tab_id: '<NEW_TAB_ID>'}). Anotá cuántos párrafos hay y cuántos de tipo heading_1/heading_2.\\n\\n4. gdocs_replace_text({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', find: 'DRAFT', replace: 'FINAL', scope: {kind: 'tab', tab_id: '<NEW_TAB_ID>'}}). El find 'DRAFT' aparece 4 veces. NO uses confirm_many porque son menos de 5 (el threshold es >= 5). Anotá cuántos cambios reportó.\\n\\n5. gdocs_style_text({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', find: 'Plan de proyecto Q3-2026', style: {bold: true, foreground: {r: 0.1, g: 0.4, b: 0.8}}, occurrence: 1, scope: {kind: 'tab', tab_id: '<NEW_TAB_ID>'}}). Pone en negrita azul el título principal.\\n\\n6. gdocs_insert_after_text({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', anchor: 'Las fases planificadas son tres bloques de trabajo.', new_markdown: '\\n\\n- Fase 1: Investigación (semanas 1-3)\\n- Fase 2: Implementación (semanas 4-9)\\n- Fase 3: Validación (semanas 10-12)\\n'}). Esto inserta las fases concretas después del párrafo introductorio.\\n\\n7. gdocs_read_outline({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', tab_id: '<NEW_TAB_ID>'}). Confirmá que ahora hay más párrafos (por las fases insertadas).\\n\\n8. Reporte final (máximo 250 palabras): URL del doc (https://docs.google.com/document/d/1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k/edit), tab_id de la nueva tab, los resultados de cada paso. Al final del reporte AGREGÁ ESTE BLOQUE LITERAL para el usuario:\\n\\n---\\nPHASE 1 LISTO. Ahora hacé esto manualmente en el doc:\\n1. Abrí el doc y andá a la tab 'Plan Q3 CoEdit Demo'\\n2. En la sección 'Objetivos', cambiá manualmente el texto 'Objetivo 3: Mejorar la performance del backend.' por 'Objetivo 3: Reescribir el backend en Rust.'\\n3. Agregá un objetivo nuevo abajo: 'Objetivo 4: Documentar la arquitectura.'\\n4. Cuando termines, corré Phase 2 con el mismo --agent-session-id.\\n---"
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 30,
+        "lazy_tool_loading": false,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "Eres un asistente probando el flujo completo de gdocs en colmena. Usá las tools EXACTAS con los nombres dados (todos empiezan con gdocs_). Cuando una respuesta te trae un tab_id, GUARDALO y úsalo en TODAS las llamadas siguientes que toquen esa tab — eso aísla el trabajo y evita chocar con contenido viejo. No inventes resultados — reportá lo que realmente devolvieron las tools.",
+        "enabled_tools": [
+          "gdocs_add_tab",
+          "gdocs_append_markdown",
+          "gdocs_read_outline",
+          "gdocs_replace_text",
+          "gdocs_style_text",
+          "gdocs_insert_after_text",
+          "gdocs_list_tabs"
+        ]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}
