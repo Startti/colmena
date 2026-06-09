@@ -72,6 +72,7 @@ Las secciones están organizadas por **tema**, no por orden numérico. Los prefi
 - [**CRDT Documents**](./developer_guide/38_crdt_documents.md) — Workbooks colaborativos en tiempo real sobre `yrs::Doc`.
 - [**Google Sheets**](./developer_guide/39_gsheets.md) — Integración con la Sheets API; lectura/escritura desde grafos.
 - [**Sheets local (CRDT) vs Google Sheets**](./developer_guide/43_sheets_local_vs_gsheets.md) — Comparativa, cuándo elegir cada uno, API write-back unificada.
+- [**Google Docs**](./developer_guide/45_gdocs.md) — 22 tools sintéticos para crear, leer, exportar y editar quirúrgicamente Google Docs (content-addressed, multi-tab, co-edit guard).
 - [**Nodo Suspend (HITL)**](./developer_guide/44_suspend_node.md) — `suspend` / `secure_suspend`, formato Q/A, resume, patrones canónicos.
 
 ## 9. Tools y skills (catálogos y referencias)

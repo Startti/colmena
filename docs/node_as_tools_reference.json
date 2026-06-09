@@ -1536,6 +1536,525 @@
       ]
     },
 
+    "gdocs": {
+      "summary": "Synthetic LLM tools for Google Docs (subsystem G v1). 22 tools that let the agent create, read, share, export, and surgically edit Google Docs via content-addressed operations — the LLM specifies WHAT to change (text, heading, named range) and never computes UTF-16 indices. Multi-tab supported. Markdown ↔ Docs conversion with structured `lossy_conversions` reporting. Co-edit safety via Drive Revisions + postgres table `gdocs_session_state(agent_session_id, document_id, last_revision_id)`. Auth via Service Account JSON (GOOGLE_APPLICATION_CREDENTIALS) or Application Default Credentials. Requires `COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID` (or per-call `parent_folder_id`) for create. Two toolkit aliases: `gdocs` (full 22 tools), `gdocsread` (read-only 6 tools). See docs/developer_guide/45_gdocs.md.",
+      "synthetic_tools": [
+        "gdocs_create", "gdocs_create_from_markdown", "gdocs_create_from_docx",
+        "gdocs_share", "gdocs_export",
+        "gdocs_list_tabs", "gdocs_add_tab",
+        "gdocs_read_as_markdown", "gdocs_read_outline", "gdocs_list_named_ranges",
+        "gdocs_replace_text", "gdocs_insert_after_text", "gdocs_insert_before_text",
+        "gdocs_insert_between", "gdocs_delete_text", "gdocs_replace_section",
+        "gdocs_append_markdown", "gdocs_apply_edits", "gdocs_style_text",
+        "gdocs_create_named_range", "gdocs_replace_named_range",
+        "gdocs_acknowledge_human_changes"
+      ],
+      "how_exposed": "Add `\"gdocs\"` to llm_call.config.enabled_tools (flag-only activation). For read-only agents use `\"gdocsread\"` (excludes all write/share/create/edit tools). No tool_configurations entry required. Auth resolves at first call via GOOGLE_APPLICATION_CREDENTIALS or ADC.",
+      "lifecycle": "Each call makes one or more HTTPS requests to docs.googleapis.com / drive.googleapis.com. Tokens cached 50 min. Outline cached per-revision (TTL via COLMENA_GDOCS_REVISION_CACHE_SECS, default 5s). Before every write the co-edit guard checks the current Drive revision against the cursor stored in postgres `gdocs_session_state` keyed on (agent_session_id, document_id); divergence yields a structured `human_changes_pending` error.",
+      "examples": {
+        "llm_call_with_gdocs_full": {
+          "description": "llm_call exposing all 22 gdocs tools.",
+          "config_block": {
+            "type": "llm_call",
+            "config": {
+              "provider": "google",
+              "model": "gemini-2.5-flash",
+              "api_key": "${GEMINI_API_KEY}",
+              "prompt": "Open doc 1AbC...XyZ, find the heading '## Resumen' and replace its body with a 3-bullet summary of the financial section.",
+              "enabled_tools": ["gdocs"]
+            }
+          }
+        },
+        "llm_call_with_gdocsread_only": {
+          "description": "Read-only agent (6 tools).",
+          "config_block": {
+            "type": "llm_call",
+            "config": {
+              "provider": "google",
+              "model": "gemini-2.5-flash",
+              "api_key": "${GEMINI_API_KEY}",
+              "prompt": "List all tabs of doc 1AbC...XyZ and read the outline.",
+              "enabled_tools": ["gdocsread"]
+            }
+          }
+        }
+      },
+      "tool_descriptions": {
+        "gdocs_create": {
+          "name": "gdocs_create",
+          "description": "Create an empty Google Doc with the given title. Requires `parent_folder_id` (or operator env `COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID`) so Drive knows where to place the new file.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "title":            { "type": "string", "required": true, "description": "Display title for the new doc." },
+              "parent_folder_id": { "type": "string", "required": false, "description": "Drive folder id. Falls back to COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID env var." }
+            },
+            "required": ["title"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id":      { "type": "string" },
+              "url":         { "type": "string", "description": "https://docs.google.com/document/d/<id>/edit" },
+              "title":       { "type": "string" },
+              "revision_id": { "type": "string", "description": "Drive revision id of the newly created doc; initialized as the agent's cursor." },
+              "tabs":        { "type": "array", "items": { "type": "object" } }
+            }
+          },
+          "errors": ["no_parent_folder_configured", "auth_failed", "permission_denied"]
+        },
+        "gdocs_create_from_markdown": {
+          "name": "gdocs_create_from_markdown",
+          "description": "Create a Google Doc from a markdown string. Drive converts natively; we re-export and diff to surface elements that did not round-trip cleanly (math, footnotes, etc.) under `lossy_conversions`.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "title":            { "type": "string", "required": true },
+              "markdown":         { "type": "string", "required": true },
+              "parent_folder_id": { "type": "string", "required": false }
+            },
+            "required": ["title", "markdown"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id":             { "type": "string" },
+              "url":                { "type": "string" },
+              "title":              { "type": "string" },
+              "revision_id":        { "type": "string" },
+              "tabs":               { "type": "array" },
+              "outline_snapshot":   { "type": "array", "description": "OutlineEntry[] after creation." },
+              "lossy_conversions":  { "type": "array", "description": "Structured warnings for elements that did not round-trip (footnotes, math, etc.). Tables are supported in this tool via Drive's native converter." }
+            }
+          },
+          "errors": ["no_parent_folder_configured", "auth_failed", "permission_denied"]
+        },
+        "gdocs_create_from_docx": {
+          "name": "gdocs_create_from_docx",
+          "description": "Upload a .docx attachment and convert it to a Google Doc. DEFERRED in v1 — attachment-fetcher plumbing is not yet wired; dispatcher returns a typed `not_yet_wired` envelope.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "attachment_id":    { "type": "string", "required": true },
+              "title":            { "type": "string", "required": true },
+              "parent_folder_id": { "type": "string", "required": false }
+            },
+            "required": ["attachment_id", "title"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "error": { "type": "string", "description": "`not_yet_wired` in v1." }
+            }
+          },
+          "errors": ["not_yet_wired"]
+        },
+        "gdocs_share": {
+          "name": "gdocs_share",
+          "description": "Grant a user reader/commenter/writer access. Wraps drive.permissions.create.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id": { "type": "string", "required": true },
+              "email":  { "type": "string", "required": true },
+              "role":   { "type": "string", "enum": ["reader", "commenter", "writer"], "required": true }
+            },
+            "required": ["doc_id", "email", "role"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": { "ok": { "type": "boolean" } }
+          },
+          "errors": ["auth_failed", "permission_denied", "document_not_found"]
+        },
+        "gdocs_export": {
+          "name": "gdocs_export",
+          "description": "Export a doc to docx / pdf / markdown / txt / rtf / epub / odt / html. v1 returns `{format, byte_len}`; attachment-id wrapper deferred to v1.1.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id": { "type": "string", "required": true },
+              "format": { "type": "string", "enum": ["docx", "pdf", "markdown", "txt", "rtf", "epub", "odt", "html"], "required": true }
+            },
+            "required": ["doc_id", "format"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "format":   { "type": "string" },
+              "byte_len": { "type": "integer" }
+            }
+          },
+          "errors": ["invalid_args", "document_not_found", "auth_failed"]
+        },
+        "gdocs_list_tabs": {
+          "name": "gdocs_list_tabs",
+          "description": "List every tab inside a multi-tab Google Doc, including nested childTabs (jerarchical tab_id with dot notation).",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id": { "type": "string", "required": true }
+            },
+            "required": ["doc_id"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "tabs": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "tab_id":        { "type": "string" },
+                    "title":         { "type": "string" },
+                    "index":         { "type": "integer" },
+                    "parent_tab_id": { "type": ["string", "null"] }
+                  }
+                }
+              }
+            }
+          },
+          "errors": ["document_not_found", "auth_failed"]
+        },
+        "gdocs_add_tab": {
+          "name": "gdocs_add_tab",
+          "description": "Create a new tab. Optional `after_tab_id` positions it; `markdown` seeding is acknowledged but DEFERRED in v1 (response includes `pending_markdown_seed: true`).",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id":       { "type": "string", "required": true },
+              "title":        { "type": "string", "required": true },
+              "after_tab_id": { "type": "string", "required": false },
+              "markdown":     { "type": "string", "required": false }
+            },
+            "required": ["doc_id", "title"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "tab_id":                  { "type": "string" },
+              "pending_markdown_seed":   { "type": "boolean", "description": "true when `markdown` was provided — v1 does not auto-seed; use append_markdown after." }
+            }
+          },
+          "errors": ["tab_exists", "document_not_found"]
+        },
+        "gdocs_read_as_markdown": {
+          "name": "gdocs_read_as_markdown",
+          "description": "Use Drive's files.export to read the doc as text/markdown. When `tab_id` is set, v1 still returns the full export (per-tab slicing lands in v1.1).",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id": { "type": "string", "required": true },
+              "tab_id": { "type": "string", "required": false }
+            },
+            "required": ["doc_id"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "markdown": { "type": "string" }
+            }
+          },
+          "errors": ["document_not_found", "auth_failed"]
+        },
+        "gdocs_read_outline": {
+          "name": "gdocs_read_outline",
+          "description": "Return an array of OutlineEntry (paragraph number, kind, ~80-char preview, tab_id). Built from a fresh documents.get so always reflects latest revision.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id": { "type": "string", "required": true }
+            },
+            "required": ["doc_id"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "outline": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "paragraph_n": { "type": "integer" },
+                    "kind":        { "type": "string", "description": "heading_1..6 | paragraph | bullet | quote | code" },
+                    "preview":     { "type": "string", "description": "Up to ~80 chars of paragraph text." },
+                    "tab_id":      { "type": ["string", "null"] }
+                  }
+                }
+              },
+              "revision_id": { "type": "string" }
+            }
+          },
+          "errors": ["document_not_found", "auth_failed"]
+        },
+        "gdocs_list_named_ranges": {
+          "name": "gdocs_list_named_ranges",
+          "description": "Return every namedRange declared in the doc. Named ranges give the agent stable, name-addressable spans that survive across edits.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id": { "type": "string", "required": true }
+            },
+            "required": ["doc_id"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "named_ranges": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "named_range_id":  { "type": "string" },
+                    "name":            { "type": "string" },
+                    "paragraph_start": { "type": "integer" },
+                    "paragraph_end":   { "type": "integer" }
+                  }
+                }
+              }
+            }
+          },
+          "errors": ["document_not_found", "auth_failed"]
+        },
+        "gdocs_replace_text": {
+          "name": "gdocs_replace_text",
+          "description": "Find-and-replace within `scope`. Content-addressed — the LLM never computes UTF-16 indices. Scope shapes: {kind:'all'} | {kind:'paragraph', n:N} | {kind:'under_heading', heading:'## X'} | {kind:'between_headings', after:'## A', before:'## B'} | {kind:'tab', tab_id:'...'}. Returns structured errors when 0 matches, ambiguous matches, ≥5 matches without confirm_many, or human edits pending.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id":         { "type": "string", "required": true },
+              "find":           { "type": "string", "required": true },
+              "replace":        { "type": "string", "required": true },
+              "scope":          { "type": "object", "required": true, "description": "Tagged enum: see description." },
+              "case_sensitive": { "type": "boolean", "required": false, "default": false },
+              "whole_word":     { "type": "boolean", "required": false, "default": false, "description": "Matches \\bfind\\b." },
+              "dry_run":        { "type": "boolean", "required": false, "default": false, "description": "Preview without writing." },
+              "confirm_many":   { "type": "boolean", "required": false, "default": false, "description": "Required when ≥5 matches." },
+              "occurrence":     { "type": "integer", "required": false, "description": "Only the Nth match (1-based)." },
+              "anchor":         { "type": "string", "required": false, "description": "Disambiguator — paragraph must also contain this text." },
+              "mode":           { "type": "string", "enum": ["direct"], "required": false, "description": "v1 only supports 'direct'." }
+            },
+            "required": ["doc_id", "find", "replace", "scope"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "changes":           { "type": "array", "description": "Per-match summary." },
+              "revision_id_after": { "type": "string" },
+              "outline_snapshot":  { "type": "array" },
+              "lossy_conversions": { "type": "array" }
+            }
+          },
+          "errors": ["confirm_many_matches", "text_not_found", "ambiguous_match", "human_changes_pending", "scope_crosses_boundary"]
+        },
+        "gdocs_insert_after_text": {
+          "name": "gdocs_insert_after_text",
+          "description": "Locate `anchor` and insert `new_markdown` immediately after it. Markdown is converted to Docs API requests via the shared converter. V1 rejects markdown tables in this tool.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id":       { "type": "string", "required": true },
+              "anchor":       { "type": "string", "required": true },
+              "new_markdown": { "type": "string", "required": true },
+              "occurrence":   { "type": "integer", "required": false }
+            },
+            "required": ["doc_id", "anchor", "new_markdown"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "changes":           { "type": "array" },
+              "revision_id_after": { "type": "string" },
+              "outline_snapshot":  { "type": "array" },
+              "lossy_conversions": { "type": "array" }
+            }
+          },
+          "errors": ["text_not_found", "invalid_args", "human_changes_pending"]
+        },
+        "gdocs_insert_before_text": {
+          "name": "gdocs_insert_before_text",
+          "description": "Mirror of insert_after_text — insertion lands immediately before the match. Same args and errors.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id":       { "type": "string", "required": true },
+              "anchor":       { "type": "string", "required": true },
+              "new_markdown": { "type": "string", "required": true },
+              "occurrence":   { "type": "integer", "required": false }
+            },
+            "required": ["doc_id", "anchor", "new_markdown"]
+          },
+          "output_schema": { "type": "object", "properties": { "changes": { "type": "array" }, "revision_id_after": { "type": "string" }, "outline_snapshot": { "type": "array" }, "lossy_conversions": { "type": "array" } } },
+          "errors": ["text_not_found", "invalid_args", "human_changes_pending"]
+        },
+        "gdocs_insert_between": {
+          "name": "gdocs_insert_between",
+          "description": "Insert `new_markdown` between two headings. `before_heading` omitted means EOF. Insertion goes at the first paragraph after `after_heading`; existing content is pushed down.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id":         { "type": "string", "required": true },
+              "after_heading":  { "type": "string", "required": true, "description": "e.g. '## Resumen'." },
+              "before_heading": { "type": "string", "required": false, "description": "Omit for EOF." },
+              "new_markdown":   { "type": "string", "required": true }
+            },
+            "required": ["doc_id", "after_heading", "new_markdown"]
+          },
+          "output_schema": { "type": "object", "properties": { "changes": { "type": "array" }, "revision_id_after": { "type": "string" }, "outline_snapshot": { "type": "array" }, "lossy_conversions": { "type": "array" } } },
+          "errors": ["invalid_args", "human_changes_pending"]
+        },
+        "gdocs_delete_text": {
+          "name": "gdocs_delete_text",
+          "description": "Delete occurrences of `find` in `scope`. Same scope/case/occurrence/confirm_many semantics as replace_text.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id":         { "type": "string", "required": true },
+              "find":           { "type": "string", "required": true },
+              "scope":          { "type": "object", "required": true },
+              "case_sensitive": { "type": "boolean", "required": false },
+              "whole_word":     { "type": "boolean", "required": false },
+              "occurrence":     { "type": "integer", "required": false },
+              "confirm_many":   { "type": "boolean", "required": false }
+            },
+            "required": ["doc_id", "find", "scope"]
+          },
+          "output_schema": { "type": "object", "properties": { "changes": { "type": "array" }, "revision_id_after": { "type": "string" }, "outline_snapshot": { "type": "array" } } },
+          "errors": ["text_not_found", "confirm_many_matches", "human_changes_pending"]
+        },
+        "gdocs_replace_section": {
+          "name": "gdocs_replace_section",
+          "description": "Find `heading` and replace the paragraphs between it and the next same-or-higher heading (or EOF) with `new_markdown`. Markdown tables are rejected in v1.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id":       { "type": "string", "required": true },
+              "heading":      { "type": "string", "required": true },
+              "new_markdown": { "type": "string", "required": true }
+            },
+            "required": ["doc_id", "heading", "new_markdown"]
+          },
+          "output_schema": { "type": "object", "properties": { "changes": { "type": "array" }, "revision_id_after": { "type": "string" }, "outline_snapshot": { "type": "array" }, "lossy_conversions": { "type": "array" } } },
+          "errors": ["invalid_args", "human_changes_pending"]
+        },
+        "gdocs_append_markdown": {
+          "name": "gdocs_append_markdown",
+          "description": "Convert `markdown` to Docs API requests and append at end-of-segment (whole doc or `tab_id` if provided).",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id":   { "type": "string", "required": true },
+              "markdown": { "type": "string", "required": true },
+              "tab_id":   { "type": "string", "required": false }
+            },
+            "required": ["doc_id", "markdown"]
+          },
+          "output_schema": { "type": "object", "properties": { "changes": { "type": "array" }, "revision_id_after": { "type": "string" }, "outline_snapshot": { "type": "array" }, "lossy_conversions": { "type": "array" } } },
+          "errors": ["invalid_args", "human_changes_pending"]
+        },
+        "gdocs_apply_edits": {
+          "name": "gdocs_apply_edits",
+          "description": "Apply N sub-edits (replace_text / insert_after_text / delete_text) atomically in a single batchUpdate. The co-edit guard runs ONCE for Scope::All; if any sub-edit fails resolution the whole compound is rejected before any write.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id": { "type": "string", "required": true },
+              "edits":  { "type": "array", "required": true, "description": "Array of sub-edit objects with `tool` discriminator + per-tool args. See developer guide §45." }
+            },
+            "required": ["doc_id", "edits"]
+          },
+          "output_schema": { "type": "object", "properties": { "changes": { "type": "array" }, "revision_id_after": { "type": "string" }, "outline_snapshot": { "type": "array" } } },
+          "errors": ["invalid_args", "text_not_found", "human_changes_pending"]
+        },
+        "gdocs_style_text": {
+          "name": "gdocs_style_text",
+          "description": "Apply a style patch (bold / italic / underline / strikethrough / font_size_pt / foreground / background / link / heading_level) to the span matched by `find` within `scope`. heading_level mutates updateParagraphStyle for the whole containing paragraph; other fields are character-level.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id": { "type": "string", "required": true },
+              "find":   { "type": "string", "required": true },
+              "scope":  { "type": "object", "required": true },
+              "style":  { "type": "object", "required": true, "description": "Any subset of {bold, italic, underline, strikethrough, font_size_pt, foreground, background, link, heading_level}." }
+            },
+            "required": ["doc_id", "find", "scope", "style"]
+          },
+          "output_schema": { "type": "object", "properties": { "changes": { "type": "array" }, "revision_id_after": { "type": "string" } } },
+          "errors": ["text_not_found", "human_changes_pending"]
+        },
+        "gdocs_create_named_range": {
+          "name": "gdocs_create_named_range",
+          "description": "Register a namedRange over `scope`. V1 of the HTTP client only supports {kind:'paragraph', n:N}; other scopes are forwarded for forward-compat but Google returns an error in v1.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id": { "type": "string", "required": true },
+              "name":   { "type": "string", "required": true },
+              "scope":  { "type": "object", "required": true }
+            },
+            "required": ["doc_id", "name", "scope"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "named_range_id":    { "type": "string" },
+              "revision_id_after": { "type": "string" }
+            }
+          },
+          "errors": ["invalid_args", "document_not_found", "auth_failed"]
+        },
+        "gdocs_replace_named_range": {
+          "name": "gdocs_replace_named_range",
+          "description": "Overwrite a named range's contents using replaceNamedRangeContent.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id":   { "type": "string", "required": true },
+              "name":     { "type": "string", "required": true },
+              "new_text": { "type": "string", "required": true }
+            },
+            "required": ["doc_id", "name", "new_text"]
+          },
+          "output_schema": { "type": "object", "properties": { "changes": { "type": "array" }, "revision_id_after": { "type": "string" } } },
+          "errors": ["invalid_args", "human_changes_pending"]
+        },
+        "gdocs_acknowledge_human_changes": {
+          "name": "gdocs_acknowledge_human_changes",
+          "description": "Fetch the current revision of `doc_id` and set the agent's stored cursor to it. Use after the co-edit guard returns `human_changes_pending` and the agent has decided to proceed despite overlapping human edits.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "doc_id": { "type": "string", "required": true }
+            },
+            "required": ["doc_id"]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "ok":              { "type": "boolean" },
+              "revision_id_now": { "type": "string" }
+            }
+          },
+          "errors": ["document_not_found", "auth_failed"]
+        }
+      },
+      "special_behaviors": [
+        "Flag-only activation: `enabled_tools: [\"gdocs\"]` exposes all 22 tools; `enabled_tools: [\"gdocsread\"]` exposes the 6 read-only tools. No tool_configurations entry needed.",
+        "Auth resolves automatically: GOOGLE_APPLICATION_CREDENTIALS (Service Account JSON path) takes precedence; otherwise ADC.",
+        "Service Account email must be shared (writer/editor) on each doc the agent touches.",
+        "Parent folder requirement: gdocs_create* fail with `no_parent_folder_configured` unless `parent_folder_id` arg is set OR COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID env var is configured.",
+        "Content-addressed editing: every edit tool resolves its target via text search; the LLM never computes UTF-16 indices. 0 matches → text_not_found. 2 matches with identical neighbours → ambiguous_match. ≥5 matches without confirm_many → confirm_many_matches.",
+        "Co-edit guard: before every write, the dispatcher compares the Drive revision to the cursor stored in postgres `gdocs_session_state` (keyed on agent_session_id + document_id). Divergence → `human_changes_pending` with delta summary. Acknowledge via gdocs_acknowledge_human_changes.",
+        "Markdown converter: tables in insert/append/replace_section/apply_edits are rejected with `invalid_args` in v1; tables in gdocs_create_from_markdown work via Drive's native conversion. Math/footnotes/images are reported under `lossy_conversions` rather than failing silently.",
+        "Outline cache: per-revision outline cached for COLMENA_GDOCS_REVISION_CACHE_SECS seconds (default 5).",
+        "Scopes default to documents + drive.file; override via COLMENA_GDOCS_SCOPES.",
+        "gdocs_create_from_docx and gdocs_export attachment_id wrapper are DEFERRED — tool defs are published; create_from_docx returns `not_yet_wired`; export returns the raw byte length without registering an attachment."
+      ],
+      "reference_graphs": [
+        "tests/graphs/agents/gdocs_smoke.json"
+      ]
+    },
+
     "math_nodes": {
       "summary": "Arithmetic nodes (add, subtract, multiply, divide, exponential) can be used as tools when the LLM needs to perform calculations on values it already knows. Expose 'a' and 'b' as LLM parameters.",
       "node_types": ["add", "subtract", "multiply", "divide", "exponential"],
@@ -1716,6 +2235,46 @@
         "gsheets_run_python"
       ],
       "exclusion_example": "[\"gsheets\", \"!gsheets_delete_sheet\"]"
+    },
+    "gdocs": {
+      "description": "Create, read, share, export, and surgically edit Google Docs (22 tools, content-addressed)",
+      "tools": [
+        "gdocs_create",
+        "gdocs_create_from_markdown",
+        "gdocs_create_from_docx",
+        "gdocs_share",
+        "gdocs_export",
+        "gdocs_list_tabs",
+        "gdocs_add_tab",
+        "gdocs_read_as_markdown",
+        "gdocs_read_outline",
+        "gdocs_list_named_ranges",
+        "gdocs_replace_text",
+        "gdocs_insert_after_text",
+        "gdocs_insert_before_text",
+        "gdocs_insert_between",
+        "gdocs_delete_text",
+        "gdocs_replace_section",
+        "gdocs_append_markdown",
+        "gdocs_apply_edits",
+        "gdocs_style_text",
+        "gdocs_create_named_range",
+        "gdocs_replace_named_range",
+        "gdocs_acknowledge_human_changes"
+      ],
+      "exclusion_example": "[\"gdocs\", \"!gdocs_share\", \"!gdocs_export\"]"
+    },
+    "gdocsread": {
+      "description": "Read-only subset of gdocs (6 tools): list/read tabs, read as markdown, outline, named ranges. Use for inspector agents that should never mutate or share docs.",
+      "tools": [
+        "gdocs_list_tabs",
+        "gdocs_read_as_markdown",
+        "gdocs_read_outline",
+        "gdocs_list_named_ranges",
+        "gdocs_export",
+        "gdocs_acknowledge_human_changes"
+      ],
+      "exclusion_example": "[\"gdocsread\", \"!gdocs_export\"]"
     }
   }
 }

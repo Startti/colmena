@@ -584,3 +584,68 @@ Files:
   `tests/graphs/basic/suspend_then_llm_resume.json` — canonical
   smoke graphs that the integration test runs against.
 - **References:** develop commit `772c9f3`.
+
+---
+
+## 15. Google Docs integration (subsystem G) — shipped 2026-06-08
+
+**Qué cambió.** 22 tools sintéticos `gdocs_*` que reflejan el modelo de
+edición quirúrgica direccionada por contenido — el agente describe **qué**
+cambiar (`find`, anchor, heading, named range), nunca offsets UTF-16.
+Soporte multi-tab, conversión markdown ↔ Docs con `lossy_conversions`
+estructurado, y seguridad ante co-edición vía Drive Revisions diff +
+tabla postgres `gdocs_session_state(agent_session_id, document_id,
+last_revision_id)`. Auth por Service Account JSON o ADC; requiere
+`COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID` (o `parent_folder_id` per-call)
+para creación.
+
+**Toolkit aliases.**
+- `gdocs` — los 22 tools completos.
+- `gdocsread` — subset de solo-lectura (6 tools: list_tabs,
+  read_as_markdown, read_outline, list_named_ranges, export,
+  acknowledge_human_changes).
+
+**Por qué importa.** Google Docs no expone un modelo "celda" como
+Sheets — internamente es un stream lineal indexado por UTF-16. Pedirle
+al LLM que calcule esos índices es una receta para off-by-one. v1
+elimina por completo esa superficie con tres decisiones de diseño:
+content-addressed, markdown como I/O, co-edit guard por revisión.
+
+**Documentación de referencia.**
+- Dev guide: [`docs/developer_guide/45_gdocs.md`](developer_guide/45_gdocs.md)
+- Spec: [`docs/superpowers/specs/2026-06-08-google-docs-design.md`](superpowers/specs/2026-06-08-google-docs-design.md)
+- Plan: [`docs/superpowers/plans/2026-06-08-google-docs.md`](superpowers/plans/2026-06-08-google-docs.md)
+- Smoke graph: [`tests/graphs/agents/gdocs_smoke.json`](../tests/graphs/agents/gdocs_smoke.json)
+
+**Breaking changes.** Ninguno — puramente aditivo. Nueva tabla postgres
+`gdocs_session_state` con migración propia.
+
+**Impacto ADP.** Cero breaking changes. ADP opta-in habilitando el
+toolkit `gdocs` o `gdocsread` en `enabled_tools` del agente, más
+`GOOGLE_APPLICATION_CREDENTIALS` + `COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID`
+en el worker. El requisito de `SECURE_VALUES_KEY` del §1 sigue
+aplicando.
+
+**Limitaciones v1 (deferidas a v1.1 — ver BACKLOG "Subsystem G v1.1").**
+- `mode: "suggest"` no implementado (los writes son siempre `direct`).
+- Tablas markdown en `gdocs_insert_*`, `gdocs_replace_section`,
+  `gdocs_append_markdown` y `gdocs_apply_edits` se rechazan con
+  `invalid_args`. Tablas en `gdocs_create_from_markdown` sí funcionan
+  (Drive las convierte nativamente).
+- Edits quirúrgicos a celdas de tabla (`set_table_cell`,
+  `insert_table_row`) no existen aún.
+- `gdocs_create_from_docx` devuelve `not_yet_wired` (falta plumbing de
+  attachment-fetcher).
+- `gdocs_export` devuelve raw `byte_len` sin registrar attachment.
+- `gdocs_add_tab` no siembra `markdown` (responde con
+  `pending_markdown_seed: true`).
+- `gdocs_read_as_markdown` con `tab_id` devuelve el doc completo (slicing
+  per-tab v1.1).
+- `gdocs_create_named_range` solo soporta `Scope::Paragraph` a nivel del
+  API.
+- No hay Drive Comments API, ni insertion de imágenes, ni Apps Script,
+  ni rollback de revisiones, ni OAuth user-scoped.
+
+**Estado.** done.
+
+**Commits (G-T1 a G-T24).** Ver `git log develop --grep="gdocs"`.

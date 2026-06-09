@@ -446,6 +446,33 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
 
 ---
 
+## Subsystem G v1.1 (Google Docs)
+
+- [ ] **`mode: "suggest"`** — `writeControl.suggestionsEnabled` (parámetro
+  aceptado pero no-op en v1; el agente recibe un warning si lo pasa).
+- [ ] **Surgical table-cell edits** (`gdocs_set_table_cell`,
+  `gdocs_insert_table_row`).
+- [ ] **Markdown tables en insert/replace** — requiere round-trip snapshot
+  para computar índices de celda. Hoy se rechazan con `invalid_args`.
+- [ ] **Drive Comments API** — mensajería humano ↔ agente in-doc
+  (`gdocs_add_comment`, `gdocs_resolve_comment`, etc.).
+- [ ] **`gdocs_acknowledge_human_changes` enriquecido** — cheap-tier LLM
+  summary del delta + warnings de conflictos detectados antes de
+  reescribir.
+- [ ] **`gdocs_insert_image_after_text`** (sabores `attachment_id` + URL).
+- [ ] **Plumbing de attachments** para `gdocs_create_from_docx` (load
+  bytes) y `gdocs_export` (register attachment). Comparte raíz con
+  E-T7b (gsheets xlsx).
+- [ ] **`gdocs_list_documents`** — descubrimiento scoped a folder via
+  Drive (`drive.files.list?q=mimeType='application/vnd.google-apps.document'`).
+- [ ] **OAuth user-scoped auth** — hoy solo SA + ADC. Misma raíz que la
+  línea equivalente en Subsystem E v1.1.
+- [ ] **Ejecución de Apps Script** desde colmena (`scripts.run`).
+- [ ] **Drive Revisions restore** (rollback a una revisión previa).
+- [ ] **Math expressions en markdown** — hoy pasan como `$…$` literal.
+
+---
+
 ## Toolkit packages v1.1
 
 - [ ] **Auto-inject package description** into agent system message when a

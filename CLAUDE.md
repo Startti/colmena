@@ -326,3 +326,21 @@ For overrides (custom alias, `expose_sub_tools` filtering, `cache_ttl_seconds`, 
   guard) verified live against real Google Sheets. See
   [`docs/superpowers/specs/2026-06-06-sheets-write-safety-design.md`](docs/superpowers/specs/2026-06-06-sheets-write-safety-design.md)
   and CHANGELOG §11.
+- **Google Docs integration shipped 2026-06-08 (Subsystem G)** —
+  22 synthetic tools (`gdocs_*`) with content-addressed surgical edits,
+  multi-tab, markdown import/export with loss detection, co-edit safety
+  via Drive Revisions + postgres revision tracking
+  (`gdocs_session_state` keyed on `agent_session_id` + `document_id`).
+  Toolkit aliases `gdocs` (full 22) and `gdocsread` (read-only 6).
+  Auth: SA JSON + ADC; requires
+  `COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID` (or per-call
+  `parent_folder_id`) for creation. ~92 unit tests, 11 integration tests
+  (`#[ignore]`-gated). See
+  [`docs/developer_guide/45_gdocs.md`](docs/developer_guide/45_gdocs.md)
+  and the spec at
+  [`docs/superpowers/specs/2026-06-08-google-docs-design.md`](docs/superpowers/specs/2026-06-08-google-docs-design.md).
+  v1 limitations: `mode: "suggest"`, surgical table-cell edits,
+  markdown tables in inserts, image insertion, and attachment plumbing
+  for `gdocs_create_from_docx` / `gdocs_export` → all v1.1
+  (see BACKLOG "Subsystem G v1.1"). Purely additive — no breaking
+  changes; ADP unaffected unless it opts in via `enabled_tools`.
