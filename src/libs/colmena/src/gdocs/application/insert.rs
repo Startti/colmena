@@ -271,11 +271,15 @@ async fn apply_and_finalize(
         .batch_update(doc_id, requests, Some(&snap.revision_id))
         .await?;
 
+    // CRITICAL: store the snapshot's revision_id (documents.get format)
+    // — not batch_update's writeControl id — so the next guard's
+    // revisionId comparison succeeds. See replace_text.rs for the full
+    // explanation.
     ctx.cache.invalidate(ctx.session_id, doc_id);
-    ctx.revisions
-        .put(ctx.session_id, doc_id, &result.revision_id_after)
-        .await?;
     let fresh = ctx.client.get(doc_id).await?;
+    ctx.revisions
+        .put(ctx.session_id, doc_id, &fresh.revision_id)
+        .await?;
     ctx.cache.put(ctx.session_id, doc_id, fresh.clone());
 
     Ok(EditResult {

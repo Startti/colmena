@@ -177,11 +177,20 @@ pub async fn run(
         .await?;
 
     // 8. Refresh cache + revision state.
+    //
+    // CRITICAL: Use the snapshot's revision_id (from documents.get) for
+    // the stored cursor, NOT batch_update's writeControl id. They have
+    // different formats — documents.get returns a long opaque token
+    // (~111 chars), writeControl returns a short one (~25 chars).
+    // Storing the short id makes the next guard's revisionId comparison
+    // fail spuriously (long != short), firing false HumanChangesPending
+    // after every write. The guard always reads via documents.get, so
+    // store what THAT endpoint will return next.
     ctx.cache.invalidate(ctx.session_id, doc_id);
-    ctx.revisions
-        .put(ctx.session_id, doc_id, &result.revision_id_after)
-        .await?;
     let fresh = ctx.client.get(doc_id).await?;
+    ctx.revisions
+        .put(ctx.session_id, doc_id, &fresh.revision_id)
+        .await?;
     ctx.cache.put(ctx.session_id, doc_id, fresh.clone());
 
     Ok(EditResult {
