@@ -249,6 +249,39 @@ impl SqlNode {
         ));
         lines.push("Use introspection queries to discover column details when needed.".to_string());
 
+        // Multi-statement + anti-patterns block (shipped 2026-06-09 with Política C).
+        // For deeper guidance load the `sql-query-best-practices` skill if the
+        // operator enabled it.
+        lines.push(String::new());
+        lines.push(
+            "Multi-statement queries: separá statements con `;`. Se ejecutan TODOS en \
+             una transacción atómica (rollback completo si cualquiera falla). El output \
+             devuelto es el resultado del ÚLTIMO statement. SELECTs anteriores se \
+             ejecutan pero su resultado se descarta. LIMIT auto se aplica solo al \
+             último SELECT."
+                .to_string(),
+        );
+        lines.push(String::new());
+        lines.push("NO: BEGIN, COMMIT, ROLLBACK      → automático, no escribirlos".to_string());
+        lines.push(
+            "NO: $1, ?, :name                  → pegá valores literales, escapá ' con ''"
+                .to_string(),
+        );
+        lines.push("NO: TRUNCATE, DROP, ALTER         → bloqueado; usá DELETE con WHERE".to_string());
+        lines.push("NO: CREATE INDEX/VIEW/SCHEMA      → bloqueado; pedile al operator".to_string());
+        lines.push("NO: GRANT, REVOKE                  → bloqueado".to_string());
+        lines.push("NO: DELETE/UPDATE sin WHERE       → bloqueado".to_string());
+        lines.push(
+            "NO: CREATE FUNCTION sin COMMENT ON FUNCTION → bloqueado".to_string(),
+        );
+        lines.push(String::new());
+        lines.push(
+            "Para bulk insert: hasta ~20 rows usá VALUES multi-row inline. Más allá, \
+             si los datos vienen de un CSV/Excel adjunto, pedile al operator \
+             sql_bulk_insert_from_attachment (cuando esté disponible)."
+                .to_string(),
+        );
+
         lines.join("\n")
     }
 

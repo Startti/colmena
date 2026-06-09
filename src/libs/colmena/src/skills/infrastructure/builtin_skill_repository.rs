@@ -327,4 +327,40 @@ mod tests {
         assert!(listed.contains(&"python-expert".to_string()));
         assert!(listed.contains(&"sql-optimizer".to_string()));
     }
+
+    #[tokio::test]
+    async fn sql_query_best_practices_is_loadable() {
+        let repo =
+            BuiltinSkillRepository::new(&["sql-query-best-practices".to_string()]).unwrap();
+        let skill = repo.load_skill("sql-query-best-practices").await.unwrap();
+        assert_eq!(skill.name, "sql-query-best-practices");
+        assert!(
+            skill.body.contains("Quick rules"),
+            "body should contain the quick-rules section"
+        );
+        // Six references: multi_statement, bulk_insert, select_after_mutation,
+        // anti_patterns, schema_discovery, error_recovery.
+        assert_eq!(
+            skill.references.len(),
+            6,
+            "expected 6 references, got {}",
+            skill.references.len()
+        );
+        let names: Vec<String> = skill.references.iter().map(|r| r.name.clone()).collect();
+        for expected in &[
+            "multi_statement",
+            "bulk_insert",
+            "select_after_mutation",
+            "anti_patterns",
+            "schema_discovery",
+            "error_recovery",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "missing reference '{}', got {:?}",
+                expected,
+                names
+            );
+        }
+    }
 }
