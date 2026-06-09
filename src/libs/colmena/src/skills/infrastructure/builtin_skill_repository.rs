@@ -330,8 +330,7 @@ mod tests {
 
     #[tokio::test]
     async fn sql_query_best_practices_is_loadable() {
-        let repo =
-            BuiltinSkillRepository::new(&["sql-query-best-practices".to_string()]).unwrap();
+        let repo = BuiltinSkillRepository::new(&["sql-query-best-practices".to_string()]).unwrap();
         let skill = repo.load_skill("sql-query-best-practices").await.unwrap();
         assert_eq!(skill.name, "sql-query-best-practices");
         assert!(

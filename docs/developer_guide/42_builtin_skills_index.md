@@ -22,6 +22,7 @@ For context on skills design and authoring, see
 | `python-expert` | Modern Python (3.11+) — typing, async, dataclasses, stdlib internals. Not for general programming questions. | [SKILL.md](../../src/libs/colmena/skills/python-expert/SKILL.md) |
 | `sales-analysis` | Analyzing sales data — common tables, KPIs, pitfalls. | [SKILL.md](../../src/libs/colmena/skills/sales-analysis/SKILL.md) |
 | `sql-optimizer` | Writing, reviewing, or optimizing SQL — performance, indexes, joins, query plans. Not for ORM-specific questions. | [SKILL.md](../../src/libs/colmena/skills/sql-optimizer/SKILL.md) |
+| `sql-query-best-practices` | Calling the `sql_query` tool — multi-statement patterns, bulk loads, common pitfalls, what is blocked and why. 6 references on-demand (multi_statement, bulk_insert, select_after_mutation, anti_patterns, schema_discovery, error_recovery). | [SKILL.md](../../src/libs/colmena/skills/sql-query-best-practices/SKILL.md) |
 
 ## How an LLM loads a skill
 

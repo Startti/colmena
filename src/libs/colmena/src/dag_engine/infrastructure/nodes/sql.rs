@@ -267,13 +267,13 @@ impl SqlNode {
             "NO: $1, ?, :name                  → pegá valores literales, escapá ' con ''"
                 .to_string(),
         );
-        lines.push("NO: TRUNCATE, DROP, ALTER         → bloqueado; usá DELETE con WHERE".to_string());
+        lines.push(
+            "NO: TRUNCATE, DROP, ALTER         → bloqueado; usá DELETE con WHERE".to_string(),
+        );
         lines.push("NO: CREATE INDEX/VIEW/SCHEMA      → bloqueado; pedile al operator".to_string());
         lines.push("NO: GRANT, REVOKE                  → bloqueado".to_string());
         lines.push("NO: DELETE/UPDATE sin WHERE       → bloqueado".to_string());
-        lines.push(
-            "NO: CREATE FUNCTION sin COMMENT ON FUNCTION → bloqueado".to_string(),
-        );
+        lines.push("NO: CREATE FUNCTION sin COMMENT ON FUNCTION → bloqueado".to_string());
         lines.push(String::new());
         lines.push(
             "Para bulk insert: hasta ~20 rows usá VALUES multi-row inline. Más allá, \
