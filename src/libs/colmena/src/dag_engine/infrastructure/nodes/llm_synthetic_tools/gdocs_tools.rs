@@ -90,7 +90,7 @@ async fn shared_revs() -> Result<Arc<dyn RevisionStore>, serde_json::Value> {
         let pool = sqlx::PgPool::connect(&url)
             .await
             .map_err(|e| DocsError::Internal(format!("db connect: {e}")))?;
-        let arc: Arc<dyn RevisionStore> = Arc::new(PostgresRevisionStore::new(pool));
+        let arc: Arc<dyn RevisionStore> = Arc::new(PostgresRevisionStore::new(pool).await);
         Ok::<_, DocsError>(arc)
     })
     .await
