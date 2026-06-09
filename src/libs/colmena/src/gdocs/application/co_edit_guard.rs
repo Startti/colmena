@@ -102,11 +102,11 @@ pub async fn run_guard(
             // Treat as a human edit. The since timestamp is best-effort:
             // we don't have a precise wall-clock for the human's edit,
             // so we use the snapshot's "now" as the upper bound.
-            return Err(DocsError::HumanChangesPending {
+            Err(DocsError::HumanChangesPending {
                 since: chrono::Utc::now(),
                 changes_overlapping_scope: vec![],
                 changes_outside_scope: vec![],
-            });
+            })
         }
         Some(_) | None => {
             // Either revisions match, or this is first contact for
