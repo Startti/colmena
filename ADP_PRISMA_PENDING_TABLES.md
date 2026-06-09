@@ -373,3 +373,251 @@ Mismo flujo que §4 (`gdocs_session_state` base):
 - Plan: `docs/superpowers/plans/2026-06-09-gdocs-paragraph-diff.md`
 - Dev guide: `docs/developer_guide/45_gdocs.md` §"Co-edit safety pipeline"
 - CHANGELOG: `docs/CHANGELOG_2026-06.md` §17
+
+---
+
+# Apéndice — Opción A: artefacto consolidado ready-to-PR
+
+> Esta es la versión "copy-paste sin pensar" del PR de ADP. Contiene
+> TODO lo que el ADP team necesita aplicar en un solo migration + un
+> bloque a `schema.prisma`. Las secciones §1-§5 arriba son el detalle
+> + rationale de cada pieza.
+
+## A.1 — Single `migration.sql` (combo)
+
+Crear:
+```
+packages/database/prisma/migrations/<YYYYMMDDHHMMSS>_colmena_crdt_gdocs_v11/migration.sql
+```
+
+(reemplazar `<YYYYMMDDHHMMSS>` por timestamp del momento de creación,
+e.g. `20260609160000`).
+
+```sql
+-- ============================================================================
+-- Migration combo: colmena CRDT documents + gdocs session state (v1 + v1.1)
+-- ============================================================================
+-- Fuentes en colmena:
+--   - src/libs/colmena/migrations/postgres/20260603000000_crdt_doc_changes.sql
+--   - src/libs/colmena/migrations/postgres/20260608000000_gdocs_session_state.sql
+--   - src/libs/colmena/migrations/postgres/20260609000000_gdocs_session_state_snapshot.sql
+--
+-- Orden importa: el ALTER TABLE de v1.1 referencia `gdocs_session_state`
+-- creada en el bloque anterior. Todos los statements son idempotentes
+-- (`IF NOT EXISTS`) — re-aplicar es seguro.
+-- ============================================================================
+
+-- ---------------------------------------------------------------------------
+-- 1) CRDT documents — event log + per-session cursors + artifact index
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS crdt_doc_events (
+    id          BIGSERIAL   PRIMARY KEY,
+    artifact_id TEXT        NOT NULL,
+    sheet_id    TEXT,
+    origin      TEXT        NOT NULL,
+    summary     TEXT        NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS crdt_doc_events_lookup
+    ON crdt_doc_events(artifact_id, id);
+
+CREATE INDEX IF NOT EXISTS crdt_doc_events_by_sheet
+    ON crdt_doc_events(artifact_id, sheet_id, id);
+
+CREATE TABLE IF NOT EXISTS crdt_doc_session_cursors (
+    agent_session_id TEXT        NOT NULL,
+    artifact_id      TEXT        NOT NULL,
+    last_event_id    BIGINT      NOT NULL,
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (agent_session_id, artifact_id)
+);
+
+CREATE TABLE IF NOT EXISTS crdt_doc_session_artifacts (
+    agent_session_id TEXT        NOT NULL,
+    artifact_id      TEXT        NOT NULL,
+    name             TEXT        NOT NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_accessed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (agent_session_id, artifact_id)
+);
+
+CREATE INDEX IF NOT EXISTS crdt_doc_session_artifacts_recent_idx
+    ON crdt_doc_session_artifacts(agent_session_id, last_accessed_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- 2) gdocs_session_state — v1 base (co-edit guard cursor)
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS gdocs_session_state (
+    agent_session_id TEXT        NOT NULL,
+    document_id      TEXT        NOT NULL,
+    last_revision_id TEXT        NOT NULL,
+    last_edit_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (agent_session_id, document_id)
+);
+
+CREATE INDEX IF NOT EXISTS gdocs_session_state_last_edit_at_idx
+    ON gdocs_session_state (last_edit_at);
+
+-- ---------------------------------------------------------------------------
+-- 3) gdocs_session_state — v1.1 extension (paragraph-level human-change diff)
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE gdocs_session_state
+  ADD COLUMN IF NOT EXISTS last_snapshot_json       JSONB,
+  ADD COLUMN IF NOT EXISTS last_snapshot_size_bytes INTEGER;
+```
+
+### Rollback (no automatizado — manual)
+
+Si por alguna razón hay que revertir (raro; las migrations son
+additive y no destructivas):
+
+```sql
+-- v1.1 first (depend on v1 table existing)
+ALTER TABLE gdocs_session_state DROP COLUMN IF EXISTS last_snapshot_size_bytes;
+ALTER TABLE gdocs_session_state DROP COLUMN IF EXISTS last_snapshot_json;
+
+-- v1 gdocs
+DROP INDEX IF EXISTS gdocs_session_state_last_edit_at_idx;
+DROP TABLE IF EXISTS gdocs_session_state;
+
+-- CRDT
+DROP INDEX IF EXISTS crdt_doc_session_artifacts_recent_idx;
+DROP TABLE IF EXISTS crdt_doc_session_artifacts;
+DROP TABLE IF EXISTS crdt_doc_session_cursors;
+DROP INDEX IF EXISTS crdt_doc_events_by_sheet;
+DROP INDEX IF EXISTS crdt_doc_events_lookup;
+DROP TABLE IF EXISTS crdt_doc_events;
+```
+
+---
+
+## A.2 — Bloque consolidado para `schema.prisma`
+
+Pegar este bloque al final de `packages/database/prisma/schema.prisma`,
+después de `model ProviderFileCache` (que es el último mirror existente
+de colmena). Los 4 models siguen la convención **camelCase + `@map()`**
+ya usada por `ConversationAttachment`.
+
+```prisma
+// =====================================================================
+// Colmena mirrors — CRDT documents + Google Docs co-edit guard
+// =====================================================================
+// Source migrations (in colmena):
+//   - 20260603000000_crdt_doc_changes.sql     (CRDT — 3 tables)
+//   - 20260608000000_gdocs_session_state.sql  (Subsystem G v1 base)
+//   - 20260609000000_gdocs_session_state_snapshot.sql (Subsystem G v1.1)
+// Applied to ADP via combined migration in packages/database/prisma/migrations/.
+// =====================================================================
+
+model CrdtDocEvent {
+  id         BigInt   @id @default(autoincrement())
+  artifactId String   @map("artifact_id")
+  sheetId    String?  @map("sheet_id")
+  origin     String
+  summary    String
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  @@index([artifactId, id], map: "crdt_doc_events_lookup")
+  @@index([artifactId, sheetId, id], map: "crdt_doc_events_by_sheet")
+  @@map("crdt_doc_events")
+}
+
+model CrdtDocSessionCursor {
+  agentSessionId String   @map("agent_session_id")
+  artifactId     String   @map("artifact_id")
+  lastEventId    BigInt   @map("last_event_id")
+  updatedAt      DateTime @default(now()) @map("updated_at") @db.Timestamptz()
+
+  @@id([agentSessionId, artifactId])
+  @@map("crdt_doc_session_cursors")
+}
+
+model CrdtDocSessionArtifact {
+  agentSessionId String   @map("agent_session_id")
+  artifactId     String   @map("artifact_id")
+  name           String
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz()
+  lastAccessedAt DateTime @default(now()) @map("last_accessed_at") @db.Timestamptz()
+
+  @@id([agentSessionId, artifactId])
+  @@index([agentSessionId, lastAccessedAt(sort: Desc)], map: "crdt_doc_session_artifacts_recent_idx")
+  @@map("crdt_doc_session_artifacts")
+}
+
+model GdocsSessionState {
+  agentSessionId        String   @map("agent_session_id")
+  documentId            String   @map("document_id")
+  lastRevisionId        String   @map("last_revision_id")
+  lastEditAt            DateTime @default(now()) @map("last_edit_at") @db.Timestamptz()
+  // v1.1 — paragraph-level human-change diff (additive, nullable):
+  lastSnapshotJson      Json?    @map("last_snapshot_json")
+  lastSnapshotSizeBytes Int?     @map("last_snapshot_size_bytes")
+
+  @@id([agentSessionId, documentId])
+  @@index([lastEditAt], map: "gdocs_session_state_last_edit_at_idx")
+  @@map("gdocs_session_state")
+}
+```
+
+---
+
+## A.3 — Comandos de aplicación
+
+Desde la raíz del repo ADP:
+
+```bash
+# 1) Crear el dir + file de migration (timestamp como nombre del dir)
+TS=$(date +%Y%m%d%H%M%S)
+mkdir -p "packages/database/prisma/migrations/${TS}_colmena_crdt_gdocs_v11"
+$EDITOR "packages/database/prisma/migrations/${TS}_colmena_crdt_gdocs_v11/migration.sql"
+# pegar el SQL de A.1
+
+# 2) Pegar el bloque de A.2 al final de packages/database/prisma/schema.prisma
+$EDITOR packages/database/prisma/schema.prisma
+
+# 3) Local: aplicar a dev DB (NEVER `migrate dev`/`reset`)
+pnpm prisma migrate deploy
+
+# 4) Verificar prisma client regenera y schema queda válido
+pnpm prisma generate
+pnpm prisma format
+
+# 5) Probar que el worker compila + boot-checks pasan
+cargo check --manifest-path apps/service/ia/platform/worker/Cargo.toml
+cd apps/service/ia/platform/worker && cargo run -- --boot-check
+# Boot-check NO debería loguear:
+#   "gdocs: last_snapshot_json column missing on gdocs_session_state"
+# Si lo loguea → la columna no se aplicó. Investigar antes de mergear.
+
+# 6) PR a develop. El deploy hook en deploy_gcp.sh corre `migrate deploy`
+#    automáticamente antes de levantar los workers en GCP.
+```
+
+---
+
+## A.4 — Verificación post-deploy en GCP
+
+Después del primer deploy a dev/prod con esta migration aplicada:
+
+```bash
+# Verificar columnas presentes en la DB de Cloud SQL (vía proxy o Cloud Run job)
+psql "$DATABASE_URL" -c "\d gdocs_session_state"
+# Output esperado:
+#   last_snapshot_json       | jsonb
+#   last_snapshot_size_bytes | integer
+
+# Verificar que el worker NO emite el warn de v1.1 en boot
+gcloud logging read 'resource.type="cloud_run_revision" \
+  AND resource.labels.service_name="colmena-worker" \
+  AND textPayload:"last_snapshot_json column missing"' \
+  --limit 5 --freshness=10m
+# Output esperado: vacío.
+```
+
+Si el warn aparece, la migration no se aplicó — verificar el log del
+deploy hook (`gcloud builds log <BUILD_ID>`) o correr `migrate deploy`
+manualmente vía Cloud Run job.
