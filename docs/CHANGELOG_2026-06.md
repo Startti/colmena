@@ -782,3 +782,75 @@ schema Prisma. Detalles en
 [`ADP_PRISMA_PENDING_TABLES.md`](../ADP_PRISMA_PENDING_TABLES.md) §5.
 
 **Estado.** done.
+
+---
+
+## 18. SQL node — multi-statement support (Política C) + LLM-facing docs (2026-06-09)
+
+**Qué cambió.** El nodo `sql_query` ahora ejecuta queries con múltiples
+statements separados por `;` de forma nativa. Antes fallaba con error
+críptico `cannot insert multiple commands into a prepared statement`
+porque `sqlx::query().execute()` usa el extended protocol de Postgres
+(PREPARE + BIND + EXECUTE) que solo acepta UN comando por mensaje.
+
+**Política C — atomic loop sobre AST statements.** El refactor:
+- Parsea la query con `sqlparser`, obtiene `Vec<Statement>`.
+- Inicia UNA transacción.
+- Itera los statements ejecutándolos con `sqlx::query(stmt.to_string())`.
+- El output devuelto es el del ÚLTIMO statement:
+  - SELECT → rows (con LIMIT auto solo si no tiene)
+  - INSERT/UPDATE/DELETE → `{rows_affected: SUM_de_todos}`
+  - CREATE TABLE → `{created: true, type: "table"}`
+  - CREATE FUNCTION → `{created: true}`
+- SELECTs intermedios se ejecutan pero su resultado se descarta.
+- Cualquier fallo → rollback completo (atomicidad preservada).
+
+**Por qué importa.** El LLM tiende a escribir naturalmente:
+```sql
+INSERT INTO orders (...) VALUES (...);
+INSERT INTO order_items (...) VALUES (...);
+UPDATE inventory SET ... WHERE ...;
+```
+Cada `;\n` rompía la query. Ahora corre todo en una TX atómica.
+
+**Docs LLM-facing.** Dos capas:
+- `build_description_supplement` (always-on): bloque corto con
+  multi-statement note + lista visual `NO: ... → ...` con anti-patterns
+  (BEGIN/COMMIT, $1/?/:name, TRUNCATE/DROP, etc.). ~150 tokens extras por
+  turn.
+- Nueva skill built-in `sql-query-best-practices` (opt-in vía
+  `llm_call.skills.paths`): 6 references on-demand con ejemplos
+  visuales ✅/❌ — `multi_statement`, `bulk_insert`,
+  `select_after_mutation`, `anti_patterns`, `schema_discovery`,
+  `error_recovery`.
+
+**Cambios técnicos clave.**
+- `sql_pool_adapter.rs::execute_query` — refactor completo a Política C
+  (~80 LOC modificadas + helper `marshall_rows()` extraído).
+- `sql.rs:396` — fix UTF-8 panic en log preview (`chars().take(100)` en
+  vez de byte slicing).
+- `sql.rs::build_description_supplement` — append L1 anti-patterns block.
+- Nuevo dir `src/libs/colmena/skills/sql-query-best-practices/` con
+  `SKILL.md` + 6 references.
+- 7 nuevos tests `#[ignore]`-gated en
+  `sql_pool_adapter::tests::pc_*` cubriendo: single insert, multi-insert
+  aggregation, rollback atomicity, insert+select, intermediate-select
+  discard, LIMIT en final SELECT, multi-line formato de 1 stmt.
+- 1 test agregado en `builtin_skill_repository::tests::sql_query_best_practices_is_loadable`
+  para catch regresiones del skill.
+- Live verification graph `tests/graphs/agents/sql_multistatement_repro.json`.
+
+**Documentación actualizada.**
+- Dev guide: nueva sección §"Multi-statement queries (Política C)" en
+  [`docs/developer_guide/23_sql_node.md`](developer_guide/23_sql_node.md).
+- BACKLOG: item 12 ("SQL INSERT multi-line bug") marked done.
+
+**Tests.** 7/7 nuevos integration tests pasan (`cargo test --ignored`).
+1572+ unit tests total pasan. ADP worker recompila clean.
+
+**Impacto ADP.** Cero breaking changes. La señal externa (output
+shape) no cambia para queries single-statement; multi-statement antes
+fallaba con error, ahora funciona. ADP worker recompila clean sin
+modificaciones.
+
+**Estado.** done.

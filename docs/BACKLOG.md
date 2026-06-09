@@ -15,7 +15,7 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 | # | Item | Sección detallada | Esfuerzo |
 |---|---|---|---|
 | **11** | Cache nativo de provider habilitado por default en Anthropic + Gemini | [Provider-level prompt caching](#crdt-documents-v11--provider-level-prompt-caching-anthropic--gemini) (ya parqueado bajo CRDT v1.1) | ~5h |
-| **12** | 🐛 SQL node — `INSERT` multi-línea falla (bug a reproducir) | [SQL node — INSERT multi-line bug](#sql-node--insert-multi-line-bug-2026-06-09) | 0.5-1 día |
+| **12** | ✅ SQL node — `INSERT` multi-statement (shipped 2026-06-09) | [SQL node — INSERT multi-line bug](#sql-node--insert-multi-line-bug-2026-06-09--shipped-2026-06-09) | done |
 | **13** | SQL node — bulk insert desde CSV/Excel adjunto sin que el LLM lea las filas | [SQL node — bulk insert desde attachment](#sql-node--bulk-insert-desde-attachment-2026-06-09) | 3-5 días |
 | **14** | 🧠 Filtrar fields que el LLM ve de outputs de nodos upstream | [Output filtering para LLM](#output-filtering-para-llm--qué-campos-ve-el-modelo-2026-06-09) | requiere brainstorming dedicado |
 
@@ -27,26 +27,26 @@ queda referenciado en su sección original con bump de prioridad. Items
 
 ---
 
-## SQL node — INSERT multi-line bug (2026-06-09)
+## ~~SQL node — INSERT multi-line bug (2026-06-09)~~ — SHIPPED 2026-06-09
 
-- **Origen:** Reporte del owner (2026-06-09). Un `INSERT` con múltiples
-  líneas (multi-row VALUES, o INSERT formateado con saltos de línea entre
-  `INTO`/`VALUES`/list de columnas) falla en el nodo `sql_query`.
-- **Repro pendiente:** falta el SQL exacto que disparó el error y el
-  mensaje de respuesta. Sospechas hasta confirmar repro:
-  - **(a) Multi-row VALUES** — `INSERT INTO t (a, b) VALUES (1, 2),\n(3, 4)`. El parser AST (`sqlparser` via `sql_ast.rs`) maneja esto bien en su contrato; sospechoso si el splitter por statement cortó el `;` mal.
-  - **(b) Formato multi-línea** — `INSERT INTO t\n(a, b)\nVALUES\n(1, 2)`. Misma sospecha que (a).
-  - **(c) Multi-statement con `\n`** — `INSERT ...;\n\nINSERT ...;`. El validador per-statement (sql_node 2026-05-26) debería tratarlos separadamente; si el splitter colapsa `\n\n` mal puede romperse.
-- **Fix esperado:** una vez con el repro exacto, ~1h de debug + ~2-4h
-  de fix + tests. Total **0.5-1 día**.
-- **Acceptance:**
-  - Test unitario en `sql_ast.rs` cubriendo los 3 shapes de arriba.
-  - Test de integración (gated por DB) ejecutando el INSERT real
-    contra Postgres y verificando el rowcount.
-- **Cuándo retomar:** **bloqueante** — bug en producción. Apenas tenga
-  el repro, lo levanto al `develop` queue.
-- **Bloqueador externo:** necesito de daniel@startti.co el SQL exacto
-  que falló + texto del error.
+- **Origen:** Reporte del owner (2026-06-09).
+- **Root cause confirmado:** el bug NO era multi-líneas — era
+  **multi-statement** (varios `;` en la misma query). `sqlx::query().execute()`
+  usa el extended protocol de Postgres (PREPARE+BIND+EXECUTE) que solo acepta
+  UN comando SQL por mensaje. Cuando el LLM escribía 2+ INSERTs separados
+  por `;\n`, Postgres rechazaba con `cannot insert multiple commands into a
+  prepared statement`.
+- **Fix shipped:** Política C — refactor de `execute_query` en
+  `sql_pool_adapter.rs` para iterar `Vec<Statement>` ejecutando uno por
+  vez dentro de una transacción atómica. Output del último statement;
+  rollback total en cualquier fallo. + UTF-8 panic fix en log preview.
+- **Docs LLM-facing:** description_supplement con anti-patterns visuales
+  + nueva skill built-in `sql-query-best-practices` con 6 references
+  opt-in.
+- **Verificación:** 7 integration tests `#[ignore]`-gated en
+  `sql_pool_adapter::tests::pc_*`. Live verification via
+  `tests/graphs/agents/sql_multistatement_repro.json`.
+- **CHANGELOG:** §18.
 
 ---
 

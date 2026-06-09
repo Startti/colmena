@@ -1,0 +1,103 @@
+{
+  "_comment": "Live verification para Política C — multi-statement SQL. 3 cases: (1) multi-row VALUES single statement; (2) multi-row con formato multi-línea (newlines entre cláusulas); (3) multi-statement separados por ;\\n. Antes de 2026-06-09, case 3 fallaba con 'cannot insert multiple commands into a prepared statement'. Setup usa CREATE TABLE IF NOT EXISTS + DELETE para idempotencia. Operadores: si la tabla quedó de un run viejo SIN primary key, dropéenla manualmente antes con `psql -c 'DROP TABLE public.test_multiline'`. Ejecutar: `set -a && source .env && set +a && cargo run --bin dag_engine -- run tests/graphs/agents/sql_multistatement_repro.json`. Output esperado: case1 rows_affected=3, case2 rows_affected=2, case3 rows_affected=2, final_select 7 rows.",
+  "nodes": {
+    "setup_params": {
+      "type": "input",
+      "config": {
+        "data": {
+          "query": "CREATE TABLE IF NOT EXISTS public.test_multiline (id INT PRIMARY KEY, name TEXT);\nDELETE FROM public.test_multiline WHERE id BETWEEN 1 AND 100",
+          "connection_url": "${DATABASE_URL}",
+          "permissions": {"preset": "full", "allowed_schemas": ["public"], "sandbox_schema": "public"},
+          "runtime_limits": {"max_rows": 100}
+        }
+      }
+    },
+    "setup": { "type": "sql_query", "config": {} },
+
+    "p1": {
+      "type": "input",
+      "config": {
+        "data": {
+          "query": "INSERT INTO public.test_multiline (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c')",
+          "connection_url": "${DATABASE_URL}",
+          "permissions": {"preset": "full", "allowed_schemas": ["public"], "sandbox_schema": "public"},
+          "runtime_limits": {"max_rows": 100}
+        }
+      }
+    },
+    "case1_multirow_single_stmt": { "type": "sql_query", "config": {} },
+
+    "p2": {
+      "type": "input",
+      "config": {
+        "data": {
+          "query": "INSERT INTO public.test_multiline\n  (id, name)\nVALUES\n  (4, 'd'),\n  (5, 'e')",
+          "connection_url": "${DATABASE_URL}",
+          "permissions": {"preset": "full", "allowed_schemas": ["public"], "sandbox_schema": "public"},
+          "runtime_limits": {"max_rows": 100}
+        }
+      }
+    },
+    "case2_multirow_multiline_formatting": { "type": "sql_query", "config": {} },
+
+    "p3": {
+      "type": "input",
+      "config": {
+        "data": {
+          "query": "INSERT INTO public.test_multiline (id, name) VALUES (6, 'f');\nINSERT INTO public.test_multiline (id, name) VALUES (7, 'g');",
+          "connection_url": "${DATABASE_URL}",
+          "permissions": {"preset": "full", "allowed_schemas": ["public"], "sandbox_schema": "public"},
+          "runtime_limits": {"max_rows": 100}
+        }
+      }
+    },
+    "case3_multistatement": { "type": "sql_query", "config": {} },
+
+    "p_final": {
+      "type": "input",
+      "config": {
+        "data": {
+          "query": "SELECT id, name FROM public.test_multiline ORDER BY id",
+          "connection_url": "${DATABASE_URL}",
+          "permissions": {"preset": "full", "allowed_schemas": ["public"], "sandbox_schema": "public"},
+          "runtime_limits": {"max_rows": 100}
+        }
+      }
+    },
+    "final_select": { "type": "sql_query", "config": {} },
+
+    "out": { "type": "output", "config": { "label": "Multi-statement repro results" } }
+  },
+  "edges": [
+    { "from": "setup_params.query", "to": "setup.query" },
+    { "from": "setup_params.connection_url", "to": "setup.connection_url" },
+    { "from": "setup_params.permissions", "to": "setup.permissions" },
+    { "from": "setup_params.runtime_limits", "to": "setup.runtime_limits" },
+
+    { "from": "setup", "to": "p1" },
+    { "from": "p1.query", "to": "case1_multirow_single_stmt.query" },
+    { "from": "p1.connection_url", "to": "case1_multirow_single_stmt.connection_url" },
+    { "from": "p1.permissions", "to": "case1_multirow_single_stmt.permissions" },
+    { "from": "p1.runtime_limits", "to": "case1_multirow_single_stmt.runtime_limits" },
+
+    { "from": "case1_multirow_single_stmt", "to": "p2" },
+    { "from": "p2.query", "to": "case2_multirow_multiline_formatting.query" },
+    { "from": "p2.connection_url", "to": "case2_multirow_multiline_formatting.connection_url" },
+    { "from": "p2.permissions", "to": "case2_multirow_multiline_formatting.permissions" },
+    { "from": "p2.runtime_limits", "to": "case2_multirow_multiline_formatting.runtime_limits" },
+
+    { "from": "case2_multirow_multiline_formatting", "to": "p3" },
+    { "from": "p3.query", "to": "case3_multistatement.query" },
+    { "from": "p3.connection_url", "to": "case3_multistatement.connection_url" },
+    { "from": "p3.permissions", "to": "case3_multistatement.permissions" },
+    { "from": "p3.runtime_limits", "to": "case3_multistatement.runtime_limits" },
+
+    { "from": "case3_multistatement", "to": "p_final" },
+    { "from": "p_final.query", "to": "final_select.query" },
+    { "from": "p_final.connection_url", "to": "final_select.connection_url" },
+    { "from": "p_final.permissions", "to": "final_select.permissions" },
+    { "from": "p_final.runtime_limits", "to": "final_select.runtime_limits" },
+
+    { "from": "final_select", "to": "out" }
+  ]
+}

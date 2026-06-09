@@ -344,6 +344,17 @@ For overrides (custom alias, `expose_sub_tools` filtering, `cache_ttl_seconds`, 
   for `gdocs_create_from_docx` / `gdocs_export` → all v1.1
   (see BACKLOG "Subsystem G v1.1"). Purely additive — no breaking
   changes; ADP unaffected unless it opts in via `enabled_tools`.
+- **SQL node multi-statement shipped 2026-06-09** — `execute_query` refactored
+  to Política C: iterate AST statements one-by-one in a single atomic transaction.
+  Fixes 'cannot insert multiple commands into a prepared statement' error
+  when LLM writes natural multi-INSERT queries separated by `;\n`. Last statement
+  shapes the output (SELECT → rows + LIMIT, mutation → rows_affected sum,
+  CREATE TABLE/FUNCTION → created marker). Intermediate SELECTs execute but
+  rows discarded. Atomic rollback on any failure. New LLM-facing docs:
+  description_supplement always-on with visual anti-patterns + new built-in
+  skill `sql-query-best-practices` (opt-in) with 6 references. Bonus: UTF-8
+  panic fix in `sql.rs:396`. See CHANGELOG §18 and dev guide §"Multi-statement
+  queries".
 - **Subsystem G v1.1 paragraph diff shipped 2026-06-09** — co-edit guard
   now returns paragraph-level `before_text`/`after_text` per
   `HumanChange`, partitioned by scope overlap. Cambios fuera del scope

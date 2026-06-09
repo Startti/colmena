@@ -433,6 +433,112 @@ comparación de strings heurística.
 
 ---
 
+## Multi-statement queries (Política C, shipped 2026-06-09)
+
+### Problema que resuelve
+
+`sqlx::query(…).execute()` usa el **extended protocol** de Postgres
+(PREPARE + BIND + EXECUTE) que solo acepta UN SQL command por mensaje.
+Cuando el LLM escribía multi-statement (super natural, ej. dos INSERTs
+separados por `;\n`), Postgres respondía con error críptico:
+
+```
+cannot insert multiple commands into a prepared statement
+```
+
+### Pipeline
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ Política C — sqlx::query() loop sobre AST statements             │
+├──────────────────────────────────────────────────────────────────┤
+│ BEGIN (auto)                                                     │
+│   SET LOCAL statement_timeout = ...                              │
+│   SET LOCAL work_mem = ...                                       │
+│   SELECT set_config('app.current_user_id', ...)   ← if tenant   │
+│                                                                  │
+│   for (idx, stmt) in stmts.iter().enumerate():                   │
+│     let is_last = idx == last_idx;                               │
+│     let stmt_sql = stmt.to_string();   // sqlparser reserializes │
+│                                                                  │
+│     if is_select && is_last:                                     │
+│       sqlx::query(limited_sql).fetch_all → marshall rows         │
+│       → return Ok({output: rows, row_count, truncated})          │
+│     elif is_select:                                              │
+│       sqlx::query(stmt_sql).execute  // rows discarded           │
+│     else (mutation):                                             │
+│       result = sqlx::query(stmt_sql).execute                     │
+│       rows_affected_sum += result.rows_affected()                │
+│       if is_last:                                                │
+│         match stmt {                                             │
+│           CreateFunction → {created: true}                       │
+│           CreateTable    → {created: true, type: "table"}        │
+│           _              → {rows_affected: sum}                  │
+│         }                                                        │
+│         → return Ok                                              │
+│                                                                  │
+│ COMMIT (auto) ⤴ inside each branch's return path                 │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Reglas exactas
+
+| Caso | Output |
+|---|---|
+| Último statement es SELECT | `output: Vec<Value>`, `row_count: N`, LIMIT auto si no tiene |
+| Último statement es INSERT/UPDATE/DELETE | `output: {rows_affected: SUM_de_todos_los_mutadores}` |
+| Último statement es CREATE TABLE | `output: {created: true, type: "table"}` |
+| Último statement es CREATE FUNCTION | `output: {created: true}` |
+| Cualquier statement falla | Rollback completo, error retornado al caller |
+| Query con solo whitespace o solo comentarios | Error: `empty SQL script` |
+
+**Intermediate SELECTs**: se ejecutan (para que sus side effects como
+`set_config` corran), pero las rows se descartan. **NO se inyecta
+LIMIT** en SELECTs intermedios — solo en el último.
+
+### Por qué no usamos `sqlx::raw_sql`
+
+`raw_sql` ejecuta multi-statement en simple protocol pero NO permite:
+- Recuperar rows tipadas del SELECT final (devuelve `PgQueryResult`, no `PgRow`).
+- Aplicar `LIMIT` automático per-statement.
+- Distinguir CREATE TABLE de INSERT en el output.
+
+La iteración manual por `Vec<Statement>` (AST output) da todo eso a
+costa de N round-trips a Postgres por N statements. Para los workloads
+típicos del LLM (1–10 stmts/call) el costo es despreciable.
+
+### Backward compatibility
+
+Queries single-statement siguen funcionando idéntico — el loop entra al
+if/else apropiado en la primera iteración y retorna. No hay cambio en
+el wire format de `QueryResult`.
+
+### `auto_rls` + multi-statement
+
+Si `permissions.auto_rls = true`, el post-execution hook itera TODOS
+los stmts del script buscando `CREATE TABLE` (vía
+`sql_ast::created_table_name`) y aplica RLS a cada uno. Multi-statement
+con varios `CREATE TABLE` funciona; cada tabla nueva recibe sus
+policies.
+
+### Cómo lo ve el LLM
+
+El `description_supplement` que el nodo construye trae siempre un
+bloque corto con multi-statement + anti-patterns visuales (BEGIN, $1,
+TRUNCATE, etc.). Para profundizar, los operators pueden habilitar la
+skill built-in `sql-query-best-practices` vía
+`llm_call.skills.paths` — tiene 6 references on-demand
+(`multi_statement`, `bulk_insert`, `select_after_mutation`,
+`anti_patterns`, `schema_discovery`, `error_recovery`).
+
+Ver:
+- `src/libs/colmena/skills/sql-query-best-practices/SKILL.md`
+- Tests: `src/libs/colmena/src/dag_engine/infrastructure/sql_pool_adapter.rs`
+  → `pc_*` tests (7 integration tests `#[ignore]`-gated, run con
+  `TEST_DATABASE_URL=$DATABASE_URL cargo test -- --ignored`).
+
+---
+
 ## Sandbox Schema and Function Registry
 
 The `sandbox` schema (configurable via `sandbox_schema`) provides an isolated space for agent-created objects:
