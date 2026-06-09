@@ -109,18 +109,24 @@ pub async fn run(
                     let p = lookup_para(snap, *n);
                     let s = p.start_index + utf16_len(&p.text[..*off]);
                     let e = s + utf16_len(&p.text[*off..*off + *len]);
+                    let para_tab = lookup_tab_id(snap, *n);
                     all_requests.push(serde_json::json!({
-                        "deleteContentRange": {"range": {"startIndex": s, "endIndex": e}}
+                        "deleteContentRange": {
+                            "range": crate::gdocs::application::util::range(s, e, &para_tab),
+                        }
                     }));
                     all_requests.push(serde_json::json!({
-                        "insertText": {"location": {"index": s}, "text": replace.clone()}
+                        "insertText": {
+                            "location": crate::gdocs::application::util::location(s, &para_tab),
+                            "text": replace.clone(),
+                        }
                     }));
                     all_changes.push(ChangeRecord {
                         kind: ChangeKind::Replace,
                         paragraph: *n,
                         before: Some(p.text[*off..*off + *len].to_string()),
                         after: Some(replace.clone()),
-                        tab_id: lookup_tab_id(snap, *n),
+                        tab_id: para_tab,
                     });
                 }
             }
@@ -158,15 +164,18 @@ pub async fn run(
                     let p = lookup_para(snap, *n);
                     let s = p.start_index + utf16_len(&p.text[..*off]);
                     let e = s + utf16_len(&p.text[*off..*off + *len]);
+                    let para_tab = lookup_tab_id(snap, *n);
                     all_requests.push(serde_json::json!({
-                        "deleteContentRange": {"range": {"startIndex": s, "endIndex": e}}
+                        "deleteContentRange": {
+                            "range": crate::gdocs::application::util::range(s, e, &para_tab),
+                        }
                     }));
                     all_changes.push(ChangeRecord {
                         kind: ChangeKind::Delete,
                         paragraph: *n,
                         before: Some(p.text[*off..*off + *len].to_string()),
                         after: None,
-                        tab_id: lookup_tab_id(snap, *n),
+                        tab_id: para_tab,
                     });
                 }
             }

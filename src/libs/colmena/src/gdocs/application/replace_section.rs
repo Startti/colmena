@@ -64,7 +64,9 @@ pub async fn run_replace_section(
     let end = last.end_index;
 
     let mut requests = vec![serde_json::json!({
-        "deleteContentRange": {"range": {"startIndex": start, "endIndex": end}}
+        "deleteContentRange": {
+            "range": crate::gdocs::application::util::range(start, end, &rs.tab_id),
+        }
     })];
     let conv = markdown_to_requests(
         &input.new_markdown,

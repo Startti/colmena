@@ -92,15 +92,18 @@ pub async fn run(
         let start = p.start_index + prefix_utf16;
         let end = start + match_utf16;
         let before: String = p.text[*off..*off + *len].to_string();
+        let para_tab = lookup_tab_id(snap, *n);
         requests.push(serde_json::json!({
-            "deleteContentRange": {"range": {"startIndex": start, "endIndex": end}}
+            "deleteContentRange": {
+                "range": crate::gdocs::application::util::range(start, end, &para_tab),
+            }
         }));
         changes.push(ChangeRecord {
             kind: ChangeKind::Delete,
             paragraph: *n,
             before: Some(before),
             after: None,
-            tab_id: lookup_tab_id(snap, *n),
+            tab_id: para_tab,
         });
     }
 

@@ -144,18 +144,27 @@ pub async fn run(
         let start = p.start_index + prefix_utf16;
         let end = start + match_utf16;
         let before: String = p.text[*off..*off + *len].to_string();
+        // Critical: range/location indices are SEGMENT-RELATIVE.
+        // Include `tabId` whenever the paragraph lives in a non-default
+        // tab — otherwise Google interprets the index against tab 1.
+        let para_tab = lookup_tab_id(snap, *n);
         requests.push(serde_json::json!({
-            "deleteContentRange": {"range": {"startIndex": start, "endIndex": end}}
+            "deleteContentRange": {
+                "range": crate::gdocs::application::util::range(start, end, &para_tab),
+            }
         }));
         requests.push(serde_json::json!({
-            "insertText": {"location": {"index": start}, "text": input.replace.clone()}
+            "insertText": {
+                "location": crate::gdocs::application::util::location(start, &para_tab),
+                "text": input.replace.clone(),
+            }
         }));
         changes.push(ChangeRecord {
             kind: ChangeKind::Replace,
             paragraph: *n,
             before: Some(before),
             after: Some(input.replace.clone()),
-            tab_id: lookup_tab_id(snap, *n),
+            tab_id: para_tab,
         });
     }
 

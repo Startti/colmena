@@ -93,10 +93,11 @@ pub async fn run(
         let match_utf16 = utf16_len(&p.text[*off..*off + *len]);
         let start = p.start_index + prefix_utf16;
         let end = start + match_utf16;
+        let para_tab = lookup_tab_id(snap, *n);
         if !text_fields.is_empty() {
             requests.push(serde_json::json!({
                 "updateTextStyle": {
-                    "range": {"startIndex": start, "endIndex": end},
+                    "range": crate::gdocs::application::util::range(start, end, &para_tab),
                     "textStyle": text_style_json.clone(),
                     "fields": text_fields.clone(),
                 }
@@ -106,7 +107,9 @@ pub async fn run(
             // Paragraph-level style applies to the WHOLE containing paragraph.
             requests.push(serde_json::json!({
                 "updateParagraphStyle": {
-                    "range": {"startIndex": p.start_index, "endIndex": p.end_index},
+                    "range": crate::gdocs::application::util::range(
+                        p.start_index, p.end_index, &para_tab,
+                    ),
                     "paragraphStyle": paragraph_style_json.clone(),
                     "fields": paragraph_fields.clone(),
                 }
