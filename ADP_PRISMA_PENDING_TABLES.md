@@ -1,7 +1,36 @@
 # Tablas pendientes en ADP Prisma para sincronizar con colmena develop
 
-> Última verificación: 2026-06-09 (post v1.1 paragraph diff)
+> Última verificación: 2026-06-09 (post v1.1 paragraph diff + decisión ADP).
 > Verificado contra: `apps/service/ia/platform/{api,worker}` (Rust) + `packages/database/prisma/schema.prisma`.
+
+## 🚦 Estado por decisión del equipo ADP (2026-06-09)
+
+| Cambio | Decisión ADP | Notas |
+|---|---|---|
+| `gdocs_session_state` v1 (4 columnas base) | ✅ **Going forward** — en cola para aplicar | Confirmado 2026-06-09 |
+| `gdocs_session_state` ADD COLUMNS v1.1 | ✅ **Going forward** — junto con v1 (combo single-PR § Opción A) | Confirmado 2026-06-09 |
+| `crdt_doc_events` | ❌ **NO se aplica** ni en develop ni en prod | Decisión ADP 2026-06-09 — subsistema CRDT diferido del lado de ADP |
+| `crdt_doc_session_cursors` | ❌ **NO se aplica** ni en develop ni en prod | Idem |
+| `crdt_doc_session_artifacts` | ❌ **NO se aplica** ni en develop ni en prod | Idem |
+
+**Implicación para colmena develop:** los subsistemas B/C/F (CRDT
+documents) seguirán funcionando en colmena standalone y en cualquier
+host que sí aplique las migraciones — pero **no van a fire desde ADP**
+hasta que esa decisión cambie. Tools como `crdt_doc_*`,
+`gsheets_run_python`, `crdt_doc_run_python` se mantienen en el binario
+de colmena (no se remueven) pero su uso desde un agent corriendo en
+worker de ADP será imposible si no hay `crdt_doc_events`/etc en la DB.
+
+**Acción requerida desde colmena:** ninguna. Las migraciones siguen en
+`src/libs/colmena/migrations/postgres/` para hosts que las quieran;
+ADP simplemente no las re-escribe en su Prisma schema. No hay
+breaking change.
+
+**Para el follow-up (si la decisión ADP cambia):** §1-§3 de este doc
+tienen el detalle completo (SQL + Prisma DSL + rationale) — quedan
+como referencia "lista para activar" si el roadmap de ADP cambia.
+
+---
 
 ## Resumen ejecutivo
 
@@ -21,23 +50,28 @@ ADP **ya tiene mirror** de estas 7 tablas de colmena:
 6. `SecureValueMapping` → `secure_value_mappings`
 7. `ProviderFileCache` → `provider_file_cache`
 
-ADP **NO tiene** 4 tablas nuevas + 1 extensión a `gdocs_session_state`
-que colmena necesita. Sin las 4 tablas el subsistema CRDT y el subsistema
-G fallan al primer call. Sin la extensión v1.1 el guard de Google Docs
-funciona pero **degrada a v1 behavior** (sin diff per-paragraph; warn
-al boot). Hay que crear una nueva migration en ADP siguiendo el patrón
-`migrate deploy`-only.
+ADP **decidió aplicar** (2026-06-09):
 
-| Tabla / change | Migration de origen en colmena | Subsistema | Criticidad |
+- `gdocs_session_state` v1 base (4 columnas)
+- `gdocs_session_state` v1.1 extension (2 columnas adicionales —
+  paragraph-level human-change diff)
+
+ADP **decidió NO aplicar** (2026-06-09, posiblemente reversible):
+
+- `crdt_doc_events` / `crdt_doc_session_cursors` / `crdt_doc_session_artifacts`
+
+| Tabla / change | Migration de origen en colmena | Subsistema | Estado ADP |
 |---|---|---|---|
-| `crdt_doc_events` | `20260603000000_crdt_doc_changes.sql` | CRDT documents | bloqueante |
-| `crdt_doc_session_cursors` | `20260603000000_crdt_doc_changes.sql` | CRDT documents | bloqueante |
-| `crdt_doc_session_artifacts` | `20260603000000_crdt_doc_changes.sql` | CRDT documents | bloqueante |
-| `gdocs_session_state` ⭐ | `20260608000000_gdocs_session_state.sql` | G — Google Docs v1 | bloqueante |
-| `gdocs_session_state` ADD COLUMNS (v1.1) | `20260609000000_gdocs_session_state_snapshot.sql` | G v1.1 paragraph diff | feature flag — graceful degrade |
+| `crdt_doc_events` | `20260603000000_crdt_doc_changes.sql` | CRDT documents | ❌ deferido por ADP 2026-06-09 |
+| `crdt_doc_session_cursors` | `20260603000000_crdt_doc_changes.sql` | CRDT documents | ❌ deferido por ADP 2026-06-09 |
+| `crdt_doc_session_artifacts` | `20260603000000_crdt_doc_changes.sql` | CRDT documents | ❌ deferido por ADP 2026-06-09 |
+| `gdocs_session_state` ⭐ | `20260608000000_gdocs_session_state.sql` | G — Google Docs v1 | ✅ en cola ADP |
+| `gdocs_session_state` ADD COLUMNS (v1.1) | `20260609000000_gdocs_session_state_snapshot.sql` | G v1.1 paragraph diff | ✅ en cola ADP (combo single-PR) |
 
-Detalles de las 4 tablas en §1-§4 abajo; detalles del ADD COLUMNS v1.1
-en §5.
+Detalles históricos de las 4 tablas en §1-§4 abajo (mantenidos para
+referencia si ADP retoma CRDT); detalles del ADD COLUMNS v1.1 en §5.
+Apéndice Opción A al final tiene **solo gdocs** ahora — el SQL CRDT
+queda en §1-§3 si en algún momento se necesita.
 
 ## Tablas faltantes
 
@@ -378,16 +412,17 @@ Mismo flujo que §4 (`gdocs_session_state` base):
 
 # Apéndice — Opción A: artefacto consolidado ready-to-PR
 
-> Esta es la versión "copy-paste sin pensar" del PR de ADP. Contiene
-> TODO lo que el ADP team necesita aplicar en un solo migration + un
-> bloque a `schema.prisma`. Las secciones §1-§5 arriba son el detalle
-> + rationale de cada pieza.
+> **Actualizado 2026-06-09 tras decisión ADP:** este apéndice ahora
+> contiene **solo el bloque gdocs** (v1 + v1.1). Las 3 tablas CRDT
+> fueron deferidas indefinidamente por el equipo ADP. Si esa decisión
+> cambia, el SQL + Prisma DSL de las 3 tablas CRDT está en §A.5
+> abajo como "to-apply opcional".
 
-## A.1 — Single `migration.sql` (combo)
+## A.1 — Single `migration.sql` (gdocs only)
 
 Crear:
 ```
-packages/database/prisma/migrations/<YYYYMMDDHHMMSS>_colmena_crdt_gdocs_v11/migration.sql
+packages/database/prisma/migrations/<YYYYMMDDHHMMSS>_colmena_gdocs_v11/migration.sql
 ```
 
 (reemplazar `<YYYYMMDDHHMMSS>` por timestamp del momento de creación,
@@ -395,59 +430,23 @@ e.g. `20260609160000`).
 
 ```sql
 -- ============================================================================
--- Migration combo: colmena CRDT documents + gdocs session state (v1 + v1.1)
+-- Migration: colmena gdocs_session_state (v1 base + v1.1 paragraph diff)
 -- ============================================================================
 -- Fuentes en colmena:
---   - src/libs/colmena/migrations/postgres/20260603000000_crdt_doc_changes.sql
 --   - src/libs/colmena/migrations/postgres/20260608000000_gdocs_session_state.sql
 --   - src/libs/colmena/migrations/postgres/20260609000000_gdocs_session_state_snapshot.sql
 --
 -- Orden importa: el ALTER TABLE de v1.1 referencia `gdocs_session_state`
 -- creada en el bloque anterior. Todos los statements son idempotentes
 -- (`IF NOT EXISTS`) — re-aplicar es seguro.
+--
+-- Las 3 tablas CRDT (crdt_doc_events / cursors / artifacts) fueron
+-- explícitamente deferidas por el equipo ADP el 2026-06-09 y NO se
+-- incluyen acá. Si esa decisión cambia, ver §A.5.
 -- ============================================================================
 
 -- ---------------------------------------------------------------------------
--- 1) CRDT documents — event log + per-session cursors + artifact index
--- ---------------------------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS crdt_doc_events (
-    id          BIGSERIAL   PRIMARY KEY,
-    artifact_id TEXT        NOT NULL,
-    sheet_id    TEXT,
-    origin      TEXT        NOT NULL,
-    summary     TEXT        NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS crdt_doc_events_lookup
-    ON crdt_doc_events(artifact_id, id);
-
-CREATE INDEX IF NOT EXISTS crdt_doc_events_by_sheet
-    ON crdt_doc_events(artifact_id, sheet_id, id);
-
-CREATE TABLE IF NOT EXISTS crdt_doc_session_cursors (
-    agent_session_id TEXT        NOT NULL,
-    artifact_id      TEXT        NOT NULL,
-    last_event_id    BIGINT      NOT NULL,
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (agent_session_id, artifact_id)
-);
-
-CREATE TABLE IF NOT EXISTS crdt_doc_session_artifacts (
-    agent_session_id TEXT        NOT NULL,
-    artifact_id      TEXT        NOT NULL,
-    name             TEXT        NOT NULL,
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_accessed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (agent_session_id, artifact_id)
-);
-
-CREATE INDEX IF NOT EXISTS crdt_doc_session_artifacts_recent_idx
-    ON crdt_doc_session_artifacts(agent_session_id, last_accessed_at DESC);
-
--- ---------------------------------------------------------------------------
--- 2) gdocs_session_state — v1 base (co-edit guard cursor)
+-- 1) gdocs_session_state — v1 base (co-edit guard cursor)
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS gdocs_session_state (
@@ -462,7 +461,7 @@ CREATE INDEX IF NOT EXISTS gdocs_session_state_last_edit_at_idx
     ON gdocs_session_state (last_edit_at);
 
 -- ---------------------------------------------------------------------------
--- 3) gdocs_session_state — v1.1 extension (paragraph-level human-change diff)
+-- 2) gdocs_session_state — v1.1 extension (paragraph-level human-change diff)
 -- ---------------------------------------------------------------------------
 
 ALTER TABLE gdocs_session_state
@@ -483,70 +482,28 @@ ALTER TABLE gdocs_session_state DROP COLUMN IF EXISTS last_snapshot_json;
 -- v1 gdocs
 DROP INDEX IF EXISTS gdocs_session_state_last_edit_at_idx;
 DROP TABLE IF EXISTS gdocs_session_state;
-
--- CRDT
-DROP INDEX IF EXISTS crdt_doc_session_artifacts_recent_idx;
-DROP TABLE IF EXISTS crdt_doc_session_artifacts;
-DROP TABLE IF EXISTS crdt_doc_session_cursors;
-DROP INDEX IF EXISTS crdt_doc_events_by_sheet;
-DROP INDEX IF EXISTS crdt_doc_events_lookup;
-DROP TABLE IF EXISTS crdt_doc_events;
 ```
 
 ---
 
-## A.2 — Bloque consolidado para `schema.prisma`
+## A.2 — Bloque consolidado para `schema.prisma` (gdocs only)
 
 Pegar este bloque al final de `packages/database/prisma/schema.prisma`,
 después de `model ProviderFileCache` (que es el último mirror existente
-de colmena). Los 4 models siguen la convención **camelCase + `@map()`**
-ya usada por `ConversationAttachment`.
+de colmena). Sigue la convención **camelCase + `@map()`** ya usada por
+`ConversationAttachment`.
 
 ```prisma
 // =====================================================================
-// Colmena mirrors — CRDT documents + Google Docs co-edit guard
+// Colmena mirror — Google Docs co-edit guard (v1 + v1.1)
 // =====================================================================
 // Source migrations (in colmena):
-//   - 20260603000000_crdt_doc_changes.sql     (CRDT — 3 tables)
-//   - 20260608000000_gdocs_session_state.sql  (Subsystem G v1 base)
-//   - 20260609000000_gdocs_session_state_snapshot.sql (Subsystem G v1.1)
-// Applied to ADP via combined migration in packages/database/prisma/migrations/.
+//   - 20260608000000_gdocs_session_state.sql           (Subsystem G v1 base)
+//   - 20260609000000_gdocs_session_state_snapshot.sql  (Subsystem G v1.1)
+// Applied to ADP via single combined migration in
+// packages/database/prisma/migrations/.
+// CRDT tables explicitly deferred by ADP team (2026-06-09).
 // =====================================================================
-
-model CrdtDocEvent {
-  id         BigInt   @id @default(autoincrement())
-  artifactId String   @map("artifact_id")
-  sheetId    String?  @map("sheet_id")
-  origin     String
-  summary    String
-  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz()
-
-  @@index([artifactId, id], map: "crdt_doc_events_lookup")
-  @@index([artifactId, sheetId, id], map: "crdt_doc_events_by_sheet")
-  @@map("crdt_doc_events")
-}
-
-model CrdtDocSessionCursor {
-  agentSessionId String   @map("agent_session_id")
-  artifactId     String   @map("artifact_id")
-  lastEventId    BigInt   @map("last_event_id")
-  updatedAt      DateTime @default(now()) @map("updated_at") @db.Timestamptz()
-
-  @@id([agentSessionId, artifactId])
-  @@map("crdt_doc_session_cursors")
-}
-
-model CrdtDocSessionArtifact {
-  agentSessionId String   @map("agent_session_id")
-  artifactId     String   @map("artifact_id")
-  name           String
-  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz()
-  lastAccessedAt DateTime @default(now()) @map("last_accessed_at") @db.Timestamptz()
-
-  @@id([agentSessionId, artifactId])
-  @@index([agentSessionId, lastAccessedAt(sort: Desc)], map: "crdt_doc_session_artifacts_recent_idx")
-  @@map("crdt_doc_session_artifacts")
-}
 
 model GdocsSessionState {
   agentSessionId        String   @map("agent_session_id")
@@ -572,8 +529,8 @@ Desde la raíz del repo ADP:
 ```bash
 # 1) Crear el dir + file de migration (timestamp como nombre del dir)
 TS=$(date +%Y%m%d%H%M%S)
-mkdir -p "packages/database/prisma/migrations/${TS}_colmena_crdt_gdocs_v11"
-$EDITOR "packages/database/prisma/migrations/${TS}_colmena_crdt_gdocs_v11/migration.sql"
+mkdir -p "packages/database/prisma/migrations/${TS}_colmena_gdocs_v11"
+$EDITOR "packages/database/prisma/migrations/${TS}_colmena_gdocs_v11/migration.sql"
 # pegar el SQL de A.1
 
 # 2) Pegar el bloque de A.2 al final de packages/database/prisma/schema.prisma
@@ -621,3 +578,96 @@ gcloud logging read 'resource.type="cloud_run_revision" \
 Si el warn aparece, la migration no se aplicó — verificar el log del
 deploy hook (`gcloud builds log <BUILD_ID>`) o correr `migrate deploy`
 manualmente vía Cloud Run job.
+
+---
+
+## A.5 — CRDT tables (si ADP retoma) — DEFERIDO 2026-06-09
+
+> El equipo ADP decidió el 2026-06-09 **no aplicar** las 3 tablas
+> CRDT (`crdt_doc_events`, `crdt_doc_session_cursors`,
+> `crdt_doc_session_artifacts`) ni en develop ni en prod. Si esa
+> decisión cambia en el futuro, el SQL + Prisma DSL listo para
+> aplicar está acá.
+
+### A.5.1 — SQL extra (a sumar al migration.sql de A.1)
+
+```sql
+-- ---------------------------------------------------------------------------
+-- CRDT documents — event log + per-session cursors + artifact index
+-- (deferido 2026-06-09; aplicar solo si la decisión ADP cambia)
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS crdt_doc_events (
+    id          BIGSERIAL   PRIMARY KEY,
+    artifact_id TEXT        NOT NULL,
+    sheet_id    TEXT,
+    origin      TEXT        NOT NULL,
+    summary     TEXT        NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS crdt_doc_events_lookup
+    ON crdt_doc_events(artifact_id, id);
+
+CREATE INDEX IF NOT EXISTS crdt_doc_events_by_sheet
+    ON crdt_doc_events(artifact_id, sheet_id, id);
+
+CREATE TABLE IF NOT EXISTS crdt_doc_session_cursors (
+    agent_session_id TEXT        NOT NULL,
+    artifact_id      TEXT        NOT NULL,
+    last_event_id    BIGINT      NOT NULL,
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (agent_session_id, artifact_id)
+);
+
+CREATE TABLE IF NOT EXISTS crdt_doc_session_artifacts (
+    agent_session_id TEXT        NOT NULL,
+    artifact_id      TEXT        NOT NULL,
+    name             TEXT        NOT NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_accessed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (agent_session_id, artifact_id)
+);
+
+CREATE INDEX IF NOT EXISTS crdt_doc_session_artifacts_recent_idx
+    ON crdt_doc_session_artifacts(agent_session_id, last_accessed_at DESC);
+```
+
+### A.5.2 — Prisma DSL extra (a sumar al bloque de A.2)
+
+```prisma
+model CrdtDocEvent {
+  id         BigInt   @id @default(autoincrement())
+  artifactId String   @map("artifact_id")
+  sheetId    String?  @map("sheet_id")
+  origin     String
+  summary    String
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  @@index([artifactId, id], map: "crdt_doc_events_lookup")
+  @@index([artifactId, sheetId, id], map: "crdt_doc_events_by_sheet")
+  @@map("crdt_doc_events")
+}
+
+model CrdtDocSessionCursor {
+  agentSessionId String   @map("agent_session_id")
+  artifactId     String   @map("artifact_id")
+  lastEventId    BigInt   @map("last_event_id")
+  updatedAt      DateTime @default(now()) @map("updated_at") @db.Timestamptz()
+
+  @@id([agentSessionId, artifactId])
+  @@map("crdt_doc_session_cursors")
+}
+
+model CrdtDocSessionArtifact {
+  agentSessionId String   @map("agent_session_id")
+  artifactId     String   @map("artifact_id")
+  name           String
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz()
+  lastAccessedAt DateTime @default(now()) @map("last_accessed_at") @db.Timestamptz()
+
+  @@id([agentSessionId, artifactId])
+  @@index([agentSessionId, lastAccessedAt(sort: Desc)], map: "crdt_doc_session_artifacts_recent_idx")
+  @@map("crdt_doc_session_artifacts")
+}
+```

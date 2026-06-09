@@ -6,6 +6,119 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 
 ---
 
+## ⭐ Cola priorizada — daniel@startti.co (2026-06-09)
+
+> Items elevados por el owner el 2026-06-09 tras shippear Subsystem G v1.1.
+> Mezclados de varios subsistemas; agrupados acá para visibilidad.
+> Cada item tiene su entrada de detalle más abajo (cross-referenced).
+
+| # | Item | Sección detallada | Esfuerzo |
+|---|---|---|---|
+| **11** | Cache nativo de provider habilitado por default en Anthropic + Gemini | [Provider-level prompt caching](#crdt-documents-v11--provider-level-prompt-caching-anthropic--gemini) (ya parqueado bajo CRDT v1.1) | ~5h |
+| **12** | 🐛 SQL node — `INSERT` multi-línea falla (bug a reproducir) | [SQL node — INSERT multi-line bug](#sql-node--insert-multi-line-bug-2026-06-09) | 0.5-1 día |
+| **13** | SQL node — bulk insert desde CSV/Excel adjunto sin que el LLM lea las filas | [SQL node — bulk insert desde attachment](#sql-node--bulk-insert-desde-attachment-2026-06-09) | 3-5 días |
+| **14** | 🧠 Filtrar fields que el LLM ve de outputs de nodos upstream | [Output filtering para LLM](#output-filtering-para-llm--qué-campos-ve-el-modelo-2026-06-09) | requiere brainstorming dedicado |
+
+**Estado:** items 11-14 fueron agregados al backlog el 2026-06-09. Item 11
+ya existía bajo la sección "CRDT Documents v1.1 — Provider-level prompt
+caching" (estaba mal categorizado — es plataforma-wide, no CRDT-specific);
+queda referenciado en su sección original con bump de prioridad. Items
+12-14 son nuevos y tienen sus propias secciones abajo.
+
+---
+
+## SQL node — INSERT multi-line bug (2026-06-09)
+
+- **Origen:** Reporte del owner (2026-06-09). Un `INSERT` con múltiples
+  líneas (multi-row VALUES, o INSERT formateado con saltos de línea entre
+  `INTO`/`VALUES`/list de columnas) falla en el nodo `sql_query`.
+- **Repro pendiente:** falta el SQL exacto que disparó el error y el
+  mensaje de respuesta. Sospechas hasta confirmar repro:
+  - **(a) Multi-row VALUES** — `INSERT INTO t (a, b) VALUES (1, 2),\n(3, 4)`. El parser AST (`sqlparser` via `sql_ast.rs`) maneja esto bien en su contrato; sospechoso si el splitter por statement cortó el `;` mal.
+  - **(b) Formato multi-línea** — `INSERT INTO t\n(a, b)\nVALUES\n(1, 2)`. Misma sospecha que (a).
+  - **(c) Multi-statement con `\n`** — `INSERT ...;\n\nINSERT ...;`. El validador per-statement (sql_node 2026-05-26) debería tratarlos separadamente; si el splitter colapsa `\n\n` mal puede romperse.
+- **Fix esperado:** una vez con el repro exacto, ~1h de debug + ~2-4h
+  de fix + tests. Total **0.5-1 día**.
+- **Acceptance:**
+  - Test unitario en `sql_ast.rs` cubriendo los 3 shapes de arriba.
+  - Test de integración (gated por DB) ejecutando el INSERT real
+    contra Postgres y verificando el rowcount.
+- **Cuándo retomar:** **bloqueante** — bug en producción. Apenas tenga
+  el repro, lo levanto al `develop` queue.
+- **Bloqueador externo:** necesito de daniel@startti.co el SQL exacto
+  que falló + texto del error.
+
+---
+
+## SQL node — bulk insert desde attachment (2026-06-09)
+
+- **Origen:** Reporte del owner (2026-06-09). Use case: usuario sube
+  CSV/Excel de 1000+ filas. Hoy si el agente quiere meterlo en DB
+  tiene que leerlo entero (token waste + alucinaciones).
+- **Goal:** que el LLM vea solo un sample (primeras N filas + header
+  + count + tipos inferidos) y decida si la column mapping es correcta;
+  el bulk insert lo hace el backend leyendo el adjunto desde
+  `OutputStorageRepository` y emitiendo INSERTs o `COPY` (Postgres).
+- **Diseño v1 propuesto:**
+  - Nuevo tool `sql_bulk_insert_from_attachment(attachment_id, table, column_mapping?, on_error?)`.
+  - El LLM previamente llama `sql_inspect_attachment(attachment_id, sample_rows?)` que devuelve `{columns: [...], inferred_types: {...}, sample: [row1, row2, ...], total_rows, encoding, delimiter}` sin cargar todo.
+  - El `sql_bulk_insert` streamea el archivo (CSV via `csv` crate; xlsx via `calamine`) → batched INSERT o `COPY FROM STDIN` (Postgres only).
+  - Reusa el SQL sandbox + permissions de v1 (`sql_ast` valida la table está en `allowed_schemas`).
+  - On-error policy: `fail_fast` (default — rollback al primer error), `skip_rows` (continúa, reporta fallas), `partial_commit` (commit lo que pase).
+- **Files:**
+  - Nuevo: `dag_engine/infrastructure/nodes/llm_synthetic_tools/sql_bulk_tools.rs` (~400 LOC)
+  - Modificado: `sql_node.rs` (exponer port para `OutputStorageRepository::read_stream`)
+  - Tests: ~100 LOC con CSV/xlsx fixtures.
+- **Esfuerzo:** **3-5 días**.
+- **Acceptance:**
+  - CSV de 1k filas se inserta con LLM viendo solo 5 rows de sample.
+  - xlsx con headers en row 1 funciona idem.
+  - `on_error: fail_fast` rollbackea atomic.
+  - Postgres `COPY` se usa cuando se detecta backend Postgres (perf).
+- **Cuándo retomar:** alta prioridad — habilita workflow concreto que
+  ya pidieron usuarios. Después de items 11 y 12.
+- **Decisiones abiertas:**
+  - ¿Solo Postgres con `COPY`, o también MySQL/SQLite con batched INSERT? Recomendado v1 = solo Postgres; otros vienen después.
+  - ¿`column_mapping` opcional con auto-inference, o siempre requerido? Recomendado: opcional con echo del mapping inferido para que el LLM lo confirme.
+
+---
+
+## Output filtering para LLM — qué campos ve el modelo (2026-06-09)
+
+- **Origen:** Reporte del owner (2026-06-09). Use case: nodo upstream
+  emite `{param1, param2, param3, param4, param5}` pero el LLM solo
+  necesita ver `param1` y `param4`. Hoy ve todo → desperdicio de
+  tokens + ruido.
+- **🧠 Requiere brainstorming dedicado antes de scope.** El owner
+  ya lo flagueó así. Este item es estratégico — toca el contrato
+  fundamental entre nodos y el LLM en el DAG.
+- **Bocetos posibles (ninguno decidido):**
+  - **(A) Per-edge `select`** — JsonPath / JMESPath en la edge:
+    `{ "from": "api_call", "to": "llm", "select": [".result.data.param1", ".result.data.param4"] }`.
+    Pro: localizado al uso. Con: cada llm_call repite el select.
+  - **(B) Per-node `llm_visible_fields`** — el nodo emisor declara qué expone al LLM:
+    `api_call: { ..., llm_visible_fields: ["result.param1", "result.param4"] }`.
+    Pro: una sola fuente de verdad. Con: el nodo emisor decide por el consumidor.
+  - **(C) Per-tool-config en `llm_call`** — el `llm_call` config declara qué fields ver de cada upstream:
+    `llm_call: { ..., upstream_filters: { api_call: ["param1", "param4"] } }`.
+    Pro: máximo control del consumidor. Con: el llm_call queda acoplado a sus upstreams.
+  - **(D) Lazy field access** — tool devuelve metadata `{available_fields: [...]}` + el LLM hace `read_field(node, field)` a demanda. Pro: cero waste, máxima flexibilidad. Con: 1+ turn extra, más latencia.
+  - **(E) Output schema declarativo** — outputs traen anotaciones `@llm_hidden` en JSON schema; engine las strippea antes del LLM. Pro: cleanest. Con: invasivo (schema requerido en todo nodo emisor).
+- **Trade-offs serios a discutir:**
+  - **Ownership:** ¿quién decide qué se filtra? (operador del grafo / autor del nodo / agente)
+  - **Retrocompat:** sin filter default = mismo comportamiento de hoy.
+  - **Debuggability:** ¿el `extra_info` sigue mostrando el output completo aunque el LLM no lo vea? (sí — para que el operador pueda debuggear sin perder data).
+  - **Observabilidad:** SSE debe loguear qué se filtró.
+  - **Performance:** la transformación debe ser barata (filter inline, no nueva pasada).
+- **Próximo paso:** sesión de brainstorming con `superpowers:brainstorming` skill.
+  - **Input requerido del owner:** pintar el use case real (qué nodo, qué fields, qué pasó). Después se discuten las opciones A-E con escenarios concretos.
+  - **Output esperado:** propuesta formal en `docs/proposals/2026-06-XX-output-filtering-for-llm.md` con la opción ganadora + spec + plan.
+- **Estimación post-brainstorming:** indeterminada (depende de la opción ganadora). Sospecha: opción (A) o (C) ~3-5 días. Opción (B) o (E) ~5-8 días.
+- **Cuándo retomar:** después de items 11-13. Brainstorming primero,
+  implementación después.
+
+---
+
 ## CRDT Documents v1.1 — formato visual en xlsx (fills, fonts, merges)
 
 - **Origen:** validación manual de v1 (2026-06-02). El operador importó `spike/fixtures/test.xlsx`, vio que merges (A1:D1) y fills de header (amarillo) desaparecen tanto en el browser (Univer) como en el `.xlsx` exportado. Spec v1 explícitamente difirió formato — esta entrada deja el path para retomarlo.
@@ -273,6 +386,11 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 ---
 
 ## CRDT Documents v1.1 — Provider-level prompt caching (Anthropic + Gemini)
+
+> ⭐ **Priority bumped 2026-06-09 por daniel@startti.co** — listado como
+> item 11 en la "cola priorizada" al inicio del backlog. El item no es
+> CRDT-specific (es plataforma-wide); el título quedó así por contexto
+> histórico (se descubrió durante F-T14).
 
 - **Origen:** F-T14 step A4 / análisis de tokens (2026-06-04). Las 3 optimizaciones de Plan GAMMA bajaron tokens enviados de ~95K → ~75K (-22% por run). Pero hay otra capa de ahorro disponible que no se atacó: caching nativo del provider, que reduce el COSTO de los tokens que igual se mandan.
 - **Problema:** OpenAI tiene caching automático para prefixes ≥1024 tokens (ya leemos `cached_tokens` en el adapter — funciona out of the box). Anthropic requiere markers `cache_control: ephemeral` en system_message + tools[] (nuestro adapter LEE `cache_read_input_tokens` pero NO los SETEA — caching nunca se activa). Gemini tiene Cached Content API explícita (nuestro adapter no tiene nada). Resultado: 2 de 3 providers no aprovechan caching aunque el infra del adapter ya sabe leer las stats.
