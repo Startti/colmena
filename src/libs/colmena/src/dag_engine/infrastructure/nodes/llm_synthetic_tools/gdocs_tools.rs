@@ -182,7 +182,8 @@ pub(crate) fn error_to_json(e: DocsError) -> serde_json::Value {
 // ── Helpers ───────────────────────────────────────────────────────────
 
 fn parse_scope(v: Option<serde_json::Value>) -> Scope {
-    v.and_then(|j| serde_json::from_value(j).ok()).unwrap_or_default()
+    v.and_then(|j| serde_json::from_value(j).ok())
+        .unwrap_or_default()
 }
 
 fn parse_style_patch(v: serde_json::Value) -> StylePatch {
@@ -878,10 +879,7 @@ pub async fn dispatch_list_named_ranges(
 
 // Edits ────────────────────────────────────────────────────────────────
 
-pub async fn dispatch_replace_text(
-    args: serde_json::Value,
-    session_id: &str,
-) -> serde_json::Value {
+pub async fn dispatch_replace_text(args: serde_json::Value, session_id: &str) -> serde_json::Value {
     let parsed: ReplaceTextArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -1190,7 +1188,11 @@ pub async fn dispatch_apply_edits(args: serde_json::Value, session_id: &str) -> 
         let tool = e.get("tool").and_then(|v| v.as_str()).unwrap_or("");
         match tool {
             "replace_text" => {
-                let find = e.get("find").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let find = e
+                    .get("find")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let replace = e
                     .get("replace")
                     .and_then(|v| v.as_str())
@@ -1220,7 +1222,11 @@ pub async fn dispatch_apply_edits(args: serde_json::Value, session_id: &str) -> 
                 });
             }
             "delete_text" => {
-                let find = e.get("find").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let find = e
+                    .get("find")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let scope = parse_scope(e.get("scope").cloned());
                 ops.push(apply_edits::ApplyEditOp::DeleteText { find, scope });
             }
@@ -1371,10 +1377,7 @@ pub async fn dispatch_acknowledge_human_changes(
         Ok(s) => s,
         Err(e) => return error_to_json(e),
     };
-    if let Err(e) = revisions
-        .put(session_id, &doc_id, &snap.revision_id)
-        .await
-    {
+    if let Err(e) = revisions.put(session_id, &doc_id, &snap.revision_id).await {
         return error_to_json(e);
     }
     serde_json::json!({"ok": true, "revision_id_now": snap.revision_id.0})
@@ -1433,15 +1436,27 @@ mod tests {
 
     #[test]
     fn parse_share_role_maps_strings() {
-        assert!(matches!(parse_share_role("reader").unwrap(), ShareRole::Reader));
-        assert!(matches!(parse_share_role("writer").unwrap(), ShareRole::Writer));
+        assert!(matches!(
+            parse_share_role("reader").unwrap(),
+            ShareRole::Reader
+        ));
+        assert!(matches!(
+            parse_share_role("writer").unwrap(),
+            ShareRole::Writer
+        ));
         assert!(parse_share_role("bogus").is_err());
     }
 
     #[test]
     fn parse_export_format_maps_strings() {
-        assert!(matches!(parse_export_format("docx").unwrap(), ExportFormat::Docx));
-        assert!(matches!(parse_export_format("pdf").unwrap(), ExportFormat::Pdf));
+        assert!(matches!(
+            parse_export_format("docx").unwrap(),
+            ExportFormat::Docx
+        ));
+        assert!(matches!(
+            parse_export_format("pdf").unwrap(),
+            ExportFormat::Pdf
+        ));
         assert!(parse_export_format("xyz").is_err());
     }
 }

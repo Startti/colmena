@@ -28,9 +28,10 @@ pub struct TabId(pub String);
 pub struct RevisionId(pub String);
 
 /// Where to look for the `find` text. `All` is doc-wide (default).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Scope {
+    #[default]
     All,
     Tab {
         tab_id: TabId,
@@ -45,12 +46,6 @@ pub enum Scope {
         after: String,
         before: Option<String>,
     },
-}
-
-impl Default for Scope {
-    fn default() -> Self {
-        Self::All
-    }
 }
 
 /// 0..=1 normalised RGB.

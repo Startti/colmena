@@ -52,7 +52,7 @@ pub enum InsertionPoint {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConversionResult {
     pub requests: Vec<Value>,
-    pub lossy:    Vec<LossyConversion>,
+    pub lossy: Vec<LossyConversion>,
 }
 
 /// Convert markdown to a sequence of Google Docs `batchUpdate`
@@ -87,37 +87,37 @@ enum ParaKind {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct StyleFlags {
-    bold:          bool,
-    italic:        bool,
+    bold: bool,
+    italic: bool,
     strikethrough: bool,
-    code:          bool, // inline code (monospace)
-    link:          Option<String>,
+    code: bool, // inline code (monospace)
+    link: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct StyleSpan {
     start_utf16: u32, // offset from paragraph start, in utf16 units
-    len_utf16:   u32,
-    style:       StyleFlags,
+    len_utf16: u32,
+    style: StyleFlags,
 }
 
 #[derive(Debug)]
 struct Emitter {
-    cursor:       u32,
-    _tab_id:      Option<TabId>,
+    cursor: u32,
+    _tab_id: Option<TabId>,
     out_requests: Vec<Value>,
-    out_lossy:    Vec<LossyConversion>,
+    out_lossy: Vec<LossyConversion>,
 
     /// Accumulated paragraph text since the last flush.
-    cur_text:    String,
+    cur_text: String,
     /// Length of `cur_text` in UTF-16 code units.
     cur_len_u16: u32,
     /// Style spans within the current paragraph.
-    cur_spans:   Vec<StyleSpan>,
+    cur_spans: Vec<StyleSpan>,
     /// Stack of currently-open inline styles (Strong/Emphasis/etc.).
     style_stack: Vec<StyleFlags>,
     /// Kind of the current paragraph (default = Normal).
-    cur_kind:    ParaKind,
+    cur_kind: ParaKind,
 
     /// `Some(open_start_utf16)` while inside a Strong tag (etc.).
     style_open_starts: Vec<u32>,
@@ -126,10 +126,10 @@ struct Emitter {
     suppress_depth: u32,
 
     /// Table state (for fixture 10).
-    in_table:        bool,
-    cur_table_rows:  Vec<Vec<String>>, // rows × cells (text only, no formatting in v1)
-    cur_table_cell:  String,
-    cur_table_row:   Vec<String>,
+    in_table: bool,
+    cur_table_rows: Vec<Vec<String>>, // rows × cells (text only, no formatting in v1)
+    cur_table_cell: String,
+    cur_table_row: Vec<String>,
 }
 
 impl Emitter {
@@ -197,7 +197,7 @@ impl Emitter {
         if style != StyleFlags::default() {
             self.cur_spans.push(StyleSpan {
                 start_utf16: start,
-                len_utf16:   added,
+                len_utf16: added,
                 style,
             });
         }
@@ -288,7 +288,7 @@ impl Emitter {
             Tag::FootnoteDefinition(label) => {
                 let label_str: String = label.into_string();
                 self.out_lossy.push(LossyConversion {
-                    element_type:      "footnote".to_string(),
+                    element_type: "footnote".to_string(),
                     original_markdown: format!("[^{}]", label_str),
                 });
                 self.suppress_depth += 1;
@@ -324,9 +324,7 @@ impl Emitter {
                     ..Default::default()
                 });
             }
-            Tag::Link {
-                dest_url, ..
-            } => {
+            Tag::Link { dest_url, .. } => {
                 self.style_stack.push(StyleFlags {
                     link: Some(dest_url.into_string()),
                     ..Default::default()
@@ -335,7 +333,7 @@ impl Emitter {
             Tag::Image { dest_url, .. } => {
                 let url: String = dest_url.into_string();
                 self.out_lossy.push(LossyConversion {
-                    element_type:      "image_reference".to_string(),
+                    element_type: "image_reference".to_string(),
                     original_markdown: format!("![]({})", url),
                 });
                 self.suppress_depth += 1;
@@ -460,10 +458,7 @@ impl Emitter {
             }
             (Value::Object(obj), "namedStyleType,indentStart")
         } else {
-            (
-                json!({ "namedStyleType": named_style }),
-                "namedStyleType",
-            )
+            (json!({ "namedStyleType": named_style }), "namedStyleType")
         };
         self.out_requests.push(json!({
             "updateParagraphStyle": {
@@ -580,7 +575,7 @@ impl Emitter {
         self.flush_paragraph_if_any();
         ConversionResult {
             requests: self.out_requests,
-            lossy:    self.out_lossy,
+            lossy: self.out_lossy,
         }
     }
 }
@@ -643,7 +638,10 @@ mod tests {
             .unwrap_or_else(|e| panic!("md fixture {md_path:?} missing: {e}"));
         let got = markdown_to_requests(
             &md,
-            InsertionPoint::Index { index: 1, tab_id: None },
+            InsertionPoint::Index {
+                index: 1,
+                tab_id: None,
+            },
         );
         let got_json = json!({
             "requests": got.requests,
@@ -660,8 +658,7 @@ mod tests {
         }
         let exp_raw = std::fs::read_to_string(&exp_path)
             .unwrap_or_else(|e| panic!("ops.json {exp_path:?} missing: {e}"));
-        let exp: Value =
-            serde_json::from_str(&exp_raw).expect("ops.json parse");
+        let exp: Value = serde_json::from_str(&exp_raw).expect("ops.json parse");
         if got_json != exp {
             panic!(
                 "fixture '{stem}' mismatch (set COLMENA_MD_FIXTURE_UPDATE=1 to regenerate):\n--- expected ---\n{}\n--- got ---\n{}\n",
@@ -735,12 +732,12 @@ mod tests {
         let md = "Hello\n";
         let a = markdown_to_requests(
             md,
-            InsertionPoint::Index { index: 0, tab_id: None },
+            InsertionPoint::Index {
+                index: 0,
+                tab_id: None,
+            },
         );
-        let b = markdown_to_requests(
-            md,
-            InsertionPoint::EndOfSegment { tab_id: None },
-        );
+        let b = markdown_to_requests(md, InsertionPoint::EndOfSegment { tab_id: None });
         assert_eq!(a.requests, b.requests);
     }
 }

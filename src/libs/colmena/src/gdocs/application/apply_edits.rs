@@ -104,7 +104,7 @@ pub async fn run(
                     });
                 }
                 let mut sorted = hits.clone();
-                sorted.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+                sorted.sort_by_key(|b| std::cmp::Reverse((b.0, b.1)));
                 for (n, off, len) in &sorted {
                     let p = lookup_para(snap, *n);
                     let s = p.start_index + utf16_len(&p.text[..*off]);
@@ -153,7 +153,7 @@ pub async fn run(
                     });
                 }
                 let mut sorted = hits.clone();
-                sorted.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+                sorted.sort_by_key(|b| std::cmp::Reverse((b.0, b.1)));
                 for (n, off, len) in &sorted {
                     let p = lookup_para(snap, *n);
                     let s = p.start_index + utf16_len(&p.text[..*off]);

@@ -399,7 +399,7 @@ impl DocsClient for GoogleDocsHttpClient {
         // Step 1: create blank via Docs API.
         let resp = self
             .send_with_retry(|c, t| {
-                c.request(Method::POST, &format!("{}/documents", self.base_docs))
+                c.request(Method::POST, format!("{}/documents", self.base_docs))
                     .bearer_auth(t)
                     .json(&serde_json::json!({ "title": title }))
             })
@@ -474,7 +474,7 @@ impl DocsClient for GoogleDocsHttpClient {
             .send_with_retry(|c, t| {
                 c.request(
                     Method::POST,
-                    &format!("{}/files?uploadType=multipart", self.base_drive_upld),
+                    format!("{}/files?uploadType=multipart", self.base_drive_upld),
                 )
                 .bearer_auth(t)
                 .header(
@@ -556,7 +556,7 @@ impl DocsClient for GoogleDocsHttpClient {
             .send_with_retry(|c, t| {
                 c.request(
                     Method::POST,
-                    &format!("{}/files?uploadType=multipart", self.base_drive_upld),
+                    format!("{}/files?uploadType=multipart", self.base_drive_upld),
                 )
                 .bearer_auth(t)
                 .header(

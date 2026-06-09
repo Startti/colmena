@@ -353,13 +353,14 @@ impl ExecutableNode for SqlNode {
                 // guardrailed query as `InvalidApiKey`. Surface the
                 // misconfiguration at engine startup instead so it appears
                 // before any traffic is served.
-                let api_key = Self::resolve_env_vars(api_key_raw)
-                    .map_err(|e| format!(
+                let api_key = Self::resolve_env_vars(api_key_raw).map_err(|e| {
+                    format!(
                         "sql node: guardrail_llm.api_key failed to resolve \
                          (`{api_key_raw}`): {e}. Set guardrail_llm.api_key to a \
                          non-empty literal or to an env-var placeholder like \
                          ${{OPENAI_API_KEY}} that is set at startup."
-                    ))?;
+                    )
+                })?;
                 if api_key.is_empty() {
                     return Err(format!(
                         "sql node: guardrail_llm.enabled = true but api_key \

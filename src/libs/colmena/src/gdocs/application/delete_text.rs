@@ -83,7 +83,7 @@ pub async fn run(
     let mut requests: Vec<serde_json::Value> = Vec::new();
     let mut changes: Vec<ChangeRecord> = Vec::new();
     let mut hits_sorted = hits.clone();
-    hits_sorted.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+    hits_sorted.sort_by_key(|b| std::cmp::Reverse((b.0, b.1)));
 
     for (n, off, len) in &hits_sorted {
         let p = lookup_para(snap, *n);

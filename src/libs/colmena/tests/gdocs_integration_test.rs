@@ -142,7 +142,10 @@ async fn share_grants_access_without_error() {
     // Shouldn't panic. If the email is invalid, Google will return 400 —
     // accept either Ok or a structured error; the test asserts the call
     // signature plumbing, not Google's policy.
-    match client.share(&meta.doc_id, &test_email, ShareRole::Reader).await {
+    match client
+        .share(&meta.doc_id, &test_email, ShareRole::Reader)
+        .await
+    {
         Ok(()) => {}
         Err(e) => eprintln!("share returned err (acceptable for test emails): {e}"),
     }
