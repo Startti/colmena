@@ -873,6 +873,159 @@ impl DagToolExecutor {
             }
         }
 
+        // --- G-T21: Synthetic Google Docs tools (gdocs_*) ---
+        // Self-contained dispatchers — each builds its own DocsClient from
+        // env/config. Every gdocs dispatcher takes `(args, session_id)`;
+        // session_id keys the revision_store (HTTP-If-Match guard) so
+        // content-addressed edits survive across calls. When the executor
+        // was built without a session_id we fall back to "unknown" — the
+        // revision_store treats that as ephemeral and edits still work,
+        // they just don't reuse cached revisions across runs.
+        //
+        // create_from_docx + export remain stubbed (`not_yet_wired`) in
+        // gdocs_tools.rs — they need attachment-byte plumbing that is
+        // also missing for the gsheets xlsx pair (see comment above the
+        // gsheets block). Wiring both is tracked separately and out of
+        // scope for the router task.
+        {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
+                dispatch_gdocs_acknowledge_human_changes, dispatch_gdocs_add_tab,
+                dispatch_gdocs_append_markdown, dispatch_gdocs_apply_edits, dispatch_gdocs_create,
+                dispatch_gdocs_create_from_docx, dispatch_gdocs_create_from_markdown,
+                dispatch_gdocs_create_named_range, dispatch_gdocs_delete_text,
+                dispatch_gdocs_export, dispatch_gdocs_insert_after_text,
+                dispatch_gdocs_insert_before_text, dispatch_gdocs_insert_between,
+                dispatch_gdocs_list_named_ranges, dispatch_gdocs_list_tabs,
+                dispatch_gdocs_read_as_markdown, dispatch_gdocs_read_outline,
+                dispatch_gdocs_replace_named_range, dispatch_gdocs_replace_section,
+                dispatch_gdocs_replace_text, dispatch_gdocs_share, dispatch_gdocs_style_text,
+                GDOCS_ACKNOWLEDGE_HUMAN_CHANGES_TOOL, GDOCS_ADD_TAB_TOOL,
+                GDOCS_APPEND_MARKDOWN_TOOL, GDOCS_APPLY_EDITS_TOOL, GDOCS_CREATE_FROM_DOCX_TOOL,
+                GDOCS_CREATE_FROM_MARKDOWN_TOOL, GDOCS_CREATE_NAMED_RANGE_TOOL, GDOCS_CREATE_TOOL,
+                GDOCS_DELETE_TEXT_TOOL, GDOCS_EXPORT_TOOL, GDOCS_INSERT_AFTER_TEXT_TOOL,
+                GDOCS_INSERT_BEFORE_TEXT_TOOL, GDOCS_INSERT_BETWEEN_TOOL,
+                GDOCS_LIST_NAMED_RANGES_TOOL, GDOCS_LIST_TABS_TOOL, GDOCS_READ_AS_MARKDOWN_TOOL,
+                GDOCS_READ_OUTLINE_TOOL, GDOCS_REPLACE_NAMED_RANGE_TOOL,
+                GDOCS_REPLACE_SECTION_TOOL, GDOCS_REPLACE_TEXT_TOOL, GDOCS_SHARE_TOOL,
+                GDOCS_STYLE_TEXT_TOOL,
+            };
+
+            let name = tool_call.function.name.as_str();
+            let is_gdocs_tool = matches!(
+                name,
+                n if n == GDOCS_CREATE_TOOL
+                    || n == GDOCS_CREATE_FROM_MARKDOWN_TOOL
+                    || n == GDOCS_CREATE_FROM_DOCX_TOOL
+                    || n == GDOCS_SHARE_TOOL
+                    || n == GDOCS_EXPORT_TOOL
+                    || n == GDOCS_LIST_TABS_TOOL
+                    || n == GDOCS_ADD_TAB_TOOL
+                    || n == GDOCS_READ_AS_MARKDOWN_TOOL
+                    || n == GDOCS_READ_OUTLINE_TOOL
+                    || n == GDOCS_LIST_NAMED_RANGES_TOOL
+                    || n == GDOCS_REPLACE_TEXT_TOOL
+                    || n == GDOCS_INSERT_AFTER_TEXT_TOOL
+                    || n == GDOCS_INSERT_BEFORE_TEXT_TOOL
+                    || n == GDOCS_INSERT_BETWEEN_TOOL
+                    || n == GDOCS_DELETE_TEXT_TOOL
+                    || n == GDOCS_REPLACE_SECTION_TOOL
+                    || n == GDOCS_APPEND_MARKDOWN_TOOL
+                    || n == GDOCS_APPLY_EDITS_TOOL
+                    || n == GDOCS_STYLE_TEXT_TOOL
+                    || n == GDOCS_CREATE_NAMED_RANGE_TOOL
+                    || n == GDOCS_REPLACE_NAMED_RANGE_TOOL
+                    || n == GDOCS_ACKNOWLEDGE_HUMAN_CHANGES_TOOL
+            );
+
+            if is_gdocs_tool {
+                let args: serde_json::Value = if tool_call.function.arguments.trim().is_empty() {
+                    serde_json::json!({})
+                } else {
+                    serde_json::from_str(&tool_call.function.arguments).map_err(|e| {
+                        LlmError::InvalidToolCall {
+                            reason: format!("Failed to parse arguments for tool {}: {}", name, e),
+                        }
+                    })?
+                };
+
+                let session_id: &str = self.session_id.as_deref().unwrap_or("unknown");
+
+                let result = match name {
+                    n if n == GDOCS_CREATE_TOOL => dispatch_gdocs_create(args, session_id).await,
+                    n if n == GDOCS_CREATE_FROM_MARKDOWN_TOOL => {
+                        dispatch_gdocs_create_from_markdown(args, session_id).await
+                    }
+                    n if n == GDOCS_CREATE_FROM_DOCX_TOOL => {
+                        dispatch_gdocs_create_from_docx(args, session_id).await
+                    }
+                    n if n == GDOCS_SHARE_TOOL => dispatch_gdocs_share(args, session_id).await,
+                    n if n == GDOCS_EXPORT_TOOL => dispatch_gdocs_export(args, session_id).await,
+                    n if n == GDOCS_LIST_TABS_TOOL => {
+                        dispatch_gdocs_list_tabs(args, session_id).await
+                    }
+                    n if n == GDOCS_ADD_TAB_TOOL => dispatch_gdocs_add_tab(args, session_id).await,
+                    n if n == GDOCS_READ_AS_MARKDOWN_TOOL => {
+                        dispatch_gdocs_read_as_markdown(args, session_id).await
+                    }
+                    n if n == GDOCS_READ_OUTLINE_TOOL => {
+                        dispatch_gdocs_read_outline(args, session_id).await
+                    }
+                    n if n == GDOCS_LIST_NAMED_RANGES_TOOL => {
+                        dispatch_gdocs_list_named_ranges(args, session_id).await
+                    }
+                    n if n == GDOCS_REPLACE_TEXT_TOOL => {
+                        dispatch_gdocs_replace_text(args, session_id).await
+                    }
+                    n if n == GDOCS_INSERT_AFTER_TEXT_TOOL => {
+                        dispatch_gdocs_insert_after_text(args, session_id).await
+                    }
+                    n if n == GDOCS_INSERT_BEFORE_TEXT_TOOL => {
+                        dispatch_gdocs_insert_before_text(args, session_id).await
+                    }
+                    n if n == GDOCS_INSERT_BETWEEN_TOOL => {
+                        dispatch_gdocs_insert_between(args, session_id).await
+                    }
+                    n if n == GDOCS_DELETE_TEXT_TOOL => {
+                        dispatch_gdocs_delete_text(args, session_id).await
+                    }
+                    n if n == GDOCS_REPLACE_SECTION_TOOL => {
+                        dispatch_gdocs_replace_section(args, session_id).await
+                    }
+                    n if n == GDOCS_APPEND_MARKDOWN_TOOL => {
+                        dispatch_gdocs_append_markdown(args, session_id).await
+                    }
+                    n if n == GDOCS_APPLY_EDITS_TOOL => {
+                        dispatch_gdocs_apply_edits(args, session_id).await
+                    }
+                    n if n == GDOCS_STYLE_TEXT_TOOL => {
+                        dispatch_gdocs_style_text(args, session_id).await
+                    }
+                    n if n == GDOCS_CREATE_NAMED_RANGE_TOOL => {
+                        dispatch_gdocs_create_named_range(args, session_id).await
+                    }
+                    n if n == GDOCS_REPLACE_NAMED_RANGE_TOOL => {
+                        dispatch_gdocs_replace_named_range(args, session_id).await
+                    }
+                    n if n == GDOCS_ACKNOWLEDGE_HUMAN_CHANGES_TOOL => {
+                        dispatch_gdocs_acknowledge_human_changes(args, session_id).await
+                    }
+                    other => serde_json::json!({
+                        "error": "unknown_gdocs_tool",
+                        "message": format!("router matched gdocs prefix but no dispatch arm for `{other}` — this is a bug in dag_tool_executor"),
+                    }),
+                };
+
+                let success =
+                    !matches!(&result, serde_json::Value::Object(m) if m.contains_key("error"));
+                return Ok(crate::llm::domain::ToolResult {
+                    tool_call_id: tool_call.id.clone(),
+                    output: result.to_string(),
+                    success,
+                    error: None,
+                });
+            }
+        }
+
         // --- F-T15: recall_history synthetic tool ---
         // Active whenever a conversation_repository + conversation_key are wired.
         // Independent of crdt_docs — useful for any LLM node with persistent memory.

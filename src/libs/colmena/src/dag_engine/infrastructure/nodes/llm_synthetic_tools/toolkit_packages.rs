@@ -19,22 +19,68 @@ pub struct ToolkitPackage {
 }
 
 /// The registry. New packages append here as a single struct literal.
-pub static TOOLKIT_PACKAGES: &[ToolkitPackage] = &[ToolkitPackage {
-    alias: "gsheets",
-    description: "Read, write, and analyze Google Sheets workbooks (10 tools)",
-    tools: &[
-        "gsheets_create_spreadsheet",
-        "gsheets_create_from_xlsx",
-        "gsheets_export_xlsx",
-        "gsheets_list_sheets",
-        "gsheets_add_sheet",
-        "gsheets_delete_sheet",
-        "gsheets_read",
-        "gsheets_set_cell",
-        "gsheets_set_range",
-        "gsheets_run_python",
-    ],
-}];
+pub static TOOLKIT_PACKAGES: &[ToolkitPackage] = &[
+    ToolkitPackage {
+        alias: "gsheets",
+        description: "Read, write, and analyze Google Sheets workbooks (10 tools)",
+        tools: &[
+            "gsheets_create_spreadsheet",
+            "gsheets_create_from_xlsx",
+            "gsheets_export_xlsx",
+            "gsheets_list_sheets",
+            "gsheets_add_sheet",
+            "gsheets_delete_sheet",
+            "gsheets_read",
+            "gsheets_set_cell",
+            "gsheets_set_range",
+            "gsheets_run_python",
+        ],
+    },
+    ToolkitPackage {
+        alias: "gdocs",
+        description:
+            "Read, write, and edit Google Docs with content-addressed surgical edits (22 tools)",
+        tools: &[
+            "gdocs_create",
+            "gdocs_create_from_markdown",
+            "gdocs_create_from_docx",
+            "gdocs_share",
+            "gdocs_export",
+            "gdocs_list_tabs",
+            "gdocs_add_tab",
+            "gdocs_read_as_markdown",
+            "gdocs_read_outline",
+            "gdocs_list_named_ranges",
+            "gdocs_replace_text",
+            "gdocs_insert_after_text",
+            "gdocs_insert_before_text",
+            "gdocs_insert_between",
+            "gdocs_delete_text",
+            "gdocs_replace_section",
+            "gdocs_append_markdown",
+            "gdocs_apply_edits",
+            "gdocs_style_text",
+            "gdocs_create_named_range",
+            "gdocs_replace_named_range",
+            "gdocs_acknowledge_human_changes",
+        ],
+    },
+    ToolkitPackage {
+        // Alias has no `_` per the package-vs-tool naming convention enforced
+        // by `package_aliases_have_no_underscore`. `gdocsread` is the
+        // read-only subset (6 tools — no writes).
+        alias: "gdocsread",
+        description: "Read-only Google Docs access (6 tools — no writes)",
+        tools: &[
+            "gdocs_export",
+            "gdocs_list_tabs",
+            "gdocs_read_as_markdown",
+            "gdocs_read_outline",
+            "gdocs_list_named_ranges",
+            "gdocs_acknowledge_human_changes",
+        ],
+    },
+];
 
 /// Linear-scan lookup. The registry is small (≪ 50 entries) so a HashMap
 /// would be over-engineering.
@@ -91,5 +137,77 @@ mod tests {
         assert!(find_package("gsheetz").is_none());
         assert!(find_package("").is_none());
         assert!(find_package("gsheets_read").is_none());
+    }
+
+    #[test]
+    fn gdocs_package_has_all_twenty_two_tools() {
+        let pkg = find_package("gdocs").expect("gdocs package must exist");
+        assert_eq!(pkg.tools.len(), 22, "gdocs package must list 22 tools");
+        for required in &[
+            "gdocs_create",
+            "gdocs_create_from_markdown",
+            "gdocs_create_from_docx",
+            "gdocs_share",
+            "gdocs_export",
+            "gdocs_list_tabs",
+            "gdocs_add_tab",
+            "gdocs_read_as_markdown",
+            "gdocs_read_outline",
+            "gdocs_list_named_ranges",
+            "gdocs_replace_text",
+            "gdocs_insert_after_text",
+            "gdocs_insert_before_text",
+            "gdocs_insert_between",
+            "gdocs_delete_text",
+            "gdocs_replace_section",
+            "gdocs_append_markdown",
+            "gdocs_apply_edits",
+            "gdocs_style_text",
+            "gdocs_create_named_range",
+            "gdocs_replace_named_range",
+            "gdocs_acknowledge_human_changes",
+        ] {
+            assert!(
+                pkg.tools.contains(required),
+                "gdocs package missing tool: {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn gdocsread_readonly_package_subset() {
+        let pkg = find_package("gdocsread").expect("gdocsread package must exist");
+        assert_eq!(pkg.tools.len(), 6);
+        // Every entry must be a gdocs_* tool.
+        for t in pkg.tools {
+            assert!(t.starts_with("gdocs_"), "gdocsread non-gdocs tool: {t}");
+        }
+        // No write/mutation tools should leak in (acknowledge_human_changes
+        // is read-only: it just resets the revision cursor).
+        let write_substrings = [
+            "create_", "delete_", "insert_", "style_", "append_", "apply_", "share", "add_tab",
+        ];
+        for t in pkg.tools {
+            // Also catch `replace_*` writes — exclude `replace_*` rather
+            // than substring "replace_" so the test stays explicit.
+            assert!(
+                !t.starts_with("gdocs_replace_"),
+                "gdocsread should not contain write tool: {t} (replace_*)"
+            );
+            for write in &write_substrings {
+                assert!(
+                    !t.contains(write),
+                    "gdocsread should not contain write tool: {t} (matched '{write}')"
+                );
+            }
+        }
+        // Every tool listed must also exist in the full `gdocs` package.
+        let full = find_package("gdocs").expect("gdocs package");
+        for t in pkg.tools {
+            assert!(
+                full.tools.contains(t),
+                "gdocsread tool {t} missing from full gdocs package"
+            );
+        }
     }
 }
