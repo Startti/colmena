@@ -161,7 +161,7 @@ pub async fn run_between(
 // ── Helpers ────────────────────────────────────────────────────────
 
 /// Pre-scan markdown for table syntax; reject with a clear v1 message.
-fn reject_table_markdown(md: &str) -> Result<(), DocsError> {
+pub(crate) fn reject_table_markdown(md: &str) -> Result<(), DocsError> {
     // A CommonMark table requires a separator line of the form
     // `|---|---|` (with optional colons for alignment). The simplest
     // reliable check is matching that separator line — bash pipes and
