@@ -134,12 +134,7 @@ pub async fn run_append_markdown(
     let fresh = ctx.client.get(doc_id).await?;
     ctx.cache.put(ctx.session_id, doc_id, fresh.clone());
 
-    let last_para = snap
-        .tabs
-        .iter()
-        .flat_map(|t| t.paragraphs.iter())
-        .count() as u32
-        + 1;
+    let last_para = snap.tabs.iter().flat_map(|t| t.paragraphs.iter()).count() as u32 + 1;
 
     Ok(EditResult {
         changes: vec![ChangeRecord {
@@ -177,4 +172,195 @@ fn build_outline(s: &DocumentSnapshot) -> Vec<OutlineEntry> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod app_tests {
+    use super::*;
+    use crate::gdocs::application::_test_helpers::*;
+    use crate::gdocs::application::co_edit_guard::GuardContext;
+    use crate::gdocs::domain::{BatchUpdateResult, ParagraphKind, RevisionId};
+    use std::sync::{Arc, Mutex};
+
+    fn expect_get_sequence(
+        client: &mut crate::gdocs::domain::traits::MockDocsClient,
+        snaps: Vec<DocumentSnapshot>,
+    ) {
+        let queue = Arc::new(Mutex::new(snaps));
+        client.expect_get().returning(move |_| {
+            let mut q = queue.lock().unwrap();
+            let s = if q.len() > 1 {
+                q.remove(0)
+            } else {
+                q[0].clone()
+            };
+            Ok(s)
+        });
+    }
+
+    fn make_batch_update_ok(
+        client: &mut crate::gdocs::domain::traits::MockDocsClient,
+        rev_after: &'static str,
+    ) {
+        client.expect_batch_update().returning(move |_, _, _| {
+            Ok(BatchUpdateResult {
+                revision_id_after: RevisionId(rev_after.into()),
+                replies: vec![],
+            })
+        });
+    }
+
+    #[tokio::test]
+    async fn replace_section_happy() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![
+                (1, ParagraphKind::Heading2, "Resumen", 1, 9),
+                (2, ParagraphKind::Paragraph, "contenido viejo", 9, 25),
+                (3, ParagraphKind::Heading2, "Otro", 25, 30),
+            ],
+        );
+        let s2 = snap(
+            "r2",
+            vec![
+                (1, ParagraphKind::Heading2, "Resumen", 1, 9),
+                (2, ParagraphKind::Paragraph, "contenido nuevo", 9, 25),
+                (3, ParagraphKind::Heading2, "Otro", 25, 30),
+            ],
+        );
+        expect_get_sequence(&mut rig.client, vec![s, s2]);
+        make_batch_update_ok(&mut rig.client, "r2");
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let result = super::run_replace_section(
+            &ctx,
+            &doc_id(),
+            ReplaceSectionInput {
+                heading: "## Resumen".into(),
+                new_markdown: "contenido nuevo".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.changes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn replace_section_heading_not_found() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![
+                (1, ParagraphKind::Heading2, "Otro", 1, 6),
+                (2, ParagraphKind::Paragraph, "txt", 6, 10),
+            ],
+        );
+        expect_get_sequence(&mut rig.client, vec![s]);
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let err = super::run_replace_section(
+            &ctx,
+            &doc_id(),
+            ReplaceSectionInput {
+                heading: "## Resumen".into(),
+                new_markdown: "x".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, DocsError::InvalidArgs(_)));
+    }
+
+    #[tokio::test]
+    async fn replace_section_rejects_table() {
+        let rig = TestRig::new();
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let md = "| c1 | c2 |\n|----|----|\n| a  | b  |";
+        let err = super::run_replace_section(
+            &ctx,
+            &doc_id(),
+            ReplaceSectionInput {
+                heading: "## R".into(),
+                new_markdown: md.into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, DocsError::InvalidArgs(_)));
+    }
+
+    #[tokio::test]
+    async fn append_markdown_happy() {
+        let mut rig = TestRig::new();
+        let s = snap("r1", vec![(1, ParagraphKind::Paragraph, "Original", 1, 10)]);
+        let s2 = snap(
+            "r2",
+            vec![
+                (1, ParagraphKind::Paragraph, "Original", 1, 10),
+                (2, ParagraphKind::Paragraph, "Apéndice", 10, 19),
+            ],
+        );
+        expect_get_sequence(&mut rig.client, vec![s, s2]);
+        make_batch_update_ok(&mut rig.client, "r2");
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let result = super::run_append_markdown(
+            &ctx,
+            &doc_id(),
+            AppendMarkdownInput {
+                new_markdown: "Apéndice".into(),
+                tab_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].kind, ChangeKind::Insert);
+    }
+
+    #[tokio::test]
+    async fn append_markdown_rejects_table() {
+        let rig = TestRig::new();
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let md = "| c1 | c2 |\n|----|----|\n| a  | b  |";
+        let err = super::run_append_markdown(
+            &ctx,
+            &doc_id(),
+            AppendMarkdownInput {
+                new_markdown: md.into(),
+                tab_id: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, DocsError::InvalidArgs(_)));
+    }
 }

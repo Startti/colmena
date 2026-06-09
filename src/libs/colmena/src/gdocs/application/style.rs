@@ -250,3 +250,216 @@ fn build_outline(s: &DocumentSnapshot) -> Vec<OutlineEntry> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod app_tests {
+    use super::*;
+    use crate::gdocs::application::_test_helpers::*;
+    use crate::gdocs::application::co_edit_guard::GuardContext;
+    use crate::gdocs::domain::{BatchUpdateResult, HeadingLevel, ParagraphKind, RevisionId};
+    use std::sync::{Arc, Mutex};
+
+    fn expect_get_sequence(
+        client: &mut crate::gdocs::domain::traits::MockDocsClient,
+        snaps: Vec<DocumentSnapshot>,
+    ) {
+        let queue = Arc::new(Mutex::new(snaps));
+        client.expect_get().returning(move |_| {
+            let mut q = queue.lock().unwrap();
+            let s = if q.len() > 1 {
+                q.remove(0)
+            } else {
+                q[0].clone()
+            };
+            Ok(s)
+        });
+    }
+
+    fn make_batch_update_capture(
+        client: &mut crate::gdocs::domain::traits::MockDocsClient,
+        rev_after: &'static str,
+    ) -> Arc<Mutex<Vec<serde_json::Value>>> {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let c = captured.clone();
+        client.expect_batch_update().returning(move |_, reqs, _| {
+            *c.lock().unwrap() = reqs.clone();
+            Ok(BatchUpdateResult {
+                revision_id_after: RevisionId(rev_after.into()),
+                replies: vec![],
+            })
+        });
+        captured
+    }
+
+    fn default_input() -> StyleTextInput {
+        StyleTextInput {
+            find: "negrita".into(),
+            style: StylePatch::default(),
+            scope: Scope::All,
+            case_sensitive: false,
+            whole_word: false,
+            occurrence: None,
+            anchor: None,
+            dry_run: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn style_bold_emits_update_text_style() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![(1, ParagraphKind::Paragraph, "Texto negrita texto", 1, 22)],
+        );
+        let s2 = snap(
+            "r2",
+            vec![(1, ParagraphKind::Paragraph, "Texto negrita texto", 1, 22)],
+        );
+        expect_get_sequence(&mut rig.client, vec![s, s2]);
+        let captured = make_batch_update_capture(&mut rig.client, "r2");
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let input = StyleTextInput {
+            style: StylePatch {
+                bold: Some(true),
+                ..Default::default()
+            },
+            ..default_input()
+        };
+        let result = super::run(&ctx, &doc_id(), input).await.unwrap();
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].kind, ChangeKind::Style);
+        let reqs = captured.lock().unwrap();
+        assert!(reqs.iter().any(|r| r.get("updateTextStyle").is_some()));
+    }
+
+    #[tokio::test]
+    async fn style_heading_level_emits_update_paragraph_style() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![(1, ParagraphKind::Paragraph, "Mi título", 1, 11)],
+        );
+        let s2 = snap("r2", vec![(1, ParagraphKind::Heading1, "Mi título", 1, 11)]);
+        expect_get_sequence(&mut rig.client, vec![s, s2]);
+        let captured = make_batch_update_capture(&mut rig.client, "r2");
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let input = StyleTextInput {
+            find: "Mi título".into(),
+            style: StylePatch {
+                heading_level: Some(HeadingLevel::H1),
+                ..Default::default()
+            },
+            ..default_input()
+        };
+        super::run(&ctx, &doc_id(), input).await.unwrap();
+        let reqs = captured.lock().unwrap();
+        assert!(reqs.iter().any(|r| r.get("updateParagraphStyle").is_some()));
+    }
+
+    #[tokio::test]
+    async fn style_link_sets_url() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![(1, ParagraphKind::Paragraph, "click negrita aquí", 1, 21)],
+        );
+        let s2 = snap(
+            "r2",
+            vec![(1, ParagraphKind::Paragraph, "click negrita aquí", 1, 21)],
+        );
+        expect_get_sequence(&mut rig.client, vec![s, s2]);
+        let captured = make_batch_update_capture(&mut rig.client, "r2");
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let input = StyleTextInput {
+            style: StylePatch {
+                link: Some("https://example.com".into()),
+                ..Default::default()
+            },
+            ..default_input()
+        };
+        super::run(&ctx, &doc_id(), input).await.unwrap();
+        let reqs = captured.lock().unwrap();
+        let has_link = reqs.iter().any(|r| {
+            r.get("updateTextStyle")
+                .and_then(|u| u.get("textStyle"))
+                .and_then(|t| t.get("link"))
+                .and_then(|l| l.get("url"))
+                .map(|u| u.as_str() == Some("https://example.com"))
+                .unwrap_or(false)
+        });
+        assert!(has_link);
+    }
+
+    #[tokio::test]
+    async fn style_dry_run_skips_batch_update() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![(1, ParagraphKind::Paragraph, "Texto negrita texto", 1, 22)],
+        );
+        expect_get_sequence(&mut rig.client, vec![s]);
+        // No expect_batch_update.
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let input = StyleTextInput {
+            style: StylePatch {
+                bold: Some(true),
+                ..Default::default()
+            },
+            dry_run: true,
+            ..default_input()
+        };
+        let result = super::run(&ctx, &doc_id(), input).await.unwrap();
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.revision_id_after.0, "r1");
+    }
+
+    #[tokio::test]
+    async fn style_text_not_found() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![(1, ParagraphKind::Paragraph, "Solo texto", 1, 12)],
+        );
+        expect_get_sequence(&mut rig.client, vec![s]);
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let input = StyleTextInput {
+            style: StylePatch {
+                bold: Some(true),
+                ..Default::default()
+            },
+            ..default_input()
+        };
+        let err = super::run(&ctx, &doc_id(), input).await.unwrap_err();
+        assert!(matches!(err, DocsError::TextNotFound { .. }));
+    }
+}

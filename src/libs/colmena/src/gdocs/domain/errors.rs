@@ -40,18 +40,28 @@ pub enum DocsError {
     /// `find` returned multiple matches and the caller did not pass
     /// `occurrence` or `anchor` to disambiguate.
     #[error("ambiguous_match: '{find}' has {} candidates", matches.len())]
-    AmbiguousMatch { find: String, matches: Vec<MatchPreview> },
+    AmbiguousMatch {
+        find: String,
+        matches: Vec<MatchPreview>,
+    },
 
     /// `find` returned zero matches. `fuzzy_suggestions` carries the
     /// nearest candidates by Levenshtein distance (may be empty).
     #[error("text_not_found: '{find}'")]
-    TextNotFound { find: String, fuzzy_suggestions: Vec<String> },
+    TextNotFound {
+        find: String,
+        fuzzy_suggestions: Vec<String>,
+    },
 
     /// `find` returned ≥5 matches and `confirm_many: true` was not set.
     /// The caller (LLM) must re-issue with explicit confirmation OR
     /// narrow the scope.
     #[error("confirm_many_matches: {count} matches in scope")]
-    ConfirmManyMatches { find: String, count: u32, preview: Vec<MatchPreview> },
+    ConfirmManyMatches {
+        find: String,
+        count: u32,
+        preview: Vec<MatchPreview>,
+    },
 
     /// Human edits have landed since the agent's last known revision
     /// AND at least one overlaps the intended scope. The agent must
@@ -107,7 +117,11 @@ mod tests {
     fn display_strings_render() {
         let e = DocsError::AmbiguousMatch {
             find: "cliente".into(),
-            matches: vec![MatchPreview { n: 1, paragraph: 3, preview: "…".into() }],
+            matches: vec![MatchPreview {
+                n: 1,
+                paragraph: 3,
+                preview: "…".into(),
+            }],
         };
         assert!(e.to_string().contains("'cliente' has 1 candidates"));
 
@@ -116,7 +130,7 @@ mod tests {
             changes_overlapping_scope: vec![],
             changes_outside_scope: vec![],
         };
-        let _ = HumanChangeKind::Insert;  // unused-import canary
+        let _ = HumanChangeKind::Insert; // unused-import canary
         assert!(e2.to_string().contains("0 overlapping, 0 outside"));
     }
 

@@ -121,9 +121,7 @@ mod tests {
 
     #[tokio::test]
     async fn cache_returns_seeded_token_within_ttl() {
-        let cache = TokenCache::new(vec![
-            "https://www.googleapis.com/auth/documents".to_string(),
-        ]);
+        let cache = TokenCache::new(vec!["https://www.googleapis.com/auth/documents".to_string()]);
         // Seed the cache directly so we don't hit Google.
         {
             let mut guard = cache.cache.lock().await;

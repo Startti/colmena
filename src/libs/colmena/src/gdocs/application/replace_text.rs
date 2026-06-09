@@ -9,8 +9,8 @@
 
 use crate::gdocs::application::co_edit_guard::{run_guard, GuardContext};
 use crate::gdocs::domain::{
-    ChangeKind, ChangeRecord, DocsError, DocumentId, DocumentSnapshot, EditResult,
-    MatchPreview, OutlineEntry, ParagraphSnapshot, Scope, TabId,
+    ChangeKind, ChangeRecord, DocsError, DocumentId, DocumentSnapshot, EditResult, MatchPreview,
+    OutlineEntry, ParagraphSnapshot, Scope, TabId,
 };
 use regex::RegexBuilder;
 
@@ -57,14 +57,20 @@ pub async fn run(
     let mut hits: Vec<(u32, usize, usize)> = Vec::new();
     for tab in &snap.tabs {
         if let Some(scope_tab) = &scope.tab_id {
-            if tab.tab_id.as_ref() != Some(scope_tab) { continue; }
+            if tab.tab_id.as_ref() != Some(scope_tab) {
+                continue;
+            }
         }
         for p in &tab.paragraphs {
-            if p.n < scope.paragraph_start || p.n > scope.paragraph_end { continue; }
+            if p.n < scope.paragraph_start || p.n > scope.paragraph_end {
+                continue;
+            }
             // Anchor filter — both `find` AND `anchor` must appear in
             // the same paragraph text.
             if let Some(a) = &input.anchor {
-                if !p.text.contains(a) { continue; }
+                if !p.text.contains(a) {
+                    continue;
+                }
             }
             for m in re.find_iter(&p.text) {
                 hits.push((p.n, m.start(), m.end() - m.start()));
@@ -101,17 +107,20 @@ pub async fn run(
     // 5. dry_run short-circuits before any write.
     if input.dry_run {
         return Ok(EditResult {
-            changes: hits.iter().map(|(n, off, len)| {
-                let text = &lookup_para(snap, *n).text;
-                let before: String = take_chars_in_byte_range(text, *off, *len);
-                ChangeRecord {
-                    kind: ChangeKind::Replace,
-                    paragraph: *n,
-                    before: Some(before),
-                    after: Some(input.replace.clone()),
-                    tab_id: lookup_tab_id(snap, *n),
-                }
-            }).collect(),
+            changes: hits
+                .iter()
+                .map(|(n, off, len)| {
+                    let text = &lookup_para(snap, *n).text;
+                    let before: String = take_chars_in_byte_range(text, *off, *len);
+                    ChangeRecord {
+                        kind: ChangeKind::Replace,
+                        paragraph: *n,
+                        before: Some(before),
+                        after: Some(input.replace.clone()),
+                        tab_id: lookup_tab_id(snap, *n),
+                    }
+                })
+                .collect(),
             revision_id_after: snap.revision_id.clone(),
             outline_snapshot: vec![],
             lossy_conversions: vec![],
@@ -153,13 +162,16 @@ pub async fn run(
     // 7. POST the batchUpdate with required_revision = the snapshot we
     // saw. If Google rejects with conflict, the guard will catch it on
     // the next call.
-    let result = ctx.client
+    let result = ctx
+        .client
         .batch_update(doc_id, requests, Some(&snap.revision_id))
         .await?;
 
     // 8. Refresh cache + revision state.
     ctx.cache.invalidate(ctx.session_id, doc_id);
-    ctx.revisions.put(ctx.session_id, doc_id, &result.revision_id_after).await?;
+    ctx.revisions
+        .put(ctx.session_id, doc_id, &result.revision_id_after)
+        .await?;
     let fresh = ctx.client.get(doc_id).await?;
     ctx.cache.put(ctx.session_id, doc_id, fresh.clone());
 
@@ -175,34 +187,51 @@ pub async fn run(
 // ── Helpers ────────────────────────────────────────────────────────
 
 fn lookup_para<'a>(s: &'a DocumentSnapshot, n: u32) -> &'a ParagraphSnapshot {
-    s.tabs.iter().flat_map(|t| t.paragraphs.iter()).find(|p| p.n == n)
+    s.tabs
+        .iter()
+        .flat_map(|t| t.paragraphs.iter())
+        .find(|p| p.n == n)
         .expect("para exists — caller filtered by scope")
 }
 
 fn lookup_tab_id(s: &DocumentSnapshot, n: u32) -> Option<TabId> {
-    s.tabs.iter().find(|t| t.paragraphs.iter().any(|p| p.n == n))
+    s.tabs
+        .iter()
+        .find(|t| t.paragraphs.iter().any(|p| p.n == n))
         .and_then(|t| t.tab_id.clone())
 }
 
 fn build_previews(snap: &DocumentSnapshot, hits: &[(u32, usize, usize)]) -> Vec<MatchPreview> {
-    hits.iter().enumerate().map(|(i, (n, off, _len))| {
-        let p = lookup_para(snap, *n);
-        // ~30 chars before the match, ~50 after.
-        let byte_start = off.saturating_sub(30);
-        let byte_end = (*off + 50).min(p.text.len());
-        // Slice on char boundaries.
-        let preview = take_slice_around(&p.text, byte_start, byte_end);
-        MatchPreview { n: (i + 1) as u32, paragraph: *n, preview }
-    }).collect()
+    hits.iter()
+        .enumerate()
+        .map(|(i, (n, off, _len))| {
+            let p = lookup_para(snap, *n);
+            // ~30 chars before the match, ~50 after.
+            let byte_start = off.saturating_sub(30);
+            let byte_end = (*off + 50).min(p.text.len());
+            // Slice on char boundaries.
+            let preview = take_slice_around(&p.text, byte_start, byte_end);
+            MatchPreview {
+                n: (i + 1) as u32,
+                paragraph: *n,
+                preview,
+            }
+        })
+        .collect()
 }
 
 fn build_outline(s: &DocumentSnapshot) -> Vec<OutlineEntry> {
-    s.tabs.iter().flat_map(|t| t.paragraphs.iter().map(|p| OutlineEntry {
-        paragraph: p.n,
-        tab_id: t.tab_id.clone(),
-        kind: p.kind,
-        text_preview: p.text.chars().take(80).collect(),
-    })).collect()
+    s.tabs
+        .iter()
+        .flat_map(|t| {
+            t.paragraphs.iter().map(|p| OutlineEntry {
+                paragraph: p.n,
+                tab_id: t.tab_id.clone(),
+                kind: p.kind,
+                text_preview: p.text.chars().take(80).collect(),
+            })
+        })
+        .collect()
 }
 
 fn utf16_len(s: &str) -> u32 {
@@ -210,13 +239,385 @@ fn utf16_len(s: &str) -> u32 {
 }
 
 fn take_chars_in_byte_range(s: &str, byte_off: usize, byte_len: usize) -> String {
-    s.get(byte_off..byte_off + byte_len).map(String::from).unwrap_or_default()
+    s.get(byte_off..byte_off + byte_len)
+        .map(String::from)
+        .unwrap_or_default()
 }
 
 fn take_slice_around(s: &str, start: usize, end: usize) -> String {
     let mut start = start;
     let mut end = end.min(s.len());
-    while start < s.len() && !s.is_char_boundary(start) { start += 1; }
-    while end < s.len() && !s.is_char_boundary(end) { end += 1; }
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    while end < s.len() && !s.is_char_boundary(end) {
+        end += 1;
+    }
     s.get(start..end).unwrap_or(s).chars().take(80).collect()
+}
+
+#[cfg(test)]
+mod app_tests {
+    use super::*;
+    use crate::gdocs::application::_test_helpers::*;
+    use crate::gdocs::application::co_edit_guard::GuardContext;
+    use crate::gdocs::domain::{BatchUpdateResult, ParagraphKind, RevisionId};
+    use std::sync::Mutex;
+
+    /// Have `expect_get()` return successive snapshots from a queue.
+    /// When the queue is empty the LAST element is reused.
+    fn expect_get_sequence(
+        client: &mut crate::gdocs::domain::traits::MockDocsClient,
+        snaps: Vec<DocumentSnapshot>,
+    ) {
+        let queue = std::sync::Arc::new(Mutex::new(snaps));
+        client.expect_get().returning(move |_| {
+            let mut q = queue.lock().unwrap();
+            let s = if q.len() > 1 {
+                q.remove(0)
+            } else {
+                q[0].clone()
+            };
+            Ok(s)
+        });
+    }
+
+    fn make_batch_update_ok(
+        client: &mut crate::gdocs::domain::traits::MockDocsClient,
+        rev_after: &'static str,
+    ) {
+        client.expect_batch_update().returning(move |_, _, _| {
+            Ok(BatchUpdateResult {
+                revision_id_after: RevisionId(rev_after.into()),
+                replies: vec![],
+            })
+        });
+    }
+
+    fn default_input() -> ReplaceTextInput {
+        ReplaceTextInput {
+            find: "cliente".into(),
+            replace: "Acme".into(),
+            scope: Scope::All,
+            case_sensitive: false,
+            whole_word: false,
+            dry_run: false,
+            confirm_many: false,
+            occurrence: None,
+            anchor: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn replace_text_happy_single_match() {
+        let mut rig = TestRig::new();
+        let snap0 = snap(
+            "r1",
+            vec![(
+                1,
+                ParagraphKind::Paragraph,
+                "Hola cliente bienvenido",
+                1,
+                25,
+            )],
+        );
+        let snap1 = snap(
+            "r2",
+            vec![(1, ParagraphKind::Paragraph, "Hola Acme bienvenido", 1, 22)],
+        );
+        expect_get_sequence(&mut rig.client, vec![snap0, snap1]);
+        make_batch_update_ok(&mut rig.client, "r2");
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let result = super::run(&ctx, &doc_id(), default_input()).await.unwrap();
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.revision_id_after.0, "r2");
+        assert_eq!(result.changes[0].kind, ChangeKind::Replace);
+    }
+
+    #[tokio::test]
+    async fn replace_text_text_not_found() {
+        let mut rig = TestRig::new();
+        let snap0 = snap(
+            "r1",
+            vec![(1, ParagraphKind::Paragraph, "Texto sin coincidencia", 1, 22)],
+        );
+        expect_get_sequence(&mut rig.client, vec![snap0]);
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let err = super::run(&ctx, &doc_id(), default_input())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DocsError::TextNotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn replace_text_confirm_many_threshold() {
+        let mut rig = TestRig::new();
+        // 5 occurrences of "x" — should trigger ConfirmManyMatches.
+        let text = "x x x x x".to_string();
+        let snap0 = snap("r1", vec![(1, ParagraphKind::Paragraph, &text, 1, 12)]);
+        expect_get_sequence(&mut rig.client, vec![snap0]);
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let input = ReplaceTextInput {
+            find: "x".into(),
+            ..default_input()
+        };
+        let err = super::run(&ctx, &doc_id(), input).await.unwrap_err();
+        match err {
+            DocsError::ConfirmManyMatches { count, .. } => assert_eq!(count, 5),
+            e => panic!("wrong error: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn replace_text_confirm_many_flag_allows_write() {
+        let mut rig = TestRig::new();
+        let text = "x x x x x".to_string();
+        let snap0 = snap("r1", vec![(1, ParagraphKind::Paragraph, &text, 1, 12)]);
+        let snap1 = snap(
+            "r2",
+            vec![(1, ParagraphKind::Paragraph, "y y y y y", 1, 12)],
+        );
+        expect_get_sequence(&mut rig.client, vec![snap0, snap1]);
+        make_batch_update_ok(&mut rig.client, "r2");
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let input = ReplaceTextInput {
+            find: "x".into(),
+            replace: "y".into(),
+            confirm_many: true,
+            ..default_input()
+        };
+        let result = super::run(&ctx, &doc_id(), input).await.unwrap();
+        assert_eq!(result.changes.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn replace_text_dry_run_skips_batch_update() {
+        let mut rig = TestRig::new();
+        let snap0 = snap(
+            "r1",
+            vec![(
+                1,
+                ParagraphKind::Paragraph,
+                "Hola cliente bienvenido",
+                1,
+                25,
+            )],
+        );
+        expect_get_sequence(&mut rig.client, vec![snap0]);
+        // Note: no expect_batch_update — would panic if called.
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let input = ReplaceTextInput {
+            dry_run: true,
+            ..default_input()
+        };
+        let result = super::run(&ctx, &doc_id(), input).await.unwrap();
+        assert_eq!(result.changes.len(), 1);
+        // dry_run returns snap revision_id unchanged.
+        assert_eq!(result.revision_id_after.0, "r1");
+    }
+
+    #[tokio::test]
+    async fn replace_text_whole_word_filters_substring() {
+        let mut rig = TestRig::new();
+        let snap0 = snap(
+            "r1",
+            vec![(1, ParagraphKind::Paragraph, "clientela y clientes", 1, 22)],
+        );
+        expect_get_sequence(&mut rig.client, vec![snap0]);
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        // whole_word=true with "cliente" — "clientela" and "clientes" should NOT match.
+        let input = ReplaceTextInput {
+            whole_word: true,
+            ..default_input()
+        };
+        let err = super::run(&ctx, &doc_id(), input).await.unwrap_err();
+        assert!(matches!(err, DocsError::TextNotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn replace_text_case_sensitive_filters_mismatched_case() {
+        let mut rig = TestRig::new();
+        let snap0 = snap(
+            "r1",
+            vec![(1, ParagraphKind::Paragraph, "Cliente y CLIENTE", 1, 18)],
+        );
+        expect_get_sequence(&mut rig.client, vec![snap0]);
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let input = ReplaceTextInput {
+            case_sensitive: true,
+            ..default_input()
+        };
+        let err = super::run(&ctx, &doc_id(), input).await.unwrap_err();
+        assert!(matches!(err, DocsError::TextNotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn replace_text_scope_paragraph_limits_search() {
+        let mut rig = TestRig::new();
+        let snap0 = snap(
+            "r1",
+            vec![
+                (1, ParagraphKind::Paragraph, "cliente uno", 1, 14),
+                (2, ParagraphKind::Paragraph, "cliente dos", 14, 27),
+            ],
+        );
+        let snap1 = snap(
+            "r2",
+            vec![
+                (1, ParagraphKind::Paragraph, "Acme uno", 1, 11),
+                (2, ParagraphKind::Paragraph, "cliente dos", 11, 24),
+            ],
+        );
+        expect_get_sequence(&mut rig.client, vec![snap0, snap1]);
+        make_batch_update_ok(&mut rig.client, "r2");
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let input = ReplaceTextInput {
+            scope: Scope::Paragraph { n: 1 },
+            ..default_input()
+        };
+        let result = super::run(&ctx, &doc_id(), input).await.unwrap();
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].paragraph, 1);
+    }
+
+    #[tokio::test]
+    async fn replace_text_occurrence_selects_nth() {
+        let mut rig = TestRig::new();
+        let snap0 = snap(
+            "r1",
+            vec![
+                (1, ParagraphKind::Paragraph, "cliente uno", 1, 14),
+                (2, ParagraphKind::Paragraph, "cliente dos", 14, 27),
+            ],
+        );
+        let snap1 = snap(
+            "r2",
+            vec![
+                (1, ParagraphKind::Paragraph, "cliente uno", 1, 14),
+                (2, ParagraphKind::Paragraph, "Acme dos", 14, 24),
+            ],
+        );
+        expect_get_sequence(&mut rig.client, vec![snap0, snap1]);
+        make_batch_update_ok(&mut rig.client, "r2");
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let input = ReplaceTextInput {
+            occurrence: Some(2),
+            ..default_input()
+        };
+        let result = super::run(&ctx, &doc_id(), input).await.unwrap();
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].paragraph, 2);
+    }
+
+    #[tokio::test]
+    async fn replace_text_anchor_filters_to_matching_paragraph() {
+        let mut rig = TestRig::new();
+        let snap0 = snap(
+            "r1",
+            vec![
+                (1, ParagraphKind::Paragraph, "cliente uno", 1, 14),
+                (2, ParagraphKind::Paragraph, "cliente dos especial", 14, 35),
+            ],
+        );
+        let snap1 = snap(
+            "r2",
+            vec![
+                (1, ParagraphKind::Paragraph, "cliente uno", 1, 14),
+                (2, ParagraphKind::Paragraph, "Acme dos especial", 14, 32),
+            ],
+        );
+        expect_get_sequence(&mut rig.client, vec![snap0, snap1]);
+        make_batch_update_ok(&mut rig.client, "r2");
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let input = ReplaceTextInput {
+            anchor: Some("especial".into()),
+            ..default_input()
+        };
+        let result = super::run(&ctx, &doc_id(), input).await.unwrap();
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].paragraph, 2);
+    }
+
+    #[tokio::test]
+    async fn replace_text_occurrence_out_of_range_errors() {
+        let mut rig = TestRig::new();
+        let snap0 = snap(
+            "r1",
+            vec![(1, ParagraphKind::Paragraph, "cliente uno", 1, 14)],
+        );
+        expect_get_sequence(&mut rig.client, vec![snap0]);
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let input = ReplaceTextInput {
+            occurrence: Some(99),
+            ..default_input()
+        };
+        let err = super::run(&ctx, &doc_id(), input).await.unwrap_err();
+        assert!(matches!(err, DocsError::TextNotFound { .. }));
+    }
 }

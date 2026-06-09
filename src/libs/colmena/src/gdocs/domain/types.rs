@@ -32,38 +32,63 @@ pub struct RevisionId(pub String);
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Scope {
     All,
-    Tab { tab_id: TabId },
-    Paragraph { n: u32 },
-    UnderHeading { heading: String },
-    BetweenHeadings { after: String, before: Option<String> },
+    Tab {
+        tab_id: TabId,
+    },
+    Paragraph {
+        n: u32,
+    },
+    UnderHeading {
+        heading: String,
+    },
+    BetweenHeadings {
+        after: String,
+        before: Option<String>,
+    },
 }
 
 impl Default for Scope {
-    fn default() -> Self { Self::All }
+    fn default() -> Self {
+        Self::All
+    }
 }
 
 /// 0..=1 normalised RGB.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct RgbColor { pub r: f32, pub g: f32, pub b: f32 }
+pub struct RgbColor {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+}
 
 /// Cascading heading level for paragraph styles, mapping to Google Docs'
 /// `namedStyleType` values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum HeadingLevel { Normal, H1, H2, H3, H4, H5, H6, Title, Subtitle }
+pub enum HeadingLevel {
+    Normal,
+    H1,
+    H2,
+    H3,
+    H4,
+    H5,
+    H6,
+    Title,
+    Subtitle,
+}
 
 impl HeadingLevel {
     /// Wire-format string for `paragraphStyle.namedStyleType`.
     pub fn as_api_str(self) -> &'static str {
         match self {
-            Self::Normal   => "NORMAL_TEXT",
-            Self::H1       => "HEADING_1",
-            Self::H2       => "HEADING_2",
-            Self::H3       => "HEADING_3",
-            Self::H4       => "HEADING_4",
-            Self::H5       => "HEADING_5",
-            Self::H6       => "HEADING_6",
-            Self::Title    => "TITLE",
+            Self::Normal => "NORMAL_TEXT",
+            Self::H1 => "HEADING_1",
+            Self::H2 => "HEADING_2",
+            Self::H3 => "HEADING_3",
+            Self::H4 => "HEADING_4",
+            Self::H5 => "HEADING_5",
+            Self::H6 => "HEADING_6",
+            Self::Title => "TITLE",
             Self::Subtitle => "SUBTITLE",
         }
     }
@@ -72,21 +97,26 @@ impl HeadingLevel {
 /// Style patch supplied by the agent. Only set fields are applied.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StylePatch {
-    pub bold:           Option<bool>,
-    pub italic:         Option<bool>,
-    pub underline:      Option<bool>,
-    pub strikethrough:  Option<bool>,
-    pub font_size_pt:   Option<f32>,
-    pub foreground:     Option<RgbColor>,
-    pub background:     Option<RgbColor>,
-    pub link:           Option<String>,
-    pub heading_level:  Option<HeadingLevel>,
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    pub underline: Option<bool>,
+    pub strikethrough: Option<bool>,
+    pub font_size_pt: Option<f32>,
+    pub foreground: Option<RgbColor>,
+    pub background: Option<RgbColor>,
+    pub link: Option<String>,
+    pub heading_level: Option<HeadingLevel>,
 }
 
 /// What kind of edit a [`ChangeRecord`] describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ChangeKind { Replace, Insert, Delete, Style }
+pub enum ChangeKind {
+    Replace,
+    Insert,
+    Delete,
+    Style,
+}
 
 /// One observable edit applied to a paragraph, returned to the dispatcher
 /// so the agent can report what actually changed.
@@ -103,8 +133,17 @@ pub struct ChangeRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ParagraphKind {
-    Heading1, Heading2, Heading3, Heading4, Heading5, Heading6,
-    Title, Subtitle, Paragraph, ListItem, TableRow,
+    Heading1,
+    Heading2,
+    Heading3,
+    Heading4,
+    Heading5,
+    Heading6,
+    Title,
+    Subtitle,
+    Paragraph,
+    ListItem,
+    TableRow,
 }
 
 /// A single line in the document outline returned to the agent after every
@@ -121,7 +160,11 @@ pub struct OutlineEntry {
 /// synced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum HumanChangeKind { Insert, Modify, Delete }
+pub enum HumanChangeKind {
+    Insert,
+    Modify,
+    Delete,
+}
 
 /// A human-authored change observed outside the agent's current edit scope,
 /// surfaced so the agent can decide whether to proceed or re-plan.
@@ -211,7 +254,11 @@ pub struct CreateFromMarkdownResult {
 /// Drive sharing role granted by a `share` call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ShareRole { Reader, Commenter, Writer }
+pub enum ShareRole {
+    Reader,
+    Commenter,
+    Writer,
+}
 
 impl ShareRole {
     /// Wire-format string for Drive's `permissions.role` field.
@@ -230,21 +277,30 @@ impl ShareRole {
 /// `application/zip` — see [`ExportFormat::mime`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ExportFormat { Docx, Pdf, Markdown, Txt, Rtf, Epub, Odt, Html }
+pub enum ExportFormat {
+    Docx,
+    Pdf,
+    Markdown,
+    Txt,
+    Rtf,
+    Epub,
+    Odt,
+    Html,
+}
 
 impl ExportFormat {
     /// Wire-format MIME string for Drive's `files.export?mimeType=...`.
     pub fn mime(self) -> &'static str {
         match self {
-            Self::Docx     => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            Self::Pdf      => "application/pdf",
+            Self::Docx => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            Self::Pdf => "application/pdf",
             Self::Markdown => "text/markdown",
-            Self::Txt      => "text/plain",
-            Self::Rtf      => "application/rtf",
-            Self::Epub     => "application/epub+zip",
-            Self::Odt      => "application/vnd.oasis.opendocument.text",
+            Self::Txt => "text/plain",
+            Self::Rtf => "application/rtf",
+            Self::Epub => "application/epub+zip",
+            Self::Odt => "application/vnd.oasis.opendocument.text",
             // Drive bundles HTML + assets into a zip — this is the documented MIME.
-            Self::Html     => "application/zip",
+            Self::Html => "application/zip",
         }
     }
 }
@@ -295,11 +351,23 @@ mod tests {
     #[test]
     fn scope_roundtrips() {
         let cases = [
-            (json!({"kind": "all"}),                       Scope::All),
-            (json!({"kind": "tab", "tab_id": "t1"}),       Scope::Tab { tab_id: TabId("t1".into()) }),
-            (json!({"kind": "paragraph", "n": 5}),         Scope::Paragraph { n: 5 }),
-            (json!({"kind": "under_heading", "heading": "## A"}),
-                Scope::UnderHeading { heading: "## A".into() }),
+            (json!({"kind": "all"}), Scope::All),
+            (
+                json!({"kind": "tab", "tab_id": "t1"}),
+                Scope::Tab {
+                    tab_id: TabId("t1".into()),
+                },
+            ),
+            (
+                json!({"kind": "paragraph", "n": 5}),
+                Scope::Paragraph { n: 5 },
+            ),
+            (
+                json!({"kind": "under_heading", "heading": "## A"}),
+                Scope::UnderHeading {
+                    heading: "## A".into(),
+                },
+            ),
         ];
         for (j, expected) in cases {
             let s: Scope = serde_json::from_value(j.clone()).unwrap();
@@ -317,8 +385,10 @@ mod tests {
 
     #[test]
     fn export_format_mime_types() {
-        assert_eq!(ExportFormat::Docx.mime(),
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+        assert_eq!(
+            ExportFormat::Docx.mime(),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        );
         assert_eq!(ExportFormat::Markdown.mime(), "text/markdown");
     }
 

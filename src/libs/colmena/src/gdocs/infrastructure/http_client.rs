@@ -235,14 +235,8 @@ fn paragraph_kind(p: &serde_json::Value) -> ParagraphKind {
     }
 }
 
-fn paragraph_text_and_range(
-    elem: &serde_json::Value,
-    p: &serde_json::Value,
-) -> (String, u32, u32) {
-    let start = elem
-        .get("startIndex")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+fn paragraph_text_and_range(elem: &serde_json::Value, p: &serde_json::Value) -> (String, u32, u32) {
+    let start = elem.get("startIndex").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let end = elem.get("endIndex").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let mut text = String::new();
     if let Some(elems) = p.get("elements").and_then(|v| v.as_array()) {
@@ -397,10 +391,10 @@ impl DocsClient for GoogleDocsHttpClient {
         parse_snapshot(&j, id)
     }
 
-    async fn create(
+    async fn create<'a>(
         &self,
         title: &str,
-        parent_folder: Option<&str>,
+        parent_folder: Option<&'a str>,
     ) -> Result<DocumentMeta, DocsError> {
         // Step 1: create blank via Docs API.
         let resp = self
@@ -452,11 +446,11 @@ impl DocsClient for GoogleDocsHttpClient {
         })
     }
 
-    async fn create_from_markdown(
+    async fn create_from_markdown<'a>(
         &self,
         title: &str,
         md: &str,
-        parent_folder: Option<&str>,
+        parent_folder: Option<&'a str>,
     ) -> Result<CreateFromMarkdownResult, DocsError> {
         let folder = parent_folder
             .map(String::from)
@@ -490,9 +484,7 @@ impl DocsClient for GoogleDocsHttpClient {
                 .body(body.clone())
             })
             .await?;
-        let resp = self
-            .map_status(resp, "create_from_markdown upload")
-            .await?;
+        let resp = self.map_status(resp, "create_from_markdown upload").await?;
         let j: serde_json::Value = resp
             .json()
             .await
@@ -527,11 +519,11 @@ impl DocsClient for GoogleDocsHttpClient {
         })
     }
 
-    async fn create_from_docx(
+    async fn create_from_docx<'a>(
         &self,
         title: &str,
         bytes: Vec<u8>,
-        parent_folder: Option<&str>,
+        parent_folder: Option<&'a str>,
     ) -> Result<DocumentMeta, DocsError> {
         let folder = parent_folder
             .map(String::from)
@@ -596,12 +588,7 @@ impl DocsClient for GoogleDocsHttpClient {
         })
     }
 
-    async fn share(
-        &self,
-        id: &DocumentId,
-        email: &str,
-        role: ShareRole,
-    ) -> Result<(), DocsError> {
+    async fn share(&self, id: &DocumentId, email: &str, role: ShareRole) -> Result<(), DocsError> {
         let url = format!("{}/files/{}/permissions", self.base_drive, id.0);
         let body = serde_json::json!({
             "role": role.as_api_str(),
@@ -615,11 +602,7 @@ impl DocsClient for GoogleDocsHttpClient {
         Ok(())
     }
 
-    async fn export(
-        &self,
-        id: &DocumentId,
-        format: ExportFormat,
-    ) -> Result<Vec<u8>, DocsError> {
+    async fn export(&self, id: &DocumentId, format: ExportFormat) -> Result<Vec<u8>, DocsError> {
         // Manually encode the MIME — / and + need percent-encoding.
         // Safe for every MIME in `ExportFormat::mime()` (they only
         // contain `/`, `+`, alphanumeric, `.`, `-`).
@@ -641,10 +624,10 @@ impl DocsClient for GoogleDocsHttpClient {
         Ok(bytes.to_vec())
     }
 
-    async fn read_as_markdown(
+    async fn read_as_markdown<'a>(
         &self,
         id: &DocumentId,
-        tab_id: Option<&TabId>,
+        tab_id: Option<&'a TabId>,
     ) -> Result<String, DocsError> {
         // Drive export → text/markdown. v1 returns the full export; tab
         // slicing is deferred (Drive's export joins all tabs). When the
@@ -666,10 +649,10 @@ impl DocsClient for GoogleDocsHttpClient {
             .map_err(|e| DocsError::Http(format!("export text: {e}")))
     }
 
-    async fn read_outline(
+    async fn read_outline<'a>(
         &self,
         id: &DocumentId,
-        tab_id: Option<&TabId>,
+        tab_id: Option<&'a TabId>,
     ) -> Result<Vec<OutlineEntry>, DocsError> {
         let snap = self.get(id).await?;
         let mut out = Vec::new();
@@ -692,10 +675,7 @@ impl DocsClient for GoogleDocsHttpClient {
         Ok(out)
     }
 
-    async fn list_named_ranges(
-        &self,
-        id: &DocumentId,
-    ) -> Result<Vec<NamedRangeMeta>, DocsError> {
+    async fn list_named_ranges(&self, id: &DocumentId) -> Result<Vec<NamedRangeMeta>, DocsError> {
         // Need the snapshot to map index-ranges to paragraph numbers.
         let snap = self.get(id).await?;
         // Drive's `documents.get` with `fields=namedRanges` gives just the
@@ -853,11 +833,11 @@ impl DocsClient for GoogleDocsHttpClient {
             .map_err(|e| DocsError::Http(format!("revisions.get text: {e}")))
     }
 
-    async fn batch_update(
+    async fn batch_update<'a>(
         &self,
         id: &DocumentId,
         requests: Vec<serde_json::Value>,
-        required_revision: Option<&RevisionId>,
+        required_revision: Option<&'a RevisionId>,
     ) -> Result<BatchUpdateResult, DocsError> {
         let url = format!("{}/documents/{}:batchUpdate", self.base_docs, id.0);
         let mut body = serde_json::json!({ "requests": requests });
@@ -900,11 +880,11 @@ impl DocsClient for GoogleDocsHttpClient {
         })
     }
 
-    async fn add_tab(
+    async fn add_tab<'a>(
         &self,
         id: &DocumentId,
         title: &str,
-        after_tab: Option<&TabId>,
+        after_tab: Option<&'a TabId>,
     ) -> Result<TabMeta, DocsError> {
         // Pre-check: tab with this title already exists?
         let existing = self.list_tabs(id).await?;

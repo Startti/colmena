@@ -51,8 +51,7 @@ pub async fn run_after_text(
     reject_table_markdown(&input.new_markdown)?;
     let guard = run_guard(ctx, doc_id, &Scope::All).await?;
     let snap = &guard.snapshot;
-    let (para_n, byte_off, byte_len, tab_id) =
-        find_anchor(snap, &input.anchor, input.occurrence)?;
+    let (para_n, byte_off, byte_len, tab_id) = find_anchor(snap, &input.anchor, input.occurrence)?;
     let p = lookup_para(snap, para_n);
     // Insert AFTER the match: byte_off + byte_len within the paragraph.
     let after_byte = byte_off + byte_len;
@@ -61,7 +60,10 @@ pub async fn run_after_text(
 
     let conversion = markdown_to_requests(
         &input.new_markdown,
-        InsertionPoint::Index { index, tab_id: tab_id.clone() },
+        InsertionPoint::Index {
+            index,
+            tab_id: tab_id.clone(),
+        },
     );
 
     apply_and_finalize(
@@ -88,15 +90,17 @@ pub async fn run_before_text(
     reject_table_markdown(&input.new_markdown)?;
     let guard = run_guard(ctx, doc_id, &Scope::All).await?;
     let snap = &guard.snapshot;
-    let (para_n, byte_off, _byte_len, tab_id) =
-        find_anchor(snap, &input.anchor, input.occurrence)?;
+    let (para_n, byte_off, _byte_len, tab_id) = find_anchor(snap, &input.anchor, input.occurrence)?;
     let p = lookup_para(snap, para_n);
     let prefix_utf16 = utf16_len(&p.text[..byte_off]);
     let index = p.start_index + prefix_utf16;
 
     let conversion = markdown_to_requests(
         &input.new_markdown,
-        InsertionPoint::Index { index, tab_id: tab_id.clone() },
+        InsertionPoint::Index {
+            index,
+            tab_id: tab_id.clone(),
+        },
     );
 
     apply_and_finalize(
@@ -140,7 +144,10 @@ pub async fn run_between(
 
     let conversion = markdown_to_requests(
         &input.new_markdown,
-        InsertionPoint::Index { index, tab_id: tab_id.clone() },
+        InsertionPoint::Index {
+            index,
+            tab_id: tab_id.clone(),
+        },
     );
 
     apply_and_finalize(
@@ -322,5 +329,266 @@ mod tests {
         // Pipes outside tables should NOT trigger rejection.
         let md = "Use the bash pipe operator: `ls | grep foo`\n";
         assert!(reject_table_markdown(md).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod app_tests {
+    use super::*;
+    use crate::gdocs::application::_test_helpers::*;
+    use crate::gdocs::application::co_edit_guard::GuardContext;
+    use crate::gdocs::domain::{BatchUpdateResult, ParagraphKind, RevisionId};
+    use std::sync::{Arc, Mutex};
+
+    fn expect_get_sequence(
+        client: &mut crate::gdocs::domain::traits::MockDocsClient,
+        snaps: Vec<DocumentSnapshot>,
+    ) {
+        let queue = Arc::new(Mutex::new(snaps));
+        client.expect_get().returning(move |_| {
+            let mut q = queue.lock().unwrap();
+            let s = if q.len() > 1 {
+                q.remove(0)
+            } else {
+                q[0].clone()
+            };
+            Ok(s)
+        });
+    }
+
+    fn make_batch_update_ok(
+        client: &mut crate::gdocs::domain::traits::MockDocsClient,
+        rev_after: &'static str,
+    ) {
+        client.expect_batch_update().returning(move |_, _, _| {
+            Ok(BatchUpdateResult {
+                revision_id_after: RevisionId(rev_after.into()),
+                replies: vec![],
+            })
+        });
+    }
+
+    #[tokio::test]
+    async fn insert_after_text_happy() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![(1, ParagraphKind::Paragraph, "intro anchor texto", 1, 20)],
+        );
+        let s2 = snap(
+            "r2",
+            vec![(
+                1,
+                ParagraphKind::Paragraph,
+                "intro anchor NUEVO texto",
+                1,
+                26,
+            )],
+        );
+        expect_get_sequence(&mut rig.client, vec![s, s2]);
+        make_batch_update_ok(&mut rig.client, "r2");
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let result = super::run_after_text(
+            &ctx,
+            &doc_id(),
+            InsertAfterTextInput {
+                anchor: "anchor".into(),
+                new_markdown: "NUEVO".into(),
+                occurrence: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].kind, ChangeKind::Insert);
+    }
+
+    #[tokio::test]
+    async fn insert_before_text_happy() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![(1, ParagraphKind::Paragraph, "intro anchor texto", 1, 20)],
+        );
+        let s2 = snap(
+            "r2",
+            vec![(
+                1,
+                ParagraphKind::Paragraph,
+                "intro NUEVO anchor texto",
+                1,
+                26,
+            )],
+        );
+        expect_get_sequence(&mut rig.client, vec![s, s2]);
+        make_batch_update_ok(&mut rig.client, "r2");
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let result = super::run_before_text(
+            &ctx,
+            &doc_id(),
+            InsertBeforeTextInput {
+                anchor: "anchor".into(),
+                new_markdown: "NUEVO".into(),
+                occurrence: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.changes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn insert_after_text_anchor_not_found() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![(1, ParagraphKind::Paragraph, "intro texto", 1, 12)],
+        );
+        expect_get_sequence(&mut rig.client, vec![s]);
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let err = super::run_after_text(
+            &ctx,
+            &doc_id(),
+            InsertAfterTextInput {
+                anchor: "missing".into(),
+                new_markdown: "NUEVO".into(),
+                occurrence: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, DocsError::TextNotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn insert_rejects_table_markdown() {
+        let rig = TestRig::new();
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let md = "| col1 | col2 |\n|------|------|\n| val1 | val2 |";
+        let err = super::run_after_text(
+            &ctx,
+            &doc_id(),
+            InsertAfterTextInput {
+                anchor: "anchor".into(),
+                new_markdown: md.into(),
+                occurrence: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, DocsError::InvalidArgs(_)));
+    }
+
+    #[tokio::test]
+    async fn insert_after_text_occurrence_picks_second() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![(
+                1,
+                ParagraphKind::Paragraph,
+                "anchor uno y anchor dos",
+                1,
+                25,
+            )],
+        );
+        let s2 = snap(
+            "r2",
+            vec![(
+                1,
+                ParagraphKind::Paragraph,
+                "anchor uno y anchor NUEVO dos",
+                1,
+                32,
+            )],
+        );
+        expect_get_sequence(&mut rig.client, vec![s, s2]);
+        make_batch_update_ok(&mut rig.client, "r2");
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let result = super::run_after_text(
+            &ctx,
+            &doc_id(),
+            InsertAfterTextInput {
+                anchor: "anchor".into(),
+                new_markdown: "NUEVO".into(),
+                occurrence: Some(2),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.changes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn insert_between_happy() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![
+                (1, ParagraphKind::Heading2, "Sección A", 1, 11),
+                (2, ParagraphKind::Paragraph, "contenido A", 11, 23),
+                (3, ParagraphKind::Heading2, "Sección B", 23, 33),
+            ],
+        );
+        let s2 = snap(
+            "r2",
+            vec![
+                (1, ParagraphKind::Heading2, "Sección A", 1, 11),
+                (2, ParagraphKind::Paragraph, "NUEVO", 11, 17),
+                (3, ParagraphKind::Paragraph, "contenido A", 17, 29),
+                (4, ParagraphKind::Heading2, "Sección B", 29, 39),
+            ],
+        );
+        expect_get_sequence(&mut rig.client, vec![s, s2]);
+        make_batch_update_ok(&mut rig.client, "r2");
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let result = super::run_between(
+            &ctx,
+            &doc_id(),
+            InsertBetweenInput {
+                after_heading: "## Sección A".into(),
+                before_heading: Some("## Sección B".into()),
+                new_markdown: "NUEVO".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.changes.len(), 1);
     }
 }

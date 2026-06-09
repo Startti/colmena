@@ -28,20 +28,25 @@ pub struct OutlineCache {
 impl OutlineCache {
     /// Construct an empty cache with the given entry TTL.
     pub fn new(ttl: Duration) -> Self {
-        Self { ttl, map: Mutex::new(HashMap::new()) }
+        Self {
+            ttl,
+            map: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Return the cached snapshot if it is younger than the TTL.
     /// `None` means "fetch fresh".
     pub fn get_fresh(&self, session_id: &str, doc_id: &DocumentId) -> Option<DocumentSnapshot> {
         let guard = self.map.lock().expect("outline cache mutex poisoned");
-        guard.get(&(session_id.to_string(), doc_id.clone())).and_then(|e| {
-            if e.fetched_at.elapsed() < self.ttl {
-                Some(e.snapshot.clone())
-            } else {
-                None
-            }
-        })
+        guard
+            .get(&(session_id.to_string(), doc_id.clone()))
+            .and_then(|e| {
+                if e.fetched_at.elapsed() < self.ttl {
+                    Some(e.snapshot.clone())
+                } else {
+                    None
+                }
+            })
     }
 
     /// Insert or replace the cached snapshot. Call after `documents.get`
@@ -51,7 +56,10 @@ impl OutlineCache {
         let mut guard = self.map.lock().expect("outline cache mutex poisoned");
         guard.insert(
             (session_id.to_string(), doc_id.clone()),
-            Entry { snapshot, fetched_at: Instant::now() },
+            Entry {
+                snapshot,
+                fetched_at: Instant::now(),
+            },
         );
     }
 
@@ -73,7 +81,10 @@ mod tests {
             doc_id: DocumentId("d1".into()),
             revision_id: RevisionId("r1".into()),
             title: "Test".into(),
-            tabs: vec![TabSnapshot { tab_id: None, paragraphs: vec![] }],
+            tabs: vec![TabSnapshot {
+                tab_id: None,
+                paragraphs: vec![],
+            }],
         }
     }
 

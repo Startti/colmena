@@ -187,3 +187,181 @@ fn build_outline(s: &DocumentSnapshot) -> Vec<OutlineEntry> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod app_tests {
+    use super::*;
+    use crate::gdocs::application::_test_helpers::*;
+    use crate::gdocs::application::co_edit_guard::GuardContext;
+    use crate::gdocs::domain::{BatchUpdateResult, ParagraphKind, RevisionId};
+    use std::sync::{Arc, Mutex};
+
+    fn expect_get_sequence(
+        client: &mut crate::gdocs::domain::traits::MockDocsClient,
+        snaps: Vec<DocumentSnapshot>,
+    ) {
+        let queue = Arc::new(Mutex::new(snaps));
+        client.expect_get().returning(move |_| {
+            let mut q = queue.lock().unwrap();
+            let s = if q.len() > 1 {
+                q.remove(0)
+            } else {
+                q[0].clone()
+            };
+            Ok(s)
+        });
+    }
+
+    fn make_batch_update_ok(
+        client: &mut crate::gdocs::domain::traits::MockDocsClient,
+        rev_after: &'static str,
+    ) {
+        client.expect_batch_update().returning(move |_, _, _| {
+            Ok(BatchUpdateResult {
+                revision_id_after: RevisionId(rev_after.into()),
+                replies: vec![],
+            })
+        });
+    }
+
+    fn default_input() -> DeleteTextInput {
+        DeleteTextInput {
+            find: "deleteme".into(),
+            scope: Scope::All,
+            case_sensitive: false,
+            whole_word: false,
+            occurrence: None,
+            confirm_many: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_text_happy() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![(1, ParagraphKind::Paragraph, "Hola deleteme final", 1, 22)],
+        );
+        let s2 = snap(
+            "r2",
+            vec![(1, ParagraphKind::Paragraph, "Hola  final", 1, 13)],
+        );
+        expect_get_sequence(&mut rig.client, vec![s, s2]);
+        make_batch_update_ok(&mut rig.client, "r2");
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let result = super::run(&ctx, &doc_id(), default_input()).await.unwrap();
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].kind, ChangeKind::Delete);
+    }
+
+    #[tokio::test]
+    async fn delete_text_not_found() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![(1, ParagraphKind::Paragraph, "Hola final", 1, 12)],
+        );
+        expect_get_sequence(&mut rig.client, vec![s]);
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let err = super::run(&ctx, &doc_id(), default_input())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DocsError::TextNotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn delete_text_confirm_many_threshold() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![(1, ParagraphKind::Paragraph, "x x x x x", 1, 12)],
+        );
+        expect_get_sequence(&mut rig.client, vec![s]);
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let input = DeleteTextInput {
+            find: "x".into(),
+            ..default_input()
+        };
+        let err = super::run(&ctx, &doc_id(), input).await.unwrap_err();
+        match err {
+            DocsError::ConfirmManyMatches { count, .. } => assert_eq!(count, 5),
+            e => panic!("wrong: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_text_multi_match_deletes_all() {
+        let mut rig = TestRig::new();
+        // 3 matches → below 5-threshold, no confirm_many needed.
+        let s = snap(
+            "r1",
+            vec![(
+                1,
+                ParagraphKind::Paragraph,
+                "deleteme y deleteme y deleteme",
+                1,
+                33,
+            )],
+        );
+        let s2 = snap("r2", vec![(1, ParagraphKind::Paragraph, " y  y ", 1, 9)]);
+        expect_get_sequence(&mut rig.client, vec![s, s2]);
+        make_batch_update_ok(&mut rig.client, "r2");
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let result = super::run(&ctx, &doc_id(), default_input()).await.unwrap();
+        assert_eq!(result.changes.len(), 3);
+        assert!(result.changes.iter().all(|c| c.kind == ChangeKind::Delete));
+    }
+
+    #[tokio::test]
+    async fn delete_text_whole_word_filters() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![(
+                1,
+                ParagraphKind::Paragraph,
+                "deletemepre deletemepost",
+                1,
+                26,
+            )],
+        );
+        expect_get_sequence(&mut rig.client, vec![s]);
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let input = DeleteTextInput {
+            whole_word: true,
+            ..default_input()
+        };
+        let err = super::run(&ctx, &doc_id(), input).await.unwrap_err();
+        assert!(matches!(err, DocsError::TextNotFound { .. }));
+    }
+}

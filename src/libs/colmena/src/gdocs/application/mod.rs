@@ -1,5 +1,8 @@
 //! Application layer — high-level use cases shared across dispatchers.
 
+#[cfg(test)]
+pub mod _test_helpers;
+
 pub mod apply_edits;
 pub mod co_edit_guard;
 pub mod delete_text;

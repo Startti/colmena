@@ -280,3 +280,191 @@ fn build_outline(s: &DocumentSnapshot) -> Vec<OutlineEntry> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod app_tests {
+    use super::*;
+    use crate::gdocs::application::_test_helpers::*;
+    use crate::gdocs::application::co_edit_guard::GuardContext;
+    use crate::gdocs::domain::{BatchUpdateResult, ParagraphKind, RevisionId};
+    use std::sync::{Arc, Mutex};
+
+    fn expect_get_sequence(
+        client: &mut crate::gdocs::domain::traits::MockDocsClient,
+        snaps: Vec<DocumentSnapshot>,
+    ) {
+        let queue = Arc::new(Mutex::new(snaps));
+        client.expect_get().returning(move |_| {
+            let mut q = queue.lock().unwrap();
+            let s = if q.len() > 1 {
+                q.remove(0)
+            } else {
+                q[0].clone()
+            };
+            Ok(s)
+        });
+    }
+
+    fn make_batch_update_capture(
+        client: &mut crate::gdocs::domain::traits::MockDocsClient,
+        rev_after: &'static str,
+    ) -> Arc<Mutex<Vec<serde_json::Value>>> {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let c = captured.clone();
+        client.expect_batch_update().returning(move |_, reqs, _| {
+            *c.lock().unwrap() = reqs.clone();
+            Ok(BatchUpdateResult {
+                revision_id_after: RevisionId(rev_after.into()),
+                replies: vec![],
+            })
+        });
+        captured
+    }
+
+    #[tokio::test]
+    async fn apply_edits_empty_errors() {
+        let rig = TestRig::new();
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let err = super::run(&ctx, &doc_id(), ApplyEditsInput { edits: vec![] })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DocsError::InvalidArgs(_)));
+    }
+
+    #[tokio::test]
+    async fn apply_edits_single_replace() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![(1, ParagraphKind::Paragraph, "Hola cliente", 1, 14)],
+        );
+        let s2 = snap(
+            "r2",
+            vec![(1, ParagraphKind::Paragraph, "Hola Acme", 1, 11)],
+        );
+        expect_get_sequence(&mut rig.client, vec![s, s2]);
+        make_batch_update_capture(&mut rig.client, "r2");
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let result = super::run(
+            &ctx,
+            &doc_id(),
+            ApplyEditsInput {
+                edits: vec![ApplyEditOp::ReplaceText {
+                    find: "cliente".into(),
+                    replace: "Acme".into(),
+                    scope: Scope::All,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.changes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn apply_edits_compound_3_ops_concatenates_changes() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![(
+                1,
+                ParagraphKind::Paragraph,
+                "anchor uno cliente delete",
+                1,
+                28,
+            )],
+        );
+        let s2 = snap(
+            "r2",
+            vec![(1, ParagraphKind::Paragraph, "anchor NUEVO uno Acme ", 1, 25)],
+        );
+        expect_get_sequence(&mut rig.client, vec![s, s2]);
+        let captured = make_batch_update_capture(&mut rig.client, "r2");
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let result = super::run(
+            &ctx,
+            &doc_id(),
+            ApplyEditsInput {
+                edits: vec![
+                    ApplyEditOp::ReplaceText {
+                        find: "cliente".into(),
+                        replace: "Acme".into(),
+                        scope: Scope::All,
+                    },
+                    ApplyEditOp::InsertAfterText {
+                        anchor: "anchor".into(),
+                        new_markdown: "NUEVO".into(),
+                    },
+                    ApplyEditOp::DeleteText {
+                        find: "delete".into(),
+                        scope: Scope::All,
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+        // 1 replace + 1 insert + 1 delete = 3 changes.
+        assert_eq!(result.changes.len(), 3);
+        // Single batchUpdate POST → captured contains many requests
+        // (delete/insert pairs + markdown ops + delete range).
+        let reqs = captured.lock().unwrap();
+        assert!(reqs.len() >= 3);
+    }
+
+    #[tokio::test]
+    async fn apply_edits_sub_edit_failure_aborts_compound() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![(1, ParagraphKind::Paragraph, "Hola cliente", 1, 14)],
+        );
+        expect_get_sequence(&mut rig.client, vec![s]);
+        // No batch_update expected; the missing-find should abort first.
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let err = super::run(
+            &ctx,
+            &doc_id(),
+            ApplyEditsInput {
+                edits: vec![
+                    ApplyEditOp::ReplaceText {
+                        find: "cliente".into(),
+                        replace: "Acme".into(),
+                        scope: Scope::All,
+                    },
+                    ApplyEditOp::DeleteText {
+                        find: "MISSING_TEXT".into(),
+                        scope: Scope::All,
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, DocsError::TextNotFound { .. }));
+    }
+}

@@ -103,11 +103,7 @@ impl InMemoryRevisionStore {
 #[cfg(test)]
 #[async_trait]
 impl RevisionStore for InMemoryRevisionStore {
-    async fn get(
-        &self,
-        sid: &str,
-        doc: &DocumentId,
-    ) -> Result<Option<RevisionId>, DocsError> {
+    async fn get(&self, sid: &str, doc: &DocumentId) -> Result<Option<RevisionId>, DocsError> {
         Ok(self
             .map
             .read()
@@ -116,12 +112,7 @@ impl RevisionStore for InMemoryRevisionStore {
             .cloned())
     }
 
-    async fn put(
-        &self,
-        sid: &str,
-        doc: &DocumentId,
-        rev: &RevisionId,
-    ) -> Result<(), DocsError> {
+    async fn put(&self, sid: &str, doc: &DocumentId, rev: &RevisionId) -> Result<(), DocsError> {
         self.map
             .write()
             .await
@@ -148,8 +139,14 @@ mod tests {
     async fn in_memory_scoped_by_session() {
         let store = InMemoryRevisionStore::new();
         let doc = DocumentId("doc1".into());
-        store.put("s1", &doc, &RevisionId("ra".into())).await.unwrap();
-        store.put("s2", &doc, &RevisionId("rb".into())).await.unwrap();
+        store
+            .put("s1", &doc, &RevisionId("ra".into()))
+            .await
+            .unwrap();
+        store
+            .put("s2", &doc, &RevisionId("rb".into()))
+            .await
+            .unwrap();
         assert_eq!(store.get("s1", &doc).await.unwrap().unwrap().0, "ra");
         assert_eq!(store.get("s2", &doc).await.unwrap().unwrap().0, "rb");
     }
@@ -158,8 +155,14 @@ mod tests {
     async fn in_memory_overwrite_same_key() {
         let store = InMemoryRevisionStore::new();
         let doc = DocumentId("d".into());
-        store.put("s", &doc, &RevisionId("r1".into())).await.unwrap();
-        store.put("s", &doc, &RevisionId("r2".into())).await.unwrap();
+        store
+            .put("s", &doc, &RevisionId("r1".into()))
+            .await
+            .unwrap();
+        store
+            .put("s", &doc, &RevisionId("r2".into()))
+            .await
+            .unwrap();
         assert_eq!(store.get("s", &doc).await.unwrap().unwrap().0, "r2");
     }
 }
