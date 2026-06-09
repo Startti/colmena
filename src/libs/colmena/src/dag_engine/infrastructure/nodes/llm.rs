@@ -2191,13 +2191,13 @@ impl ExecutableNode for LlmNode {
                 gdocs_tool_replace_text, gdocs_tool_share, gdocs_tool_style_text,
                 GDOCS_ACKNOWLEDGE_HUMAN_CHANGES_TOOL, GDOCS_ADD_TAB_TOOL,
                 GDOCS_APPEND_MARKDOWN_TOOL, GDOCS_APPLY_EDITS_TOOL, GDOCS_CREATE_FROM_DOCX_TOOL,
-                GDOCS_CREATE_FROM_MARKDOWN_TOOL, GDOCS_CREATE_NAMED_RANGE_TOOL,
-                GDOCS_CREATE_TOOL, GDOCS_DELETE_TEXT_TOOL, GDOCS_EXPORT_TOOL,
-                GDOCS_INSERT_AFTER_TEXT_TOOL, GDOCS_INSERT_BEFORE_TEXT_TOOL,
-                GDOCS_INSERT_BETWEEN_TOOL, GDOCS_LIST_NAMED_RANGES_TOOL, GDOCS_LIST_TABS_TOOL,
-                GDOCS_READ_AS_MARKDOWN_TOOL, GDOCS_READ_OUTLINE_TOOL,
-                GDOCS_REPLACE_NAMED_RANGE_TOOL, GDOCS_REPLACE_SECTION_TOOL,
-                GDOCS_REPLACE_TEXT_TOOL, GDOCS_SHARE_TOOL, GDOCS_STYLE_TEXT_TOOL,
+                GDOCS_CREATE_FROM_MARKDOWN_TOOL, GDOCS_CREATE_NAMED_RANGE_TOOL, GDOCS_CREATE_TOOL,
+                GDOCS_DELETE_TEXT_TOOL, GDOCS_EXPORT_TOOL, GDOCS_INSERT_AFTER_TEXT_TOOL,
+                GDOCS_INSERT_BEFORE_TEXT_TOOL, GDOCS_INSERT_BETWEEN_TOOL,
+                GDOCS_LIST_NAMED_RANGES_TOOL, GDOCS_LIST_TABS_TOOL, GDOCS_READ_AS_MARKDOWN_TOOL,
+                GDOCS_READ_OUTLINE_TOOL, GDOCS_REPLACE_NAMED_RANGE_TOOL,
+                GDOCS_REPLACE_SECTION_TOOL, GDOCS_REPLACE_TEXT_TOOL, GDOCS_SHARE_TOOL,
+                GDOCS_STYLE_TEXT_TOOL,
             };
             // Silence the unused-import lint — we only import the dispatch
             // symbol here so the compiler enforces the link in the
@@ -2268,7 +2268,10 @@ impl ExecutableNode for LlmNode {
 
             let gdocs_entries: [(&str, fn() -> crate::llm::domain::ToolDefinition); 22] = [
                 (GDOCS_CREATE_TOOL, gdocs_tool_create),
-                (GDOCS_CREATE_FROM_MARKDOWN_TOOL, gdocs_tool_create_from_markdown),
+                (
+                    GDOCS_CREATE_FROM_MARKDOWN_TOOL,
+                    gdocs_tool_create_from_markdown,
+                ),
                 (GDOCS_CREATE_FROM_DOCX_TOOL, gdocs_tool_create_from_docx),
                 (GDOCS_SHARE_TOOL, gdocs_tool_share),
                 (GDOCS_EXPORT_TOOL, gdocs_tool_export),
@@ -2287,7 +2290,10 @@ impl ExecutableNode for LlmNode {
                 (GDOCS_APPLY_EDITS_TOOL, gdocs_tool_apply_edits),
                 (GDOCS_STYLE_TEXT_TOOL, gdocs_tool_style_text),
                 (GDOCS_CREATE_NAMED_RANGE_TOOL, gdocs_tool_create_named_range),
-                (GDOCS_REPLACE_NAMED_RANGE_TOOL, gdocs_tool_replace_named_range),
+                (
+                    GDOCS_REPLACE_NAMED_RANGE_TOOL,
+                    gdocs_tool_replace_named_range,
+                ),
                 (
                     GDOCS_ACKNOWLEDGE_HUMAN_CHANGES_TOOL,
                     gdocs_tool_acknowledge_human_changes,

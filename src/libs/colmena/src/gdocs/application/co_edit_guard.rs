@@ -141,7 +141,6 @@ fn _suppress_warnings(_: RevisionMeta) {}
 // `MockDocsClient`. We add a small smoke test here that exercises the
 // pure helpers without any I/O.
 
-
 #[cfg(test)]
 mod guard_tests {
     use super::*;
