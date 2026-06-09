@@ -784,7 +784,7 @@ pub async fn dispatch_list_tabs(args: serde_json::Value, _session_id: &str) -> s
     }
 }
 
-pub async fn dispatch_add_tab(args: serde_json::Value, _session_id: &str) -> serde_json::Value {
+pub async fn dispatch_add_tab(args: serde_json::Value, session_id: &str) -> serde_json::Value {
     let parsed: AddTabArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -794,20 +794,27 @@ pub async fn dispatch_add_tab(args: serde_json::Value, _session_id: &str) -> ser
         Err(e) => return e,
     };
     let after = parsed.after_tab_id.map(TabId);
-    match client
-        .add_tab(&DocumentId(parsed.doc_id), &parsed.title, after.as_ref())
-        .await
-    {
-        Ok(tab) => serde_json::json!({
-            "ok": true,
-            "tab_id": tab.tab_id.0,
-            "title": tab.title,
-            "index": tab.index,
-            "parent_tab_id": tab.parent_tab_id.map(|t| t.0),
-            // markdown seeding for new tabs is deferred to v1.1 — surface
-            // the unused arg back so the LLM can see it was acknowledged.
-            "pending_markdown_seed": parsed.markdown.is_some(),
-        }),
+    let doc_id = DocumentId(parsed.doc_id);
+    match client.add_tab(&doc_id, &parsed.title, after.as_ref()).await {
+        Ok(tab) => {
+            // Invalidate the outline cache so the next read/edit sees
+            // the new tab. Without this, an immediate
+            // `append_markdown({tab_id: <new>, ...})` would resolve
+            // its insert_index against a stale snapshot that lacks
+            // the new tab and the markdown would land in the wrong
+            // tab (Google defaults to tab 1 when tabId is unknown).
+            shared_cache().await.invalidate(session_id, &doc_id);
+            serde_json::json!({
+                "ok": true,
+                "tab_id": tab.tab_id.0,
+                "title": tab.title,
+                "index": tab.index,
+                "parent_tab_id": tab.parent_tab_id.map(|t| t.0),
+                // markdown seeding for new tabs is deferred to v1.1 — surface
+                // the unused arg back so the LLM can see it was acknowledged.
+                "pending_markdown_seed": parsed.markdown.is_some(),
+            })
+        }
         Err(e) => error_to_json(e),
     }
 }

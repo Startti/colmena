@@ -104,7 +104,10 @@ struct StyleSpan {
 #[derive(Debug)]
 struct Emitter {
     cursor: u32,
-    _tab_id: Option<TabId>,
+    /// When set, every emitted `location` and `range` carries this
+    /// `tabId` so Google routes the write into the correct tab. When
+    /// `None`, locations have no `tabId` field (default tab applies).
+    tab_id: Option<TabId>,
     out_requests: Vec<Value>,
     out_lossy: Vec<LossyConversion>,
 
@@ -140,7 +143,7 @@ impl Emitter {
         };
         Self {
             cursor,
-            _tab_id: tab_id,
+            tab_id,
             out_requests: vec![],
             out_lossy: vec![],
             cur_text: String::new(),
@@ -226,9 +229,10 @@ impl Emitter {
             Event::Rule => {
                 // Horizontal rule → InsertSectionBreakRequest at cursor.
                 self.flush_paragraph_if_any();
+                let location = loc(self.cursor, &self.tab_id);
                 self.out_requests.push(json!({
                     "insertSectionBreak": {
-                        "location": { "index": self.cursor },
+                        "location": location,
                         "sectionType": "CONTINUOUS"
                     }
                 }));
@@ -422,9 +426,10 @@ impl Emitter {
         let para_end = para_start + text_with_nl_u16; // open-ended
 
         // 1. InsertText.
+        let para_loc = loc(para_start, &self.tab_id);
         self.out_requests.push(json!({
             "insertText": {
-                "location": { "index": para_start },
+                "location": para_loc,
                 "text": text_with_nl,
             }
         }));
@@ -460,9 +465,10 @@ impl Emitter {
         } else {
             (json!({ "namedStyleType": named_style }), "namedStyleType")
         };
+        let para_range = rng(para_start, para_end, &self.tab_id);
         self.out_requests.push(json!({
             "updateParagraphStyle": {
-                "range": { "startIndex": para_start, "endIndex": para_end },
+                "range": para_range,
                 "paragraphStyle": style_obj,
                 "fields": fields,
             }
@@ -475,9 +481,10 @@ impl Emitter {
             _ => None,
         };
         if let Some(preset) = bullet_preset {
+            let bullet_range = rng(para_start, para_end, &self.tab_id);
             self.out_requests.push(json!({
                 "createParagraphBullets": {
-                    "range": { "startIndex": para_start, "endIndex": para_end },
+                    "range": bullet_range,
                     "bulletPreset": preset,
                 }
             }));
@@ -485,9 +492,10 @@ impl Emitter {
 
         // 4. CodeBlock paragraph-wide monospace (when no spans cover it).
         if matches!(self.cur_kind, ParaKind::CodeBlock) {
+            let code_range = rng(para_start, para_end - 1, &self.tab_id);
             self.out_requests.push(json!({
                 "updateTextStyle": {
-                    "range": { "startIndex": para_start, "endIndex": para_end - 1 },
+                    "range": code_range,
                     "textStyle": { "weightedFontFamily": { "fontFamily": "Roboto Mono" } },
                     "fields": "weightedFontFamily",
                 }
@@ -498,9 +506,10 @@ impl Emitter {
                 let start = para_start + span.start_utf16;
                 let end = start + span.len_utf16;
                 let (style_json, fields) = build_text_style(&span.style);
+                let span_range = rng(start, end, &self.tab_id);
                 self.out_requests.push(json!({
                     "updateTextStyle": {
-                        "range": { "startIndex": start, "endIndex": end },
+                        "range": span_range,
                         "textStyle": style_json,
                         "fields": fields,
                     }
@@ -536,9 +545,10 @@ impl Emitter {
             .max()
             .unwrap_or(0) as u32;
         let table_start = self.cursor;
+        let table_loc = loc(table_start, &self.tab_id);
         self.out_requests.push(json!({
             "insertTable": {
-                "location": { "index": table_start },
+                "location": table_loc,
                 "rows": rows,
                 "columns": cols,
             }
@@ -553,10 +563,11 @@ impl Emitter {
                 if cell.is_empty() {
                     continue;
                 }
+                let cell_start = loc(table_start, &self.tab_id);
                 self.out_requests.push(json!({
                     "insertText": {
                         "tableCellLocation": {
-                            "tableStartLocation": { "index": table_start },
+                            "tableStartLocation": cell_start,
                             "rowIndex": r_idx as u32,
                             "columnIndex": c_idx as u32,
                         },
@@ -611,6 +622,30 @@ fn build_text_style(style: &StyleFlags) -> (Value, String) {
 
 #[allow(dead_code)]
 fn _suppress_unused(_k: CodeBlockKind) {}
+
+/// Build a `Location` JSON: `{ index, tabId? }`. The `tabId` field is
+/// omitted when `tab_id` is `None` so the existing golden fixtures
+/// (which all use `tab_id: None`) keep byte-for-byte parity.
+fn loc(index: u32, tab_id: &Option<TabId>) -> Value {
+    let mut m = serde_json::Map::new();
+    m.insert("index".into(), json!(index));
+    if let Some(t) = tab_id {
+        m.insert("tabId".into(), json!(t.0));
+    }
+    Value::Object(m)
+}
+
+/// Build a `Range` JSON: `{ startIndex, endIndex, tabId? }`. Same
+/// omission rule as `loc`.
+fn rng(start: u32, end: u32, tab_id: &Option<TabId>) -> Value {
+    let mut m = serde_json::Map::new();
+    m.insert("startIndex".into(), json!(start));
+    m.insert("endIndex".into(), json!(end));
+    if let Some(t) = tab_id {
+        m.insert("tabId".into(), json!(t.0));
+    }
+    Value::Object(m)
+}
 
 // ---------------------------------------------------------------------
 // Tests
@@ -739,5 +774,54 @@ mod tests {
         );
         let b = markdown_to_requests(md, InsertionPoint::EndOfSegment { tab_id: None });
         assert_eq!(a.requests, b.requests);
+    }
+
+    /// When a tab_id is provided, EVERY emitted location/range carries
+    /// `tabId` so Google routes the write into the correct tab. With
+    /// `tab_id: None` the field is omitted (verified by every existing
+    /// golden fixture passing unchanged).
+    #[test]
+    fn tab_id_threads_through_all_emitted_locations() {
+        let md = "# Heading\n\nA paragraph with **bold**.\n\n- item one\n";
+        let result = markdown_to_requests(
+            md,
+            InsertionPoint::Index {
+                index: 1,
+                tab_id: Some(TabId("t.special".into())),
+            },
+        );
+
+        // Walk every request and assert that any `location` or `range`
+        // object includes a `tabId` field matching our tab.
+        fn check(obj: &Value) {
+            if let Some(loc) = obj.get("location") {
+                let id = loc.get("tabId").and_then(|v| v.as_str()).unwrap_or("");
+                assert_eq!(id, "t.special", "location missing tabId: {loc}");
+            }
+            if let Some(range) = obj.get("range") {
+                let id = range.get("tabId").and_then(|v| v.as_str()).unwrap_or("");
+                assert_eq!(id, "t.special", "range missing tabId: {range}");
+            }
+            if let Some(table_loc) = obj.get("tableCellLocation") {
+                let start = table_loc.get("tableStartLocation").unwrap();
+                let id = start.get("tabId").and_then(|v| v.as_str()).unwrap_or("");
+                assert_eq!(id, "t.special", "tableStartLocation missing tabId");
+            }
+        }
+
+        for req in &result.requests {
+            // Each request is `{ <op_name>: { <payload> } }`. Walk the
+            // payload's `location`/`range`/`tableCellLocation`.
+            if let Some(payload) = req.as_object().and_then(|m| m.values().next()) {
+                check(payload);
+            }
+        }
+
+        // Sanity: at least 2 requests emitted (insertText + paragraphStyle).
+        assert!(
+            result.requests.len() >= 2,
+            "expected ≥2 requests, got {}",
+            result.requests.len()
+        );
     }
 }
