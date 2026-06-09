@@ -260,46 +260,105 @@ impl PgPoolAdapter {
     }
 }
 
+/// Marshall a vector of sqlx `PgRow`s into JSON-friendly `Vec<Value>`.
+/// Extracted so the SELECT path and any future helper can share the logic.
+fn marshall_rows(rows: &[sqlx::postgres::PgRow]) -> Vec<Value> {
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut obj = serde_json::Map::new();
+        for col in row.columns() {
+            let name = col.name();
+            let type_name = col.type_info().name();
+            let val: Value = match type_name {
+                "INT8" => row
+                    .try_get::<i64, _>(name)
+                    .map(|v| json!(v))
+                    .unwrap_or(Value::Null),
+                "INT4" | "OID" => row
+                    .try_get::<i32, _>(name)
+                    .map(|v| json!(v as i64))
+                    .unwrap_or(Value::Null),
+                "INT2" => row
+                    .try_get::<i16, _>(name)
+                    .map(|v| json!(v as i64))
+                    .unwrap_or(Value::Null),
+                "FLOAT4" | "FLOAT8" | "NUMERIC" => row
+                    .try_get::<f64, _>(name)
+                    .map(|v| json!(v))
+                    .unwrap_or(Value::Null),
+                "BOOL" => row
+                    .try_get::<bool, _>(name)
+                    .map(|v| json!(v))
+                    .unwrap_or(Value::Null),
+                _ => row
+                    .try_get::<String, _>(name)
+                    .map(|v| json!(v))
+                    .unwrap_or(Value::Null),
+            };
+            obj.insert(name.to_string(), val);
+        }
+        out.push(Value::Object(obj));
+    }
+    out
+}
+
 #[async_trait::async_trait]
 impl SqlConnectionPort for PgPoolAdapter {
+    /// Execute a SQL script that may contain multiple statements separated by `;`.
+    ///
+    /// **Policy C (shipped 2026-06-09):** parses the script with `sqlparser`,
+    /// then executes each statement individually inside ONE atomic transaction.
+    /// The result returned is the output of the LAST statement:
+    /// - last is SELECT → rows as `Value::Array`, with `LIMIT` auto-injected
+    ///   when the statement has no explicit LIMIT.
+    /// - last is INSERT/UPDATE/DELETE → `{ rows_affected: SUM }` over all
+    ///   mutator statements in the script (not just the last one).
+    /// - last is CREATE TABLE → `{ created: true, type: "table" }`.
+    /// - last is CREATE FUNCTION → `{ created: true }`.
+    ///
+    /// Intermediate SELECTs execute normally but their rows are discarded;
+    /// `LIMIT` is NOT auto-injected on intermediate SELECTs.
+    ///
+    /// If ANY statement fails, the whole transaction rolls back.
+    ///
+    /// See dev guide `docs/developer_guide/23_sql_node.md` §"Multi-statement"
+    /// and the user-facing skill `sql-query-best-practices` for examples.
     async fn execute_query(
         &self,
         query: &str,
         max_rows: u64,
         tenant_user_id: Option<&str>,
     ) -> Result<QueryResult, SqlNodeError> {
+        use sqlparser::ast::Statement;
         let pool = &*self.pool;
-        let timeout_ms = self.statement_timeout_ms;
-        let work_mem = self.work_mem_mb;
 
-        let parsed = crate::dag_engine::infrastructure::sql_ast::parse(query).ok();
-        // First statement classifier — execution-path decisions only consider the
-        // outer shape, but the validator (which ran before us) checked every statement.
-        let first_stmt = parsed.as_ref().and_then(|s| s.first());
-        let is_select = first_stmt
-            .map(crate::dag_engine::infrastructure::sql_ast::is_query)
-            .unwrap_or(false);
-        let already_has_limit = first_stmt
-            .map(crate::dag_engine::infrastructure::sql_ast::query_has_limit)
-            .unwrap_or(false);
+        // Parse the script. The validator already parsed and accepted it before
+        // we got here, so a parse error here is unexpected — surface clearly.
+        let stmts = crate::dag_engine::infrastructure::sql_ast::parse(query)
+            .map_err(|e| SqlNodeError::ExecutionError(format!("re-parse failed: {}", e)))?;
+        if stmts.is_empty() {
+            return Err(SqlNodeError::ExecutionError("empty SQL script".into()));
+        }
+        let last_idx = stmts.len() - 1;
 
-        // All queries now use transactions so we can SET LOCAL tenant context
+        // Begin transaction + apply session-level guardrails.
         let mut tx = pool.begin().await.map_err(|e| {
             SqlNodeError::ExecutionError(format!("Failed to begin transaction: {}", e))
         })?;
 
-        // Apply runtime limits
-        sqlx::query(&format!("SET LOCAL statement_timeout = {}", timeout_ms))
+        sqlx::query(&format!(
+            "SET LOCAL statement_timeout = {}",
+            self.statement_timeout_ms
+        ))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| SqlNodeError::ExecutionError(format!("{}", e)))?;
+
+        sqlx::query(&format!("SET LOCAL work_mem = '{}MB'", self.work_mem_mb))
             .execute(&mut *tx)
             .await
             .map_err(|e| SqlNodeError::ExecutionError(format!("{}", e)))?;
 
-        sqlx::query(&format!("SET LOCAL work_mem = '{}MB'", work_mem))
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SqlNodeError::ExecutionError(format!("{}", e)))?;
-
-        // Set tenant context if multi-tenancy is active
         if let Some(uid) = tenant_user_id {
             sqlx::query("SELECT set_config('app.current_user_id', $1, true)")
                 .bind(uid)
@@ -310,96 +369,84 @@ impl SqlConnectionPort for PgPoolAdapter {
                 })?;
         }
 
-        if is_select {
-            let limited_query = if max_rows > 0 && !already_has_limit {
-                format!("{} LIMIT {}", query.trim_end_matches(';'), max_rows + 1)
+        // Per-statement loop.
+        let mut rows_affected_sum: u64 = 0;
+
+        for (idx, stmt) in stmts.iter().enumerate() {
+            let is_last = idx == last_idx;
+            // sqlparser re-serializes the statement — preserves PL/pgSQL bodies
+            // (`AS $$ ... $$`), JSON arrows, escaped quotes, etc. Stable round-trip.
+            let stmt_sql = stmt.to_string();
+            let is_select_stmt = crate::dag_engine::infrastructure::sql_ast::is_query(stmt);
+
+            if is_select_stmt && is_last {
+                // Final SELECT — apply LIMIT, fetch, marshall, return.
+                let already_has_limit =
+                    crate::dag_engine::infrastructure::sql_ast::query_has_limit(stmt);
+                let limited = if max_rows > 0 && !already_has_limit {
+                    format!("{} LIMIT {}", stmt_sql.trim_end_matches(';'), max_rows + 1)
+                } else {
+                    stmt_sql
+                };
+                let rows = sqlx::query(&limited)
+                    .fetch_all(&mut *tx)
+                    .await
+                    .map_err(|e| SqlNodeError::ExecutionError(format!("{}", e)))?;
+                tx.commit().await.map_err(|e| {
+                    SqlNodeError::ExecutionError(format!("Failed to commit: {}", e))
+                })?;
+
+                let mut json_rows = marshall_rows(&rows);
+                let truncated = max_rows > 0 && json_rows.len() as u64 > max_rows;
+                if truncated {
+                    json_rows.truncate(max_rows as usize);
+                }
+                let row_count = json_rows.len() as u64;
+                return Ok(QueryResult {
+                    output: Value::Array(json_rows),
+                    row_count,
+                    truncated,
+                });
+            } else if is_select_stmt {
+                // Intermediate SELECT — execute (side effects, e.g. set_config),
+                // discard rows. No LIMIT injection.
+                sqlx::query(&stmt_sql)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| SqlNodeError::ExecutionError(format!("{}", e)))?;
             } else {
-                query.to_string()
-            };
+                // Mutation (INSERT/UPDATE/DELETE/CREATE TABLE/CREATE FUNCTION/COMMENT/...).
+                let result = sqlx::query(&stmt_sql)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| SqlNodeError::ExecutionError(format!("{}", e)))?;
 
-            let rows = sqlx::query(&limited_query)
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(|e| SqlNodeError::ExecutionError(format!("{}", e)))?;
-
-            tx.commit()
-                .await
-                .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to commit: {}", e)))?;
-
-            let mut json_rows: Vec<Value> = Vec::new();
-            for row in &rows {
-                let mut obj = serde_json::Map::new();
-                for col in row.columns() {
-                    let name = col.name();
-                    let type_name = col.type_info().name();
-                    let val: Value = match type_name {
-                        "INT8" => row
-                            .try_get::<i64, _>(name)
-                            .map(|v| json!(v))
-                            .unwrap_or(Value::Null),
-                        "INT4" | "OID" => row
-                            .try_get::<i32, _>(name)
-                            .map(|v| json!(v as i64))
-                            .unwrap_or(Value::Null),
-                        "INT2" => row
-                            .try_get::<i16, _>(name)
-                            .map(|v| json!(v as i64))
-                            .unwrap_or(Value::Null),
-                        "FLOAT4" | "FLOAT8" | "NUMERIC" => row
-                            .try_get::<f64, _>(name)
-                            .map(|v| json!(v))
-                            .unwrap_or(Value::Null),
-                        "BOOL" => row
-                            .try_get::<bool, _>(name)
-                            .map(|v| json!(v))
-                            .unwrap_or(Value::Null),
-                        _ => row
-                            .try_get::<String, _>(name)
-                            .map(|v| json!(v))
-                            .unwrap_or(Value::Null),
+                if is_last {
+                    let total = rows_affected_sum + result.rows_affected();
+                    tx.commit().await.map_err(|e| {
+                        SqlNodeError::ExecutionError(format!("Failed to commit: {}", e))
+                    })?;
+                    let (output, row_count) = match stmt {
+                        Statement::CreateFunction(_) => (json!({ "created": true }), 0u64),
+                        Statement::CreateTable(_) => {
+                            (json!({ "created": true, "type": "table" }), 0u64)
+                        }
+                        _ => (json!({ "rows_affected": total }), total),
                     };
-                    obj.insert(name.to_string(), val);
+                    return Ok(QueryResult {
+                        output,
+                        row_count,
+                        truncated: false,
+                    });
                 }
-                json_rows.push(Value::Object(obj));
+                rows_affected_sum += result.rows_affected();
             }
-
-            let truncated = max_rows > 0 && json_rows.len() as u64 > max_rows;
-            if truncated {
-                json_rows.truncate(max_rows as usize);
-            }
-
-            let row_count = json_rows.len() as u64;
-            Ok(QueryResult {
-                output: Value::Array(json_rows),
-                row_count,
-                truncated,
-            })
-        } else {
-            let result = sqlx::query(query)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| SqlNodeError::ExecutionError(format!("{}", e)))?;
-
-            tx.commit()
-                .await
-                .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to commit: {}", e)))?;
-
-            let rows_affected = result.rows_affected();
-
-            use sqlparser::ast::Statement;
-            let (output, row_count) = match first_stmt {
-                Some(Statement::CreateFunction(_)) => (json!({ "created": true }), 0u64),
-                Some(Statement::CreateTable(_)) => {
-                    (json!({ "created": true, "type": "table" }), 0u64)
-                }
-                _ => (json!({ "rows_affected": rows_affected }), rows_affected),
-            };
-            Ok(QueryResult {
-                output,
-                row_count,
-                truncated: false,
-            })
         }
+
+        // Loop always returns when processing the last statement (guaranteed
+        // because we checked `!stmts.is_empty()` above and every branch in the
+        // `is_last` path returns).
+        unreachable!("statements vector was non-empty but loop did not return");
     }
 
     async fn load_table_metadata(
@@ -568,5 +615,195 @@ mod tests {
             missing.is_empty(),
             "introspection schemas must never be reported missing"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Multi-statement execution tests (Política C, shipped 2026-06-09).
+    //
+    // All require a fresh test table; setup_test_table() recreates a known
+    // schema on each test for full isolation.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Drop and recreate a fresh test table; returns table name.
+    async fn setup_test_table(adapter: &PgPoolAdapter, suffix: &str) -> String {
+        let table = format!("public.test_pc_{}", suffix);
+        sqlx::query(&format!("DROP TABLE IF EXISTS {}", table))
+            .execute(&*adapter.pool())
+            .await
+            .unwrap();
+        sqlx::query(&format!(
+            "CREATE TABLE {} (id INT PRIMARY KEY, name TEXT)",
+            table
+        ))
+        .execute(&*adapter.pool())
+        .await
+        .unwrap();
+        table
+    }
+
+    async fn teardown(adapter: &PgPoolAdapter, table: &str) {
+        let _ = sqlx::query(&format!("DROP TABLE IF EXISTS {}", table))
+            .execute(&*adapter.pool())
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn pc_single_insert_returns_rows_affected() {
+        let Some(adapter) = test_adapter().await else {
+            return;
+        };
+        let table = setup_test_table(&adapter, "single").await;
+        let q = format!("INSERT INTO {} (id, name) VALUES (1, 'a')", table);
+
+        let r = adapter.execute_query(&q, 100, None).await.unwrap();
+
+        assert_eq!(r.row_count, 1);
+        assert_eq!(r.output, json!({"rows_affected": 1}));
+        teardown(&adapter, &table).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn pc_multistatement_inserts_aggregate_rows_affected() {
+        let Some(adapter) = test_adapter().await else {
+            return;
+        };
+        let table = setup_test_table(&adapter, "multi_ins").await;
+        let q = format!(
+            "INSERT INTO {t} (id, name) VALUES (10, 'a');\n\
+             INSERT INTO {t} (id, name) VALUES (11, 'b');\n\
+             INSERT INTO {t} (id, name) VALUES (12, 'c');",
+            t = table
+        );
+
+        let r = adapter.execute_query(&q, 100, None).await.unwrap();
+
+        // Sum across all 3 mutator statements.
+        assert_eq!(r.output, json!({"rows_affected": 3}));
+        assert_eq!(r.row_count, 3);
+        teardown(&adapter, &table).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn pc_multistatement_failure_rolls_back_everything() {
+        let Some(adapter) = test_adapter().await else {
+            return;
+        };
+        let table = setup_test_table(&adapter, "rollback").await;
+        // First INSERT ok, second violates PK → TX must rollback both.
+        let q = format!(
+            "INSERT INTO {t} (id, name) VALUES (20, 'a');\n\
+             INSERT INTO {t} (id, name) VALUES (20, 'b');",
+            t = table
+        );
+
+        let r = adapter.execute_query(&q, 100, None).await;
+        assert!(r.is_err(), "PK violation must propagate as error");
+
+        // Verify row 20 is NOT in the table (rollback worked).
+        let check = adapter
+            .execute_query(
+                &format!("SELECT id FROM {} WHERE id = 20", table),
+                100,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            check.output,
+            json!([]),
+            "rollback must remove the first INSERT too"
+        );
+        teardown(&adapter, &table).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn pc_multistatement_insert_then_select_returns_rows() {
+        let Some(adapter) = test_adapter().await else {
+            return;
+        };
+        let table = setup_test_table(&adapter, "ins_sel").await;
+        let q = format!(
+            "INSERT INTO {t} (id, name) VALUES (30, 'a'), (31, 'b');\n\
+             SELECT id, name FROM {t} WHERE id IN (30, 31) ORDER BY id;",
+            t = table
+        );
+
+        let r = adapter.execute_query(&q, 100, None).await.unwrap();
+
+        assert_eq!(r.row_count, 2);
+        let arr = r.output.as_array().unwrap();
+        assert_eq!(arr[0]["id"], 30);
+        assert_eq!(arr[1]["name"], "b");
+        teardown(&adapter, &table).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn pc_multistatement_intermediate_select_rows_discarded() {
+        let Some(adapter) = test_adapter().await else {
+            return;
+        };
+        let table = setup_test_table(&adapter, "inter_sel").await;
+        let q = format!(
+            "SELECT id FROM {t} WHERE id < 100;\n\
+             INSERT INTO {t} (id, name) VALUES (40, 'a');\n\
+             SELECT id FROM {t} WHERE id = 40;",
+            t = table
+        );
+
+        let r = adapter.execute_query(&q, 100, None).await.unwrap();
+
+        // Only the final SELECT's rows returned (the table started empty).
+        let arr = r.output.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "only the final SELECT contributes rows");
+        assert_eq!(arr[0]["id"], 40);
+        teardown(&adapter, &table).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn pc_limit_applies_only_to_final_select() {
+        let Some(adapter) = test_adapter().await else {
+            return;
+        };
+        let table = setup_test_table(&adapter, "limit").await;
+        // Insert 5 rows; SELECT with max_rows=2 → expect truncation.
+        let q = format!(
+            "INSERT INTO {t} (id, name) VALUES \
+              (50,'a'),(51,'b'),(52,'c'),(53,'d'),(54,'e');\n\
+             SELECT id FROM {t} WHERE id BETWEEN 50 AND 54 ORDER BY id;",
+            t = table
+        );
+
+        let r = adapter.execute_query(&q, 2, None).await.unwrap();
+
+        assert!(r.truncated, "LIMIT injection must take effect");
+        assert_eq!(r.row_count, 2);
+        teardown(&adapter, &table).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn pc_multiline_formatting_single_statement_works() {
+        let Some(adapter) = test_adapter().await else {
+            return;
+        };
+        let table = setup_test_table(&adapter, "multiline").await;
+        // Single statement formatted across multiple lines — sqlparser
+        // already handles whitespace; this just confirms Política C doesn't
+        // regress single-statement multi-line.
+        let q = format!(
+            "INSERT INTO {}\n  (id, name)\nVALUES\n  (60, 'a'),\n  (61, 'b')",
+            table
+        );
+
+        let r = adapter.execute_query(&q, 100, None).await.unwrap();
+
+        assert_eq!(r.output, json!({"rows_affected": 2}));
+        teardown(&adapter, &table).await;
     }
 }

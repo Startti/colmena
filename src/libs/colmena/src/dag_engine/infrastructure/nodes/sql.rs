@@ -393,7 +393,10 @@ impl ExecutableNode for SqlNode {
         let session_id = Self::new_session_id();
         let schema_context = init.description_supplement.clone();
 
-        println!("[SqlNode] Executing: {}", &query[..query.len().min(100)]);
+        // Use char-based truncation to avoid panicking on multi-byte UTF-8
+        // characters that straddle byte index 100.
+        let preview: String = query.chars().take(100).collect();
+        println!("[SqlNode] Executing: {}", preview);
 
         match service
             .execute(
