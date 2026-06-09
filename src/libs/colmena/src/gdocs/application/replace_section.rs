@@ -111,9 +111,28 @@ pub async fn run_append_markdown(
     let guard = run_guard(ctx, doc_id, &Scope::All).await?;
     let snap = &guard.snapshot;
 
+    // Resolve EndOfSegment to a concrete index. The Docs API requires
+    // insertText.location.index to be INSIDE an existing paragraph
+    // (i.e. before its terminating newline). For a tab with content
+    // that's `last_paragraph.end_index - 1`. For an empty doc (no
+    // paragraphs at all), index 1 is the only legal position.
+    let tab_paras: Vec<_> = snap
+        .tabs
+        .iter()
+        .filter(|t| input.tab_id.is_none() || t.tab_id == input.tab_id)
+        .flat_map(|t| t.paragraphs.iter())
+        .collect();
+    let insert_index = tab_paras
+        .iter()
+        .map(|p| p.end_index)
+        .max()
+        .map(|e| e.saturating_sub(1).max(1))
+        .unwrap_or(1);
+
     let conv = markdown_to_requests(
         &input.new_markdown,
-        InsertionPoint::EndOfSegment {
+        InsertionPoint::Index {
+            index: insert_index,
             tab_id: input.tab_id.clone(),
         },
     );

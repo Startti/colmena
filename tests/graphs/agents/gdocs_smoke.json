@@ -1,5 +1,5 @@
 {
-  "_comment": "Subsistema G smoke — Google Docs. The agent creates a doc from markdown, reads the outline, replaces a token, adds a tab, exports as PDF, and reports the resulting URL. Requires GOOGLE_APPLICATION_CREDENTIALS + COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID env vars and a Drive folder shared (Edit) with the SA. Run: `set -a; source .env; set +a; cargo run --bin dag_engine -- run tests/graphs/agents/gdocs_smoke.json --agent-session-id g_smoke_$(date +%s) --include-extra-info`",
+  "_comment": "Subsistema G smoke v2 — Google Docs. El usuario creó un doc vacío en su Drive y lo compartió con la SA como Editor. El agente PRIMERO popula contenido vía append_markdown, después ejerce read/replace/style/insert/export. add_tab se omite porque requiere multi-tab content support (limitación de Google Docs API en docs legacy). Run: `set -a; source .env; set +a; export GOOGLE_APPLICATION_CREDENTIALS=~/colmena-sa.json; cargo run --bin dag_engine -- run tests/graphs/agents/gdocs_smoke.json --agent-session-id g_smoke_$(date +%s) --include-extra-info`",
   "nodes": {
     "trigger": {
       "type": "trigger_webhook",
@@ -7,7 +7,8 @@
         "path": "/g-smoke",
         "method": "POST",
         "test_payload": {
-          "prompt": "Run a Google Docs smoke. Use ONLY these exact tool names (all start with the gdocs_ prefix):\n\n1. Call gdocs_create_from_markdown({title: 'Colmena G Smoke <UTC timestamp>', markdown: '# Reporte\\n\\nEste es el __PLACEHOLDER__ original.\\n\\n## Detalles\\n\\nMás contexto aquí.\\n'}). Capture meta.doc_id and meta.url from the response.\n2. Call gdocs_read_outline({doc_id}). Confirm there is at least one heading_1 entry titled 'Reporte'.\n3. Call gdocs_replace_text({doc_id, find: '__PLACEHOLDER__', replace: 'contenido final'}). Confirm at least one change in the response.\n4. Call gdocs_add_tab({doc_id, title: 'Anexo'}).\n5. Call gdocs_list_tabs({doc_id}). Confirm the 'Anexo' tab is present.\n6. Call gdocs_export({doc_id, format: 'pdf'}). The response is an attachment reference — note its document_id.\n7. Final report (under 200 words): the doc url, the replace_text change count, the tab titles you observed, and the exported PDF attachment id."
+          "doc_id": "1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k",
+          "prompt": "El usuario te comparte un Google Doc para que validés la integración. El doc_id es `1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k`. Ya está compartido con la cuenta de servicio (Editor). El doc puede estar vacío — la primera tool del flujo agrega contenido.\n\nEjecutá esta secuencia EXACTA usando los nombres de tools tal cual (todos empiezan con gdocs_):\n\n1. gdocs_append_markdown({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', markdown: '# Reporte de prueba\\n\\nEste es el __PLACEHOLDER__ original que el agente va a reemplazar.\\n\\n## Detalles\\n\\nMás contexto sobre el reporte va acá.\\n\\n## Conclusiones\\n\\nUna sección para conclusiones.\\n'}). Esto inserta el contenido base al final del doc.\n\n2. gdocs_read_outline({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k'}). Anotá cuántos párrafos hay y cuántos son de tipo heading_1 o heading_2.\n\n3. gdocs_read_as_markdown({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k'}). Esto te trae el doc convertido a markdown. Anotá el primer encabezado que ves y un par de palabras del primer párrafo de texto normal.\n\n4. gdocs_replace_text({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', find: '__PLACEHOLDER__', replace: 'contenido reemplazado por el agente'}). Anotá cuántos cambios reportó.\n\n5. gdocs_style_text({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', find: 'Reporte de prueba', style: {bold: true, foreground: {r: 0.1, g: 0.4, b: 0.8}}, occurrence: 1}). Esto pone en negrita azul la primera ocurrencia.\n\n6. gdocs_insert_after_text({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', anchor: 'Conclusiones', new_markdown: '\\n\\nEsta sección fue agregada por el agente como parte del smoke test.\\n'}).\n\n7. gdocs_export({doc_id: '1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k', format: 'pdf'}). Anotá el byte_len y el note de la respuesta.\n\n8. Reporte final (máximo 300 palabras): Para cada uno de los 7 pasos describí en 1-2 oraciones qué hiciste, qué te devolvió la tool, y si fue exitoso o no. Si algo falló incluí el mensaje de error tal cual. NO inventes datos. Al final pegá la URL del doc para que el user pueda verlo: https://docs.google.com/document/d/1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k/edit"
         }
       }
     },
@@ -18,16 +19,17 @@
         "api_key": "${GEMINI_API_KEY}",
         "model": "gemini-2.5-flash",
         "stream": false,
-        "max_iterations": 20,
+        "max_iterations": 25,
         "lazy_tool_loading": false,
         "connection_url": "${DATABASE_URL}",
-        "system_message": "You are an assistant exercising the Google Docs tool surface. Use ONLY the exact tool names provided in your tool schemas (they all start with gdocs_). Do NOT invent tool names or drop the prefix. Report what you observed at each step (heading count, change count, tab list, attachment id).",
+        "system_message": "Eres un asistente probando la integración de Google Docs en colmena. Usá ÚNICAMENTE los nombres de tools que aparecen en tus schemas (todos comienzan con gdocs_). No inventes nombres, no saques el prefijo. Si una tool falla, reportá el error estructurado tal cual te lo devuelve. Tu tarea es generar un reporte honesto: éxito o fallas detalladas.",
         "enabled_tools": [
-          "gdocs_create_from_markdown",
+          "gdocs_append_markdown",
           "gdocs_read_outline",
+          "gdocs_read_as_markdown",
           "gdocs_replace_text",
-          "gdocs_add_tab",
-          "gdocs_list_tabs",
+          "gdocs_style_text",
+          "gdocs_insert_after_text",
           "gdocs_export"
         ]
       }
