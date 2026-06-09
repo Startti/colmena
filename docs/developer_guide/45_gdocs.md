@@ -203,60 +203,144 @@ un heading que actúa como límite.
 
 ## Co-edit safety pipeline
 
-> **Pivot de diseño v1 (2026-06-09).** La spec original proponía un
-> diff párrafo-por-párrafo del delta humano, derivado del log de
-> revisiones de Drive. **Esto no es factible para Google Docs nativos:**
-> `drive.revisions.list` solo devuelve _named versions_ (snapshots
-> explícitos), no el log granular de ediciones individuales. v1 hace
-> **revisionId equality check**: si la revisión actual difiere de la
-> guardada, devolvemos `human_changes_pending` con la señal
-> "algo cambió" — pero **sin diff per-paragraph**. El agente decide
-> ciegamente si acknowledge o leer el doc antes. El diff per-paragraph
-> queda como item v1.1 (ver BACKLOG → Subsystem G v1.1).
+> **v1.1 shipped 2026-06-09 — paragraph-level diff disponible.** Cuando
+> hay drift, el agente recibe la lista concreta de cambios humano
+> (`changes_overlapping_scope`, `changes_outside_scope`) con
+> `before_text` y `after_text` por cambio. Cambios fuera del scope
+> intencionado pasan como `soft_warnings` y el edit procede.
+> v1 (2026-06-08) había shippeado solo con revisionId equality —
+> ahora ese path es el "degraded mode" cuando no hay snapshot stored
+> (instancias sin migration aplicada o docs >1 MB).
+
+### Pipeline (v1.1)
 
 Antes de cualquier write:
 
 1. `agent_session_id` (estable) + `doc_id` keyean el cursor en
    `gdocs_session_state(agent_session_id, document_id, last_revision_id,
-   updated_at)`.
-2. El dispatcher fetcha la revisión actual del doc (cached) y la compara
-   con el cursor guardado.
-3. Si `current_revision_id != last_known_revision_id`, devuelve
-   `human_changes_pending` con `{since, current_revision_id}` — sin lista
-   de cambios por paragraph (limitación v1).
-4. El agente puede:
-   - llamar `gdocs_acknowledge_human_changes` (fija el cursor a la
-     revisión actual y reintenta), o
-   - leer `gdocs_read_outline` / `gdocs_read_as_markdown` para entender
-     qué cambió, replantear, y luego acknowledge.
+   last_snapshot_json, last_snapshot_size_bytes, last_edit_at)`.
+2. El dispatcher fetcha la revisión actual del doc (cached 5s) y la
+   compara con el cursor guardado.
+3. Si revisiones coinciden o es first contact → proceed.
+4. Si revisiones difieren y **hay un snapshot guardado** → diff
+   párrafo-por-párrafo (Myers via crate `similar`) entre el snapshot
+   prior y el current, particionado por overlap con el scope intencionado:
+   - Algún cambio **dentro del scope** → block con
+     `human_changes_pending` populado con `changes_overlapping_scope` +
+     `changes_outside_scope`.
+   - Todos los cambios **fuera del scope** → proceed con
+     `soft_warnings` (cambios outside listados para awareness, no
+     bloquean).
+5. Si revisiones difieren y **no hay snapshot stored** (degraded mode)
+   → block conservador con listas vacías (comportamiento v1).
 
-El cursor se actualiza después de **cada** write exitoso (`replace_*`,
-`insert_*`, `delete_*`, `append_*`, `apply_edits`, `style_text`,
-`*_named_range`). Operaciones de creación (`gdocs_create*`) inicializan
-el cursor con la revisión inicial del doc recién creado.
+El cursor + snapshot se actualizan después de **cada** write exitoso
+(`replace_*`, `insert_*`, `delete_*`, `append_*`, `apply_edits`,
+`style_text`, `*_named_range`). El snapshot que se persiste es el mismo
+que ya hidratamos para construir `outline_snapshot` en `EditResult` —
+cero API calls extra.
 
-**Detalle de implementación importante (fix `de05cbf`, 2026-06-09).**
-Los use cases en `application/` guardaban el `writeControl.requiredRevisionId`
-que devuelve `batchUpdate` (~25 chars) como `last_revision_id`. Pero el
-ID que devuelve `documents.get` es distinto (~111 chars). El siguiente
-guard chequeaba el del `get` contra el guardado del `batch_update` →
-falso positivo `human_changes_pending` en cada turno. v1 ahora **siempre
-captura `revision_id` desde un snapshot `documents.get` post-write** y lo
-fija como cursor. El campo de `batchUpdate` se descarta.
+El agente puede:
+- llamar `gdocs_acknowledge_human_changes` (fija el cursor a la
+  revisión actual y captura el snapshot fresh como nuevo baseline), o
+- replantear el edit con los cambios humanos visibles, o
+- leer `gdocs_read_outline` / `gdocs_read_as_markdown` para más
+  contexto (pero rara vez es necesario en v1.1 — el diff ya viene).
 
-### Tabla postgres
+### Formato del error (v1.1)
+
+```json
+{
+  "error": "human_changes_pending",
+  "since": "2026-06-09T23:25:13Z",
+  "changes_overlapping_scope": [
+    {
+      "kind": "modify",
+      "paragraph": 7,
+      "tab_id": "Plan",
+      "preview": "Objetivo 4: ... Modificado por humano: 11:25pm",
+      "before_text": "Objetivo 4: Desplegar el backend en GCP.",
+      "after_text": "Objetivo 4: Desplegar el backend en GCP. Modificado por humano: 11:25pm",
+      "modified_time": "2026-06-09T23:25:13Z",
+      "modifying_user": null
+    }
+  ],
+  "changes_outside_scope": [
+    {
+      "kind": "insert",
+      "paragraph": 12,
+      "tab_id": "Anexo",
+      "preview": "Objetivo 5: Documentación de los endpoints",
+      "before_text": null,
+      "after_text": "Objetivo 5: Documentación de los endpoints",
+      "modified_time": "2026-06-09T23:25:13Z",
+      "modifying_user": null
+    }
+  ],
+  "advice": "Human modified the paragraph you targeted...",
+  "valid_next_moves": ["acknowledge_human_changes", "read_as_markdown", "replace_section"]
+}
+```
+
+`modifying_user` queda `None` en v1.1 — no tenemos per-edit attribution
+de Google. `modified_time` es la hora de detección del drift, no la
+hora real del humano.
+
+### Cap de snapshot y modo degraded
+
+El snapshot serializado tiene un cap de **1 MB** (1,048,576 bytes) por
+defecto, configurable con `COLMENA_GDOCS_MAX_SNAPSHOT_BYTES`. Si un doc
+supera el cap, el snapshot se descarta (NULL) y ese (session, doc)
+funciona en modo degraded — block conservador con listas vacías. Log
+warn: `gdocs.snapshot.too_large` con bytes + cap + doc_id.
+
+El modo degraded también dispara automáticamente cuando una instancia
+arranca contra una DB sin la migración `20260609000000_gdocs_session_state_snapshot.sql`
+aplicada — el adapter detecta la ausencia de las columnas vía
+`information_schema.columns` y loguea una sola vez al boot:
+
+```
+gdocs: last_snapshot_json column missing on gdocs_session_state;
+co-edit guard degrades to v1 (revisionId equality only).
+Apply migration 20260609000000_gdocs_session_state_snapshot.sql
+```
+
+No crash, no data loss; solo se pierde el diff per-paragraph hasta
+aplicar la migración.
+
+### Tabla postgres (v1.1)
 
 ```sql
 CREATE TABLE IF NOT EXISTS gdocs_session_state (
-  agent_session_id TEXT NOT NULL,
-  document_id      TEXT NOT NULL,
-  last_revision_id TEXT NOT NULL,
-  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  agent_session_id         TEXT        NOT NULL,
+  document_id              TEXT        NOT NULL,
+  last_revision_id         TEXT        NOT NULL,
+  last_snapshot_json       JSONB,                -- v1.1
+  last_snapshot_size_bytes INTEGER,              -- v1.1
+  last_edit_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (agent_session_id, document_id)
 );
 ```
 
-Migración: `src/libs/colmena/migrations/<n>_gdocs_session_state.sql`.
+Migraciones:
+- `20260608000000_gdocs_session_state.sql` (v1 base)
+- `20260609000000_gdocs_session_state_snapshot.sql` (v1.1 extension —
+  additive `ALTER TABLE ADD COLUMN IF NOT EXISTS`).
+
+### Limitaciones residuales (v1.1)
+
+- **No detecta cambios solo de estilo** (bold/italic sin tocar texto).
+  v1.1 compara solo texto; v1.2 agregará `style_hash` al snapshot.
+- **No detecta cambios intra-paragraph carácter-perfecto.** Si dos
+  ediciones humanas y agentes apuntan a partes distintas del mismo
+  párrafo, v1.1 lo trata como un único Modify del párrafo entero.
+  Detalle character-level queda para v1.2.
+- **No atribuye a un usuario específico.** Sin per-edit log de Google,
+  `modifying_user: null` siempre. Si Google expone fine-grained edit
+  log en el futuro, lo wireamos directo.
+- **Docs >1 MB de snapshot** funcionan en modo degraded — sin diff,
+  block conservador. Configurable vía
+  `COLMENA_GDOCS_MAX_SNAPSHOT_BYTES`.
 
 ## Conversión markdown ↔ Docs
 
@@ -370,14 +454,13 @@ explícita. Workaround v1: crear el tab vacío y luego llamar
 `gdocs_append_markdown` con el `tab_id` devuelto. v1.1 lo hará en un
 paso.
 
-### 5. Co-edit guard sin diff per-paragraph
+### 5. ~~Co-edit guard sin diff per-paragraph~~ — shipped en v1.1 (2026-06-09)
 
-Como explicó la sección anterior, `human_changes_pending` señala que
-algo cambió pero no devuelve la lista de paragraphs afectados. El
-agente debe llamar `read_outline` o `read_as_markdown` antes de
-acknowledge si necesita saber qué cambió. v1.1 traerá el diff
-estructurado (requiere snapshot caching en postgres porque Drive no
-expone el log de ediciones).
+v1.1 trae el diff estructurado vía snapshot caching en postgres. Ver
+"Co-edit safety pipeline" arriba para el formato del error y el modo
+degraded cuando la migración no está aplicada. Limitaciones residuales
+(solo-estilo, intra-paragraph carácter-perfecto, atribución a usuario)
+listadas al final de esa sección.
 
 ## Out of scope for v1 (BACKLOG)
 
