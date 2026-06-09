@@ -2168,6 +2168,150 @@ impl ExecutableNode for LlmNode {
             }
         }
 
+        // ---- gdocs synthetic tools — Subsystem G v1 (22 tools) ------------------
+        //
+        // Same pattern as the gsheets block above: builds the `wants` set
+        // from `enabled_tools`, then pushes each opted-in tool definition
+        // onto `tools`. Improvement over gsheets: also resolves the
+        // `gdocs` / `gdocsread` toolkit-package aliases (via `find_package`)
+        // so `enabled_tools: ["gdocs"]` works as flag-only activation.
+        //
+        // Honors `lazy_tool_loading` identically.
+        {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
+                dispatch_gdocs_acknowledge_human_changes as _dispatch_unused, find_package,
+                gdocs_tool_acknowledge_human_changes, gdocs_tool_add_tab,
+                gdocs_tool_append_markdown, gdocs_tool_apply_edits, gdocs_tool_create,
+                gdocs_tool_create_from_docx, gdocs_tool_create_from_markdown,
+                gdocs_tool_create_named_range, gdocs_tool_delete_text, gdocs_tool_export,
+                gdocs_tool_insert_after_text, gdocs_tool_insert_before_text,
+                gdocs_tool_insert_between, gdocs_tool_list_named_ranges, gdocs_tool_list_tabs,
+                gdocs_tool_read_as_markdown, gdocs_tool_read_outline,
+                gdocs_tool_replace_named_range, gdocs_tool_replace_section,
+                gdocs_tool_replace_text, gdocs_tool_share, gdocs_tool_style_text,
+                GDOCS_ACKNOWLEDGE_HUMAN_CHANGES_TOOL, GDOCS_ADD_TAB_TOOL,
+                GDOCS_APPEND_MARKDOWN_TOOL, GDOCS_APPLY_EDITS_TOOL, GDOCS_CREATE_FROM_DOCX_TOOL,
+                GDOCS_CREATE_FROM_MARKDOWN_TOOL, GDOCS_CREATE_NAMED_RANGE_TOOL,
+                GDOCS_CREATE_TOOL, GDOCS_DELETE_TEXT_TOOL, GDOCS_EXPORT_TOOL,
+                GDOCS_INSERT_AFTER_TEXT_TOOL, GDOCS_INSERT_BEFORE_TEXT_TOOL,
+                GDOCS_INSERT_BETWEEN_TOOL, GDOCS_LIST_NAMED_RANGES_TOOL, GDOCS_LIST_TABS_TOOL,
+                GDOCS_READ_AS_MARKDOWN_TOOL, GDOCS_READ_OUTLINE_TOOL,
+                GDOCS_REPLACE_NAMED_RANGE_TOOL, GDOCS_REPLACE_SECTION_TOOL,
+                GDOCS_REPLACE_TEXT_TOOL, GDOCS_SHARE_TOOL, GDOCS_STYLE_TEXT_TOOL,
+            };
+            // Silence the unused-import lint — we only import the dispatch
+            // symbol here so the compiler enforces the link in the
+            // generated re-export block; it's not called from this file.
+            let _ = _dispatch_unused;
+
+            let all_gdocs: [&str; 22] = [
+                GDOCS_CREATE_TOOL,
+                GDOCS_CREATE_FROM_MARKDOWN_TOOL,
+                GDOCS_CREATE_FROM_DOCX_TOOL,
+                GDOCS_SHARE_TOOL,
+                GDOCS_EXPORT_TOOL,
+                GDOCS_LIST_TABS_TOOL,
+                GDOCS_ADD_TAB_TOOL,
+                GDOCS_READ_AS_MARKDOWN_TOOL,
+                GDOCS_READ_OUTLINE_TOOL,
+                GDOCS_LIST_NAMED_RANGES_TOOL,
+                GDOCS_REPLACE_TEXT_TOOL,
+                GDOCS_INSERT_AFTER_TEXT_TOOL,
+                GDOCS_INSERT_BEFORE_TEXT_TOOL,
+                GDOCS_INSERT_BETWEEN_TOOL,
+                GDOCS_DELETE_TEXT_TOOL,
+                GDOCS_REPLACE_SECTION_TOOL,
+                GDOCS_APPEND_MARKDOWN_TOOL,
+                GDOCS_APPLY_EDITS_TOOL,
+                GDOCS_STYLE_TEXT_TOOL,
+                GDOCS_CREATE_NAMED_RANGE_TOOL,
+                GDOCS_REPLACE_NAMED_RANGE_TOOL,
+                GDOCS_ACKNOWLEDGE_HUMAN_CHANGES_TOOL,
+            ];
+
+            // Build wants. Three input shapes plus alias expansion.
+            let mut wants: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            let absorb_one = |s: &str, wants: &mut std::collections::HashSet<&str>| {
+                if s == "*" {
+                    for t in &all_gdocs {
+                        wants.insert(t);
+                    }
+                } else if let Some(pkg) = find_package(s) {
+                    for t in pkg.tools {
+                        // Only include the tool name if it's actually a gdocs tool —
+                        // pkg.tools may include gsheets entries for the gsheets pkg.
+                        if all_gdocs.contains(t) {
+                            wants.insert(t);
+                        }
+                    }
+                } else if all_gdocs.contains(&s) {
+                    wants.insert(
+                        all_gdocs
+                            .iter()
+                            .find(|t| **t == s)
+                            .copied()
+                            .expect("just matched"),
+                    );
+                }
+            };
+            match enabled_tools_config {
+                Some(Value::String(s)) => absorb_one(s.as_str(), &mut wants),
+                Some(Value::Array(arr)) => {
+                    for v in arr {
+                        if let Some(s) = v.as_str() {
+                            absorb_one(s, &mut wants);
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            let gdocs_entries: [(&str, fn() -> crate::llm::domain::ToolDefinition); 22] = [
+                (GDOCS_CREATE_TOOL, gdocs_tool_create),
+                (GDOCS_CREATE_FROM_MARKDOWN_TOOL, gdocs_tool_create_from_markdown),
+                (GDOCS_CREATE_FROM_DOCX_TOOL, gdocs_tool_create_from_docx),
+                (GDOCS_SHARE_TOOL, gdocs_tool_share),
+                (GDOCS_EXPORT_TOOL, gdocs_tool_export),
+                (GDOCS_LIST_TABS_TOOL, gdocs_tool_list_tabs),
+                (GDOCS_ADD_TAB_TOOL, gdocs_tool_add_tab),
+                (GDOCS_READ_AS_MARKDOWN_TOOL, gdocs_tool_read_as_markdown),
+                (GDOCS_READ_OUTLINE_TOOL, gdocs_tool_read_outline),
+                (GDOCS_LIST_NAMED_RANGES_TOOL, gdocs_tool_list_named_ranges),
+                (GDOCS_REPLACE_TEXT_TOOL, gdocs_tool_replace_text),
+                (GDOCS_INSERT_AFTER_TEXT_TOOL, gdocs_tool_insert_after_text),
+                (GDOCS_INSERT_BEFORE_TEXT_TOOL, gdocs_tool_insert_before_text),
+                (GDOCS_INSERT_BETWEEN_TOOL, gdocs_tool_insert_between),
+                (GDOCS_DELETE_TEXT_TOOL, gdocs_tool_delete_text),
+                (GDOCS_REPLACE_SECTION_TOOL, gdocs_tool_replace_section),
+                (GDOCS_APPEND_MARKDOWN_TOOL, gdocs_tool_append_markdown),
+                (GDOCS_APPLY_EDITS_TOOL, gdocs_tool_apply_edits),
+                (GDOCS_STYLE_TEXT_TOOL, gdocs_tool_style_text),
+                (GDOCS_CREATE_NAMED_RANGE_TOOL, gdocs_tool_create_named_range),
+                (GDOCS_REPLACE_NAMED_RANGE_TOOL, gdocs_tool_replace_named_range),
+                (
+                    GDOCS_ACKNOWLEDGE_HUMAN_CHANGES_TOOL,
+                    gdocs_tool_acknowledge_human_changes,
+                ),
+            ];
+
+            for (name, builder) in gdocs_entries {
+                if !wants.contains(name) {
+                    continue;
+                }
+                if tools.iter().any(|t| t.name == name) {
+                    continue;
+                }
+                let td = builder();
+                if lazy_tool_loading {
+                    catalog.push(CatalogEntry {
+                        name: td.name.clone(),
+                        summary: summary_for_catalog(td.summary.as_deref(), &td.description),
+                    });
+                }
+                tools.push(td);
+            }
+        }
+
         // 2.2 Build the final system message. We assemble up to three sections,
         // each emitted only when relevant:
         //   - the user-provided `system_message` (if any),
