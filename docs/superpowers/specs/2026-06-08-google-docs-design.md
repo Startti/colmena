@@ -1083,3 +1083,48 @@ None at design time. Decisions explicit in §2 (scope), §3 (architecture),
 If a reviewer wants to bring forward a v1.1 item (e.g. suggesting mode,
 table-cell edits, comments API), move the row from §14 to §15 and the
 plan grows by ~200-500 LOC per item.
+
+---
+
+## 17. Live verification findings 2026-06-09
+
+End-to-end verification ran against a real user-shared Google Doc
+(`1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k`) with SA
+`colmena-sheets-tester@startti-dev.iam.gserviceaccount.com`. The full
+co-edit flow ("agent builds plan in new tab → user manually edits doc
+mid-session → agent's next replace_text gets `human_changes_pending` →
+agent calls `acknowledge_human_changes` → retry succeeds") was verified
+green at 04:25 UTC.
+
+Nine post-spec bug fixes landed during verification:
+
+| # | Commit | What was broken | Fix |
+|---|---|---|---|
+| 1 | `b82bd35` | `llm.rs` registry didn't expose the gdocs tools — LLM only saw `recall_history` | Added the 22 gdocs dispatchers to the synthetic-tool enumeration |
+| 2 | `79eae72` | Default scope `drive.file` rejected user-shared docs with `appNotAuthorizedToFile` | Changed default to `drive` (full scope); operators can still downgrade |
+| 3 | `8c9ea0e` | `gdocs_append_markdown` used placeholder `index: 0` → HTTP 400 from Google | Computed the real end-of-segment index from the snapshot |
+| 4 | `940d508` | `gdocs_list_tabs` returned empty because the HTTP client called `documents.get` with `includeTabsContent=false` and Google omits the tabs field entirely in that mode | Switched to `includeTabsContent=true` |
+| 5 | `baaf48d` | `markdown_to_docs_ops` didn't emit `location.tabId` AND `add_tab` didn't invalidate the outline cache → all content seeded after `add_tab` landed on tab 1 instead of the new tab | Emit `tabId` in every `location`/`range`; invalidate cache after `add_tab` |
+| 6 | `8de4922` | Application use cases emitted `range` / `location` JSON without `tabId` for content-addressed edits → `replace_text` reported success but the batchUpdate landed in tab 1 because Google defaulted | Pass-through `tab_id` from the resolved scope into every emitted request |
+| 7 | `081b0d2` | Dispatcher keyed `gdocs_session_state` on the CLI-ephemeral `session_id` (UUID per invocation), so co-edit cursors never survived a single run | Switched to `agent_session_id` (stable across runs — same rule as gsheets, llm_history, dag_runs) |
+| 8 | `c868794` | **Design pivot.** Spec §8 assumed Drive Revisions API exposed per-edit revisions usable for paragraph-level diff. Empirically Drive only returns _named versions_ for native Google Docs (not per-edit log). | Pivoted v1 to **revisionId equality check only** — `human_changes_pending` signals "something changed" but does not include the diff. Paragraph-level diff moves to v1.1 (requires colmena-side snapshot caching, see BACKLOG) |
+| 9 | `de05cbf` | Use cases stored `batch_update`'s `writeControl.requiredRevisionId` (~25 chars) as the cursor; the next guard chunked `documents.get`'s `revisionId` (~111 chars) and got a mismatch → false `human_changes_pending` on every turn | After every successful write, fetch a fresh `documents.get` snapshot and store its `revisionId` as the new cursor |
+
+**Operational findings.** Documented in dev guide §"Limitaciones en v1":
+(i) `create_*` fails on personal Gmail folders by
+`storageQuotaExceeded` — realistic v1 pattern is "user-creates-first";
+(ii) `dispatch_create_from_docx` returns `not_yet_wired` (attachment
+plumbing v1.1); (iii) `dispatch_export` returns `byte_len` without
+wrapping bytes as an attachment (v1.1); (iv) `add_tab` with `markdown`
+arg responds `pending_markdown_seed: true` and does not seed content
+(v1.1); (v) `add_tab` works on legacy single-tab docs — the previous
+belief that it didn't was a masking effect from bug #4.
+
+**Spec sections superseded by this appendix:**
+- §8 "Co-edition safety pipeline" — the `diff_outlines` + per-paragraph
+  attribution flow described there is **not v1**. v1 ships revisionId
+  equality only. The full per-paragraph diff vision is preserved as a
+  v1.1 target.
+- §6 "Tool surface — agent-facing", `gdocs_create_from_docx` /
+  `gdocs_export` / `gdocs_add_tab(markdown)` — dispatchers exist but
+  return structured "deferred" markers.

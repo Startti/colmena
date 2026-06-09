@@ -448,25 +448,69 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
 
 ## Subsystem G v1.1 (Google Docs)
 
+> Refreshed 2026-06-09 post live verification. Los items abajo reflejan
+> el shape real de v1 shipped (ver §17 de la
+> [spec](superpowers/specs/2026-06-08-google-docs-design.md)) y los
+> hallazgos operacionales documentados en
+> [`developer_guide/45_gdocs.md`](developer_guide/45_gdocs.md) §"Limitaciones
+> en v1".
+
+- [ ] **OAuth user-scoped flow** — bloqueante para "cualquier Gmail user
+  puede usar el agente sin Shared Drive". Hoy `create_*` solo funciona
+  con Workspace Shared Drives o DWD por la quota cero del SA. Con
+  OAuth user-scoped (consent screen + refresh_token storage + ciclo
+  de refresh + `OAuthDocsClient` adapter alternativo), los archivos
+  creados quedan owned directamente por el usuario. ~1-2 semanas dev.
+  Misma raíz que la línea equivalente en Subsystem E v1.1.
+- [ ] **Paragraph-level human-change diff en `human_changes_pending`** —
+  el v1 pivotó a revisionId equality check porque `drive.revisions.list`
+  para Google Docs nativos no devuelve log per-edit, solo named versions.
+  Hoy el agente recibe solo "algo cambió" sin saber qué. Dos caminos
+  para v1.1:
+  - **Camino A (preferido):** colmena cachea snapshots prior en una
+    nueva tabla `gdocs_snapshot_cache(revision_id, document_id, snapshot_json)`
+    post-write. Cuando el guard detecta drift, hace `documents.get`
+    actual + lookup del snapshot anterior + diff párrafo-por-párrafo
+    usando `similar` crate. Storage cost: ~50-500 KB per revision per
+    doc, con TTL configurable. Cleanup via `attachment_gc` pattern.
+  - **Camino B (depende de Google):** si en el futuro Google expone
+    per-edit revisions para Docs nativos (hoy solo binary files),
+    revertir al diseño original §8 sin caching. Bajo control externo.
+- [ ] **`add_tab` markdown seeding** — hoy el arg `markdown` se acepta
+  pero la response incluye `pending_markdown_seed: true` y el contenido
+  no se aplica. Implementar: post-creación del tab, llamar el converter
+  + `batch_update` con `tabId` del nuevo tab. ~30 LOC en el dispatcher.
+- [ ] **`dispatch_create_from_docx` attachment plumbing** — el dispatcher
+  devuelve `not_yet_wired`. Necesita attachment-byte fetcher
+  threaded a `DagToolExecutor` (mismo bloqueo que E-T7b en gsheets).
+  Una vez fixed, ambos features (gsheets + gdocs) se desbloquean
+  simultáneamente.
+- [ ] **`dispatch_export` attachment wrapping** — hoy devuelve
+  `{format, byte_len}`. Falta envolver los bytes en un attachment
+  registrado para que downstream pueda re-compartirlo. Mismo plumbing
+  que E-T7b (register-bytes path).
 - [ ] **`mode: "suggest"`** — `writeControl.suggestionsEnabled` (parámetro
   aceptado pero no-op en v1; el agente recibe un warning si lo pasa).
 - [ ] **Surgical table-cell edits** (`gdocs_set_table_cell`,
-  `gdocs_insert_table_row`).
-- [ ] **Markdown tables en insert/replace** — requiere round-trip snapshot
-  para computar índices de celda. Hoy se rechazan con `invalid_args`.
-- [ ] **Drive Comments API** — mensajería humano ↔ agente in-doc
-  (`gdocs_add_comment`, `gdocs_resolve_comment`, etc.).
-- [ ] **`gdocs_acknowledge_human_changes` enriquecido** — cheap-tier LLM
-  summary del delta + warnings de conflictos detectados antes de
-  reescribir.
+  `gdocs_insert_table_row`). Hoy las tablas existen en el doc (Drive
+  las convierte nativamente desde markdown en `create_from_markdown`)
+  pero el agente no puede editar celdas individuales sin un round-trip
+  manual.
 - [ ] **`gdocs_insert_image_after_text`** (sabores `attachment_id` + URL).
-- [ ] **Plumbing de attachments** para `gdocs_create_from_docx` (load
-  bytes) y `gdocs_export` (register attachment). Comparte raíz con
-  E-T7b (gsheets xlsx).
+  Hoy no existe — markdown images en inserts pasan como lossy. Requiere
+  attachment fetcher (shared root con `create_from_docx`).
+- [ ] **Drive Comments API** — mensajería humano ↔ agente in-doc
+  (`gdocs_add_comment`, `gdocs_resolve_comment`, `gdocs_list_comments`).
+  Útil para el flujo de revisión donde el humano deja TODO comments y
+  el agente los procesa.
 - [ ] **`gdocs_list_documents`** — descubrimiento scoped a folder via
   Drive (`drive.files.list?q=mimeType='application/vnd.google-apps.document'`).
-- [ ] **OAuth user-scoped auth** — hoy solo SA + ADC. Misma raíz que la
-  línea equivalente en Subsystem E v1.1.
+  Hoy el agente solo opera sobre `doc_id` recibidos en el prompt o
+  input del grafo.
+- [ ] **Markdown tables en insert/replace** — requiere round-trip snapshot
+  para computar índices de celda. Hoy `gdocs_insert_*`,
+  `gdocs_replace_section`, `gdocs_append_markdown` y `gdocs_apply_edits`
+  rechazan markdown con tablas (`invalid_args`).
 - [ ] **Ejecución de Apps Script** desde colmena (`scripts.run`).
 - [ ] **Drive Revisions restore** (rollback a una revisión previa).
 - [ ] **Math expressions en markdown** — hoy pasan como `$…$` literal.

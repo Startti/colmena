@@ -649,3 +649,68 @@ aplicando.
 **Estado.** done.
 
 **Commits (G-T1 a G-T24).** Ver `git log develop --grep="gdocs"`.
+
+---
+
+## 16. Subsystem G live-verified + 9 fixes 2026-06-09
+
+**Qué pasó.** End-to-end verification del Subsystem G contra un Google
+Doc real compartido por el usuario
+(`1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k`, SA
+`colmena-sheets-tester@startti-dev.iam.gserviceaccount.com`). El flujo
+canónico funciona end-to-end:
+
+1. **Phase 1** — el agente arma su plan en un tab nuevo (`add_tab` +
+   content seeding via `apply_edits`).
+2. **Out-of-band** — el usuario edita el doc manualmente desde el browser.
+3. **Phase 2** — la siguiente `replace_text` del agente detecta drift y
+   devuelve `human_changes_pending`.
+4. **Acknowledge** — el agente llama `gdocs_acknowledge_human_changes`.
+5. **Retry** — la operación procede y completa exitosamente.
+
+Verificado live 2026-06-09 04:25 UTC.
+
+**Nueve fixes shipped durante la verification** (commits sobre `develop`):
+
+| Commit | Bug |
+|---|---|
+| `b82bd35` | `llm.rs` no exponía los gdocs tools — el LLM solo veía `recall_history` |
+| `79eae72` | Default scope `drive.file` rechazaba docs user-shared con `appNotAuthorizedToFile`. Cambiado a `drive` |
+| `8c9ea0e` | `append_markdown` usaba placeholder `index: 0` → HTTP 400 de Google |
+| `940d508` | `list_tabs` con `includeTabsContent=false` devolvía vacío (Google omite el field). Cambiado a `true` |
+| `baaf48d` | `markdown_to_docs_ops` no emitía `location.tabId`; `add_tab` no invalidaba el cache → contenido iba a tab 1 |
+| `8de4922` | Use cases application emitían `range`/`location` JSON sin `tabId` → `replace_text` decía "ok" pero escribía en la tab equivocada |
+| `081b0d2` | Dispatcher keyaba el cursor de co-edit en `session_id` (UUID ephemeral por CLI run). Cambiado a `agent_session_id` (estable, alineado con la regla de CLAUDE.md) |
+| `c868794` | **Pivot de diseño.** Drive Revisions API no devuelve log per-edit para Google Docs nativos (solo named versions). v1 ya NO ofrece diff párrafo-por-párrafo en `human_changes_pending` — solo señal "algo cambió". El diff completo queda para v1.1 con snapshot caching en postgres (ver BACKLOG) |
+| `de05cbf` | Use cases guardaban el `writeControl.requiredRevisionId` de `batch_update` (~25 chars) en vez del `revisionId` de `documents.get` (~111 chars) → falso positivo `human_changes_pending` en cada turno. Fixed capturando snapshot post-write |
+
+**Limitaciones operacionales documentadas** (ver
+[`developer_guide/45_gdocs.md`](developer_guide/45_gdocs.md) §"Limitaciones
+en v1"):
+
+- Realidad de ownership: `create_*` falla en folders personales de Gmail
+  por `storageQuotaExceeded` (SA con quota cero). Patrón v1 robusto =
+  "user-creates-first, agent-edits-only".
+- `add_tab` funciona en docs legacy single-tab (lo que se creía
+  inicialmente como limitación era el bug #4 enmascarando).
+- `add_tab` con arg `markdown` responde `pending_markdown_seed: true` y
+  no siembra contenido (v1.1).
+- `dispatch_create_from_docx` devuelve `not_yet_wired` (attachment
+  plumbing v1.1).
+- `dispatch_export` devuelve `byte_len` sin envolver bytes como
+  attachment (v1.1).
+
+**Documentación actualizada.**
+- [Spec §17 "Live verification findings 2026-06-09"](superpowers/specs/2026-06-08-google-docs-design.md)
+- [Dev guide](developer_guide/45_gdocs.md) — nueva sección "Limitaciones
+  en v1", co-edit pipeline reescrito alrededor del pivot, scope default
+  documentado.
+- [BACKLOG → Subsystem G v1.1](BACKLOG.md) — refreshed con 10 items
+  priorizados (OAuth user-scoped y paragraph-level diff arriba).
+
+**Impacto ADP.** Cero breaking changes adicionales. El feature shipped
+en §15 sigue siendo el mismo wire-format público; los 9 fixes son
+correcciones internas. La SA `colmena-sheets-tester` queda como SA de
+testing oficial para gdocs (mismo patrón que gsheets).
+
+**Estado.** done.
