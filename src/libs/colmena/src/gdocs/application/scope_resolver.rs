@@ -17,6 +17,22 @@ pub struct ResolvedScope {
     pub paragraph_end: u32,
 }
 
+impl ResolvedScope {
+    /// True if `(tab, n)` falls within this resolved scope.
+    ///
+    /// - When `self.tab_id` is `None` the scope is doc-wide; any tab matches.
+    /// - When `self.tab_id` is `Some(x)` the change's tab must equal `x`.
+    /// - `n` must be in `[paragraph_start, paragraph_end]` (inclusive).
+    pub fn contains_paragraph(&self, tab: Option<&TabId>, n: u32) -> bool {
+        let tab_ok = match (&self.tab_id, tab) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(a), Some(b)) => a == b,
+        };
+        tab_ok && n >= self.paragraph_start && n <= self.paragraph_end
+    }
+}
+
 /// Translate `scope` against `snap` into a `ResolvedScope`.
 pub fn resolve(scope: &Scope, snap: &DocumentSnapshot) -> Result<ResolvedScope, DocsError> {
     use Scope::*;
@@ -351,5 +367,35 @@ mod tests {
         assert_eq!(heading_level("###### A"), 6);
         assert_eq!(heading_level("####### A"), 6); // clamped
         assert_eq!(heading_level("plain"), 1); // no hashes → clamped
+    }
+
+    #[test]
+    fn contains_paragraph_respects_tab_and_range() {
+        let rs = ResolvedScope {
+            tab_id: Some(TabId("plan".into())),
+            paragraph_start: 5,
+            paragraph_end: 10,
+        };
+        // In tab, in range.
+        assert!(rs.contains_paragraph(Some(&TabId("plan".into())), 5));
+        assert!(rs.contains_paragraph(Some(&TabId("plan".into())), 10));
+        assert!(rs.contains_paragraph(Some(&TabId("plan".into())), 7));
+        // In tab, out of range.
+        assert!(!rs.contains_paragraph(Some(&TabId("plan".into())), 4));
+        assert!(!rs.contains_paragraph(Some(&TabId("plan".into())), 11));
+        // Different tab.
+        assert!(!rs.contains_paragraph(Some(&TabId("anexo".into())), 7));
+        // Scope tab is None (doc-wide) — any tab matches.
+        let rs_no_tab = ResolvedScope {
+            tab_id: None,
+            paragraph_start: 1,
+            paragraph_end: 3,
+        };
+        assert!(rs_no_tab.contains_paragraph(None, 2));
+        assert!(rs_no_tab.contains_paragraph(Some(&TabId("anexo".into())), 2));
+        // Out-of-range still rejected even when tab matches.
+        assert!(!rs_no_tab.contains_paragraph(None, 4));
+        // Scope wants a specific tab but change has no tab — reject.
+        assert!(!rs.contains_paragraph(None, 7));
     }
 }
