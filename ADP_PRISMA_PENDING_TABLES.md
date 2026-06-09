@@ -1,6 +1,6 @@
 # Tablas pendientes en ADP Prisma para sincronizar con colmena develop
 
-> Última verificación: 2026-06-09
+> Última verificación: 2026-06-09 (post v1.1 paragraph diff)
 > Verificado contra: `apps/service/ia/platform/{api,worker}` (Rust) + `packages/database/prisma/schema.prisma`.
 
 ## Resumen ejecutivo
@@ -21,17 +21,23 @@ ADP **ya tiene mirror** de estas 7 tablas de colmena:
 6. `SecureValueMapping` → `secure_value_mappings`
 7. `ProviderFileCache` → `provider_file_cache`
 
-ADP **NO tiene** 4 tablas que colmena necesita. Sin ellas, el subsistema CRDT
-de documents y el subsistema G (Google Docs co-edit guard) fallan en el
-primer call. Hay que crear una nueva migration en ADP siguiendo el patrón
+ADP **NO tiene** 4 tablas nuevas + 1 extensión a `gdocs_session_state`
+que colmena necesita. Sin las 4 tablas el subsistema CRDT y el subsistema
+G fallan al primer call. Sin la extensión v1.1 el guard de Google Docs
+funciona pero **degrada a v1 behavior** (sin diff per-paragraph; warn
+al boot). Hay que crear una nueva migration en ADP siguiendo el patrón
 `migrate deploy`-only.
 
-| Tabla | Migration de origen en colmena | Subsistema |
-|-------|--------------------------------|------------|
-| `crdt_doc_events` | `20260603000000_crdt_doc_changes.sql` | CRDT documents |
-| `crdt_doc_session_cursors` | `20260603000000_crdt_doc_changes.sql` | CRDT documents |
-| `crdt_doc_session_artifacts` | `20260603000000_crdt_doc_changes.sql` | CRDT documents |
-| `gdocs_session_state` ⭐ | `20260608000000_gdocs_session_state.sql` | G — Google Docs |
+| Tabla / change | Migration de origen en colmena | Subsistema | Criticidad |
+|---|---|---|---|
+| `crdt_doc_events` | `20260603000000_crdt_doc_changes.sql` | CRDT documents | bloqueante |
+| `crdt_doc_session_cursors` | `20260603000000_crdt_doc_changes.sql` | CRDT documents | bloqueante |
+| `crdt_doc_session_artifacts` | `20260603000000_crdt_doc_changes.sql` | CRDT documents | bloqueante |
+| `gdocs_session_state` ⭐ | `20260608000000_gdocs_session_state.sql` | G — Google Docs v1 | bloqueante |
+| `gdocs_session_state` ADD COLUMNS (v1.1) | `20260609000000_gdocs_session_state_snapshot.sql` | G v1.1 paragraph diff | feature flag — graceful degrade |
+
+Detalles de las 4 tablas en §1-§4 abajo; detalles del ADD COLUMNS v1.1
+en §5.
 
 ## Tablas faltantes
 
@@ -231,11 +237,36 @@ en su propio dir de Prisma siguiendo el modelo que ya usa para
 `secure_value_mappings`, `llm_node_history`, etc. Per memoria del
 operador: **solo `migrate deploy`. Nunca `migrate dev` ni `migrate reset`.**
 
-1. Crear `packages/database/prisma/migrations/<YYYYMMDDHHMMSS>_colmena_crdt_and_gdocs/migration.sql` con el SQL combinado de las 4 tablas (en el orden de arriba: las 3 de CRDT en un bloque, luego `gdocs_session_state`).
-2. Agregar los 4 models al `schema.prisma`, después de los modelos espejo existentes de colmena (después de `ProviderFileCache`).
+**Opción A — combo single-PR (recomendado):**
+
+1. Crear `packages/database/prisma/migrations/<YYYYMMDDHHMMSS>_colmena_crdt_gdocs_v11/migration.sql`
+   con TODO el SQL en orden:
+   - 3 CRDT tables (`crdt_doc_events`, `crdt_doc_session_cursors`,
+     `crdt_doc_session_artifacts`)
+   - `gdocs_session_state` (v1 base)
+   - `ALTER TABLE gdocs_session_state ADD COLUMN IF NOT EXISTS …` (v1.1 extension — §5)
+2. Agregar los 4 models al `schema.prisma`, después de
+   `ProviderFileCache`. El modelo `GdocsSessionState` debe incluir los
+   campos v1 + v1.1 desde el principio (`lastSnapshotJson` y
+   `lastSnapshotSizeBytes` como `Json?` / `Int?` — ver §5).
 3. Local: `pnpm prisma migrate deploy` contra una DB de dev.
-4. Verificar que `apps/service/ia/platform/worker` compila y boot-checks pasan localmente contra esa DB.
-5. Cloud: el deploy hook (`apps/service/ia/platform/deploy_gcp.sh`) corre `migrate deploy` antes de levantar los workers.
+4. Verificar que `apps/service/ia/platform/worker` compila y boot-checks
+   pasan localmente contra esa DB **sin** el warn
+   `gdocs.snapshot.column_missing`.
+5. Cloud: el deploy hook
+   (`apps/service/ia/platform/deploy_gcp.sh`) corre `migrate deploy`
+   antes de levantar los workers.
+
+**Opción B — split en dos PRs (si el v1.1 quiere shipear después):**
+
+- PR-1: solo §1-§4 (las 4 tablas base). Subsystem G v1 funciona; v1.1
+  funciona en modo degraded con warn al boot.
+- PR-2: §5 (`ALTER TABLE`). Activa el diff per-paragraph; warn
+  desaparece.
+
+Ambas opciones son seguras — la migration de §5 es additive con
+`IF NOT EXISTS` y colmena degrada grácilmente cuando las columnas no
+existen.
 
 ## Notas operativas
 
