@@ -1,0 +1,41 @@
+{
+  "_comment": "Subsistema G smoke — Google Docs. The agent creates a doc from markdown, reads the outline, replaces a token, adds a tab, exports as PDF, and reports the resulting URL. Requires GOOGLE_APPLICATION_CREDENTIALS + COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID env vars and a Drive folder shared (Edit) with the SA. Run: `set -a; source .env; set +a; cargo run --bin dag_engine -- run tests/graphs/agents/gdocs_smoke.json --agent-session-id g_smoke_$(date +%s) --include-extra-info`",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/g-smoke",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Run a Google Docs smoke. Use ONLY these exact tool names (all start with the gdocs_ prefix):\n\n1. Call gdocs_create_from_markdown({title: 'Colmena G Smoke <UTC timestamp>', markdown: '# Reporte\\n\\nEste es el __PLACEHOLDER__ original.\\n\\n## Detalles\\n\\nMás contexto aquí.\\n'}). Capture meta.doc_id and meta.url from the response.\n2. Call gdocs_read_outline({doc_id}). Confirm there is at least one heading_1 entry titled 'Reporte'.\n3. Call gdocs_replace_text({doc_id, find: '__PLACEHOLDER__', replace: 'contenido final'}). Confirm at least one change in the response.\n4. Call gdocs_add_tab({doc_id, title: 'Anexo'}).\n5. Call gdocs_list_tabs({doc_id}). Confirm the 'Anexo' tab is present.\n6. Call gdocs_export({doc_id, format: 'pdf'}). The response is an attachment reference — note its document_id.\n7. Final report (under 200 words): the doc url, the replace_text change count, the tab titles you observed, and the exported PDF attachment id."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 20,
+        "lazy_tool_loading": false,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "You are an assistant exercising the Google Docs tool surface. Use ONLY the exact tool names provided in your tool schemas (they all start with gdocs_). Do NOT invent tool names or drop the prefix. Report what you observed at each step (heading count, change count, tab list, attachment id).",
+        "enabled_tools": [
+          "gdocs_create_from_markdown",
+          "gdocs_read_outline",
+          "gdocs_replace_text",
+          "gdocs_add_tab",
+          "gdocs_list_tabs",
+          "gdocs_export"
+        ]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}
