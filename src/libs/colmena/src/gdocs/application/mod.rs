@@ -6,6 +6,7 @@ pub mod _test_helpers;
 pub mod apply_edits;
 pub mod co_edit_guard;
 pub mod delete_text;
+pub mod diff;
 pub mod insert;
 pub mod named_range;
 pub mod replace_section;
