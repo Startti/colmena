@@ -948,7 +948,17 @@ impl DagToolExecutor {
                     })?
                 };
 
-                let session_id: &str = self.session_id.as_deref().unwrap_or("unknown");
+                // Prefer agent_session_id (stable, survives CLI invocations)
+                // for the revision tracking that the co-edit guard depends
+                // on. Falls back to the ephemeral session_id when no
+                // agent_session is configured — see CLAUDE.md "Regla — Usar
+                // `--agent-session-id`". The previous `session_id` default
+                // gave every CLI run a fresh UUID, defeating the guard.
+                let session_id: &str = self
+                    .agent_session_id
+                    .as_deref()
+                    .or(self.session_id.as_deref())
+                    .unwrap_or("unknown");
 
                 let result = match name {
                     n if n == GDOCS_CREATE_TOOL => dispatch_gdocs_create(args, session_id).await,
