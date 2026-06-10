@@ -587,6 +587,99 @@ Focus on: 1) Auth flaws, 2) Input validation, 3) Output encoding. Rate severity.
 
 ---
 
-**Versión:** 1.1  
-**Fecha:** 2026-04-08  
+## 💾 Provider prompt caching (default ON, shipped 2026-06-09)
+
+Los tres providers reducen el costo de tokens repetidos vía caching nativo.
+**Caching es ON por default — no requiere opt-in.** Los stats se surface en
+`response.extra_info.usage.cache_read_tokens` (y `cache_write_tokens` para
+Anthropic).
+
+### Tabla resumen
+
+| Provider | Mecanismo | Qué se cachea | TTL | Mínimo prefix | Descuento |
+|---|---|---|---|---|---|
+| **OpenAI** | Automatic server-side | Prefix completo del request | ~5-10 min | 1024 tokens | 50% sobre cached |
+| **Anthropic** | `cache_control: ephemeral` markers | System message + tools[] | 5 min | ninguno explícito | ~90% sobre cached |
+| **Gemini 2.5+** | Implicit caching (automatic) | Prefix del request | ~3-5 min | 1024 (flash) / 2048 (pro) | 25-75% sobre cached |
+
+### Cómo funciona internamente
+
+**OpenAI** — el adapter no hace nada en el request body. La API server-side
+detecta prefixes repetidos y los cachea automáticamente. El adapter lee
+`prompt_tokens_details.cached_tokens` del usage response.
+
+**Anthropic** — el adapter `build_request_body` agrega 2 markers en cada
+request:
+
+```jsonc
+{
+  "system": [
+    {
+      "type": "text",
+      "text": "<system message>",
+      "cache_control": {"type": "ephemeral"}   // ← marker 1
+    }
+  ],
+  "tools": [
+    { "name": "tool_a", "description": "...", "input_schema": {...} },
+    { "name": "tool_b", "description": "...", "input_schema": {...} },
+    {
+      "name": "tool_c",
+      "description": "...",
+      "input_schema": {...},
+      "cache_control": {"type": "ephemeral"}    // ← marker 2 (último tool)
+    }
+  ]
+}
+```
+
+Anthropic interpreta cada marker como "todo el contenido hasta este punto
+es cacheable". El system message marker cachea ese block; el last-tool
+marker cachea todo el array `tools[]`. Cualquier llamada siguiente del
+**mismo agente** dentro de los 5 minutos siguientes paga ~10% del precio
+normal sobre la porción cacheada.
+
+**Importante**: el conversational tail (user/assistant messages) NO se
+cachea — cambia cada turn y cachearlo causaría cache-write churn sin read
+benefit.
+
+**Gemini 2.5+** — el adapter no toca el request body. Gemini 2.5 models
+tienen **implicit caching** automático server-side (lanzado mayo 2025) que
+cachea cualquier prefix repetido ≥1024 tokens (flash) o ≥2048 tokens (pro).
+El adapter solo lee `usageMetadata.cachedContentTokenCount` y lo mapea a
+`LlmUsage::cache_read_tokens`.
+
+### Cómo verificar que el caching está activo
+
+```python
+# Run 1 (uncached)
+response_1 = llm_call(system="You are an agent...", tools=[...], prompt="hi")
+print(response_1.extra_info.usage.cache_read_tokens)  # → None o 0
+
+# Run 2 (cache hit, mismo system + tools, dentro de 5 min)
+response_2 = llm_call(system="You are an agent...", tools=[...], prompt="hi again")
+print(response_2.extra_info.usage.cache_read_tokens)  # → >0 (Anthropic/Gemini/OpenAI)
+```
+
+Si `cache_read_tokens` es 0 en el run 2 sospechá:
+- TTL expiró (esperaste >5 min).
+- El system message o las tools cambiaron entre runs (cualquier byte difference invalida el cache).
+- El prefix es menor al mínimo del provider (e.g. Gemini 2.5-pro requiere ≥2048).
+
+### Cuándo NO querés caching
+
+Caching es ON por default y no hay flag para apagarlo. Si el operador necesita
+deshabilitarlo (e.g. para benchmarks de billing aislados), el workaround es:
+- Anthropic: editar `build_request_body` localmente para no inyectar el marker.
+- Gemini: caching es server-side, no se puede apagar — los stats se pueden
+  ignorar a nivel del consumer.
+
+Casos típicos donde caching es siempre net-positive: agentes con
+system_message largo (>2K tokens), agentes con muchos tools (`tools[]`
+agrega ~1-5K tokens), workflows multi-turn con state persistente.
+
+---
+
+**Versión:** 1.2  
+**Fecha:** 2026-06-09  
 **Status:** ✅ Completo

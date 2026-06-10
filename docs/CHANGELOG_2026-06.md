@@ -921,3 +921,92 @@ BOOL) en queries fixas del sistema. `crdt_doc_*` / `gsheets_*` /
 worker recompila clean.
 
 **Estado.** done.
+
+---
+
+## 20. Provider-level prompt caching enabled by default (Anthropic + Gemini, 2026-06-09)
+
+**Origen.** Item 11 de la cola priorizada del BACKLOG (lvl-up de "CRDT
+Documents v1.1 — Provider-level prompt caching"). Antes del fix, dos de
+los tres providers ignoraban completamente prompt caching:
+
+| Provider | Lectura de stats | Marker en request | Estado pre-fix |
+|---|---|---|---|
+| OpenAI | ✅ `cached_tokens` | N/A (cache automático server-side) | funcionando |
+| Anthropic | ✅ Leía `cache_read_input_tokens` | ❌ NUNCA seteaba `cache_control` | **stats siempre = 0** |
+| Gemini | ❌ NO leía `cachedContentTokenCount` | ❌ Ni implicit ni explicit | **0% visibilidad** |
+
+**Fix shipped.** Cambios localizados a 2 adapters:
+
+- **Anthropic** (`anthropic_adapter.rs::build_request_body`):
+  agregadas 2 cache-control markers `{type: "ephemeral"}` en el body de
+  cada request:
+  1. **System message** ahora serializado como content-block array
+     (`[{type: "text", text: "...", cache_control: {type: "ephemeral"}}]`)
+     en vez de plain string. Anthropic acepta ambas formas y la billing
+     es idéntica en uncached, pero solo la forma con marker activa
+     caching en repeats.
+  2. **Último tool de `tools[]`** recibe `cache_control: ephemeral`,
+     marcando el array completo de tool definitions como prefix
+     cacheable.
+  
+  Calls subsecuentes del mismo agente dentro de los 5 minutos siguientes
+  se billan al ~10% del precio normal sobre la porción cacheada (system
+  + tools). Conversational tail (user/assistant messages) NO se cachea
+  porque cambia cada turno — cachearla causaría cache-write churn sin
+  read benefit.
+
+- **Gemini** (`gemini_adapter.rs`): agregado el campo
+  `cachedContentTokenCount` al struct `GeminiUsage` y mapeado a
+  `LlmUsage::cache_read_tokens` en ambos paths (call sync + streaming).
+  Gemini 2.5+ models (gemini-2.5-flash default + 2.5-pro) tienen
+  **implicit caching automático server-side** (lanzado mayo 2025) —
+  no requiere ningún marker en el request. Mínimos: 1024 tokens para
+  2.5-flash, 2048 para 2.5-pro. Solo hacía falta surface las stats.
+
+**OpenAI: sin cambios.** Su caching es 100% automático server-side para
+prefixes ≥1024 tokens y el adapter ya lee `cached_tokens`. Quedaba como
+único provider funcionando out-of-the-box; ahora los tres están en
+paridad.
+
+**Por qué Path A (implicit) y no Path B (CachedContent API explícita) en Gemini.**
+El BACKLOG original proponía implementar Cached Content API explícita
+para Gemini (~3h de complejidad: state mgmt del cache ID, TTL refresh).
+Pero Gemini 2.5+ tiene implicit caching que cubre el mismo use case con
+~30 LOC de cambio (solo lectura de stats). Path B se justifica solo si
+operadores quieren forzar cache hits para system prompts especialmente
+grandes — diferido al BACKLOG como follow-up si aparece el use case.
+
+**Tests agregados** (`cargo test --lib`):
+- `anthropic_adapter::tests::cache_control_marker_on_system_message_block`
+- `anthropic_adapter::tests::cache_control_marker_on_last_tool_only`
+- `anthropic_adapter::tests::cache_control_works_without_tools`
+- `gemini_adapter::tests::usage_metadata_with_cached_content_populates_cache_read_tokens`
+- `gemini_adapter::tests::usage_metadata_without_cache_omits_cache_read_tokens`
+- `gemini_adapter::tests::usage_metadata_with_zero_cached_tokens_does_not_set_field`
+
+Suite full pasa (verificado en T5).
+
+**Impacto ADP / breaking changes.** **CERO breaking changes.**
+- Wire-format change Colmena ↔ provider API — nunca cruza el SSE boundary.
+- `LlmUsage` shape no cambia (campos ya existían).
+- ADP worker recompila clean sin tocar nada.
+- Operadores no necesitan opt-in: caching es ON por default.
+
+**Ahorro esperado en producción.**
+- Anthropic: ~90% descuento sobre tokens cacheados de system + tools.
+  Para un agente típico con ~5K tokens de system + tools y 10 turnos,
+  ahorro = ~45K tokens × 90% = ~40K tokens/conversación.
+- Gemini 2.5: 25-75% descuento sobre tokens cacheados (server-side
+  determina exact rate). Implicit caching aplica automáticamente cuando
+  el prefix supera 1024 tokens.
+- OpenAI: sin cambios (ya estaba activo).
+
+**Verificación.** Tests unit confirman shape correcto del request body
+(Anthropic) y parsing de stats (Gemini). E2E verification con providers
+reales requiere repeat-call patrón y comparar `cache_read_tokens` entre
+iter 1 vs iter ≥2 — diferido a operador post-deploy. El test
+`cache_control_marker_on_last_tool_only` previene regresión del shape
+en el request body.
+
+**Estado.** done.

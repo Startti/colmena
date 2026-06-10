@@ -449,6 +449,9 @@ impl LlmRepository for GeminiAdapter {
             if let Some(t) = u.thoughts_token_count.filter(|&n| n > 0) {
                 usage = usage.with_thinking_tokens(t);
             }
+            if let Some(c) = u.cached_content_token_count.filter(|&n| n > 0) {
+                usage = usage.with_cache_read_tokens(c);
+            }
             usage
         });
 
@@ -644,6 +647,9 @@ impl LlmRepository for GeminiAdapter {
                     if let Some(t) = u.thoughts_token_count.filter(|&n| n > 0) {
                         usage = usage.with_thinking_tokens(t);
                     }
+                    if let Some(c) = u.cached_content_token_count.filter(|&n| n > 0) {
+                        usage = usage.with_cache_read_tokens(c);
+                    }
                     latest_usage = Some(usage);
                 }
             }
@@ -769,6 +775,14 @@ struct GeminiUsage {
     /// Thinking tokens reported separately by Gemini 2.5 models.
     #[serde(rename = "thoughtsTokenCount")]
     thoughts_token_count: Option<u32>,
+    /// Tokens served from Gemini's implicit prompt cache (Gemini 2.5+ models).
+    /// Implicit caching is automatic server-side — no markers needed in the
+    /// request. Field present in `usageMetadata` only when the call hit the
+    /// cache (minimum prefix: 1024 tokens for 2.5-flash, 2048 for 2.5-pro).
+    /// Surfaced via `LlmUsage::cache_read_tokens` for cost-tracking parity
+    /// with OpenAI's `cached_tokens` and Anthropic's `cache_read_input_tokens`.
+    #[serde(rename = "cachedContentTokenCount")]
+    cached_content_token_count: Option<u32>,
 }
 
 // Custom Stream Parser for Gemini's JSON array stream
@@ -1067,5 +1081,90 @@ mod tests {
         let (_, contents) = GeminiAdapter::new().convert_messages(&req).unwrap();
         let fr = extract_function_response(&contents);
         assert_eq!(fr["response"]["result"], "plain error text");
+    }
+
+    // ---------------------------------------------------------------------
+    // Implicit prompt caching (item 11, 2026-06-09) — Gemini 2.5+ models
+    // automatically cache request prefixes (≥1024 tokens for 2.5-flash,
+    // ≥2048 for 2.5-pro). On cache hits the API surfaces the count in
+    // `usageMetadata.cachedContentTokenCount`. We must parse it and surface
+    // it as `LlmUsage::cache_read_tokens` for cost-tracking parity with
+    // OpenAI/Anthropic.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn usage_metadata_with_cached_content_populates_cache_read_tokens() {
+        // Synthetic Gemini response with a cache hit. The adapter only
+        // depends on the `usageMetadata` shape, so we go straight at the
+        // struct rather than mocking the whole HTTP layer.
+        let raw = serde_json::json!({
+            "promptTokenCount": 1500,
+            "candidatesTokenCount": 200,
+            "thoughtsTokenCount": 50,
+            "cachedContentTokenCount": 1200
+        });
+        let parsed: GeminiUsage = serde_json::from_value(raw).unwrap();
+        assert_eq!(parsed.prompt_token_count, Some(1500));
+        assert_eq!(parsed.candidates_token_count, Some(200));
+        assert_eq!(parsed.thoughts_token_count, Some(50));
+        assert_eq!(parsed.cached_content_token_count, Some(1200));
+
+        // Now exercise the LlmUsage builder path the adapter uses.
+        let mut usage = LlmUsage::new(
+            parsed.prompt_token_count.unwrap_or(0),
+            parsed.candidates_token_count.unwrap_or(0),
+        );
+        if let Some(t) = parsed.thoughts_token_count.filter(|&n| n > 0) {
+            usage = usage.with_thinking_tokens(t);
+        }
+        if let Some(c) = parsed.cached_content_token_count.filter(|&n| n > 0) {
+            usage = usage.with_cache_read_tokens(c);
+        }
+        assert_eq!(usage.cache_read_tokens, Some(1200));
+        assert_eq!(usage.thinking_tokens, Some(50));
+        assert_eq!(usage.prompt_tokens, 1500);
+    }
+
+    #[test]
+    fn usage_metadata_without_cache_omits_cache_read_tokens() {
+        // No `cachedContentTokenCount` field → cache_read_tokens stays None.
+        let raw = serde_json::json!({
+            "promptTokenCount": 1500,
+            "candidatesTokenCount": 200
+        });
+        let parsed: GeminiUsage = serde_json::from_value(raw).unwrap();
+        assert_eq!(parsed.cached_content_token_count, None);
+
+        let mut usage = LlmUsage::new(
+            parsed.prompt_token_count.unwrap_or(0),
+            parsed.candidates_token_count.unwrap_or(0),
+        );
+        if let Some(c) = parsed.cached_content_token_count.filter(|&n| n > 0) {
+            usage = usage.with_cache_read_tokens(c);
+        }
+        assert_eq!(
+            usage.cache_read_tokens, None,
+            "no cachedContentTokenCount → cache_read_tokens must remain None"
+        );
+    }
+
+    #[test]
+    fn usage_metadata_with_zero_cached_tokens_does_not_set_field() {
+        // Field present but zero → still don't surface. Avoids polluting
+        // dashboards with "0 cached tokens" noise on every uncached call.
+        let raw = serde_json::json!({
+            "promptTokenCount": 800,
+            "candidatesTokenCount": 100,
+            "cachedContentTokenCount": 0
+        });
+        let parsed: GeminiUsage = serde_json::from_value(raw).unwrap();
+        let mut usage = LlmUsage::new(
+            parsed.prompt_token_count.unwrap_or(0),
+            parsed.candidates_token_count.unwrap_or(0),
+        );
+        if let Some(c) = parsed.cached_content_token_count.filter(|&n| n > 0) {
+            usage = usage.with_cache_read_tokens(c);
+        }
+        assert_eq!(usage.cache_read_tokens, None);
     }
 }

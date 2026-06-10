@@ -25,6 +25,12 @@ caching" (estaba mal categorizado — es plataforma-wide, no CRDT-specific);
 queda referenciado en su sección original con bump de prioridad. Items
 12-14 son nuevos y tienen sus propias secciones abajo.
 
+**🧊 CRDT freeze (2026-06-09):** todo el bloque "CRDT Documents v1.1" más
+abajo queda **despriorizado** por decisión del owner (el subsistema no se
+va a llevar a develop/prod en ADP por ahora). **Excepción explícita:**
+item 11 (prompt caching) sigue activo porque es plataforma-wide, no
+CRDT-specific. Ver banner detallado al inicio del bloque CRDT.
+
 ---
 
 ## ~~SQL node — INSERT multi-line bug (2026-06-09)~~ — SHIPPED 2026-06-09
@@ -116,6 +122,27 @@ queda referenciado en su sección original con bump de prioridad. Items
 - **Estimación post-brainstorming:** indeterminada (depende de la opción ganadora). Sospecha: opción (A) o (C) ~3-5 días. Opción (B) o (E) ~5-8 días.
 - **Cuándo retomar:** después de items 11-13. Brainstorming primero,
   implementación después.
+
+---
+
+## 🧊 CRDT Documents v1.1 — TODO EL BLOQUE DESPRIORIZADO (2026-06-09)
+
+> **Decisión del owner (daniel@startti.co, 2026-06-09):** todos los items
+> de CRDT Documents v1.1 quedan **despriorizados** hasta nuevo aviso.
+> El subsistema CRDT no se va a llevar a producción ni a develop en ADP
+> por ahora — el equipo confirmó que la tabla CRDT vive solo en memoria
+> y no se va a integrar al frontend en el horizonte cercano. Mientras
+> tanto, ningún item de esta sección debe consumir tiempo de dev.
+>
+> **Excepción — item 11 de la cola priorizada (prompt caching).** El item
+> "Provider-level prompt caching (Anthropic + Gemini)" sigue activo
+> porque es **plataforma-wide**, no CRDT-specific. Su título quedó así
+> por contexto histórico (se descubrió durante F-T14). Tratar esa única
+> entrada como independiente del freeze de CRDT.
+>
+> **Trigger para descongelar el resto:** cuando ADP retome el roadmap de
+> documents colaborativos en frontend, o cuando un cliente concreto pida
+> el feature. Hasta entonces, NO atacar ninguno de estos items.
 
 ---
 
@@ -1036,7 +1063,23 @@ Conservado para referencia histórica:
 
 ---
 
-## CRÍTICO — `gsheets_run_python` y `crdt_doc_run_python` rotos en dev: pandas no instalado en worker image
+## ~~CRÍTICO — `gsheets_run_python` y `crdt_doc_run_python` rotos en dev: pandas no instalado en worker image~~ — RESUELTO 2026-06-07
+
+**Fix shipped:** ADP commit `ee08598e` ("fix(worker): install pandas/numpy/scipy
+for gsheets_run_python runtime", 2026-06-07 16:58 -0500, mergeado en `develop`).
+El `Dockerfile` del worker (`apps/service/ia/platform/worker/Dockerfile:31-43`)
+ahora hace `apt-get install -y --no-install-recommends python3 libpython3.11
+python3-pandas python3-numpy python3-scipy` con un bloque de comentario
+explicando por qué (Debian Bookworm ships pandas 1.5.3 / numpy 1.24 / scipy 1.10,
+compatibles con el contrato read-records / write-records del dispatcher).
+
+**Verificación pendiente:** re-correr Phase 6.B1-B5 del runbook E2E contra el
+worker dev re-deployado para confirmar que el fix llegó a Cloud Run. Si la
+imagen actual en `colmena-worker` (us-central1) fue built post-`ee08598e`, todos
+los tests deberían pasar verde.
+
+**Conservado para referencia histórica:**
+
 
 - **Origen:** E2E verification — Phase 6 (sheets-write-safety) del runbook `verifying_deployed_worker.md` (2026-06-07). Intento de ejecutar B1 (`gsheets_create_new`) contra el worker dev en Cloud Run. El dispatcher cargó las bindings correctamente desde el sheet real (1F7AsFx4yW4uVnJRaRWwpzQuSNvruqGohI2B2NRygT-Y), confirmó permisos del SA, pero falla en la ejecución del Python con `ModuleNotFoundError: No module named 'pandas'`.
 - **Problema:** la imagen Docker del worker desplegado en Cloud Run dev **no tiene pandas instalado**. El sandbox lo lista como import permitido (`Allowed imports: collections, datetime, decimal, functools, itertools, json, math, numpy, pandas, re, scipy, statistics, string`) — pero el runtime real no lo tiene. La causa probable es que el dispatcher pre-importa `pandas as pd` antes del código del usuario (es uno de los globals que documenta como disponible: "Has access to `pandas as pd`, `numpy as np`, `scipy.stats as stats`"). Ese pre-import falla con ModuleNotFoundError, abortando el run antes de que el código del usuario ejecute. Confirmado: incluso un script que solo importa numpy falla porque la inicialización de pandas pasa primero.

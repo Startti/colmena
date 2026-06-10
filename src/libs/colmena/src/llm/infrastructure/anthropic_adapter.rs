@@ -179,8 +179,31 @@ impl AnthropicAdapter {
             "stream": request.stream()
         });
 
+        // Prompt caching (default ON, 2026-06-09).
+        // Anthropic caches the *prefix* of the request up to a marked breakpoint
+        // for 5 minutes (ephemeral). Two breakpoints maximize cache hits:
+        //
+        //   1. System message — stable across turns of the same agent.
+        //   2. Last tool definition — anchors a cacheable tools[] prefix
+        //      (tools are unlikely to change mid-conversation).
+        //
+        // Marker shape: serialize as a content-block array with
+        // `cache_control: {type: "ephemeral"}` on the block. A plain string
+        // `system` still works for non-cached requests, but we always use the
+        // block form when there is a system message. Net effect on uncached
+        // requests: zero — Anthropic accepts both shapes and bills identically.
+        // On cached requests (repeats within 5 min): system + tools billed at
+        // ~10% of the normal rate.
+        //
+        // We do NOT add a marker on user/assistant messages because the
+        // conversation tail changes every turn — caching it would cause
+        // constant cache-write churn with no read benefit.
         if let Some(system) = system_message {
-            body["system"] = json!(system);
+            body["system"] = json!([{
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"}
+            }]);
         }
 
         if let Some(temp) = request.config().temperature() {
@@ -205,7 +228,7 @@ impl AnthropicAdapter {
         }
 
         if let Some(tools) = request.tools() {
-            let anthropic_tools: Vec<serde_json::Value> = tools
+            let mut anthropic_tools: Vec<serde_json::Value> = tools
                 .iter()
                 .map(|tool| {
                     let input_schema = tool.input_schema_override.clone().unwrap_or_else(|| {
@@ -224,6 +247,15 @@ impl AnthropicAdapter {
                 .collect();
 
             if !anthropic_tools.is_empty() {
+                // Prompt caching marker on the LAST tool (see comment on system
+                // above). Anthropic interprets this as "everything up to here
+                // is cacheable" — so all tool defs in front of the marker are
+                // included in the cached prefix.
+                if let Some(last) = anthropic_tools.last_mut() {
+                    if let Some(obj) = last.as_object_mut() {
+                        obj.insert("cache_control".to_string(), json!({"type": "ephemeral"}));
+                    }
+                }
                 body["tools"] = json!(anthropic_tools);
             }
         }
@@ -937,5 +969,107 @@ mod tests {
         assert_eq!(doc_block["source"]["media_type"], "application/pdf");
         assert!(doc_block["source"]["data"].is_string());
         assert!(doc_block["source"].get("file_id").is_none());
+    }
+
+    // ---------------------------------------------------------------------
+    // Prompt caching (item 11, 2026-06-09) — tests verify that the request
+    // body marks the system message and the last tool as cacheable so
+    // Anthropic bills repeat calls within 5 min at ~10% of the normal rate.
+    // ---------------------------------------------------------------------
+
+    fn anth_request_with_system_and_tools(system: &str, tool_names: &[&str]) -> LlmRequest {
+        use crate::llm::domain::tools::{ToolDefinition, ToolParameters};
+        use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, ProviderKind};
+        let messages = vec![
+            LlmMessage::system(system.into()).unwrap(),
+            LlmMessage::user("hi".into()).unwrap(),
+        ];
+        let provider = LlmProvider::new(
+            ProviderKind::Anthropic,
+            "k".into(),
+            Some("claude-3-5-sonnet".into()),
+        )
+        .unwrap();
+        let config = LlmConfig::new(provider);
+        let tools: Vec<ToolDefinition> = tool_names
+            .iter()
+            .map(|name| {
+                ToolDefinition::new(
+                    (*name).into(),
+                    format!("desc {}", name),
+                    ToolParameters::new(),
+                )
+            })
+            .collect();
+        let mut req = LlmRequest::new(messages, config, false).unwrap();
+        if !tools.is_empty() {
+            req = req.with_tools(tools);
+        }
+        req
+    }
+
+    #[test]
+    fn cache_control_marker_on_system_message_block() {
+        let adapter = AnthropicAdapter::new();
+        let req = anth_request_with_system_and_tools("you are an agent", &[]);
+        let body = adapter.build_request_body(&req).unwrap();
+
+        // System must be a content-block array (NOT a plain string), with
+        // the cache_control marker on the single text block.
+        let system = body.get("system").expect("system field present");
+        let arr = system.as_array().expect("system serialized as block array");
+        assert_eq!(arr.len(), 1, "exactly one system block");
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "you are an agent");
+        assert_eq!(
+            arr[0]["cache_control"]["type"], "ephemeral",
+            "system message must carry cache_control: ephemeral"
+        );
+    }
+
+    #[test]
+    fn cache_control_marker_on_last_tool_only() {
+        let adapter = AnthropicAdapter::new();
+        let req =
+            anth_request_with_system_and_tools("you are an agent", &["tool_a", "tool_b", "tool_c"]);
+        let body = adapter.build_request_body(&req).unwrap();
+
+        let tools = body
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .expect("tools array present");
+        assert_eq!(tools.len(), 3);
+
+        // First two tools: no cache_control.
+        assert!(
+            tools[0].get("cache_control").is_none(),
+            "first tool must NOT carry cache_control"
+        );
+        assert!(
+            tools[1].get("cache_control").is_none(),
+            "middle tool must NOT carry cache_control"
+        );
+
+        // Last tool: cache_control: ephemeral (anchors cacheable prefix).
+        assert_eq!(
+            tools[2]["cache_control"]["type"], "ephemeral",
+            "last tool must carry cache_control: ephemeral"
+        );
+        // Tool fields preserved.
+        assert_eq!(tools[2]["name"], "tool_c");
+        assert!(tools[2]["input_schema"].is_object());
+    }
+
+    #[test]
+    fn cache_control_works_without_tools() {
+        // Smoke: when there are no tools, the body must still be valid
+        // (no `tools` key) and system still carries the marker.
+        let adapter = AnthropicAdapter::new();
+        let req = anth_request_with_system_and_tools("hello", &[]);
+        let body = adapter.build_request_body(&req).unwrap();
+
+        assert!(body.get("tools").is_none(), "no tools key when empty");
+        let arr = body["system"].as_array().unwrap();
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
     }
 }
