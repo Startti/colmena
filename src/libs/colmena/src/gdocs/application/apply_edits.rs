@@ -755,10 +755,7 @@ mod app_tests {
             "r1",
             vec![(1, ParagraphKind::Paragraph, "alpha beta gamma", 1, 18)],
         );
-        let s2 = snap(
-            "r2",
-            vec![(1, ParagraphKind::Paragraph, "X beta Y", 1, 10)],
-        );
+        let s2 = snap("r2", vec![(1, ParagraphKind::Paragraph, "X beta Y", 1, 10)]);
         expect_get_sequence(&mut rig.client, vec![s, s2]);
         let captured = make_batch_update_capture(&mut rig.client, "r2");
         let ctx = GuardContext {
