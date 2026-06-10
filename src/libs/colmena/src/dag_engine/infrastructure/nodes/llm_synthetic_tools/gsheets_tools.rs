@@ -108,19 +108,64 @@ pub struct SetRangeArgs {
 // ── Shared helpers ────────────────────────────────────────────────────
 
 /// Map a `SheetsError` to a tool-result JSON value with a stable shape.
+///
+/// `PermissionDenied` is special-cased: instead of a single `message`
+/// field, it carries the share email as a structured field AND a `hint`
+/// string the LLM can paraphrase to the user. The hint is intentionally
+/// directive ("pedile al usuario que verifique...") so models with a
+/// terse default reply style still pass the actionable bit through to
+/// the user.
 pub(crate) fn error_to_json(e: SheetsError) -> serde_json::Value {
-    let (kind, message) = match &e {
-        SheetsError::NotConfigured(m) => ("gsheets_not_configured", m.clone()),
-        SheetsError::AuthFailed(m) => ("auth_failed", m.clone()),
-        SheetsError::SpreadsheetNotFound(s) => ("spreadsheet_not_found", s.clone()),
-        SheetsError::SheetNotFound(s) => ("sheet_not_found", s.clone()),
-        SheetsError::InvalidRange(m) => ("invalid_range", m.clone()),
-        SheetsError::PermissionDenied(sa) => ("permission_denied", sa.clone()),
-        SheetsError::RateLimit(s) => ("rate_limit", format!("retry after {s}s")),
-        SheetsError::Http(m) => ("http_error", m.clone()),
-        SheetsError::Internal(m) => ("internal", m.clone()),
-    };
-    serde_json::json!({"error": kind, "message": message})
+    match &e {
+        SheetsError::PermissionDenied(share_email) => permission_denied_payload(share_email),
+        _ => {
+            let (kind, message) = match &e {
+                SheetsError::NotConfigured(m) => ("gsheets_not_configured", m.clone()),
+                SheetsError::AuthFailed(m) => ("auth_failed", m.clone()),
+                SheetsError::SpreadsheetNotFound(s) => ("spreadsheet_not_found", s.clone()),
+                SheetsError::SheetNotFound(s) => ("sheet_not_found", s.clone()),
+                SheetsError::InvalidRange(m) => ("invalid_range", m.clone()),
+                SheetsError::PermissionDenied(_) => unreachable!("handled above"),
+                SheetsError::RateLimit(s) => ("rate_limit", format!("retry after {s}s")),
+                SheetsError::Http(m) => ("http_error", m.clone()),
+                SheetsError::Internal(m) => ("internal", m.clone()),
+            };
+            serde_json::json!({"error": kind, "message": message})
+        }
+    }
+}
+
+/// Build the `permission_denied` tool result. Pulled into its own
+/// helper so the gdocs side can use the same shape and the wording
+/// stays in lockstep across subsystems. The hint string is the
+/// load-bearing UX: the LLM reads it and translates to the user's
+/// chat language.
+fn permission_denied_payload(share_email: &str) -> serde_json::Value {
+    if share_email.is_empty() {
+        // Degraded mode — COLMENA_GOOGLE_SHARE_EMAIL was not set on
+        // the worker, so we don't know what email to instruct the
+        // user to share with. Surface a generic but still actionable
+        // hint that points the LLM to ask the operator.
+        return serde_json::json!({
+            "error": "permission_denied",
+            "share_email": null,
+            "hint": "Google devolvió 403. Pedile al usuario que verifique \
+                     con el operador del agente cuál es el correo con el \
+                     que debe compartir el documento como Editor."
+        });
+    }
+    serde_json::json!({
+        "error": "permission_denied",
+        "share_email": share_email,
+        "hint": format!(
+            "Google devolvió 403 — el agent no tiene acceso al sheet. \
+             Pedile al usuario que verifique que compartió el documento \
+             como Editor (no Viewer) con `{share_email}`. Si dice que sí, \
+             pedile que abra el share dialog del sheet y confirme que ese \
+             correo aparece listado con permiso de Editor.",
+            share_email = share_email
+        )
+    })
 }
 
 fn build_client() -> Result<GoogleSheetsHttpClient, serde_json::Value> {
@@ -564,5 +609,52 @@ mod tests {
         let v = error_to_json(SheetsError::SpreadsheetNotFound("abc".into()));
         assert_eq!(v["error"], "spreadsheet_not_found");
         assert_eq!(v["message"], "abc");
+    }
+
+    /// Pins the `permission_denied` tool result shape. The LLM relies
+    /// on `share_email` being a structured field (so it can quote the
+    /// email back verbatim) AND a directive `hint` (so it doesn't
+    /// paraphrase away the share instruction).
+    ///
+    /// Keep in lockstep with the gdocs equivalent — both subsystems
+    /// emit the same shape so an agent that mixes gsheets + gdocs
+    /// tools sees consistent error UX.
+    #[test]
+    fn permission_denied_payload_emits_share_email_and_directive_hint() {
+        let v = error_to_json(SheetsError::PermissionDenied("agents@startti.co".into()));
+        assert_eq!(v["error"], "permission_denied");
+        assert_eq!(v["share_email"], "agents@startti.co");
+        let hint = v["hint"].as_str().expect("hint must be a string");
+        // Must reference the email so the LLM can pass it through.
+        assert!(
+            hint.contains("agents@startti.co"),
+            "hint must inline the share email: {hint}"
+        );
+        // Directive language so terse models still surface the
+        // actionable instruction.
+        assert!(
+            hint.contains("Editor"),
+            "hint must mention Editor permission: {hint}"
+        );
+        assert!(
+            hint.contains("verifique") || hint.contains("compartió"),
+            "hint must direct the LLM to verify the share: {hint}"
+        );
+    }
+
+    /// Degraded mode — when COLMENA_GOOGLE_SHARE_EMAIL is unset and
+    /// the share_email arrives empty, the payload must still be
+    /// actionable: tell the LLM to ask the operator for the email
+    /// rather than fail silently.
+    #[test]
+    fn permission_denied_payload_in_degraded_mode_directs_to_operator() {
+        let v = error_to_json(SheetsError::PermissionDenied(String::new()));
+        assert_eq!(v["error"], "permission_denied");
+        assert!(v["share_email"].is_null());
+        let hint = v["hint"].as_str().unwrap();
+        assert!(
+            hint.contains("operador"),
+            "degraded hint must point to the operator: {hint}"
+        );
     }
 }

@@ -159,10 +159,35 @@ pub(crate) fn error_to_json(e: DocsError) -> serde_json::Value {
         AuthFailed(m) => serde_json::json!({"error": "auth_failed", "message": m}),
         DocumentNotFound(d) => serde_json::json!({"error": "document_not_found", "doc_id": d}),
         TabNotFound(t) => serde_json::json!({"error": "tab_not_found", "tab_id": t}),
-        PermissionDenied(sa) => serde_json::json!({
-            "error": "permission_denied",
-            "hint": format!("share the doc with {sa}")
-        }),
+        // Same shape as gsheets_tools::permission_denied_payload —
+        // structured share_email + directive hint so the LLM passes
+        // the actionable instruction to the user instead of
+        // paraphrasing it away. Empty share_email (degraded mode)
+        // surfaces a generic hint pointing to the operator.
+        PermissionDenied(share_email) => {
+            if share_email.is_empty() {
+                serde_json::json!({
+                    "error": "permission_denied",
+                    "share_email": serde_json::Value::Null,
+                    "hint": "Google devolvió 403. Pedile al usuario que verifique \
+                             con el operador del agente cuál es el correo con el \
+                             que debe compartir el documento como Editor."
+                })
+            } else {
+                serde_json::json!({
+                    "error": "permission_denied",
+                    "share_email": share_email,
+                    "hint": format!(
+                        "Google devolvió 403 — el agent no tiene acceso al documento. \
+                         Pedile al usuario que verifique que compartió el documento \
+                         como Editor (no Viewer) con `{share_email}`. Si dice que sí, \
+                         pedile que abra el share dialog del doc y confirme que ese \
+                         correo aparece listado con permiso de Editor.",
+                        share_email = share_email
+                    )
+                })
+            }
+        }
         NoParentFolder => serde_json::json!({
             "error": "no_parent_folder_configured",
             "hint": "set COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID or pass parent_folder_id"
@@ -1465,5 +1490,32 @@ mod tests {
             ExportFormat::Pdf
         ));
         assert!(parse_export_format("xyz").is_err());
+    }
+
+    /// Pins the `permission_denied` tool result shape for gdocs.
+    /// Same shape as gsheets — see `gsheets_tools::permission_denied_payload_emits_share_email_and_directive_hint`.
+    /// Keep wording in lockstep across both subsystems.
+    #[test]
+    fn permission_denied_payload_emits_share_email_and_directive_hint() {
+        use crate::gdocs::domain::DocsError;
+        let v = error_to_json(DocsError::PermissionDenied("agents@startti.co".into()));
+        assert_eq!(v["error"], "permission_denied");
+        assert_eq!(v["share_email"], "agents@startti.co");
+        let hint = v["hint"].as_str().expect("hint must be a string");
+        assert!(hint.contains("agents@startti.co"));
+        assert!(hint.contains("Editor"));
+        assert!(hint.contains("verifique") || hint.contains("compartió"));
+    }
+
+    /// Degraded mode mirror — empty share_email surfaces an actionable
+    /// hint pointing to the operator.
+    #[test]
+    fn permission_denied_payload_in_degraded_mode_directs_to_operator() {
+        use crate::gdocs::domain::DocsError;
+        let v = error_to_json(DocsError::PermissionDenied(String::new()));
+        assert_eq!(v["error"], "permission_denied");
+        assert!(v["share_email"].is_null());
+        let hint = v["hint"].as_str().unwrap();
+        assert!(hint.contains("operador"));
     }
 }

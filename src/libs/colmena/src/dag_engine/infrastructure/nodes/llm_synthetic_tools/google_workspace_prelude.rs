@@ -99,40 +99,42 @@ fn read_client_email_from_json(path: &Path) -> Option<String> {
 pub fn build_google_workspace_prelude(sa_email: Option<&str>) -> String {
     match sa_email {
         Some(email) => format!(
-            "## Acceso a Google Workspace — instrucciones obligatorias\n\
+            "## Acceso a Google Workspace\n\
              Tenés tools de Google Docs y/o Sheets habilitadas. Para operar sobre \
              un documento NECESITÁS DOS COSAS, no una:\n\
              1. El **ID del documento** (lo da el usuario, o se extrae de la URL: \
              `docs.google.com/document/d/<ID>/edit` o `docs.google.com/spreadsheets/d/<ID>/edit`).\n\
              2. Que el documento esté compartido como **Editor** con: `{email}`\n\n\
-             ### Reglas estrictas para el primer turno\n\
-             Si en este turno el usuario NO mandó un doc ID Y compartió que ya hizo el share:\n\
-             - Tu respuesta DEBE incluir AMBAS instrucciones siguientes en el mismo mensaje, no una sola:\n\
-               1. Pedile el doc ID al usuario (mostrale dónde sacarlo de la URL).\n\
-               2. Decile explícitamente que ANTES de seguir tiene que compartir el doc \
+             ### Si el usuario YA mandó un doc ID en este turno o en uno previo\n\
+             Procedé directo a operar — confiá en que el ID que pasó es real y que \
+             está compartido. NO le vuelvas a pedir el ID. Si la tool falla con \
+             `permission_denied`, el tool result va a traer un `hint` actionable: \
+             paraphraseálo al usuario citando el email `{email}` literal, y pedile \
+             que verifique que el share está hecho como Editor (no Viewer).\n\n\
+             ### Si el usuario NO mandó un doc ID en ningún turno\n\
+             Tu respuesta DEBE incluir AMBAS instrucciones siguientes en el mismo \
+             mensaje, no una sola:\n\
+             1. Pedile el doc ID al usuario (mostrale dónde sacarlo de la URL).\n\
+             2. Decile explícitamente que ANTES de seguir tiene que compartir el doc \
              como Editor con `{email}` (poné el email literal, no escribas \"el agent\" \
-             o \"el service account\" como sustituto).\n\
-             - NO mandes una respuesta que solo pida el ID — el usuario no va a saber \
-             que necesita compartir.\n\
-             - NO intentes tool calls sobre IDs adivinados o inferidos.\n\n\
-             ### Si el usuario YA mandó un doc ID\n\
-             Procedé directo a operar — confiá en que está compartido. Si una tool \
-             falla con `PermissionDenied`, recién ahí pedile al usuario que verifique \
-             el share con `{email}`.",
+             o \"el service account\" como sustituto).\n\n\
+             NO mandes una respuesta que solo pida el ID — el usuario no va a saber \
+             que también necesita compartir.",
             email = email
         ),
-        None => "## Acceso a Google Workspace — instrucciones obligatorias\n\
+        None => "## Acceso a Google Workspace\n\
              Tenés tools de Google Docs y/o Sheets habilitadas. Para operar sobre \
              un documento NECESITÁS DOS COSAS, no una:\n\
              1. El **ID del documento** (lo da el usuario, o se extrae de la URL: \
              `docs.google.com/document/d/<ID>/edit` o `docs.google.com/spreadsheets/d/<ID>/edit`).\n\
              2. Que el documento esté compartido como **Editor** con el service account \
              configurado para este agente (pedile al operador la dirección si no la sabés).\n\n\
-             Si en este turno el usuario NO mandó un doc ID, tu respuesta DEBE incluir \
-             AMBAS instrucciones: pedirle el ID y avisarle que debe compartir el doc \
-             como Editor. NO adivines IDs.\n\n\
-             Si una tool falla con `PermissionDenied`, pedile al usuario que verifique \
-             el share con el service account."
+             Si el usuario ya mandó un doc ID, procedé directo. Si la tool falla con \
+             `permission_denied`, el tool result trae un `hint` accionable que debés \
+             paraphrasear al usuario.\n\n\
+             Si el usuario NO mandó un doc ID, tu respuesta DEBE incluir AMBAS \
+             instrucciones: pedirle el ID y avisarle que debe compartir el doc como \
+             Editor."
             .to_string(),
     }
 }
