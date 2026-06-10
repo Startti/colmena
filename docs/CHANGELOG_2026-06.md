@@ -1393,3 +1393,82 @@ todos los usos legítimos quedan bajo 5 hits o ya usan `scope`.
 **Estado.** done. Pareja conceptual con item §25 (skill auto-loaded
 para scope-discipline) que enseña al LLM a no llegar al guard en
 primer lugar.
+
+---
+
+## 25. gdocs-surgical-edits builtin skill — auto-enrolado para agentes con tools de edición (2026-06-10)
+
+**Qué cambió.** Nuevo skill `gdocs-surgical-edits` (en
+[`src/libs/colmena/skills/gdocs-surgical-edits/`](../src/libs/colmena/skills/gdocs-surgical-edits/))
+con SKILL.md + 5 references on-demand. Auto-enrolado por
+`LlmNode::build_skill_repository_from_config` cuando el agente expone
+al menos un tool de edición gdocs. El LLM lo descubre vía el catálogo
+del tool `load_skill` y lo carga a demanda.
+
+**Por qué importa.** Tema A (ConfirmManyMatches en apply_edits) puso un
+freno backend que aborta cuando una sub-edit matchea ≥5 párrafos. Tema
+B (este) enseña al LLM a NO llegar al freno: usar `scope`/`anchor`
+desde el primer call, entender qué hace cada error estructurado, no
+inyectar markdown literal como texto. Defensa en capas: rails + educación.
+
+**Contenido del skill.**
+- **SKILL.md** (~700 tokens) con 6 quick rules siempre presentes
+  + anti-patterns + fallback path "si tu intent no está cubierto".
+- **`references/replace_text_scoping.md`** — Las 4 herramientas de
+  scope (`Paragraph`, `Tab`, `UnderHeading`, `BetweenHeadings`) +
+  `anchor` + `occurrence`. Tabla de decisión "qué usar cuándo".
+- **`references/apply_edits_patterns.md`** — Cuándo SÍ y NO usar
+  compound vs standalone, anatomía del flujo interno (Phase A
+  resolve / Phase B sort+emit), por qué el sort cross-edit importa.
+- **`references/error_recovery.md`** — Decoder de
+  `ConfirmManyMatches`, `AmbiguousMatch`, `TextNotFound`,
+  overlapping-ranges. Patrón de recovery canónico para cada uno.
+- **`references/style_changes_pattern.md`** — Receta canónica para
+  "agregale formato a esta sección": 3 pasos (read_outline →
+  read_as_markdown → replace_section con markdown). Lección clave:
+  NUNCA `replace_text` con sintaxis markdown literal.
+- **`references/before_after_examples.md`** — 4 casos worked, incluyendo
+  el bug del usuario (`agent_session cmq7kem1h003001s6mr36uwe8`) con
+  wrong way vs right way side by side.
+
+**Implementación.**
+- Skill files compilan en el binario vía `include_dir!` (mismo
+  pipeline que sql-query-best-practices, etc.).
+- Constante `LlmNode::GDOCS_SURGICAL_EDIT_TOOL_NAMES` lista los 11
+  nombres de tools de edición (excluye los read-only).
+- Helper `LlmNode::agent_has_gdocs_edit_tools(config, inputs)` detecta
+  enrollment:
+  - `enabled_tools` contains `"*"` → true.
+  - `enabled_tools` contains alias `"gdocs"` → true.
+  - `enabled_tools` contains any edit tool name → true.
+  - `tool_configurations.<edit_tool>` declared → true.
+  - `enabled_tools: ["gdocsread"]` (read-only alias) → false.
+  - Exclusion entries `"!gdocs_apply_edits"` → ignored, no false trigger.
+- `build_skill_repository_from_config` auto-inserta
+  `gdocs-surgical-edits` en `skills_config.builtin` cuando el helper
+  retorna true Y el operador no lo agregó manualmente (idempotente).
+
+**Tests** (en `dag_engine::infrastructure::nodes::llm`):
+- 10 unit tests de `agent_has_gdocs_edit_tools_tests` cubriendo cada
+  caso de la matriz de decisión (alias, exclusiones, tool_configurations,
+  precedencia inputs vs config).
+- 2 integration tests del wiring end-to-end:
+  `build_skill_repository_auto_enrolls_gdocs_surgical_edits`
+  (positive: gdocs alias → skill aparece en
+  `repo.list_available()`) y
+  `build_skill_repository_does_not_enroll_for_read_only_agents`
+  (negative: gdocsread sin opt-in → repo None).
+- Test `skills::infrastructure::builtin_skill_repository::tests::gdocs_surgical_edits_is_loadable`
+  confirma frontmatter parsea + las 5 references existen.
+- Suite full: 1640 tests pass, 0 fallos.
+
+**BREAKING.** Ninguno. Skill puramente additive. Agentes existentes con
+`gdocs_*` edit tools van a tener el skill en su catálogo `load_skill`
+pero no están obligados a cargarlo. Operadores que ya tenían
+`gdocs-surgical-edits` en su config no se duplican (idempotente).
+
+**Entrada en `docs/developer_guide/42_builtin_skills_index.md`** actualizada
+con la línea del nuevo skill.
+
+**Estado.** done. Pareja conceptual con item §24 (ConfirmManyMatches guard
+backend). Juntos cubren backend rails + LLM education.

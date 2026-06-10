@@ -362,4 +362,42 @@ mod tests {
             );
         }
     }
+
+    /// Verifies the `gdocs-surgical-edits` skill (shipped 2026-06-10
+    /// alongside the apply_edits ConfirmManyMatches guard) compiles
+    /// into the binary via `include_dir!`, parses its frontmatter, and
+    /// exposes the five expected references. Catches regressions where
+    /// a future YAML edit breaks the frontmatter or someone drops a
+    /// reference file.
+    #[tokio::test]
+    async fn gdocs_surgical_edits_is_loadable() {
+        let repo = BuiltinSkillRepository::new(&["gdocs-surgical-edits".to_string()]).unwrap();
+        let skill = repo.load_skill("gdocs-surgical-edits").await.unwrap();
+        assert_eq!(skill.name, "gdocs-surgical-edits");
+        assert!(
+            skill.body.contains("Quick rules"),
+            "body should contain the quick-rules section"
+        );
+        assert_eq!(
+            skill.references.len(),
+            5,
+            "expected 5 references, got {}",
+            skill.references.len()
+        );
+        let names: Vec<String> = skill.references.iter().map(|r| r.name.clone()).collect();
+        for expected in &[
+            "replace_text_scoping",
+            "apply_edits_patterns",
+            "error_recovery",
+            "style_changes_pattern",
+            "before_after_examples",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "missing reference '{}', got {:?}",
+                expected,
+                names
+            );
+        }
+    }
 }

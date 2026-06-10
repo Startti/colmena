@@ -639,14 +639,19 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
   `APPLY_EDITS_MANY_HITS_THRESHOLD` documentada en
   [`apply_edits.rs`](../src/libs/colmena/src/gdocs/application/apply_edits.rs).
 
-- [ ] **`apply_edits` skill auto-loaded para scope-discipline** — el
-  LLM hoy llama `replace_text` con find strings ambiguos ("Ejercicios:"
-  matchea Día 1 y Día 3) sin usar `scope` ni `anchor`. Educable vía
-  skill markdown auto-cargada cuando `gdocs_*` está en el catálogo
-  (mismo pattern que sql-query-best-practices). Incluye: "siempre
-  scope-á por paragraph range cuando hay múltiples secciones",
-  "preferí `anchor` sobre find strings genéricos", ejemplo del bug.
-  Origen: misma sesión (2026-06-10).
+- [x] **`apply_edits` skill auto-loaded para scope-discipline** —
+  SHIPPED 2026-06-10. Nuevo builtin skill
+  [`gdocs-surgical-edits`](../src/libs/colmena/skills/gdocs-surgical-edits/SKILL.md)
+  con SKILL.md + 5 references (`replace_text_scoping`,
+  `apply_edits_patterns`, `error_recovery`, `style_changes_pattern`,
+  `before_after_examples`). Auto-enrolado por `LlmNode::build_skill_repository_from_config`
+  cuando `enabled_tools` incluye el alias `gdocs`, `*`, o cualquier
+  nombre de tool de edición específica
+  (`gdocs_apply_edits`/`replace_text`/`delete_text`/`insert_*`/
+  `replace_section`/`append_markdown`/`style_text`/`*named_range`).
+  `gdocsread` (read-only) NO trigger-ea. Helper testeado
+  `agent_has_gdocs_edit_tools(config, inputs)`. Sin opt-in del
+  operador requerido.
 
 - [ ] **OAuth user-scoped flow** — bloqueante para "cualquier Gmail user
   puede usar el agente sin Shared Drive". Hoy `create_*` solo funciona

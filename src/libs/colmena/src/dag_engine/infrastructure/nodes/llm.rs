@@ -418,6 +418,79 @@ impl LlmNode {
         }
     }
 
+    /// Names of every `gdocs_*` tool that performs a surgical write
+    /// (creates, edits, deletes, or styles content). Used to decide
+    /// whether the agent should auto-receive the `gdocs-surgical-edits`
+    /// skill — read-only tools like `gdocs_read_outline` or anything in
+    /// the `gdocsread` toolkit do NOT trigger enrollment because they
+    /// can't corrupt the doc.
+    const GDOCS_SURGICAL_EDIT_TOOL_NAMES: &[&str] = &[
+        "gdocs_apply_edits",
+        "gdocs_replace_text",
+        "gdocs_delete_text",
+        "gdocs_insert_after_text",
+        "gdocs_insert_before_text",
+        "gdocs_insert_between",
+        "gdocs_replace_section",
+        "gdocs_append_markdown",
+        "gdocs_style_text",
+        "gdocs_create_named_range",
+        "gdocs_replace_named_range",
+    ];
+
+    /// True when this LlmCall will expose at least one gdocs surgical
+    /// edit tool. Three signals:
+    ///   1. `enabled_tools` contains `"*"` (everything is exposed).
+    ///   2. `enabled_tools` contains the toolkit alias `"gdocs"` (which
+    ///      expands to all 22 gdocs tools, including the edit subset).
+    ///   3. `enabled_tools` lists any specific name from
+    ///      `GDOCS_SURGICAL_EDIT_TOOL_NAMES`.
+    ///   4. `tool_configurations` declares any of those names
+    ///      (auto-enables the tool without it needing to appear in
+    ///      `enabled_tools`).
+    ///
+    /// `gdocsread` is deliberately NOT enrolled — it ships only the 6
+    /// read-only tools and the surgical-edits skill would be noise.
+    /// Exclusion entries like `"!gdocs_apply_edits"` do not by
+    /// themselves trigger enrollment.
+    pub(super) fn agent_has_gdocs_edit_tools(config: &Value, inputs: &NodeInputs) -> bool {
+        let enabled = inputs
+            .get("enabled_tools")
+            .or_else(|| config.get("enabled_tools"));
+
+        let raw_names: Vec<&str> = match enabled {
+            Some(Value::String(s)) => vec![s.as_str()],
+            Some(Value::Array(arr)) => arr.iter().filter_map(|v| v.as_str()).collect(),
+            _ => Vec::new(),
+        };
+
+        for n in &raw_names {
+            // Skip `!entry` exclusions entirely — they remove tools
+            // from the catalog, never add them.
+            if n.starts_with('!') {
+                continue;
+            }
+            if *n == "*" || *n == "gdocs" {
+                return true;
+            }
+            if Self::GDOCS_SURGICAL_EDIT_TOOL_NAMES.contains(n) {
+                return true;
+            }
+        }
+
+        // `tool_configurations.<name>` auto-enables that name even
+        // when `enabled_tools` does not list it.
+        if let Some(Value::Object(tc)) = config.get("tool_configurations") {
+            for key in tc.keys() {
+                if Self::GDOCS_SURGICAL_EDIT_TOOL_NAMES.contains(&key.as_str()) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
     /// Parse `COLMENA_SKILLS_ALLOWED_DIRS` env var into a list of PathBufs.
     /// Separator: `:` on Unix, `;` on Windows. Missing env var → empty list.
     fn parse_allowed_dirs_env() -> Vec<PathBuf> {
@@ -521,6 +594,27 @@ impl LlmNode {
                     skills_config.paths.push(dir);
                 }
             }
+        }
+
+        // Auto-enroll the `gdocs-surgical-edits` builtin skill whenever
+        // the agent's catalog will contain at least one surgical edit
+        // tool (`gdocs_apply_edits`, `gdocs_replace_text`, etc.). This
+        // pairs with the ConfirmManyMatches threshold guard in
+        // `apply_edits.rs`: the guard catches blunt scope mistakes, the
+        // skill teaches the LLM how to avoid them in the first place.
+        //
+        // No-op when the operator already added it (idempotent) or
+        // when only read-only `gdocsread` aliases are enabled (read
+        // tools don't need scope discipline).
+        if Self::agent_has_gdocs_edit_tools(config, inputs)
+            && !skills_config
+                .builtin
+                .iter()
+                .any(|n| n == "gdocs-surgical-edits")
+        {
+            skills_config
+                .builtin
+                .push("gdocs-surgical-edits".to_string());
         }
 
         // If there's nothing to load (no builtins, no paths), short-circuit.
@@ -4923,6 +5017,156 @@ mod skills_path_tests {
             resolved.is_empty(),
             "expected empty list, got: {:?}",
             resolved
+        );
+    }
+}
+
+#[cfg(test)]
+mod agent_has_gdocs_edit_tools_tests {
+    //! Covers the gate that auto-enrolls the `gdocs-surgical-edits`
+    //! builtin skill. Each test pairs a config shape with the expected
+    //! true/false return so future tweaks to the rule stay deliberate.
+    use super::*;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn empty_inputs() -> NodeInputs {
+        HashMap::new()
+    }
+
+    #[tokio::test]
+    async fn gdocs_alias_in_enabled_tools_triggers_enrollment() {
+        let cfg = json!({ "enabled_tools": ["gdocs"] });
+        assert!(LlmNode::agent_has_gdocs_edit_tools(&cfg, &empty_inputs()));
+    }
+
+    #[tokio::test]
+    async fn gdocsread_alias_does_not_trigger_enrollment() {
+        // The read-only toolkit has no edit tools — scope-discipline
+        // skill would be noise.
+        let cfg = json!({ "enabled_tools": ["gdocsread"] });
+        assert!(!LlmNode::agent_has_gdocs_edit_tools(&cfg, &empty_inputs()));
+    }
+
+    #[tokio::test]
+    async fn explicit_edit_tool_name_triggers_enrollment() {
+        let cfg = json!({ "enabled_tools": ["gdocs_apply_edits"] });
+        assert!(LlmNode::agent_has_gdocs_edit_tools(&cfg, &empty_inputs()));
+        let cfg = json!({ "enabled_tools": ["gdocs_replace_text"] });
+        assert!(LlmNode::agent_has_gdocs_edit_tools(&cfg, &empty_inputs()));
+        let cfg = json!({ "enabled_tools": ["gdocs_style_text"] });
+        assert!(LlmNode::agent_has_gdocs_edit_tools(&cfg, &empty_inputs()));
+    }
+
+    #[tokio::test]
+    async fn read_only_tool_name_alone_does_not_trigger() {
+        let cfg = json!({ "enabled_tools": ["gdocs_read_outline"] });
+        assert!(!LlmNode::agent_has_gdocs_edit_tools(&cfg, &empty_inputs()));
+        let cfg = json!({ "enabled_tools": ["gdocs_read_as_markdown", "gdocs_list_tabs"] });
+        assert!(!LlmNode::agent_has_gdocs_edit_tools(&cfg, &empty_inputs()));
+    }
+
+    #[tokio::test]
+    async fn wildcard_triggers_enrollment() {
+        // `"*"` exposes every available tool, including the edit ones.
+        let cfg = json!({ "enabled_tools": "*" });
+        assert!(LlmNode::agent_has_gdocs_edit_tools(&cfg, &empty_inputs()));
+        let cfg = json!({ "enabled_tools": ["*"] });
+        assert!(LlmNode::agent_has_gdocs_edit_tools(&cfg, &empty_inputs()));
+    }
+
+    #[tokio::test]
+    async fn exclusion_marker_does_not_trigger() {
+        // `!gdocs_apply_edits` removes the tool from the catalog —
+        // it must not be misread as "the tool is enabled".
+        let cfg = json!({ "enabled_tools": ["current_time", "!gdocs_apply_edits"] });
+        assert!(!LlmNode::agent_has_gdocs_edit_tools(&cfg, &empty_inputs()));
+    }
+
+    #[tokio::test]
+    async fn gdocs_alias_with_exclusions_still_triggers() {
+        // The user opted into the gdocs toolkit and excluded a couple
+        // of edit tools. The remaining ones still include surgical
+        // edits → enrollment stands.
+        let cfg = json!({ "enabled_tools": ["gdocs", "!gdocs_create_from_docx"] });
+        assert!(LlmNode::agent_has_gdocs_edit_tools(&cfg, &empty_inputs()));
+    }
+
+    #[tokio::test]
+    async fn tool_configurations_entry_triggers_enrollment() {
+        // `tool_configurations.<edit_tool>` auto-enables that tool
+        // even when `enabled_tools` does not list it.
+        let cfg = json!({
+            "tool_configurations": {
+                "gdocs_replace_text": { "fixed_config": { "dry_run": true } }
+            }
+        });
+        assert!(LlmNode::agent_has_gdocs_edit_tools(&cfg, &empty_inputs()));
+    }
+
+    #[tokio::test]
+    async fn empty_config_does_not_trigger() {
+        let cfg = json!({});
+        assert!(!LlmNode::agent_has_gdocs_edit_tools(&cfg, &empty_inputs()));
+        let cfg = json!({ "enabled_tools": [] });
+        assert!(!LlmNode::agent_has_gdocs_edit_tools(&cfg, &empty_inputs()));
+        let cfg = json!({ "enabled_tools": ["current_time", "add", "multiply"] });
+        assert!(!LlmNode::agent_has_gdocs_edit_tools(&cfg, &empty_inputs()));
+    }
+
+    #[tokio::test]
+    async fn inputs_enabled_tools_takes_precedence_over_config() {
+        // The function should read `enabled_tools` from inputs first,
+        // matching how the rest of the LLM node resolves config.
+        let cfg = json!({ "enabled_tools": ["current_time"] });
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert("enabled_tools".to_string(), json!(["gdocs_apply_edits"]));
+        assert!(LlmNode::agent_has_gdocs_edit_tools(&cfg, &inputs));
+    }
+
+    /// End-to-end of the auto-enrollment path: a config that only opts
+    /// into the `gdocs` toolkit (no explicit `skills` key) must yield
+    /// a SkillRepository whose catalog includes `gdocs-surgical-edits`.
+    /// This locks in the wiring between `agent_has_gdocs_edit_tools`,
+    /// `build_skill_repository_from_config`, and the builtin skill
+    /// registry.
+    #[tokio::test]
+    async fn build_skill_repository_auto_enrolls_gdocs_surgical_edits() {
+        let cfg = json!({
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "api_key": "test",
+            "enabled_tools": ["gdocs"],
+        });
+        let inputs: NodeInputs = HashMap::new();
+        let repo = LlmNode::build_skill_repository_from_config(&cfg, &inputs)
+            .expect("build_skill_repository_from_config should succeed")
+            .expect("repo must be Some — gdocs alias should auto-enroll the skill");
+        let names: Vec<String> = repo.list_available().into_iter().map(|e| e.name).collect();
+        assert!(
+            names.iter().any(|n| n == "gdocs-surgical-edits"),
+            "expected `gdocs-surgical-edits` in repo catalog, got: {names:?}"
+        );
+    }
+
+    /// Negative pin: agents with only read-only gdocs tools (or none
+    /// at all) must not get the skill auto-enrolled — keeps the
+    /// catalog clean for non-editing agents.
+    #[tokio::test]
+    async fn build_skill_repository_does_not_enroll_for_read_only_agents() {
+        let cfg = json!({
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "api_key": "test",
+            "enabled_tools": ["gdocsread"],
+        });
+        let inputs: NodeInputs = HashMap::new();
+        let repo = LlmNode::build_skill_repository_from_config(&cfg, &inputs)
+            .expect("build_skill_repository_from_config should succeed");
+        // No skills configured → repo is None (short-circuit path).
+        assert!(
+            repo.is_none(),
+            "read-only gdocs agents should not get a skill repo unless the operator opted in"
         );
     }
 }
