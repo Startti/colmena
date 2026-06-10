@@ -678,6 +678,88 @@ Casos típicos donde caching es siempre net-positive: agentes con
 system_message largo (>2K tokens), agentes con muchos tools (`tools[]`
 agrega ~1-5K tokens), workflows multi-turn con state persistente.
 
+### Surfacing de cache tokens en el SSE
+
+Los cache stats salen en **2 lugares del stream SSE**, en formatos
+distintos para distintos consumidores:
+
+| Evento | Naming convention | Scope | Consumidor típico |
+|---|---|---|---|
+| `node-end` (por llm_call) | `cache_read_tokens` / `cache_write_tokens` (snake_case) | Por-nodo, aggregate de todas las iteraciones de ese `llm_call` | ADP backoffice, dashboards por nodo |
+| `finish` (run-level) | `cacheReadTokens` / `cacheWriteTokens` (camelCase) | Aggregate de TODAS las `LlmUsage` events del run | ADP frontend (costo total del turn) |
+
+**Esquema del `finish.usage` aggregate:**
+
+```jsonc
+{
+  "type": "finish",
+  "finishReason": "stop",
+  "usage": {
+    "promptTokens": 4193,            // siempre presente
+    "completionTokens": 52,          // siempre presente
+    "totalTokens": 4321,             // siempre presente (incluye thinking)
+    "thinkingTokens": 76,            // solo si > 0
+    "cacheReadTokens": 725,          // solo si > 0
+    "cacheWriteTokens": 24882        // solo si > 0
+  },
+  "output": { ... }
+}
+```
+
+**Esquema del `node-end.output.extra_info.usage` por nodo:**
+
+```jsonc
+{
+  "type": "node-end",
+  "node_id": "agent",
+  "output": {
+    "extra_info": {
+      "usage": {
+        "prompt_tokens": 4193,
+        "completion_tokens": 52,
+        "total_tokens": 4321,
+        "thinking_tokens": 76,        // solo si > 0
+        "cache_read_tokens": 725,     // solo si > 0
+        "cache_write_tokens": 24882   // solo si > 0
+      },
+      "tool_calls": [ ... ]
+    }
+  }
+}
+```
+
+**Gate `> 0`:** los campos opcionales (`thinking`, `cacheRead`, `cacheWrite`)
+solo aparecen cuando son > 0. Esto evita ruido en runs sin cache hits. El
+consumidor debe defenderse con `??`/`?.` (e.g. `usage.cacheReadTokens ?? 0`).
+Si tu UI asume siempre presente, romperá en runs sin caching.
+
+**Cómo calcular costo real (ejemplo Anthropic):**
+
+```
+costo_input  = (promptTokens − cacheReadTokens) × rate_full_input
+             + cacheReadTokens × rate_full_input × 0.10
+             + cacheWriteTokens × rate_full_input × 1.25      (una vez)
+costo_output = completionTokens × rate_output
+costo_total  = costo_input + costo_output
+```
+
+(Rates exactos: ver pricing del provider; Anthropic cobra ~10% para cache
+reads y ~125% para cache writes, balance neto positivo si hay ≥2 hits.)
+
+**Cómo verificar live que el surfacing funciona:**
+
+```bash
+set -a && source .env && set +a
+./target/release/dag_engine run <graph.json> --include-extra-info > /tmp/run.sse
+# Cache tokens en node-end events:
+grep -oE '"cache_read_tokens":[0-9]+|"cache_write_tokens":[0-9]+' /tmp/run.sse
+# Cache tokens en finish event aggregate:
+grep -oE '"cacheReadTokens":[0-9]+|"cacheWriteTokens":[0-9]+' /tmp/run.sse
+```
+
+Si ves valores > 0 en al menos uno de los dos formatos, el caching está activo
+y el SSE lo está propagando correctamente.
+
 ---
 
 **Versión:** 1.2  
