@@ -282,8 +282,21 @@ fn marshall_rows(rows: &[sqlx::postgres::PgRow]) -> Vec<Value> {
                     .try_get::<i16, _>(name)
                     .map(|v| json!(v as i64))
                     .unwrap_or(Value::Null),
-                "FLOAT4" | "FLOAT8" | "NUMERIC" => row
+                "FLOAT4" | "FLOAT8" => row
                     .try_get::<f64, _>(name)
+                    .map(|v| json!(v))
+                    .unwrap_or(Value::Null),
+                // Postgres NUMERIC/DECIMAL is arbitrary-precision and cannot be
+                // decoded directly as `f64` by sqlx — we must go through
+                // `BigDecimal` (enabled via the `bigdecimal` feature on sqlx).
+                // We then convert to `f64` for JSON output, accepting the
+                // ~15-17 significant-digit precision limit of IEEE 754 doubles.
+                // For values that require exact precision beyond that, ask the
+                // LLM to cast the column to TEXT in its SELECT.
+                "NUMERIC" => row
+                    .try_get::<sqlx::types::BigDecimal, _>(name)
+                    .ok()
+                    .and_then(|bd| bd.to_string().parse::<f64>().ok())
                     .map(|v| json!(v))
                     .unwrap_or(Value::Null),
                 "BOOL" => row
@@ -805,5 +818,63 @@ mod tests {
 
         assert_eq!(r.output, json!({"rows_affected": 2}));
         teardown(&adapter, &table).await;
+    }
+
+    /// Regression: Postgres NUMERIC columns must marshall as JSON numbers,
+    /// not nulls. Pre-fix (before 2026-06-09 NUMERIC bigdecimal feature)
+    /// returned `null` because sqlx can't decode NUMERIC into `f64` directly —
+    /// only into `BigDecimal`. Detected during the LLM-in-the-loop E2E test
+    /// `tests/graphs/agents/sql_multistatement_e2e_llm.json`.
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn pc_numeric_column_marshalls_as_f64_not_null() {
+        let Some(adapter) = test_adapter().await else {
+            return;
+        };
+        // Custom-schema test: needs NUMERIC, not the helper's INT/TEXT shape.
+        let table = "public.test_pc_numeric";
+        let _ = sqlx::query(&format!("DROP TABLE IF EXISTS {}", table))
+            .execute(&*adapter.pool())
+            .await;
+        sqlx::query(&format!(
+            "CREATE TABLE {} (id INT PRIMARY KEY, amount NUMERIC(10,2), big_amount NUMERIC)",
+            table
+        ))
+        .execute(&*adapter.pool())
+        .await
+        .unwrap();
+
+        let q = format!(
+            "INSERT INTO {t} (id, amount, big_amount) VALUES \
+                (1, 100.00, 12345.6789),\n\
+                (2,   1.81, 0.5),\n\
+                (3, 999.99, 1234567890.123);\n\
+             SELECT id, amount, big_amount FROM {t} ORDER BY id;",
+            t = table
+        );
+        let r = adapter.execute_query(&q, 100, None).await.unwrap();
+
+        let arr = r.output.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        // Values must be JSON numbers, NOT JSON nulls.
+        assert!(
+            arr[0]["amount"].is_number(),
+            "amount must be a number, got: {}",
+            arr[0]["amount"]
+        );
+        assert!(
+            arr[0]["big_amount"].is_number(),
+            "big_amount must be a number"
+        );
+        // Exact comparisons (f64 reproduces these values exactly).
+        assert_eq!(arr[0]["amount"].as_f64(), Some(100.0));
+        assert_eq!(arr[1]["amount"].as_f64(), Some(1.81));
+        assert_eq!(arr[2]["amount"].as_f64(), Some(999.99));
+        // Precision within f64 (15-17 sig digits).
+        assert!((arr[0]["big_amount"].as_f64().unwrap() - 12345.6789).abs() < 1e-9);
+
+        let _ = sqlx::query(&format!("DROP TABLE IF EXISTS {}", table))
+            .execute(&*adapter.pool())
+            .await;
     }
 }

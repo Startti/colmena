@@ -854,3 +854,70 @@ fallaba con error, ahora funciona. ADP worker recompila clean sin
 modificaciones.
 
 **Estado.** done.
+
+---
+
+## 19. SQL node — fix NUMERIC columns marshalling as null (2026-06-09)
+
+**Qué cambió.** Las columnas `NUMERIC` / `DECIMAL` que retornaban `null`
+en SELECT outputs ahora vuelven como JSON numbers (f64). Bug detectado
+durante el E2E LLM-in-the-loop del item §18 (`SELECT amount FROM …` para
+testear Política C devolvía `amount: null` aunque la DB tenía
+`amount: 100.50`).
+
+**Root cause.** `sqlx::query().fetch_all()` devuelve `PgRow`s; en
+`marshall_rows` el código intentaba `row.try_get::<f64, _>(name)` para
+columnas con `type_info.name() == "NUMERIC"`. sqlx-postgres NO soporta
+esa coerción directamente — NUMERIC es de precisión arbitraria
+(hasta ~131k dígitos en Postgres) y f64 tiene precisión limitada
+(~15-17 sig digits). sqlx te obliga a pedir el tipo intermedio
+explícitamente: `BigDecimal` (feature `bigdecimal`) o `Decimal`
+(feature `rust_decimal`). Ninguno estaba habilitado → `try_get`
+fallaba y `.unwrap_or(Value::Null)` silenciaba el error.
+
+**Fix.** Habilitamos `sqlx` feature `bigdecimal` + agregamos la dep
+`bigdecimal = "0.4"` al `Cargo.toml`. La rama `NUMERIC` en
+`marshall_rows` ahora hace `BigDecimal → string → f64`:
+
+```rust
+"NUMERIC" => row
+    .try_get::<sqlx::types::BigDecimal, _>(name)
+    .ok()
+    .and_then(|bd| bd.to_string().parse::<f64>().ok())
+    .map(|v| json!(v))
+    .unwrap_or(Value::Null),
+```
+
+**Trade-off documentado.** Para valores con >15 sig digits
+(financieros estrictos), el LLM debe castear a TEXT en su SELECT
+(`amount::TEXT`). Documentado en:
+- Dev guide §"Tipo-mapping de columnas" en
+  [`23_sql_node.md`](developer_guide/23_sql_node.md).
+- Skill `sql-query-best-practices`, reference `error_recovery`.
+
+**Bug scope.** El bug existía desde la implementación inicial del
+nodo — `marshall_rows` (antes inline en `execute_query`) tenía la
+misma lógica fallida. **No fue introducido por Política C** del §18;
+solo se hizo más visible al E2E live verification con un modelo real.
+
+**Otros nodos afectados.** Ninguno. El único punto de marshalling
+genérico de `PgRow → JSON` está en `sql_pool_adapter::marshall_rows`.
+Los demás usos de sqlx en colmena (load_table_metadata,
+sql_function_registry, dag_state_repository, secure_value_mappings,
+llm_node_history) decodifican tipos específicos conocidos (TEXT, INT,
+BOOL) en queries fixas del sistema. `crdt_doc_*` / `gsheets_*` /
+`gdocs_*` no usan sqlx para resultados LLM-facing.
+
+**Tests.** 1 nuevo integration test `pc_numeric_column_marshalls_as_f64_not_null`
+(7→8 `pc_*` tests). Verifica que NUMERIC con valores 100.00, 1.81,
+999.99 y 12345.6789 vuelven como JSON numbers, no nulls.
+
+**Live verification re-runned.** El graph
+`tests/graphs/agents/sql_multistatement_e2e_llm.json` ahora muestra
+`amount: 100.0, 200.0, 350.0` en vez de `amount: null`.
+
+**Impacto ADP.** Cero breaking changes. La señal cambia de
+`{amount: null}` (silencioso) a `{amount: 100.50}` (correcto). ADP
+worker recompila clean.
+
+**Estado.** done.

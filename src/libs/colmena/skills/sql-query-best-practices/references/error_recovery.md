@@ -48,6 +48,20 @@ Older colmena version (pre-2026-06-09). Either send one statement per call, or a
 ### "statement timeout"
 - Query took longer than the limit (default 30s). Add a selective `WHERE`, or break it into smaller queries.
 
+## Output quirks
+
+### NUMERIC columns come back as JSON numbers (f64)
+
+`NUMERIC` and `DECIMAL` columns are returned as JSON numbers (e.g. `100.50`), suitable for direct arithmetic. The precision is limited to ~15-17 significant digits (IEEE 754 double). For values that need exact precision beyond that — e.g. financial calculations with many decimals — cast the column to TEXT in your SELECT:
+
+```sql
+SELECT id, amount::TEXT AS amount_text FROM big_money_table;
+```
+The LLM gets a string it can quote verbatim back to the user without precision loss.
+
+### Numbers that show up as null
+If a numeric-looking column returns `null` despite the row having a value, the column type may be one the marshaller doesn't recognize (e.g. `MONEY`, `NUMRANGE`). Cast to TEXT in the SELECT for now.
+
 ## Validator-block errors
 
 ### "DELETE/UPDATE without a WHERE clause is not allowed"

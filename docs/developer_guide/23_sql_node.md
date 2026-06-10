@@ -165,6 +165,26 @@ When used as an LLM tool via `tool_configurations`, all `node_schema` fixed valu
 }
 ```
 
+#### Tipo-mapping de columnas (PgRow → JSON)
+
+| Postgres type | JSON output | Notas |
+|---|---|---|
+| `INT2`, `INT4`, `INT8`, `OID` | JSON number | enteros exactos |
+| `FLOAT4`, `FLOAT8` | JSON number | f64, ~15-17 sig digits |
+| `NUMERIC`, `DECIMAL` | JSON number | decodifica vía `BigDecimal` → `f64`. Para precisión arbitraria castear a `TEXT` en el SELECT. Fix shipped 2026-06-09. |
+| `BOOL` | JSON boolean | |
+| Cualquier otro (`TEXT`, `VARCHAR`, `TIMESTAMPTZ`, `JSONB`, etc.) | JSON string | fallback `try_get::<String, _>()`. `TIMESTAMPTZ` queda en formato ISO 8601 estándar; `JSONB` viene como string serializado — el LLM puede `JSON.parse`. |
+| Tipos no soportados (`MONEY`, `NUMRANGE`, `INTERVAL`, arrays nativos, custom types) | JSON null | El marshaller no los reconoce. Workaround: castear a TEXT en el SELECT. |
+
+Para columnas `NUMERIC(p,s)` con `p > 15` (alta precisión, e.g. systems
+financieros estrictos), recomendamos castear a TEXT:
+
+```sql
+SELECT id, amount::TEXT AS amount_text FROM big_money_table;
+```
+
+El LLM recibe un string que puede ecoear verbatim sin pérdida.
+
 ### Mutation Output (INSERT, UPDATE, DELETE)
 
 ```json
