@@ -23,6 +23,7 @@
         "connection_url": "${DATABASE_URL}",
         "agent_session_id": "bulk_e2e_001",
         "attachments_enabled": true,
+        "summary_enabled": true,
         "stream": false,
         "max_iterations": 10,
         "temperature": 0.0,

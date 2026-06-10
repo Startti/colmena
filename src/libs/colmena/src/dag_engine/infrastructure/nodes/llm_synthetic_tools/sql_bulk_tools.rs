@@ -353,6 +353,127 @@ pub struct BulkInsertRowError {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Tabular attachment auto-summary (option B, 2026-06-10)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Default sample rows included in the tabular auto-summary. Three rows keeps
+/// the catalog block compact (~50 tokens for typical 5-column tables) while
+/// still showing enough variety for the LLM to recognise type patterns.
+pub const DEFAULT_TABULAR_SUMMARY_SAMPLE_ROWS: u32 = 3;
+
+/// Build a structured one-paragraph summary for a tabular attachment
+/// (CSV/XLSX) so the LLM can see the schema + a few sample rows in the
+/// catalog block of the system message **without any tool call**.
+///
+/// Returns:
+/// - `Some(text)` when `mime` (or the filename extension) resolves to CSV
+///   or XLSX AND the bytes parse cleanly. The text is the structured
+///   summary the caller should persist to the attachment's `description`
+///   field.
+/// - `None` when the mime is not tabular OR the bytes exceed
+///   `MAX_ATTACHMENT_BYTES` (50 MB) OR the parser errors. The caller
+///   should then fall back to the LLM-based summary path.
+///
+/// **Cost:** zero LLM tokens. Pure local parse via `parse_inspect_bytes`.
+pub fn build_tabular_summary(mime: &str, filename: &str, bytes: &[u8]) -> Option<String> {
+    if bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
+        return None;
+    }
+    // Only fire for tabular mimes / extensions. Plain text and PDFs go
+    // through the existing LLM-based summarizer.
+    let format = match (
+        FileFormat::from_mime(mime),
+        FileFormat::from_filename(filename),
+    ) {
+        (Some(f), _) => f,
+        (None, Some(f)) => f,
+        (None, None) => return None,
+    };
+    // Plain text mime (`text/plain`) is too ambiguous — we don't want every
+    // .txt upload to be treated as CSV. Only fire when the mime is
+    // explicitly tabular OR the filename extension is `.csv`/`.xlsx`.
+    let is_tabular_mime = matches!(
+        FileFormat::from_mime(mime),
+        Some(FileFormat::Csv) | Some(FileFormat::Xlsx)
+    ) && !matches!(mime.to_ascii_lowercase().as_str(), "text/plain");
+    let is_tabular_extension = FileFormat::from_filename(filename).is_some();
+    if !is_tabular_mime && !is_tabular_extension {
+        return None;
+    }
+
+    let args = InspectArgs {
+        attachment_id: String::new(), // not used by parse path
+        sample_rows: Some(DEFAULT_TABULAR_SUMMARY_SAMPLE_ROWS),
+        delimiter: None,
+        sheet_name: None,
+        header_row: None,
+        target_table: None,
+    };
+    let resp = parse_inspect_bytes_with_filename(bytes, mime, filename, &args).ok()?;
+
+    Some(format_tabular_summary(&resp, format))
+}
+
+/// Render the inspect response as a compact one-paragraph summary suitable
+/// for the catalog block. The format is stable and self-describing so the
+/// LLM can recognize column names + types + sample rows without further
+/// parsing.
+fn format_tabular_summary(resp: &InspectResponse, format: FileFormat) -> String {
+    let col_count = resp.columns.len();
+    let row_count = resp.total_rows;
+
+    // Header line: format, dimensions, optional sheet name.
+    let format_str = match format {
+        FileFormat::Csv => "CSV",
+        FileFormat::Xlsx => "XLSX",
+    };
+    let mut header = format!("{format_str}, {col_count} cols × {row_count} rows");
+    if let Some(sheet) = resp.sheet_name.as_deref() {
+        header.push_str(&format!(" (sheet \"{sheet}\")"));
+    }
+    if let Some(delim) = resp.delimiter.as_deref() {
+        let visible = if delim == "\t" { "\\t" } else { delim };
+        header.push_str(&format!(" (delimiter '{visible}')"));
+    }
+
+    // Schema line: column names with inferred types.
+    let mut schema = String::from("schema: ");
+    for (i, (col, t)) in resp
+        .columns
+        .iter()
+        .zip(resp.inferred_types.iter())
+        .enumerate()
+    {
+        if i > 0 {
+            schema.push_str(", ");
+        }
+        schema.push_str(&format!("{col} ({})", t.as_str()));
+    }
+
+    // Sample rows: render each row as a CSV-style line of values, truncating
+    // long strings so a single huge cell doesn't blow up the catalog token cost.
+    let mut sample = String::from("sample rows:");
+    for row in &resp.sample {
+        sample.push_str("\n  ");
+        for (i, col) in resp.columns.iter().enumerate() {
+            if i > 0 {
+                sample.push_str(", ");
+            }
+            let raw = row.get(col).and_then(|v| v.as_str()).unwrap_or("");
+            let truncated = if raw.chars().count() > 40 {
+                let head: String = raw.chars().take(37).collect();
+                format!("{head}...")
+            } else {
+                raw.to_string()
+            };
+            sample.push_str(&truncated);
+        }
+    }
+
+    format!("{header}\n{schema}\n{sample}")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Pure attachment parsing — `parse_inspect_bytes`
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1617,6 +1738,90 @@ mod tests {
         // Column where some rows are empty but all non-empty are integers.
         let r = rows(vec![vec!["1"], vec![""], vec!["42"]]);
         assert_eq!(infer_column_types(&r, 1), vec![InferredType::Integer]);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Tabular auto-summary tests (option B, 2026-06-10)
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn tabular_summary_for_simple_csv_includes_header_types_and_sample() {
+        let csv = b"product_id,sku,price\n1,A001,9.99\n2,A002,14.50\n3,A003,7.25\n4,A004,21.00\n";
+        let s = build_tabular_summary("text/csv", "products.csv", csv).unwrap();
+        // Header line: format + dims + delimiter.
+        assert!(s.contains("CSV, 3 cols × 4 rows"), "missing dims, got: {s}");
+        assert!(s.contains("delimiter ','"), "missing delimiter, got: {s}");
+        // Schema line: columns with inferred types.
+        assert!(
+            s.contains("product_id (integer)"),
+            "missing product_id type"
+        );
+        assert!(s.contains("sku (text)"), "missing sku type");
+        assert!(s.contains("price (numeric)"), "missing price type");
+        // Sample lines: at most DEFAULT_TABULAR_SUMMARY_SAMPLE_ROWS rows.
+        let sample_lines: Vec<&str> = s
+            .lines()
+            .filter(|l| {
+                l.trim_start().starts_with('1')
+                    || l.trim_start().starts_with('2')
+                    || l.trim_start().starts_with('3')
+            })
+            .collect();
+        assert_eq!(
+            sample_lines.len(),
+            DEFAULT_TABULAR_SUMMARY_SAMPLE_ROWS as usize
+        );
+    }
+
+    #[test]
+    fn tabular_summary_returns_none_for_non_tabular_mime() {
+        let pdf_like = b"%PDF-1.4\nfake pdf content\n";
+        assert!(build_tabular_summary("application/pdf", "doc.pdf", pdf_like).is_none());
+    }
+
+    #[test]
+    fn tabular_summary_returns_none_for_plain_text_mime_without_csv_extension() {
+        // text/plain alone is ambiguous; we don't want every .txt to look like CSV.
+        // No .csv/.xlsx extension either → must skip.
+        let text = b"this is just\nsome text\nwithout commas\n";
+        assert!(build_tabular_summary("text/plain", "readme.txt", text).is_none());
+    }
+
+    #[test]
+    fn tabular_summary_fires_when_text_plain_but_filename_says_csv() {
+        // Common: signed-URL providers send text/plain for .csv. We rely on
+        // the filename extension to still recognise it.
+        let csv = b"a,b\n1,2\n3,4\n";
+        let s = build_tabular_summary("text/plain", "data.csv", csv);
+        assert!(s.is_some(), "should resolve via .csv extension");
+        assert!(s.unwrap().contains("CSV"));
+    }
+
+    #[test]
+    fn tabular_summary_returns_none_for_oversized_payload() {
+        let too_big = vec![b'a'; (MAX_ATTACHMENT_BYTES + 1) as usize];
+        assert!(build_tabular_summary("text/csv", "huge.csv", &too_big).is_none());
+    }
+
+    #[test]
+    fn tabular_summary_truncates_very_long_cells() {
+        // A cell of 200 chars should be truncated to ~40 in the rendered sample.
+        let long_cell = "x".repeat(200);
+        let csv = format!("name,desc\nrow1,{long_cell}\n");
+        let s = build_tabular_summary("text/csv", "data.csv", csv.as_bytes()).unwrap();
+        // Long string should be truncated with `...` marker.
+        assert!(s.contains("..."));
+        // And the original 200-char run must not survive verbatim.
+        assert!(!s.contains(&"x".repeat(100)));
+    }
+
+    #[test]
+    fn tabular_summary_handles_csv_with_only_header() {
+        // 0 data rows is a degenerate but valid case. Summary should render
+        // `0 rows` without panicking and without producing "sample rows:" garbage.
+        let csv = b"a,b,c\n";
+        let s = build_tabular_summary("text/csv", "empty.csv", csv).unwrap();
+        assert!(s.contains("3 cols × 0 rows"));
     }
 
     // ─────────────────────────────────────────────────────────────────────

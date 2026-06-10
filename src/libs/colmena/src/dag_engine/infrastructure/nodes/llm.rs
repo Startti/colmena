@@ -296,6 +296,25 @@ async fn generate_one_summary(
         }
     };
 
+    // 1b. Short-circuit for tabular attachments (CSV / XLSX).
+    //
+    // Auto-summary option B (shipped 2026-06-10): instead of feeding the raw
+    // CSV text through a cheap-tier LLM (slow + token cost) — or returning
+    // `Skipped` for XLSX (no useful summary today) — build a structured
+    // summary locally from the parser used by `sql_inspect_attachment`. The
+    // LLM sees schema + sample rows + total row count in the catalog block
+    // from turn 1, with zero LLM tokens spent on summarization.
+    //
+    // Falls through to the existing extract_text/LLM path for any other
+    // mime (PDF, plain text, markdown, etc.).
+    {
+        use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::sql_bulk_tools::build_tabular_summary;
+        if let Some(structured) = build_tabular_summary(&target.mime_type, &target.filename, &bytes)
+        {
+            return SummaryOutcome::Generated(structured);
+        }
+    }
+
     // 2. Build SummarySource based on mime.
     let source = if target.mime_type.starts_with("image/") {
         SummarySource::ImageBytes(bytes)

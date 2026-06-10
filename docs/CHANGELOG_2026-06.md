@@ -1104,3 +1104,80 @@ en el request body.
 - Si no se setea ninguna: el prelude usa el path degraded (pide el doc_id y le dice al user que consulte al operador para el share). Funciona pero menos fluido.
 
 **Estado.** done.
+
+---
+
+## 22. Tabular attachment auto-summary (CSV/XLSX) in catalog block (2026-06-10)
+
+**Origen.** Pregunta del owner post item 13: "¿el LLM puede leer solo una parte
+para entender el schema sin tener que leer todo?" La respuesta era "sí, vía
+`sql_inspect_attachment`, pero solo cuando el operador habilita SQL tools".
+Para agentes sin SQL configurado, el LLM tenía 2 caminos malos:
+1. `load_attachment` → ~50K tokens para un CSV de 1487 rows
+2. Adivinar desde el filename → erróneo
+
+**Fix shipped.** Auto-summary estructurado para CSV/XLSX en el catalog block
+del system message. **Zero LLM tokens** consumidos en summarization — el
+parser local de `parse_inspect_bytes` produce el summary directamente.
+
+**Resultado live verificado** (`bulk_e2e_auto_002` session, 2026-06-10):
+
+```
+CSV, 5 cols × 100 rows (delimiter ',')
+schema: product_id (integer), sku (text), name (text), price (numeric), stock (integer)
+sample rows:
+  1, SKU001, Product 1, 10.49, 10
+  2, SKU002, Product 2, 10.99, 20
+  3, SKU003, Product 3, 11.49, 30
+```
+
+~150 tokens persistidos en `conversation_attachments.description`. El LLM
+los ve desde el turn 1 sin ningún round-trip de tool call.
+
+**Cambios:**
+
+| Componente | LOC | Función |
+|---|---|---|
+| `sql_bulk_tools::build_tabular_summary(mime, filename, bytes)` | ~110 | Public helper que detecta CSV/XLSX, parsea con `parse_inspect_bytes`, formatea como string compacto. Reusa `MAX_ATTACHMENT_BYTES` cap (50 MB). |
+| `sql_bulk_tools::format_tabular_summary` (interno) | ~50 | Render del response como string (header line + schema line + sample lines). Trunca cells > 40 chars con `...` para evitar runaway tokens. |
+| `generate_one_summary` (en `llm.rs`) | +10 | Short-circuit: si `build_tabular_summary` devuelve Some, retorna `SummaryOutcome::Generated(text)` directo (skip extract_text + LLM summarizer). |
+| Tests `tabular_summary_*` | 7 tests | CSV simple, mime no-tabular, text/plain ambiguo, .csv extension fallback, oversized, cell truncation, only-header degenerate |
+
+**Cobertura mimes:**
+
+| Mime / extension | Fires auto-summary? |
+|---|---|
+| `text/csv` | ✅ |
+| `application/csv` | ✅ |
+| `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` (XLSX) | ✅ |
+| `application/vnd.ms-excel` | ✅ |
+| `text/plain` + filename `.csv` | ✅ (filename extension fallback) |
+| `text/plain` + filename `.txt` | ❌ (ambiguo, no fire) |
+| `application/pdf`, `image/*`, `text/markdown`, etc. | ❌ (path LLM-based existente) |
+
+**Cuándo NO fire:**
+- Bytes > 50 MB (mismo cap que `sql_inspect_attachment`)
+- Mime no tabular ni filename .csv/.xlsx
+- Parser de CSV/XLSX falla (e.g. archivo corrupto) → cae al path LLM existente
+
+**Impacto LLM tokens:**
+
+| Scenario | Pre-fix | Post-fix |
+|---|---|---|
+| Usuario sube CSV 1487 rows, agente sin SQL config | LLM ve solo `filename, mime, size` en catalog. Para conocer schema necesita `load_attachment` (~50K tokens). | LLM ve schema + sample + total en catalog automáticamente. **Zero LLM calls.** |
+| Agente CON SQL config | `sql_inspect_attachment` cuesta 1 tool call (~300 tokens response) | Catalog ya tiene la info → no necesita ni siquiera `sql_inspect_attachment` salvo que quiera `target_table_schema` |
+| Agente que invoca `summary_enabled: true` con CSV pre-fix | Cheap-tier LLM corre sobre raw CSV truncado → 1 LLM call extra | Zero LLM calls de summarization para CSV/XLSX |
+
+**Impacto ADP.** Cero breaking changes. El campo
+`conversation_attachments.description` ya existe — el cambio es solo qué
+contenido se persiste para mimes tabulares. Agentes existentes ven mejor
+contexto desde el primer turn. ADP worker recompila clean.
+
+**Tests:** 7 nuevos en `sql_bulk_tools::tests::tabular_summary_*`.
+Suite full: 1686 PASS / 0 FAIL / 92 IGNORED.
+
+**Verificación live (E2E).** `tests/graphs/agents/sql_bulk_insert_e2e.json` ahora
+tiene `summary_enabled: true`. Run 1 dispara la tarea concurrente de summary;
+DB query confirma la persistencia con shape correcto.
+
+**Estado.** done.
