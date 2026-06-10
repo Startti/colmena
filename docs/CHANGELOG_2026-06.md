@@ -1339,3 +1339,57 @@ literal de un CSV, `load_attachment` sigue siendo la herramienta
 primaria.
 
 **Estado.** done.
+
+---
+
+## 24. gdocs `apply_edits` — ConfirmManyMatches threshold guard (2026-06-10)
+
+**Qué cambió.** `apply_edits` ahora aborta el compound entero con
+`DocsError::ConfirmManyMatches` cuando una sub-edit individual
+`ReplaceText` o `DeleteText` resuelve a 5 o más párrafos (igual
+threshold que el standalone `replace_text`). El guard corre durante la
+fase A (resolve), antes de cualquier batchUpdate request — el documento
+queda intacto.
+
+**Por qué importa.** Antes del fix: el LLM podía mandar `find: "Enfriamiento: ..."`
+y el compound reescribía silenciosamente 4 párrafos cuando el LLM creía
+estar tocando 1 (ver bug en `agent_session cmq7kem1h003001s6mr36uwe8`).
+Ahora: el guard fuerza al LLM a reconsiderar — su único camino de
+recovery es narrow-down vía `scope.paragraph_range` o usar un find
+string más específico. **Deliberadamente NO se expone `confirm_many`
+ni `occurrence` como bypass** — la disciplina correcta es disambiguar
+por scope, no waivar el guard.
+
+**Implementación.**
+- Nueva constante pública `APPLY_EDITS_MANY_HITS_THRESHOLD: usize = 5`
+  documentada con rationale + sync con standalone.
+- Helper `enforce_many_hits_threshold(&hits, &find, snap)` corre justo
+  después de `find_hits` en ambos brazos (`ReplaceText`, `DeleteText`).
+- Helpers `build_previews` + `take_slice_around` copiados desde
+  `replace_text.rs` para producir el MISMO shape de `MatchPreview` que
+  el standalone — el LLM ve el contrato idéntico sin importar qué tool
+  usó.
+
+**Tests de regresión** (en `apply_edits.rs:app_tests`):
+- `apply_edits_replace_with_5_hits_triggers_confirm_many_matches`
+  — 5 párrafos → `ConfirmManyMatches { find, count: 5, preview[5] }`.
+- `apply_edits_replace_with_4_hits_proceeds` — boundary: 4 hits
+  pasan sin error (pin del threshold en 5).
+- `apply_edits_threshold_bypassed_by_scope_narrowing` — 5 párrafos
+  contienen el find pero `Scope::Paragraph { n: 1 }` lo reduce a 1
+  → call procede.
+- `apply_edits_delete_with_5_hits_triggers_confirm_many_matches`
+  — DeleteText obedece el mismo threshold.
+
+**BREAKING.** Comportamiento, no API: compounds que dependían del
+replace-all silencioso de ≥5 hits ahora fallan con
+`ConfirmManyMatches`. Ningún grafo conocido se beneficiaba del bug;
+todos los usos legítimos quedan bajo 5 hits o ya usan `scope`.
+
+**Verificación.**
+- 11 tests de `apply_edits` pasan (7 previos + 4 nuevos).
+- Suite full: 1627 tests pasan, 0 fallos.
+
+**Estado.** done. Pareja conceptual con item §25 (skill auto-loaded
+para scope-discipline) que enseña al LLM a no llegar al guard en
+primer lugar.

@@ -629,16 +629,15 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
 > [`developer_guide/45_gdocs.md`](developer_guide/45_gdocs.md) §"Limitaciones
 > en v1".
 
-- [ ] **`apply_edits` ConfirmManyMatches threshold** — standalone
-  `replace_text` aborta con `ConfirmManyMatches` cuando una find string
-  matchea ≥5 veces (sin `confirm_many: true`). `apply_edits` hoy lo
-  bypassa: ejecuta replace-all silenciosamente. Resultado: el LLM puede
-  modificar 4 párrafos cuando creía estar tocando solo 1. Fix: aplicar
-  el mismo threshold por sub-edit antes de la fase de resolve. Decisión
-  pendiente: ¿romper compat (siempre exigir `confirm_many` cuando
-  multi-hit) o solo emitir warning estructurado en el `EditResult`?
-  Origen: análisis del bug en agent_session `cmq7kem1h003001s6mr36uwe8`
-  (2026-06-10).
+- [x] **`apply_edits` ConfirmManyMatches threshold** — SHIPPED 2026-06-10.
+  `apply_edits` ahora aplica el mismo umbral de ≥5 hits que el
+  standalone `replace_text`, tanto para `ReplaceText` como para
+  `DeleteText`. Si una sub-edit resuelve a 5 o más párrafos, el
+  compound aborta con `DocsError::ConfirmManyMatches` (find + count +
+  preview) ANTES de cualquier write. Sin bypass por `confirm_many` —
+  el camino de recovery del LLM es narrow-down vía `scope`. Constante
+  `APPLY_EDITS_MANY_HITS_THRESHOLD` documentada en
+  [`apply_edits.rs`](../src/libs/colmena/src/gdocs/application/apply_edits.rs).
 
 - [ ] **`apply_edits` skill auto-loaded para scope-discipline** — el
   LLM hoy llama `replace_text` con find strings ambiguos ("Ejercicios:"

@@ -15,10 +15,26 @@ use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::markdown_to_d
 use crate::gdocs::application::co_edit_guard::{run_guard, GuardContext};
 use crate::gdocs::application::insert::reject_table_markdown;
 use crate::gdocs::domain::{
-    ChangeKind, ChangeRecord, DocsError, DocumentId, DocumentSnapshot, EditResult, OutlineEntry,
-    ParagraphSnapshot, Scope, TabId,
+    ChangeKind, ChangeRecord, DocsError, DocumentId, DocumentSnapshot, EditResult, MatchPreview,
+    OutlineEntry, ParagraphSnapshot, Scope, TabId,
 };
 use regex::RegexBuilder;
+
+/// Hard cap on the number of hits a single `ReplaceText`/`DeleteText`
+/// sub-edit can resolve to before `apply_edits` refuses to proceed.
+///
+/// Mirrors the same threshold used by the standalone `replace_text` tool
+/// (see `gdocs/application/replace_text.rs`). The guard fires before
+/// any batchUpdate request is emitted, so the document is left
+/// untouched. The LLM's recourse is to narrow the sub-edit with a
+/// `scope.paragraph_range` or a more specific `find` string.
+///
+/// Why 5: empirically the standalone limit catches blunt mistakes
+/// (the same line repeating across N sections) without tripping on
+/// legitimate "rename a token everywhere" edits, which usually stay
+/// under five occurrences in a Google Doc. If we later see false
+/// positives, tune here — keep both sides aligned.
+const APPLY_EDITS_MANY_HITS_THRESHOLD: usize = 5;
 
 /// Sub-edit variants accepted in v1 `apply_edits`.
 #[derive(Debug, Clone)]
@@ -89,6 +105,7 @@ pub async fn run(
                 scope,
             } => {
                 let hits = find_hits(snap, &find, &scope)?;
+                enforce_many_hits_threshold(&hits, &find, snap)?;
                 for (n, off, len) in hits {
                     let p = lookup_para(snap, n);
                     let s = p.start_index + utf16_len(&p.text[..off]);
@@ -124,6 +141,7 @@ pub async fn run(
             }
             ApplyEditOp::DeleteText { find, scope } => {
                 let hits = find_hits(snap, &find, &scope)?;
+                enforce_many_hits_threshold(&hits, &find, snap)?;
                 for (n, off, len) in hits {
                     let p = lookup_para(snap, n);
                     let s = p.start_index + utf16_len(&p.text[..off]);
@@ -296,6 +314,76 @@ fn find_hits(
         });
     }
     Ok(hits)
+}
+
+/// Abort the compound when a single `ReplaceText`/`DeleteText` sub-edit
+/// would touch `APPLY_EDITS_MANY_HITS_THRESHOLD` or more paragraphs.
+///
+/// Mirrors the `ConfirmManyMatches` guard in standalone `replace_text`:
+/// catches blunt finds like a per-day "Enfriamiento: ..." line that
+/// repeats across every day in a workout plan, where the LLM intended
+/// to touch one section but would silently rewrite four or more.
+///
+/// Returns `DocsError::ConfirmManyMatches` carrying the same `find`,
+/// `count`, and `preview` shape standalone produces. The LLM's recourse
+/// is to either narrow `scope.paragraph_range` to the section it really
+/// meant or replace the find string with one that is unique to that
+/// section. `apply_edits` deliberately exposes NO `confirm_many` /
+/// `occurrence` bypass — compound calls should disambiguate via scope,
+/// not by waving the guard away.
+///
+/// Fired BEFORE any batchUpdate request is emitted (during Phase A
+/// resolve), so the document is left untouched on error.
+fn enforce_many_hits_threshold(
+    hits: &[(u32, usize, usize)],
+    find: &str,
+    snap: &DocumentSnapshot,
+) -> Result<(), DocsError> {
+    if hits.len() >= APPLY_EDITS_MANY_HITS_THRESHOLD {
+        return Err(DocsError::ConfirmManyMatches {
+            find: find.to_string(),
+            count: hits.len() as u32,
+            preview: build_previews(snap, hits),
+        });
+    }
+    Ok(())
+}
+
+/// Build the per-hit `MatchPreview` list used by
+/// `ConfirmManyMatches`. Same shape standalone `replace_text` returns
+/// (~30 chars before the match, ~50 after, sliced on char boundaries)
+/// so the LLM sees identical previews regardless of which tool it called.
+fn build_previews(snap: &DocumentSnapshot, hits: &[(u32, usize, usize)]) -> Vec<MatchPreview> {
+    hits.iter()
+        .enumerate()
+        .map(|(i, (n, off, _len))| {
+            let p = lookup_para(snap, *n);
+            let byte_start = off.saturating_sub(30);
+            let byte_end = (*off + 50).min(p.text.len());
+            let preview = take_slice_around(&p.text, byte_start, byte_end);
+            MatchPreview {
+                n: (i + 1) as u32,
+                paragraph: *n,
+                preview,
+            }
+        })
+        .collect()
+}
+
+/// Slice `s` between byte offsets `start`..`end`, snapping each end
+/// inward to the nearest UTF-8 char boundary so the resulting `String`
+/// is always valid UTF-8 even when the raw indices land inside a
+/// multi-byte sequence.
+fn take_slice_around(s: &str, start: usize, end: usize) -> String {
+    let mut a = start.min(s.len());
+    while a > 0 && !s.is_char_boundary(a) {
+        a -= 1;
+    }
+    let mut b = end.min(s.len());
+    while b < s.len() && !s.is_char_boundary(b) {
+        b += 1;
+    }
+    s[a..b].to_string()
 }
 
 /// Reject any pair of `ResolvedEmit`s on the same paragraph whose touched
@@ -804,5 +892,208 @@ mod app_tests {
             starts[0] > starts[1],
             "expected write-backwards order, got {starts:?}"
         );
+    }
+
+    /// 5 hits of the same find string on different paragraphs must
+    /// trigger `ConfirmManyMatches` before any write. The error must
+    /// carry the find, the count, and a preview list — same shape the
+    /// standalone `replace_text` returns, so the LLM sees an identical
+    /// contract regardless of which tool it called.
+    ///
+    /// Regression scaffold for the bug where the LLM's per-day
+    /// "Enfriamiento: ..." find silently rewrote four paragraphs
+    /// (agent_session `cmq7kem1h003001s6mr36uwe8`). Once the doc had
+    /// five days that gate would have caught it.
+    #[tokio::test]
+    async fn apply_edits_replace_with_5_hits_triggers_confirm_many_matches() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![
+                (1, ParagraphKind::Paragraph, "Día 1 Enfriamiento: x", 1, 23),
+                (2, ParagraphKind::Paragraph, "Día 2 Enfriamiento: x", 23, 45),
+                (3, ParagraphKind::Paragraph, "Día 3 Enfriamiento: x", 45, 67),
+                (4, ParagraphKind::Paragraph, "Día 4 Enfriamiento: x", 67, 89),
+                (5, ParagraphKind::Paragraph, "Día 5 Enfriamiento: x", 89, 111),
+            ],
+        );
+        // Only one Get expected — the call must fail before any write.
+        expect_get_sequence(&mut rig.client, vec![s]);
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let err = super::run(
+            &ctx,
+            &doc_id(),
+            ApplyEditsInput {
+                edits: vec![ApplyEditOp::ReplaceText {
+                    find: "Enfriamiento: x".into(),
+                    replace: "- **Enfriamiento:** x".into(),
+                    scope: Scope::All,
+                }],
+            },
+        )
+        .await
+        .unwrap_err();
+        match err {
+            DocsError::ConfirmManyMatches {
+                find,
+                count,
+                preview,
+            } => {
+                assert_eq!(find, "Enfriamiento: x");
+                assert_eq!(count, 5);
+                assert_eq!(preview.len(), 5, "preview must list every hit");
+                // Preview entries should reference paragraphs 1..=5 in
+                // some order — exact ordering depends on snapshot
+                // iteration but every paragraph must appear once.
+                let mut paragraphs: Vec<u32> = preview.iter().map(|m| m.paragraph).collect();
+                paragraphs.sort();
+                assert_eq!(paragraphs, vec![1, 2, 3, 4, 5]);
+            }
+            other => panic!("expected ConfirmManyMatches, got {other:?}"),
+        }
+    }
+
+    /// Boundary: exactly 4 hits is BELOW the threshold and must succeed.
+    /// Pins the threshold value to 5 — bump this test and the const in
+    /// lockstep if we ever tune it.
+    #[tokio::test]
+    async fn apply_edits_replace_with_4_hits_proceeds() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![
+                (1, ParagraphKind::Paragraph, "Día 1 token", 1, 13),
+                (2, ParagraphKind::Paragraph, "Día 2 token", 13, 25),
+                (3, ParagraphKind::Paragraph, "Día 3 token", 25, 37),
+                (4, ParagraphKind::Paragraph, "Día 4 token", 37, 49),
+            ],
+        );
+        let s2 = s.clone();
+        expect_get_sequence(&mut rig.client, vec![s, s2]);
+        let captured = make_batch_update_capture(&mut rig.client, "r1");
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let result = super::run(
+            &ctx,
+            &doc_id(),
+            ApplyEditsInput {
+                edits: vec![ApplyEditOp::ReplaceText {
+                    find: "token".into(),
+                    replace: "TOKEN".into(),
+                    scope: Scope::All,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.changes.len(), 4);
+        let reqs = captured.lock().unwrap().clone();
+        assert_eq!(reqs.len(), 8, "4 replaces × 2 requests each");
+    }
+
+    /// Bypass path: 5 paragraphs contain the same find, but the LLM
+    /// narrows `scope.paragraph_range` to a single paragraph. After
+    /// scope filtering the hit count drops to 1 and the call must
+    /// succeed. This is the canonical recovery the LLM is expected to
+    /// take after seeing `ConfirmManyMatches`.
+    #[tokio::test]
+    async fn apply_edits_threshold_bypassed_by_scope_narrowing() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![
+                (1, ParagraphKind::Paragraph, "Día 1 Enfriamiento: x", 1, 23),
+                (2, ParagraphKind::Paragraph, "Día 2 Enfriamiento: x", 23, 45),
+                (3, ParagraphKind::Paragraph, "Día 3 Enfriamiento: x", 45, 67),
+                (4, ParagraphKind::Paragraph, "Día 4 Enfriamiento: x", 67, 89),
+                (5, ParagraphKind::Paragraph, "Día 5 Enfriamiento: x", 89, 111),
+            ],
+        );
+        let s2 = s.clone();
+        expect_get_sequence(&mut rig.client, vec![s, s2]);
+        make_batch_update_capture(&mut rig.client, "r1");
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let result = super::run(
+            &ctx,
+            &doc_id(),
+            ApplyEditsInput {
+                edits: vec![ApplyEditOp::ReplaceText {
+                    find: "Enfriamiento: x".into(),
+                    replace: "- **Enfriamiento:** x".into(),
+                    // Only paragraph 1. After scope filter there is 1
+                    // hit, well under the 5-hit threshold.
+                    scope: Scope::Paragraph { n: 1 },
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.changes.len(),
+            1,
+            "scope-narrowed call should produce one change"
+        );
+    }
+
+    /// `DeleteText` must obey the same threshold as `ReplaceText`.
+    /// Without this the LLM could pass a too-broad find string to
+    /// DeleteText and silently strip the same line out of multiple
+    /// sections.
+    #[tokio::test]
+    async fn apply_edits_delete_with_5_hits_triggers_confirm_many_matches() {
+        let mut rig = TestRig::new();
+        let s = snap(
+            "r1",
+            vec![
+                (1, ParagraphKind::Paragraph, "Día 1 borrar", 1, 14),
+                (2, ParagraphKind::Paragraph, "Día 2 borrar", 14, 27),
+                (3, ParagraphKind::Paragraph, "Día 3 borrar", 27, 40),
+                (4, ParagraphKind::Paragraph, "Día 4 borrar", 40, 53),
+                (5, ParagraphKind::Paragraph, "Día 5 borrar", 53, 66),
+            ],
+        );
+        expect_get_sequence(&mut rig.client, vec![s]);
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let err = super::run(
+            &ctx,
+            &doc_id(),
+            ApplyEditsInput {
+                edits: vec![ApplyEditOp::DeleteText {
+                    find: "borrar".into(),
+                    scope: Scope::All,
+                }],
+            },
+        )
+        .await
+        .unwrap_err();
+        match err {
+            DocsError::ConfirmManyMatches { count, .. } => {
+                assert_eq!(count, 5);
+            }
+            other => panic!("expected ConfirmManyMatches, got {other:?}"),
+        }
     }
 }
