@@ -1,0 +1,83 @@
+{
+  "_comment": "E2E test — LLM-in-the-loop verificando que Política C funciona con un modelo real. Escenario: el usuario pide DELETE + INSERT + SELECT en una sola call multi-statement. Verifica end-to-end: (1) el LLM ve el description_supplement y NO escribe BEGIN/COMMIT ni bind params; (2) genera multi-statement naturalmente; (3) Política C ejecuta atomic TX y devuelve solo el output del último SELECT; (4) el LLM reporta el resultado sin alucinar. Pre-req: tabla public.test_e2e_orders se crea idempotente al inicio. Ejecutar: `set -a && source .env && set +a && cargo run --bin dag_engine -- run tests/graphs/agents/sql_multistatement_e2e_llm.json --include-extra-info`. Si la SKILL `sql-query-best-practices` no está habilitada, el LLM tiene menos guía pero igual debería funcionar (Gemini cumple la consigna del prompt). El test es interactivo con un modelo real — output exacto puede variar entre runs.",
+  "nodes": {
+    "setup_params": {
+      "type": "input",
+      "config": {
+        "data": {
+          "query": "CREATE TABLE IF NOT EXISTS public.test_e2e_orders (id SERIAL PRIMARY KEY, user_id INT NOT NULL, amount NUMERIC(10,2) NOT NULL, created_at TIMESTAMPTZ DEFAULT now());\nDELETE FROM public.test_e2e_orders WHERE user_id = 42",
+          "connection_url": "${DATABASE_URL}",
+          "permissions": {"preset": "full", "allowed_schemas": ["public"], "sandbox_schema": "public"},
+          "runtime_limits": {"max_rows": 100}
+        }
+      }
+    },
+    "setup": { "type": "sql_query", "config": {} },
+
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/sql-e2e-llm",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Tengo una tabla public.test_e2e_orders con columnas (id SERIAL, user_id INT, amount NUMERIC, created_at TIMESTAMPTZ). Hacé esta operación en UNA sola call a sql_query con un script multi-statement: 1) DELETE rows de user_id 42; 2) INSERT 3 rows con user_id 42 y montos 100.00, 200.00, 350.00; 3) SELECT id, user_id, amount FROM public.test_e2e_orders WHERE user_id = 42 ORDER BY amount ASC. NO uses RETURNING. NO uses ORDER BY adentro de RETURNING. Si la tool devuelve un error, REPORTÁLO TAL CUAL (verbatim, no lo arregles ni inventes), no intentes generar el resultado vos mismo."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 6,
+        "lazy_tool_loading": false,
+        "system_message": "Sos un agente de testing. Cuando uses tools, NUNCA inventes el resultado. Si una tool devuelve un error, reportá el error EXACTO. Si una tool devuelve un output, reportá el output EXACTO sin reformatear. Tu única tarea es ser un canal transparente entre el usuario y la tool.",
+        "skills": {
+          "builtin": ["sql-query-best-practices"]
+        },
+        "tool_configurations": {
+          "sql_query": {
+            "name": "sql_query",
+            "node_type": "sql_query",
+            "description": "Execute PostgreSQL queries against the test database. Supports multi-statement.",
+            "node_schema": {
+              "connection_url": {
+                "type": "string",
+                "fixed": "${DATABASE_URL}"
+              },
+              "permissions": {
+                "type": "object",
+                "fixed": {
+                  "preset": "full",
+                  "allowed_schemas": ["public"],
+                  "sandbox_schema": "public"
+                }
+              },
+              "runtime_limits": {
+                "type": "object",
+                "fixed": {"max_rows": 100, "statement_timeout_ms": 15000, "work_mem_mb": 32}
+              },
+              "query": {
+                "type": "string",
+                "description": "The SQL query (or multi-statement script) to execute."
+              }
+            }
+          }
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "setup_params.query", "to": "setup.query" },
+    { "from": "setup_params.connection_url", "to": "setup.connection_url" },
+    { "from": "setup_params.permissions", "to": "setup.permissions" },
+    { "from": "setup_params.runtime_limits", "to": "setup.runtime_limits" },
+
+    { "from": "setup", "to": "trigger" },
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}
