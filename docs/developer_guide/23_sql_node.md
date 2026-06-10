@@ -979,7 +979,7 @@ como signed URLs. El LLM no necesita saber el source type.
 
 - DataFrame > 100K rows → usar `sql_bulk_insert_from_attachment` para meter en DB y luego `sql_query` con filtros
 - Archivo > 50 MB → mismo workaround
-- Quiere ver TODA la data al contexto → `load_attachment` (último recurso)
+- Necesitás el contenido literal (PDF, imagen, markdown, o inspeccionar fila específica del CSV) → usar [`load_attachment`](31_load_attachment.md), que es el reader general-purpose para cualquier mime
 
 ### Referencias
 
@@ -987,3 +987,43 @@ como signed URLs. El LLM no necesita saber el source type.
 - Implementación: [`attachment_run_python.rs`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/attachment_run_python.rs)
 - E2E graph: [`tests/graphs/agents/attachment_run_python_e2e.json`](../../tests/graphs/agents/attachment_run_python_e2e.json)
 - CHANGELOG §23
+
+---
+
+## Elegir la herramienta correcta para un attachment
+
+Después de items 13 + auto-summary + `attachment_run_python` (2026-06-09 / 2026-06-10) el LLM tiene **5 caminos** para interactuar con un archivo registrado. La elección depende del tipo de archivo y de la naturaleza de la pregunta.
+
+### Matriz por tipo de archivo
+
+| Tipo de archivo | "Qué columnas/contenido tiene?" | "Hacé un cálculo sobre la data" | "Cargá esto en mi DB" | "Leé el contenido literal" |
+|---|---|---|---|---|
+| **CSV / XLSX** | Catalog auto-summary (gratis, sin call) | `attachment_run_python` | `sql_inspect_attachment` + `sql_bulk_insert_from_attachment` | `load_attachment` |
+| **PDF** | Catalog summary (LLM-generated, gratis después de generación) | N/A | N/A | `load_attachment` |
+| **Imagen** | Catalog metadata (filename, mime, size) | `load_attachment` (multimodal vision) | N/A | `load_attachment` |
+| **Markdown / código / plain text** | Catalog summary (LLM-generated) | N/A | N/A | `load_attachment` |
+| **Audio / video** | Catalog metadata | N/A | N/A | `load_attachment` (cuando el provider lo soporte) |
+
+### `load_attachment` es el reader general-purpose
+
+[`load_attachment`](31_load_attachment.md) **no es legacy ni un fallback de último recurso**. Es la herramienta primaria para **leer el contenido de cualquier attachment** dentro del loop del LLM. Lo que hicieron items 13 + auto-summary + `attachment_run_python` es **agregar paths más eficientes para el caso tabular específico**:
+
+| Caso | Por qué la herramienta especializada gana |
+|---|---|
+| CSV/XLSX → ver columnas/sample | El catalog auto-summary ya pone esa info en el system message — no hace falta gastar tokens en `load_attachment` |
+| CSV/XLSX → cálculo | `attachment_run_python` hace la math server-side; el LLM solo ve el resultado |
+| CSV → cargar en Postgres | `sql_bulk_insert_from_attachment` streamea via COPY; el LLM solo ve un stats response |
+
+Para todo lo demás (PDFs, imágenes, código, markdown, texto plain), o cuando el LLM genuinamente necesita ver el contenido literal de un CSV (e.g. "mostrame las filas con error"), [`load_attachment`](31_load_attachment.md) es la herramienta correcta. El catalog auto-summary cubre la mayoría de los casos "qué es esto" sin necesidad de gastar tokens leyendo el archivo entero.
+
+### Token cost por path (referencia)
+
+| Path | Tokens consumidos | Cubre |
+|---|---|---|
+| Catalog auto-summary | 0 calls, ~150 tokens fijos en system message | Schema + 3 sample rows (CSV/XLSX) o summary AI-generated (PDF/text) |
+| `attachment_run_python` | ~80 tokens response | Cálculo analítico (CSV/XLSX) |
+| `sql_inspect_attachment` | ~300 tokens response | Schema + sample + opt. target_table schema (CSV/XLSX) |
+| `sql_bulk_insert_from_attachment` | ~80 tokens response | Stats del insert (CSV → Postgres) |
+| `load_attachment` | proporcional al tamaño del archivo | Contenido literal completo (cualquier mime) |
+
+El cost de `load_attachment` no es un defecto — es el costo de tener el contenido en contexto, que a veces es lo que necesitás. La regla práctica: usá `load_attachment` cuando el LLM tiene que **leer**; usá las herramientas especializadas cuando el LLM solo tiene que **decidir** sobre la data sin verla.

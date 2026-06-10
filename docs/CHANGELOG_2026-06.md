@@ -1320,14 +1320,22 @@ PYTHONPATH=".venv/lib/python3.14/site-packages" \
 (El binario lockea contra Python 3.14 del sistema en macOS; pandas vive
 en `.venv` solo. En Cloud Run el binary usa el Python del Dockerfile.)
 
-**Comparación con tools relacionados:**
+**Comparación con tools relacionados** (matriz completa en
+[`docs/developer_guide/23_sql_node.md` §"Elegir la herramienta correcta para un attachment"](developer_guide/23_sql_node.md)):
 
 | Tool | Cuándo usar |
 |---|---|
-| Catalog auto-summary (§22) | "Qué columnas tiene este archivo?" — gratis, 0 calls |
-| `attachment_run_python` | Cálculos analíticos: max, mean, filter, group_by, etc. |
-| `sql_inspect_attachment` (item 13) | Para conocer el schema de la tabla destino antes de bulk insert |
+| Catalog auto-summary (§22) | "Qué columnas tiene este archivo?" — gratis, 0 calls (CSV/XLSX/PDF/text) |
+| `attachment_run_python` | Cálculos analíticos sobre CSV/XLSX: max, mean, filter, group_by, etc. |
+| `sql_inspect_attachment` (item 13) | Pre-bulk: conocer el schema del table destino antes de COPY |
 | `sql_bulk_insert_from_attachment` (item 13) | Cargar el CSV a Postgres |
-| `load_attachment` | Último recurso — dumps TODO al context |
+| [`load_attachment`](developer_guide/31_load_attachment.md) | Reader general-purpose para CUALQUIER mime. Es la herramienta correcta cuando el LLM necesita ver el contenido literal (PDF, imagen, markdown, código, o filas verbatim de un CSV). NO es fallback — es la primaria para non-tabular. |
+
+`load_attachment` **no fue deprecado**. Item 13 + auto-summary +
+`attachment_run_python` agregaron paths más eficientes solo para el
+caso tabular. Para todo lo demás (PDFs, imágenes, código, markdown,
+texto plain), o cuando el LLM genuinamente necesita ver el contenido
+literal de un CSV, `load_attachment` sigue siendo la herramienta
+primaria.
 
 **Estado.** done.

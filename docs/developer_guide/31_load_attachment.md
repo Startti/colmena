@@ -3,6 +3,24 @@
 > **Estado:** Disponible desde 0.4.0
 > **Spec:** [docs/superpowers/specs/2026-05-13-load-attachment-design.md](../superpowers/specs/2026-05-13-load-attachment-design.md)
 
+## Rol — reader general-purpose para cualquier mime
+
+`load_attachment` es **la herramienta primaria** para leer el contenido literal de un attachment dentro del loop LLM, **para cualquier mime type** (PDF, imagen, markdown, plain text, código, audio cuando el provider lo soporte, y sí, CSV/XLSX cuando el LLM necesita ver filas verbatim).
+
+Items 13 + auto-summary + `attachment_run_python` (2026-06-09 / 2026-06-10) **agregaron paths más eficientes para el caso tabular específico** — no reemplazaron `load_attachment`. La regla:
+
+| Pregunta del usuario | Tool primario |
+|---|---|
+| "Qué columnas tiene este CSV?" | Catalog auto-summary (gratis, ya en system message) |
+| "Cuál producto tiene precio más alto?" | `attachment_run_python` (math server-side) |
+| "Cargá este CSV en mi DB" | `sql_bulk_insert_from_attachment` (COPY) |
+| **"Leéme el PDF" / "Describime la imagen" / "Resumime este markdown"** | **`load_attachment`** |
+| "Mostrame la fila 23 del CSV verbatim" | `load_attachment` |
+| "Qué dice este código?" | `load_attachment` |
+
+La matriz completa de elección está en
+[`23_sql_node.md` §"Elegir la herramienta correcta para un attachment"](23_sql_node.md).
+
 > ### ✅ Validado en dev (2026-05-28)
 > Confirmado end-to-end contra el worker `colmena-worker-00047` (bucket
 > `adp-reference-develop-startti-dev`, DB `adp_db_develop`):
