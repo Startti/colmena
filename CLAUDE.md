@@ -246,9 +246,9 @@ Full reference: `docs/node_as_tools_reference.json` → `parameter_strategies.no
 
 Tools defined in `tool_configurations` are **auto-enabled** — you do NOT need `enabled_tools` to activate them.
 
-> **Flag-only toolkits.** Today only `api_explorer` supports activation by flag alone (toolkit-prefix match + dispatch fallback synthesises a default `ToolConfiguration`). Other toolkits (`tavily_client`, future `browser`) still require an explicit `tool_configurations` entry because they need per-instance config (`api_key`, defaults, etc.).
+> **Flag-only toolkits.** `api_explorer`, `gsheets`, `gdocs`, and `gdocsread` support activation by flag alone — credentials come from process-level env (ADC, `GOOGLE_APPLICATION_CREDENTIALS`, or the spec itself), not from per-node config, so listing the alias in `enabled_tools` is enough. All four also honor `!sub_tool` exclusions inside the same array (e.g. `["gsheets", "!gsheets_export_xlsx"]` → 9 tools). Other toolkits (`tavily_client`, future `browser`) still require an explicit `tool_configurations` entry because they need per-instance config (`api_key`, defaults, etc.).
 
-Because `api_explorer` has no required per-instance configuration (auth comes from the spec itself, not from node config), it's the only toolkit with flag-only activation today; other toolkits like `tavily_client` still need a `tool_configurations` entry to pass `api_key`.
+`tavily_client` still needs a `tool_configurations` entry to pass `api_key`.
 
 ```json
 // RECOMMENDED — flag-only activation for api_explorer (auto-exposes 5 sub-tools:

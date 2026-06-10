@@ -148,6 +148,74 @@ pub(crate) fn filter_enabled_tools(
         .collect()
 }
 
+/// Resolve an `enabled_tools` config into `(includes, excludes)` for a
+/// closed bundle of synthetic tools (gsheets / gdocs).
+///
+/// Unlike `filter_enabled_tools` (which operates over the executor catalog),
+/// synthetic-tool blocks build their tool set inline AFTER the executor
+/// catalog has been filtered. They need the same semantics — toolkit-package
+/// alias expansion, `"*"` wildcard, and `!entry` exclusion — but applied to
+/// a hard-coded list of known names.
+///
+/// `all_known` is the universe of tool names exposed by the synthetic block.
+/// Returned sets contain `&'static str` slices borrowed from `all_known`.
+///
+/// Entries that don't match `"*"`, a toolkit-package alias, or any name in
+/// `all_known` are silently ignored — they may belong to a different
+/// synthetic block (e.g. a `gdocs_*` tool listed alongside `gsheets`).
+pub(crate) fn resolve_synthetic_enabled_tools<'a>(
+    enabled_tools_config: Option<&Value>,
+    all_known: &'a [&'a str],
+) -> (
+    std::collections::HashSet<&'a str>,
+    std::collections::HashSet<&'a str>,
+) {
+    use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::find_package;
+
+    let mut wants: std::collections::HashSet<&'a str> = std::collections::HashSet::new();
+    let mut excludes: std::collections::HashSet<&'a str> = std::collections::HashSet::new();
+
+    let absorb = |s: &str, target: &mut std::collections::HashSet<&'a str>| {
+        if s == "*" {
+            for t in all_known {
+                target.insert(*t);
+            }
+        } else if let Some(pkg) = find_package(s) {
+            for t in pkg.tools {
+                if let Some(matched) = all_known.iter().find(|n| **n == *t).copied() {
+                    target.insert(matched);
+                }
+            }
+        } else if let Some(matched) = all_known.iter().find(|n| **n == s).copied() {
+            target.insert(matched);
+        }
+    };
+
+    let mut absorb_one = |s: &str| {
+        if let Some(stripped) = s.strip_prefix('!') {
+            if !stripped.is_empty() {
+                absorb(stripped, &mut excludes);
+            }
+        } else {
+            absorb(s, &mut wants);
+        }
+    };
+
+    match enabled_tools_config {
+        Some(Value::String(s)) => absorb_one(s.as_str()),
+        Some(Value::Array(arr)) => {
+            for v in arr {
+                if let Some(s) = v.as_str() {
+                    absorb_one(s);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    (wants, excludes)
+}
+
 /// Walk a message history and return the first `ToolCall` from the latest
 /// `Assistant` message-with-tool_calls that has NO matching `Tool` message
 /// (by `tool_call_id`) appearing later in the list.
@@ -2116,28 +2184,26 @@ impl ExecutableNode for LlmNode {
                 GSHEETS_SET_CELL_TOOL, GSHEETS_SET_RANGE_TOOL, TOOL_GSHEETS_RUN_PYTHON,
             };
 
-            // Determine which gsheets tools the user opted into. `"*"` enables
-            // all 10; an array enables each named entry; a single string enables
-            // one. Anything else (or absent config) leaves gsheets disabled.
-            let wants: std::collections::HashSet<&str> = match enabled_tools_config {
-                Some(Value::String(s)) if s == "*" => [
-                    GSHEETS_CREATE_SPREADSHEET_TOOL,
-                    GSHEETS_CREATE_FROM_XLSX_TOOL,
-                    GSHEETS_EXPORT_XLSX_TOOL,
-                    GSHEETS_LIST_SHEETS_TOOL,
-                    GSHEETS_ADD_SHEET_TOOL,
-                    GSHEETS_DELETE_SHEET_TOOL,
-                    GSHEETS_READ_TOOL,
-                    GSHEETS_SET_CELL_TOOL,
-                    GSHEETS_SET_RANGE_TOOL,
-                    TOOL_GSHEETS_RUN_PYTHON,
-                ]
-                .into_iter()
-                .collect(),
-                Some(Value::String(s)) => std::iter::once(s.as_str()).collect(),
-                Some(Value::Array(arr)) => arr.iter().filter_map(|v| v.as_str()).collect(),
-                _ => std::collections::HashSet::new(),
-            };
+            let all_gsheets: [&str; 10] = [
+                GSHEETS_CREATE_SPREADSHEET_TOOL,
+                GSHEETS_CREATE_FROM_XLSX_TOOL,
+                GSHEETS_EXPORT_XLSX_TOOL,
+                GSHEETS_LIST_SHEETS_TOOL,
+                GSHEETS_ADD_SHEET_TOOL,
+                GSHEETS_DELETE_SHEET_TOOL,
+                GSHEETS_READ_TOOL,
+                GSHEETS_SET_CELL_TOOL,
+                GSHEETS_SET_RANGE_TOOL,
+                TOOL_GSHEETS_RUN_PYTHON,
+            ];
+
+            // Resolve `enabled_tools` → (wants, excludes). Supports `"*"`,
+            // the `"gsheets"` toolkit-package alias, exact tool names, and
+            // `"!<entry>"` exclusions on any of the above. Final set is
+            // `wants - excludes`. See `resolve_synthetic_enabled_tools` for
+            // the full semantics — kept consistent with `filter_enabled_tools`.
+            let (wants, excludes) =
+                resolve_synthetic_enabled_tools(enabled_tools_config, &all_gsheets);
 
             let gsheets_entries: [(&str, fn() -> crate::llm::domain::ToolDefinition); 10] = [
                 (
@@ -2156,10 +2222,11 @@ impl ExecutableNode for LlmNode {
             ];
 
             for (name, builder) in gsheets_entries {
-                // Skip if the user did not opt in, OR if a `tool_configurations`
-                // entry / earlier `filter_enabled_tools` pass already added it
-                // (dedup by tool name keeps the catalog single-valued).
-                if !wants.contains(name) {
+                // Skip if the user did not opt in, was explicitly excluded,
+                // OR if a `tool_configurations` entry / earlier
+                // `filter_enabled_tools` pass already added it (dedup by
+                // tool name keeps the catalog single-valued).
+                if !wants.contains(name) || excludes.contains(name) {
                     continue;
                 }
                 if tools.iter().any(|t| t.name == name) {
@@ -2187,7 +2254,7 @@ impl ExecutableNode for LlmNode {
         // Honors `lazy_tool_loading` identically.
         {
             use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
-                dispatch_gdocs_acknowledge_human_changes as _dispatch_unused, find_package,
+                dispatch_gdocs_acknowledge_human_changes as _dispatch_unused,
                 gdocs_tool_acknowledge_human_changes, gdocs_tool_add_tab,
                 gdocs_tool_append_markdown, gdocs_tool_apply_edits, gdocs_tool_create,
                 gdocs_tool_create_from_docx, gdocs_tool_create_from_markdown,
@@ -2237,42 +2304,12 @@ impl ExecutableNode for LlmNode {
                 GDOCS_ACKNOWLEDGE_HUMAN_CHANGES_TOOL,
             ];
 
-            // Build wants. Three input shapes plus alias expansion.
-            let mut wants: std::collections::HashSet<&str> = std::collections::HashSet::new();
-            let absorb_one = |s: &str, wants: &mut std::collections::HashSet<&str>| {
-                if s == "*" {
-                    for t in &all_gdocs {
-                        wants.insert(t);
-                    }
-                } else if let Some(pkg) = find_package(s) {
-                    for t in pkg.tools {
-                        // Only include the tool name if it's actually a gdocs tool —
-                        // pkg.tools may include gsheets entries for the gsheets pkg.
-                        if all_gdocs.contains(t) {
-                            wants.insert(t);
-                        }
-                    }
-                } else if all_gdocs.contains(&s) {
-                    wants.insert(
-                        all_gdocs
-                            .iter()
-                            .find(|t| **t == s)
-                            .copied()
-                            .expect("just matched"),
-                    );
-                }
-            };
-            match enabled_tools_config {
-                Some(Value::String(s)) => absorb_one(s.as_str(), &mut wants),
-                Some(Value::Array(arr)) => {
-                    for v in arr {
-                        if let Some(s) = v.as_str() {
-                            absorb_one(s, &mut wants);
-                        }
-                    }
-                }
-                _ => {}
-            }
+            // Resolve `enabled_tools` → (wants, excludes). Supports `"*"`,
+            // `"gdocs"` / `"gdocsread"` toolkit-package aliases, exact tool
+            // names, and `"!<entry>"` exclusions. See
+            // `resolve_synthetic_enabled_tools` for the full semantics.
+            let (wants, excludes) =
+                resolve_synthetic_enabled_tools(enabled_tools_config, &all_gdocs);
 
             let gdocs_entries: [(&str, fn() -> crate::llm::domain::ToolDefinition); 22] = [
                 (GDOCS_CREATE_TOOL, gdocs_tool_create),
@@ -2309,7 +2346,7 @@ impl ExecutableNode for LlmNode {
             ];
 
             for (name, builder) in gdocs_entries {
-                if !wants.contains(name) {
+                if !wants.contains(name) || excludes.contains(name) {
                     continue;
                 }
                 if tools.iter().any(|t| t.name == name) {
@@ -4547,6 +4584,139 @@ mod filter_enabled_tools_tests {
         );
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "gsheets_read");
+    }
+}
+
+#[cfg(test)]
+mod resolve_synthetic_enabled_tools_tests {
+    //! Coverage for `resolve_synthetic_enabled_tools`. Regression suite for the
+    //! bug that left `enabled_tools: ["gsheets"]` exposing 0 tools because the
+    //! synthetic-tools block didn't expand the toolkit-package alias and didn't
+    //! honor `!entry` exclusions. The helper centralizes that logic now;
+    //! both the gsheets and gdocs synthetic blocks call it.
+    use super::resolve_synthetic_enabled_tools;
+    use serde_json::json;
+
+    const GSHEETS_ALL: [&str; 10] = [
+        "gsheets_create_spreadsheet",
+        "gsheets_create_from_xlsx",
+        "gsheets_export_xlsx",
+        "gsheets_list_sheets",
+        "gsheets_add_sheet",
+        "gsheets_delete_sheet",
+        "gsheets_read",
+        "gsheets_set_cell",
+        "gsheets_set_range",
+        "gsheets_run_python",
+    ];
+
+    #[test]
+    fn alias_expands_to_full_package() {
+        let cfg = json!(["gsheets"]);
+        let (wants, excludes) = resolve_synthetic_enabled_tools(Some(&cfg), &GSHEETS_ALL);
+        assert_eq!(wants.len(), 10);
+        assert!(excludes.is_empty());
+    }
+
+    #[test]
+    fn alias_with_exclusions_yields_partial_package() {
+        // Reproduces the exact ADP payload that surfaced the original bug:
+        // gsheets alias + two negated sub-tools must net 8 wants and 2 excludes.
+        let cfg = json!([
+            "gsheets",
+            "!gsheets_create_from_xlsx",
+            "!gsheets_export_xlsx"
+        ]);
+        let (wants, excludes) = resolve_synthetic_enabled_tools(Some(&cfg), &GSHEETS_ALL);
+        assert_eq!(wants.len(), 10);
+        assert_eq!(excludes.len(), 2);
+        assert!(excludes.contains("gsheets_create_from_xlsx"));
+        assert!(excludes.contains("gsheets_export_xlsx"));
+        // Final set (wants - excludes) used by the synthetic block.
+        let final_set: std::collections::HashSet<&&str> =
+            wants.difference(&excludes).collect();
+        assert_eq!(final_set.len(), 8);
+    }
+
+    #[test]
+    fn wildcard_string_enables_all() {
+        let cfg = json!("*");
+        let (wants, excludes) = resolve_synthetic_enabled_tools(Some(&cfg), &GSHEETS_ALL);
+        assert_eq!(wants.len(), 10);
+        assert!(excludes.is_empty());
+    }
+
+    #[test]
+    fn wildcard_in_array_with_exclusion() {
+        let cfg = json!(["*", "!gsheets_run_python"]);
+        let (wants, excludes) = resolve_synthetic_enabled_tools(Some(&cfg), &GSHEETS_ALL);
+        assert_eq!(wants.len(), 10);
+        assert_eq!(excludes.len(), 1);
+        assert!(excludes.contains("gsheets_run_python"));
+    }
+
+    #[test]
+    fn exact_tool_name_works_without_alias() {
+        let cfg = json!(["gsheets_read", "gsheets_set_cell"]);
+        let (wants, excludes) = resolve_synthetic_enabled_tools(Some(&cfg), &GSHEETS_ALL);
+        assert_eq!(wants.len(), 2);
+        assert!(wants.contains("gsheets_read"));
+        assert!(wants.contains("gsheets_set_cell"));
+        assert!(excludes.is_empty());
+    }
+
+    #[test]
+    fn alias_only_in_string_form() {
+        let cfg = json!("gsheets");
+        let (wants, _) = resolve_synthetic_enabled_tools(Some(&cfg), &GSHEETS_ALL);
+        assert_eq!(wants.len(), 10);
+    }
+
+    #[test]
+    fn entries_unrelated_to_known_set_are_ignored() {
+        // `gdocs_create` is a real package tool but not part of `GSHEETS_ALL`.
+        // The gsheets synthetic block must silently ignore it (the gdocs
+        // block will pick it up separately).
+        let cfg = json!(["gsheets", "gdocs_create", "unknown_tool"]);
+        let (wants, excludes) = resolve_synthetic_enabled_tools(Some(&cfg), &GSHEETS_ALL);
+        assert_eq!(wants.len(), 10);
+        assert!(excludes.is_empty());
+    }
+
+    #[test]
+    fn cross_toolkit_exclusion_is_silently_ignored() {
+        // Excluding a gdocs tool while scoped to gsheets is a no-op (the
+        // exclusion would apply at the gdocs synthetic block instead).
+        let cfg = json!(["gsheets", "!gdocs_create"]);
+        let (wants, excludes) = resolve_synthetic_enabled_tools(Some(&cfg), &GSHEETS_ALL);
+        assert_eq!(wants.len(), 10);
+        assert!(excludes.is_empty());
+    }
+
+    #[test]
+    fn empty_exclusion_marker_is_dropped() {
+        let cfg = json!(["gsheets", "!"]);
+        let (wants, excludes) = resolve_synthetic_enabled_tools(Some(&cfg), &GSHEETS_ALL);
+        assert_eq!(wants.len(), 10);
+        assert!(excludes.is_empty());
+    }
+
+    #[test]
+    fn no_enabled_tools_yields_empty_sets() {
+        let (wants, excludes) = resolve_synthetic_enabled_tools(None, &GSHEETS_ALL);
+        assert!(wants.is_empty());
+        assert!(excludes.is_empty());
+    }
+
+    #[test]
+    fn gdocs_alias_expands_correctly() {
+        // The gdocs synthetic block uses the same helper. Confirm `gdocs`
+        // package alias resolves against a gdocs-only universe.
+        let gdocs_all: [&str; 3] = ["gdocs_create", "gdocs_share", "gdocs_export"];
+        let cfg = json!(["gdocs"]);
+        let (wants, _) = resolve_synthetic_enabled_tools(Some(&cfg), &gdocs_all);
+        // Helper filters package tools through `all_known`, so wants ⊆ gdocs_all.
+        assert_eq!(wants.len(), 3);
     }
 }
 

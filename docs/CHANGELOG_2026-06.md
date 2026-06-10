@@ -1010,3 +1010,24 @@ iter 1 vs iter ≥2 — diferido a operador post-deploy. El test
 en el request body.
 
 **Estado.** done.
+
+---
+
+## 21. gsheets / gdocs `enabled_tools` alias + exclusions fix (2026-06-09)
+
+**Qué cambió.** `enabled_tools: ["gsheets"]` ahora expande correctamente a los 10 sub-tools `gsheets_*`. La sintaxis `!sub_tool` para excluir tools del paquete también funciona (e.g. `["gsheets", "!gsheets_export_xlsx"]` → 9 tools expuestos). Mismo fix aplicado a `gdocs` / `gdocsread`. La lógica wants/excludes se extrajo al helper testable `resolve_synthetic_enabled_tools` (en `dag_engine/infrastructure/nodes/llm.rs`), que mantiene paridad de semántica con `filter_enabled_tools` (usado para el catálogo del executor).
+
+**Por qué importa.** Bug observado desde ADP: un agente con `enabled_tools: ["gsheets", "!gsheets_create_from_xlsx", "!gsheets_export_xlsx"]` no recibía ningún tool gsheets. El bloque sintético en `llm.rs:2122` hacía un literal-match sin pasar por `find_package()`, mientras que el bloque equivalente de `gdocs` (escrito después) sí expandía el alias. Ninguno de los dos manejaba las exclusiones `!entry`. Resultado: el agente respondía "no tengo herramientas para Google Sheets" — comportamiento idéntico a no tener tools.
+
+**Documentación de referencia.**
+- Tests de regresión: `dag_engine::infrastructure::nodes::llm::resolve_synthetic_enabled_tools_tests` (11 tests, incluye el payload exacto que rompía desde ADP).
+- CLAUDE.md sección "Tool Config Standard — `enabled_tools`" actualizada: gsheets/gdocs/gdocsread ahora son flag-only oficialmente.
+
+**Verificación.**
+- 1562 tests unit pasan (`cargo test --verbose`).
+- E2E con el grafo ADP (gpt-4o-mini, `lazy_tool_loading: false`): el agente enumera correctamente los 8 sub-tools gsheets disponibles (10 - 2 excluidos).
+- E2E con `lazy_tool_loading: true`: el catálogo se inyecta vía `tools_discovered` en el system message; el `describe_tool` puede listarlos a demanda.
+
+**BREAKING.** Ninguno. Cambios puramente aditivos para `enabled_tools: ["gsheets"]` (antes: 0 tools; ahora: 10 tools). Si algún graph en producción dependía del comportamiento previo (que probablemente no, porque era roto), tendría que migrar a un listado explícito de sub-tools — pero ningún grafo conocido se comportaba así intencionalmente.
+
+**Estado.** done.
