@@ -653,13 +653,18 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
   `agent_has_gdocs_edit_tools(config, inputs)`. Sin opt-in del
   operador requerido.
 
-- [ ] **OAuth user-scoped flow** — bloqueante para "cualquier Gmail user
-  puede usar el agente sin Shared Drive". Hoy `create_*` solo funciona
-  con Workspace Shared Drives o DWD por la quota cero del SA. Con
-  OAuth user-scoped (consent screen + refresh_token storage + ciclo
-  de refresh + `OAuthDocsClient` adapter alternativo), los archivos
-  creados quedan owned directamente por el usuario. ~1-2 semanas dev.
-  Misma raíz que la línea equivalente en Subsystem E v1.1.
+- [x] **OAuth user-scoped flow** — SHIPPED 2026-06-10. Reemplazó
+  completamente la auth Service Account en gsheets + gdocs por OAuth
+  user-scoped sobre `agents@startti.co`. Nuevo módulo
+  `src/libs/colmena/src/google_oauth/` con domain + infrastructure +
+  HTTP refresh client + token cache con mutex coalescing. Nuevo binary
+  `colmena_oauth_setup` para el consent flow one-time. Env vars
+  `COLMENA_GOOGLE_OAUTH_*` + `COLMENA_GOOGLE_SHARE_EMAIL`. Guía
+  operacional completa: [`docs/developer_guide/47_google_oauth.md`](developer_guide/47_google_oauth.md).
+  Spec: [`docs/superpowers/specs/2026-06-10-oauth-user-scoped-design.md`](superpowers/specs/2026-06-10-oauth-user-scoped-design.md).
+  Pending para ADP: actualizar `deploy_gcp.sh` para montar los 3
+  secrets nuevos. **Hard cutover** — el path SA ya no existe en
+  producción.
 - [x] ~~**Paragraph-level human-change diff en `human_changes_pending`**~~ —
   **shipped 2026-06-09** vía Camino A. Snapshot cache extendido sobre
   `gdocs_session_state` (no tabla nueva — additive ALTER TABLE con

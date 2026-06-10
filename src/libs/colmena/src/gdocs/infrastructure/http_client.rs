@@ -44,12 +44,20 @@ pub struct GoogleDocsHttpClient {
 
 impl GoogleDocsHttpClient {
     /// Build a production client from operator config (env-derived).
+    ///
+    /// Reads OAuth credentials from env via
+    /// `OAuthCredentials::from_env`. Any missing variable surfaces as
+    /// `DocsError::NotConfigured` carrying the full list of missing
+    /// vars — so deploys see one clear error per boot rather than
+    /// playing whack-a-mole through them.
     pub fn from_config(cfg: &GDocsConfig) -> Result<Self, DocsError> {
         let http = Client::builder()
             .timeout(cfg.request_timeout)
             .build()
             .map_err(|e| DocsError::Http(e.to_string()))?;
-        let tokens = Arc::new(TokenCache::new(cfg.scopes.clone()));
+        let creds = crate::google_oauth::infrastructure::OAuthCredentials::from_env()
+            .map_err(|e| DocsError::NotConfigured(format!("{e}")))?;
+        let tokens = Arc::new(TokenCache::from_oauth_credentials(creds));
         Ok(Self {
             cfg: cfg.clone(),
             http,
@@ -62,6 +70,8 @@ impl GoogleDocsHttpClient {
 
     /// Construct a client whose endpoints point at user-supplied base
     /// URLs. Used by wiremock-based tests; do NOT use in production.
+    /// Uses the static (pre-seedable) token cache so tests don't need
+    /// to fake `oauth2.googleapis.com`.
     #[cfg(test)]
     pub fn with_base_urls(
         cfg: &GDocsConfig,
@@ -73,7 +83,7 @@ impl GoogleDocsHttpClient {
             .timeout(cfg.request_timeout)
             .build()
             .map_err(|e| DocsError::Http(e.to_string()))?;
-        let tokens = Arc::new(TokenCache::new(cfg.scopes.clone()));
+        let tokens = Arc::new(TokenCache::for_tests_static());
         Ok(Self {
             cfg: cfg.clone(),
             http,
@@ -1052,12 +1062,12 @@ mod tests {
 
     fn test_cfg() -> GDocsConfig {
         GDocsConfig {
-            credentials_path: None,
             scopes: vec!["https://www.googleapis.com/auth/documents".to_string()],
             default_parent_folder: None,
             request_timeout: Duration::from_secs(5),
             max_retries: 0,
             revision_cache_ttl: Duration::from_secs(5),
+            share_email: String::new(),
         }
     }
 

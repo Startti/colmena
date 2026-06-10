@@ -23,11 +23,12 @@ pub struct GoogleSheetsHttpClient {
     /// Base unit for exponential backoff. Production uses 1s; tests use
     /// 50ms to keep wiremock tests fast.
     retry_base_delay: Duration,
-    /// Service account email parsed from the credentials JSON, if any.
-    /// Used to populate `PermissionDenied(sa_email)` so the agent can
-    /// tell the user which email to share spreadsheets with. Empty
-    /// string when running under ADC (no SA JSON file available).
-    sa_email: String,
+    /// Workspace user email the agent acts as — read from
+    /// `COLMENA_GOOGLE_SHARE_EMAIL` via [`GSheetsConfig`]. Surfaced in
+    /// `SheetsError::PermissionDenied` so the LLM can tell the user
+    /// which address to share the spreadsheet with. Empty string in
+    /// degraded deployments where the var is not set.
+    share_email: String,
     sheets_base: String,
     drive_base: String,
     drive_upload_base: String,
@@ -35,31 +36,25 @@ pub struct GoogleSheetsHttpClient {
 
 impl GoogleSheetsHttpClient {
     /// Construct from config — production path.
+    ///
+    /// Reads OAuth credentials from env (via
+    /// `OAuthCredentials::from_env`). Any missing variable surfaces as
+    /// `SheetsError::NotConfigured` with the full list of missing
+    /// vars in the message — so deploys see one clear error per boot
+    /// rather than playing whack-a-mole.
     pub fn from_config(cfg: &GSheetsConfig) -> Result<Self, SheetsError> {
         let http = Client::builder()
             .timeout(cfg.request_timeout)
             .build()
             .map_err(|e| SheetsError::Internal(format!("reqwest builder: {e}")))?;
-        // Parse the SA email out of the credentials JSON once at construction
-        // so PermissionDenied can carry it as a hint. Failure to read or
-        // parse falls back silently to empty string (ADC path also empty).
-        let sa_email = cfg
-            .credentials_path
-            .as_ref()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-            .and_then(|v| {
-                v.get("client_email")
-                    .and_then(|e| e.as_str())
-                    .map(String::from)
-            })
-            .unwrap_or_default();
+        let creds = crate::google_oauth::infrastructure::OAuthCredentials::from_env()
+            .map_err(|e| SheetsError::NotConfigured(format!("{e}")))?;
         Ok(Self {
             http,
-            token: TokenProvider::new(cfg.scopes.clone()),
+            token: TokenProvider::from_oauth_credentials(creds),
             max_retries: cfg.max_retries,
             retry_base_delay: Duration::from_secs(1), // production: 1s/2s/4s
-            sa_email,
+            share_email: cfg.share_email.clone(),
             sheets_base: SHEETS_BASE.to_string(),
             drive_base: DRIVE_BASE.to_string(),
             drive_upload_base: DRIVE_UPLOAD_BASE.to_string(),
@@ -76,10 +71,10 @@ impl GoogleSheetsHttpClient {
                 .timeout(Duration::from_secs(5))
                 .build()
                 .unwrap(),
-            token: TokenProvider::new(vec!["test".to_string()]),
+            token: TokenProvider::for_tests_static(),
             max_retries: 2,
             retry_base_delay: Duration::from_millis(50), // tests: 50ms/100ms/200ms
-            sa_email: String::new(),                     // ADC-style for tests
+            share_email: String::new(),
             sheets_base: sheets_base.to_string(),
             drive_base: drive_base.to_string(),
             drive_upload_base: drive_upload_base.to_string(),
@@ -118,7 +113,7 @@ impl GoogleSheetsHttpClient {
                     continue;
                 }
                 StatusCode::FORBIDDEN => {
-                    return Err(SheetsError::PermissionDenied(self.sa_email.clone()));
+                    return Err(SheetsError::PermissionDenied(self.share_email.clone()));
                 }
                 StatusCode::NOT_FOUND => {
                     return Err(SheetsError::SpreadsheetNotFound(url.to_string()));
@@ -170,7 +165,7 @@ impl GoogleSheetsHttpClient {
                     continue;
                 }
                 StatusCode::FORBIDDEN => {
-                    return Err(SheetsError::PermissionDenied(self.sa_email.clone()));
+                    return Err(SheetsError::PermissionDenied(self.share_email.clone()));
                 }
                 StatusCode::NOT_FOUND => {
                     return Err(SheetsError::SpreadsheetNotFound(url.to_string()));
@@ -229,7 +224,7 @@ impl GoogleSheetsHttpClient {
                     continue;
                 }
                 StatusCode::FORBIDDEN => {
-                    return Err(SheetsError::PermissionDenied(self.sa_email.clone()));
+                    return Err(SheetsError::PermissionDenied(self.share_email.clone()));
                 }
                 StatusCode::NOT_FOUND => {
                     return Err(SheetsError::SpreadsheetNotFound(url.to_string()));
@@ -509,7 +504,7 @@ impl SheetsClient for GoogleSheetsHttpClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(match status {
                 StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-                    SheetsError::PermissionDenied(self.sa_email.clone())
+                    SheetsError::PermissionDenied(self.share_email.clone())
                 }
                 _ => SheetsError::Http(format!("upload {status}: {body}")),
             });
@@ -547,7 +542,7 @@ impl SheetsClient for GoogleSheetsHttpClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(match status {
                 StatusCode::NOT_FOUND => SheetsError::SpreadsheetNotFound(id.0.clone()),
-                StatusCode::FORBIDDEN => SheetsError::PermissionDenied(self.sa_email.clone()),
+                StatusCode::FORBIDDEN => SheetsError::PermissionDenied(self.share_email.clone()),
                 _ => SheetsError::Http(format!("export {status}: {body}")),
             });
         }

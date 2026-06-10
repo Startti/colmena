@@ -1472,3 +1472,120 @@ con la línea del nuevo skill.
 
 **Estado.** done. Pareja conceptual con item §24 (ConfirmManyMatches guard
 backend). Juntos cubren backend rails + LLM education.
+
+---
+
+## 26. Google OAuth user-scoped auth (hard cutover) — shipped 2026-06-10
+
+**Qué cambió.** Reemplazo completo del path Service Account de auth en
+`gsheets` y `gdocs` por **OAuth user-scoped** sobre un user dedicado
+de Workspace (`agents@startti.co` en el deploy canónico). El refresh_token
+se obtiene una sola vez por el operador via `colmena_oauth_setup` y se
+guarda en Google Secret Manager. Cada API call del worker hace un
+refresh contra `oauth2.googleapis.com` con cache de 1h.
+
+**Por qué importa.**
+- **Identity leak eliminada**: el activity log de cada doc ahora muestra
+  `agents@startti.co` (humano, dominio Startti) en vez del email feo de
+  la SA que revelaba el GCP project ID (`startti-dev`), el tooling
+  usado (Colmena), y el env tier.
+- **Identity continuity**: rotación del refresh_token no rompe docs ya
+  compartidos. Comparado al SA donde rotación implicaba re-share por
+  cada doc.
+- **Setup mínimo viable**: 1 cuenta Workspace, 1 GCP OAuth client, 1
+  consent flow, 3 secrets en Secret Manager. ~3 hs operacional + 0
+  cambios de código del usuario después del deploy.
+
+**Implementación.**
+
+- **Nuevo módulo `src/libs/colmena/src/google_oauth/`** (hexagonal):
+  - `domain/types.rs` — `AccessToken`, `RefreshTokenSecret` (debug
+    redactado), `CachedToken`.
+  - `domain/errors.rs` — `OAuthError` (RefreshTokenRevoked,
+    ClientCredsInvalid, Transient con retry annotation, ConfigMissing
+    con lista de TODAS las vars faltantes).
+  - `domain/traits.rs` — `AuthTokenProvider` async trait.
+  - `infrastructure/config.rs` — `OAuthCredentials::from_env()` con
+    tres env vars + tratamiento de empty/whitespace como missing.
+  - `infrastructure/refresh_client.rs` — POST a
+    `oauth2.googleapis.com/token`, mapeo de errores Google → variantes
+    OAuthError, retry con backoff (1s, 2s, 2 attempts) en 5xx.
+  - `infrastructure/token_provider.rs` — `OAuthRefreshTokenProvider`
+    con `tokio::sync::Mutex<Option<CachedToken>>`. 60s margin, mutex
+    coalescing de concurrent refreshes, WARN log + no-persist en
+    rotated refresh_token.
+- **Refactor de `gsheets/infrastructure/auth.rs` + `gdocs/infrastructure/auth.rs`**:
+  enum `Inner { OAuth, Static }` donde OAuth envuelve un
+  `Arc<OAuthRefreshTokenProvider>` y Static es el path de test sticky.
+  Borre 100% del path yup-oauth2 ADC.
+- **Refactor de `gsheets/infrastructure/config.rs` + `gdocs/infrastructure/config.rs`**:
+  borré `credentials_path` (era el SA JSON), agregué `share_email`
+  desde `COLMENA_GOOGLE_SHARE_EMAIL`.
+- **Refactor de `gsheets/infrastructure/http_client.rs` + `gdocs/infrastructure/http_client.rs`**:
+  borré la extracción del `client_email` JSON (~10 líneas), renombré
+  `sa_email` → `share_email`. `from_config` ahora llama
+  `OAuthCredentials::from_env()` y mapea ConfigMissing → NotConfigured.
+- **`google_workspace_prelude.rs`**: nueva chain de resolución
+  `COLMENA_GOOGLE_SHARE_EMAIL` → `COLMENA_GOOGLE_SA_EMAIL` (legacy
+  para tests) → SA JSON (legacy) → None. `resolve_sa_email` queda
+  como deprecated alias.
+- **Nuevo binary `src/bin/colmena_oauth_setup.rs`** (~330 líneas):
+  CLI con clap + axum localhost server + webbrowser open. Parsea
+  client_secret.json (acepta `installed` y `web` shapes), abre browser
+  a consent URL con `access_type=offline + prompt=consent` (manda
+  refresh_token garantizado), capta callback en localhost:8080,
+  exchange code → refresh_token, lo imprime con instrucciones de
+  Secret Manager + history clear.
+- **Dependencia nueva**: `webbrowser = "1"` (~30 KB, solo para el
+  binary target, no la lib).
+
+**Tests.**
+- **27 tests nuevos en `google_oauth`** cubriendo cada path:
+  - 8 domain tests (newtype redaction, error variants, partial_eq).
+  - 5 config tests (presencia/ausencia/empty/whitespace/trim).
+  - 7 refresh_client wiremock tests (happy, rotation, invalid_grant,
+    invalid_client, retry-success, retry-exhausted, no-retry on 4xx).
+  - 6 token_provider tests (first-call refreshes, cache hit,
+    near-expiry refresh, concurrent coalescing, rotation handling,
+    failed-refresh leaves cache empty).
+- **3 tests nuevos en prelude** cubriendo precedencia de la chain:
+  share_email gana sobre todo, fallback al legacy SA var, empty
+  share_email lo ignora y usa fallback.
+- **4 tests del CLI binary** (auth URL shape, client_secret parsing
+  ambas variantes, error on missing block).
+- **Wiremock tests existentes de gsheets + gdocs siguen pasando**
+  (48 + 29) — el path test usa `for_tests_static()` que bypassa OAuth.
+- **Suite total: 1673 tests pasan, 0 fallos.** `cargo clippy --lib`
+  limpio.
+
+**BREAKING para deploys.**
+- `GOOGLE_APPLICATION_CREDENTIALS` ya no se lee en producción.
+- `COLMENA_GOOGLE_SA_EMAIL` deprecated (fallback solo).
+- **ADP deploy_gcp.sh debe actualizarse** antes del próximo deploy
+  contra colmena develop o el worker boot-paniquea con `ConfigMissing`
+  listando exactamente qué env vars faltan. Ver
+  [`docs/developer_guide/47_google_oauth.md`](../developer_guide/47_google_oauth.md)
+  paso F.
+
+**BREAKING para usuarios de docs ya compartidos.** Como discutimos con
+el operador, hard cutover: docs que estaban compartidos con la SA
+vieja dejan de funcionar; el usuario debe re-compartir con
+`agents@startti.co` cuando el agent diga "PermissionDenied — pedile al
+user que comparta con agents@startti.co". El prelude ya orquesta esto
+naturalmente.
+
+**Configuración operacional requerida en ADP.**
+- Crear 3 secrets en Secret Manager: `colmena-oauth-client-id`,
+  `colmena-oauth-client-secret`, `colmena-oauth-refresh-token`.
+- IAM binding `secretAccessor` al worker SA en los 3.
+- `deploy_gcp.sh`: `--update-secrets=COLMENA_GOOGLE_OAUTH_*=...:latest`
+  + `--update-env-vars=COLMENA_GOOGLE_SHARE_EMAIL=agents@startti.co`
+  + `--remove-secrets=GOOGLE_APPLICATION_CREDENTIALS`
+  + `--remove-env-vars=COLMENA_GOOGLE_SA_EMAIL`.
+
+**Estado.** done en colmena develop. ADP pending (T47-T50 del plan).
+
+**Spec + plan.**
+- Design: [`docs/superpowers/specs/2026-06-10-oauth-user-scoped-design.md`](../superpowers/specs/2026-06-10-oauth-user-scoped-design.md)
+- Plan: [`docs/superpowers/plans/2026-06-10-oauth-user-scoped.md`](../superpowers/plans/2026-06-10-oauth-user-scoped.md)
+- Guía operacional: [`docs/developer_guide/47_google_oauth.md`](../developer_guide/47_google_oauth.md)

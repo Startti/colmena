@@ -288,7 +288,7 @@ pub use load_skill_tool::{
 pub use crdt_summary::{build_recent_changes_block, CRDT_SPREADSHEET_PROTOCOL_PRELUDE};
 
 pub use google_workspace_prelude::{
-    build_google_workspace_prelude, has_google_workspace_tools, resolve_sa_email,
+    build_google_workspace_prelude, has_google_workspace_tools, resolve_share_email,
 };
 
 pub use crdt_doc_tools::{

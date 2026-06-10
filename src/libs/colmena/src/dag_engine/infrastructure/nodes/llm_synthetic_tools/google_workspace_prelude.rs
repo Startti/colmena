@@ -5,18 +5,22 @@
 //!   1. Tell the LLM that it needs a Google document ID before it can
 //!      operate (extract from URLs or ask the user) — fail fast instead
 //!      of guessing.
-//!   2. Surface the service-account email so the LLM can instruct the
+//!   2. Surface the email the agent ACTS AS so the LLM can instruct the
 //!      user to share the doc with it. Without this, every first turn
 //!      ends in a `PermissionDenied` round-trip.
 //!
-//! The SA email is resolved at LlmCallNode build time via
-//! `resolve_sa_email`, which checks in order:
-//!   * `COLMENA_GOOGLE_SA_EMAIL` env var (operator override, also the
-//!     only path that works under ADC since there is no JSON file).
-//!   * The `client_email` field of the JSON pointed to by
-//!     `GOOGLE_APPLICATION_CREDENTIALS`.
-//!   * `None` — emits a degraded prelude that still demands the doc ID
-//!     but tells the user to consult the operator for the SA email.
+//! Resolution order (post-OAuth migration 2026-06-10) — first non-empty
+//! value wins:
+//!   1. `COLMENA_GOOGLE_SHARE_EMAIL` — the OAuth-flow identity (e.g.
+//!      `agents@startti.co`). New canonical var; what production
+//!      uses.
+//!   2. `COLMENA_GOOGLE_SA_EMAIL` — legacy SA email var, retained for
+//!      tests / local dev that still run against the SA flow.
+//!   3. `client_email` field in the JSON at
+//!      `GOOGLE_APPLICATION_CREDENTIALS` — legacy SA JSON fallback,
+//!      same audience as (2).
+//!   4. `None` — emits a degraded prelude that still demands the doc
+//!      ID but tells the user to consult the operator for the email.
 //!
 //! Token cost: ~140 tokens with email, ~110 without. Always-on (every
 //! turn) — the LLM will simply skip past it after turn 1 once the doc
@@ -25,23 +29,50 @@
 
 use std::path::Path;
 
-/// Resolve the service account email using the chain documented above.
-/// Returns `None` only when both the env var is unset/empty AND the
-/// JSON file is missing/unreadable/lacks `client_email`. The result is
-/// safe to display in a system message (it's just an identifier; the
-/// actual credential is the private key, never returned).
-pub fn resolve_sa_email() -> Option<String> {
-    // 1. Env-var override (wins so operators can swap without redeploying).
-    if let Ok(email) = std::env::var("COLMENA_GOOGLE_SA_EMAIL") {
-        let trimmed = email.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
+/// Resolve the share email using the chain documented at the top of
+/// this module. Returns `None` only when every source is missing or
+/// empty. The result is safe to display in a system message — it's
+/// just an identifier; the actual credential (refresh_token or
+/// private key) is never returned.
+///
+/// The function is named `resolve_share_email` post-migration. The
+/// historical `resolve_sa_email` name is kept as a deprecated alias
+/// for any external callers; new callers should use the new name.
+pub fn resolve_share_email() -> Option<String> {
+    // 1. New canonical var — the OAuth identity.
+    if let Some(s) = read_env_nonempty("COLMENA_GOOGLE_SHARE_EMAIL") {
+        return Some(s);
     }
 
-    // 2. Read `client_email` out of the SA JSON.
+    // 2. Legacy SA-flow override (tests / local dev).
+    if let Some(s) = read_env_nonempty("COLMENA_GOOGLE_SA_EMAIL") {
+        return Some(s);
+    }
+
+    // 3. Legacy SA JSON path (tests / local dev).
     let path = std::env::var("GOOGLE_APPLICATION_CREDENTIALS").ok()?;
     read_client_email_from_json(Path::new(&path))
+}
+
+/// Deprecated alias preserved for any external callers that imported
+/// the pre-OAuth name. New code should call [`resolve_share_email`].
+#[deprecated(
+    since = "0.4.0",
+    note = "Use `resolve_share_email` instead — the name was generalised \
+            when OAuth user-scoped auth replaced the SA-only flow."
+)]
+pub fn resolve_sa_email() -> Option<String> {
+    resolve_share_email()
+}
+
+fn read_env_nonempty(name: &str) -> Option<String> {
+    let raw = std::env::var(name).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn read_client_email_from_json(path: &Path) -> Option<String> {
@@ -105,6 +136,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::io::Write;
 
     #[test]
@@ -139,6 +171,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn resolve_sa_email_env_var_wins_over_json() {
         // Write a fake JSON that would resolve to one email...
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -152,12 +185,67 @@ mod tests {
         // (We cannot safely mutate process env vars in parallel tests,
         // so this is a focused single-env-var test; the suite runs it
         // in isolation if needed via #[serial].)
+        std::env::remove_var("COLMENA_GOOGLE_SHARE_EMAIL");
         std::env::set_var("COLMENA_GOOGLE_SA_EMAIL", "from-env@example.com");
         std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", path.to_str().unwrap());
-        let out = resolve_sa_email();
+        let out = resolve_share_email();
         std::env::remove_var("COLMENA_GOOGLE_SA_EMAIL");
         std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
         assert_eq!(out.as_deref(), Some("from-env@example.com"));
+    }
+
+    /// Pins the precedence: `COLMENA_GOOGLE_SHARE_EMAIL` (OAuth-era
+    /// canonical var) MUST win when set alongside both the legacy SA
+    /// env var and the SA JSON file. Catches regressions where someone
+    /// reorders the resolution chain.
+    #[test]
+    #[serial]
+    fn resolve_share_email_oauth_var_wins_over_everything() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(br#"{"client_email":"from-json@example.com"}"#)
+            .unwrap();
+        f.flush().unwrap();
+
+        std::env::set_var("COLMENA_GOOGLE_SHARE_EMAIL", "agents@startti.co");
+        std::env::set_var("COLMENA_GOOGLE_SA_EMAIL", "legacy-sa@example.com");
+        std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", path.to_str().unwrap());
+        let out = resolve_share_email();
+        std::env::remove_var("COLMENA_GOOGLE_SHARE_EMAIL");
+        std::env::remove_var("COLMENA_GOOGLE_SA_EMAIL");
+        std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
+        assert_eq!(out.as_deref(), Some("agents@startti.co"));
+    }
+
+    /// When only the legacy SA-flow vars are set, those must still
+    /// resolve — local-dev and test environments that haven't
+    /// migrated to the OAuth canonical name should keep working.
+    #[test]
+    #[serial]
+    fn resolve_share_email_falls_back_to_legacy_sa_var() {
+        std::env::remove_var("COLMENA_GOOGLE_SHARE_EMAIL");
+        std::env::set_var("COLMENA_GOOGLE_SA_EMAIL", "fallback@example.com");
+        std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
+        let out = resolve_share_email();
+        std::env::remove_var("COLMENA_GOOGLE_SA_EMAIL");
+        assert_eq!(out.as_deref(), Some("fallback@example.com"));
+    }
+
+    /// Empty/whitespace-only values must NOT win — they should be
+    /// treated as unset so the fallback chain proceeds. Catches the
+    /// case where a Secret Manager mount resolves to an empty string
+    /// because the secret version is missing.
+    #[test]
+    #[serial]
+    fn resolve_share_email_treats_empty_share_email_as_unset() {
+        std::env::set_var("COLMENA_GOOGLE_SHARE_EMAIL", "   ");
+        std::env::set_var("COLMENA_GOOGLE_SA_EMAIL", "fallback@example.com");
+        std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
+        let out = resolve_share_email();
+        std::env::remove_var("COLMENA_GOOGLE_SHARE_EMAIL");
+        std::env::remove_var("COLMENA_GOOGLE_SA_EMAIL");
+        assert_eq!(out.as_deref(), Some("fallback@example.com"));
     }
 
     #[test]

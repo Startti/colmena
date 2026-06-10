@@ -246,7 +246,9 @@ Full reference: `docs/node_as_tools_reference.json` → `parameter_strategies.no
 
 Tools defined in `tool_configurations` are **auto-enabled** — you do NOT need `enabled_tools` to activate them.
 
-> **Flag-only toolkits.** `api_explorer`, `gsheets`, `gdocs`, and `gdocsread` support activation by flag alone — credentials come from process-level env (ADC, `GOOGLE_APPLICATION_CREDENTIALS`, or the spec itself), not from per-node config, so listing the alias in `enabled_tools` is enough. All four also honor `!sub_tool` exclusions inside the same array (e.g. `["gsheets", "!gsheets_export_xlsx"]` → 9 tools). Other toolkits (`tavily_client`, future `browser`) still require an explicit `tool_configurations` entry because they need per-instance config (`api_key`, defaults, etc.).
+> **Flag-only toolkits.** `api_explorer`, `gsheets`, `gdocs`, and `gdocsread` support activation by flag alone — credentials come from process-level env (the new OAuth user-scoped flow's `COLMENA_GOOGLE_OAUTH_*` vars for gsheets/gdocs since 2026-06-10; spec itself for api_explorer), not from per-node config, so listing the alias in `enabled_tools` is enough. All four also honor `!sub_tool` exclusions inside the same array (e.g. `["gsheets", "!gsheets_export_xlsx"]` → 9 tools). Other toolkits (`tavily_client`, future `browser`) still require an explicit `tool_configurations` entry because they need per-instance config (`api_key`, defaults, etc.).
+>
+> **Google auth migration (2026-06-10):** Service Account JSON path is gone from production. Production now uses OAuth user-scoped via `agents@startti.co`. Required env vars: `COLMENA_GOOGLE_OAUTH_CLIENT_ID`, `..._CLIENT_SECRET`, `..._REFRESH_TOKEN`, `COLMENA_GOOGLE_SHARE_EMAIL`. ADP deploy_gcp.sh must be updated to mount these from Secret Manager + remove the old `GOOGLE_APPLICATION_CREDENTIALS` mount. Full guide: [`docs/developer_guide/47_google_oauth.md`](docs/developer_guide/47_google_oauth.md).
 
 `tavily_client` still needs a `tool_configurations` entry to pass `api_key`.
 
