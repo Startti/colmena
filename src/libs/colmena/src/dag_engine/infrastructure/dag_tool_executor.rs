@@ -95,6 +95,20 @@ pub struct DagToolExecutor {
     /// registry handle stays in the llm_call node; we only need the catalog
     /// here so dispatch can succeed without an extra dependency.
     attachment_catalog: Option<Vec<crate::llm::domain::ConversationAttachment>>,
+    /// Shared attachment bytes plumbing (Bulk T0, 2026-06-09). When `Some(...)`,
+    /// dispatchers can call [`fetch_attachment_bytes`](Self::fetch_attachment_bytes)
+    /// to stream bytes for a registered attachment, or
+    /// [`register_attachment_bytes`](Self::register_attachment_bytes) to
+    /// persist newly produced bytes and surface them as a new attachment
+    /// `document_id`. Unblocks features that previously had to invent their
+    /// own wiring (sql_bulk_insert_from_attachment, gsheets xlsx import/export,
+    /// gdocs create_from_docx/export/insert_image).
+    ///
+    /// Wiring is optional: dispatchers that don't need attachment I/O remain
+    /// unaffected. Dispatchers that do need it must gracefully surface a
+    /// "not wired" error when this is `None` (e.g. invoked from a graph that
+    /// did not configure the storage adapter).
+    attachment_storage: Option<Arc<dyn crate::storage::domain::OutputStorageRepository>>,
     /// F-T15: per-call wiring for the `recall_history` synthetic tool.
     /// When both fields are populated, the executor intercepts `recall_history`
     /// tool calls and reads the persisted conversation directly. When either is
@@ -184,6 +198,7 @@ impl DagToolExecutor {
             describe_tool_lookup: None,
             describe_tool_observer: None,
             attachment_catalog: None,
+            attachment_storage: None,
             conversation_repository: None,
             conversation_key: None,
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_STRING_BYTES,
@@ -299,6 +314,143 @@ impl DagToolExecutor {
     ) -> Self {
         self.attachment_catalog = Some(catalog);
         self
+    }
+
+    /// Builder: attach the OutputStorageRepository so dispatchers that need
+    /// attachment bytes (sql_bulk_insert_from_attachment, gsheets xlsx
+    /// import/export, gdocs create_from_docx/export/insert_image) can call
+    /// [`fetch_attachment_bytes`](Self::fetch_attachment_bytes) and
+    /// [`register_attachment_bytes`](Self::register_attachment_bytes).
+    ///
+    /// When this is not set, those dispatchers must surface a structured
+    /// "attachment_storage not wired" error so the calling agent knows to
+    /// report the missing wiring back to the operator.
+    pub fn with_attachment_storage(
+        mut self,
+        storage: Arc<dyn crate::storage::domain::OutputStorageRepository>,
+    ) -> Self {
+        self.attachment_storage = Some(storage);
+        self
+    }
+
+    /// Fetch the raw bytes of a registered attachment by `document_id`.
+    ///
+    /// Resolution order:
+    /// 1. Look up `document_id` in `attachment_catalog` to obtain the
+    ///    `storage_key` (catalog rows always carry a storage_key once Plan A
+    ///    of the attachment uniform resolution shipped).
+    /// 2. Call `attachment_storage.read(storage_key)` to materialize the bytes
+    ///    in memory.
+    ///
+    /// Returns a structured error string when the catalog or the storage
+    /// adapter are not wired — dispatchers should propagate this to the LLM
+    /// verbatim so the operator sees a clear "not configured" signal.
+    ///
+    /// **Memory note:** this loads the full payload into RAM. For large
+    /// payloads where streaming is preferable (e.g. multipart upload or
+    /// Postgres COPY), use
+    /// [`fetch_attachment_stream`](Self::fetch_attachment_stream) instead.
+    pub async fn fetch_attachment_bytes(
+        &self,
+        document_id: &str,
+    ) -> Result<crate::storage::domain::StoredBytes, String> {
+        let storage = self.attachment_storage.as_ref().ok_or_else(|| {
+            "attachment_storage not wired: the engine config did not configure an \
+             OutputStorageRepository for this run, so attachment bytes cannot be \
+             fetched. Operator action: pass an OutputStorageRepository when \
+             constructing the LLM node."
+                .to_string()
+        })?;
+        let storage_key = self.lookup_storage_key(document_id)?;
+        storage
+            .read(&storage_key)
+            .await
+            .map_err(|e| format!("attachment_storage.read failed for '{document_id}': {e}"))
+    }
+
+    /// Streaming counterpart of [`fetch_attachment_bytes`](Self::fetch_attachment_bytes).
+    /// Returns `StoredStream` (bytes async stream + size + mime + filename)
+    /// without buffering. Use this for Postgres COPY, multipart uploads, or
+    /// any path that processes attachment bytes incrementally.
+    pub async fn fetch_attachment_stream(
+        &self,
+        document_id: &str,
+    ) -> Result<crate::storage::domain::StoredStream, String> {
+        let storage = self.attachment_storage.as_ref().ok_or_else(|| {
+            "attachment_storage not wired (see fetch_attachment_bytes docs).".to_string()
+        })?;
+        let storage_key = self.lookup_storage_key(document_id)?;
+        storage
+            .read_stream(&storage_key)
+            .await
+            .map_err(|e| format!("attachment_storage.read_stream failed for '{document_id}': {e}"))
+    }
+
+    /// Persist freshly produced bytes (e.g. a `gdocs_export` PDF, an
+    /// `image_edit` output) as a new attachment and return the bytes' new
+    /// `document_id`. The returned id can be embedded in the dispatcher's
+    /// tool result so the LLM can reference the new attachment in subsequent
+    /// turns (or pass it back via `$attachment:<id>` to `http_request`).
+    ///
+    /// Note: this does NOT update the in-memory `attachment_catalog` snapshot.
+    /// The catalog is rebuilt by the LLM use case at the next turn boundary;
+    /// new attachments registered mid-turn become visible at the start of the
+    /// following turn.
+    pub async fn register_attachment_bytes(
+        &self,
+        bytes: Vec<u8>,
+        mime_type: String,
+        filename: String,
+    ) -> Result<String, String> {
+        let storage = self.attachment_storage.as_ref().ok_or_else(|| {
+            "attachment_storage not wired: cannot register attachment bytes.".to_string()
+        })?;
+        // Forward session scope so backends (e.g. ADP HTTP callback) can build
+        // a conversation-scoped storage path. Local/test adapters ignore them.
+        let req = crate::storage::domain::StoreRequest {
+            bytes,
+            mime_type,
+            filename,
+            session_id: self.session_id.clone(),
+            agent_session_id: self.agent_session_id.clone(),
+        };
+        let stored = storage
+            .store(req)
+            .await
+            .map_err(|e| format!("attachment_storage.store failed: {e}"))?;
+        // `storage_key` is the document_id surface for downstream tools.
+        // The host application (ADP worker) inserts the row into
+        // conversation_attachments out-of-band when this completes
+        // (registrar fan-out is owned by the LLM use case, not the executor).
+        Ok(stored.storage_key)
+    }
+
+    /// Internal: catalog lookup for `document_id` → `storage_key`.
+    fn lookup_storage_key(&self, document_id: &str) -> Result<String, String> {
+        let catalog = self.attachment_catalog.as_ref().ok_or_else(|| {
+            format!(
+                "attachment '{document_id}' lookup failed: no attachment_catalog wired \
+                 (this run does not have any attachments registered)."
+            )
+        })?;
+        let entry = catalog
+            .iter()
+            .find(|a| a.document_id == document_id)
+            .ok_or_else(|| {
+                format!(
+                    "attachment '{document_id}' not found in catalog \
+                     (catalog size: {}). Verify the LLM passed a document_id \
+                     that came from the catalog block.",
+                    catalog.len()
+                )
+            })?;
+        entry.storage_key.clone().ok_or_else(|| {
+            format!(
+                "attachment '{document_id}' has no storage_key — it likely \
+                 originated from a pre-Plan-A path that did not persist bytes. \
+                 Tell the operator to re-upload."
+            )
+        })
     }
 
     /// Recursively scan fixed_config for all "$DYNAMIC" placeholders.
@@ -3080,6 +3232,207 @@ mod toolkit_runtime_tests {
         let parsed: serde_json::Value = serde_json::from_str(&res.output).unwrap();
         assert_eq!(parsed["__colmena_status"], "LOAD_ATTACHMENT");
         assert_eq!(parsed["document_id"], "doc-x");
+    }
+}
+
+#[cfg(test)]
+mod attachment_plumbing_tests {
+    //! Unit tests for the shared attachment plumbing shipped as Bulk T0
+    //! (2026-06-09). Verifies the contract used by sql_bulk_insert,
+    //! gsheets xlsx import/export, and gdocs create_from_docx/export/insert_image
+    //! dispatchers:
+    //!
+    //! - `fetch_attachment_bytes(document_id)` surfaces a clear error when
+    //!   storage is not wired, catalog is not wired, or the id is missing.
+    //! - It returns `StoredBytes` when the catalog row carries a
+    //!   `storage_key` AND the storage adapter is attached.
+    //! - `register_attachment_bytes` propagates `session_id` /
+    //!   `agent_session_id` so backends (ADP HTTP callback) can build a
+    //!   conversation-scoped storage path.
+    use super::*;
+    use crate::dag_engine::domain::node::ExecutableNode;
+    use crate::llm::domain::attachments::AttachmentSource;
+    use crate::llm::domain::ProviderKind;
+    use crate::llm::domain::{ConversationAttachment, ToolCall};
+    use crate::storage::domain::{MockOutputStorageRepository, StoredBytes, StoredOutput};
+    use chrono::Utc;
+
+    struct DummyRegistry;
+    impl NodeRegistryPort for DummyRegistry {
+        fn get_node(&self, _: &str) -> Option<Arc<dyn ExecutableNode>> {
+            None
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    fn attach_with_key(doc_id: &str, key: Option<&str>) -> ConversationAttachment {
+        ConversationAttachment {
+            agent_session_id: "agent_42".to_string(),
+            document_id: doc_id.to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf".to_string(),
+            mime_type: "text/csv".to_string(),
+            filename: "data.csv".to_string(),
+            size_bytes: Some(1024),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+            registered_at: Utc::now(),
+            refreshed_at: Utc::now(),
+            storage_key: key.map(|s| s.to_string()),
+            origin: None,
+            last_used_at: None,
+        }
+    }
+
+    fn _smoke_tool_call() -> ToolCall {
+        use crate::llm::domain::tools::FunctionCall;
+        ToolCall {
+            id: "c1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall::new("any".to_string(), r#"{}"#.to_string()),
+            response: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_attachment_bytes_fails_when_storage_not_wired() {
+        // Catalog present, storage absent. Dispatcher must get a clear
+        // "not wired" error — not a panic, not an Ok with empty bytes.
+        let executor = DagToolExecutor::new(Arc::new(DummyRegistry), Default::default())
+            .with_attachments(vec![attach_with_key("doc-x", Some("sk_1"))]);
+        let err = executor.fetch_attachment_bytes("doc-x").await.unwrap_err();
+        assert!(
+            err.contains("attachment_storage not wired"),
+            "expected 'attachment_storage not wired' message, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_attachment_bytes_fails_when_catalog_not_wired() {
+        // Storage wired, catalog absent (e.g. run with no attachments at all).
+        let mut mock_storage = MockOutputStorageRepository::new();
+        // Storage should NOT be called when the catalog is missing.
+        mock_storage.expect_read().never();
+        let executor = DagToolExecutor::new(Arc::new(DummyRegistry), Default::default())
+            .with_attachment_storage(Arc::new(mock_storage));
+        let err = executor.fetch_attachment_bytes("doc-x").await.unwrap_err();
+        assert!(
+            err.contains("no attachment_catalog wired"),
+            "expected 'no attachment_catalog wired' message, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_attachment_bytes_fails_when_doc_id_not_in_catalog() {
+        let mock_storage = MockOutputStorageRepository::new();
+        let executor = DagToolExecutor::new(Arc::new(DummyRegistry), Default::default())
+            .with_attachments(vec![attach_with_key("doc-a", Some("sk_a"))])
+            .with_attachment_storage(Arc::new(mock_storage));
+        let err = executor
+            .fetch_attachment_bytes("doc-not-found")
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("not found in catalog"),
+            "expected catalog-lookup error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_attachment_bytes_fails_when_storage_key_is_none() {
+        // Catalog row exists but has no storage_key (legacy pre-Plan-A row).
+        // Dispatcher must get a clear "no storage_key" error.
+        let mock_storage = MockOutputStorageRepository::new();
+        let executor = DagToolExecutor::new(Arc::new(DummyRegistry), Default::default())
+            .with_attachments(vec![attach_with_key("doc-legacy", None)])
+            .with_attachment_storage(Arc::new(mock_storage));
+        let err = executor
+            .fetch_attachment_bytes("doc-legacy")
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("no storage_key"),
+            "expected legacy-row error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_attachment_bytes_succeeds_when_wired_correctly() {
+        // Happy path: catalog has storage_key, storage adapter returns bytes.
+        let mut mock_storage = MockOutputStorageRepository::new();
+        mock_storage
+            .expect_read()
+            .withf(|key| key == "sk_csv_001")
+            .returning(|_| {
+                Ok(StoredBytes {
+                    bytes: b"product_id,sku,price\n1,A001,9.99\n".to_vec(),
+                    mime_type: "text/csv".to_string(),
+                    filename: "data.csv".to_string(),
+                })
+            });
+        let executor = DagToolExecutor::new(Arc::new(DummyRegistry), Default::default())
+            .with_attachments(vec![attach_with_key("doc-csv", Some("sk_csv_001"))])
+            .with_attachment_storage(Arc::new(mock_storage));
+        let bytes = executor.fetch_attachment_bytes("doc-csv").await.unwrap();
+        assert_eq!(bytes.mime_type, "text/csv");
+        assert!(bytes.bytes.starts_with(b"product_id,sku,price"));
+    }
+
+    #[tokio::test]
+    async fn register_attachment_bytes_fails_when_storage_not_wired() {
+        let executor = DagToolExecutor::new(Arc::new(DummyRegistry), Default::default());
+        let err = executor
+            .register_attachment_bytes(
+                b"pdf-bytes".to_vec(),
+                "application/pdf".into(),
+                "x.pdf".into(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("attachment_storage not wired"),
+            "expected 'not wired' error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_attachment_bytes_forwards_session_scope() {
+        // Backends derive their storage path from (session_id, agent_session_id).
+        // The executor must forward both to `StoreRequest`.
+        let mut mock_storage = MockOutputStorageRepository::new();
+        mock_storage
+            .expect_store()
+            .withf(|req| {
+                req.session_id.as_deref() == Some("sess_99")
+                    && req.agent_session_id.as_deref() == Some("agent_42")
+                    && req.mime_type == "application/pdf"
+                    && req.filename == "export.pdf"
+            })
+            .returning(|_| {
+                Ok(StoredOutput {
+                    storage_key: "sk_new_001".to_string(),
+                    read_url: "data:application/pdf;base64,...".to_string(),
+                    mime_type: "application/pdf".to_string(),
+                    filename: "export.pdf".to_string(),
+                    size_bytes: 1024,
+                })
+            });
+        let executor = DagToolExecutor::new(Arc::new(DummyRegistry), Default::default())
+            .with_session_id("sess_99".into())
+            .with_agent_session_id(Some("agent_42".into()))
+            .with_attachment_storage(Arc::new(mock_storage));
+        let new_id = executor
+            .register_attachment_bytes(
+                b"%PDF...".to_vec(),
+                "application/pdf".into(),
+                "export.pdf".into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(new_id, "sk_new_001");
     }
 }
 

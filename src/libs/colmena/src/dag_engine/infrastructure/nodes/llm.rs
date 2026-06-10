@@ -1837,6 +1837,14 @@ impl ExecutableNode for LlmNode {
             if !attachment_catalog.is_empty() {
                 executor = executor.with_attachments(attachment_catalog.clone());
             }
+            // Bulk T0 (2026-06-09): also thread the OutputStorageRepository so
+            // dispatchers that need attachment bytes can call
+            // `fetch_attachment_bytes` / `fetch_attachment_stream` /
+            // `register_attachment_bytes` from a single shared source of truth.
+            // Unblocks sql_bulk_insert_from_attachment + E-T7b + G items 4/5/8.
+            if let Some(storage) = self.storage.clone() {
+                executor = executor.with_attachment_storage(storage);
+            }
             if let Some(repo) = skill_repo.clone() {
                 executor = executor.with_skills(repo.clone());
 
