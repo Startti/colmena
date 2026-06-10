@@ -897,3 +897,93 @@ An LLM agent that manages per-user todo lists with automatic Row-Level Security 
 - Increase `statement_timeout_ms` in `runtime_limits`
 - Optimize the query (add indexes, reduce result set)
 - Check if the LLM critic is adding latency (disable if not needed)
+
+---
+
+## attachment_run_python (shipped 2026-06-10)
+
+Tool sintético que **carga un CSV/XLSX adjunto en pandas y ejecuta código del LLM
+server-side**. La data del archivo nunca cruza al contexto del LLM — solo
+viaja el resultado (stdout + `result` global) de vuelta.
+
+### Workflow
+
+```
+LLM ─[attachment_run_python({attachment_id, code: "result = df['price'].max()"})]→
+       Backend carga DataFrame → ejecuta sandbox → devuelve {result, stdout, ...}
+LLM ←[~80 tokens]──
+```
+
+### Args
+
+| Field | Tipo | Default | Descripción |
+|---|---|---|---|
+| `attachment_id` | string (req) | — | document_id del catálogo |
+| `code` | string (req) | — | Python source. `df` pre-loaded |
+| `delimiter` | string | auto | CSV only |
+| `sheet_name` | string | primera | XLSX only |
+| `header_row` | int | 1 | 1-indexed |
+
+### Pre-loaded en el sandbox
+
+- `df` — pandas DataFrame del attachment completo
+- `pd` (pandas), `np` (numpy), `stats` (scipy.stats)
+- stdlib: math, datetime, decimal, json, re, statistics, string, collections,
+  functools, itertools
+
+### Cómo surface output
+
+| Camino | Cómo |
+|---|---|
+| `stdout` | `print(...)` (capturado) |
+| `result` | Asignar a global `result`. DataFrames → `to_dict(orient='records')`, Series → `to_list()`, numpy scalars → `.item()` |
+
+### Restricciones de sandbox
+
+Mismo `restricted` mode que `gsheets_run_python`:
+
+- Blocked: `os`, `sys`, `subprocess`, `socket`, `urllib`, `requests`, `importlib`, `builtins`, `ctypes`
+- No filesystem, no network
+- Wall-clock cap 30 s
+
+### Caps (v1, hardcoded)
+
+| | Valor |
+|---|---|
+| Attachment size | 50 MB |
+| DataFrame rows | 100 000 |
+| Code wall-clock | 30 s |
+| Response stdout/error | 50 KB |
+
+### Configuración del operador
+
+```jsonc
+"tool_configurations": {
+  "attachment_run_python": {
+    "name": "attachment_run_python",
+    "node_type": "attachment_run_python",
+    "fixed_config": {}
+  }
+}
+```
+
+No requiere `connection_url` ni `permissions` — el sandbox es self-contained.
+
+### Soporta inline + signed URL
+
+El dispatcher usa el cable compartido (Bulk T0) → `OutputStorageRepository`.
+Funciona idénticamente para archivos enviados como `data:` base64 (inline) o
+como signed URLs. El LLM no necesita saber el source type.
+
+### Cuándo NO usarlo
+
+- DataFrame > 100K rows → usar `sql_bulk_insert_from_attachment` para meter en DB y luego `sql_query` con filtros
+- Archivo > 50 MB → mismo workaround
+- Quiere ver TODA la data al contexto → `load_attachment` (último recurso)
+
+### Referencias
+
+- Tool YAML: [`text/tools/sql.yaml`](../../src/libs/colmena/text/tools/sql.yaml) (entry `attachment_run_python`)
+- Implementación: [`attachment_run_python.rs`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/attachment_run_python.rs)
+- E2E graph: [`tests/graphs/agents/attachment_run_python_e2e.json`](../../tests/graphs/agents/attachment_run_python_e2e.json)
+- CHANGELOG §23

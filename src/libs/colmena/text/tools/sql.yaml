@@ -1,3 +1,42 @@
+attachment_run_python:
+  summary: Run pandas/numpy code against a registered CSV/XLSX attachment, get back stdout + a structured result — without dumping every row into your context
+  description: |
+    Execute Python code against a pandas DataFrame loaded from a registered CSV or XLSX attachment. The backend loads the file into a DataFrame named `df` BEFORE your code runs; you get back captured stdout and (if your code assigned one) a `result` value. The attachment's bytes never enter your context — only your code's output crosses the wire.
+
+    Workflow: ALWAYS prefer this over `load_attachment` when the user asks a question that can be answered with computation against the data. Example: "qué producto tiene el precio más alto?" — call this tool with `code: "result = df.loc[df['price'].astype(float).idxmax()][['name', 'price']].to_dict()"`.
+
+    Required args:
+      - `attachment_id`: a document_id from the conversation catalog
+      - `code`: Python source. A pandas DataFrame `df` is pre-loaded. Convenience modules also pre-imported: `pd` (pandas), `np` (numpy), `stats` (scipy.stats), and the stdlib (math, datetime, decimal, json, re, statistics, string, collections, functools, itertools).
+
+    Optional args:
+      - `delimiter`: CSV only. Override the auto-detected separator
+      - `sheet_name`: XLSX only. Default = first sheet
+      - `header_row`: 1-indexed row of the header (default 1; set to 2 for files with a title row)
+
+    How to surface output:
+      - `print(...)` → captured into `stdout` field of the response
+      - Assign to a global `result` → returned in the `result` field of the response. Pandas DataFrames are auto-converted via `to_dict(orient="records")`, Series via `to_list()`, numpy scalars via `item()`. Other types pass through as JSON.
+
+    Limits (v1, hardcoded):
+      - Attachment ≤ 50 MB
+      - DataFrame ≤ 100 000 rows
+      - Code wall-clock ≤ 30 seconds
+      - Response stdout / error truncated at 50 KB
+
+    Sandbox restrictions (mirrors gsheets_run_python):
+      - Blocked imports: os, sys, subprocess, socket, urllib, requests, importlib, builtins, ctypes
+      - No filesystem access, no network access
+      - The attachment bytes live in Python memory only for the duration of the call
+
+    All CSV cell values arrive as strings (pandas object dtype). Coerce with `df['price'] = pd.to_numeric(df['price'], errors='coerce')` or `df = df.astype({'price': float, 'stock': int})` when you need numeric ops. The catalog auto-summary tells you the inferred type per column.
+
+    Comparison to other tools for tabular attachments:
+      - Use `attachment_run_python` for ANY analytical question (max, mean, filter, group_by, etc.)
+      - Use `sql_inspect_attachment` only when you need the destination table's column schema before a `sql_bulk_insert_from_attachment`
+      - Use `sql_bulk_insert_from_attachment` when the goal is to load the data into Postgres
+      - Use `load_attachment` only as a LAST RESORT — it dumps every row into your context
+
 sql_inspect_attachment:
   summary: Open a registered CSV/XLSX attachment and report its header, sample rows, total row count, and inferred column types — without forcing the LLM to read every row
   description: |

@@ -820,6 +820,21 @@ impl DagToolExecutor {
             }
         }
 
+        // --- Synthetic attachment_run_python (post item 13, 2026-06-10) ---
+        // Loads a registered CSV/XLSX attachment into a pandas DataFrame and
+        // runs the LLM's Python code against it inside the existing
+        // restricted sandbox. Same shared attachment plumbing (Bulk T0) as
+        // the SQL bulk tools below — supports inline AND signed-URL sources
+        // uniformly. No per-tool fixed_config needed.
+        {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::attachment_run_python::{
+                dispatch_attachment_run_python_via_executor, ATTACHMENT_RUN_PYTHON_TOOL_NAME,
+            };
+            if tool_call.function.name == ATTACHMENT_RUN_PYTHON_TOOL_NAME {
+                return dispatch_attachment_run_python_via_executor(self, tool_call).await;
+            }
+        }
+
         // --- Synthetic SQL bulk tools (Bulk T4) ---
         // sql_inspect_attachment + sql_bulk_insert_from_attachment use the
         // shared attachment plumbing (Bulk T0) to stream CSV/XLSX bytes from

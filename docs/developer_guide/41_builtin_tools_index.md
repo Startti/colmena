@@ -62,14 +62,15 @@ For toolkit packages (`enabled_tools: ["gsheets"]` shortcut), see
 | `load_attachment` | Materialize a registered attachment's content (with auto-summary for large files) into the conversation | [§31](31_load_attachment.md) |
 | `recall_history` | Re-read the original content of one past message by its turn index | [§29](29_lazy_tool_loading.md) |
 
-## sql (2 tools — synthetic SQL bulk tools, item 13)
+## sql (3 tools — synthetic SQL/pandas tools for tabular attachments)
 
-Opt-in via `tool_configurations`. Bypass the LLM context for large CSV
-attachments — the LLM sees only a small sample, the backend streams the
-bytes into Postgres via `COPY FROM STDIN`.
+Opt-in via `tool_configurations`. Bypass the LLM context for large CSV/XLSX
+attachments — the LLM sees only a sample (catalog auto-summary) or runs
+computation server-side (run_python) instead of dumping every row.
 
 | Tool | Summary | Detailed docs |
 |---|---|---|
+| `attachment_run_python` | Run pandas/numpy code against a registered CSV/XLSX attachment, get back stdout + a structured result — without dumping every row into your context | [§23](23_sql_node.md#attachment_run_python-shipped-2026-06-10) |
 | `sql_inspect_attachment` | Open a registered CSV/XLSX attachment and report its header, sample rows, total row count, and inferred column types — without forcing the LLM to read every row | [§23](23_sql_node.md#bulk-insert-from-attachment-shipped-2026-06-09) |
 | `sql_bulk_insert_from_attachment` | Stream a CSV attachment into a Postgres table via COPY FROM STDIN — bypasses the LLM context for the rows and runs orders of magnitude faster than per-row INSERT | [§23](23_sql_node.md#bulk-insert-from-attachment-shipped-2026-06-09) |
 

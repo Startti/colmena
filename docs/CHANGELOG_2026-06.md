@@ -1181,3 +1181,153 @@ tiene `summary_enabled: true`. Run 1 dispara la tarea concurrente de summary;
 DB query confirma la persistencia con shape correcto.
 
 **Estado.** done.
+
+---
+
+## 23. `attachment_run_python` — pandas on registered CSV/XLSX without dumping rows (2026-06-10)
+
+**Origen.** Pregunta del owner post auto-summary (§22): "¿el LLM puede usar
+pandas para responder preguntas específicas sobre el archivo sin gastar
+muchos tokens viendo los CSV/Excel?". Hoy la única forma era
+`load_attachment` (~50K tokens para un CSV de 1487 rows), o adivinar
+desde el catalog auto-summary que muestra solo 3 sample rows.
+
+**Fix shipped.** Nuevo synthetic tool `attachment_run_python(attachment_id, code, ...)`
+que carga el attachment en un pandas DataFrame server-side, ejecuta el código
+del LLM en el mismo sandbox restricted que usa `gsheets_run_python`, y
+devuelve **solo stdout + result global**. La data del archivo nunca cruza
+al contexto del LLM.
+
+**Verificación live (LLM-in-the-loop)** — Gemini 2.5-flash con CSV de
+100 productos:
+
+```
+User: "Cuál es el producto con el precio más alto, su precio, y cuál es
+       la suma total de stock entre todos los productos?"
+
+LLM:  → attachment_run_python({
+          attachment_id: "products_csv",
+          code: "df['price'] = pd.to_numeric(df['price'])
+                 df['stock'] = pd.to_numeric(df['stock'])
+                 top = df.loc[df['price'].idxmax()]
+                 result = {'top_product': top['name'],
+                           'max_price': float(top['price']),
+                           'total_stock': int(df['stock'].sum())}"
+       })
+      ← {row_count: 100, columns: [...],
+         result: {top_product: 'Product 100', max_price: 59.99, total_stock: 50500},
+         duration_ms: 84}
+      → "El producto con el precio más alto es Product 100 con un precio de
+         59.99, y la suma total de stock es 50500"
+```
+
+Cálculo verificado: precio máx = `9.99 + 50 = 59.99` ✓; stock total =
+`10 × Σ(1..100) = 50500` ✓.
+
+**Token economy:**
+
+| Approach | Tokens consumidos |
+|---|---|
+| `load_attachment` (todo el CSV de 100 rows) | ~5K tokens |
+| `attachment_run_python` | ~80 tokens response |
+| **Ratio** | **~60×** mejor (para CSV pequeños) |
+
+Para CSVs grandes (1487 rows): ~50K vs ~80 = **~600× mejor**.
+
+**Cambios:**
+
+| Componente | LOC | Función |
+|---|---|---|
+| `llm_synthetic_tools/attachment_run_python.rs` (NEW) | ~280 | Tool definition + Args + Response + dispatcher + Python wrapper |
+| `sql_bulk_tools::parse_attachment_to_records` | ~150 | Helper público que devuelve ALL rows (no solo sample) como Vec<JSON records>. Reusa la lógica CSV/XLSX existente |
+| `dag_tool_executor.rs` | +12 | Match arm en `execute` para el tool name |
+| `llm.rs` registration | +10 | Push del ToolDefinition cuando `attachment_run_python` está en `configured_aliases` |
+| `text/tools/sql.yaml` | +35 | Entry con workflow + caps + sandbox restrictions + comparación con otros tools |
+| `developer_guide/41_builtin_tools_index.md` | +1 row | Listado en el index doc (3 tools en SQL section) |
+
+**Sandbox.** Reusa `execute_sandboxed_helper` (PyO3) en modo `restricted`,
+idéntico a `gsheets_run_python` y `crdt_doc_run_python`:
+- Allowed imports: `pandas`, `numpy`, `scipy.stats`, `math`, `datetime`,
+  `decimal`, `json`, `re`, `statistics`, `string`, `collections`,
+  `functools`, `itertools`
+- Blocked imports: `os`, `sys`, `subprocess`, `socket`, `urllib`,
+  `requests`, `importlib`, `builtins`, `ctypes`
+- No filesystem access, no network access
+- Bytes del attachment viven en memoria Python solo durante la call
+
+**Wrapper Python.** El dispatcher carga el DataFrame antes del código del
+LLM y serializa `result` después:
+
+```python
+import pandas as pd
+import numpy as np
+import scipy.stats as stats
+
+df = pd.DataFrame(_attachment_records)   # records loaded by Rust
+result = None
+
+<user code>
+
+# postlude: aliases result → output (helper extracts `output`)
+def __col_serialise(v):
+    if hasattr(v, 'to_dict'):
+        return v.to_dict(orient='records')
+    if hasattr(v, 'to_list'):
+        return v.to_list()
+    if isinstance(v, np.generic):
+        return v.item()
+    return v
+output = __col_serialise(result)
+```
+
+Pandas DataFrames y Series se serializan estructuralmente; numpy scalars
+se desbox-ean con `.item()`.
+
+**Soporta inline + signed URL uniformemente.** El dispatcher usa
+`DagToolExecutor::fetch_attachment_bytes` (Bulk T0), que va por
+`OutputStorageRepository`. Ese adapter persiste bytes para AMBOS source
+types al registrar el attachment. El LLM no sabe (ni le importa) de
+dónde vino el archivo.
+
+**Limits (v1, hardcoded):**
+
+| Cap | Valor |
+|---|---|
+| Attachment size | 50 MB |
+| DataFrame rows | 100 000 |
+| Code wall-clock | 30 s |
+| Stdout / error per response | 50 KB |
+
+**Tests:**
+- 5 unit tests en `attachment_run_python::tests` (args deserialize, wrapper,
+  truncate)
+- E2E LLM-in-the-loop en
+  `tests/graphs/agents/attachment_run_python_e2e.json` — verificado contra
+  Gemini 2.5-flash + CSV de 100 productos. PASS.
+- Full suite: 1691 PASS / 0 FAIL / 92 IGNORED.
+
+**Impacto ADP.** **Cero breaking changes.** Tool opt-in vía
+`tool_configurations`. El worker image YA tiene pandas/numpy/scipy
+instalado (resuelto en commit `ee08598e` 2026-06-07). ADP recompila clean.
+
+**Para correr local con PyO3:**
+
+```bash
+PYTHONPATH=".venv/lib/python3.14/site-packages" \
+  cargo run --bin dag_engine -- run <graph.json>
+```
+
+(El binario lockea contra Python 3.14 del sistema en macOS; pandas vive
+en `.venv` solo. En Cloud Run el binary usa el Python del Dockerfile.)
+
+**Comparación con tools relacionados:**
+
+| Tool | Cuándo usar |
+|---|---|
+| Catalog auto-summary (§22) | "Qué columnas tiene este archivo?" — gratis, 0 calls |
+| `attachment_run_python` | Cálculos analíticos: max, mean, filter, group_by, etc. |
+| `sql_inspect_attachment` (item 13) | Para conocer el schema de la tabla destino antes de bulk insert |
+| `sql_bulk_insert_from_attachment` (item 13) | Cargar el CSV a Postgres |
+| `load_attachment` | Último recurso — dumps TODO al context |
+
+**Estado.** done.

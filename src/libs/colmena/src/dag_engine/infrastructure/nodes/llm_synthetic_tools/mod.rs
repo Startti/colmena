@@ -1,5 +1,6 @@
 //! Synthetic tools for the LLM node — tools that don't map to DAG nodes.
 
+pub mod attachment_run_python;
 pub mod crdt_doc_context;
 pub mod crdt_doc_import_sheet;
 pub mod crdt_doc_run_python;
@@ -478,6 +479,9 @@ mod text_coverage_tests {
         // sql_bulk_tools — 2 tools (item 13, 2026-06-09)
         tools.push(super::sql_bulk_tools::build_sql_inspect_attachment_tool_definition());
         tools.push(super::sql_bulk_tools::build_sql_bulk_insert_tool_definition());
+
+        // attachment_run_python — 1 tool (post item 13, 2026-06-10)
+        tools.push(super::attachment_run_python::build_attachment_run_python_tool_definition());
 
         tools
     }

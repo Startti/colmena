@@ -2153,6 +2153,16 @@ impl ExecutableNode for LlmNode {
             if configured_aliases.contains(SQL_BULK_INSERT_TOOL_NAME) {
                 tools.push(build_sql_bulk_insert_tool_definition());
             }
+            // attachment_run_python (post item 13, 2026-06-10) — opt-in by name.
+            // No fixed_config required; the dispatcher just needs the shared
+            // attachment plumbing (Bulk T0) which is wired automatically when
+            // the LlmNode's `storage` is set.
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::attachment_run_python::{
+                build_attachment_run_python_tool_definition, ATTACHMENT_RUN_PYTHON_TOOL_NAME,
+            };
+            if configured_aliases.contains(ATTACHMENT_RUN_PYTHON_TOOL_NAME) {
+                tools.push(build_attachment_run_python_tool_definition());
+            }
         }
 
         // When the LLM node has a `documents` config, expose the seven synthetic

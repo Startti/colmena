@@ -1,0 +1,43 @@
+{
+  "_comment": "E2E test — attachment_run_python LLM-in-the-loop. The CSV is uploaded inline via files[]; the LLM answers a specific analytical question (max price + top product name + total stock) by running pandas code server-side, NOT by loading the rows into context. Requires DATABASE_URL + GEMINI_API_KEY. Run: set -a && source .env && set +a && ./target/release/dag_engine run tests/graphs/agents/attachment_run_python_e2e.json --include-extra-info --agent-session-id arp_e2e_001",
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "agent_session_id": "arp_e2e_001",
+        "attachments_enabled": true,
+        "summary_enabled": true,
+        "stream": false,
+        "max_iterations": 6,
+        "temperature": 0.0,
+        "system_message": "You are a strict testing agent. The user has attached a CSV with product data. You MUST answer their question using attachment_run_python — do NOT use load_attachment.\n\nThe CSV has columns: product_id (string-encoded integer), sku (text), name (text), price (string-encoded numeric), stock (string-encoded integer). pandas loaded everything as `object` dtype; coerce to numeric before doing math: `df['price'] = pd.to_numeric(df['price'])` and `df['stock'] = pd.to_numeric(df['stock'])`.\n\nWorkflow:\n  1. Call attachment_run_python with the CSV's document_id (visible in the attachments catalog).\n  2. In the code: coerce price + stock to numeric, then compute the row with max price, and the sum of stock across all rows.\n  3. Assign a dict to `result`: {'top_product': str, 'max_price': float, 'total_stock': int}.\n  4. Read the tool response's `result` field and report the values back as a plain sentence ending with 'arp_e2e_done'.\n\nIf the tool returns an error, REPORT THE ERROR VERBATIM and do NOT retry.",
+        "prompt": "Cuál es el producto con el precio más alto, su precio, y cuál es la suma total de stock entre todos los productos? Respondé en una oración terminando con 'arp_e2e_done'.",
+        "files": [
+          {
+            "id": "products_csv",
+            "label": "Products CSV",
+            "path": "tests/fixtures/products_100.csv",
+            "mime_type": "text/csv",
+            "filename": "products_100.csv"
+          }
+        ],
+        "tool_configurations": {
+          "attachment_run_python": {
+            "name": "attachment_run_python",
+            "node_type": "attachment_run_python",
+            "description": "Run pandas code against the attached CSV; result + stdout returned without loading the rows.",
+            "fixed_config": {}
+          }
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "agent", "to": "log" }
+  ]
+}

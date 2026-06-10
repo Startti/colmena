@@ -536,6 +536,209 @@ pub fn parse_inspect_bytes_with_filename(
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Records-extraction path (attachment_run_python, 2026-06-10)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `(columns, rows)` returned by [`parse_attachment_to_records`]. Each row
+/// is a JSON `{column_name: value_or_null}` map ready to feed into
+/// `pd.DataFrame(records)` in the Python sandbox.
+pub type AttachmentRecords = (Vec<String>, Vec<serde_json::Map<String, serde_json::Value>>);
+
+/// Load every row of a tabular attachment as a `Vec` of `{column: value}`
+/// JSON records — the shape pandas accepts via `pd.DataFrame(records)`.
+///
+/// Used by `attachment_run_python` to inject the full DataFrame into the
+/// Python sandbox in one shot (the LLM's code then runs against `df`).
+///
+/// Returns `Err` if:
+/// - bytes exceed `MAX_ATTACHMENT_BYTES` (50 MB)
+/// - row count exceeds `MAX_BULK_INSERT_ROWS` (100 K) — the helper would
+///   otherwise stream all 1M+ rows into Python memory unbounded
+/// - mime is not CSV/XLSX (caller falls back to the LLM-error envelope)
+///
+/// Values are emitted as JSON strings (CSV native shape); pandas re-infers
+/// types on `pd.DataFrame(records)`. Empty cells become `null`.
+pub fn parse_attachment_to_records(
+    bytes: &[u8],
+    mime_type: &str,
+    filename: &str,
+    delimiter: Option<&str>,
+    sheet_name: Option<&str>,
+    header_row: Option<u32>,
+) -> Result<AttachmentRecords, String> {
+    if bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
+        return Err(format!(
+            "attachment too large: {} bytes > limit {} MB",
+            bytes.len(),
+            MAX_ATTACHMENT_BYTES / 1024 / 1024
+        ));
+    }
+    let format = FileFormat::from_mime(mime_type)
+        .or_else(|| FileFormat::from_filename(filename))
+        .ok_or_else(|| {
+            format!(
+                "unsupported mime_type '{mime_type}' (filename '{filename}') for run_python. \
+                 Supported: text/csv, application/csv, text/plain (.csv), \
+                 application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, \
+                 application/vnd.ms-excel."
+            )
+        })?;
+    match format {
+        FileFormat::Csv => parse_csv_to_records(bytes, delimiter, header_row),
+        FileFormat::Xlsx => parse_xlsx_to_records(bytes, sheet_name, header_row),
+    }
+}
+
+fn parse_csv_to_records(
+    bytes: &[u8],
+    delimiter: Option<&str>,
+    header_row: Option<u32>,
+) -> Result<AttachmentRecords, String> {
+    let header_row = header_row.unwrap_or(DEFAULT_HEADER_ROW).max(1) as usize;
+    let delimiter_byte = match delimiter {
+        Some(s) => {
+            let trimmed = s.trim();
+            if trimmed.len() != 1 {
+                return Err(format!(
+                    "delimiter must be a single character, got '{trimmed}'"
+                ));
+            }
+            trimmed.bytes().next().unwrap()
+        }
+        None => {
+            let first_line = std::str::from_utf8(bytes)
+                .map_err(|e| format!("CSV bytes are not valid UTF-8: {e}"))?
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("");
+            detect_csv_delimiter(first_line)
+        }
+    };
+    let mut rdr = csv::ReaderBuilder::new()
+        .delimiter(delimiter_byte)
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(bytes);
+    let mut iter = rdr.records();
+    for _ in 1..header_row {
+        if iter.next().is_none() {
+            return Err(format!("CSV ended before reaching header_row={header_row}"));
+        }
+    }
+    let header_record = iter
+        .next()
+        .ok_or_else(|| "CSV is empty — no header row".to_string())?
+        .map_err(|e| format!("CSV header parse error: {e}"))?;
+    let columns: Vec<String> = header_record.iter().map(|s| s.to_string()).collect();
+    if columns.is_empty() {
+        return Err("CSV header has zero columns".into());
+    }
+
+    let mut records: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
+    for rec in iter {
+        let rec =
+            rec.map_err(|e| format!("CSV row parse error at row {}: {e}", records.len() + 1))?;
+        if records.len() as u64 >= MAX_BULK_INSERT_ROWS {
+            return Err(format!(
+                "CSV exceeds {MAX_BULK_INSERT_ROWS} rows — run_python cannot load the full DataFrame. \
+                 Use sql_bulk_insert_from_attachment for large files, or filter the data before upload."
+            ));
+        }
+        let values: Vec<String> = rec.iter().map(|s| s.to_string()).collect();
+        let mut row = serde_json::Map::new();
+        for (i, col) in columns.iter().enumerate() {
+            let v = values.get(i).cloned().unwrap_or_default();
+            let json_v = if v.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(v)
+            };
+            row.insert(col.clone(), json_v);
+        }
+        records.push(row);
+    }
+    Ok((columns, records))
+}
+
+fn parse_xlsx_to_records(
+    bytes: &[u8],
+    sheet_name: Option<&str>,
+    header_row: Option<u32>,
+) -> Result<AttachmentRecords, String> {
+    use calamine::{open_workbook_from_rs, Reader, Xlsx};
+    use std::io::Cursor;
+
+    let header_row = header_row.unwrap_or(DEFAULT_HEADER_ROW).max(1) as usize;
+    let mut wb: Xlsx<_> = open_workbook_from_rs(Cursor::new(bytes.to_vec()))
+        .map_err(|e| format!("XLSX parse error: {e}"))?;
+    let sheet_names = wb.sheet_names();
+    if sheet_names.is_empty() {
+        return Err("XLSX has no sheets".into());
+    }
+    let chosen_sheet = match sheet_name {
+        Some(name) => {
+            if !sheet_names.iter().any(|s| s == name) {
+                return Err(format!(
+                    "sheet '{name}' not found. Available: {sheet_names:?}"
+                ));
+            }
+            name.to_string()
+        }
+        None => sheet_names[0].clone(),
+    };
+    let range = wb
+        .worksheet_range(&chosen_sheet)
+        .map_err(|e| format!("XLSX worksheet read error for '{chosen_sheet}': {e}"))?;
+
+    let height = range.height();
+    if height < header_row {
+        return Err(format!(
+            "XLSX sheet '{chosen_sheet}' has only {height} rows; header_row={header_row} is out of range"
+        ));
+    }
+
+    let header_row_idx = header_row - 1;
+    let columns: Vec<String> = (0..range.width())
+        .map(|c| {
+            range
+                .get((header_row_idx, c))
+                .map(cell_to_string)
+                .unwrap_or_default()
+        })
+        .collect();
+    if columns.iter().all(|c| c.is_empty()) {
+        return Err(format!(
+            "XLSX header row {header_row} on sheet '{chosen_sheet}' has no column names"
+        ));
+    }
+
+    let data_row_count = height - header_row;
+    if data_row_count as u64 > MAX_BULK_INSERT_ROWS {
+        return Err(format!(
+            "XLSX exceeds {MAX_BULK_INSERT_ROWS} rows — run_python cannot load the full DataFrame. \
+             Filter the data before upload."
+        ));
+    }
+    let mut records: Vec<serde_json::Map<String, serde_json::Value>> =
+        Vec::with_capacity(data_row_count);
+    for r_offset in 0..data_row_count {
+        let r = header_row + r_offset;
+        let mut row = serde_json::Map::new();
+        for (i, col) in columns.iter().enumerate() {
+            let raw = range.get((r, i)).map(cell_to_string).unwrap_or_default();
+            let v = if raw.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(raw)
+            };
+            row.insert(col.clone(), v);
+        }
+        records.push(row);
+    }
+    Ok((columns, records))
+}
+
 /// Detect the CSV delimiter by sniffing the first non-empty line. Tries
 /// comma, semicolon, tab in order; returns the one that produces the most
 /// fields. Defaults to comma when the line has no separator candidates.
