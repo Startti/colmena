@@ -2113,6 +2113,29 @@ impl ExecutableNode for LlmNode {
             tools.push(build_load_attachment_tool_definition(&attachment_catalog));
         }
 
+        // ---- Bulk T4: expose synthetic SQL bulk tools when the operator opted in
+        // via tool_configurations. The dispatcher (DagToolExecutor) intercepts
+        // calls by name; the tool definition here is what the LLM sees in the
+        // tools[] array of the request. Same pattern as load_attachment but
+        // gated on tool_configurations membership instead of an attachment catalog.
+        //
+        // Membership is checked against `configured_aliases` (snapshot taken at
+        // line ~1618 before the map is moved into the executor) — the raw
+        // `tool_configurations` map is no longer accessible at this point.
+        {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::sql_bulk_tools::{
+                build_sql_bulk_insert_tool_definition,
+                build_sql_inspect_attachment_tool_definition, SQL_BULK_INSERT_TOOL_NAME,
+                SQL_INSPECT_ATTACHMENT_TOOL_NAME,
+            };
+            if configured_aliases.contains(SQL_INSPECT_ATTACHMENT_TOOL_NAME) {
+                tools.push(build_sql_inspect_attachment_tool_definition());
+            }
+            if configured_aliases.contains(SQL_BULK_INSERT_TOOL_NAME) {
+                tools.push(build_sql_bulk_insert_tool_definition());
+            }
+        }
+
         // When the LLM node has a `documents` config, expose the seven synthetic
         // document_* tools regardless of `enabled_tools` — same pattern as
         // load_skill. The DagToolExecutor was already wired with the matching
@@ -4633,8 +4656,7 @@ mod resolve_synthetic_enabled_tools_tests {
         assert!(excludes.contains("gsheets_create_from_xlsx"));
         assert!(excludes.contains("gsheets_export_xlsx"));
         // Final set (wants - excludes) used by the synthetic block.
-        let final_set: std::collections::HashSet<&&str> =
-            wants.difference(&excludes).collect();
+        let final_set: std::collections::HashSet<&&str> = wants.difference(&excludes).collect();
         assert_eq!(final_set.len(), 8);
     }
 

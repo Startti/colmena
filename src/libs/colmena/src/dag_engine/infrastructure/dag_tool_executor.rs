@@ -425,6 +425,18 @@ impl DagToolExecutor {
         Ok(stored.storage_key)
     }
 
+    /// Look up the catalog entry's original `(mime_type, filename)` for a
+    /// registered attachment. Useful for dispatchers that need authoritative
+    /// metadata: local storage adapters often drop the original mime
+    /// (defaulting to `application/octet-stream`) and rename the file with a
+    /// UUID-based key, so the catalog is the only reliable source of truth.
+    /// Returns `None` if no catalog is wired OR the document_id is unknown.
+    pub fn lookup_attachment_meta(&self, document_id: &str) -> Option<(String, String)> {
+        let catalog = self.attachment_catalog.as_ref()?;
+        let entry = catalog.iter().find(|a| a.document_id == document_id)?;
+        Some((entry.mime_type.clone(), entry.filename.clone()))
+    }
+
     /// Internal: catalog lookup for `document_id` → `storage_key`.
     fn lookup_storage_key(&self, document_id: &str) -> Result<String, String> {
         let catalog = self.attachment_catalog.as_ref().ok_or_else(|| {
@@ -805,6 +817,48 @@ impl DagToolExecutor {
                 let empty: Vec<crate::llm::domain::ConversationAttachment> = Vec::new();
                 let catalog = self.attachment_catalog.as_ref().unwrap_or(&empty);
                 return dispatch_load_attachment(tool_call, catalog);
+            }
+        }
+
+        // --- Synthetic SQL bulk tools (Bulk T4) ---
+        // sql_inspect_attachment + sql_bulk_insert_from_attachment use the
+        // shared attachment plumbing (Bulk T0) to stream CSV/XLSX bytes from
+        // the conversation catalog into Postgres without forcing the LLM to
+        // read each row. Config (connection_url + permissions.allowed_schemas)
+        // comes from the per-tool `fixed_config`; the LLM only supplies
+        // attachment_id + table + column_mapping.
+        {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::sql_bulk_tools::{
+                dispatch_sql_bulk_insert_from_attachment_via_executor,
+                dispatch_sql_inspect_attachment_via_executor, SQL_BULK_INSERT_TOOL_NAME,
+                SQL_INSPECT_ATTACHMENT_TOOL_NAME,
+            };
+            let name = tool_call.function.name.as_str();
+            if name == SQL_INSPECT_ATTACHMENT_TOOL_NAME {
+                let fixed_config = self
+                    .tool_configurations
+                    .get(SQL_INSPECT_ATTACHMENT_TOOL_NAME)
+                    .map(|tc| tc.fixed_config.clone())
+                    .unwrap_or_default();
+                return dispatch_sql_inspect_attachment_via_executor(
+                    self,
+                    tool_call,
+                    &fixed_config,
+                )
+                .await;
+            }
+            if name == SQL_BULK_INSERT_TOOL_NAME {
+                let fixed_config = self
+                    .tool_configurations
+                    .get(SQL_BULK_INSERT_TOOL_NAME)
+                    .map(|tc| tc.fixed_config.clone())
+                    .unwrap_or_default();
+                return dispatch_sql_bulk_insert_from_attachment_via_executor(
+                    self,
+                    tool_call,
+                    &fixed_config,
+                )
+                .await;
             }
         }
 

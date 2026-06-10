@@ -746,6 +746,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "clap",
+ "csv",
  "dashmap",
  "derivative",
  "docx-rs",

@@ -27,8 +27,73 @@ INSERT INTO products (sku, name, price) VALUES
 ```
 Whole thing still runs in one transaction. Smaller VALUES blocks keep parsing fast.
 
-### >500 rows OR data from CSV/Excel — ask for the bulk tool
-If `sql_bulk_insert_from_attachment` is enabled, prefer it. It streams the file directly to the DB without loading rows through your context. If it's not enabled and the data is in your prompt, warn the user about token cost before proceeding.
+### >500 rows OR data from CSV/Excel — use the bulk tools
+
+If `sql_inspect_attachment` + `sql_bulk_insert_from_attachment` are enabled, prefer them over INSERT. They stream the file directly to the DB without loading rows through your context. The workflow is **always two calls**:
+
+1. **`sql_inspect_attachment`** — opens the attachment, returns header, inferred column types, sample rows (default 5), total row count. Pass the optional `target_table` arg to also receive the destination table schema in the same call (saves a round-trip vs querying `information_schema` separately).
+
+   ```jsonc
+   // LLM call
+   {"name": "sql_inspect_attachment",
+    "arguments": {
+      "attachment_id": "doc_csv_abc123",
+      "sample_rows": 5,
+      "target_table": "public.products"
+    }}
+
+   // LLM receives ~300 tokens regardless of file size
+   {
+     "columns": ["product_id", "sku", "price"],
+     "inferred_types": ["integer", "text", "numeric"],
+     "sample": [{"product_id": "1", "sku": "A001", "price": "9.99"}, ...],
+     "total_rows": 1487,
+     "format": "csv",
+     "delimiter": ",",
+     "target_table_schema": {
+       "table": "public.products",
+       "columns": [
+         {"name": "id", "data_type": "integer", "is_nullable": false},
+         {"name": "sku", "data_type": "text", "is_nullable": false},
+         {"name": "price", "data_type": "numeric", "is_nullable": false}
+       ]
+     }
+   }
+   ```
+
+2. **`sql_bulk_insert_from_attachment`** — runs `COPY FROM STDIN` server-side. `column_mapping` is **required** and must cover every column in the CSV header (identity mappings included). Default `on_error: "fail_fast"` rolls back the whole batch on any row error (no partial state).
+
+   ```jsonc
+   // LLM call
+   {"name": "sql_bulk_insert_from_attachment",
+    "arguments": {
+      "attachment_id": "doc_csv_abc123",
+      "table": "public.products",
+      "column_mapping": {
+        "product_id": "id",
+        "sku": "sku",
+        "price": "price"
+      }
+    }}
+
+   // LLM receives ~80 tokens
+   {
+     "rows_inserted": 1487,
+     "rows_skipped": 0,
+     "duration_ms": 230,
+     "method": "copy_from_stdin",
+     "errors": []
+   }
+   ```
+
+**Anti-patterns to avoid with the bulk tools:**
+
+- ❌ Calling `sql_bulk_insert_from_attachment` without `sql_inspect_attachment` first. You need to see headers + sample to know what `column_mapping` to use.
+- ❌ Skipping `column_mapping` for "identity" cases. v1 requires it explicitly — `{"a":"a","b":"b"}` is fine.
+- ❌ Trying `on_error: "skip_rows"` or `"partial_commit"`. v1 supports `fail_fast` only; the others return a clear error and are tracked for v1.1.
+- ❌ Passing an `.xlsx` attachment. v1 supports CSV only. If the user uploaded XLSX, ask them to upload as CSV, or use `python_script` to convert.
+
+If the tools aren't enabled and the data is in your prompt, warn the user about token cost before proceeding.
 
 ## ❌ Anti-patterns
 

@@ -1,0 +1,67 @@
+sql_inspect_attachment:
+  summary: Open a registered CSV/XLSX attachment and report its header, sample rows, total row count, and inferred column types — without forcing the LLM to read every row
+  description: |
+    Open a registered CSV or XLSX attachment and return a compact summary the LLM can decide on without loading the entire file into the context window.
+
+    Workflow contract: ALWAYS call `sql_inspect_attachment` BEFORE `sql_bulk_insert_from_attachment`. The inspect response is what you use to build the `column_mapping` for the follow-up bulk insert.
+
+    The response includes:
+      - `columns`: header column names in source order
+      - `inferred_types`: per-column type (integer / numeric / bool / date / timestamp / text), derived from the first sample rows
+      - `sample`: first N rows as JSON objects (default 5, max 20). Values are strings; empty cells become `null`
+      - `total_rows`: total data rows (excluding header)
+      - `format` + `delimiter` (CSV) + `sheet_name` (XLSX)
+
+    Optional `target_table` arg: when set to a fully-qualified `schema.table`, the response also includes `target_table_schema` with the destination table's columns and SQL types. Use this to build a correct `column_mapping` without a separate `sql_query` round-trip against `information_schema`.
+
+    Limits (v1, hardcoded):
+      - Max attachment size: 50 MB
+      - Max sample rows returned: 20
+
+    Best practices:
+      - Pass `target_table` whenever you already know where the data goes — saves a round-trip
+      - If `inferred_types` shows `text` for what you expected to be `numeric`, the file likely has dirty rows; inspect a larger sample (`sample_rows: 20`) before deciding
+      - The `total_rows` value comes from streaming the entire file — it's accurate even for files larger than the sample
+
+sql_bulk_insert_from_attachment:
+  summary: Stream a CSV attachment into a Postgres table via COPY FROM STDIN — bypasses the LLM context for the rows and runs orders of magnitude faster than per-row INSERT
+  description: |
+    Bulk-load a registered CSV attachment into a Postgres table via `COPY FROM STDIN`. The backend streams the bytes directly without ever showing them to you; you only declare the destination and the column mapping.
+
+    **Always call `sql_inspect_attachment` first** to discover the source columns, inferred types, and (optionally via `target_table`) the destination table schema. Then build a `column_mapping` that covers EVERY column in the CSV header.
+
+    Required args:
+      - `attachment_id`: a document_id from the conversation catalog
+      - `table`: fully-qualified destination, e.g. `"public.products"`. Must be in the configured `allowed_schemas`
+      - `column_mapping`: object mapping each CSV column name to the destination column name. Every column in the CSV header must appear as a key. Identity mappings (`{"id": "id"}`) are required even when names match — explicit is safer than implicit and the cost in tokens is negligible
+
+    Optional args:
+      - `on_error`: only `"fail_fast"` (default) is supported in v1. SkipRows / PartialCommit return a structured error explaining they are tracked for v1.1 — convert your CSV to be insertable atomically, or pre-clean the rows before insert
+      - `delimiter`: override the CSV delimiter (default: auto-detect comma / semicolon / tab)
+      - `header_row`: 1-indexed row of the header (default: 1; set to 2 for files with a title row before headers)
+
+    Limits (v1, hardcoded):
+      - Max attachment size: 50 MB
+      - Max rows in a single insert: 100 000
+
+    Response shape:
+      ```json
+      {
+        "rows_inserted": 1487,
+        "rows_skipped": 0,
+        "duration_ms": 230,
+        "method": "copy_from_stdin",
+        "errors": []
+      }
+      ```
+
+    Failure modes the LLM should expect (each surfaces a clear error message):
+      - **schema 'X' is not in allowed_schemas [...]**: pick a table in a permitted schema or ask the operator
+      - **column_mapping is missing source column 'Y'**: add an entry mapping every CSV column
+      - **COPY finish failed: duplicate key / fk violation / not-null violation**: the data violates a table constraint; in `fail_fast` mode the whole batch rolls back, leaving the table unchanged
+      - **attachment too large**: pre-split the CSV
+      - **on_error='X' is not yet supported**: use `fail_fast` in v1
+
+    The operation is **atomic** in `fail_fast` mode: if any row fails, the entire batch rolls back and the table is unchanged. There is no partial state to worry about.
+
+    XLSX bulk insert is tracked for v1.1; if the user uploads an `.xlsx` you must convert it to CSV first (e.g. via a python_script that loads the workbook and writes a `.csv`), then re-register the CSV as an attachment and call this tool with the new attachment_id.

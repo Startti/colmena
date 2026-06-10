@@ -14,9 +14,9 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 
 | # | Item | Sección detallada | Esfuerzo |
 |---|---|---|---|
-| **11** | Cache nativo de provider habilitado por default en Anthropic + Gemini | [Provider-level prompt caching](#crdt-documents-v11--provider-level-prompt-caching-anthropic--gemini) (ya parqueado bajo CRDT v1.1) | ~5h |
+| **11** | ✅ Cache nativo de provider habilitado por default en Anthropic + Gemini (shipped 2026-06-09) | [Provider-level prompt caching](#crdt-documents-v11--provider-level-prompt-caching-anthropic--gemini) | done |
 | **12** | ✅ SQL node — `INSERT` multi-statement (shipped 2026-06-09) | [SQL node — INSERT multi-line bug](#sql-node--insert-multi-line-bug-2026-06-09--shipped-2026-06-09) | done |
-| **13** | SQL node — bulk insert desde CSV/Excel adjunto sin que el LLM lea las filas | [SQL node — bulk insert desde attachment](#sql-node--bulk-insert-desde-attachment-2026-06-09) | 3-5 días |
+| **13** | ✅ SQL node — bulk insert desde CSV adjunto (shipped 2026-06-09, Postgres + CSV only) | [SQL node — bulk insert desde attachment](#sql-node--bulk-insert-desde-attachment-2026-06-09) | done |
 | **14** | 🧠 Filtrar fields que el LLM ve de outputs de nodos upstream | [Output filtering para LLM](#output-filtering-para-llm--qué-campos-ve-el-modelo-2026-06-09) | requiere brainstorming dedicado |
 
 **Estado:** items 11-14 fueron agregados al backlog el 2026-06-09. Item 11

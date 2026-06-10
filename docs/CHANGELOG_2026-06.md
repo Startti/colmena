@@ -1065,3 +1065,42 @@ en el request body.
 - El LLM no usa `scope`/`anchor` para limitar finds que matchean en múltiples días/secciones. Educable vía skill auto-loaded.
 
 **Estado.** done (P0 fix). Backlog: items menores en §Subsystem G v1.1.
+
+---
+
+## 23. Google Workspace prelude — auto-inyectado para agentes con gsheets/gdocs (2026-06-10)
+
+**Qué cambió.** Todo `llm_call` cuyo catálogo expone algún tool `gsheets_*` o `gdocs_*` ahora recibe un bloque adicional en el system message:
+1. Exige el ID del documento explícitamente (extraído de URL del usuario, o pedido al usuario si no está confirmado).
+2. Le dice al LLM cuál es el SA email con el que el usuario debe compartir el doc (resuelto en runtime).
+3. Le indica que NO debe adivinar IDs ni operar sin doc_id confirmado.
+
+**Resolución del SA email** (en orden): env var `COLMENA_GOOGLE_SA_EMAIL` → `client_email` del JSON apuntado por `GOOGLE_APPLICATION_CREDENTIALS` → `None` con fallback degraded (le pide al user que consulte al operador para la dirección).
+
+**Implementación.**
+- Nuevo módulo `dag_engine/infrastructure/nodes/llm_synthetic_tools/google_workspace_prelude.rs` con:
+  - `resolve_sa_email() -> Option<String>` — cadena env → JSON → None.
+  - `build_google_workspace_prelude(sa_email: Option<&str>) -> String` — prompt v1 hardcoded en ES.
+  - `has_google_workspace_tools(tool_names)` — gate para gating.
+- Re-export desde `llm_synthetic_tools/mod.rs`.
+- Inyección en `llm.rs` en el system-message section builder, después del CRDT prelude y antes del `system_message` del usuario. Gateado por `has_google_workspace_tools(tools.iter().map(|t| t.name.as_str()))`.
+
+**Costo.** ~140 tokens fijos por turno con email; ~110 sin email. Always-on (no detecta si el doc_id ya está en scope). El LLM aprende rápido a saltearlo cuando ya tiene contexto. Trade-off: pequeño overhead constante vs comportamiento determinístico del turno 1.
+
+**Por qué importa.** Antes del fix: el LLM con `gsheets`/`gdocs` enabled, cuando el usuario decía "agregale una fila al sheet", inventaba un doc_id o llamaba la tool con info incompleta → `PermissionDenied` o tool error. Frustrante en turno 1. Ahora el LLM pide el ID y avisa del share con la SA en el primer turno.
+
+**Verificación.**
+- 8 tests unit en `google_workspace_prelude::tests` (resolución de email, fallback degraded, detección de tools, casos de JSON corrupto/missing).
+- E2E con grafo OpenAI gpt-4o-mini, `enabled_tools: ["gsheets", ...]`, prompt "agregale una fila al sheet":
+  - Sin fix: LLM hallucinaba o ejecutaba tool con args incompletos.
+  - Con fix: LLM responde `"Por favor, proporciona el ID del documento de Google Sheets al que deseas agregar una fila. Además, asegúrate de que el documento esté compartido como Editor con colmena-sheets-tester@startti-dev.iam.gserviceaccount.com."` ✓
+- Token bump observado: 2278 → 2529 (+251) en grafo de prueba.
+
+**BREAKING.** Ninguno. El prelude solo se inyecta en agentes con tools de Google Workspace; agentes sin gsheets/gdocs no ven cambios. ADP worker recompila clean.
+
+**Configuración requerida en operador.**
+- Si la SA JSON está en `GOOGLE_APPLICATION_CREDENTIALS`: el email se auto-resuelve. **Cero config.**
+- Si corre con ADC (Cloud Run sin JSON file): setear `COLMENA_GOOGLE_SA_EMAIL=<sa-email>` como env var. ADP debe agregar esta env var a `deploy_gcp.sh` antes del próximo deploy a prod.
+- Si no se setea ninguna: el prelude usa el path degraded (pide el doc_id y le dice al user que consulte al operador para el share). Funciona pero menos fluido.
+
+**Estado.** done.

@@ -1,0 +1,98 @@
+{
+  "_comment": "E2E test — item 13 (SQL bulk insert from attachment). LLM-in-the-loop verification using gemini-2.5-flash + 2 synthetic tools (sql_inspect_attachment, sql_bulk_insert_from_attachment) + a CSV fixture registered as attachment via files[].\n\nWorkflow:\n  1. setup_params + setup: create/clear public.test_bulk_e2e via sql_query.\n  2. agent: receives the CSV as files[] attachment, must call sql_inspect_attachment FIRST, build column_mapping, then sql_bulk_insert_from_attachment. Returns final 'cache_test_done'-style ack.\n  3. verify_params + verify: SELECT COUNT(*) to confirm 100 rows landed.\n\nRequires DATABASE_URL + GEMINI_API_KEY. Run with:\n  set -a && source .env && set +a && cargo run --bin dag_engine -- run tests/graphs/agents/sql_bulk_insert_e2e.json --include-extra-info",
+  "nodes": {
+    "setup_params": {
+      "type": "input",
+      "config": {
+        "data": {
+          "query": "CREATE TABLE IF NOT EXISTS public.test_bulk_e2e (product_id INTEGER PRIMARY KEY, sku TEXT NOT NULL, name TEXT NOT NULL, price NUMERIC(10,2) NOT NULL, stock INTEGER NOT NULL);\nDELETE FROM public.test_bulk_e2e WHERE product_id BETWEEN 1 AND 100",
+          "connection_url": "${DATABASE_URL}",
+          "permissions": {"preset": "full", "allowed_schemas": ["public"], "sandbox_schema": "public"},
+          "runtime_limits": {"max_rows": 100}
+        }
+      }
+    },
+    "setup": { "type": "sql_query", "config": {} },
+
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "agent_session_id": "bulk_e2e_001",
+        "attachments_enabled": true,
+        "stream": false,
+        "max_iterations": 10,
+        "temperature": 0.0,
+        "system_message": "You are a strict testing agent. The user has attached a CSV file. Your job: load it into the public.test_bulk_e2e table.\n\nWorkflow (always 2 calls, no shortcuts):\n  1. Call sql_inspect_attachment with the CSV's document_id, sample_rows=3, target_table='public.test_bulk_e2e'. Look at the columns + types + target_table_schema.\n  2. Build a column_mapping where every CSV column maps to its identically-named destination column (CSV product_id→product_id, sku→sku, name→name, price→price, stock→stock).\n  3. Call sql_bulk_insert_from_attachment with that mapping. Use the default on_error.\n\nIf either tool returns an error, REPORT THE ERROR VERBATIM. Do not retry. Do not invent results.\n\nFinal reply: just the literal text 'bulk_e2e_done' on a single line, no prose.",
+        "prompt": "Load the attached CSV into public.test_bulk_e2e following the protocol.",
+        "files": [
+          {
+            "id": "products_csv",
+            "label": "Products CSV",
+            "path": "tests/fixtures/products_100.csv",
+            "mime_type": "text/csv",
+            "filename": "products_100.csv"
+          }
+        ],
+        "tool_configurations": {
+          "sql_inspect_attachment": {
+            "name": "sql_inspect_attachment",
+            "node_type": "sql_inspect_attachment",
+            "description": "Inspect a CSV/XLSX attachment without loading every row. See system_message for workflow.",
+            "fixed_config": {
+              "connection_url": "${DATABASE_URL}",
+              "permissions": {
+                "allowed_schemas": ["public"]
+              }
+            }
+          },
+          "sql_bulk_insert_from_attachment": {
+            "name": "sql_bulk_insert_from_attachment",
+            "node_type": "sql_bulk_insert_from_attachment",
+            "description": "Stream a CSV attachment into Postgres via COPY FROM STDIN. See system_message for workflow.",
+            "fixed_config": {
+              "connection_url": "${DATABASE_URL}",
+              "permissions": {
+                "allowed_schemas": ["public"]
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "verify_params": {
+      "type": "input",
+      "config": {
+        "data": {
+          "query": "SELECT COUNT(*)::int AS row_count, MIN(product_id) AS min_id, MAX(product_id) AS max_id, ROUND(AVG(price), 2)::numeric AS avg_price FROM public.test_bulk_e2e WHERE product_id BETWEEN 1 AND 100",
+          "connection_url": "${DATABASE_URL}",
+          "permissions": {"preset": "read_only", "allowed_schemas": ["public"], "sandbox_schema": "public"},
+          "runtime_limits": {"max_rows": 10}
+        }
+      }
+    },
+    "verify": { "type": "sql_query", "config": {} },
+
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "setup_params.query", "to": "setup.query" },
+    { "from": "setup_params.connection_url", "to": "setup.connection_url" },
+    { "from": "setup_params.permissions", "to": "setup.permissions" },
+    { "from": "setup_params.runtime_limits", "to": "setup.runtime_limits" },
+
+    { "from": "setup", "to": "agent" },
+
+    { "from": "agent", "to": "verify_params" },
+    { "from": "verify_params.query", "to": "verify.query" },
+    { "from": "verify_params.connection_url", "to": "verify.connection_url" },
+    { "from": "verify_params.permissions", "to": "verify.permissions" },
+    { "from": "verify_params.runtime_limits", "to": "verify.runtime_limits" },
+
+    { "from": "verify", "to": "log" }
+  ]
+}

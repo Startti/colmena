@@ -17,6 +17,7 @@ pub mod load_skill_tool;
 pub mod markdown_to_docs_ops;
 pub mod recall_history;
 pub mod sheet_collision;
+pub mod sql_bulk_tools;
 pub mod toolkit_packages;
 
 // ── Shared schema helpers ────────────────────────────────────────────────────
@@ -183,13 +184,24 @@ fn normalize_recursive(value: &mut serde_json::Value) {
                 // as-is. Not produced by our v0/v1 Args structs today.
             }
 
-            for key in ["items", "additionalProperties"] {
-                if let Some(v) = map.get_mut(key) {
-                    if v.is_boolean() {
-                        *v = Value::Object(serde_json::Map::new());
-                    }
+            // `items`: a boolean schema there is rejected by OpenAI. Convert
+            // to an empty object schema (accept anything).
+            if let Some(v) = map.get_mut("items") {
+                if v.is_boolean() {
+                    *v = Value::Object(serde_json::Map::new());
                 }
             }
+            // `additionalProperties`: Gemini's proto Schema rejects this key
+            // entirely (treats it as "Unknown name"). schemars emits it for
+            // `Map<String, V>` field types (e.g. `column_mapping` in
+            // `sql_bulk_insert_from_attachment`'s `BulkInsertArgs`).
+            //
+            // Strategy: strip it at every nesting level. The resulting schema
+            // is semantically equivalent for our needs — OpenAI / Anthropic
+            // default to allowing extra properties in non-strict mode, and
+            // we are not in strict mode. The LLM can still pass arbitrary
+            // string-keyed maps for the column_mapping field.
+            map.remove("additionalProperties");
 
             // Schema-position keys whose children are themselves schemas —
             // a raw `true` there (schemars emits this for opaque types like
@@ -462,6 +474,10 @@ mod text_coverage_tests {
         tools.push(super::load_skill_tool::build_load_skill_tool_definition(
             &repo,
         ));
+
+        // sql_bulk_tools — 2 tools (item 13, 2026-06-09)
+        tools.push(super::sql_bulk_tools::build_sql_inspect_attachment_tool_definition());
+        tools.push(super::sql_bulk_tools::build_sql_bulk_insert_tool_definition());
 
         tools
     }
