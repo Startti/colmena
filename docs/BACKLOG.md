@@ -89,6 +89,35 @@ CRDT-specific. Ver banner detallado al inicio del bloque CRDT.
 
 ---
 
+## Google SA — alias presentable via Workspace Group + revisión del leak del project ID (2026-06-09)
+
+- **Origen:** Brainstorming con owner (2026-06-09) — el SA email actual
+  expuesto a usuarios finales para que compartan docs (`colmena-agent@startti-dev.iam.gserviceaccount.com`)
+  es feo, revela el GCP project ID, y rotar la SA implica avisarle a todos.
+- **Solución estándar Google:** crear un Google Group (`agente@startti.co`
+  o similar) en Google Workspace, agregar la SA como miembro. Los usuarios
+  comparten docs con la dirección del grupo; la SA hereda el acceso. Bonus:
+  rotar SA sin avisarle a nadie, oculta el project ID, audit log limpio.
+- **Riesgo de seguridad de exponer el email solo:** bajo (comparable a
+  publicar `soporte@`). Sin la JSON key del SA no se puede autenticar.
+  Vectores residuales: phishing a admins, share-bombing (vector latente
+  de prompt-injection indirecta SI en el futuro el agente lee "todos los
+  docs compartidos" — hoy no aplica porque siempre requiere `doc_id`
+  explícito).
+- **Bloqueado por info de operador:** quién es Workspace admin de Startti,
+  qué dominios están disponibles (`startti.co`, `startti.ai`, ...).
+- **Scope cuando se retome:**
+  - Crear el Group en Workspace.
+  - Agregar SAs de dev/prod como miembros.
+  - Actualizar `text/` y prompts auto-inyectados para usar el group email
+    en vez del email del SA.
+  - Documentar el setup en `docs/developer_guide/`.
+- **NO BLOQUEA** el feature de auto-prompt de doc-ID al primer turno
+  (BACKLOG/topic siguiente) — ese feature usa el SA email vigente, sea
+  cual sea.
+
+---
+
 ## Output filtering para LLM — qué campos ve el modelo (2026-06-09)
 
 - **Origen:** Reporte del owner (2026-06-09). Use case: nodo upstream
@@ -599,6 +628,26 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
 > hallazgos operacionales documentados en
 > [`developer_guide/45_gdocs.md`](developer_guide/45_gdocs.md) §"Limitaciones
 > en v1".
+
+- [ ] **`apply_edits` ConfirmManyMatches threshold** — standalone
+  `replace_text` aborta con `ConfirmManyMatches` cuando una find string
+  matchea ≥5 veces (sin `confirm_many: true`). `apply_edits` hoy lo
+  bypassa: ejecuta replace-all silenciosamente. Resultado: el LLM puede
+  modificar 4 párrafos cuando creía estar tocando solo 1. Fix: aplicar
+  el mismo threshold por sub-edit antes de la fase de resolve. Decisión
+  pendiente: ¿romper compat (siempre exigir `confirm_many` cuando
+  multi-hit) o solo emitir warning estructurado en el `EditResult`?
+  Origen: análisis del bug en agent_session `cmq7kem1h003001s6mr36uwe8`
+  (2026-06-10).
+
+- [ ] **`apply_edits` skill auto-loaded para scope-discipline** — el
+  LLM hoy llama `replace_text` con find strings ambiguos ("Ejercicios:"
+  matchea Día 1 y Día 3) sin usar `scope` ni `anchor`. Educable vía
+  skill markdown auto-cargada cuando `gdocs_*` está en el catálogo
+  (mismo pattern que sql-query-best-practices). Incluye: "siempre
+  scope-á por paragraph range cuando hay múltiples secciones",
+  "preferí `anchor` sobre find strings genéricos", ejemplo del bug.
+  Origen: misma sesión (2026-06-10).
 
 - [ ] **OAuth user-scoped flow** — bloqueante para "cualquier Gmail user
   puede usar el agente sin Shared Drive". Hoy `create_*` solo funciona

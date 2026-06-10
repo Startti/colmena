@@ -1031,3 +1031,37 @@ en el request body.
 **BREAKING.** Ninguno. Cambios puramente aditivos para `enabled_tools: ["gsheets"]` (antes: 0 tools; ahora: 10 tools). Si algún graph en producción dependía del comportamiento previo (que probablemente no, porque era roto), tendría que migrar a un listado explícito de sub-tools — pero ningún grafo conocido se comportaba así intencionalmente.
 
 **Estado.** done.
+
+---
+
+## 22. gdocs `apply_edits` — fix critical index-drift cross sub-edit (2026-06-10)
+
+**Qué cambió.** `gdocs_apply_edits` ahora hace **resolve → sort global write-backwards → emit**. La implementación previa sorteaba write-backwards solo DENTRO de cada sub-edit, no a través del batch entero. Cuando un compound combinaba múltiples replace/delete con hits en distintos párrafos (o multi-hit por sub-edit), el primer sub-edit modificaba el doc y los snapshot-derived offsets de los siguientes ya estaban corridos respecto al estado actual. Resultado: la API de Google aplicaba deletes/inserts en posiciones incorrectas, corrompiendo texto vecino.
+
+**Cambios estructurales en [`apply_edits.rs`](../src/libs/colmena/src/gdocs/application/apply_edits.rs):**
+- Nuevo `struct ResolvedEmit { paragraph, byte_off, byte_len, requests, change }` captura cada edit atómico con su posición en el snapshot original.
+- Nuevo helper `find_hits(snap, find, scope)` deduplica la lógica de búsqueda que tenían `ReplaceText` y `DeleteText`.
+- Nuevo helper `check_no_overlaps_within_paragraph(emits)` detecta ranges solapados en el mismo párrafo (que no se pueden interleavar de forma segura) y devuelve `InvalidArgs` con un mensaje accionable.
+- El flujo principal ahora es: PHASE A resuelve cada `ApplyEditOp` en `Vec<ResolvedEmit>` sin emitir requests; PHASE B detecta overlaps, hace un `sort_by_key(|r| Reverse((r.paragraph, r.byte_off)))` global, luego flatten a `all_requests` + `all_changes`. Dentro de un `ResolvedEmit` (e.g. markdown insert con múltiples requests) el orden se preserva porque Google evalúa cada request contra el estado tras las previas.
+
+**Por qué importa.** Bug observado en `agent_session_id=cmq7kem1h003001s6mr36uwe8` (2026-06-10, dev): el agent llamó `apply_edits` con 7 `replace_text` para añadir estilos markdown a un plan de ejercicios; el doc resultante tenía párrafos como `"Crunche- **Enfriamiento:** Estiramientos de 5-10 minutos.: Estiramientos..."` con texto cortado a media palabra y fragmentos pegados. El root cause era que el sort por-sub-edit no protegía la invariante write-backwards cross-batch.
+
+**Tests de regresión** (en [`apply_edits.rs:app_tests`](../src/libs/colmena/src/gdocs/application/apply_edits.rs)):
+- `apply_edits_global_write_backwards_sort_across_sub_edits` — replica el escenario del bug (3 sub-edits, 5 hits totales repartidos en 3 párrafos) y assertea que las `deleteContentRange.startIndex` salgan en orden estrictamente decreciente.
+- `apply_edits_overlapping_ranges_in_same_paragraph_rejected` — assertea que dos replace cuyos byte ranges se solapan dentro de un párrafo aborten con `InvalidArgs` antes de cualquier write.
+- `apply_edits_disjoint_ranges_same_paragraph_ok` — assertea que ranges disjuntos en el mismo párrafo sigan funcionando con orden write-backwards correcto.
+
+**BREAKING.** Ninguno semánticamente para los happy paths. Cambia el comportamiento solo en dos escenarios que antes corrompían silenciosamente:
+- Compounds con multi-hit + multi-paragraph: ahora funcionan correctamente (antes corrompían).
+- Overlapping ranges en el mismo paragraph: ahora devuelven `InvalidArgs` con mensaje accionable (antes corrompían o se aplicaban inconsistentemente).
+
+**Verificación.**
+- 1603 unit tests pasan (`cargo test --verbose`).
+- 7 tests específicos de `apply_edits` (4 existentes + 3 nuevos) pasan.
+- 1556 → 1603 = +47 tests netos respecto al snapshot anterior (incluye los 11 de `resolve_synthetic_enabled_tools` + nuevos).
+
+**Bugs secundarios identificados** (al backlog, no shipped acá):
+- `apply_edits` no enforça `ConfirmManyMatches` threshold (≥5 hits) como sí lo hace standalone `replace_text`. El LLM puede replace-all sin signal.
+- El LLM no usa `scope`/`anchor` para limitar finds que matchean en múltiples días/secciones. Educable vía skill auto-loaded.
+
+**Estado.** done (P0 fix). Backlog: items menores en §Subsystem G v1.1.
