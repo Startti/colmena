@@ -2460,6 +2460,23 @@ impl ExecutableNode for LlmNode {
                 sections.push(CRDT_SPREADSHEET_PROTOCOL_PRELUDE.to_string());
                 let _ = ctx; // already used above
             }
+            // Google Workspace prelude — auto-injected whenever any
+            // gsheets_* or gdocs_* tool is exposed. Forces the agent to
+            // (a) require an explicit doc ID before any tool call and
+            // (b) tell the user which SA email to share the doc with.
+            // Eliminates the "agent guesses ID and hits PermissionDenied"
+            // first-turn round-trip. ~140 tokens with email; ~110 in the
+            // degraded path. See google_workspace_prelude.rs for the
+            // resolution chain (env var → JSON file → None).
+            {
+                use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
+                    build_google_workspace_prelude, has_google_workspace_tools, resolve_sa_email,
+                };
+                if has_google_workspace_tools(tools.iter().map(|t| t.name.as_str())) {
+                    let sa_email = resolve_sa_email();
+                    sections.push(build_google_workspace_prelude(sa_email.as_deref()));
+                }
+            }
             if let Some(sys_msg) = system_message {
                 sections.push(sys_msg.to_string());
             }

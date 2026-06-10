@@ -10,6 +10,7 @@ pub mod describe_tool;
 pub mod diff_writer;
 pub mod document_tools;
 pub mod gdocs_tools;
+pub mod google_workspace_prelude;
 pub mod gsheets_run_python;
 pub mod gsheets_tools;
 pub mod lazy_tools_catalog;
@@ -285,6 +286,10 @@ pub use load_skill_tool::{
 };
 
 pub use crdt_summary::{build_recent_changes_block, CRDT_SPREADSHEET_PROTOCOL_PRELUDE};
+
+pub use google_workspace_prelude::{
+    build_google_workspace_prelude, has_google_workspace_tools, resolve_sa_email,
+};
 
 pub use crdt_doc_tools::{
     build_all_crdt_doc_tools, dispatch_crdt_doc_add_sheet, dispatch_crdt_doc_create_artifact,
