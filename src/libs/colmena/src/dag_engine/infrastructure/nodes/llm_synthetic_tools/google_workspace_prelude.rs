@@ -86,34 +86,51 @@ fn read_client_email_from_json(path: &Path) -> Option<String> {
 /// Build the prelude string. Pass `Some(email)` to embed the SA email
 /// inline; `None` falls back to a degraded version that still enforces
 /// the doc-ID gate but defers the share recipient to the operator.
+///
+/// **Wording note (2026-06-10):** the "in turn 1 without a doc_id" branch
+/// is intentionally repetitive — the email appears twice, with explicit
+/// emphasis that BOTH instructions are mandatory in the same reply. This
+/// counters a behaviour we observed with low-temperature `gpt-4o-mini`
+/// where the model would compress the prelude's two bullets into a
+/// single "give me the ID" reply, dropping the share instruction. The
+/// share instruction is the load-bearing part of this prelude — without
+/// it the user has no way to know the agent needs to be granted access,
+/// so they paste an ID and get `PermissionDenied`. Don't soften this.
 pub fn build_google_workspace_prelude(sa_email: Option<&str>) -> String {
     match sa_email {
         Some(email) => format!(
-            "## Acceso a Google Workspace\n\
-             Tenés tools de Google Docs y/o Sheets habilitadas. Para operar sobre un \
-             documento necesitás dos cosas:\n\
+            "## Acceso a Google Workspace — instrucciones obligatorias\n\
+             Tenés tools de Google Docs y/o Sheets habilitadas. Para operar sobre \
+             un documento NECESITÁS DOS COSAS, no una:\n\
              1. El **ID del documento** (lo da el usuario, o se extrae de la URL: \
              `docs.google.com/document/d/<ID>/edit` o `docs.google.com/spreadsheets/d/<ID>/edit`).\n\
              2. Que el documento esté compartido como **Editor** con: `{email}`\n\n\
-             Si en este turno NO tenés un doc ID confirmado en la conversación:\n\
-             - Pedíselo al usuario explícitamente.\n\
-             - Avisale que debe compartir el doc con `{email}` antes de continuar.\n\
+             ### Reglas estrictas para el primer turno\n\
+             Si en este turno el usuario NO mandó un doc ID Y compartió que ya hizo el share:\n\
+             - Tu respuesta DEBE incluir AMBAS instrucciones siguientes en el mismo mensaje, no una sola:\n\
+               1. Pedile el doc ID al usuario (mostrale dónde sacarlo de la URL).\n\
+               2. Decile explícitamente que ANTES de seguir tiene que compartir el doc \
+             como Editor con `{email}` (poné el email literal, no escribas \"el agent\" \
+             o \"el service account\" como sustituto).\n\
+             - NO mandes una respuesta que solo pida el ID — el usuario no va a saber \
+             que necesita compartir.\n\
              - NO intentes tool calls sobre IDs adivinados o inferidos.\n\n\
-             Si el usuario YA mandó un doc ID en esta o en una conversación previa, \
-             procedé directo a operar — confiá en que está compartido. Si una tool \
+             ### Si el usuario YA mandó un doc ID\n\
+             Procedé directo a operar — confiá en que está compartido. Si una tool \
              falla con `PermissionDenied`, recién ahí pedile al usuario que verifique \
              el share con `{email}`.",
             email = email
         ),
-        None => "## Acceso a Google Workspace\n\
-             Tenés tools de Google Docs y/o Sheets habilitadas. Para operar sobre un \
-             documento necesitás dos cosas:\n\
+        None => "## Acceso a Google Workspace — instrucciones obligatorias\n\
+             Tenés tools de Google Docs y/o Sheets habilitadas. Para operar sobre \
+             un documento NECESITÁS DOS COSAS, no una:\n\
              1. El **ID del documento** (lo da el usuario, o se extrae de la URL: \
              `docs.google.com/document/d/<ID>/edit` o `docs.google.com/spreadsheets/d/<ID>/edit`).\n\
              2. Que el documento esté compartido como **Editor** con el service account \
              configurado para este agente (pedile al operador la dirección si no la sabés).\n\n\
-             Si en este turno NO tenés un doc ID confirmado en la conversación, \
-             pedíselo al usuario antes de cualquier tool call. NO adivines IDs.\n\n\
+             Si en este turno el usuario NO mandó un doc ID, tu respuesta DEBE incluir \
+             AMBAS instrucciones: pedirle el ID y avisarle que debe compartir el doc \
+             como Editor. NO adivines IDs.\n\n\
              Si una tool falla con `PermissionDenied`, pedile al usuario que verifique \
              el share con el service account."
             .to_string(),
@@ -147,6 +164,33 @@ mod tests {
         assert!(out.contains("doc ID") || out.contains("ID del documento"));
         // Negative: a None fallback shouldn't leak in
         assert!(!out.contains("operador la dirección"));
+    }
+
+    /// Regression pin: the email MUST appear at least twice when the
+    /// prelude is fired with a known share email. Once for the
+    /// always-present instructions block ("debe estar compartido con
+    /// {email}") and once for the first-turn explicit reminder. The
+    /// duplication is the load-bearing fix for `gpt-4o-mini` compressing
+    /// the prelude into a single "give me the ID" reply.
+    ///
+    /// If you ever DRY this and the email appears only once, models
+    /// will silently drop the share instruction.
+    #[test]
+    fn prelude_with_email_repeats_email_for_mandatory_first_turn_instructions() {
+        let email = "agents@startti.co";
+        let out = build_google_workspace_prelude(Some(email));
+        let occurrences = out.matches(email).count();
+        assert!(
+            occurrences >= 2,
+            "email must appear at least twice in prelude (intentional repetition); \
+             got {occurrences}. Did someone DRY the prelude?"
+        );
+        // The "two things, not one" anti-compression language must be
+        // present — it's the load-bearing prompt-engineering bit.
+        assert!(
+            out.contains("DOS COSAS") || out.contains("dos cosas"),
+            "prelude lost the explicit 'two things' anti-compression hint"
+        );
     }
 
     #[test]

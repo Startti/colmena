@@ -118,6 +118,61 @@ COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN=colmena-oauth-refresh-token:latest \
    - El agent NO devuelve `PermissionDenied`.
    - El doc en activity log muestra "edited by agents@startti.co" (no la SA vieja).
 
+## Auto-prompt de share email (primer turno)
+
+Cuando un `llm_call` expone cualquier tool `gsheets_*` o `gdocs_*`, colmena auto-inyecta un bloque en el system message del LLM con instrucciones obligatorias para el primer turno:
+
+1. Pedir el `doc_id` al usuario si no está en la conversación.
+2. Decirle explícitamente que tiene que compartir el doc como Editor con el valor de `COLMENA_GOOGLE_SHARE_EMAIL` (en producción: `agents@startti.co`).
+
+### Cómo se ve en producción
+
+**Prompt del usuario** (sin doc ID):
+
+> "agregale una fila a mi sheet con un producto nuevo"
+
+**Respuesta del agente** (auto):
+
+> Para agregar una fila a tu hoja de cálculo, necesito que me proporciones el **ID del documento**. Puedes encontrarlo en la URL de tu hoja de cálculo, que se verá algo así: `docs.google.com/spreadsheets/d/<ID>/edit`.
+>
+> Además, asegúrate de que el documento esté compartido como **Editor** con el correo `agents@startti.co` antes de continuar.
+
+### Gating
+
+El prelude se inyecta **solo cuando hay tools de Google Workspace en el catálogo del agente**. Si el agente no tiene `gsheets_*` ni `gdocs_*` enabled, no se gasta ningún token. La verificación está en `has_google_workspace_tools()`:
+
+```rust
+pub fn has_google_workspace_tools<I, S>(tool_names: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    tool_names.into_iter().any(|name| {
+        let n = name.as_ref();
+        n.starts_with("gsheets_") || n.starts_with("gdocs_")
+    })
+}
+```
+
+### Resolución del email mostrado
+
+El email que aparece en el prelude se resuelve via `resolve_share_email()` con este orden de precedencia:
+
+1. `COLMENA_GOOGLE_SHARE_EMAIL` env var (canónica desde 2026-06-10).
+2. `COLMENA_GOOGLE_SA_EMAIL` env var (legacy — soportada para tests / local dev).
+3. `client_email` field del JSON en `GOOGLE_APPLICATION_CREDENTIALS` (legacy).
+4. `None` → fallback degradado: el prelude pide el doc ID y dice "compartilo con el service account configurado para este agente (pedile al operador la dirección si no la sabés)".
+
+En el deploy de ADP esto se setea como literal en `deploy_gcp.sh`:
+
+```bash
+COLMENA_GOOGLE_SHARE_EMAIL=${COLMENA_GOOGLE_SHARE_EMAIL:-"agents@startti.co"}
+```
+
+### Por qué el wording es repetitivo
+
+Si abrís [`google_workspace_prelude.rs`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/google_workspace_prelude.rs), vas a ver que el email aparece **dos veces** en el prelude (uno en la sección de "qué necesitás", otro en "reglas para el primer turno"). Esto es **intencional**. Sin la repetición, `gpt-4o-mini` con `temperature=0` tiende a comprimir la instrucción en un único mensaje tipo "dame el ID" y deja afuera el share. Pin del wording en tests: `prelude_with_email_repeats_email_for_mandatory_first_turn_instructions`.
+
 ## Env vars (referencia completa)
 
 | Variable | Rol | Source |
