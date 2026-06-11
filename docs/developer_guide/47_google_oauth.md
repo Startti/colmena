@@ -325,26 +325,30 @@ export COLMENA_GOOGLE_SHARE_EMAIL="vos@startti.co"  # o agents@startti.co
 
 ## Runbook — E2E local contra Google real (sin tocar prod)
 
-Para verificar tools `gsheets_*` / `gdocs_*` localmente contra Google real
-**sin** un consent flow propio, inyectá las credenciales OAuth del worker desde
-GCP Secret Manager **en memoria** (nunca a un archivo, nunca commiteadas).
+Para verificar tools `gsheets_*` / `gdocs_*` localmente contra Google real,
+exportá las credenciales OAuth del agente **en el env del proceso** y corré el
+grafo. **Nunca** commitees valores reales: obtené los secrets de tu gestor de
+secretos (Secret Manager u equivalente) e inyectalos en memoria — no a un
+archivo versionado, no por `echo`, no con `set -x`.
 
-**Prerequisito:** `gcloud auth login` con una cuenta que tenga
-`roles/secretmanager.secretAccessor` en `startti-dev`. El token de gcloud
-caduca y el refresh es interactivo — si ves `Reauthentication failed. cannot
-prompt during non-interactive execution`, corré `gcloud auth login` de nuevo.
+Variables requeridas (los **valores** salen de tu gestor de secretos, NO de
+este repo):
 
 ```bash
 source .venv/bin/activate                 # ver "Gotcha: pandas" abajo
 set -a; source .env; set +a               # GEMINI_API_KEY + DATABASE_URL
 unset ANTHROPIC_BASE_URL                   # evita 404 si quedó exportada
-export COLMENA_GOOGLE_SHARE_EMAIL=agents@startti.co
-export COLMENA_GOOGLE_OAUTH_CLIENT_ID=$(gcloud secrets versions access latest --secret=colmena-oauth-client-id --project=startti-dev)
-export COLMENA_GOOGLE_OAUTH_CLIENT_SECRET=$(gcloud secrets versions access latest --secret=colmena-oauth-client-secret --project=startti-dev)
-export COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN=$(gcloud secrets versions access latest --secret=colmena-oauth-refresh-token --project=startti-dev)
-# Gotcha: el binario release embebe Homebrew python@3.14; el sandbox de
-# gsheets_run_python necesita ver pandas del .venv (mismo ABI 3.14):
-export PYTHONPATH="$PWD/.venv/lib/python3.14/site-packages"
+
+# Identidad + credenciales OAuth del agente (valores desde tu secret manager):
+export COLMENA_GOOGLE_SHARE_EMAIL=<agent-share-email>
+export COLMENA_GOOGLE_OAUTH_CLIENT_ID=<...>
+export COLMENA_GOOGLE_OAUTH_CLIENT_SECRET=<...>
+export COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN=<...>
+
+# Gotcha pandas: el binario release embebe el Python del sistema; el sandbox de
+# gsheets_run_python necesita ver pandas con el MISMO ABI. Apuntá PYTHONPATH al
+# site-packages del .venv de la versión que embebe el binario (ver gotcha abajo):
+export PYTHONPATH="$PWD/.venv/lib/pythonX.Y/site-packages"
 
 ./target/release/dag_engine run tests/graphs/agents/gsheets_collision_envelope_e2e.json \
   --agent-session-id e2e_$(date +%s) --include-extra-info \
@@ -352,22 +356,23 @@ export PYTHONPATH="$PWD/.venv/lib/python3.14/site-packages"
 ```
 
 **Reglas de seguridad (no negociables):** los valores de los secrets se
-asignan por command-substitution (no se imprimen), viven solo en el env del
-proceso, y **NO se commitea nada** sobre los secrets de ADP. No `echo` del
-valor, no `set -x`, no escribir a `.env`.
+inyectan en memoria (idealmente por command-substitution desde el secret
+manager, sin imprimir), viven solo en el env del proceso, y **NO se commitea
+ningún valor real**. No `echo` del valor, no `set -x`, no escribir a `.env`.
 
 **Gotcha: `ModuleNotFoundError: No module named 'pandas'`.** Si cada llamada a
 `gsheets_run_python` / `crdt_doc_run_python` muere así, el `PYTHONPATH` no
 apunta al `site-packages` del intérprete que embebe el binario. Confirmá la
-versión con `otool -L target/release/dag_engine | grep -i python` y usá ese
-`pythonX.Y` en el path (acá: `python3.14`). Mismo class de bug que el
-pandas-en-worker (CHANGELOG, "pandas no instalado en worker image").
+versión con `otool -L target/release/dag_engine | grep -i python` (macOS) y usá
+ese `pythonX.Y` en el path. Mismo class de bug que el pandas-en-worker
+(CHANGELOG, "pandas no instalado en worker image").
 
 **Graphs de referencia (collision envelope, QW1+QW3):**
 - [`tests/graphs/agents/gsheets_collision_envelope_e2e.json`](../../tests/graphs/agents/gsheets_collision_envelope_e2e.json)
   — sheet creado por la app (prueba `last_modified` presente).
 - [`tests/graphs/agents/gsheets_collision_envelope_existing_e2e.json`](../../tests/graphs/agents/gsheets_collision_envelope_existing_e2e.json)
-  — sheet operator-shared (prueba el caveat de scope: `last_modified` ausente).
+  — sheet operator-shared (placeholder `<YOUR_SPREADSHEET_ID>`; prueba el caveat
+  de scope: `last_modified` ausente).
 
 **Caveat de scope `drive.file` (hallazgo E2E 2026-06-11).** El scope OAuth
 actual (`spreadsheets` + `drive.file`) solo cubre operaciones Drive sobre
