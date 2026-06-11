@@ -36,6 +36,11 @@ impl GeminiAdapter {
         }
     }
 
+    /// The configured endpoint. Exposed for tests and diagnostics.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     fn convert_messages(
         &self,
         request: &LlmRequest,

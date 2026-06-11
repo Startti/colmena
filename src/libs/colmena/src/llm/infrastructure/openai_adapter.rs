@@ -36,6 +36,11 @@ impl OpenAiAdapter {
         }
     }
 
+    /// The configured endpoint. Exposed for tests and diagnostics.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     fn build_messages(&self, request: &LlmRequest) -> Result<Vec<serde_json::Value>, LlmError> {
         let mut out = Vec::with_capacity(request.messages().len());
         for msg in request.messages() {

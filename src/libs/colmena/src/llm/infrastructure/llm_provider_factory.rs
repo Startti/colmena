@@ -20,7 +20,6 @@ static OVERRIDE: once_cell::sync::Lazy<RwLock<Option<Arc<dyn LlmRepository>>>> =
 ///
 /// Returns `None` when no relevant var is set, preserving the hardcoded
 /// production defaults baked into each adapter's `new()`.
-#[allow(dead_code)]
 fn base_url_override(kind: ProviderKind) -> Option<String> {
     let per_provider = match kind {
         ProviderKind::OpenAi => Some("OPENAI_BASE_URL"),
@@ -49,9 +48,18 @@ impl LlmProviderFactory {
             return Arc::clone(adapter);
         }
         match kind {
-            ProviderKind::OpenAi => Arc::new(OpenAiAdapter::new()),
-            ProviderKind::Google => Arc::new(GeminiAdapter::new()),
-            ProviderKind::Anthropic => Arc::new(AnthropicAdapter::new()),
+            ProviderKind::OpenAi => match base_url_override(ProviderKind::OpenAi) {
+                Some(url) => Arc::new(OpenAiAdapter::with_base_url(url)),
+                None => Arc::new(OpenAiAdapter::new()),
+            },
+            ProviderKind::Google => match base_url_override(ProviderKind::Google) {
+                Some(url) => Arc::new(GeminiAdapter::with_base_url(url)),
+                None => Arc::new(GeminiAdapter::new()),
+            },
+            ProviderKind::Anthropic => match base_url_override(ProviderKind::Anthropic) {
+                Some(url) => Arc::new(AnthropicAdapter::with_base_url(url)),
+                None => Arc::new(AnthropicAdapter::new()),
+            },
             ProviderKind::Mock => Arc::new(MockAdapter::new()),
             // `Generated` is a sentinel for AttachmentRegistry rows — never a
             // live LLM provider. Return the mock as a safe placeholder; any
