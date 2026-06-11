@@ -1172,4 +1172,16 @@ mod tests {
         }
         assert_eq!(usage.cache_read_tokens, None);
     }
+
+    #[test]
+    fn new_uses_production_default() {
+        let a = GeminiAdapter::new();
+        assert_eq!(a.base_url(), "https://generativelanguage.googleapis.com/v1beta");
+    }
+
+    #[test]
+    fn with_base_url_overrides() {
+        let a = GeminiAdapter::with_base_url("http://127.0.0.1:4000/gemini/v1beta".to_string());
+        assert_eq!(a.base_url(), "http://127.0.0.1:4000/gemini/v1beta");
+    }
 }
