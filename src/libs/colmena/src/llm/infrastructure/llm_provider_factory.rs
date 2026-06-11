@@ -11,6 +11,34 @@ pub struct LlmProviderFactory;
 static OVERRIDE: once_cell::sync::Lazy<RwLock<Option<Arc<dyn LlmRepository>>>> =
     once_cell::sync::Lazy::new(|| RwLock::new(None));
 
+/// Resolve a base_url override for `kind` from the environment.
+///
+/// Precedence: the provider-specific var (`OPENAI_BASE_URL`,
+/// `GEMINI_BASE_URL`, `ANTHROPIC_BASE_URL`) wins; otherwise the
+/// `COLMENA_LLM_BASE_URL` catch-all applies. `Mock` and `Generated` are
+/// never overridden — they don't make network calls.
+///
+/// Returns `None` when no relevant var is set, preserving the hardcoded
+/// production defaults baked into each adapter's `new()`.
+#[allow(dead_code)]
+fn base_url_override(kind: ProviderKind) -> Option<String> {
+    let per_provider = match kind {
+        ProviderKind::OpenAi => Some("OPENAI_BASE_URL"),
+        ProviderKind::Google => Some("GEMINI_BASE_URL"),
+        ProviderKind::Anthropic => Some("ANTHROPIC_BASE_URL"),
+        ProviderKind::Mock | ProviderKind::Generated => None,
+    }?;
+    if let Ok(url) = std::env::var(per_provider) {
+        if !url.is_empty() {
+            return Some(url);
+        }
+    }
+    match std::env::var("COLMENA_LLM_BASE_URL") {
+        Ok(url) if !url.is_empty() => Some(url),
+        _ => None,
+    }
+}
+
 impl LlmProviderFactory {
     pub fn create(kind: ProviderKind) -> Arc<dyn LlmRepository> {
         if let Some(adapter) = OVERRIDE.read().expect("override poisoned").as_ref() {
@@ -96,5 +124,66 @@ impl<'a> Drop for OverrideGuard<'a> {
             target: "colmena::llm_factory",
             "OverrideGuard: cleared override"
         );
+    }
+}
+
+#[cfg(test)]
+mod base_url_override_tests {
+    use super::*;
+    use crate::llm::domain::ProviderKind;
+
+    fn with_clean_env<F: FnOnce()>(f: F) {
+        let _lock = match LlmProviderFactory::override_lock().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        for k in ["OPENAI_BASE_URL", "GEMINI_BASE_URL", "ANTHROPIC_BASE_URL", "COLMENA_LLM_BASE_URL"] {
+            std::env::remove_var(k);
+        }
+        f();
+        for k in ["OPENAI_BASE_URL", "GEMINI_BASE_URL", "ANTHROPIC_BASE_URL", "COLMENA_LLM_BASE_URL"] {
+            std::env::remove_var(k);
+        }
+    }
+
+    #[test]
+    fn none_when_no_env_set() {
+        with_clean_env(|| {
+            assert_eq!(base_url_override(ProviderKind::Google), None);
+            assert_eq!(base_url_override(ProviderKind::OpenAi), None);
+            assert_eq!(base_url_override(ProviderKind::Anthropic), None);
+        });
+    }
+
+    #[test]
+    fn per_provider_var_wins() {
+        with_clean_env(|| {
+            std::env::set_var("GEMINI_BASE_URL", "http://127.0.0.1:4000/gemini/v1beta");
+            std::env::set_var("COLMENA_LLM_BASE_URL", "http://catchall");
+            assert_eq!(
+                base_url_override(ProviderKind::Google),
+                Some("http://127.0.0.1:4000/gemini/v1beta".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn catchall_used_when_no_per_provider_var() {
+        with_clean_env(|| {
+            std::env::set_var("COLMENA_LLM_BASE_URL", "http://catchall");
+            assert_eq!(
+                base_url_override(ProviderKind::Anthropic),
+                Some("http://catchall".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn mock_and_generated_never_overridden() {
+        with_clean_env(|| {
+            std::env::set_var("COLMENA_LLM_BASE_URL", "http://catchall");
+            assert_eq!(base_url_override(ProviderKind::Mock), None);
+            assert_eq!(base_url_override(ProviderKind::Generated), None);
+        });
     }
 }
