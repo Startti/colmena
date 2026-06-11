@@ -78,10 +78,15 @@ gcloud secrets create colmena-oauth-refresh-token \
 
 **Inmediatamente después**: limpiá history del terminal (`history -c` en bash/zsh) y borrá el archivo local `~/.colmena/oauth_client_secret.json` si ya no lo necesitás.
 
-### E. Otorgar acceso al worker SA
+### E. Otorgar acceso al runtime SA del worker
+
+El runtime SA del Cloud Run **service** `colmena-worker` (y de `colmena-api`) está
+definido en `deploy_gcp.sh` como `RUNTIME_SERVICE_ACCOUNT`. En el deploy canónico
+de dev (2026-06-10) es `adp-backend-sa-develop@startti-dev.iam.gserviceaccount.com`.
+Ajustá según tu env.
 
 ```bash
-WORKER_SA=adp-worker@$PROJECT_ID.iam.gserviceaccount.com  # ajustá
+WORKER_SA=adp-backend-sa-develop@startti-dev.iam.gserviceaccount.com  # ajustá
 
 for secret in colmena-oauth-client-id colmena-oauth-client-secret colmena-oauth-refresh-token; do
     gcloud secrets add-iam-policy-binding "$secret" \
@@ -93,22 +98,42 @@ done
 
 ### F. Actualizar `deploy_gcp.sh` del ADP worker
 
-En el repo ADP (`apps/service/ia/platform/deploy_gcp.sh`), agregar el bloque de `--update-secrets` + `--update-env-vars`. Ver `ADP_PRISMA_PENDING_TABLES.md` o la documentación interna del ADP repo para el shape exacto. Resumen:
+Esto **ya está hecho** en ADP develop a partir del commit `09e90674` (2026-06-10).
+Si vas a hacer un setup desde cero en otro project / dominio, mirá la documentación
+operacional del script en
+[`apps/service/ia/platform/CICD.md`](../../../adp/apps/service/ia/platform/CICD.md)
+(en el repo ADP, no en colmena).
+
+Los cambios clave en el script son:
 
 ```bash
-gcloud run jobs update adp-worker \
-    --update-secrets=\
+# 1) Default del share email (linea ~110 de deploy_gcp.sh):
+COLMENA_GOOGLE_SHARE_EMAIL=${COLMENA_GOOGLE_SHARE_EMAIL:-"agents@startti.co"}
+
+# 2) Bloque de secret refs (linea ~115 de deploy_gcp.sh):
+COLMENA_OAUTH_SECRETS_REF="\
 COLMENA_GOOGLE_OAUTH_CLIENT_ID=colmena-oauth-client-id:latest,\
 COLMENA_GOOGLE_OAUTH_CLIENT_SECRET=colmena-oauth-client-secret:latest,\
-COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN=colmena-oauth-refresh-token:latest \
-    --update-env-vars=COLMENA_GOOGLE_SHARE_EMAIL=agents@startti.co \
-    --remove-secrets=GOOGLE_APPLICATION_CREDENTIALS \
-    --remove-env-vars=COLMENA_GOOGLE_SA_EMAIL \
-    --region=us-central1 \
-    --project=$PROJECT_ID
+COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN=colmena-oauth-refresh-token:latest"
+
+# 3) Propagación literal vía build_env_vars() (linea ~178):
+COLMENA_GOOGLE_SHARE_EMAIL agregado al for loop.
+
+# 4) Mount en deploy de worker + api (líneas ~265 y ~285):
+gcloud run deploy colmena-worker \
+    ... \
+    --set-secrets "$COLMENA_OAUTH_SECRETS_REF" \
+    ...
+gcloud run deploy colmena-api \
+    ... \
+    --set-secrets "$COLMENA_OAUTH_SECRETS_REF" \
+    ...
 ```
 
-`--remove-secrets` / `--remove-env-vars` son seguros si no estaban set (idempotente).
+Notar: son Cloud Run **services** (`gcloud run deploy`), NO Cloud Run Jobs
+(`gcloud run jobs ...`). El único Cloud Run Job en el stack es
+`attachment-gc`, que no usa gsheets/gdocs y por lo tanto NO necesita los
+secrets OAuth.
 
 ### G. Smoke test post-deploy
 
@@ -206,15 +231,22 @@ Los 4 errores estructurados que produce el subsystem y qué hacer con cada uno:
 
 **Recovery (runbook):**
 1. Volvé a correr `colmena_oauth_setup` en tu laptop (login otra vez como `agents@startti.co`).
-2. Subí el nuevo refresh_token a Secret Manager:
+2. Subí el nuevo refresh_token como una nueva versión del secret:
    ```bash
-   gcloud secrets versions add colmena-oauth-refresh-token --data-file=-
+   gcloud secrets versions add colmena-oauth-refresh-token \
+       --project=startti-dev --data-file=-
    ```
-3. Los workers automáticamente leen `latest` en su siguiente refresh — **no necesitás redeploy**.
-4. Si Cloud Run cachea el secret (raro pero posible), forzá reinicio del job:
+   (Pegás el nuevo token, después Ctrl-D.)
+3. Los workers leen `:latest` del secret pero el valor SOLO se re-resuelve
+   cuando el container reinicia (Cloud Run no recarga mounts en runtime).
+   Forzá un rollout sin cambiar la imagen:
    ```bash
-   gcloud run jobs execute adp-worker --region=us-central1
+   gcloud run services update colmena-worker --region=us-central1 \
+       --project=startti-dev --update-env-vars="OAUTH_RESYNC=$(date +%s)"
    ```
+   El truco del env var con timestamp obliga a Cloud Run a crear una nueva
+   revisión, que monta la versión `latest` del secret. Repetí para
+   `colmena-api`.
 
 Tiempo total: ~10 min.
 
