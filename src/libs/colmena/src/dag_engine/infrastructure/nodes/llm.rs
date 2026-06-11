@@ -2516,11 +2516,16 @@ impl ExecutableNode for LlmNode {
         //     config — so the user prompt does not need to explain how the
         //     document tools work),
         //   - the generic tool-use rules block (when any tool is exposed).
-        // The combined message is pushed only when at least one section was
-        // produced AND no prior history already supplies a system message.
-        if !history_exists {
-            let mut sections: Vec<String> = Vec::new();
-            // Temporal & geographic context — always the first section.
+        // Temporal & geographic context — cache-safe injection (2026-06-11).
+        // Computed EVERY turn (not frozen at turn 1) and carried as the
+        // config's `volatile_system_suffix`. Each adapter places it AFTER the
+        // stable system content, OUTSIDE the cached prefix — so the timestamp
+        // stays fresh per turn without busting prompt caching. Previously this
+        // block was the FIRST section of the (frozen, cached) system message,
+        // which (a) went stale across turns of a long conversation and (b)
+        // would have poisoned the cache prefix if it were ever refreshed.
+        // See docs/superpowers/specs/2026-06-11-temporal-block-cache-safe-design.md.
+        {
             let tz_str = inputs
                 .get("__colmena_timezone")
                 .and_then(|v| v.as_str())
@@ -2534,11 +2539,18 @@ impl ExecutableNode for LlmNode {
                 .and_then(|v| v.as_str())
                 .unwrap_or("es-CO");
             let context_block = format_temporal_context_block(tz_str, loc_str, locale_str);
-            sections.push(context_block);
-            // CRDT recent-changes auto-context. Append after the temporal
-            // block so the order is: temporal → workbook-changes → user
-            // instructions → tool rules. The helper returns `None` when
-            // there is no session_id, no cursor delta, or no events.
+            llm_config = llm_config.with_volatile_system_suffix(context_block);
+        }
+
+        // The combined message is pushed only when at least one section was
+        // produced AND no prior history already supplies a system message.
+        if !history_exists {
+            let mut sections: Vec<String> = Vec::new();
+            // CRDT recent-changes auto-context. First stable section now that
+            // the temporal block moved to the volatile suffix. Order:
+            // workbook-changes → user instructions → tool rules. The helper
+            // returns `None` when there is no session_id, no cursor delta, or
+            // no events.
             if let Some(ctx) = crdt_docs_context.as_ref() {
                 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
                     build_recent_changes_block, CRDT_SPREADSHEET_PROTOCOL_PRELUDE,

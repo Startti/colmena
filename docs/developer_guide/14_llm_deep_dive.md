@@ -664,7 +664,38 @@ print(response_2.extra_info.usage.cache_read_tokens)  # → >0 (Anthropic/Gemini
 Si `cache_read_tokens` es 0 en el run 2 sospechá:
 - TTL expiró (esperaste >5 min).
 - El system message o las tools cambiaron entre runs (cualquier byte difference invalida el cache).
-- El prefix es menor al mínimo del provider (e.g. Gemini 2.5-pro requiere ≥2048).
+- El prefix es menor al mínimo del provider (ver tabla abajo).
+- **Gemini necesita warmup**: el implicit cache recién popula tras ~3-5 calls con el mismo prefijo (verificado live 2026-06-11). Los primeros 2-3 turnos de una conversación pueden no mostrar `cache_read`; a partir del turn ~4-5 sí.
+
+### Mínimos cacheables reales por modelo (verificado live 2026-06-11)
+
+| Modelo | Mínimo documentado | Realidad empírica |
+|---|---|---|
+| `claude-sonnet-4-6`, opus | 1024 | ✅ cachea a ~1.5K |
+| **`claude-haiku-4-5`** | "2048" | ❌ **NO cachea ni a ~2900 tokens** — el mínimo real es bastante mayor. **Preferí sonnet/opus para cachear**, o garantizá prefijos grandes en haiku. |
+| `gpt-4o` | 1024 | ✅ cachea confiablemente a ≥~2K (a ~1.2K es intermitente) |
+| `gemini-2.5-flash` | 1024 | ✅ cachea el prefijo a ~3K **tras warmup** |
+
+> **Lección del E2E:** un test de cache con `claude-haiku-4-5` + prefijo de ~2K dará `cache_read=0` y parecerá un bug del feature — pero es el mínimo del modelo. Los grafos `tests/graphs/agents/provider_cache_temporal_{anthropic,openai,gemini}_e2e.json` usan sonnet/gpt-4o/2.5-flash justamente por esto.
+
+### Bloque temporal cache-safe (2026-06-11)
+
+El bloque **Temporal & Geographic Context** (date/time/location, ver §35) se
+inyecta como **suffix volátil al FINAL del system message**, fuera del prefijo
+cacheado. Esto permite que el timestamp se refresque **cada turno** (hora
+correcta en conversaciones largas) **sin romper el cache** del prefijo estable.
+
+- **Anthropic**: el adapter emite el system como 2 bloques —
+  `[estable (cache_control: ephemeral), temporal (sin marker)]`. El marker
+  cubre solo el bloque estable.
+- **OpenAI / Gemini**: el temporal se concatena al final del system /
+  `systemInstruction`; su prefix-cache automático cachea el prefijo estable.
+
+Antes del fix el timestamp iba al FRENTE del system y quedaba **congelado** en
+turn 1 (gate `if !history_exists`) para no romper el cache — al costo de mostrar
+una hora vieja en chats largos. Ahora se obtienen las dos cosas. Mecanismo:
+campo `LlmConfig::volatile_system_suffix`. Spec:
+[`docs/superpowers/specs/2026-06-11-temporal-block-cache-safe-design.md`](../superpowers/specs/2026-06-11-temporal-block-cache-safe-design.md).
 
 ### Cuándo NO querés caching
 

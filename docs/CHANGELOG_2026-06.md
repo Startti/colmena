@@ -2123,3 +2123,81 @@ Spike de 1d cuando se confirme la ventana del re-consent.
 **Estado.** done (4A). 4B diferido.
 
 ---
+
+## 29. Cache-safe temporal context — timestamp fresco sin romper prompt caching (2026-06-11)
+
+**Origen.** Investigación durante la verificación E2E del feature de cache
+(item 11). Se descubrió que el bloque **Temporal & Geographic Context** (§35)
+iba como **primera sección** del system message con un timestamp de
+granularidad de segundos, DENTRO del prefijo que los 3 providers cachean.
+
+**Lo que NO era un bug (aclaración importante).** El cache de item 11 **funciona
+correctamente**. Verificado live 2026-06-11:
+- Anthropic sonnet-4-6: turn 1 `cache_write 1824` → turn 2 `cache_read 1824`
+  cross-proceso (mismo `agent_session_id`).
+- El timestamp NO rompía el cache porque el gate `if !history_exists`
+  **congela** el system en turn 1 y lo reusa desde memoria en turns siguientes.
+
+**El costo oculto que SÍ se arregló.** El freeze implicaba que en conversaciones
+largas el modelo veía una **hora vieja** (turn 40 con la hora del turn 1).
+Trade-off forzado: hora-fresca XOR cache.
+
+**Bonus encontrado:** `claude-haiku-4-5` tiene un mínimo cacheable
+**empíricamente mayor a ~2900 tokens** (no cachea ni ahí), pese a que el doc
+dice 2048. El E2E original usaba haiku → daba `cache_read=0` y parecía bug del
+feature. Migrado a sonnet-4-6.
+
+**Fix shipped.** El bloque temporal ahora se inyecta como **suffix volátil al
+FINAL** del system, FUERA del prefijo cacheado, regenerado **cada turno**:
+
+- Nuevo campo `LlmConfig::volatile_system_suffix` (aditivo, `#[serde(default)]`
+  → no-breaking; ADP no construye `LlmConfig` directo, verificado).
+- `llm.rs`: el temporal se computa cada turno (fuera de `if !history_exists`)
+  y se setea como suffix; sale del `sections` estable (que se persiste
+  congelado y cacheable).
+- **Anthropic** (`anthropic_adapter`): system de 2 bloques —
+  `[estable (cache_control: ephemeral), temporal (sin marker)]`. El marker
+  cubre solo el bloque estable.
+- **OpenAI** (`openai_adapter`, ambos paths Chat Completions + Responses): el
+  suffix se concatena al final del system content.
+- **Gemini** (`gemini_adapter`): el suffix se concatena al final del
+  `systemInstruction`.
+- **Strip-on-load** (`agent_service`): migración para conversaciones
+  pre-fix que tienen el temporal horneado al frente del system persistido —
+  se borra al cargar de historial para evitar doble-temporal.
+
+**Resultado: las dos cosas a la vez** — timestamp fresco cada turno Y cache
+intacto.
+
+| | Hora fresca | Cache intra-conv | Cache cross-conv |
+|---|---|---|---|
+| Antes (freeze) | ❌ vieja | ✅ | ❌ |
+| Después (suffix volátil) | ✅ | ✅ | ✅ |
+
+**Tests.** 1701 unit PASS / 0 FAIL. Nuevos:
+- `anthropic_adapter`: `volatile_suffix_emits_two_system_blocks_marker_on_first_only`,
+  `no_suffix_keeps_single_marked_system_block`.
+- `openai_adapter`: `chat_completions_appends_volatile_suffix_after_stable_system`,
+  `responses_appends_volatile_suffix_after_stable_system`, `no_suffix_leaves_system_unchanged`.
+- `gemini_adapter`: `volatile_suffix_appended_to_system_instruction`,
+  `no_suffix_leaves_system_instruction_unchanged`.
+- `agent_service`: `strip_temporal_removes_leading_block_keeps_rest`,
+  `strip_temporal_drops_block_when_only_section`,
+  `strip_temporal_leaves_non_temporal_system_untouched`.
+
+**E2E live — los 3 providers** (`tests/graphs/agents/provider_cache_temporal_{anthropic,openai,gemini}_e2e.json`):
+- **Anthropic** sonnet-4-6: turn 1 `cache_write 1573` → turn 2 `cache_read 1573`,
+  con timestamp cambiando (prompt 404→418). ✅
+- **OpenAI** gpt-4o: turn 2 `cache_read 4224` con prefijo ≥2K. ✅
+- **Gemini** 2.5-flash: turn 5 `cache_read 7818` tras warmup (~3-5 calls).
+  Curl crudo probó que cachea el prefijo estable (3047 tok) **aunque el suffix
+  temporal cambie cada call** → fix 100% compatible con implicit caching. ✅
+
+Spec completo:
+[`docs/superpowers/specs/2026-06-11-temporal-block-cache-safe-design.md`](superpowers/specs/2026-06-11-temporal-block-cache-safe-design.md).
+Dev guide: §14 (mínimos reales + cómo funciona el suffix), §35 (nota de
+actualización).
+
+**Estado.** done.
+
+---

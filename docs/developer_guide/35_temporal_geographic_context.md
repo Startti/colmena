@@ -8,7 +8,17 @@
 
 Los modelos de lenguaje no tienen reloj. Si les preguntás "¿qué día es hoy?" o "¿qué hora es?", o el LLM alucina una fecha de su training data, o responde "no tengo acceso a información actual". Lo mismo con la ubicación y el idioma del usuario — sin contexto explícito, el modelo no puede dar respuestas localizadas.
 
-Esta feature inyecta automáticamente, al inicio del `system_message` de cada `llm_call`, un bloque con:
+> **Actualización 2026-06-11 (cache-safe):** el bloque ya **NO** va al inicio
+> del system message. Ahora se inyecta como **suffix volátil al FINAL**, fuera
+> del prefijo cacheado por los providers (campo
+> `LlmConfig::volatile_system_suffix`). Esto permite que el timestamp se
+> **refresque cada turno** (hora correcta en chats largos) **sin romper el
+> prompt caching** del prefijo estable. Antes iba al frente y quedaba congelado
+> en turn 1 para no invalidar el cache. Ver
+> [§14 — Bloque temporal cache-safe](14_llm_deep_dive.md) y el spec
+> [`2026-06-11-temporal-block-cache-safe-design.md`](../superpowers/specs/2026-06-11-temporal-block-cache-safe-design.md).
+
+Esta feature inyecta automáticamente, en el `system_message` de cada `llm_call`, un bloque con:
 
 - **Fecha y hora actuales** en formato **ISO 8601** (canónico, machine-friendly) más un echo human-readable.
 - **Timezone** IANA (`America/Bogota`) con su offset UTC mostrado (`UTC-5`).

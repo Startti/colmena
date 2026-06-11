@@ -203,12 +203,43 @@ impl AnthropicAdapter {
         // We do NOT add a marker on user/assistant messages because the
         // conversation tail changes every turn — caching it would cause
         // constant cache-write churn with no read benefit.
-        if let Some(system) = system_message {
-            body["system"] = json!([{
-                "type": "text",
-                "text": system,
-                "cache_control": {"type": "ephemeral"}
-            }]);
+        // Cache-safe temporal suffix (2026-06-11). When the config carries a
+        // `volatile_system_suffix` (the per-turn temporal block), it is emitted
+        // as a SECOND system block WITHOUT a cache_control marker. The cache
+        // breakpoint stays on the first (stable) block, so the changing
+        // timestamp lives outside the cached prefix and never busts it. When
+        // there is no stable system but there IS a suffix, the suffix becomes
+        // the (uncached) system on its own.
+        let volatile_suffix = request.config().volatile_system_suffix();
+        match (system_message, volatile_suffix) {
+            (Some(system), Some(suffix)) => {
+                body["system"] = json!([
+                    {
+                        "type": "text",
+                        "text": system,
+                        "cache_control": {"type": "ephemeral"}
+                    },
+                    {
+                        "type": "text",
+                        "text": suffix
+                    }
+                ]);
+            }
+            (Some(system), None) => {
+                body["system"] = json!([{
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"}
+                }]);
+            }
+            (None, Some(suffix)) => {
+                // No stable system to cache; the suffix is the whole system.
+                body["system"] = json!([{
+                    "type": "text",
+                    "text": suffix
+                }]);
+            }
+            (None, None) => {}
         }
 
         if let Some(temp) = request.config().temperature() {
@@ -1087,6 +1118,58 @@ mod tests {
 
         assert!(body.get("tools").is_none(), "no tools key when empty");
         let arr = body["system"].as_array().unwrap();
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    // ── Cache-safe temporal suffix (2026-06-11) ──────────────────────────
+
+    fn anth_request_with_suffix(system: &str, suffix: Option<&str>) -> LlmRequest {
+        use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, ProviderKind};
+        let messages = vec![
+            LlmMessage::system(system.into()).unwrap(),
+            LlmMessage::user("hi".into()).unwrap(),
+        ];
+        let provider = LlmProvider::new(
+            ProviderKind::Anthropic,
+            "k".into(),
+            Some("claude-3-5-sonnet".into()),
+        )
+        .unwrap();
+        let mut config = LlmConfig::new(provider);
+        if let Some(s) = suffix {
+            config = config.with_volatile_system_suffix(s);
+        }
+        LlmRequest::new(messages, config, false).unwrap()
+    }
+
+    #[test]
+    fn volatile_suffix_emits_two_system_blocks_marker_on_first_only() {
+        let adapter = AnthropicAdapter::new();
+        let req =
+            anth_request_with_suffix("stable system", Some("## Temporal\n2026-06-11T14:00:00"));
+        let body = adapter.build_request_body(&req).unwrap();
+
+        let arr = body["system"].as_array().expect("system block array");
+        assert_eq!(arr.len(), 2, "stable + volatile = 2 blocks");
+        // Block 0: stable, carries the cache_control marker.
+        assert_eq!(arr[0]["text"], "stable system");
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+        // Block 1: volatile suffix, NO marker (outside the cached prefix).
+        assert_eq!(arr[1]["text"], "## Temporal\n2026-06-11T14:00:00");
+        assert!(
+            arr[1].get("cache_control").is_none(),
+            "volatile suffix block must NOT carry cache_control"
+        );
+    }
+
+    #[test]
+    fn no_suffix_keeps_single_marked_system_block() {
+        let adapter = AnthropicAdapter::new();
+        let req = anth_request_with_suffix("stable system", None);
+        let body = adapter.build_request_body(&req).unwrap();
+
+        let arr = body["system"].as_array().unwrap();
+        assert_eq!(arr.len(), 1, "single block when no suffix");
         assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
     }
 }

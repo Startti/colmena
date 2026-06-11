@@ -56,6 +56,16 @@ pub struct LlmConfig {
     frequency_penalty: Option<f32>,
     presence_penalty: Option<f32>,
     thinking_budget: Option<u32>,
+    /// Cache-safe temporal context (2026-06-11): a block injected at the END
+    /// of the system message, OUTSIDE the cacheable prefix. Regenerated every
+    /// request (carries the current timestamp). Each adapter places it after
+    /// the stable system content: Anthropic emits it as a 2nd system block
+    /// without a `cache_control` marker; OpenAI/Gemini concatenate it after
+    /// the stable system text. Keeping it out of the cached prefix lets the
+    /// timestamp stay fresh per turn without busting prompt caching. See
+    /// `docs/superpowers/specs/2026-06-11-temporal-block-cache-safe-design.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    volatile_system_suffix: Option<String>,
 }
 
 impl LlmConfig {
@@ -68,6 +78,7 @@ impl LlmConfig {
             frequency_penalty: None,
             presence_penalty: None,
             thinking_budget: None,
+            volatile_system_suffix: None,
         }
     }
 
@@ -116,6 +127,15 @@ impl LlmConfig {
         self
     }
 
+    /// Set the cache-safe volatile suffix (temporal block). See the field
+    /// docs. Empty/blank strings are normalized to `None` so adapters can
+    /// branch on `Option::is_some` without trimming.
+    pub fn with_volatile_system_suffix(mut self, suffix: impl Into<String>) -> Self {
+        let s = suffix.into();
+        self.volatile_system_suffix = if s.trim().is_empty() { None } else { Some(s) };
+        self
+    }
+
     // Getters
     pub fn provider(&self) -> &LlmProvider {
         &self.provider
@@ -151,6 +171,10 @@ impl LlmConfig {
 
     pub fn thinking_budget(&self) -> Option<u32> {
         self.thinking_budget
+    }
+
+    pub fn volatile_system_suffix(&self) -> Option<&str> {
+        self.volatile_system_suffix.as_deref()
     }
 }
 

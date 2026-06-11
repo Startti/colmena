@@ -260,7 +260,18 @@ impl GeminiAdapter {
             "contents": contents
         });
 
-        if let Some(system) = system_instruction {
+        // Cache-safe temporal suffix (2026-06-11). Appended to the END of the
+        // systemInstruction so Gemini's implicit prefix cache still matches the
+        // stable prefix while the timestamp changes per turn. If there is no
+        // stable system instruction, the suffix becomes the whole instruction.
+        let volatile_suffix = request.config().volatile_system_suffix();
+        let final_system: Option<String> = match (system_instruction, volatile_suffix) {
+            (Some(system), Some(suffix)) => Some(format!("{system}\n\n{suffix}")),
+            (Some(system), None) => Some(system),
+            (None, Some(suffix)) => Some(suffix.to_string()),
+            (None, None) => None,
+        };
+        if let Some(system) = final_system {
             body["systemInstruction"] = json!({
                 "parts": [{"text": system}]
             });
@@ -1186,5 +1197,46 @@ mod tests {
     fn with_base_url_overrides() {
         let a = GeminiAdapter::with_base_url("http://127.0.0.1:4000/gemini/v1beta".to_string());
         assert_eq!(a.base_url(), "http://127.0.0.1:4000/gemini/v1beta");
+    }
+
+    // ── Cache-safe temporal suffix (2026-06-11) ──────────────────────────
+
+    fn gemini_req_with_suffix(suffix: Option<&str>) -> crate::llm::domain::LlmRequest {
+        use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind};
+        let provider = LlmProvider::new(ProviderKind::Google, "k".to_string(), None).unwrap();
+        let mut config = LlmConfig::new(provider);
+        if let Some(s) = suffix {
+            config = config.with_volatile_system_suffix(s);
+        }
+        let messages = vec![
+            LlmMessage::system("stable system".into()).unwrap(),
+            LlmMessage::user("hi".into()).unwrap(),
+        ];
+        LlmRequest::new(messages, config, false).unwrap()
+    }
+
+    #[test]
+    fn volatile_suffix_appended_to_system_instruction() {
+        let adapter = GeminiAdapter::new();
+        let req = gemini_req_with_suffix(Some("## Temporal\n2026-06-11T14:00:00"));
+        let body = adapter.build_request_body(&req).unwrap();
+        let text = body["systemInstruction"]["parts"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.starts_with("stable system"));
+        assert!(text.ends_with("## Temporal\n2026-06-11T14:00:00"));
+    }
+
+    #[test]
+    fn no_suffix_leaves_system_instruction_unchanged() {
+        let adapter = GeminiAdapter::new();
+        let req = gemini_req_with_suffix(None);
+        let body = adapter.build_request_body(&req).unwrap();
+        assert_eq!(
+            body["systemInstruction"]["parts"][0]["text"]
+                .as_str()
+                .unwrap(),
+            "stable system"
+        );
     }
 }

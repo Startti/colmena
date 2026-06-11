@@ -42,16 +42,33 @@ impl OpenAiAdapter {
     }
 
     fn build_messages(&self, request: &LlmRequest) -> Result<Vec<serde_json::Value>, LlmError> {
+        // Cache-safe temporal suffix (2026-06-11). Appended to the END of the
+        // system message content so OpenAI's automatic prefix cache still
+        // matches the stable prefix while the timestamp changes per turn.
+        let volatile_suffix = request.config().volatile_system_suffix();
+        let mut suffix_applied = false;
         let mut out = Vec::with_capacity(request.messages().len());
         for msg in request.messages() {
             let mut message_json = json!({
                 "role": msg.role().as_str(),
             });
 
+            // Effective content: append the volatile suffix to the system text.
+            let content_text: String = if msg.role() == &MessageRole::System {
+                if let Some(suffix) = volatile_suffix {
+                    suffix_applied = true;
+                    format!("{}\n\n{}", msg.content(), suffix)
+                } else {
+                    msg.content().to_string()
+                }
+            } else {
+                msg.content().to_string()
+            };
+
             if let Some(files) = msg.files() {
                 let mut content_arr = vec![json!({
                     "type": "text",
-                    "text": msg.content()
+                    "text": content_text
                 })];
 
                 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -96,7 +113,7 @@ impl OpenAiAdapter {
                 }
                 message_json["content"] = json!(content_arr);
             } else {
-                message_json["content"] = json!(msg.content());
+                message_json["content"] = json!(content_text);
             }
 
             // Add tool_calls for assistant messages
@@ -124,6 +141,15 @@ impl OpenAiAdapter {
 
             out.push(message_json);
         }
+
+        // No system message carried the suffix → prepend a system message with
+        // just the volatile block.
+        if let Some(suffix) = volatile_suffix {
+            if !suffix_applied {
+                out.insert(0, json!({ "role": "system", "content": suffix }));
+            }
+        }
+
         Ok(out)
     }
 
@@ -670,6 +696,13 @@ impl OpenAiAdapter {
         // for assistant messages with "Invalid value: 'input_text'. Supported
         // values are: 'output_text' and 'refusal'.") and dropped tool_calls
         // entirely. See colmena BACKLOG entry "OpenAI Responses API serialization".
+        // Cache-safe temporal suffix (2026-06-11). Appended to the END of the
+        // system message text so OpenAI's automatic prefix cache still matches
+        // the stable system prefix while the timestamp changes per turn. If no
+        // system message exists, a standalone system item is pushed at the
+        // front carrying just the suffix (nothing stable to cache anyway).
+        let volatile_suffix = request.config().volatile_system_suffix();
+        let mut suffix_applied = false;
         let mut input_items: Vec<serde_json::Value> = Vec::new();
         for msg in request.messages() {
             match msg.role() {
@@ -704,9 +737,20 @@ impl OpenAiAdapter {
                     }
                 }
                 MessageRole::System | MessageRole::User => {
+                    // Append the volatile suffix to the system message text.
+                    let text: String = if msg.role() == &MessageRole::System {
+                        if let Some(suffix) = volatile_suffix {
+                            suffix_applied = true;
+                            format!("{}\n\n{}", msg.content(), suffix)
+                        } else {
+                            msg.content().to_string()
+                        }
+                    } else {
+                        msg.content().to_string()
+                    };
                     let mut content_arr = vec![json!({
                         "type": "input_text",
-                        "text": msg.content()
+                        "text": text
                     })];
 
                     if let Some(files) = msg.files() {
@@ -746,6 +790,20 @@ impl OpenAiAdapter {
                         "content": content_arr
                     }));
                 }
+            }
+        }
+
+        // No system message carried the suffix → push a standalone system item
+        // at the front with just the volatile block.
+        if let Some(suffix) = volatile_suffix {
+            if !suffix_applied {
+                input_items.insert(
+                    0,
+                    json!({
+                        "role": "system",
+                        "content": [{ "type": "input_text", "text": suffix }]
+                    }),
+                );
             }
         }
 
@@ -1305,5 +1363,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Cache-safe temporal suffix (2026-06-11) ──────────────────────────
+
+    fn openai_req_with_suffix(suffix: Option<&str>) -> LlmRequest {
+        use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, ProviderKind};
+        let messages = vec![
+            LlmMessage::system("stable system".into()).unwrap(),
+            LlmMessage::user("hi".into()).unwrap(),
+        ];
+        let provider =
+            LlmProvider::new(ProviderKind::OpenAi, "k".into(), Some("gpt-4o".into())).unwrap();
+        let mut config = LlmConfig::new(provider);
+        if let Some(s) = suffix {
+            config = config.with_volatile_system_suffix(s);
+        }
+        LlmRequest::new(messages, config, false).unwrap()
+    }
+
+    #[test]
+    fn chat_completions_appends_volatile_suffix_after_stable_system() {
+        let adapter = OpenAiAdapter::new();
+        let req = openai_req_with_suffix(Some("## Temporal\n2026-06-11T14:00:00"));
+        let body = adapter.build_request_body(&req).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        let system = messages
+            .iter()
+            .find(|m| m["role"] == "system")
+            .expect("system message present");
+        let content = system["content"].as_str().unwrap();
+        // Stable prefix preserved; suffix appended at the END.
+        assert!(content.starts_with("stable system"));
+        assert!(content.ends_with("## Temporal\n2026-06-11T14:00:00"));
+    }
+
+    #[test]
+    fn responses_appends_volatile_suffix_after_stable_system() {
+        let adapter = OpenAiAdapter::new();
+        let req = openai_req_with_suffix(Some("## Temporal\n2026-06-11T14:00:00"));
+        let body = adapter.build_responses_request_body(&req).unwrap();
+        let input = body["input"].as_array().unwrap();
+        let system = input
+            .iter()
+            .find(|m| m["role"] == "system")
+            .expect("system input item present");
+        let text = system["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("stable system"));
+        assert!(text.ends_with("## Temporal\n2026-06-11T14:00:00"));
+    }
+
+    #[test]
+    fn no_suffix_leaves_system_unchanged() {
+        let adapter = OpenAiAdapter::new();
+        let req = openai_req_with_suffix(None);
+        let body = adapter.build_request_body(&req).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        let system = messages.iter().find(|m| m["role"] == "system").unwrap();
+        assert_eq!(system["content"].as_str().unwrap(), "stable system");
     }
 }

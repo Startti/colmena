@@ -123,6 +123,32 @@ impl AgentService {
         let conversation = self.conversation_repository.get_by_id(session_id).await?;
         let mut messages = conversation.messages;
 
+        // 1b. Migration shim (2026-06-11): conversations persisted BEFORE the
+        // cache-safe temporal fix carry the `## Temporal & Geographic Context`
+        // block baked into the FRONT of their system message. The fix now
+        // injects a fresh temporal block per turn as a volatile suffix, so a
+        // loaded pre-fix system would produce a stale duplicate. Strip the
+        // leading temporal block from any system message loaded from history.
+        // New conversations never hit this (their persisted system has no
+        // temporal block). Drops a system message that was ONLY temporal.
+        messages = messages
+            .into_iter()
+            .filter_map(|msg| {
+                if msg.role() == &MessageRole::System {
+                    let stripped = strip_leading_temporal_block(msg.content());
+                    if stripped.trim().is_empty() {
+                        None
+                    } else if stripped == msg.content() {
+                        Some(msg)
+                    } else {
+                        LlmMessage::system(stripped).ok()
+                    }
+                } else {
+                    Some(msg)
+                }
+            })
+            .collect();
+
         // 2. Add user prompt (or pre-built messages)
         //    When `prompt` is `None` and `messages` is `None`, we continue from
         //    whatever is already in the conversation (resume path).
@@ -635,6 +661,30 @@ impl AgentService {
 /// when `crdt_documents` is configured) tells it to just call `load_skill`
 /// again.
 ///
+/// Migration shim (2026-06-11): strip a leading `## Temporal & Geographic
+/// Context` block from a system message loaded from history.
+///
+/// Pre-fix conversations baked the temporal block into the FRONT of the
+/// persisted system message (joined with the `\n\n---\n` section separator).
+/// The cache-safe fix injects a fresh temporal block per turn as a volatile
+/// suffix, so a loaded pre-fix system would carry a stale duplicate. This
+/// removes everything from the `## Temporal & Geographic Context` header up to
+/// and including the first `\n\n---\n` separator. If the block has no trailing
+/// separator (it was the only section), the whole content is dropped (returns
+/// empty). System messages that do not start with the header are returned
+/// unchanged.
+fn strip_leading_temporal_block(content: &str) -> String {
+    const HEADER: &str = "## Temporal & Geographic Context";
+    const SEP: &str = "\n\n---\n";
+    if !content.starts_with(HEADER) {
+        return content.to_string();
+    }
+    match content.find(SEP) {
+        Some(idx) => content[idx + SEP.len()..].to_string(),
+        None => String::new(),
+    }
+}
+
 /// Detection: for each Tool message, find the matching Assistant message that
 /// emitted the tool call by `tool_call_id` and check whether the function name
 /// was `load_skill`. Only matches by exact function name — `crdt_doc_*` tool
@@ -956,6 +1006,36 @@ mod tests {
     use mockall::mock;
     use mockall::predicate::*;
     use std::sync::Arc;
+
+    // ── Cache-safe temporal strip-on-load (2026-06-11) ──────────────────────
+
+    #[test]
+    fn strip_temporal_removes_leading_block_keeps_rest() {
+        let sys = "## Temporal & Geographic Context\n\
+                   Current date and time: 2026-06-11T10:00:00-05:00 (...)\n\
+                   Timezone: America/Bogota (UTC-5)\n\
+                   Location: Bogotá, Colombia\n\
+                   Locale: es-CO\n\n---\n\
+                   ## Tools\nAvailable: add.";
+        let out = strip_leading_temporal_block(sys);
+        assert_eq!(out, "## Tools\nAvailable: add.");
+    }
+
+    #[test]
+    fn strip_temporal_drops_block_when_only_section() {
+        let sys = "## Temporal & Geographic Context\n\
+                   Current date and time: 2026-06-11T10:00:00-05:00\n\
+                   Locale: es-CO";
+        let out = strip_leading_temporal_block(sys);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn strip_temporal_leaves_non_temporal_system_untouched() {
+        let sys = "## Tools\nAvailable: add.\n\n---\nmore stable content";
+        let out = strip_leading_temporal_block(sys);
+        assert_eq!(out, sys);
+    }
 
     // ── F-T14 step A2: skill-out-of-history compaction tests ────────────────
 
