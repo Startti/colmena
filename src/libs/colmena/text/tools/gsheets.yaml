@@ -1,7 +1,9 @@
 gsheets_create_spreadsheet:
-  summary: Create a new Google Sheets workbook and return its URL
+  summary: Create a new Google Sheets workbook (prefer asking the user to share an existing one instead)
   description: |
     Create a new empty Google Spreadsheet with the given title. Returns {spreadsheet_id, url} you can use in subsequent calls.
+
+    PREFER SHARING OVER CREATING: a spreadsheet you create here lives in the AGENT account, not the user's Drive — the user does not own it and may not even see it unless you share it back. Default to asking the user to share an EXISTING spreadsheet with the agent (as Editor) instead. Use this tool only when the user explicitly wants a brand-new sheet or has nothing to share, and tell them the file will live in the agent account.
 
 gsheets_create_from_xlsx:
   summary: Upload a local .xlsx attachment and convert it into a new Google Sheet

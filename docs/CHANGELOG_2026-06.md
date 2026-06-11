@@ -2260,3 +2260,29 @@ fetch. CRDT pasa `None` (no tiene concepto de `modifiedTime`). Tests en
 **Estado.** done (con caveat de scope documentado para QW3 en sheets compartidos).
 
 ---
+
+## 31. Google Workspace prelude — preferir COMPARTIR un doc existente sobre CREAR uno nuevo (2026-06-11)
+
+Cambio de guía LLM-facing (no rompe nada, additive). El prelude auto-inyectado
+para agentes con tools `gsheets_*`/`gdocs_*` (`google_workspace_prelude.rs`)
+ahora incluye un bloque de **preferencia explícita**: cuando el usuario necesita
+una planilla o documento, la opción por defecto es pedirle que **comparta uno
+EXISTENTE** (como Editor, con el share email del agente) en vez de crear uno
+nuevo. Razón: un doc creado por el agente vive en la **cuenta del agente**
+(`agents@startti.co`), no en el Drive del usuario — el usuario no lo posee ni lo
+ve a menos que el agente lo comparta de vuelta. Crear queda como fallback para
+cuando el usuario lo pide explícitamente o no tiene nada que compartir.
+
+Presente en ambas variantes del prelude (con y sin share email). Reforzado en
+las descripciones de los tools de creación (`gsheets_create_spreadsheet`,
+`gdocs_create`, `gdocs_create_from_markdown`) con un bloque "PREFER SHARING OVER
+CREATING". Las skills `gsheets-*`/`gdocs-*` no necesitaron cambios (son de
+análisis/edición, no de creación).
+
+Token cost del prelude: ~140→~215 tokens con email. Tests:
+`prelude_prefers_share_over_create_in_both_variants` + los pins existentes de
+repetición de email / anti-compresión siguen verdes (13 tests del módulo).
+
+**Estado.** done.
+
+---

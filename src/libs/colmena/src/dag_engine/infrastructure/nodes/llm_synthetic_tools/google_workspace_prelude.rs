@@ -22,9 +22,10 @@
 //!   4. `None` — emits a degraded prelude that still demands the doc
 //!      ID but tells the user to consult the operator for the email.
 //!
-//! Token cost: ~140 tokens with email, ~110 without. Always-on (every
-//! turn) — the LLM will simply skip past it after turn 1 once the doc
-//! ID is in scope. This trades a small per-turn overhead for
+//! Token cost: ~215 tokens with email, ~150 without (incluye el bloque
+//! de preferencia "compartir > crear" agregado 2026-06-11). Always-on
+//! (every turn) — the LLM will simply skip past it after turn 1 once the
+//! doc ID is in scope. This trades a small per-turn overhead for
 //! deterministic first-turn behavior.
 
 use std::path::Path;
@@ -105,6 +106,15 @@ pub fn build_google_workspace_prelude(sa_email: Option<&str>) -> String {
              1. El **ID del documento** (lo da el usuario, o se extrae de la URL: \
              `docs.google.com/document/d/<ID>/edit` o `docs.google.com/spreadsheets/d/<ID>/edit`).\n\
              2. Que el documento esté compartido como **Editor** con: `{email}`\n\n\
+             ### Preferí COMPARTIR un doc existente antes que CREAR uno nuevo\n\
+             Cuando el usuario necesita una planilla o un documento, la opción por \
+             defecto es pedirle que **comparta uno EXISTENTE** con vos (como Editor, \
+             con `{email}`): ese archivo queda bajo el ownership y control del \
+             usuario, en SU Drive. Crear uno nuevo con `gsheets_create_spreadsheet` \
+             o `gdocs_create*` lo deja en la cuenta del agente (`{email}`), NO en la \
+             del usuario — reservá esa opción para cuando el usuario lo pida \
+             explícitamente o no tenga nada que compartir, y avisale que el archivo \
+             va a vivir en la cuenta del agente.\n\n\
              ### Si el usuario YA mandó un doc ID en este turno o en uno previo\n\
              Procedé directo a operar — confiá en que el ID que pasó es real y que \
              está compartido. NO le vuelvas a pedir el ID. Si la tool falla con \
@@ -129,6 +139,10 @@ pub fn build_google_workspace_prelude(sa_email: Option<&str>) -> String {
              `docs.google.com/document/d/<ID>/edit` o `docs.google.com/spreadsheets/d/<ID>/edit`).\n\
              2. Que el documento esté compartido como **Editor** con el service account \
              configurado para este agente (pedile al operador la dirección si no la sabés).\n\n\
+             Preferí que el usuario COMPARTA un doc EXISTENTE (queda bajo su ownership, \
+             en su Drive) antes que crear uno nuevo con `gsheets_create_spreadsheet` / \
+             `gdocs_create*` (que lo dejaría en la cuenta del agente). Creá uno nuevo \
+             solo si el usuario lo pide o no tiene nada que compartir.\n\n\
              Si el usuario ya mandó un doc ID, procedé directo. Si la tool falla con \
              `permission_denied`, el tool result trae un `hint` accionable que debés \
              paraphrasear al usuario.\n\n\
@@ -166,6 +180,34 @@ mod tests {
         assert!(out.contains("doc ID") || out.contains("ID del documento"));
         // Negative: a None fallback shouldn't leak in
         assert!(!out.contains("operador la dirección"));
+    }
+
+    /// The "prefer sharing an existing doc over creating one in the agent
+    /// account" guidance must be present in BOTH prelude variants. This is
+    /// a product requirement (2026-06-11): created docs live in the agent
+    /// account, not the user's Drive, so sharing is the default path.
+    #[test]
+    fn prelude_prefers_share_over_create_in_both_variants() {
+        for out in [
+            build_google_workspace_prelude(Some("agents@startti.co")),
+            build_google_workspace_prelude(None),
+        ] {
+            let lower = out.to_lowercase();
+            assert!(
+                lower.contains("comparta") || lower.contains("compartir"),
+                "prelude must steer toward the user sharing a doc"
+            );
+            assert!(
+                lower.contains("existente"),
+                "prelude must mention preferring an EXISTING doc"
+            );
+            assert!(
+                lower.contains("crear") || lower.contains("create"),
+                "prelude must contrast against creating a new doc"
+            );
+            // The create tools must be named so the LLM knows what to avoid by default.
+            assert!(out.contains("gsheets_create_spreadsheet") || out.contains("gdocs_create"));
+        }
     }
 
     /// Regression pin: the email MUST appear at least twice when the

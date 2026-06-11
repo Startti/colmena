@@ -1,21 +1,32 @@
 gdocs_create:
-  summary: Create an empty Google Doc and place it in a shared folder
+  summary: Create an empty Google Doc (prefer asking the user to share an existing one instead)
   description: |
     Create a blank Google Doc with the given `title`. Requires either the
     `parent_folder_id` argument or the operator's
     `COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID` env var so Drive knows where
     to place the new file. Returns `{doc_id, url, title, revision_id, tabs}`.
 
+    PREFER SHARING OVER CREATING: a doc you create here lives in the AGENT
+    account, not the user's Drive — the user does not own it. Default to
+    asking the user to share an EXISTING doc with the agent (as Editor)
+    instead. Use this tool only when the user explicitly wants a brand-new
+    doc or has nothing to share, and tell them the file will live in the
+    agent account.
+
     Errors: `no_parent_folder_configured`, `auth_failed`, `permission_denied`.
 
 gdocs_create_from_markdown:
-  summary: Create a new Google Doc from a markdown string (Drive does the conversion)
+  summary: Create a new Google Doc from a markdown string (prefer sharing an existing doc when possible)
   description: |
     Create a Google Doc from a markdown string. Drive converts natively;
     we re-export to markdown to detect elements that did not round-trip
     cleanly (footnotes, math, tables in v1 are reported in
     `lossy_conversions`). Returns the same shape as `gdocs_create` plus
     `outline_snapshot` and `lossy_conversions`.
+
+    PREFER SHARING OVER CREATING: like `gdocs_create`, the new doc lives in
+    the AGENT account, not the user's Drive. If the user already has a doc to
+    work on, ask them to share it (as Editor) instead of creating a new one.
 
     Errors: `no_parent_folder_configured`, `auth_failed`, `permission_denied`.
 
