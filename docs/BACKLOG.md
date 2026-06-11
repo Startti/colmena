@@ -1060,6 +1060,15 @@ guides the LLM more.
 `None`, nunca tumba el fetch. CRDT pasa `None`. Tests en `sheet_collision.rs` +
 wiremock combinado en `gsheets_run_python.rs`.
 
+**⚠️ CAVEAT de scope (hallazgo E2E live 2026-06-11):** `last_modified` aparece
+SOLO en spreadsheets **creados por la app**. En sheets **operator-shared**
+(creados por el usuario y compartidos con `agents@startti.co`) el campo degrada
+a ausente porque el scope OAuth actual `drive.file` NO cubre `files.get` de
+archivos que la app no creó. El Sheets API (`spreadsheets` scope) sí cubre R/W
+del sheet compartido (las columnas surface bien). Para `last_modified` en sheets
+compartidos → agregar `drive.metadata.readonly` al consent. Ver el siguiente
+item.
+
 Conservado para referencia histórica:
 
 - **Origen:** spec sheets-write-safety §1 mencionaba `last_modified:
@@ -1112,6 +1121,37 @@ Conservado para referencia histórica:
   por SA.
 - **Cuándo retomar:** cuando un usuario o agente real lo requiera.
   Bajo ASAP — bloquea ciertos workflows de auto-bootstrap.
+
+---
+
+## OAuth scope para `last_modified` en sheets compartidos (2026-06-11)
+
+- **Origen:** hallazgo durante E2E live del QW3 `last_modified` (2026-06-11).
+  Sobre un spreadsheet operator-shared (`1N8uvfWVBBGwIi...`, creado por el
+  usuario y compartido con `agents@startti.co`), `current_state.last_modified`
+  sale **ausente** — el envelope `SheetExists` muestra columnas correctamente
+  (30 cols verificadas) pero sin timestamp.
+- **Root cause:** el scope OAuth actual de gsheets es `spreadsheets` +
+  `drive.file`. `drive.file` solo da acceso a archivos **creados o abiertos por
+  la app**; un sheet que el usuario creó y compartió no está cubierto, así que
+  el `files.get?fields=modifiedTime` de `get_modified_time` devuelve 403/404 →
+  best-effort degrada a `None`. (Sobre un sheet creado por la app sí funciona —
+  verificado live: `2026-06-11T20:01:44.922Z`.)
+- **Fix propuesto:** agregar `https://www.googleapis.com/auth/drive.metadata.readonly`
+  (o `drive.readonly`) al scope del consent OAuth de `agents@startti.co`.
+  Implica: actualizar `DEFAULT_SCOPES` / `COLMENA_GSHEETS_SCOPES`, **re-consent
+  one-time** de la cuenta (nuevo refresh token), y actualizar el secret
+  `colmena-oauth-refresh-token` en Secret Manager + redeploy worker.
+- **Esfuerzo:** ~30 min de código (agregar scope) + fricción operacional de
+  re-consent + rotación de secret. Sin re-consent, el código nuevo no obtiene
+  el scope ampliado.
+- **Cuándo retomar:** cuando un operador reporte que necesita ver la frescura de
+  data en sheets compartidos (no creados por el agente) antes de overwrite. Hoy
+  el workaround es que el LLM lea las primeras/últimas filas para inferir
+  antigüedad. Bajo impacto mientras el flujo dominante sea sheets creados por el
+  agente.
+- **Nota:** mismo scope desbloquearía discovery más rico (modifiedTime en
+  `gsheets_list_spreadsheets` para sheets compartidos) — evaluar juntos.
 
 ---
 

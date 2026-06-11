@@ -1,0 +1,33 @@
+{
+  "_comment": "E2E (manual, live): verifies the SheetExists collision envelope surfaces (a) ALL headers for a >26-column tab (QW1 — old A1:Z1 hardcode truncated at Z) and (b) a real Drive last_modified timestamp (QW3). Self-contained: agents@startti.co creates its own spreadsheet, seeds a 30-column 'Wide' tab, then writes to it again under the default fail policy to trigger the structured SheetExists error. Auth: OAuth user-scoped (COLMENA_GOOGLE_OAUTH_* from GCP Secret Manager, injected in-memory). Run: see runbook in the assistant transcript.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/gsheets-collision-envelope",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Do these steps in order using the gsheets tools, then report the final tool result verbatim:\n1. Create a new spreadsheet titled 'colmena-e2e-collision-<random>'. Note its spreadsheet_id.\n2. Call gsheets_run_python ONCE to seed a tab named 'Wide' with EXACTLY 30 columns named c0..c29 and 3 data rows. Use a code-level `output_sheets = {'Wide': df}` where df is a pandas DataFrame with columns c0..c29. You will need a binding to satisfy the tool; bind the default first sheet (usually 'Sheet1') of the new spreadsheet as var `seed`. write_to_spreadsheet must be the new spreadsheet_id. This first write creates 'Wide' (no collision yet).\n3. Call gsheets_run_python AGAIN with the SAME spreadsheet, binding the 'Wide' tab as var `w`, and again set `output_sheets = {'Wide': df}` (any df). Do NOT pass on_existing_sheet — use the default policy. This MUST collide.\n4. Report the EXACT tool result of step 3, especially the `wrote_sheets[0]` object: its `error`, the full `current_state.columns` list, `current_state.n_cols`, and `current_state.last_modified`. Do not summarize — paste the structured fields."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 15,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "You are a precise data engineer testing a Google Sheets integration. Follow the user's numbered steps EXACTLY and in order. When a tool returns a structured error envelope, report its fields verbatim — that envelope is the point of the test. Use gsheets_run_python for all DataFrame writes (output_sheets is a code-level variable your Python assigns, never a tool argument).",
+        "enabled_tools": ["gsheets", "load_skill"]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}

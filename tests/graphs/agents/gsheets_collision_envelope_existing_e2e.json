@@ -1,0 +1,33 @@
+{
+  "_comment": "E2E (manual, live): same SheetExists collision check as gsheets_collision_envelope_e2e.json (QW1 >26-col headers + QW3 last_modified) but against an OPERATOR-PROVIDED existing spreadsheet (no creation). Uses a unique tab name per run so the seed write never pre-collides; the second write triggers the structured SheetExists error. Auth: OAuth user-scoped, injected in-memory.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/gsheets-collision-existing",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Work ONLY on the EXISTING spreadsheet with id 1N8uvfWVBBGwIi-01ZO1w6x4m6y82GPb_ctVupdJ0rFc. DO NOT create a new spreadsheet. The target tab name is 'WideE2E_RUNTAG' (it does NOT exist yet — it is unique to this run). HARD RULES: you may ONLY use gsheets_list_sheets and gsheets_run_python. You are FORBIDDEN from calling gsheets_add_sheet or gsheets_set_range. The tab must be created exclusively by the gsheets_run_python output_sheets write so its column grid matches the data width. Steps, in order:\n1. Call gsheets_list_sheets to find any existing tab title; remember the first one as your bind anchor.\n2. Call gsheets_run_python ONCE. Bind the existing anchor tab from step 1 as var `anchor`. In the code, build a pandas DataFrame `df` with EXACTLY 30 columns named c0..c29 and 3 data rows of real values, then set a code-level `output_sheets = {'WideE2E_RUNTAG': df}` (NO mode key — plain create). Set write_to_spreadsheet to 1N8uvfWVBBGwIi-01ZO1w6x4m6y82GPb_ctVupdJ0rFc. Because 'WideE2E_RUNTAG' does not exist, this creates it with all 30 columns of data — no collision.\n3. Call gsheets_run_python AGAIN. Bind the now-existing 'WideE2E_RUNTAG' tab as var `w`. Build any small `df2` and set `output_sheets = {'WideE2E_RUNTAG': df2}`. Do NOT pass on_existing_sheet / mode — use the DEFAULT policy. This MUST collide and return a SheetExists error.\n4. Report the EXACT step-3 tool result, especially wrote_sheets[0]: its `error`, the FULL `current_state.columns` list, `current_state.n_cols`, and `current_state.last_modified`. Paste the structured fields verbatim — do not summarize."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 15,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "You are a precise data engineer testing a Google Sheets integration against an existing operator spreadsheet. Never create a new spreadsheet. Follow the numbered steps EXACTLY and in order. When a tool returns a structured error envelope, report its fields verbatim — that envelope is the point of the test. output_sheets is a code-level variable your Python assigns inside gsheets_run_python, never a tool argument.",
+        "enabled_tools": ["gsheets", "load_skill"]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}

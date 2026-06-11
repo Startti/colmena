@@ -2236,6 +2236,27 @@ fetch. CRDT pasa `None` (no tiene concepto de `modifiedTime`). Tests en
 **Archivos:** `gsheets/domain/traits.rs`, `gsheets/infrastructure/http_client.rs`,
 `llm_synthetic_tools/{sheet_collision,gsheets_run_python,crdt_doc_run_python,gsheets_tools}.rs`.
 
-**Estado.** done.
+**E2E live (real Google Sheets, OAuth user-scoped `agents@startti.co`)** —
+`tests/graphs/agents/gsheets_collision_envelope_e2e.json` (app-created sheet) +
+`gsheets_collision_envelope_existing_e2e.json` (operator-shared sheet):
+- **QW1 ✅** ambos runs: el envelope `SheetExists` surface **30 columnas**
+  (`c0..c29`, `n_cols: 30`) — el `A1:Z1` viejo habría cortado en `c25`.
+- **QW3 ⚠️ hallazgo de scope:** `last_modified` aparece SOLO en sheets
+  **creados por la app** (run sobre sheet propio → `2026-06-11T20:01:44.922Z`).
+  En un sheet **operator-shared** (creado por el usuario, compartido con
+  `agents@startti.co`) el campo **degrada a ausente** porque el scope OAuth
+  actual `drive.file` NO cubre `files.get` de archivos que la app no creó.
+  El best-effort se comporta como diseñado (None, sin crash). Para tener
+  `last_modified` en sheets compartidos hace falta agregar
+  `drive.metadata.readonly` al consent — ver follow-up en BACKLOG
+  ("OAuth scope para last_modified en sheets compartidos"). El Sheets API
+  (scope `spreadsheets`) sí cubre lectura/escritura del sheet compartido,
+  por eso QW1 funciona ahí.
+- Gotcha operacional: el binario release embebe Homebrew python@3.14;
+  `gsheets_run_python` necesita
+  `PYTHONPATH=.venv/lib/python3.14/site-packages` (ABI matching) o cada call
+  muere con `ModuleNotFoundError: pandas`.
+
+**Estado.** done (con caveat de scope documentado para QW3 en sheets compartidos).
 
 ---
