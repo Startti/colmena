@@ -939,6 +939,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn new_uses_production_default() {
+        let a = OpenAiAdapter::new();
+        assert_eq!(a.base_url(), "https://api.openai.com/v1");
+    }
+
+    #[test]
+    fn with_base_url_overrides() {
+        let a = OpenAiAdapter::with_base_url("http://127.0.0.1:4000/v1".to_string());
+        assert_eq!(a.base_url(), "http://127.0.0.1:4000/v1");
+    }
+
+    #[test]
     fn responses_serializes_uploaded_pdf_with_file_id() {
         use crate::llm::domain::{
             FileData, FileSource, LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderFileRef,

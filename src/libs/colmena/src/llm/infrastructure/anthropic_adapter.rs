@@ -827,6 +827,18 @@ where
 mod tests {
     use super::*;
 
+    #[test]
+    fn new_uses_production_default() {
+        let a = AnthropicAdapter::new();
+        assert_eq!(a.base_url(), "https://api.anthropic.com/v1");
+    }
+
+    #[test]
+    fn with_base_url_overrides() {
+        let a = AnthropicAdapter::with_base_url("http://127.0.0.1:4000/anthropic".to_string());
+        assert_eq!(a.base_url(), "http://127.0.0.1:4000/anthropic");
+    }
+
     fn build_request_with_file(file: crate::llm::domain::FileData) -> LlmRequest {
         use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, ProviderKind};
         let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();

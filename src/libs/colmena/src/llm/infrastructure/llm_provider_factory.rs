@@ -139,9 +139,13 @@ impl<'a> Drop for OverrideGuard<'a> {
 mod base_url_override_tests {
     use super::*;
     use crate::llm::domain::ProviderKind;
+    use std::sync::Mutex;
+    // Serializes env-var mutation across tests in this module. Distinct from
+    // the factory's override_lock (which guards set_test_override).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_clean_env<F: FnOnce()>(f: F) {
-        let _lock = match LlmProviderFactory::override_lock().lock() {
+        let _lock = match ENV_LOCK.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
@@ -166,12 +170,19 @@ mod base_url_override_tests {
     #[test]
     fn per_provider_var_wins() {
         with_clean_env(|| {
-            std::env::set_var("GEMINI_BASE_URL", "http://127.0.0.1:4000/gemini/v1beta");
+            std::env::set_var("GEMINI_BASE_URL", "http://gem");
             std::env::set_var("COLMENA_LLM_BASE_URL", "http://catchall");
-            assert_eq!(
-                base_url_override(ProviderKind::Google),
-                Some("http://127.0.0.1:4000/gemini/v1beta".to_string())
-            );
+            assert_eq!(base_url_override(ProviderKind::Google), Some("http://gem".to_string()));
+        });
+        with_clean_env(|| {
+            std::env::set_var("OPENAI_BASE_URL", "http://oai");
+            std::env::set_var("COLMENA_LLM_BASE_URL", "http://catchall");
+            assert_eq!(base_url_override(ProviderKind::OpenAi), Some("http://oai".to_string()));
+        });
+        with_clean_env(|| {
+            std::env::set_var("ANTHROPIC_BASE_URL", "http://anth");
+            std::env::set_var("COLMENA_LLM_BASE_URL", "http://catchall");
+            assert_eq!(base_url_override(ProviderKind::Anthropic), Some("http://anth".to_string()));
         });
     }
 
