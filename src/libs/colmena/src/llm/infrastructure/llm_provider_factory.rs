@@ -149,11 +149,21 @@ mod base_url_override_tests {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        for k in ["OPENAI_BASE_URL", "GEMINI_BASE_URL", "ANTHROPIC_BASE_URL", "COLMENA_LLM_BASE_URL"] {
+        for k in [
+            "OPENAI_BASE_URL",
+            "GEMINI_BASE_URL",
+            "ANTHROPIC_BASE_URL",
+            "COLMENA_LLM_BASE_URL",
+        ] {
             std::env::remove_var(k);
         }
         f();
-        for k in ["OPENAI_BASE_URL", "GEMINI_BASE_URL", "ANTHROPIC_BASE_URL", "COLMENA_LLM_BASE_URL"] {
+        for k in [
+            "OPENAI_BASE_URL",
+            "GEMINI_BASE_URL",
+            "ANTHROPIC_BASE_URL",
+            "COLMENA_LLM_BASE_URL",
+        ] {
             std::env::remove_var(k);
         }
     }
@@ -172,17 +182,26 @@ mod base_url_override_tests {
         with_clean_env(|| {
             std::env::set_var("GEMINI_BASE_URL", "http://gem");
             std::env::set_var("COLMENA_LLM_BASE_URL", "http://catchall");
-            assert_eq!(base_url_override(ProviderKind::Google), Some("http://gem".to_string()));
+            assert_eq!(
+                base_url_override(ProviderKind::Google),
+                Some("http://gem".to_string())
+            );
         });
         with_clean_env(|| {
             std::env::set_var("OPENAI_BASE_URL", "http://oai");
             std::env::set_var("COLMENA_LLM_BASE_URL", "http://catchall");
-            assert_eq!(base_url_override(ProviderKind::OpenAi), Some("http://oai".to_string()));
+            assert_eq!(
+                base_url_override(ProviderKind::OpenAi),
+                Some("http://oai".to_string())
+            );
         });
         with_clean_env(|| {
             std::env::set_var("ANTHROPIC_BASE_URL", "http://anth");
             std::env::set_var("COLMENA_LLM_BASE_URL", "http://catchall");
-            assert_eq!(base_url_override(ProviderKind::Anthropic), Some("http://anth".to_string()));
+            assert_eq!(
+                base_url_override(ProviderKind::Anthropic),
+                Some("http://anth".to_string())
+            );
         });
     }
 

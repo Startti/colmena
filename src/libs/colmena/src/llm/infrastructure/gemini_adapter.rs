@@ -1176,7 +1176,10 @@ mod tests {
     #[test]
     fn new_uses_production_default() {
         let a = GeminiAdapter::new();
-        assert_eq!(a.base_url(), "https://generativelanguage.googleapis.com/v1beta");
+        assert_eq!(
+            a.base_url(),
+            "https://generativelanguage.googleapis.com/v1beta"
+        );
     }
 
     #[test]
