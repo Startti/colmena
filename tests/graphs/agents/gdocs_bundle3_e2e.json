@@ -1,0 +1,39 @@
+{
+  "_comment": "Bundle 3 (G item 3) E2E — add_tab markdown seeding. Workflow: agent creates a Google Doc, then calls add_tab with a markdown payload — the dispatcher creates the tab, then immediately runs append_markdown on it. The agent reads the tab back as markdown to confirm the heading + list landed. Requires OAuth env (COLMENA_GOOGLE_OAUTH_*) + GEMINI_API_KEY + DATABASE_URL. Run: `set -a; source .env; set +a; cargo run --bin dag_engine -- run tests/graphs/agents/gdocs_bundle3_e2e.json --agent-session-id g_b3_$(date +%s) --include-extra-info`",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/g-b3",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Exercise the Bundle 3 add_tab markdown seeding plumbing.\n\n1. gdocs_create({title: 'Bundle3 E2E <UTC iso>'}). Capture doc_id.\n2. gdocs_add_tab({doc_id: <step1.doc_id>, title: 'Seeded Tab', markdown: '# Seeded Heading\\n\\nThis content was written by add_tab in one call.\\n\\n## Items\\n\\n- alpha\\n- beta\\n- gamma\\n'}). The response MUST include tab_id and markdown_seeded=true. If markdown_seeded is false or missing, REPORT IT and stop.\n3. gdocs_list_tabs({doc_id: <step1.doc_id>}). Confirm 'Seeded Tab' is present and capture its tab_id again.\n4. gdocs_read_as_markdown({doc_id: <step1.doc_id>, tab_id: <step3.tab_id>}). Confirm the markdown contains 'Seeded Heading' and at least one of 'alpha', 'beta', 'gamma'.\n\nFinal report (<200 words): doc_id + tab_id + markdown_seeded flag + a one-line excerpt from step4 + PASS/FAIL for each verification."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 15,
+        "lazy_tool_loading": false,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "You are testing the colmena Bundle 3 add_tab markdown seeding plumbing. Use ONLY the listed gdocs_* tool names. If a tool returns an error, report it verbatim and stop.",
+        "enabled_tools": [
+          "gdocs_create",
+          "gdocs_add_tab",
+          "gdocs_list_tabs",
+          "gdocs_read_as_markdown"
+        ]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}

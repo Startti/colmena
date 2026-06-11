@@ -1003,11 +1003,27 @@ Suite full pasa (verificado en T5).
 - OpenAI: sin cambios (ya estaba activo).
 
 **Verificación.** Tests unit confirman shape correcto del request body
-(Anthropic) y parsing de stats (Gemini). E2E verification con providers
-reales requiere repeat-call patrón y comparar `cache_read_tokens` entre
-iter 1 vs iter ≥2 — diferido a operador post-deploy. El test
-`cache_control_marker_on_last_tool_only` previene regresión del shape
-en el request body.
+(Anthropic) y parsing de stats (Gemini).
+
+**E2E LLM-in-the-loop:**
+`tests/graphs/agents/provider_cache_anthropic_e2e.json` — agente
+claude-haiku-4-5 con system message padded a ≥2048 tokens (mínimo
+cacheable para haiku). Patrón two-run: correr el mismo graph dos veces
+seguidas con el mismo `--agent-session-id` dentro de los 5 min de TTL;
+el segundo SSE debe traer `cache_read_tokens > 0`. Comando:
+
+```bash
+set -a && source .env && set +a
+SESS=cache_test_$(date +%s)
+cargo run --bin dag_engine -- run tests/graphs/agents/provider_cache_anthropic_e2e.json \
+  --agent-session-id $SESS --include-extra-info | tee /tmp/cache_run1.sse
+cargo run --bin dag_engine -- run tests/graphs/agents/provider_cache_anthropic_e2e.json \
+  --agent-session-id $SESS --include-extra-info | tee /tmp/cache_run2.sse
+grep -oE '"cache_(read|write)_tokens":[0-9]+' /tmp/cache_run1.sse /tmp/cache_run2.sse
+```
+
+El test `cache_control_marker_on_last_tool_only` previene regresión del
+shape en el request body.
 
 **Estado.** done.
 
@@ -1693,29 +1709,24 @@ vez de `not_yet_wired` envelope para create). ADP recompila clean.
 
 ### Cómo correr Bundle 1 manualmente
 
+Dos E2E LLM-in-the-loop graphs cubren el round-trip end-to-end con gemini-2.5-flash:
+
 ```bash
 # Configurar OAuth user-scoped (única vez):
 # Ver docs/developer_guide/47_google_oauth.md
+set -a && source .env && set +a
 
-# Test gdocs_export → attachment:
-# El LLM llama gdocs_export({doc_id, format: "pdf"})
-# → recibe {attachment_id, mime_type, filename, byte_len}
-# → puede usarse en http_request con "$attachment:<id>" en multipart
+# Round-trip gdocs (G items 4 + 5): create → export docx → create_from_docx → read
+cargo run --bin dag_engine -- run tests/graphs/agents/gdocs_bundle1_e2e.json \
+  --agent-session-id g_bundle1_$(date +%s) --include-extra-info
 
-# Test gdocs_create_from_docx ← attachment:
-# Usuario sube .docx via files[]
-# LLM llama gdocs_create_from_docx({title: "Doc nuevo", attachment_id: "products_docx"})
-# → recibe {doc_id, url, ...}
-
-# Test gsheets_create_from_xlsx ← attachment:
-# Usuario sube .xlsx
-# LLM llama gsheets_create_from_xlsx({title: "Planilla nueva", attachment_id: "products_xlsx"})
-# → recibe {spreadsheet_id, url, sheets}
-
-# Test gsheets_export_xlsx → attachment:
-# LLM llama gsheets_export_xlsx({spreadsheet_id})
-# → recibe {attachment_id, ...}
+# Round-trip gsheets (E-T7b): create → set_range → export_xlsx → create_from_xlsx → read
+cargo run --bin dag_engine -- run tests/graphs/agents/gsheets_etb7_e2e.json \
+  --agent-session-id e_t7b_$(date +%s) --include-extra-info
 ```
+
+Cada graph crea recursos nuevos en Drive (no requiere fixtures); el agente
+reporta PASS/FAIL por step en su respuesta final.
 
 ---
 
@@ -1782,6 +1793,12 @@ docs/spreadsheets compartidos (la SA vieja tenía Drive vacío y quota 0).
 ajustado (era 22). Coverage test `index_doc_covers_all_registered_tools` PASS.
 
 **Estado.** done.
+
+**E2E LLM-in-the-loop:** `tests/graphs/agents/gworkspace_bundle2a_e2e.json`
+— el agente crea un doc + spreadsheet con un token único en el título,
+luego los descubre vía `gdocs_list_documents({query: TOK})` y
+`gsheets_list_spreadsheets({query: TOK})`. Run:
+`set -a && source .env && set +a; cargo run --bin dag_engine -- run tests/graphs/agents/gworkspace_bundle2a_e2e.json --agent-session-id g_b2a_$(date +%s) --include-extra-info`.
 
 **Próximo (Bundle 2B, deferred):** 5 tools de permissions —
 `drive_list_permissions`, `gsheets_share`, `gdocs_unshare`,
@@ -1873,6 +1890,15 @@ Clippy + fmt clean. ADP worker recompila clean.
 
 **Estado.** done.
 
+**E2E LLM-in-the-loop:** `tests/graphs/agents/gworkspace_bundle2b_e2e.json`
+— el agente crea doc + sheet, comparte ambos con
+`SHARE_EMAIL=daniel@startti.co` (ajustar a tu email), verifica con
+`list_permissions`, revoca con `unshare`, y vuelve a listar para
+confirmar la baja. Cubre los 4 nuevos tools (`gdocs_list_permissions`,
+`gdocs_unshare`, `gsheets_share`, `gsheets_list_permissions`,
+`gsheets_unshare`) + reuso de `gdocs_share` v1. Run:
+`set -a && source .env && set +a; cargo run --bin dag_engine -- run tests/graphs/agents/gworkspace_bundle2b_e2e.json --agent-session-id g_b2b_$(date +%s) --include-extra-info`.
+
 **Bundle 2 (A+B) cerrado** — Drive discovery + sharing/permissions
 totalmente cubiertos. Próximos bundles del backlog:
 
@@ -1956,6 +1982,13 @@ notan diferencia. Agentes que pasaban markdown obtienen el shape esperado
 **Tests.** Full suite: **1760 PASS / 0 FAIL / 92 IGNORED**. Sin tests
 nuevos en este commit — el dispatcher es wiring de primitives ya cubiertas
 por sus tests propios (replace_section + co-edit guard).
+
+**E2E LLM-in-the-loop:** `tests/graphs/agents/gdocs_bundle3_e2e.json` —
+el agente crea un doc, llama `add_tab` con `markdown` no vacío,
+verifica que el response trae `markdown_seeded: true`, luego lee el
+tab como markdown para confirmar que el heading + items quedaron
+escritos en una sola call. Run:
+`set -a && source .env && set +a; cargo run --bin dag_engine -- run tests/graphs/agents/gdocs_bundle3_e2e.json --agent-session-id g_b3_$(date +%s) --include-extra-info`.
 
 **Markdown tables NO incluidas en este bundle.** Originalmente Bundle 3
 planeaba incluir support para tablas en `insert/replace`. Tras

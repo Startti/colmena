@@ -251,6 +251,35 @@ The system message of the agent should instruct it to always call the tool for a
 
 > **Trade-off.** The LLM has to re-emit the data into its `rows` argument, costing tokens. In return you get a minimal, dependency-free sandbox feature without changes to the tool execution architecture. Token-efficient tool-to-tool piping (where the LLM never re-sees the raw data) is tracked as a future enhancement.
 
+### Pattern C — `attachment_run_python` (pandas DataFrame from attachment)
+
+For CSV / XLSX attachments the LLM never has to re-emit the rows. The synthetic tool **`attachment_run_python`** parses the attachment server-side into a pandas `DataFrame` called `df` and runs the LLM-authored snippet against it inside the same restricted sandbox as Pattern B.
+
+```
+LLM call:  attachment_run_python({ document_id: "att_abc", code: "output = df.groupby('country')['amount'].sum().to_dict()" })
+
+Server:    bytes ← OutputStorageRepository.read(document_id)
+           df ← pandas.read_csv(bytes)        (or read_excel for .xlsx)
+           sandboxed exec → reads `output`
+           → tool result
+```
+
+- Activation: **`enabled_tools: ["attachment_run_python"]`** (zero config needed; the only state it needs is the `document_id`).
+- Sandbox: `restricted` always — same allow-list as Pattern B plus `pandas` (which itself is whitelisted; `numpy` is reachable as `pd.np` and as a direct import).
+- Wall-clock cap: 30 s; output JSON cap: 50 KB.
+- The `df` global is pre-loaded; the LLM only writes the analysis. No need to `import pandas` (it is already in scope as `pd`).
+- The attachment must be in the conversation catalog — pass `--agent-session-id` when running the graph so attachments are registered.
+
+When to pick which:
+
+| Pattern | LLM passes data? | Best when |
+|---|---|---|
+| A | No — fixed code | Tool authors know the exact computation |
+| B (`run_python`) | Yes — re-emits `rows` | Data lives in a previous turn's tool result |
+| C (`attachment_run_python`) | No — server loads `df` | Data is a CSV/XLSX attachment (inline or signed URL) |
+
+E2E example: `tests/graphs/agents/attachment_run_python_e2e.json` — gemini-2.5-flash + an inline CSV attachment + a sum-by-group analysis.
+
 ---
 
 ## Common Patterns

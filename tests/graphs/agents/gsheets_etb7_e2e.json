@@ -1,0 +1,41 @@
+{
+  "_comment": "E-T7b E2E — round-trip xlsx through Google Sheets. Workflow: agent creates a spreadsheet, seeds values, exports as xlsx (E-T7b — attachment plumbing), then re-creates a spreadsheet from that xlsx attachment. Confirms both attachment_id flows (export → register, create_from_xlsx → fetch). Requires OAuth env (COLMENA_GOOGLE_OAUTH_*) + GEMINI_API_KEY + DATABASE_URL. Run: `set -a; source .env; set +a; cargo run --bin dag_engine -- run tests/graphs/agents/gsheets_etb7_e2e.json --agent-session-id e_t7b_$(date +%s) --include-extra-info`",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/e-t7b",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Exercise the E-T7b attachment plumbing for Google Sheets. Execute this EXACT sequence and report observed values (no inventing).\n\n1. gsheets_create_spreadsheet({title: 'E-T7b E2E Source <UTC iso>'}). Capture spreadsheet_id + url.\n2. gsheets_set_range({spreadsheet_id, sheet: 'Sheet1', start_addr: 'A1', values_2d: [['name','score'],['alice',10],['bob',20],['carol',30]]}).\n3. gsheets_export_xlsx({spreadsheet_id}). This calls the E-T7b wrap — the result MUST include a document_id + filename + byte_len. Capture document_id_xlsx.\n4. gsheets_create_from_xlsx({attachment_id: <step3.document_id_xlsx>, title: 'E-T7b E2E Roundtrip <UTC iso>'}). Capture new spreadsheet_id_roundtrip + url_roundtrip.\n5. gsheets_read({spreadsheet_id: <step4.spreadsheet_id_roundtrip>, sheet: 'Sheet1', range: 'A1:B4', value_render: 'UNFORMATTED_VALUE'}). Confirm rows = [['name','score'],['alice',10],['bob',20],['carol',30]].\n\nFinal report (<200 words): one line per step with actual values, then both spreadsheet URLs and the xlsx attachment_id."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 20,
+        "lazy_tool_loading": false,
+        "connection_url": "${DATABASE_URL}",
+        "attachments_enabled": true,
+        "system_message": "You are a strict testing agent for the colmena E-T7b plumbing. Use ONLY the gsheets_* tool names. Do not invent inputs. If a tool returns an error, report it verbatim and stop.",
+        "enabled_tools": [
+          "gsheets_create_spreadsheet",
+          "gsheets_set_range",
+          "gsheets_export_xlsx",
+          "gsheets_create_from_xlsx",
+          "gsheets_read"
+        ]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}

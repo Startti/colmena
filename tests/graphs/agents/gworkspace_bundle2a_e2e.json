@@ -1,0 +1,39 @@
+{
+  "_comment": "Bundle 2A E2E — discovery tools (list_documents + list_spreadsheets). Workflow: agent creates a doc + a spreadsheet, then calls list_documents and list_spreadsheets with a `query` (Drive `name contains`) to find them back. Requires OAuth env (COLMENA_GOOGLE_OAUTH_*) + GEMINI_API_KEY + DATABASE_URL. Run: `set -a; source .env; set +a; cargo run --bin dag_engine -- run tests/graphs/agents/gworkspace_bundle2a_e2e.json --agent-session-id g_b2a_$(date +%s) --include-extra-info`",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/g-b2a",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Exercise the Bundle 2A discovery tools. Use a unique token in both titles so list_* queries are deterministic.\n\nGenerate the token TOK = 'B2A-<random 8 chars>' at the start and reuse it everywhere.\n\n1. gdocs_create({title: 'Bundle2A Doc <TOK>'}). Capture doc_id.\n2. gsheets_create_spreadsheet({title: 'Bundle2A Sheet <TOK>'}). Capture spreadsheet_id.\n3. gdocs_list_documents({query: <TOK>, limit: 10}). Confirm the array has ≥1 entry whose document_id equals step1.doc_id.\n4. gsheets_list_spreadsheets({query: <TOK>, limit: 10}). Confirm the array has ≥1 entry whose spreadsheet_id equals step2.spreadsheet_id.\n\nFinal report (<200 words): the token, both IDs created, the count returned by each list call, and PASS/FAIL for each verification."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 15,
+        "lazy_tool_loading": false,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "You are testing the colmena Bundle 2A discovery tools. Use ONLY the listed tool names. If a tool returns an error, report it verbatim and stop.",
+        "enabled_tools": [
+          "gdocs_create",
+          "gsheets_create_spreadsheet",
+          "gdocs_list_documents",
+          "gsheets_list_spreadsheets"
+        ]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}

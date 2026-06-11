@@ -1,0 +1,41 @@
+{
+  "_comment": "Bundle 1 (G items 4 + 5) E2E — round-trip docx through Google Docs. Workflow: agent creates a Google Doc, populates content via append_markdown, exports the doc as docx (G item 5 — attachment plumbing produces a document_id), then re-creates a Google Doc from that docx attachment (G item 4 — attachment fetch). The final report confirms both doc URLs + the docx attachment_id. Requires OAuth env (COLMENA_GOOGLE_OAUTH_*) + GEMINI_API_KEY + DATABASE_URL. Run: `set -a; source .env; set +a; cargo run --bin dag_engine -- run tests/graphs/agents/gdocs_bundle1_e2e.json --agent-session-id g_bundle1_$(date +%s) --include-extra-info`",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/g-bundle1",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "You are exercising the Bundle 1 attachment plumbing for Google Docs. Execute this EXACT sequence and report what each tool returned (no inventing).\n\n1. gdocs_create({title: 'Bundle1 E2E Source <UTC iso>'}). Capture doc_id and url.\n2. gdocs_append_markdown({doc_id: <step1.doc_id>, markdown: '# Bundle 1 E2E\\n\\nThis document was created by the bundle1 test. It contains a paragraph and a list.\\n\\n## Items\\n\\n- alpha\\n- beta\\n- gamma\\n'}).\n3. gdocs_export({doc_id: <step1.doc_id>, format: 'docx'}). This calls the G item 5 wrap — the result MUST include a document_id (the exported docx as a new attachment) plus filename + byte_len. Capture document_id_docx.\n4. gdocs_create_from_docx({title: 'Bundle1 E2E Roundtrip <UTC iso>', attachment_id: <step3.document_id_docx>}). This is the G item 4 fetch — the server reads the docx bytes from the catalog. Capture new doc_id_roundtrip + url_roundtrip.\n5. gdocs_read_as_markdown({doc_id: <step4.doc_id_roundtrip>}). Verify the H1 'Bundle 1 E2E' and the list items appear.\n\nFinal report (<200 words): one line per step with the actual values returned, then both doc URLs and the docx attachment_id."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 20,
+        "lazy_tool_loading": false,
+        "connection_url": "${DATABASE_URL}",
+        "attachments_enabled": true,
+        "system_message": "You are a strict testing agent for the colmena Bundle 1 plumbing. Use ONLY the gdocs_* tool names. Do not invent inputs. If a tool returns an error, report it verbatim and stop.",
+        "enabled_tools": [
+          "gdocs_create",
+          "gdocs_append_markdown",
+          "gdocs_export",
+          "gdocs_create_from_docx",
+          "gdocs_read_as_markdown"
+        ]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}

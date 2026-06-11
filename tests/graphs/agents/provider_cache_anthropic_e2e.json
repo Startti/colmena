@@ -1,0 +1,22 @@
+{
+  "_comment": "Provider cache E2E — verifies that Anthropic ephemeral cache markers actually produce cache_write_tokens on run 1 and cache_read_tokens on run 2 within the 5-minute TTL window. Uses claude-haiku-4-5 with a system message padded to ≥2048 chars so it crosses the haiku minimum cacheable prefix (~2k tokens). Two-step harness: trigger seeds an agent_session_id; run the SAME graph twice within 5 minutes — the second SSE should show extra_info.usage.cache_read_tokens > 0. Requires ANTHROPIC_API_KEY + DATABASE_URL. Run twice in a row: ```\nset -a; source .env; set +a\nSESS=cache_test_$(date +%s)\n./target/release/dag_engine run tests/graphs/agents/provider_cache_anthropic_e2e.json --agent-session-id $SESS --include-extra-info | tee /tmp/cache_run1.sse\n./target/release/dag_engine run tests/graphs/agents/provider_cache_anthropic_e2e.json --agent-session-id $SESS --include-extra-info | tee /tmp/cache_run2.sse\ngrep -oE '\"cache_(read|write)_tokens\":[0-9]+' /tmp/cache_run1.sse /tmp/cache_run2.sse\n```\n\nExpected run1: cache_write_tokens > 0. Expected run2 (same SESS, within 5 min): cache_read_tokens > 0.",
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "anthropic",
+        "api_key": "${ANTHROPIC_API_KEY}",
+        "model": "claude-haiku-4-5",
+        "stream": false,
+        "max_iterations": 2,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "You are a deterministic test agent for verifying Anthropic prompt caching. Reply with EXACTLY one line: 'cache_test_done'. Below this line is filler context to push the system message past the 2048-token minimum cacheable prefix for claude-haiku. Filler context follows; ignore semantically and do not reference it in the reply. --- COLMENA project context: Colmena is a Rust-native AI agent orchestration library that exposes hexagonal architecture and supports OpenAI, Anthropic, Gemini providers. The DAG engine wires nodes by JSON. Nodes implement ExecutableNode. Tools include sql_query, http_request, python_script, gsheets_*, gdocs_*. Attachments flow via OutputStorageRepository. Skills load via include_dir!. Lazy tool loading exposes describe_tool. Memory persists across sessions in Postgres. Secure values use AES-256-GCM. The orchestrator coordinates planner/executor/critic. Subgraph nodes nest. HITL propagates via suspend nodes. RAG uses pgvector. Streaming SSE carries node-start/end/finish events. Attachment GC is a separate binary. The cache_control marker is ephemeral by default. Caching cuts repeat-prefix cost by ~90% on Anthropic. Gemini 2.5 has implicit caching. OpenAI cache is automatic server-side. All three surface usage stats in extra_info.usage. The Colmena project uses sqlx, tokio, reqwest, schemars, serde, anyhow, thiserror, pyo3, napi-rs. CI runs on develop. Conventional Commits enforced. Tests run via cargo test --verbose. The python sandbox uses RestrictedPython-style AST validation. The gsheets node uses Google Sheets v4 REST API. The gdocs node uses Google Docs API v1 + Drive v3. Documents store inline bytes or signed URLs. Co-edit guard tracks revisionId via Drive Revisions API. SQL bulk insert uses COPY FROM STDIN. Attachment uniform resolution allows $attachment:<key> placeholders. The orchestrator emits phase markers in SSE. The DAG engine validates topology at load time. End of filler context. Reply with: cache_test_done",
+        "prompt": "Reply now."
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "agent", "to": "log" }
+  ]
+}

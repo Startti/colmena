@@ -1,0 +1,44 @@
+{
+  "_comment": "Bundle 2B E2E — Drive permissions (share + list_permissions + unshare on both gdocs and gsheets). Workflow: agent creates a doc + a spreadsheet, shares both with a test reader email, lists permissions to confirm the grant landed, then unshares (revokes by permission_id) and lists again to confirm removal. Requires OAuth env (COLMENA_GOOGLE_OAUTH_*) + GEMINI_API_KEY + DATABASE_URL. The test_payload pins `share_email` to daniel@startti.co — change it to a real email you control before running. Run: `set -a; source .env; set +a; cargo run --bin dag_engine -- run tests/graphs/agents/gworkspace_bundle2b_e2e.json --agent-session-id g_b2b_$(date +%s) --include-extra-info`",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/g-b2b",
+        "method": "POST",
+        "test_payload": {
+          "share_email": "daniel@startti.co",
+          "prompt": "Exercise the Bundle 2B permissions surface. Use the email below in every share call:\n  SHARE_EMAIL = daniel@startti.co\n\n1. gdocs_create({title: 'Bundle2B Doc <UTC iso>'}). Capture doc_id.\n2. gsheets_create_spreadsheet({title: 'Bundle2B Sheet <UTC iso>'}). Capture spreadsheet_id.\n\n3. gdocs_share({doc_id, email: SHARE_EMAIL, role: 'reader'}). Capture permission_id_doc.\n4. gsheets_share({spreadsheet_id, email: SHARE_EMAIL, role: 'reader'}). Capture permission_id_sheet.\n\n5. gdocs_list_permissions({doc_id}). Confirm an entry exists with role='reader' and email=SHARE_EMAIL.\n6. gsheets_list_permissions({spreadsheet_id}). Confirm an entry exists with role='reader' and email=SHARE_EMAIL.\n\n7. gdocs_unshare({doc_id, permission_id: permission_id_doc}).\n8. gsheets_unshare({spreadsheet_id, permission_id: permission_id_sheet}).\n\n9. gdocs_list_permissions({doc_id}). Confirm permission_id_doc is GONE.\n10. gsheets_list_permissions({spreadsheet_id}). Confirm permission_id_sheet is GONE.\n\nFinal report (<200 words): for each numbered step report the result + PASS/FAIL. Include both resource IDs and both permission_ids that were grant/revoked."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 25,
+        "lazy_tool_loading": false,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "You are testing the colmena Bundle 2B permissions tools. Use ONLY the listed tool names. If a tool returns an error, report it verbatim and stop.",
+        "enabled_tools": [
+          "gdocs_create",
+          "gsheets_create_spreadsheet",
+          "gdocs_share",
+          "gsheets_share",
+          "gdocs_list_permissions",
+          "gsheets_list_permissions",
+          "gdocs_unshare",
+          "gsheets_unshare"
+        ]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}
