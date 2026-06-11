@@ -2201,3 +2201,41 @@ actualización).
 **Estado.** done.
 
 ---
+
+## 30. Quick-wins batch — gsheets collision envelope + CRDT aliases (2026-06-11)
+
+Lote de tres mejoras chicas de ergonomía/correctness (🟢 quick wins de la
+priorización por impacto×esfuerzo en `BACKLOG.md`). Todas additive, sin
+breaking changes. ADP no implementa `SheetsClient` → sin sweep necesario
+(verificado: 0 impls fuera de colmena).
+
+**QW1 — Header range deja de truncar en columna Z.** `fetch_tab_meta`
+(`gsheets_run_python.rs`) leía el header con un `A1:Z1` hardcodeado, así que
+sheets con >26 columnas reportaban `current_state.columns` truncado y el LLM
+decidía colisiones con info incompleta. Ahora el rango se computa desde
+`meta.col_count` vía `a1_addr` (e.g. 30 cols → `A1:AD1`). Test:
+`header_range_spans_past_column_z` (boundary Z/AA/AD) +
+`fail_envelope_has_wide_columns_and_last_modified` (30 headers surface).
+
+**QW2 — `crdt_doc_run_python` acepta `sheets`/`sheet_names` como alias de
+`sheet_ids`.** Cierra el "Also:" del item de UX aliases — el lado gsheets
+(`var`/`binding_name`/`name`, `sheet`/`sheet_name`, drop de `output_sheets`
+como arg) ya estaba shipped. `#[serde(alias = "sheets", alias =
+"sheet_names")]`. Test: `sheet_ids_accepts_sheets_and_sheet_names_aliases`.
+
+**QW3 — `last_modified` en el envelope `SheetExists`.** Nuevo método
+best-effort `SheetsClient::get_modified_time` (Drive `files.get?fields=
+modifiedTime`, impl HTTP + FakeClient). `TabMeta` gana `last_modified:
+Option<String>`; `build_sheet_exists_error` lo expone en
+`current_state.last_modified` cuando está presente. Permite al LLM (y a la
+persona leyendo el reporte) distinguir data fresca de data del año pasado
+antes de overwrite. Falla del Drive call → degrada a `None`, nunca tumba el
+fetch. CRDT pasa `None` (no tiene concepto de `modifiedTime`). Tests en
+`sheet_collision.rs` (presencia + omisión) + el wiremock combinado arriba.
+
+**Archivos:** `gsheets/domain/traits.rs`, `gsheets/infrastructure/http_client.rs`,
+`llm_synthetic_tools/{sheet_collision,gsheets_run_python,crdt_doc_run_python,gsheets_tools}.rs`.
+
+**Estado.** done.
+
+---

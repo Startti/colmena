@@ -922,12 +922,17 @@ async fn fetch_tab_meta(
     let Some(meta) = sheets.into_iter().find(|s| s.title == tab) else {
         return Ok(None);
     };
-    // Header row (A1:Z1) — small read, gives us real column names.
+    // Header row — span the full width reported by `col_count` instead of a
+    // hardcoded `A1:Z1`, so sheets with >26 columns surface every header
+    // (otherwise `current_state.columns` truncated at column Z and the LLM
+    // decided collisions with incomplete info).
+    let last_col = meta.col_count.max(1) as usize - 1;
+    let header_range = format!("A1:{}", a1_addr(last_col, 1));
     let read = client
         .read_range(
             spreadsheet_id,
             tab,
-            Some("A1:Z1"),
+            Some(&header_range),
             ReadOptions {
                 value_render: crate::gsheets::domain::ValueRenderOption::UnformattedValue,
                 as_records: false,
@@ -947,10 +952,19 @@ async fn fetch_tab_meta(
             .unwrap_or_default(),
         _ => Vec::new(),
     };
+    // Best-effort Drive `modifiedTime` — a collision envelope is more useful
+    // when the LLM can tell fresh data from last year's. Never fail the whole
+    // meta fetch over it.
+    let last_modified = client
+        .get_modified_time(spreadsheet_id)
+        .await
+        .ok()
+        .flatten();
     Ok(Some(TabMeta {
         n_rows: meta.row_count as u64,
         n_cols: meta.col_count as u64,
         columns,
+        last_modified,
     }))
 }
 
@@ -1604,6 +1618,98 @@ mod tests {
         assert_eq!(wrote[0]["error"], "SheetExists");
         let advice = wrote[0]["advice"].as_str().unwrap();
         assert!(advice.contains("Existing"));
+    }
+
+    /// `a1_addr` is what computes the header read range in `fetch_tab_meta`.
+    /// Boundary check that wide sheets span past column Z (the old `A1:Z1`
+    /// hardcode truncated them).
+    #[test]
+    fn header_range_spans_past_column_z() {
+        assert_eq!(a1_addr(25, 1), "Z1"); // 26th col
+        assert_eq!(a1_addr(26, 1), "AA1"); // 27th col — past the old cap
+        assert_eq!(a1_addr(29, 1), "AD1"); // 30th col
+                                           // What fetch_tab_meta builds for a 30-column sheet:
+        let last_col = 30usize - 1;
+        assert_eq!(format!("A1:{}", a1_addr(last_col, 1)), "A1:AD1");
+    }
+
+    /// Wide sheet (>26 cols) surfaces ALL headers in the `SheetExists`
+    /// envelope, and `last_modified` is populated from Drive `modifiedTime`.
+    /// One mock serves both the `list_sheets` and `get_modified_time` reads
+    /// because both hit `/{id}?...` and the body carries `sheets` +
+    /// `modifiedTime`.
+    #[tokio::test]
+    async fn fail_envelope_has_wide_columns_and_last_modified() {
+        pyo3::prepare_freethreaded_python();
+
+        let server = wiremock::MockServer::start().await;
+        let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
+        client.token_test_seed("fake-token").await;
+
+        // 30-column header — proves the range went past Z.
+        let header: Vec<String> = (0..30).map(|i| format!("c{i}")).collect();
+
+        // list_sheets (cols=30) + modifiedTime served from one mock.
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(r"/ss_w\?"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "sheets": [{
+                        "properties": {
+                            "sheetId": 3, "title": "Wide", "index": 0,
+                            "gridProperties": {"rowCount": 10, "columnCount": 30}
+                        }
+                    }],
+                    "modifiedTime": "2026-06-04T10:23:00Z",
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(r"/ss_w/values/Wide"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "range": "Wide!A1:AD1",
+                    "majorDimension": "ROWS",
+                    "values": [header],
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        let args = serde_json::json!({
+            "bindings": [{"var": "x", "spreadsheet_id": "ss_w", "sheet": "Wide"}],
+            "code": "\
+        import pandas as pd\n\
+        df = pd.DataFrame(x)\n\
+        output_sheets = {'Wide': df}\n\
+        output = {}\n\
+        ",
+            "write_to_spreadsheet": "ss_w"
+        });
+
+        let client: Arc<dyn SheetsClient> = Arc::new(client);
+        let res = dispatch_gsheets_run_python_with_client(client, args).await;
+
+        if let Some(err) = res.get("error").and_then(|v| v.as_str()) {
+            if err.contains("No module named 'pandas'") {
+                eprintln!("SKIPPED (no pandas): {err}");
+                return;
+            }
+        }
+        let wrote = res
+            .get("wrote_sheets")
+            .and_then(|v| v.as_array())
+            .expect("wrote_sheets must be array");
+        assert_eq!(wrote[0]["error"], "SheetExists");
+        let cols = wrote[0]["current_state"]["columns"].as_array().unwrap();
+        assert_eq!(cols.len(), 30, "all 30 headers must surface, not just A:Z");
+        assert_eq!(cols[29], "c29");
+        assert_eq!(
+            wrote[0]["current_state"]["last_modified"],
+            "2026-06-04T10:23:00Z"
+        );
     }
 
     #[tokio::test]

@@ -779,6 +779,18 @@ impl SheetsClient for GoogleSheetsHttpClient {
         })
     }
 
+    async fn get_modified_time(&self, id: &SpreadsheetId) -> Result<Option<String>, SheetsError> {
+        let url = format!(
+            "{}/{}?fields=modifiedTime&supportsAllDrives=true",
+            self.drive_base, id.0
+        );
+        let j = self.get_json(&url).await?;
+        Ok(j.get("modifiedTime")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from))
+    }
+
     async fn add_sheet(&self, id: &SpreadsheetId, name: &str) -> Result<SheetMeta, SheetsError> {
         let url = format!("{}/{}:batchUpdate", self.sheets_base, id.0);
         let body = serde_json::json!({

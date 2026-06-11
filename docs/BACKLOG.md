@@ -43,9 +43,9 @@ CRDT-specific. Ver banner detallado al inicio del bloque CRDT.
 ### 🟢 Quick wins — bajo esfuerzo, alto ratio
 | Item | Esfuerzo | Impacto | Sección |
 |---|---|---|---|
-| `last_modified` en error `SheetExists` | ~15 min | Med — el LLM evalúa mejor si es seguro overwrite | [Sheets write safety v1.1 — surface `last_modified`](#sheets-write-safety-v11--surface-last_modified-in-sheetexists-error) |
-| `gsheets_run_python` alias `sheet`/`sheets` | ~30 LOC | Med — ergonomía LLM, menos errores de args | [gsheets_run_python sheet/sheets alias](#sheets-write-safety-v11--gsheets_run_python-acepta-sheet--sheets-como-alias-de-name) |
-| `diff_writer` límite de 26 columnas | small | Low — corrección edge-case | [diff_writer 26-column header limit](#sheets-write-safety-v11--diff_writer-26-column-header-limit) |
+| ✅ ~~`last_modified` en error `SheetExists`~~ — SHIPPED 2026-06-11 (§30) | ~15 min | Med — el LLM evalúa mejor si es seguro overwrite | [§30](CHANGELOG_2026-06.md) |
+| ✅ ~~`gsheets_run_python` / `crdt` aliases~~ — SHIPPED 2026-06-11 (§30) | ~30 LOC | Med — ergonomía LLM, menos errores de args | [§30](CHANGELOG_2026-06.md) |
+| ✅ ~~`diff_writer` límite de 26 columnas~~ — SHIPPED 2026-06-11 (§30) | small | Low — corrección edge-case | [§30](CHANGELOG_2026-06.md) |
 | `gdocs_insert_image` (path i/ii: URL o signed-URL) | ~2-3h | Med — cierra gap lossy de imágenes markdown | [gdocs_insert_image_after_text](#subsystem-g-v11-google-docs) |
 | Math expressions en gdocs markdown | small | Low — niche | [Subsystem G v1.1](#subsystem-g-v11-google-docs) |
 
@@ -946,7 +946,16 @@ Cada entrada debe tener:
 - **Cuándo retomar** — un trigger concreto, no "cuando haya tiempo".
 - **Referencias** — links a docs/specs/plans existentes.
 
-## gsheets_run_python — UX aliases for bindings + output_sheets
+## ~~gsheets_run_python — UX aliases for bindings + output_sheets~~ — SHIPPED 2026-06-11
+
+**Shipped (CHANGELOG §30 + prior):** el lado gsheets ya estaba completo —
+`var`↔`binding_name`↔`name` (línea 91), `sheet`↔`sheet_name` (línea 97), y el
+drop de `output_sheets` como tool-arg con warning. El "Also:" de
+`crdt_doc_run_python` se cerró el 2026-06-11: `sheet_ids` ahora acepta
+`sheets`/`sheet_names` vía `#[serde(alias)]`. Test:
+`sheet_ids_accepts_sheets_and_sheet_names_aliases`.
+
+Conservado para referencia histórica:
 
 **Trigger**: when re-running the multi-sheet demo and the LLM still
 hallucinates field names. Demo on 2026-06-06 showed Gemini-2.5-pro
@@ -1042,7 +1051,16 @@ guides the LLM more.
 
 ---
 
-## Sheets write safety v1.1 — surface `last_modified` in SheetExists error
+## ~~Sheets write safety v1.1 — surface `last_modified` in SheetExists error~~ — SHIPPED 2026-06-11
+
+**Fix shipped (CHANGELOG §30):** nuevo método best-effort
+`SheetsClient::get_modified_time` (Drive `files.get?fields=modifiedTime`).
+`TabMeta.last_modified: Option<String>` se expone en
+`current_state.last_modified` del envelope `SheetExists`. Falla del Drive call →
+`None`, nunca tumba el fetch. CRDT pasa `None`. Tests en `sheet_collision.rs` +
+wiremock combinado en `gsheets_run_python.rs`.
+
+Conservado para referencia histórica:
 
 - **Origen:** spec sheets-write-safety §1 mencionaba `last_modified:
   "2026-06-04T10:23:00Z"` en el ejemplo del envelope `SheetExists`.
@@ -1097,7 +1115,14 @@ guides the LLM more.
 
 ---
 
-## Sheets write safety v1.1 — diff_writer 26-column header limit
+## ~~Sheets write safety v1.1 — diff_writer 26-column header limit~~ — SHIPPED 2026-06-11
+
+**Fix shipped (CHANGELOG §30):** `fetch_tab_meta` ahora computa el header range
+desde `meta.col_count` vía `a1_addr` (30 cols → `A1:AD1`) en vez del `A1:Z1`
+hardcodeado. `current_state.columns` ya no se trunca en Z. Tests:
+`header_range_spans_past_column_z` + `fail_envelope_has_wide_columns_and_last_modified`.
+
+Conservado para referencia histórica:
 
 - **Origen:** durante E2E del feature shipped 2026-06-07,
   `fetch_tab_meta` y `do_update_in_place` leen el header row vía

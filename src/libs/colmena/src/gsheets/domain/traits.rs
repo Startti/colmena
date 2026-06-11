@@ -53,6 +53,13 @@ pub trait SheetsClient: Send + Sync {
         filter: &crate::gsheets::domain::types::SpreadsheetListFilter<'a>,
     ) -> Result<crate::gsheets::domain::types::SpreadsheetListResult, SheetsError>;
 
+    /// Drive `files.get` for a single spreadsheet's `modifiedTime`
+    /// (RFC 3339). Used to surface `last_modified` in the `SheetExists`
+    /// collision envelope so the LLM can judge whether the existing data
+    /// is fresh before overwriting. Returns `None` if Drive omits the
+    /// field. Best-effort — callers degrade gracefully on error.
+    async fn get_modified_time(&self, id: &SpreadsheetId) -> Result<Option<String>, SheetsError>;
+
     async fn list_sheets(&self, id: &SpreadsheetId) -> Result<Vec<SheetMeta>, SheetsError>;
 
     async fn add_sheet(&self, id: &SpreadsheetId, name: &str) -> Result<SheetMeta, SheetsError>;

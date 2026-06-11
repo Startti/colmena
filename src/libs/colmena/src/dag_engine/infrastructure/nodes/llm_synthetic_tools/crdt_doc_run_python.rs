@@ -34,7 +34,10 @@ const CODE_TIMEOUT_SECS: u64 = 30;
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RunPythonArgs {
     /// Sheets to load as pandas DataFrames. Available in the code as
-    /// `dfs[<sheet_id>]`. At least one required.
+    /// `dfs[<sheet_id>]`. At least one required. Accepts UX aliases
+    /// `sheets` and `sheet_names` because LLMs frequently paraphrase the
+    /// field name.
+    #[serde(alias = "sheets", alias = "sheet_names")]
     pub sheet_ids: Vec<String>,
     /// Python code to execute. Must define `output` (any JSON-serializable
     /// value) and/or `output_sheets` (a dict of names → DataFrames; supports
@@ -244,6 +247,8 @@ fn crdt_lookup_tab_by_name(doc: &yrs::Doc, name: &str) -> Option<(String, TabMet
         n_rows: recs.records.len() as u64,
         n_cols: recs.columns.len() as u64,
         columns: recs.columns,
+        // CRDT docs have no Drive `modifiedTime` concept.
+        last_modified: None,
     };
     Some((sid, meta))
 }
@@ -570,6 +575,18 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("crdt_py_{}", ulid::Ulid::new()));
         let cfg = json!({ "storage_root": tmp.to_str().unwrap() });
         Arc::new(CrdtDocumentsRuntime::from_config(&cfg).await.unwrap())
+    }
+
+    #[test]
+    fn sheet_ids_accepts_sheets_and_sheet_names_aliases() {
+        for field in ["sheet_ids", "sheets", "sheet_names"] {
+            let args: RunPythonArgs = serde_json::from_value(json!({
+                field: ["sh_1", "sh_2"],
+                "code": "output = {}",
+            }))
+            .unwrap_or_else(|e| panic!("alias `{field}` must map to sheet_ids: {e}"));
+            assert_eq!(args.sheet_ids, vec!["sh_1", "sh_2"]);
+        }
     }
 
     #[tokio::test]

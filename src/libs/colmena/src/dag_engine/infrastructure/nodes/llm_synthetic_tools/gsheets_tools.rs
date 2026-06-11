@@ -823,6 +823,12 @@ mod tests {
                 col_count: 26,
             }])
         }
+        async fn get_modified_time(
+            &self,
+            _id: &SpreadsheetId,
+        ) -> Result<Option<String>, SheetsError> {
+            Ok(Some("2026-06-04T10:23:00Z".into()))
+        }
         async fn create_spreadsheet(&self, _title: &str) -> Result<SpreadsheetMeta, SheetsError> {
             Err(SheetsError::Internal("not used".into()))
         }
