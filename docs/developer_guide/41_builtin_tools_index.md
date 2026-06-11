@@ -11,7 +11,7 @@ For the YAML registry that backs this index, see
 For toolkit packages (`enabled_tools: ["gsheets"]` shortcut), see
 [40_toolkit_packages.md](40_toolkit_packages.md).
 
-## gsheets (11 tools)
+## gsheets (14 tools)
 
 | Tool | Summary | Detailed docs |
 |---|---|---|
@@ -25,6 +25,9 @@ For toolkit packages (`enabled_tools: ["gsheets"]` shortcut), see
 | `gsheets_read` | Read a cell range from a tab; supports formatted, unformatted, and formula render modes | [§39](39_gsheets.md) |
 | `gsheets_set_cell` | Write one value or formula into a single cell | [§39](39_gsheets.md) |
 | `gsheets_set_range` | Write a 2-D values array starting at a given address | [§39](39_gsheets.md) |
+| `gsheets_share` | Grant a Google account access to a spreadsheet (reader / commenter / writer) | [§39](39_gsheets.md) |
+| `gsheets_list_permissions` | Show every Drive permission on a spreadsheet (who has access and at what role) | [§39](39_gsheets.md) |
+| `gsheets_unshare` | Revoke a previously-granted permission on a spreadsheet | [§39](39_gsheets.md) |
 | `gsheets_run_python` | Run sandboxed pandas analysis over sheet ranges loaded directly by the dispatcher (rows never pass through the LLM) | [§39](39_gsheets.md) |
 
 ## crdt_doc (11 tools)
@@ -75,7 +78,7 @@ computation server-side (run_python) instead of dumping every row.
 | `sql_inspect_attachment` | Open a registered CSV/XLSX attachment and report its header, sample rows, total row count, and inferred column types — without forcing the LLM to read every row | [§23](23_sql_node.md#bulk-insert-from-attachment-shipped-2026-06-09) |
 | `sql_bulk_insert_from_attachment` | Stream a CSV attachment into a Postgres table via COPY FROM STDIN — bypasses the LLM context for the rows and runs orders of magnitude faster than per-row INSERT | [§23](23_sql_node.md#bulk-insert-from-attachment-shipped-2026-06-09) |
 
-## gdocs (23 tools)
+## gdocs (25 tools)
 
 Content-addressed surgical editing — the LLM specifies WHAT to change
 (text, heading, named range) and never computes UTF-16 indices.
@@ -110,6 +113,8 @@ Detailed docs: [§45 — Google Docs integration](45_gdocs.md). Design spec:
 | `gdocs_replace_named_range` | Overwrite the contents of a named range | [§45](45_gdocs.md) |
 | `gdocs_acknowledge_human_changes` | Acknowledge concurrent human edits and reset the co-edit cursor | [§45](45_gdocs.md) |
 | `gdocs_list_documents` | Discover Google Docs visible to the OAuth user — optionally filtered by name, folder, or modified-after date | [§45](45_gdocs.md) |
+| `gdocs_list_permissions` | Show every Drive permission on a document (who has access and at what role) | [§45](45_gdocs.md) |
+| `gdocs_unshare` | Revoke a previously-granted permission on a document | [§45](45_gdocs.md) |
 
 ## Toolkit packages
 

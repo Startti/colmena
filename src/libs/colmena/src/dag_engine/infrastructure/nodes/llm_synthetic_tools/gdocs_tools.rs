@@ -56,6 +56,9 @@ pub const TOOL_REPLACE_NAMED_RANGE: &str = "gdocs_replace_named_range";
 pub const TOOL_ACKNOWLEDGE_HUMAN_CHANGES: &str = "gdocs_acknowledge_human_changes";
 /// Bundle 2A (2026-06-11): Drive discovery.
 pub const TOOL_LIST_DOCUMENTS: &str = "gdocs_list_documents";
+/// Bundle 2B (2026-06-11): Drive permissions tools.
+pub const TOOL_LIST_PERMISSIONS: &str = "gdocs_list_permissions";
+pub const TOOL_UNSHARE: &str = "gdocs_unshare";
 
 // ── Process-wide singletons ───────────────────────────────────────────
 
@@ -508,6 +511,37 @@ pub fn tool_list_documents() -> ToolDefinition {
     )
 }
 
+/// Bundle 2B (2026-06-11): Args for [`TOOL_LIST_PERMISSIONS`].
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListPermissionsArgs {
+    pub doc_id: String,
+}
+
+pub fn tool_list_permissions() -> ToolDefinition {
+    super::build_synthetic_tool_with_summary::<ListPermissionsArgs>(
+        TOOL_LIST_PERMISSIONS,
+        text::tool_description(TOOL_LIST_PERMISSIONS),
+        text::tool_summary(TOOL_LIST_PERMISSIONS),
+    )
+}
+
+/// Bundle 2B (2026-06-11): Args for [`TOOL_UNSHARE`].
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UnshareArgs {
+    pub doc_id: String,
+    /// Drive's stable permission id (NOT the email). Get it from
+    /// `gdocs_list_permissions`.
+    pub permission_id: String,
+}
+
+pub fn tool_unshare() -> ToolDefinition {
+    super::build_synthetic_tool_with_summary::<UnshareArgs>(
+        TOOL_UNSHARE,
+        text::tool_description(TOOL_UNSHARE),
+        text::tool_summary(TOOL_UNSHARE),
+    )
+}
+
 pub fn tool_export() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<ExportArgs>(
         TOOL_EXPORT,
@@ -680,6 +714,10 @@ pub fn build_all_gdocs_tools() -> Vec<ToolDefinition> {
         tool_replace_named_range(),
         tool_acknowledge_human_changes(),
         tool_list_documents(),
+        tool_list_permissions(),
+        tool_unshare(),
+        // Bundle 2B (2026-06-11) adds 2 permissions tools above
+        // (list_permissions, unshare); share was already in v1.
     ]
 }
 
@@ -822,6 +860,47 @@ pub async fn dispatch_create_from_docx_via_executor(
             "revision_id": meta.revision_id.0,
             "tabs": meta.tabs,
         }),
+        Err(e) => error_to_json(e),
+    }
+}
+
+/// Bundle 2B (2026-06-11) — list every Drive permission on a doc.
+pub async fn dispatch_list_permissions(
+    args: serde_json::Value,
+    _session_id: &str,
+) -> serde_json::Value {
+    let parsed: ListPermissionsArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return invalid_args(e),
+    };
+    let client = match shared_client().await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    match client.list_permissions(&DocumentId(parsed.doc_id)).await {
+        Ok(list) => serde_json::json!({
+            "ok": true,
+            "permissions": list.permissions,
+        }),
+        Err(e) => error_to_json(e),
+    }
+}
+
+/// Bundle 2B (2026-06-11) — revoke a permission from a doc.
+pub async fn dispatch_unshare(args: serde_json::Value, _session_id: &str) -> serde_json::Value {
+    let parsed: UnshareArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return invalid_args(e),
+    };
+    let client = match shared_client().await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    match client
+        .delete_permission(&DocumentId(parsed.doc_id), &parsed.permission_id)
+        .await
+    {
+        Ok(()) => serde_json::json!({ "ok": true }),
         Err(e) => error_to_json(e),
     }
 }
@@ -1630,10 +1709,11 @@ mod tests {
     }
 
     #[test]
-    fn build_all_returns_23_tools() {
+    fn build_all_returns_25_tools() {
         let tools = build_all_gdocs_tools();
-        // 22 tools v1 + gdocs_list_documents (Bundle 2A, 2026-06-11) = 23
-        assert_eq!(tools.len(), 23);
+        // 22 v1 + 1 Bundle 2A (list_documents) + 2 Bundle 2B
+        // (list_permissions, unshare) = 25.
+        assert_eq!(tools.len(), 25);
     }
 
     #[test]

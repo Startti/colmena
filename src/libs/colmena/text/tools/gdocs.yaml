@@ -256,3 +256,47 @@ gdocs_list_documents:
     The agent account only sees files that have been shared with it OR are
     owned by it. To make a new doc visible to the agent, share it with the
     share email shown in the agent's catalog prelude.
+
+gdocs_list_permissions:
+  summary: Show every Drive permission on a document (who has access and at what role)
+  description: |
+    Drive `permissions.list` for a doc. Returns all grants — users, groups,
+    domains, and `"anyone"` link-shared entries — so the LLM can audit
+    access before sharing or revoking.
+
+    Args:
+      - `doc_id` (req): the Drive id of the document.
+
+    Returns `{ok: true, permissions: [{permission_id, type, role, email?, display_name?}]}`.
+    `permission_id` is Drive's stable id (NOT the email). Pass it to
+    `gdocs_unshare` to revoke.
+
+    `email` and `display_name` are only present when Drive surfaces them
+    (some org policies mask them; `"anyone"` entries have neither).
+
+    Use this BEFORE `gdocs_unshare` to pick the right `permission_id`.
+
+gdocs_unshare:
+  summary: Revoke a previously-granted permission on a document
+  description: |
+    Drive `permissions.delete`. Removes a single grant by Drive's stable
+    `permission_id`.
+
+    Args:
+      - `doc_id` (req): the Drive id of the document.
+      - `permission_id` (req): Drive's stable id from `gdocs_list_permissions`.
+        NOT the email.
+
+    Returns `{ok: true}`. Errors:
+      - `document_not_found`: doc or permission id doesn't exist.
+      - `permission_denied`: agent account is not the owner.
+
+    Typical workflow:
+      1. User: "sacale acceso a daniel@cliente.com del plan Q3"
+      2. LLM: gdocs_list_permissions({doc_id: "1abc"})
+         → recibe permissions con {permission_id: "perm789", email: "daniel@cliente.com"}
+      3. LLM: gdocs_unshare({doc_id: "1abc", permission_id: "perm789"})
+         → {ok: true}
+
+    DO NOT confuse permission_id with email — Drive can have multiple
+    grants for the same email; each has its own permission_id.

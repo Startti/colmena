@@ -139,6 +139,45 @@ pub struct SpreadsheetMeta {
     pub sheets: Vec<SheetMeta>,
 }
 
+/// Bundle 2B (2026-06-11): Drive sharing role granted by a `share` call.
+/// Symmetric to [`crate::gdocs::domain::types::ShareRole`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShareRole {
+    Reader,
+    Commenter,
+    Writer,
+}
+
+impl ShareRole {
+    pub fn as_api_str(self) -> &'static str {
+        match self {
+            Self::Reader => "reader",
+            Self::Commenter => "commenter",
+            Self::Writer => "writer",
+        }
+    }
+}
+
+/// Bundle 2B (2026-06-11): one Drive permission entry on a spreadsheet.
+/// Symmetric to [`crate::gdocs::domain::types::PermissionEntry`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionEntry {
+    pub permission_id: String,
+    #[serde(rename = "type")]
+    pub permission_type: String,
+    pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionList {
+    pub permissions: Vec<PermissionEntry>,
+}
+
 /// One entry in the `list_spreadsheets` response. Like `DocumentListItem`
 /// but scoped to spreadsheets. Only the fields the LLM cares about are
 /// surfaced; downstream tools that need more metadata call

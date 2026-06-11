@@ -1048,7 +1048,9 @@ impl DagToolExecutor {
                 TOOL_CREATE_FROM_XLSX, TOOL_EXPORT_XLSX,
             };
             use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
-                dispatch_gsheets_list_spreadsheets, GSHEETS_LIST_SPREADSHEETS_TOOL,
+                dispatch_gsheets_list_permissions, dispatch_gsheets_list_spreadsheets,
+                dispatch_gsheets_share, dispatch_gsheets_unshare, GSHEETS_LIST_PERMISSIONS_TOOL,
+                GSHEETS_LIST_SPREADSHEETS_TOOL, GSHEETS_SHARE_TOOL, GSHEETS_UNSHARE_TOOL,
             };
             let name = tool_call.function.name.as_str();
             let is_gsheets_tool = matches!(
@@ -1064,6 +1066,9 @@ impl DagToolExecutor {
                     || n == TOOL_CREATE_FROM_XLSX
                     || n == TOOL_EXPORT_XLSX
                     || n == GSHEETS_LIST_SPREADSHEETS_TOOL
+                    || n == GSHEETS_SHARE_TOOL
+                    || n == GSHEETS_LIST_PERMISSIONS_TOOL
+                    || n == GSHEETS_UNSHARE_TOOL
             );
 
             if is_gsheets_tool {
@@ -1099,6 +1104,11 @@ impl DagToolExecutor {
                     n if n == GSHEETS_LIST_SPREADSHEETS_TOOL => {
                         dispatch_gsheets_list_spreadsheets(args).await
                     }
+                    n if n == GSHEETS_SHARE_TOOL => dispatch_gsheets_share(args).await,
+                    n if n == GSHEETS_LIST_PERMISSIONS_TOOL => {
+                        dispatch_gsheets_list_permissions(args).await
+                    }
+                    n if n == GSHEETS_UNSHARE_TOOL => dispatch_gsheets_unshare(args).await,
                     other => serde_json::json!({
                         "error": "unknown_gsheets_tool",
                         "message": format!("router matched gsheets prefix but no dispatch arm for `{other}` — this is a bug in dag_tool_executor"),
@@ -1137,19 +1147,21 @@ impl DagToolExecutor {
                 dispatch_gdocs_create_from_markdown, dispatch_gdocs_create_named_range,
                 dispatch_gdocs_delete_text, dispatch_gdocs_insert_after_text,
                 dispatch_gdocs_insert_before_text, dispatch_gdocs_insert_between,
-                dispatch_gdocs_list_named_ranges, dispatch_gdocs_list_tabs,
-                dispatch_gdocs_read_as_markdown, dispatch_gdocs_read_outline,
-                dispatch_gdocs_replace_named_range, dispatch_gdocs_replace_section,
-                dispatch_gdocs_replace_text, dispatch_gdocs_share, dispatch_gdocs_style_text,
+                dispatch_gdocs_list_named_ranges, dispatch_gdocs_list_permissions,
+                dispatch_gdocs_list_tabs, dispatch_gdocs_read_as_markdown,
+                dispatch_gdocs_read_outline, dispatch_gdocs_replace_named_range,
+                dispatch_gdocs_replace_section, dispatch_gdocs_replace_text, dispatch_gdocs_share,
+                dispatch_gdocs_style_text, dispatch_gdocs_unshare,
                 GDOCS_ACKNOWLEDGE_HUMAN_CHANGES_TOOL, GDOCS_ADD_TAB_TOOL,
                 GDOCS_APPEND_MARKDOWN_TOOL, GDOCS_APPLY_EDITS_TOOL, GDOCS_CREATE_FROM_DOCX_TOOL,
                 GDOCS_CREATE_FROM_MARKDOWN_TOOL, GDOCS_CREATE_NAMED_RANGE_TOOL, GDOCS_CREATE_TOOL,
                 GDOCS_DELETE_TEXT_TOOL, GDOCS_EXPORT_TOOL, GDOCS_INSERT_AFTER_TEXT_TOOL,
                 GDOCS_INSERT_BEFORE_TEXT_TOOL, GDOCS_INSERT_BETWEEN_TOOL,
-                GDOCS_LIST_DOCUMENTS_TOOL, GDOCS_LIST_NAMED_RANGES_TOOL, GDOCS_LIST_TABS_TOOL,
-                GDOCS_READ_AS_MARKDOWN_TOOL, GDOCS_READ_OUTLINE_TOOL,
-                GDOCS_REPLACE_NAMED_RANGE_TOOL, GDOCS_REPLACE_SECTION_TOOL,
-                GDOCS_REPLACE_TEXT_TOOL, GDOCS_SHARE_TOOL, GDOCS_STYLE_TEXT_TOOL,
+                GDOCS_LIST_DOCUMENTS_TOOL, GDOCS_LIST_NAMED_RANGES_TOOL,
+                GDOCS_LIST_PERMISSIONS_TOOL, GDOCS_LIST_TABS_TOOL, GDOCS_READ_AS_MARKDOWN_TOOL,
+                GDOCS_READ_OUTLINE_TOOL, GDOCS_REPLACE_NAMED_RANGE_TOOL,
+                GDOCS_REPLACE_SECTION_TOOL, GDOCS_REPLACE_TEXT_TOOL, GDOCS_SHARE_TOOL,
+                GDOCS_STYLE_TEXT_TOOL, GDOCS_UNSHARE_TOOL,
             };
 
             let name = tool_call.function.name.as_str();
@@ -1162,6 +1174,8 @@ impl DagToolExecutor {
                     || n == GDOCS_EXPORT_TOOL
                     || n == GDOCS_LIST_TABS_TOOL
                     || n == GDOCS_LIST_DOCUMENTS_TOOL
+                    || n == GDOCS_LIST_PERMISSIONS_TOOL
+                    || n == GDOCS_UNSHARE_TOOL
                     || n == GDOCS_ADD_TAB_TOOL
                     || n == GDOCS_READ_AS_MARKDOWN_TOOL
                     || n == GDOCS_READ_OUTLINE_TOOL
@@ -1232,6 +1246,10 @@ impl DagToolExecutor {
                         use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::dispatch_gdocs_list_documents;
                         dispatch_gdocs_list_documents(args, session_id).await
                     }
+                    n if n == GDOCS_LIST_PERMISSIONS_TOOL => {
+                        dispatch_gdocs_list_permissions(args, session_id).await
+                    }
+                    n if n == GDOCS_UNSHARE_TOOL => dispatch_gdocs_unshare(args, session_id).await,
                     n if n == GDOCS_ADD_TAB_TOOL => dispatch_gdocs_add_tab(args, session_id).await,
                     n if n == GDOCS_READ_AS_MARKDOWN_TOOL => {
                         dispatch_gdocs_read_as_markdown(args, session_id).await

@@ -612,6 +612,89 @@ impl DocsClient for GoogleDocsHttpClient {
         Ok(())
     }
 
+    async fn list_permissions(
+        &self,
+        id: &DocumentId,
+    ) -> Result<crate::gdocs::domain::types::PermissionList, DocsError> {
+        use crate::gdocs::domain::types::{PermissionEntry, PermissionList};
+        let url = format!("{}/files/{}/permissions", self.base_drive, id.0);
+        let url_for_req = url.clone();
+        let fields_for_req =
+            "permissions(id,type,role,emailAddress,displayName),nextPageToken".to_string();
+        let resp = self
+            .send_with_retry(move |c, t| {
+                c.request(Method::GET, &url_for_req).bearer_auth(t).query(&[
+                    ("fields", fields_for_req.as_str()),
+                    ("supportsAllDrives", "true"),
+                ])
+            })
+            .await?;
+        let resp = self.map_status(resp, "permissions.list").await?;
+        let j: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| DocsError::Http(format!("permissions.list json: {e}")))?;
+        let perms = j
+            .get("permissions")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut out = Vec::with_capacity(perms.len());
+        for p in perms {
+            let permission_id = p
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| DocsError::Http("permission missing id".into()))?
+                .to_string();
+            let permission_type = p
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("user")
+                .to_string();
+            let role = p
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("reader")
+                .to_string();
+            let email = p
+                .get("emailAddress")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let display_name = p
+                .get("displayName")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            out.push(PermissionEntry {
+                permission_id,
+                permission_type,
+                role,
+                email,
+                display_name,
+            });
+        }
+        Ok(PermissionList { permissions: out })
+    }
+
+    async fn delete_permission(
+        &self,
+        id: &DocumentId,
+        permission_id: &str,
+    ) -> Result<(), DocsError> {
+        let url = format!(
+            "{}/files/{}/permissions/{}",
+            self.base_drive, id.0, permission_id
+        );
+        let resp = self
+            .send_with_retry(|c, t| {
+                c.request(Method::DELETE, &url)
+                    .bearer_auth(t)
+                    .query(&[("supportsAllDrives", "true")])
+            })
+            .await?;
+        self.map_status(resp, "permissions.delete").await?;
+        Ok(())
+    }
+
     async fn list_documents<'a>(
         &self,
         filter: &crate::gdocs::domain::types::DocumentListFilter<'a>,

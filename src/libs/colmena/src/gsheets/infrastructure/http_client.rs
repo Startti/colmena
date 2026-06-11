@@ -553,6 +553,139 @@ impl SheetsClient for GoogleSheetsHttpClient {
         Ok(bytes.to_vec())
     }
 
+    async fn share(
+        &self,
+        id: &SpreadsheetId,
+        email: &str,
+        role: crate::gsheets::domain::types::ShareRole,
+    ) -> Result<(), SheetsError> {
+        let url = format!(
+            "{}/{}/permissions?supportsAllDrives=true",
+            self.drive_base, id.0
+        );
+        let body = serde_json::json!({
+            "role": role.as_api_str(),
+            "type": "user",
+            "emailAddress": email,
+        });
+        // post_json returns the created Permission resource; we only care
+        // that the call succeeds (404 / 403 surfaced as typed errors by
+        // post_json), so discard the body.
+        self.post_json(&url, body).await?;
+        Ok(())
+    }
+
+    async fn list_permissions(
+        &self,
+        id: &SpreadsheetId,
+    ) -> Result<crate::gsheets::domain::types::PermissionList, SheetsError> {
+        use crate::gsheets::domain::types::{PermissionEntry, PermissionList};
+        let url = format!(
+            "{}/{}/permissions?fields={}&supportsAllDrives=true",
+            self.drive_base,
+            id.0,
+            urlencoding::encode("permissions(id,type,role,emailAddress,displayName),nextPageToken"),
+        );
+        let j = self.get_json(&url).await?;
+        let perms = j
+            .get("permissions")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut out = Vec::with_capacity(perms.len());
+        for p in perms {
+            let permission_id = p
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| SheetsError::Internal("permission missing id".into()))?
+                .to_string();
+            let permission_type = p
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("user")
+                .to_string();
+            let role = p
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("reader")
+                .to_string();
+            let email = p
+                .get("emailAddress")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let display_name = p
+                .get("displayName")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            out.push(PermissionEntry {
+                permission_id,
+                permission_type,
+                role,
+                email,
+                display_name,
+            });
+        }
+        Ok(PermissionList { permissions: out })
+    }
+
+    async fn delete_permission(
+        &self,
+        id: &SpreadsheetId,
+        permission_id: &str,
+    ) -> Result<(), SheetsError> {
+        let url = format!(
+            "{}/{}/permissions/{}?supportsAllDrives=true",
+            self.drive_base, id.0, permission_id
+        );
+        // No existing delete_json helper — issue the request directly with
+        // a single retry on auth failure, matching the contract of get/put.
+        for attempt in 0..=self.max_retries {
+            let token = self.token.token().await?;
+            let resp = self
+                .http
+                .delete(&url)
+                .bearer_auth(&token)
+                .send()
+                .await
+                .map_err(|e| SheetsError::Http(format!("send: {e}")))?;
+            match resp.status() {
+                s if s.is_success() => return Ok(()),
+                StatusCode::UNAUTHORIZED if attempt == 0 => {
+                    self.token.invalidate().await;
+                    continue;
+                }
+                StatusCode::FORBIDDEN => {
+                    return Err(SheetsError::PermissionDenied(self.share_email.clone()));
+                }
+                StatusCode::NOT_FOUND => {
+                    return Err(SheetsError::SpreadsheetNotFound(format!(
+                        "permission {permission_id} on {}",
+                        id.0
+                    )));
+                }
+                StatusCode::TOO_MANY_REQUESTS => {
+                    if attempt < self.max_retries {
+                        tokio::time::sleep(self.retry_base_delay * (1 << attempt)).await;
+                        continue;
+                    }
+                    return Err(SheetsError::RateLimit(60));
+                }
+                s if s.is_server_error() => {
+                    if attempt < self.max_retries {
+                        tokio::time::sleep(self.retry_base_delay * (1 << attempt)).await;
+                        continue;
+                    }
+                    return Err(SheetsError::Http(format!("server error {s}")));
+                }
+                s => {
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(SheetsError::Http(format!("status {s}: {body}")));
+                }
+            }
+        }
+        Err(SheetsError::Http("retries exhausted".to_string()))
+    }
+
     async fn list_spreadsheets<'a>(
         &self,
         filter: &crate::gsheets::domain::types::SpreadsheetListFilter<'a>,

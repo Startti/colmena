@@ -161,3 +161,73 @@ gsheets_list_spreadsheets:
     The agent account only sees files that have been shared with it OR are
     owned by it. To make a new spreadsheet visible to the agent, share it
     with the share email shown in the agent's catalog prelude.
+
+gsheets_share:
+  summary: Grant a Google account access to a spreadsheet (reader / commenter / writer)
+  description: |
+    Drive `permissions.create` for a spreadsheet. Adds a single grant.
+    Drive emails the recipient unless your operator config disables
+    notifications.
+
+    Args:
+      - `spreadsheet_id` (req): the Drive id of the spreadsheet.
+      - `email` (req): the user / group address to grant access to.
+      - `role` (req): one of `"reader"`, `"commenter"`, `"writer"`.
+
+    Returns `{ok: true}`. Errors:
+      - `permission_denied`: agent account is not the owner / lacks share rights.
+      - `invalid_role`: role must be one of the three strings above.
+
+    Typical workflow:
+      1. User: "compartí el inventario con ana@cliente.com como editora"
+      2. LLM: gsheets_list_spreadsheets({query: "inventario"})
+         → recibe {spreadsheets: [{spreadsheet_id: "1xyz"}]}
+      3. LLM: gsheets_share({spreadsheet_id: "1xyz", email: "ana@cliente.com", role: "writer"})
+         → {ok: true}
+
+    To revoke later: call `gsheets_unshare` with the `permission_id` from
+    `gsheets_list_permissions`.
+
+gsheets_list_permissions:
+  summary: Show every Drive permission on a spreadsheet (who has access and at what role)
+  description: |
+    Drive `permissions.list`. Returns all grants on the spreadsheet — users,
+    groups, domains, and `"anyone"` link-shared entries — so the LLM (and the
+    user) can audit who can see / edit it.
+
+    Args:
+      - `spreadsheet_id` (req): the Drive id.
+
+    Returns `{ok: true, permissions: [{permission_id, type, role, email?, display_name?}]}`.
+    `permission_id` is Drive's stable id (NOT the email) — pass it to
+    `gsheets_unshare` to revoke a specific grant.
+
+    `email` and `display_name` are only present when Drive surfaces them
+    (some org policies mask them, and `"anyone"` entries have neither).
+
+    Use this BEFORE `gsheets_unshare` to pick the right `permission_id`.
+
+gsheets_unshare:
+  summary: Revoke a previously-granted permission on a spreadsheet
+  description: |
+    Drive `permissions.delete`. Removes a single grant by its Drive
+    `permission_id`. Idempotent on the second call (Drive returns 404 →
+    surfaced as `spreadsheet_not_found` with the permission id baked in).
+
+    Args:
+      - `spreadsheet_id` (req): the Drive id.
+      - `permission_id` (req): Drive's stable id from `gsheets_list_permissions`.
+        NOT the email — emails are not unique grants.
+
+    Returns `{ok: true}` on success.
+
+    Typical workflow:
+      1. User: "sacale acceso a ana@cliente.com del inventario"
+      2. LLM: gsheets_list_permissions({spreadsheet_id: "1xyz"})
+         → recibe permissions con {permission_id: "perm123", email: "ana@cliente.com"}
+      3. LLM: gsheets_unshare({spreadsheet_id: "1xyz", permission_id: "perm123"})
+         → {ok: true}
+
+    DO NOT confuse permission_id with email — Drive can have multiple
+    grants for the same email (different roles via different grants); each
+    has its own permission_id.

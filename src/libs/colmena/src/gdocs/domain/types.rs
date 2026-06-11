@@ -27,6 +27,39 @@ pub struct TabId(pub String);
 #[serde(transparent)]
 pub struct RevisionId(pub String);
 
+/// Bundle 2B (2026-06-11): one Drive permission entry on a file.
+/// Mirrors the subset of `drive.permissions.get` fields the LLM uses to
+/// decide whether to share/unshare a doc with someone. We omit fields
+/// like `domain`, `expirationTime`, `pendingOwner` until a real use case
+/// asks for them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionEntry {
+    /// Drive's stable permission id — pass it to `delete_permission` to
+    /// revoke a specific grant.
+    pub permission_id: String,
+    /// `"user" | "group" | "domain" | "anyone"`.
+    #[serde(rename = "type")]
+    pub permission_type: String,
+    /// `"owner" | "organizer" | "fileOrganizer" | "writer" | "commenter" | "reader"`.
+    pub role: String,
+    /// Present when `permission_type == "user" | "group"` and the account
+    /// surfaced an email (Drive masks this for some org policies).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// Present when `permission_type == "user"` (Drive resolves the
+    /// display name from the linked Google account).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+/// Result of `list_permissions`. No pagination today — Drive returns all
+/// entries in one page for files outside Shared Drives. If we ever need
+/// to support large permission lists we can add `next_page_token` later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionList {
+    pub permissions: Vec<PermissionEntry>,
+}
+
 /// One entry in the `list_documents` response. Surfaces just the fields
 /// the LLM cares about (id, name, url, modified time, owner emails);
 /// downstream tools that need more metadata can call `get()` with the

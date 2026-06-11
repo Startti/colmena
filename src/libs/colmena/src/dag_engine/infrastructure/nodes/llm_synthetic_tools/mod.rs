@@ -330,23 +330,29 @@ pub use gsheets_tools::{
     dispatch_add_sheet as dispatch_gsheets_add_sheet,
     dispatch_create_spreadsheet as dispatch_gsheets_create_spreadsheet,
     dispatch_delete_sheet as dispatch_gsheets_delete_sheet,
+    dispatch_list_permissions as dispatch_gsheets_list_permissions,
     dispatch_list_sheets as dispatch_gsheets_list_sheets,
     dispatch_list_spreadsheets as dispatch_gsheets_list_spreadsheets,
     dispatch_read as dispatch_gsheets_read, dispatch_set_cell as dispatch_gsheets_set_cell,
-    dispatch_set_range as dispatch_gsheets_set_range, tool_add_sheet as gsheets_tool_add_sheet,
+    dispatch_set_range as dispatch_gsheets_set_range, dispatch_share as dispatch_gsheets_share,
+    dispatch_unshare as dispatch_gsheets_unshare, tool_add_sheet as gsheets_tool_add_sheet,
     tool_create_from_xlsx as gsheets_tool_create_from_xlsx,
     tool_create_spreadsheet as gsheets_tool_create_spreadsheet,
     tool_delete_sheet as gsheets_tool_delete_sheet, tool_export_xlsx as gsheets_tool_export_xlsx,
+    tool_list_permissions as gsheets_tool_list_permissions,
     tool_list_sheets as gsheets_tool_list_sheets,
     tool_list_spreadsheets as gsheets_tool_list_spreadsheets, tool_read as gsheets_tool_read,
     tool_set_cell as gsheets_tool_set_cell, tool_set_range as gsheets_tool_set_range,
+    tool_share as gsheets_tool_share, tool_unshare as gsheets_tool_unshare,
     TOOL_ADD_SHEET as GSHEETS_ADD_SHEET_TOOL,
     TOOL_CREATE_FROM_XLSX as GSHEETS_CREATE_FROM_XLSX_TOOL,
     TOOL_CREATE_SPREADSHEET as GSHEETS_CREATE_SPREADSHEET_TOOL,
     TOOL_DELETE_SHEET as GSHEETS_DELETE_SHEET_TOOL, TOOL_EXPORT_XLSX as GSHEETS_EXPORT_XLSX_TOOL,
+    TOOL_LIST_PERMISSIONS as GSHEETS_LIST_PERMISSIONS_TOOL,
     TOOL_LIST_SHEETS as GSHEETS_LIST_SHEETS_TOOL,
     TOOL_LIST_SPREADSHEETS as GSHEETS_LIST_SPREADSHEETS_TOOL, TOOL_READ as GSHEETS_READ_TOOL,
     TOOL_SET_CELL as GSHEETS_SET_CELL_TOOL, TOOL_SET_RANGE as GSHEETS_SET_RANGE_TOOL,
+    TOOL_SHARE as GSHEETS_SHARE_TOOL, TOOL_UNSHARE as GSHEETS_UNSHARE_TOOL,
 };
 
 pub use gdocs_tools::{
@@ -364,13 +370,14 @@ pub use gdocs_tools::{
     dispatch_insert_between as dispatch_gdocs_insert_between,
     dispatch_list_documents as dispatch_gdocs_list_documents,
     dispatch_list_named_ranges as dispatch_gdocs_list_named_ranges,
+    dispatch_list_permissions as dispatch_gdocs_list_permissions,
     dispatch_list_tabs as dispatch_gdocs_list_tabs,
     dispatch_read_as_markdown as dispatch_gdocs_read_as_markdown,
     dispatch_read_outline as dispatch_gdocs_read_outline,
     dispatch_replace_named_range as dispatch_gdocs_replace_named_range,
     dispatch_replace_section as dispatch_gdocs_replace_section,
     dispatch_replace_text as dispatch_gdocs_replace_text, dispatch_share as dispatch_gdocs_share,
-    dispatch_style_text as dispatch_gdocs_style_text,
+    dispatch_style_text as dispatch_gdocs_style_text, dispatch_unshare as dispatch_gdocs_unshare,
     tool_acknowledge_human_changes as gdocs_tool_acknowledge_human_changes,
     tool_add_tab as gdocs_tool_add_tab, tool_append_markdown as gdocs_tool_append_markdown,
     tool_apply_edits as gdocs_tool_apply_edits, tool_create as gdocs_tool_create,
@@ -399,13 +406,14 @@ pub use gdocs_tools::{
     TOOL_INSERT_BEFORE_TEXT as GDOCS_INSERT_BEFORE_TEXT_TOOL,
     TOOL_INSERT_BETWEEN as GDOCS_INSERT_BETWEEN_TOOL,
     TOOL_LIST_DOCUMENTS as GDOCS_LIST_DOCUMENTS_TOOL,
-    TOOL_LIST_NAMED_RANGES as GDOCS_LIST_NAMED_RANGES_TOOL, TOOL_LIST_TABS as GDOCS_LIST_TABS_TOOL,
+    TOOL_LIST_NAMED_RANGES as GDOCS_LIST_NAMED_RANGES_TOOL,
+    TOOL_LIST_PERMISSIONS as GDOCS_LIST_PERMISSIONS_TOOL, TOOL_LIST_TABS as GDOCS_LIST_TABS_TOOL,
     TOOL_READ_AS_MARKDOWN as GDOCS_READ_AS_MARKDOWN_TOOL,
     TOOL_READ_OUTLINE as GDOCS_READ_OUTLINE_TOOL,
     TOOL_REPLACE_NAMED_RANGE as GDOCS_REPLACE_NAMED_RANGE_TOOL,
     TOOL_REPLACE_SECTION as GDOCS_REPLACE_SECTION_TOOL,
     TOOL_REPLACE_TEXT as GDOCS_REPLACE_TEXT_TOOL, TOOL_SHARE as GDOCS_SHARE_TOOL,
-    TOOL_STYLE_TEXT as GDOCS_STYLE_TEXT_TOOL,
+    TOOL_STYLE_TEXT as GDOCS_STYLE_TEXT_TOOL, TOOL_UNSHARE as GDOCS_UNSHARE_TOOL,
 };
 
 #[cfg(test)]
@@ -447,7 +455,7 @@ mod text_coverage_tests {
     /// Returns every synthetic ToolDefinition the colmena library registers,
     /// excluding describe_tool (dynamic per-turn construction).
     fn all_synthetic_tools() -> Vec<ToolDefinition> {
-        // gsheets — 10 tools + gsheets_run_python
+        // gsheets — 13 tools + gsheets_run_python
         let mut tools = vec![
             super::gsheets_tools::tool_create_spreadsheet(),
             super::gsheets_tools::tool_create_from_xlsx(),
@@ -459,10 +467,13 @@ mod text_coverage_tests {
             super::gsheets_tools::tool_read(),
             super::gsheets_tools::tool_set_cell(),
             super::gsheets_tools::tool_set_range(),
+            super::gsheets_tools::tool_share(),
+            super::gsheets_tools::tool_list_permissions(),
+            super::gsheets_tools::tool_unshare(),
             super::gsheets_run_python::tool_gsheets_run_python(),
         ];
 
-        // gdocs — 22 tools (via collector)
+        // gdocs — 25 tools (via collector)
         tools.extend(super::gdocs_tools::build_all_gdocs_tools());
 
         // crdt_doc — 9 tools (via collector)

@@ -20,6 +20,29 @@ pub trait SheetsClient: Send + Sync {
 
     async fn export_xlsx(&self, id: &SpreadsheetId) -> Result<Vec<u8>, SheetsError>;
 
+    /// Bundle 2B (2026-06-11): grant access to a spreadsheet.
+    /// Symmetric to `DocsClient::share`. Drive `permissions.create`.
+    async fn share(
+        &self,
+        id: &SpreadsheetId,
+        email: &str,
+        role: crate::gsheets::domain::types::ShareRole,
+    ) -> Result<(), SheetsError>;
+
+    /// Bundle 2B (2026-06-11): list every Drive permission on a spreadsheet.
+    async fn list_permissions(
+        &self,
+        id: &SpreadsheetId,
+    ) -> Result<crate::gsheets::domain::types::PermissionList, SheetsError>;
+
+    /// Bundle 2B (2026-06-11): revoke a permission. Symmetric to
+    /// `DocsClient::delete_permission`. Drive `permissions.delete`.
+    async fn delete_permission(
+        &self,
+        id: &SpreadsheetId,
+        permission_id: &str,
+    ) -> Result<(), SheetsError>;
+
     /// Drive discovery — return the spreadsheets the OAuth user can see,
     /// filtered by `filter`. Used by `gsheets_list_spreadsheets`.
     ///

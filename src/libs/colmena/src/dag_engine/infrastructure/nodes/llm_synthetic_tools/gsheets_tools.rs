@@ -33,6 +33,10 @@ pub const TOOL_CREATE_FROM_XLSX: &str = "gsheets_create_from_xlsx";
 pub const TOOL_EXPORT_XLSX: &str = "gsheets_export_xlsx";
 /// Bundle 2A (2026-06-11): Drive discovery scoped to spreadsheets.
 pub const TOOL_LIST_SPREADSHEETS: &str = "gsheets_list_spreadsheets";
+/// Bundle 2B (2026-06-11): Drive permissions tools.
+pub const TOOL_SHARE: &str = "gsheets_share";
+pub const TOOL_LIST_PERMISSIONS: &str = "gsheets_list_permissions";
+pub const TOOL_UNSHARE: &str = "gsheets_unshare";
 pub const TOOL_LIST_SHEETS: &str = "gsheets_list_sheets";
 pub const TOOL_ADD_SHEET: &str = "gsheets_add_sheet";
 pub const TOOL_DELETE_SHEET: &str = "gsheets_delete_sheet";
@@ -237,6 +241,54 @@ pub fn tool_list_spreadsheets() -> ToolDefinition {
     )
 }
 
+/// Bundle 2B (2026-06-11): Args for [`TOOL_SHARE`].
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ShareArgs {
+    pub spreadsheet_id: String,
+    pub email: String,
+    /// `"reader" | "commenter" | "writer"`.
+    pub role: String,
+}
+
+pub fn tool_share() -> ToolDefinition {
+    super::build_synthetic_tool_with_summary::<ShareArgs>(
+        TOOL_SHARE,
+        text::tool_description(TOOL_SHARE),
+        text::tool_summary(TOOL_SHARE),
+    )
+}
+
+/// Bundle 2B (2026-06-11): Args for [`TOOL_LIST_PERMISSIONS`].
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListPermissionsArgs {
+    pub spreadsheet_id: String,
+}
+
+pub fn tool_list_permissions() -> ToolDefinition {
+    super::build_synthetic_tool_with_summary::<ListPermissionsArgs>(
+        TOOL_LIST_PERMISSIONS,
+        text::tool_description(TOOL_LIST_PERMISSIONS),
+        text::tool_summary(TOOL_LIST_PERMISSIONS),
+    )
+}
+
+/// Bundle 2B (2026-06-11): Args for [`TOOL_UNSHARE`].
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UnshareArgs {
+    pub spreadsheet_id: String,
+    /// Drive's stable permission id (NOT the email). Get it from
+    /// `gsheets_list_permissions`.
+    pub permission_id: String,
+}
+
+pub fn tool_unshare() -> ToolDefinition {
+    super::build_synthetic_tool_with_summary::<UnshareArgs>(
+        TOOL_UNSHARE,
+        text::tool_description(TOOL_UNSHARE),
+        text::tool_summary(TOOL_UNSHARE),
+    )
+}
+
 pub fn tool_list_sheets() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<ListSheetsArgs>(
         TOOL_LIST_SHEETS,
@@ -353,6 +405,100 @@ pub async fn dispatch_list_spreadsheets(args: serde_json::Value) -> serde_json::
         Err(e) => return e,
     };
     dispatch_list_spreadsheets_with_client(args, &client).await
+}
+
+/// Bundle 2B (2026-06-11) — grant access to a spreadsheet.
+pub async fn dispatch_share_with_client(
+    args: serde_json::Value,
+    client: &dyn SheetsClient,
+) -> serde_json::Value {
+    let parsed: ShareArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return serde_json::json!({"error": "invalid_args", "message": e.to_string()}),
+    };
+    let role = match parsed.role.to_ascii_lowercase().as_str() {
+        "reader" => crate::gsheets::domain::types::ShareRole::Reader,
+        "commenter" => crate::gsheets::domain::types::ShareRole::Commenter,
+        "writer" => crate::gsheets::domain::types::ShareRole::Writer,
+        other => {
+            return serde_json::json!({
+                "error": "invalid_role",
+                "message": format!(
+                    "role must be one of reader/commenter/writer, got '{other}'"
+                ),
+            });
+        }
+    };
+    match client
+        .share(&SpreadsheetId(parsed.spreadsheet_id), &parsed.email, role)
+        .await
+    {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(e) => error_to_json(e),
+    }
+}
+
+pub async fn dispatch_share(args: serde_json::Value) -> serde_json::Value {
+    let client = match build_client() {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    dispatch_share_with_client(args, &client).await
+}
+
+/// Bundle 2B (2026-06-11) — list every Drive permission on a spreadsheet.
+pub async fn dispatch_list_permissions_with_client(
+    args: serde_json::Value,
+    client: &dyn SheetsClient,
+) -> serde_json::Value {
+    let parsed: ListPermissionsArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return serde_json::json!({"error": "invalid_args", "message": e.to_string()}),
+    };
+    match client
+        .list_permissions(&SpreadsheetId(parsed.spreadsheet_id))
+        .await
+    {
+        Ok(list) => serde_json::json!({
+            "ok": true,
+            "permissions": list.permissions,
+        }),
+        Err(e) => error_to_json(e),
+    }
+}
+
+pub async fn dispatch_list_permissions(args: serde_json::Value) -> serde_json::Value {
+    let client = match build_client() {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    dispatch_list_permissions_with_client(args, &client).await
+}
+
+/// Bundle 2B (2026-06-11) — revoke a permission from a spreadsheet.
+pub async fn dispatch_unshare_with_client(
+    args: serde_json::Value,
+    client: &dyn SheetsClient,
+) -> serde_json::Value {
+    let parsed: UnshareArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return serde_json::json!({"error": "invalid_args", "message": e.to_string()}),
+    };
+    match client
+        .delete_permission(&SpreadsheetId(parsed.spreadsheet_id), &parsed.permission_id)
+        .await
+    {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(e) => error_to_json(e),
+    }
+}
+
+pub async fn dispatch_unshare(args: serde_json::Value) -> serde_json::Value {
+    let client = match build_client() {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    dispatch_unshare_with_client(args, &client).await
 }
 
 pub async fn dispatch_create_spreadsheet_with_client(
@@ -694,6 +840,27 @@ mod tests {
             &self,
             _filter: &crate::gsheets::domain::types::SpreadsheetListFilter<'a>,
         ) -> Result<crate::gsheets::domain::types::SpreadsheetListResult, SheetsError> {
+            Err(SheetsError::Internal("not used".into()))
+        }
+        async fn share(
+            &self,
+            _id: &SpreadsheetId,
+            _email: &str,
+            _role: crate::gsheets::domain::types::ShareRole,
+        ) -> Result<(), SheetsError> {
+            Err(SheetsError::Internal("not used".into()))
+        }
+        async fn list_permissions(
+            &self,
+            _id: &SpreadsheetId,
+        ) -> Result<crate::gsheets::domain::types::PermissionList, SheetsError> {
+            Err(SheetsError::Internal("not used".into()))
+        }
+        async fn delete_permission(
+            &self,
+            _id: &SpreadsheetId,
+            _permission_id: &str,
+        ) -> Result<(), SheetsError> {
             Err(SheetsError::Internal("not used".into()))
         }
         async fn add_sheet(&self, _id: &SpreadsheetId, _n: &str) -> Result<SheetMeta, SheetsError> {

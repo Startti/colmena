@@ -1787,3 +1787,95 @@ ajustado (era 22). Coverage test `index_doc_covers_all_registered_tools` PASS.
 `drive_list_permissions`, `gsheets_share`, `gdocs_unshare`,
 `gsheets_unshare`, `gsheets_list_permissions` /
 `gdocs_list_permissions`. Comparten endpoint `drive.permissions.*`.
+
+---
+
+## 26. Bundle 2B — Drive permissions (5 tools) shipped 2026-06-11
+
+**Origen.** Completar el set Drive UX iniciado en Bundle 2A (discovery). El
+LLM ahora puede no solo encontrar un doc/sheet sino también gestionar quién
+tiene acceso: listar permisos, compartir con email, revocar.
+
+**Fix shipped.** 5 tools nuevos:
+
+| Tool | Endpoint Drive | Función |
+|---|---|---|
+| `gdocs_list_permissions` | `permissions.list` | "quién tiene acceso al doc" |
+| `gdocs_unshare` | `permissions.delete` | Revocar acceso al doc |
+| `gsheets_share` | `permissions.create` | Compartir spreadsheet con email |
+| `gsheets_list_permissions` | `permissions.list` | "quién tiene acceso al sheet" |
+| `gsheets_unshare` | `permissions.delete` | Revocar acceso al sheet |
+
+`gdocs_share` ya existía en v1; ahora gsheets tiene su simétrico.
+
+**Args (uniformes):**
+
+| Tool | Args |
+|---|---|
+| `gdocs_list_permissions` | `{doc_id}` |
+| `gdocs_unshare` | `{doc_id, permission_id}` |
+| `gsheets_share` | `{spreadsheet_id, email, role}` con role ∈ `reader/commenter/writer` |
+| `gsheets_list_permissions` | `{spreadsheet_id}` |
+| `gsheets_unshare` | `{spreadsheet_id, permission_id}` |
+
+**Response shape (lista):**
+```jsonc
+{
+  "ok": true,
+  "permissions": [
+    {
+      "permission_id": "perm123",
+      "type": "user",
+      "role": "writer",
+      "email": "daniel@cliente.com",
+      "display_name": "Daniel García"
+    }
+  ]
+}
+```
+
+**Workflow típico para revoke:**
+
+```
+User: "sacale acceso a daniel@cliente.com del plan Q3"
+LLM: → gdocs_list_documents({query: "Plan Q3"})    ← Bundle 2A
+       ← {documents: [{doc_id: "1abc"}]}
+     → gdocs_list_permissions({doc_id: "1abc"})    ← Bundle 2B
+       ← {permissions: [{permission_id: "perm789", email: "daniel@cliente.com"}]}
+     → gdocs_unshare({doc_id: "1abc", permission_id: "perm789"})  ← Bundle 2B
+       ← {ok: true}
+```
+
+**Decisión importante.** `permission_id` (NO el email) es el id estable
+de Drive. Un email puede tener múltiples grants (e.g. reader y writer
+via diferentes grants); cada uno tiene su propio `permission_id`. Esto
+está documentado verbatim en cada YAML de unshare para que el LLM no
+caiga en el patrón "unshare by email".
+
+**Cambios:**
+
+| Componente | LOC | Función |
+|---|---|---|
+| `gdocs::domain::types::PermissionEntry/PermissionList` | ~30 | Types compartidos |
+| `DocsClient::list_permissions + delete_permission` (trait + HTTP) | ~110 | Drive endpoints |
+| `gsheets::domain::types::ShareRole + PermissionEntry/List` | ~50 | Types simétricos |
+| `SheetsClient::share + list_permissions + delete_permission` (trait + HTTP) | ~150 | Drive endpoints + custom delete loop (no helper) |
+| 5 dispatchers + Args structs + tool defs | ~300 | gdocs_tools + gsheets_tools |
+| Mock impl en `FakeClient` (gsheets_tools tests) | +20 | Trait completeness |
+| `dag_tool_executor.rs` router (gdocs + gsheets) | +50 | 5 match arms + matchers |
+| `mod.rs` re-exports + `all_synthetic_tools()` | +12 | Coverage |
+| `text/tools/gdocs.yaml` + `gsheets.yaml` | +180 | 5 YAML entries con workflows |
+| `41_builtin_tools_index.md` | +5 | Index rows + counts (gsheets 11→14, gdocs 23→25) |
+
+**Tests.** Full suite: **1760 PASS / 0 FAIL / 92 IGNORED**.
+`build_all_returns_25_tools` ajustado (era 23). Coverage tests PASS.
+Clippy + fmt clean. ADP worker recompila clean.
+
+**Estado.** done.
+
+**Bundle 2 (A+B) cerrado** — Drive discovery + sharing/permissions
+totalmente cubiertos. Próximos bundles del backlog:
+
+- Bundle 3 — markdown content quick wins (~1d)
+- Bundle 4 — Comments + Apps Script (~3d)
+- Bundle 5-8 — table cells / formatting / suggest / webhooks

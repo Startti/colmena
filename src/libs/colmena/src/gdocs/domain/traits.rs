@@ -54,6 +54,22 @@ pub trait DocsClient: Send + Sync {
     /// Grant access to `email` with the requested `role`.
     async fn share(&self, id: &DocumentId, email: &str, role: ShareRole) -> Result<(), DocsError>;
 
+    /// Bundle 2B (2026-06-11): list every Drive permission on a doc.
+    /// Used by `gdocs_list_permissions` so the LLM can show "who has
+    /// access" before sharing or revoking.
+    async fn list_permissions(
+        &self,
+        id: &DocumentId,
+    ) -> Result<crate::gdocs::domain::types::PermissionList, DocsError>;
+
+    /// Revoke a permission. The `permission_id` comes from
+    /// `list_permissions` (Drive's stable id; NOT the email). Bundle 2B.
+    async fn delete_permission(
+        &self,
+        id: &DocumentId,
+        permission_id: &str,
+    ) -> Result<(), DocsError>;
+
     /// Drive discovery — return the documents the OAuth user can see,
     /// filtered by `filter`. Used by `gdocs_list_documents`.
     ///
