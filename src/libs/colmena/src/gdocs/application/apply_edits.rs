@@ -914,7 +914,13 @@ mod app_tests {
                 (2, ParagraphKind::Paragraph, "Día 2 Enfriamiento: x", 23, 45),
                 (3, ParagraphKind::Paragraph, "Día 3 Enfriamiento: x", 45, 67),
                 (4, ParagraphKind::Paragraph, "Día 4 Enfriamiento: x", 67, 89),
-                (5, ParagraphKind::Paragraph, "Día 5 Enfriamiento: x", 89, 111),
+                (
+                    5,
+                    ParagraphKind::Paragraph,
+                    "Día 5 Enfriamiento: x",
+                    89,
+                    111,
+                ),
             ],
         );
         // Only one Get expected — the call must fail before any write.
@@ -1017,7 +1023,13 @@ mod app_tests {
                 (2, ParagraphKind::Paragraph, "Día 2 Enfriamiento: x", 23, 45),
                 (3, ParagraphKind::Paragraph, "Día 3 Enfriamiento: x", 45, 67),
                 (4, ParagraphKind::Paragraph, "Día 4 Enfriamiento: x", 67, 89),
-                (5, ParagraphKind::Paragraph, "Día 5 Enfriamiento: x", 89, 111),
+                (
+                    5,
+                    ParagraphKind::Paragraph,
+                    "Día 5 Enfriamiento: x",
+                    89,
+                    111,
+                ),
             ],
         );
         let s2 = s.clone();

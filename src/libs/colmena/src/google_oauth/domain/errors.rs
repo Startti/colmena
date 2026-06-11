@@ -76,7 +76,10 @@ mod tests {
     fn errors_implement_partial_eq_for_test_assertions() {
         // Used heavily in `assert_eq!(err, OAuthError::RefreshTokenRevoked)`
         // patterns by callers.
-        assert_eq!(OAuthError::RefreshTokenRevoked, OAuthError::RefreshTokenRevoked);
+        assert_eq!(
+            OAuthError::RefreshTokenRevoked,
+            OAuthError::RefreshTokenRevoked
+        );
         assert_ne!(
             OAuthError::RefreshTokenRevoked,
             OAuthError::Transient("x".into())

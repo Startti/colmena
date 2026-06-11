@@ -292,9 +292,10 @@ mod tests {
     async fn failed_refresh_leaves_cache_empty() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(400).set_body_string(
-                r#"{"error":"invalid_grant","error_description":"revoked"}"#,
-            ))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_string(r#"{"error":"invalid_grant","error_description":"revoked"}"#),
+            )
             .mount(&server)
             .await;
 
@@ -307,6 +308,9 @@ mod tests {
 
         // Cache should be None — nothing to serve to the next caller.
         let guard = provider.cache.lock().await;
-        assert!(guard.is_none(), "cache must remain empty after failed refresh");
+        assert!(
+            guard.is_none(),
+            "cache must remain empty after failed refresh"
+        );
     }
 }

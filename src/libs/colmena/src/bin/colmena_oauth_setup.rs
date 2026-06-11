@@ -150,18 +150,10 @@ async fn main() -> std::process::ExitCode {
 
 async fn run(args: Args) -> Result<String, String> {
     // 1. Load client credentials from the downloaded JSON.
-    let raw = std::fs::read_to_string(&args.client_secret_path).map_err(|e| {
-        format!(
-            "cannot read {:?}: {e}",
-            args.client_secret_path
-        )
-    })?;
-    let file: ClientSecretFile = serde_json::from_str(&raw).map_err(|e| {
-        format!(
-            "cannot parse {:?} as JSON: {e}",
-            args.client_secret_path
-        )
-    })?;
+    let raw = std::fs::read_to_string(&args.client_secret_path)
+        .map_err(|e| format!("cannot read {:?}: {e}", args.client_secret_path))?;
+    let file: ClientSecretFile = serde_json::from_str(&raw)
+        .map_err(|e| format!("cannot parse {:?} as JSON: {e}", args.client_secret_path))?;
     let fields = file.into_fields()?;
 
     // 2. Build the authorization URL.
@@ -206,8 +198,7 @@ async fn run(args: Args) -> Result<String, String> {
 
     // 6. Exchange the code for a refresh_token.
     eprintln!("→ Exchanging auth_code for refresh_token…");
-    let refresh_token =
-        exchange_code_for_refresh_token(&fields, &redirect_uri, &auth_code).await?;
+    let refresh_token = exchange_code_for_refresh_token(&fields, &redirect_uri, &auth_code).await?;
 
     Ok(refresh_token)
 }
@@ -238,7 +229,8 @@ async fn handle_redirect(
         (Some(code), _) => Ok(code),
         (_, Some(err)) => Err(format!(
             "Google returned error: {err} ({})",
-            q.error_description.unwrap_or_else(|| "no description".into())
+            q.error_description
+                .unwrap_or_else(|| "no description".into())
         )),
         (None, None) => Err("redirect missing both `code` and `error`".into()),
     };

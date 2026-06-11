@@ -21,8 +21,7 @@ const DEFAULT_TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 ///
 /// Tests bypass this with [`RefreshClient::with_fast_retries`] so
 /// retry-exhaustion paths exercise quickly.
-const PRODUCTION_RETRY_DELAYS: &[Duration] =
-    &[Duration::from_secs(1), Duration::from_secs(2)];
+const PRODUCTION_RETRY_DELAYS: &[Duration] = &[Duration::from_secs(1), Duration::from_secs(2)];
 
 /// Successful refresh response from Google. The `refresh_token` field
 /// is `Option<String>` — Google sometimes includes a rotated value,
@@ -334,9 +333,10 @@ mod tests {
         // the test loudly.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(400).set_body_string(
-                r#"{"error":"invalid_grant","error_description":"revoked"}"#,
-            ))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_string(r#"{"error":"invalid_grant","error_description":"revoked"}"#),
+            )
             .expect(1) // STRICT — exactly one call.
             .mount(&server)
             .await;
