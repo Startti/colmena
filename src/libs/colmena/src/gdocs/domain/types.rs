@@ -104,6 +104,55 @@ pub struct DocumentListFilter<'a> {
     pub page_token: Option<&'a str>,
 }
 
+/// Bundle 4A (2026-06-11): one Drive comment on a file. Mirrors the
+/// subset of `drive.comments.get` fields the LLM cares about — content,
+/// author identity, timestamp, resolution status. `anchor` is the opaque
+/// JSON string Google uses to pin a comment to a text range; v1 treats
+/// it as a pass-through value (most LLM-written comments are doc-wide
+/// and leave it `None`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentEntry {
+    pub comment_id: String,
+    pub content: String,
+    /// Drive's RFC 3339 `createdTime`.
+    pub created_time: String,
+    /// `true` once any reply with `action: "resolve"` has landed.
+    pub resolved: bool,
+    /// Opaque anchor JSON (Drive returns it from `drive.comments.list`).
+    /// `None` when the comment is doc-wide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+    /// Author display name when Drive surfaced it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_display_name: Option<String>,
+    /// Author email address. Drive only returns this when the OAuth user
+    /// has permission to see the author identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_email: Option<String>,
+}
+
+/// Result of `list_comments`. `next_page_token` is `Some(...)` when more
+/// comments exist on the file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentList {
+    pub comments: Vec<CommentEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
+}
+
+/// Filter args for `list_comments`. All optional; an empty filter returns
+/// the most recent unresolved comments.
+#[derive(Debug, Clone, Default)]
+pub struct CommentListFilter<'a> {
+    /// Page size. Clamped to `[1, 100]` by the implementation.
+    pub limit: Option<u32>,
+    /// Pagination cursor from a prior call.
+    pub page_token: Option<&'a str>,
+    /// When `true`, the listing also returns comments whose `resolved`
+    /// field is `true`. Drive's default (`false`) hides them.
+    pub include_resolved: bool,
+}
+
 /// Where to look for the `find` text. `All` is doc-wide (default).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

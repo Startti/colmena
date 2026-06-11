@@ -76,7 +76,7 @@ agente nunca debe llamar `create_*`.
 
 Ver [40_toolkit_packages.md](40_toolkit_packages.md).
 
-## Tool surface (22 tools)
+## Tool surface (28 tools)
 
 ### Creación y administración
 
@@ -134,6 +134,53 @@ Ver [40_toolkit_packages.md](40_toolkit_packages.md).
 | Tool | Qué hace |
 |---|---|
 | `gdocs_acknowledge_human_changes` | Fetcha la revisión actual y la fija como cursor del agente. Úsalo después de recibir `human_changes_pending` cuando el agente decida proceder igual. |
+
+### Discovery + permissions (Bundle 2A/2B, 2026-06-11)
+
+| Tool | Qué hace |
+|---|---|
+| `gdocs_list_documents` | Drive `files.list` filtrado a `mimeType='application/vnd.google-apps.document'`. Acepta `query` (name contains), `parent_folder_id`, `modified_after` (RFC 3339), `limit`, `page_token`. Devuelve `{documents: [{doc_id, name, url, modified_time, owners[]}], next_page_token?}`. |
+| `gdocs_list_permissions` | Drive `permissions.list`. Devuelve `[{permission_id, type, role, email?, display_name?}]`. Usalo ANTES de `gdocs_unshare` para obtener el `permission_id` (NO el email). |
+| `gdocs_unshare` | Drive `permissions.delete`. Revoca por `permission_id`. |
+
+### Drive Comments — humano ↔ agente messaging (Bundle 4A, 2026-06-11)
+
+Mensajería bidireccional dentro del doc sin tocar el contenido. Útil para
+flujos de revisión: el agente flagea decisiones / preguntas / blockers, el
+humano resuelve desde la UI, y el agente puede listar para ver respuestas.
+
+| Tool | Qué hace |
+|---|---|
+| `gdocs_add_comment` | Drive `comments.create`. Args: `doc_id`, `content`, `anchor?` (opaque Drive JSON; `None` = doc-wide). Devuelve `{comment: {comment_id, content, created_time, resolved, anchor?, author_*?}}`. |
+| `gdocs_list_comments` | Drive `comments.list`. Args: `limit?`, `page_token?`, `include_resolved` (default `false`). Devuelve `{comments[], next_page_token?}`. |
+| `gdocs_resolve_comment` | Drive resuelve via reply con `action: "resolve"`. Args: `doc_id`, `comment_id`, `content?` (mensaje opcional de la respuesta). |
+
+**Workflow típico — humano pregunta, agente edita, agente resuelve:**
+
+```
+Humano: deja TODO comment: "Add stats on engagement"
+↓
+Agente: gdocs_list_comments({doc_id}) → ve el comment, captura comment_id
+Agente: gdocs_apply_edits(...) → agrega los stats
+Agente: gdocs_resolve_comment({doc_id, comment_id, content: "Added in §3"})
+↓
+Humano: ve el thread cerrado en la UI con la nota del agente
+```
+
+**Workflow inverso — agente pregunta antes de editar:**
+
+```
+Agente: gdocs_add_comment({doc_id, content: "@reviewer — should this cite the 2025 or 2026 study?"})
+↓
+Humano: responde / resuelve en la UI
+↓
+Agente (turn siguiente): gdocs_list_comments({include_resolved: true}) → ve la respuesta
+```
+
+**Anchors.** El `anchor` JSON solo lo genera la UI de Docs. Para v1 el
+agente lo deja `None` (doc-wide) o lo pasa pass-through si llegó de un
+`list_comments` previo. Pin a un range específico desde código requiere
+calcular UTF-16 offsets — fuera del scope de v1.
 
 ## Auth
 

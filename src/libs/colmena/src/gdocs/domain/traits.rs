@@ -87,6 +87,34 @@ pub trait DocsClient: Send + Sync {
     /// layer wraps the result as a colmena attachment.
     async fn export(&self, id: &DocumentId, format: ExportFormat) -> Result<Vec<u8>, DocsError>;
 
+    /// Bundle 4A (2026-06-11): post a new Drive comment on the doc.
+    /// `anchor` is the opaque JSON Google uses to pin to a text range;
+    /// pass `None` for a doc-wide comment.
+    async fn add_comment<'a>(
+        &self,
+        id: &DocumentId,
+        content: &str,
+        anchor: Option<&'a str>,
+    ) -> Result<crate::gdocs::domain::types::CommentEntry, DocsError>;
+
+    /// Bundle 4A (2026-06-11): list Drive comments on the doc.
+    async fn list_comments<'a>(
+        &self,
+        id: &DocumentId,
+        filter: &crate::gdocs::domain::types::CommentListFilter<'a>,
+    ) -> Result<crate::gdocs::domain::types::CommentList, DocsError>;
+
+    /// Bundle 4A (2026-06-11): mark a comment resolved by posting a reply
+    /// with `action: "resolve"`. Drive flips the parent comment's
+    /// `resolved` flag to `true`. `content` is the optional message
+    /// attached to the resolution reply.
+    async fn resolve_comment<'a>(
+        &self,
+        id: &DocumentId,
+        comment_id: &str,
+        content: Option<&'a str>,
+    ) -> Result<(), DocsError>;
+
     // ── Reads ────────────────────────────────────────────────────
 
     /// Fetch a full document tree as a `DocumentSnapshot`. Always

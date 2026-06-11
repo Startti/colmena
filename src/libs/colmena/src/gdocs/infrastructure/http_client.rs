@@ -143,6 +143,57 @@ impl GoogleDocsHttpClient {
     }
 }
 
+/// Bundle 4A: shape a `drive.comments.get`/list element into our domain
+/// `CommentEntry`. Tolerant of missing optional fields (Drive omits
+/// `anchor` for doc-wide comments, and `author.emailAddress` is gated by
+/// the OAuth user's permission to see it).
+fn parse_comment(
+    j: &serde_json::Value,
+) -> Result<crate::gdocs::domain::types::CommentEntry, DocsError> {
+    use crate::gdocs::domain::types::CommentEntry;
+    let comment_id = j
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| DocsError::Http("comment missing id".into()))?
+        .to_string();
+    let content = j
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let created_time = j
+        .get("createdTime")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let resolved = j.get("resolved").and_then(|v| v.as_bool()).unwrap_or(false);
+    let anchor = j
+        .get("anchor")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let (author_display_name, author_email) = match j.get("author") {
+        Some(a) => (
+            a.get("displayName")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            a.get("emailAddress")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        ),
+        None => (None, None),
+    };
+    Ok(CommentEntry {
+        comment_id,
+        content,
+        created_time,
+        resolved,
+        anchor,
+        author_display_name,
+        author_email,
+    })
+}
+
 fn is_retryable(s: StatusCode) -> bool {
     s == StatusCode::TOO_MANY_REQUESTS || s.is_server_error()
 }
@@ -824,6 +875,129 @@ impl DocsClient for GoogleDocsHttpClient {
             .await
             .map_err(|e| DocsError::Http(format!("export bytes: {e}")))?;
         Ok(bytes.to_vec())
+    }
+
+    async fn add_comment<'a>(
+        &self,
+        id: &DocumentId,
+        content: &str,
+        anchor: Option<&'a str>,
+    ) -> Result<crate::gdocs::domain::types::CommentEntry, DocsError> {
+        let url = format!("{}/files/{}/comments", self.base_drive, id.0);
+        let mut body = serde_json::json!({ "content": content });
+        if let Some(a) = anchor {
+            body["anchor"] = serde_json::Value::String(a.to_string());
+        }
+        let fields = "id,content,createdTime,resolved,anchor,author(displayName,emailAddress)";
+        let fields_for_req = fields.to_string();
+        let resp = self
+            .send_with_retry(move |c, t| {
+                c.request(Method::POST, &url)
+                    .bearer_auth(t)
+                    .query(&[("fields", fields_for_req.as_str())])
+                    .json(&body)
+            })
+            .await?;
+        let resp = self.map_status(resp, "comments.create").await?;
+        let j: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| DocsError::Http(format!("comments.create json: {e}")))?;
+        Ok(parse_comment(&j)?)
+    }
+
+    async fn list_comments<'a>(
+        &self,
+        id: &DocumentId,
+        filter: &crate::gdocs::domain::types::CommentListFilter<'a>,
+    ) -> Result<crate::gdocs::domain::types::CommentList, DocsError> {
+        use crate::gdocs::domain::types::CommentList;
+        let url = format!("{}/files/{}/comments", self.base_drive, id.0);
+        let limit = filter.limit.unwrap_or(20).clamp(1, 100);
+        let include_deleted = "false";
+        let include_resolved = if filter.include_resolved {
+            "true"
+        } else {
+            "false"
+        };
+        let fields = "nextPageToken,comments(id,content,createdTime,resolved,anchor,author(displayName,emailAddress))";
+        let url_for_req = url.clone();
+        let fields_for_req = fields.to_string();
+        let page_token_for_req = filter.page_token.map(String::from);
+        let resp = self
+            .send_with_retry(move |c, t| {
+                let mut req = c.request(Method::GET, &url_for_req).bearer_auth(t).query(&[
+                    ("pageSize", limit.to_string().as_str()),
+                    ("fields", fields_for_req.as_str()),
+                    ("includeDeleted", include_deleted),
+                    ("filter", include_resolved),
+                ]);
+                if let Some(ref pt) = page_token_for_req {
+                    req = req.query(&[("pageToken", pt.as_str())]);
+                }
+                req
+            })
+            .await?;
+        let resp = self.map_status(resp, "comments.list").await?;
+        let j: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| DocsError::Http(format!("comments.list json: {e}")))?;
+        let arr = j
+            .get("comments")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut comments = Vec::with_capacity(arr.len());
+        for c in arr {
+            // Drive returns resolved comments only when include_resolved is
+            // true; filter again client-side so the LLM never sees them by
+            // accident if the operator flips the flag.
+            if !filter.include_resolved
+                && c.get("resolved").and_then(|v| v.as_bool()).unwrap_or(false)
+            {
+                continue;
+            }
+            comments.push(parse_comment(&c)?);
+        }
+        let next_page_token = j
+            .get("nextPageToken")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .filter(|s| !s.is_empty());
+        Ok(CommentList {
+            comments,
+            next_page_token,
+        })
+    }
+
+    async fn resolve_comment<'a>(
+        &self,
+        id: &DocumentId,
+        comment_id: &str,
+        content: Option<&'a str>,
+    ) -> Result<(), DocsError> {
+        // Drive's resolve dance: POST a reply with `action: "resolve"`.
+        // Drive flips the parent comment's `resolved` flag to true.
+        let url = format!(
+            "{}/files/{}/comments/{}/replies",
+            self.base_drive, id.0, comment_id
+        );
+        let body = serde_json::json!({
+            "action": "resolve",
+            "content": content.unwrap_or(""),
+        });
+        let resp = self
+            .send_with_retry(|c, t| {
+                c.request(Method::POST, &url)
+                    .bearer_auth(t)
+                    .query(&[("fields", "id")])
+                    .json(&body)
+            })
+            .await?;
+        self.map_status(resp, "comments.replies.create (resolve)")
+            .await?;
+        Ok(())
     }
 
     async fn read_as_markdown<'a>(

@@ -1,0 +1,40 @@
+{
+  "_comment": "Bundle 4A E2E — Drive Comments. Workflow: agent creates a doc, posts a comment, lists comments, resolves it, and lists again (with include_resolved=true) to confirm the flag flipped. Requires OAuth env (COLMENA_GOOGLE_OAUTH_*) + GEMINI_API_KEY + DATABASE_URL. Run: `set -a; source .env; set +a; cargo run --bin dag_engine -- run tests/graphs/agents/gdocs_bundle4a_e2e.json --agent-session-id g_b4a_$(date +%s) --include-extra-info`",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/g-b4a",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Exercise the Bundle 4A Drive Comments surface (3 new tools).\n\n1. gdocs_create({title: 'Bundle4A E2E <UTC iso>'}). Capture doc_id.\n2. gdocs_append_markdown({doc_id, markdown: '# Bundle4A test\\n\\nA short paragraph so the comment has context.\\n'}).\n\n3. gdocs_add_comment({doc_id, content: 'TEST_COMMENT_42 — please ignore (E2E)'}). Capture comment_id. Verify the response carries created_time and resolved=false.\n\n4. gdocs_list_comments({doc_id, include_resolved: false}). Confirm ≥1 entry with the comment_id from step3, content starting with 'TEST_COMMENT_42', and resolved=false.\n\n5. gdocs_resolve_comment({doc_id, comment_id: <step3.comment_id>, content: 'resolved by E2E agent'}). Expect {ok: true}.\n\n6. gdocs_list_comments({doc_id, include_resolved: false}). Confirm the comment_id is GONE (resolved=true comments are hidden under the default filter).\n\n7. gdocs_list_comments({doc_id, include_resolved: true}). Confirm the comment_id IS present and its resolved field equals true.\n\nFinal report (<200 words): doc_id + comment_id + PASS/FAIL per step. If any step errors, paste the error verbatim."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 20,
+        "lazy_tool_loading": false,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "You are testing the colmena Bundle 4A Drive Comments tools. Use ONLY the listed tool names. If a tool returns an error, report it verbatim and stop.",
+        "enabled_tools": [
+          "gdocs_create",
+          "gdocs_append_markdown",
+          "gdocs_add_comment",
+          "gdocs_list_comments",
+          "gdocs_resolve_comment"
+        ]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}

@@ -300,3 +300,74 @@ gdocs_unshare:
 
     DO NOT confuse permission_id with email — Drive can have multiple
     grants for the same email; each has its own permission_id.
+
+gdocs_add_comment:
+  summary: Post a Drive comment on a document (human ↔ agent messaging)
+  description: |
+    Drive `comments.create`. Posts a new comment on the doc that the human
+    reviewer sees in the Google Docs UI like any other comment thread.
+    Useful when the agent needs to flag a question, decision point, or
+    blocker without editing the document itself.
+
+    Args:
+      - `doc_id` (req): the Drive id of the document.
+      - `content` (req): the comment body. Plain text; markdown is shown
+        verbatim by Drive (no rendering).
+      - `anchor` (opt): the opaque Drive anchor JSON pinning the comment
+        to a text range. Leave unset for a doc-wide comment (the common
+        case for an agent surfacing a question).
+
+    Returns `{ok: true, comment: {comment_id, content, created_time,
+    resolved, anchor?, author_display_name?, author_email?}}`.
+
+    Typical workflow:
+      1. Agent edits section X.
+      2. Agent: gdocs_add_comment({doc_id, content: "@reviewer — should
+         this paragraph cite the 2025 study or the 2026 update?"})
+      3. Human resolves via the Docs UI; agent later calls
+         `gdocs_list_comments` to see the response.
+
+gdocs_list_comments:
+  summary: List Drive comments on a document
+  description: |
+    Drive `comments.list` for a doc. Returns open comments by default.
+
+    Args:
+      - `doc_id` (req): the Drive id of the document.
+      - `limit` (opt): page size (default 20, max 100).
+      - `page_token` (opt): pagination cursor from a prior call.
+      - `include_resolved` (opt, default `false`): also return comments
+        whose `resolved` field is `true`. Match Drive's default and keep
+        the LLM focused on open threads.
+
+    Returns `{ok: true, comments: [{comment_id, content, created_time,
+    resolved, anchor?, author_display_name?, author_email?}],
+    next_page_token?}`.
+
+    Use this BEFORE `gdocs_resolve_comment` to look up the
+    `comment_id`, and before editing if the human left feedback the
+    agent should address first.
+
+gdocs_resolve_comment:
+  summary: Mark a Drive comment resolved (close the thread)
+  description: |
+    Drive resolves comments by posting a reply with `action: "resolve"`.
+    This tool wraps that dance.
+
+    Args:
+      - `doc_id` (req): the Drive id of the document.
+      - `comment_id` (req): Drive's stable id from `gdocs_list_comments`.
+      - `content` (opt): optional message attached to the resolution
+        reply (e.g. "Done — fixed in the latest edit"). Leave empty when
+        no message is needed.
+
+    Returns `{ok: true}`.
+
+    Typical workflow:
+      1. Human leaves a TODO comment: "Add stats on engagement".
+      2. Agent edits the doc to address it.
+      3. Agent: gdocs_resolve_comment({doc_id, comment_id: "AAA001",
+         content: "Added stats in §3"}) → comment closed.
+
+    Drive flips `resolved=true` on the parent comment. Re-listing with
+    `include_resolved: false` no longer surfaces it.

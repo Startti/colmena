@@ -60,6 +60,11 @@ pub const TOOL_LIST_DOCUMENTS: &str = "gdocs_list_documents";
 pub const TOOL_LIST_PERMISSIONS: &str = "gdocs_list_permissions";
 pub const TOOL_UNSHARE: &str = "gdocs_unshare";
 
+// Bundle 4A (2026-06-11): Drive Comments — humano ↔ agente messaging.
+pub const TOOL_ADD_COMMENT: &str = "gdocs_add_comment";
+pub const TOOL_LIST_COMMENTS: &str = "gdocs_list_comments";
+pub const TOOL_RESOLVE_COMMENT: &str = "gdocs_resolve_comment";
+
 // ── Process-wide singletons ───────────────────────────────────────────
 
 static CLIENT: OnceCell<Arc<GoogleDocsHttpClient>> = OnceCell::const_new();
@@ -542,6 +547,75 @@ pub fn tool_unshare() -> ToolDefinition {
     )
 }
 
+/// Bundle 4A (2026-06-11): Args for [`TOOL_ADD_COMMENT`].
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddCommentArgs {
+    pub doc_id: String,
+    /// The comment body. Markdown is not rendered; Drive shows it as
+    /// plain text in the comment thread.
+    pub content: String,
+    /// Opaque Drive anchor JSON to pin the comment to a text range.
+    /// Leave unset for a doc-wide comment (the common case for an
+    /// agent that wants to surface a question to the human reviewer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+}
+
+pub fn tool_add_comment() -> ToolDefinition {
+    super::build_synthetic_tool_with_summary::<AddCommentArgs>(
+        TOOL_ADD_COMMENT,
+        text::tool_description(TOOL_ADD_COMMENT),
+        text::tool_summary(TOOL_ADD_COMMENT),
+    )
+}
+
+/// Bundle 4A (2026-06-11): Args for [`TOOL_LIST_COMMENTS`].
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListCommentsArgs {
+    pub doc_id: String,
+    /// Page size. Default 20, max 100.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Pagination cursor from a prior call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_token: Option<String>,
+    /// Include comments already marked resolved. Default `false` —
+    /// matches Drive's default and keeps the LLM focused on open
+    /// threads.
+    #[serde(default)]
+    pub include_resolved: bool,
+}
+
+pub fn tool_list_comments() -> ToolDefinition {
+    super::build_synthetic_tool_with_summary::<ListCommentsArgs>(
+        TOOL_LIST_COMMENTS,
+        text::tool_description(TOOL_LIST_COMMENTS),
+        text::tool_summary(TOOL_LIST_COMMENTS),
+    )
+}
+
+/// Bundle 4A (2026-06-11): Args for [`TOOL_RESOLVE_COMMENT`].
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ResolveCommentArgs {
+    pub doc_id: String,
+    /// Drive's stable comment id (NOT the index). Get it from
+    /// `gdocs_list_comments`.
+    pub comment_id: String,
+    /// Optional message attached to the resolution reply. Most
+    /// agent-driven resolutions leave this empty or use a brief
+    /// status like "Done." or "Addressed in commit X".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+}
+
+pub fn tool_resolve_comment() -> ToolDefinition {
+    super::build_synthetic_tool_with_summary::<ResolveCommentArgs>(
+        TOOL_RESOLVE_COMMENT,
+        text::tool_description(TOOL_RESOLVE_COMMENT),
+        text::tool_summary(TOOL_RESOLVE_COMMENT),
+    )
+}
+
 pub fn tool_export() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<ExportArgs>(
         TOOL_EXPORT,
@@ -718,6 +792,10 @@ pub fn build_all_gdocs_tools() -> Vec<ToolDefinition> {
         tool_unshare(),
         // Bundle 2B (2026-06-11) adds 2 permissions tools above
         // (list_permissions, unshare); share was already in v1.
+        tool_add_comment(),
+        tool_list_comments(),
+        tool_resolve_comment(),
+        // Bundle 4A (2026-06-11) adds 3 Drive Comments tools.
     ]
 }
 
@@ -898,6 +976,90 @@ pub async fn dispatch_unshare(args: serde_json::Value, _session_id: &str) -> ser
     };
     match client
         .delete_permission(&DocumentId(parsed.doc_id), &parsed.permission_id)
+        .await
+    {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(e) => error_to_json(e),
+    }
+}
+
+/// Bundle 4A (2026-06-11) — post a Drive comment on a doc.
+pub async fn dispatch_add_comment(args: serde_json::Value, _session_id: &str) -> serde_json::Value {
+    let parsed: AddCommentArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return invalid_args(e),
+    };
+    let client = match shared_client().await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    match client
+        .add_comment(
+            &DocumentId(parsed.doc_id),
+            &parsed.content,
+            parsed.anchor.as_deref(),
+        )
+        .await
+    {
+        Ok(entry) => serde_json::json!({
+            "ok": true,
+            "comment": entry,
+        }),
+        Err(e) => error_to_json(e),
+    }
+}
+
+/// Bundle 4A (2026-06-11) — list Drive comments on a doc.
+pub async fn dispatch_list_comments(
+    args: serde_json::Value,
+    _session_id: &str,
+) -> serde_json::Value {
+    let parsed: ListCommentsArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return invalid_args(e),
+    };
+    let client = match shared_client().await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let filter = crate::gdocs::domain::types::CommentListFilter {
+        limit: parsed.limit,
+        page_token: parsed.page_token.as_deref(),
+        include_resolved: parsed.include_resolved,
+    };
+    match client
+        .list_comments(&DocumentId(parsed.doc_id), &filter)
+        .await
+    {
+        Ok(res) => serde_json::json!({
+            "ok": true,
+            "comments": res.comments,
+            "next_page_token": res.next_page_token,
+        }),
+        Err(e) => error_to_json(e),
+    }
+}
+
+/// Bundle 4A (2026-06-11) — resolve a comment by posting a reply with
+/// `action: "resolve"`.
+pub async fn dispatch_resolve_comment(
+    args: serde_json::Value,
+    _session_id: &str,
+) -> serde_json::Value {
+    let parsed: ResolveCommentArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return invalid_args(e),
+    };
+    let client = match shared_client().await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    match client
+        .resolve_comment(
+            &DocumentId(parsed.doc_id),
+            &parsed.comment_id,
+            parsed.content.as_deref(),
+        )
         .await
     {
         Ok(()) => serde_json::json!({ "ok": true }),
@@ -1760,11 +1922,12 @@ mod tests {
     }
 
     #[test]
-    fn build_all_returns_25_tools() {
+    fn build_all_returns_28_tools() {
         let tools = build_all_gdocs_tools();
         // 22 v1 + 1 Bundle 2A (list_documents) + 2 Bundle 2B
-        // (list_permissions, unshare) = 25.
-        assert_eq!(tools.len(), 25);
+        // (list_permissions, unshare) + 3 Bundle 4A
+        // (add_comment, list_comments, resolve_comment) = 28.
+        assert_eq!(tools.len(), 28);
     }
 
     #[test]
@@ -1789,6 +1952,54 @@ mod tests {
             ShareRole::Writer
         ));
         assert!(parse_share_role("bogus").is_err());
+    }
+
+    #[test]
+    fn add_comment_args_deserialize_with_optional_anchor() {
+        // anchor omitted → doc-wide comment (the common case).
+        let v: AddCommentArgs =
+            serde_json::from_value(serde_json::json!({"doc_id": "abc", "content": "hi"}))
+                .expect("valid args");
+        assert_eq!(v.doc_id, "abc");
+        assert_eq!(v.content, "hi");
+        assert!(v.anchor.is_none());
+
+        // anchor present → pinned comment.
+        let v: AddCommentArgs = serde_json::from_value(
+            serde_json::json!({"doc_id": "abc", "content": "hi", "anchor": "{\"r\":\"head\"}"}),
+        )
+        .expect("valid args with anchor");
+        assert_eq!(v.anchor.as_deref(), Some("{\"r\":\"head\"}"));
+    }
+
+    #[test]
+    fn list_comments_args_default_include_resolved_is_false() {
+        // omitting include_resolved should default to false — matches Drive's default and
+        // keeps the LLM focused on open threads.
+        let v: ListCommentsArgs =
+            serde_json::from_value(serde_json::json!({"doc_id": "abc"})).expect("valid args");
+        assert!(!v.include_resolved);
+
+        // Explicit true is honored.
+        let v: ListCommentsArgs =
+            serde_json::from_value(serde_json::json!({"doc_id": "abc", "include_resolved": true}))
+                .expect("valid args with include_resolved");
+        assert!(v.include_resolved);
+    }
+
+    #[test]
+    fn resolve_comment_args_deserialize_with_optional_content() {
+        let v: ResolveCommentArgs =
+            serde_json::from_value(serde_json::json!({"doc_id": "abc", "comment_id": "c1"}))
+                .expect("valid args");
+        assert_eq!(v.comment_id, "c1");
+        assert!(v.content.is_none());
+
+        let v: ResolveCommentArgs = serde_json::from_value(
+            serde_json::json!({"doc_id": "abc", "comment_id": "c1", "content": "done"}),
+        )
+        .expect("valid args with content");
+        assert_eq!(v.content.as_deref(), Some("done"));
     }
 
     #[test]

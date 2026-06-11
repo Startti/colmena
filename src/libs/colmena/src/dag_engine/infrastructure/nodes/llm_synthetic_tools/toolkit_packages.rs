@@ -38,8 +38,7 @@ pub static TOOLKIT_PACKAGES: &[ToolkitPackage] = &[
     },
     ToolkitPackage {
         alias: "gdocs",
-        description:
-            "Read, write, and edit Google Docs with content-addressed surgical edits (22 tools)",
+        description: "Read, write, edit, share, discover, and comment on Google Docs (28 tools)",
         tools: &[
             "gdocs_create",
             "gdocs_create_from_markdown",
@@ -63,14 +62,24 @@ pub static TOOLKIT_PACKAGES: &[ToolkitPackage] = &[
             "gdocs_create_named_range",
             "gdocs_replace_named_range",
             "gdocs_acknowledge_human_changes",
+            // Bundle 2A (2026-06-11): Drive discovery
+            "gdocs_list_documents",
+            // Bundle 2B (2026-06-11): permissions
+            "gdocs_list_permissions",
+            "gdocs_unshare",
+            // Bundle 4A (2026-06-11): Drive comments
+            "gdocs_add_comment",
+            "gdocs_list_comments",
+            "gdocs_resolve_comment",
         ],
     },
     ToolkitPackage {
         // Alias has no `_` per the package-vs-tool naming convention enforced
         // by `package_aliases_have_no_underscore`. `gdocsread` is the
-        // read-only subset (6 tools — no writes).
+        // read-only subset (9 tools — no writes; comments/permission/document
+        // discovery listings are all reads).
         alias: "gdocsread",
-        description: "Read-only Google Docs access (6 tools — no writes)",
+        description: "Read-only Google Docs access (9 tools — no writes)",
         tools: &[
             "gdocs_export",
             "gdocs_list_tabs",
@@ -78,6 +87,10 @@ pub static TOOLKIT_PACKAGES: &[ToolkitPackage] = &[
             "gdocs_read_outline",
             "gdocs_list_named_ranges",
             "gdocs_acknowledge_human_changes",
+            // Bundle 2A/2B/4A listings are reads — safe to ship in read-only.
+            "gdocs_list_documents",
+            "gdocs_list_permissions",
+            "gdocs_list_comments",
         ],
     },
 ];
@@ -140,9 +153,9 @@ mod tests {
     }
 
     #[test]
-    fn gdocs_package_has_all_twenty_two_tools() {
+    fn gdocs_package_has_all_tools() {
         let pkg = find_package("gdocs").expect("gdocs package must exist");
-        assert_eq!(pkg.tools.len(), 22, "gdocs package must list 22 tools");
+        assert_eq!(pkg.tools.len(), 28, "gdocs package must list 28 tools");
         for required in &[
             "gdocs_create",
             "gdocs_create_from_markdown",
@@ -166,6 +179,12 @@ mod tests {
             "gdocs_create_named_range",
             "gdocs_replace_named_range",
             "gdocs_acknowledge_human_changes",
+            "gdocs_list_documents",
+            "gdocs_list_permissions",
+            "gdocs_unshare",
+            "gdocs_add_comment",
+            "gdocs_list_comments",
+            "gdocs_resolve_comment",
         ] {
             assert!(
                 pkg.tools.contains(required),
@@ -177,15 +196,26 @@ mod tests {
     #[test]
     fn gdocsread_readonly_package_subset() {
         let pkg = find_package("gdocsread").expect("gdocsread package must exist");
-        assert_eq!(pkg.tools.len(), 6);
+        assert_eq!(pkg.tools.len(), 9);
         // Every entry must be a gdocs_* tool.
         for t in pkg.tools {
             assert!(t.starts_with("gdocs_"), "gdocsread non-gdocs tool: {t}");
         }
         // No write/mutation tools should leak in (acknowledge_human_changes
-        // is read-only: it just resets the revision cursor).
+        // is read-only: it just resets the revision cursor; list_permissions
+        // and list_comments are reads).
         let write_substrings = [
-            "create_", "delete_", "insert_", "style_", "append_", "apply_", "share", "add_tab",
+            "create_",
+            "delete_",
+            "insert_",
+            "style_",
+            "append_",
+            "apply_",
+            "share",
+            "add_tab",
+            "add_comment",
+            "resolve_comment",
+            "unshare",
         ];
         for t in pkg.tools {
             // Also catch `replace_*` writes — exclude `replace_*` rather

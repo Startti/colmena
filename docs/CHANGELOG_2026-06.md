@@ -1999,3 +1999,127 @@ pipeline de 2 batchUpdates con snapshot intermedio para resolver índices
 reales de celda. Esfuerzo: ~4-5h. Queda al backlog con scope clarificado.
 
 **Estado.** done.
+
+
+---
+
+## 28. Bundle 4A — Drive Comments (3 tools) shipped 2026-06-11
+
+**Origen.** Bundle 4 del BACKLOG (G v1.1 § "Drive Comments API — mensajería
+humano ↔ agente in-doc"). Cierra el flujo bidireccional dentro del doc
+sin tocar el contenido: el agente puede flagear preguntas, decisiones, o
+blockers; el humano resuelve desde la UI; el agente puede listar para ver
+respuestas.
+
+Bundle 4 originalmente iba a incluir también **Apps Script** (`scripts.run`),
+pero ese sub-bundle requiere agregar el scope `script.scripts.execute` a
+`REQUESTED_SCOPES` en `colmena_oauth_setup.rs` + re-correr el consent flow +
+regenerar el `refresh_token` en Secret Manager + redeploy ADP. Es un cambio
+prod-impacting que necesita coordinación operacional — diferido como
+**Bundle 4B** hasta confirmar la ventana del re-consent.
+
+**Fix shipped.** 3 tools nuevos sobre `drive.comments.*`:
+
+| Tool | Endpoint Drive | Función |
+|---|---|---|
+| `gdocs_add_comment` | `comments.create` | Postea un nuevo comment (doc-wide o pinned). |
+| `gdocs_list_comments` | `comments.list` | Lista comments (open por default, `include_resolved` opcional). |
+| `gdocs_resolve_comment` | `comments.replies.create` + `action: "resolve"` | Cierra un comment posteando una reply con la acción de resolve (no hay PATCH directo a `resolved`). |
+
+Scope OAuth: usa el `drive.file` que ya está activo — **sin cambios en
+producción**.
+
+**Cómo se ve para el LLM:**
+
+```
+LLM call:  gdocs_add_comment({
+  doc_id: "1abc",
+  content: "@reviewer — should this cite the 2025 study or the 2026 update?"
+})
+
+Result:    {
+  ok: true,
+  comment: {
+    comment_id: "AAA001",
+    content: "@reviewer — ...",
+    created_time: "2026-06-11T17:23:45.123Z",
+    resolved: false,
+    anchor: null,
+    author_display_name: "Agents Startti",
+    author_email: "agents@startti.co"
+  }
+}
+```
+
+**Workflow típico — humano deja TODO, agente resuelve:**
+
+```
+Humano: comment "Add stats on engagement"
+↓
+Agente (turn N):   gdocs_list_comments({doc_id}) → ve el TODO, captura comment_id
+Agente (turn N):   gdocs_apply_edits(...) → agrega los stats
+Agente (turn N+1): gdocs_resolve_comment({doc_id, comment_id, content: "Added in §3"})
+↓
+Humano: ve el thread cerrado con la nota del agente
+```
+
+**Workflow inverso — agente pregunta antes de editar:**
+
+```
+Agente: gdocs_add_comment({doc_id, content: "..."})
+Humano: responde / resuelve en la UI
+Agente: gdocs_list_comments({include_resolved: true}) → ve la respuesta
+```
+
+**Cambios:**
+
+| Archivo | LOC | Qué cambia |
+|---|---|---|
+| `gdocs/domain/types.rs` | +50 | `CommentEntry`, `CommentList`, `CommentListFilter<'a>` |
+| `gdocs/domain/traits.rs` | +28 | 3 trait methods (`add_comment`, `list_comments`, `resolve_comment`) |
+| `gdocs/infrastructure/http_client.rs` | +160 | 3 HTTP impls + `parse_comment` helper |
+| `llm_synthetic_tools/gdocs_tools.rs` | +85 | 3 Args structs + 3 `tool_*()` builders + 3 dispatchers + builder count test (25→28) |
+| `llm_synthetic_tools/mod.rs` | +6 | Re-exports |
+| `llm_synthetic_tools/toolkit_packages.rs` | +20 | `gdocs` 22→28, `gdocsread` 6→9 (las 3 listings son reads) |
+| `dag_engine/infrastructure/dag_tool_executor.rs` | +25 | Router: 3 imports + 3 match arms + 3 `is_gdocs_tool` checks |
+| `text/tools/gdocs.yaml` | +72 | YAML entries con descripción + workflows |
+| `docs/developer_guide/41_builtin_tools_index.md` | +5 | 3 filas + counts |
+| `docs/developer_guide/45_gdocs.md` | +50 | Nueva sección "Drive Comments" con workflows |
+
+**No breaking changes.** Tools son aditivos; el alias `gdocs` ahora
+expande a 28 (era 22 — Bundle 2A/2B no había updateado el alias todavía,
+sweep incluida en este commit). El alias `gdocsread` sube a 9 (las 3 list
+tools son reads).
+
+**Tests.** Full suite: **1737 PASS / 0 FAIL** (140 gdocs, 6 toolkit_packages,
+coverage tests). Tests nuevos:
+- `build_all_returns_28_tools` (gdocs_tools)
+- `add_comment_args_deserialize_with_optional_anchor`
+- `list_comments_args_default_include_resolved_is_false`
+- `resolve_comment_args_deserialize_with_optional_content`
+- `gdocs_package_has_all_tools` actualizado a 28
+- `gdocsread_readonly_package_subset` actualizado a 9 (cambió contadores +
+  agregó nuevas write substrings al filter: `add_comment`,
+  `resolve_comment`, `unshare`)
+
+**E2E LLM-in-the-loop:** `tests/graphs/agents/gdocs_bundle4a_e2e.json` —
+el agente crea un doc, postea un comment, lo lista, lo resuelve, y vuelve
+a listar (default + `include_resolved: true`) para confirmar que el
+`resolved` flag flipó. Run:
+`set -a && source .env && set +a; cargo run --bin dag_engine -- run tests/graphs/agents/gdocs_bundle4a_e2e.json --agent-session-id g_b4a_$(date +%s) --include-extra-info`.
+
+**Bundle 4B (Apps Script) — diferido.** Necesita:
+1. Agregar `https://www.googleapis.com/auth/script.scripts.execute` a
+   `REQUESTED_SCOPES` en `src/libs/colmena/src/bin/colmena_oauth_setup.rs`.
+2. Re-correr `colmena_oauth_setup` para regenerar el `refresh_token` con
+   el scope nuevo.
+3. Actualizar Secret Manager (`COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN`).
+4. Redeploy ADP worker.
+
+Los scripts ejecutados también necesitan que su deployment ID sea
+explicitamente whitelist-ed; ese es config en el ADP / Apps Script side.
+Spike de 1d cuando se confirme la ventana del re-consent.
+
+**Estado.** done (4A). 4B diferido.
+
+---

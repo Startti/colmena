@@ -78,7 +78,7 @@ computation server-side (run_python) instead of dumping every row.
 | `sql_inspect_attachment` | Open a registered CSV/XLSX attachment and report its header, sample rows, total row count, and inferred column types — without forcing the LLM to read every row | [§23](23_sql_node.md#bulk-insert-from-attachment-shipped-2026-06-09) |
 | `sql_bulk_insert_from_attachment` | Stream a CSV attachment into a Postgres table via COPY FROM STDIN — bypasses the LLM context for the rows and runs orders of magnitude faster than per-row INSERT | [§23](23_sql_node.md#bulk-insert-from-attachment-shipped-2026-06-09) |
 
-## gdocs (25 tools)
+## gdocs (28 tools)
 
 Content-addressed surgical editing — the LLM specifies WHAT to change
 (text, heading, named range) and never computes UTF-16 indices.
@@ -115,16 +115,20 @@ Detailed docs: [§45 — Google Docs integration](45_gdocs.md). Design spec:
 | `gdocs_list_documents` | Discover Google Docs visible to the OAuth user — optionally filtered by name, folder, or modified-after date | [§45](45_gdocs.md) |
 | `gdocs_list_permissions` | Show every Drive permission on a document (who has access and at what role) | [§45](45_gdocs.md) |
 | `gdocs_unshare` | Revoke a previously-granted permission on a document | [§45](45_gdocs.md) |
+| `gdocs_add_comment` | Post a Drive comment on a document (human ↔ agent messaging) | [§45](45_gdocs.md) |
+| `gdocs_list_comments` | List Drive comments on a document | [§45](45_gdocs.md) |
+| `gdocs_resolve_comment` | Mark a Drive comment resolved (close the thread) | [§45](45_gdocs.md) |
 
 ## Toolkit packages
 
 See [40_toolkit_packages.md](40_toolkit_packages.md). Registered packages:
 
 - `gsheets` — expands to all 10 `gsheets_*` tools.
-- `gdocs` — expands to all 22 `gdocs_*` tools.
-- `gdocsread` — read-only subset of gdocs (6 tools: `list_tabs`,
+- `gdocs` — expands to all 28 `gdocs_*` tools.
+- `gdocsread` — read-only subset of gdocs (9 tools: `list_tabs`,
   `read_as_markdown`, `read_outline`, `list_named_ranges`, `export`,
-  `acknowledge_human_changes`).
+  `acknowledge_human_changes`, `list_documents`, `list_permissions`,
+  `list_comments`).
 
 ## describe_tool
 
