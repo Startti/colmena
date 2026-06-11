@@ -33,6 +33,47 @@ CRDT-specific. Ver banner detallado al inicio del bloque CRDT.
 
 ---
 
+## 📊 Priorización por impacto × esfuerzo (2026-06-11)
+
+> Ordenamiento de trabajo de los items **activos** (excluye: bloque CRDT v1.1
+> congelado, Apps Script 4B despriorizado, y los items ya shipped marcados
+> `[x]` abajo). Revisar antes de elegir el próximo sprint. Cada fila enlaza a
+> su sección de detalle.
+
+### 🟢 Quick wins — bajo esfuerzo, alto ratio
+| Item | Esfuerzo | Impacto | Sección |
+|---|---|---|---|
+| `last_modified` en error `SheetExists` | ~15 min | Med — el LLM evalúa mejor si es seguro overwrite | [Sheets write safety v1.1 — surface `last_modified`](#sheets-write-safety-v11--surface-last_modified-in-sheetexists-error) |
+| `gsheets_run_python` alias `sheet`/`sheets` | ~30 LOC | Med — ergonomía LLM, menos errores de args | [gsheets_run_python sheet/sheets alias](#sheets-write-safety-v11--gsheets_run_python-acepta-sheet--sheets-como-alias-de-name) |
+| `diff_writer` límite de 26 columnas | small | Low — corrección edge-case | [diff_writer 26-column header limit](#sheets-write-safety-v11--diff_writer-26-column-header-limit) |
+| `gdocs_insert_image` (path i/ii: URL o signed-URL) | ~2-3h | Med — cierra gap lossy de imágenes markdown | [gdocs_insert_image_after_text](#subsystem-g-v11-google-docs) |
+| Math expressions en gdocs markdown | small | Low — niche | [Subsystem G v1.1](#subsystem-g-v11-google-docs) |
+
+### 🟡 Medium bets — desbloquean workflows reales
+| Item | Esfuerzo | Impacto | Sección |
+|---|---|---|---|
+| **Surgical table-cell edits** (`gdocs_set_table_cell`, `insert_table_row`) | ~2d | **Alto** — hoy el agente NO puede editar celdas de tabla | [Subsystem G v1.1](#subsystem-g-v11-google-docs) |
+| **Cell formatting** Sheets (colors/borders/widths) | ~2d | Med-Alto — output pulido es pedido frecuente | [Subsystem E v1.1](#subsystem-e-v11-google-sheets) |
+| Markdown tables en insert/replace | ~4-5h | Med — hoy se rechazan duro | [Subsystem G v1.1](#subsystem-g-v11-google-docs) |
+| `append`/`upsert`/`delete_where` sheet modes | ~3-4d | Med — sin trigger concreto aún | [append / upsert / delete_where modes](#sheets-write-safety-v11--append--upsert--delete_where-modes) |
+
+### 🔴 Alto impacto, requiere diseño primero
+| Item | Esfuerzo | Impacto | Sección |
+|---|---|---|---|
+| **Item 14 — Output filtering (qué fields ve el LLM)** | brainstorm → 3-8d | **Alto** — token waste en todo DAG; flagged por el owner | [Output filtering para LLM](#output-filtering-para-llm--qué-campos-ve-el-modelo-2026-06-09) |
+
+### ⚪ Parked / niche / bloqueado (no tirar todavía)
+- **Sheets batchUpdate-shaped**: charts, conditional formatting, data validation, revisions/undo, webhooks → esfuerzo medio, demanda niche. [Subsystem E v1.1](#subsystem-e-v11-google-sheets)
+- **`mode: "suggest"`** (gdocs), **Drive Revisions restore** → sin trigger.
+- **Google SA alias vía Workspace Group** → bloqueado en info de operador (quién es Workspace admin). [Google SA alias](#google-sa--alias-presentable-via-workspace-group--revisión-del-leak-del-project-id-2026-06-09)
+- **`gsheets_create_spreadsheet` permission scope** → posiblemente ya resuelto por la migración OAuth (`agents@startti.co` tiene Drive quota real); verificar 10 min antes de tratar como trabajo. [gsheets_create_spreadsheet permission scope](#sheets-write-safety-v11--gsheets_create_spreadsheet-permission-scope)
+- **Toolkit auto-inject package description** → polish. [Toolkit packages v1.1](#toolkit-packages-v11)
+- **`overwrite` mode E2E coverage** → solo QA, riesgo bajo. [overwrite mode E2E coverage](#sheets-write-safety-v11--overwrite-mode-e2e-coverage)
+
+**Recomendación de secuencia:** batch de 🟢 quick wins (≈medio día) → **surgical table-cell edits** (mejor ratio impacto/esfuerzo concreto) → abrir brainstorm de Item 14 cuando el owner pueda dar el use-case real.
+
+---
+
 ## ~~SQL node — INSERT multi-line bug (2026-06-09)~~ — SHIPPED 2026-06-09
 
 - **Origen:** Reporte del owner (2026-06-09).
@@ -616,9 +657,9 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
   register_attachment_bytes para export. Los métodos HTTP de Drive
   Files API ya estaban implementados — solo se necesitó wiring.
   Commit: ver §24 de CHANGELOG_2026-06.md.
-- [ ] **`gsheets_list_spreadsheets()`** — Drive discovery scoped to a
-  shared folder. Needs `drive.metadata.readonly` scope and a
-  folder-filter mechanism so the agent doesn't see the whole Drive.
+- [x] **`gsheets_list_spreadsheets()`** — SHIPPED 2026-06-11 (Bundle 2A,
+  commit `8eaee18`). Drive discovery scoped a folder vía
+  `drive.files.list?q=mimeType='application/vnd.google-apps.spreadsheet'`.
 - [x] **OAuth user-scoped auth** — SHIPPED 2026-06-10 como parte del
   hard cutover SA → OAuth de la entrada de Subsystem G v1.1
   (ver `## Subsystem G v1.1` § "OAuth user-scoped flow" abajo). El
@@ -632,7 +673,9 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
 - [ ] **Charts** via `batchUpdate.addChart`.
 - [ ] **Conditional formatting** via `batchUpdate.addConditionalFormatRule`.
 - [ ] **Data validation (dropdowns)** via `batchUpdate.setDataValidation`.
-- [ ] **Permissions / sharing tools** via `drive.permissions.*`.
+- [x] **Permissions / sharing tools** via `drive.permissions.*` — SHIPPED
+  2026-06-11 (Bundle 2B, commit `aba327f`): `gsheets_share` +
+  `gsheets_list_permissions` + `gsheets_delete_permission`.
 - [ ] **Revisions / undo** via Drive Revisions API.
 - [ ] **Webhook subscriptions** for push notifications on sheet changes.
 - [ ] **Per-call credential overrides** — a graph could provide a different
@@ -770,14 +813,13 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
   configurar permisos públicos, usar la Drive URL. Caminos (i) y (ii)
   son ~2-3h cada uno; (iii) es ~6-8h por la dance de permisos. Cuando
   se retome, decidir scope antes de codear.
-- [ ] **Drive Comments API** — mensajería humano ↔ agente in-doc
-  (`gdocs_add_comment`, `gdocs_resolve_comment`, `gdocs_list_comments`).
-  Útil para el flujo de revisión donde el humano deja TODO comments y
-  el agente los procesa.
-- [ ] **`gdocs_list_documents`** — descubrimiento scoped a folder via
-  Drive (`drive.files.list?q=mimeType='application/vnd.google-apps.document'`).
-  Hoy el agente solo opera sobre `doc_id` recibidos en el prompt o
-  input del grafo.
+- [x] **Drive Comments API** — SHIPPED 2026-06-11 (Bundle 4A, commit
+  `92b89c5`): `gdocs_add_comment` + `gdocs_list_comments` +
+  `gdocs_resolve_comment`. Mensajería humano ↔ agente in-doc para el
+  flujo de revisión. CHANGELOG §28.
+- [x] **`gdocs_list_documents`** — SHIPPED 2026-06-11 (Bundle 2A, commit
+  `8eaee18`). Descubrimiento scoped a folder via
+  `drive.files.list?q=mimeType='application/vnd.google-apps.document'`.
 - [ ] **Markdown tables en insert/replace** — requiere round-trip snapshot
   para computar índices de celda. Hoy `gdocs_insert_*`,
   `gdocs_replace_section`, `gdocs_append_markdown` y `gdocs_apply_edits`
