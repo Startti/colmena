@@ -591,6 +591,24 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
 
 ## Subsystem E v1.1 (Google Sheets)
 
+> **Post-OAuth migration (2026-06-10):** la auth gsheets pasó de Service
+> Account a OAuth user-scoped sobre `agents@startti.co`. Esto cambia el
+> shape de varios items abajo:
+>
+> - **Discovery items** (`gsheets_list_spreadsheets()`, sharing tools) son
+>   ahora **realmente útiles** — la cuenta `agents@startti.co` tiene
+>   Drive con quota personal, así que listar y compartir spreadsheets
+>   funciona como una user account real (la SA vieja tenía Drive vacío
+>   y quota 0).
+> - **Per-call credential overrides** quedó moot a corto plazo — un solo
+>   `agents@startti.co` cubre multi-tenant via document-level sharing en
+>   vez de SAs separadas.
+> - Items que solo tocan `batchUpdate` (formatting, charts, conditional
+>   formatting, data validation, webhooks) son neutrales — funcionan
+>   idéntico con cualquier auth.
+> - Guía operacional del OAuth:
+>   [`docs/developer_guide/47_google_oauth.md`](developer_guide/47_google_oauth.md).
+
 - [ ] **E-T7b — xlsx attachment plumbing** (deferred from E-T7). The 2 xlsx
   dispatchers (`gsheets_create_from_xlsx`, `gsheets_export_xlsx`) need
   attachment-byte fetcher AND register-bytes-as-attachment path. Neither
@@ -602,9 +620,14 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
 - [ ] **`gsheets_list_spreadsheets()`** — Drive discovery scoped to a
   shared folder. Needs `drive.metadata.readonly` scope and a
   folder-filter mechanism so the agent doesn't see the whole Drive.
-- [ ] **OAuth user-scoped auth** — act on behalf of a specific human
-  user. Likely a new `SheetsAuthProvider` trait so ADP (or any
-  downstream consumer) can plug in its OAuth flow.
+- [x] **OAuth user-scoped auth** — SHIPPED 2026-06-10 como parte del
+  hard cutover SA → OAuth de la entrada de Subsystem G v1.1
+  (ver `## Subsystem G v1.1` § "OAuth user-scoped flow" abajo). El
+  mismo módulo `src/libs/colmena/src/google_oauth/` cubre gsheets +
+  gdocs simultáneamente — no hace falta una abstracción de
+  `SheetsAuthProvider` separada porque la auth quedó unificada al
+  user `agents@startti.co`. Guía:
+  [`docs/developer_guide/47_google_oauth.md`](developer_guide/47_google_oauth.md).
 - [ ] **Cell formatting** — colors, borders, column widths via
   `batchUpdate` + `repeatCell`/`updateBorders`.
 - [ ] **Charts** via `batchUpdate.addChart`.
@@ -628,6 +651,24 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
 > hallazgos operacionales documentados en
 > [`developer_guide/45_gdocs.md`](developer_guide/45_gdocs.md) §"Limitaciones
 > en v1".
+>
+> **Post-OAuth migration (2026-06-10):** ya no se usa Service Account.
+> La auth para `gdocs_*` va por OAuth user-scoped sobre `agents@startti.co`.
+> Items abajo que dependen de creación / discovery / sharing son
+> **realmente realistas ahora**:
+> - `dispatch_create_from_docx` (item 4) y `dispatch_export` (item 5):
+>   `agents@startti.co` puede crear documentos con quota normal — sin
+>   los workarounds de Shared Drive o DWD que el SA viejo necesitaba.
+> - `gdocs_list_documents` (item 10): la cuenta tiene Drive útil con
+>   los docs compartidos con ella → list works.
+> - Drive Comments API (item 9), Apps Script (item adicional): mismo
+>   unlock — la cuenta opera como humano real.
+>
+> Items que solo tocan `batchUpdate` o el doc snapshot (table cells,
+> image insert, markdown tables, suggest mode, paragraph diff) son
+> neutrales al cambio de auth.
+> Guía operacional del OAuth:
+> [`docs/developer_guide/47_google_oauth.md`](developer_guide/47_google_oauth.md).
 
 - [x] **`apply_edits` ConfirmManyMatches threshold** — SHIPPED 2026-06-10.
   `apply_edits` ahora aplica el mismo umbral de ≥5 hits que el
