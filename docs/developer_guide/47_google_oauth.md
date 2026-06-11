@@ -323,6 +323,62 @@ export COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN="..."
 export COLMENA_GOOGLE_SHARE_EMAIL="vos@startti.co"  # o agents@startti.co
 ```
 
+## Runbook — E2E local contra Google real (sin tocar prod)
+
+Para verificar tools `gsheets_*` / `gdocs_*` localmente contra Google real
+**sin** un consent flow propio, inyectá las credenciales OAuth del worker desde
+GCP Secret Manager **en memoria** (nunca a un archivo, nunca commiteadas).
+
+**Prerequisito:** `gcloud auth login` con una cuenta que tenga
+`roles/secretmanager.secretAccessor` en `startti-dev`. El token de gcloud
+caduca y el refresh es interactivo — si ves `Reauthentication failed. cannot
+prompt during non-interactive execution`, corré `gcloud auth login` de nuevo.
+
+```bash
+source .venv/bin/activate                 # ver "Gotcha: pandas" abajo
+set -a; source .env; set +a               # GEMINI_API_KEY + DATABASE_URL
+unset ANTHROPIC_BASE_URL                   # evita 404 si quedó exportada
+export COLMENA_GOOGLE_SHARE_EMAIL=agents@startti.co
+export COLMENA_GOOGLE_OAUTH_CLIENT_ID=$(gcloud secrets versions access latest --secret=colmena-oauth-client-id --project=startti-dev)
+export COLMENA_GOOGLE_OAUTH_CLIENT_SECRET=$(gcloud secrets versions access latest --secret=colmena-oauth-client-secret --project=startti-dev)
+export COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN=$(gcloud secrets versions access latest --secret=colmena-oauth-refresh-token --project=startti-dev)
+# Gotcha: el binario release embebe Homebrew python@3.14; el sandbox de
+# gsheets_run_python necesita ver pandas del .venv (mismo ABI 3.14):
+export PYTHONPATH="$PWD/.venv/lib/python3.14/site-packages"
+
+./target/release/dag_engine run tests/graphs/agents/gsheets_collision_envelope_e2e.json \
+  --agent-session-id e2e_$(date +%s) --include-extra-info \
+  > /tmp/colmena_e2e/<name>.sse 2>&1
+```
+
+**Reglas de seguridad (no negociables):** los valores de los secrets se
+asignan por command-substitution (no se imprimen), viven solo en el env del
+proceso, y **NO se commitea nada** sobre los secrets de ADP. No `echo` del
+valor, no `set -x`, no escribir a `.env`.
+
+**Gotcha: `ModuleNotFoundError: No module named 'pandas'`.** Si cada llamada a
+`gsheets_run_python` / `crdt_doc_run_python` muere así, el `PYTHONPATH` no
+apunta al `site-packages` del intérprete que embebe el binario. Confirmá la
+versión con `otool -L target/release/dag_engine | grep -i python` y usá ese
+`pythonX.Y` en el path (acá: `python3.14`). Mismo class de bug que el
+pandas-en-worker (CHANGELOG, "pandas no instalado en worker image").
+
+**Graphs de referencia (collision envelope, QW1+QW3):**
+- [`tests/graphs/agents/gsheets_collision_envelope_e2e.json`](../../tests/graphs/agents/gsheets_collision_envelope_e2e.json)
+  — sheet creado por la app (prueba `last_modified` presente).
+- [`tests/graphs/agents/gsheets_collision_envelope_existing_e2e.json`](../../tests/graphs/agents/gsheets_collision_envelope_existing_e2e.json)
+  — sheet operator-shared (prueba el caveat de scope: `last_modified` ausente).
+
+**Caveat de scope `drive.file` (hallazgo E2E 2026-06-11).** El scope OAuth
+actual (`spreadsheets` + `drive.file`) solo cubre operaciones Drive sobre
+archivos que la app **creó o abrió**. Sobre un sheet que el usuario creó y
+compartió con `agents@startti.co`, los métodos del **Sheets API** (R/W de
+celdas) funcionan, pero `files.get` de **Drive** (e.g. `modifiedTime` que
+alimenta `current_state.last_modified`) devuelve 403/404. Por eso
+`last_modified` aparece en sheets creados por el agente y **no** en sheets
+compartidos. Para cubrir sheets compartidos: agregar `drive.metadata.readonly`
+al consent — ver BACKLOG "OAuth scope para last_modified en sheets compartidos".
+
 ## Spec design
 
 Para el design rationale completo, ver:
