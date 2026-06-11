@@ -726,6 +726,8 @@ pub async fn dispatch_create_from_markdown(
     }
 }
 
+/// Legacy entry point — returns a `not_yet_wired` envelope. Kept until all
+/// router call sites move to [`dispatch_create_from_docx_via_executor`].
 pub async fn dispatch_create_from_docx(
     args: serde_json::Value,
     _session_id: &str,
@@ -734,15 +736,61 @@ pub async fn dispatch_create_from_docx(
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    // Attachment resolver plumbing lives in T21 (toolkit router). For now
-    // surface a clear `not_yet_wired` envelope so the LLM gets a typed
-    // signal instead of a 500.
     serde_json::json!({
         "error": "not_yet_wired",
-        "message": "gdocs_create_from_docx requires attachment plumbing (Task 21).",
+        "message": "gdocs_create_from_docx requires attachment plumbing; use the via_executor variant.",
         "title": parsed.title,
         "attachment_id": parsed.attachment_id,
     })
+}
+
+/// Bundle 1 (G item 4, 2026-06-10) — production create_from_docx path.
+/// Fetches the `.docx` bytes from the conversation attachment catalog via
+/// [`DagToolExecutor::fetch_attachment_bytes`], then calls Drive
+/// `files.create?uploadType=multipart` with mime conversion to a native
+/// Google Doc. Returns the new `doc_id` + URL + revision.
+pub async fn dispatch_create_from_docx_via_executor(
+    executor: &crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor,
+    args: serde_json::Value,
+    _session_id: &str,
+) -> serde_json::Value {
+    let parsed: CreateFromDocxArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return invalid_args(e),
+    };
+    // Fetch the docx bytes via shared attachment plumbing (Bulk T0).
+    let stored = match executor.fetch_attachment_bytes(&parsed.attachment_id).await {
+        Ok(b) => b,
+        Err(e) => {
+            return serde_json::json!({
+                "error": "attachment_fetch_failed",
+                "message": e,
+                "attachment_id": parsed.attachment_id,
+            });
+        }
+    };
+    let client = match shared_client().await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    match client
+        .create_from_docx(
+            &parsed.title,
+            stored.bytes,
+            parsed.parent_folder_id.as_deref(),
+        )
+        .await
+    {
+        Ok(meta) => serde_json::json!({
+            "ok": true,
+            "doc_id": meta.doc_id.0,
+            "url": meta.url,
+            "title": meta.title,
+            "revision_id": meta.revision_id.0,
+            "tabs": meta.tabs,
+        }),
+        Err(e) => error_to_json(e),
+    }
 }
 
 pub async fn dispatch_share(args: serde_json::Value, _session_id: &str) -> serde_json::Value {
@@ -767,6 +815,10 @@ pub async fn dispatch_share(args: serde_json::Value, _session_id: &str) -> serde
     }
 }
 
+/// Legacy entry point — returns format + byte_len without registering the
+/// bytes as a new attachment. Kept for backwards compatibility with code
+/// that does its own bytes plumbing. The router now uses
+/// [`dispatch_export_via_executor`] instead.
 pub async fn dispatch_export(args: serde_json::Value, _session_id: &str) -> serde_json::Value {
     let parsed: ExportArgs = match serde_json::from_value(args) {
         Ok(a) => a,
@@ -785,10 +837,75 @@ pub async fn dispatch_export(args: serde_json::Value, _session_id: &str) -> serd
             "ok": true,
             "format": parsed.format,
             "byte_len": bytes.len(),
-            // Attachment registration is wired in T21 (router).
+            // Attachment registration is wired by the via_executor variant.
             "note": "binary bytes returned to the router; the agent receives an attachment_id from the router layer in v1.1",
         }),
         Err(e) => error_to_json(e),
+    }
+}
+
+/// Bundle 1 (G item 5, 2026-06-10) — production export path. After fetching
+/// the bytes from Drive, registers them in `OutputStorageRepository` so the
+/// LLM gets back an `attachment_id` it can re-share via `$attachment:<id>`
+/// in `http_request` multipart, or pass to downstream tools.
+///
+/// Returns the same shape as the legacy dispatcher plus an `attachment_id`
+/// field. The byte content never crosses to the LLM context — only the
+/// metadata + the id.
+pub async fn dispatch_export_via_executor(
+    executor: &crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor,
+    args: serde_json::Value,
+    _session_id: &str,
+) -> serde_json::Value {
+    let parsed: ExportArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return invalid_args(e),
+    };
+    let fmt = match parse_export_format(&parsed.format) {
+        Ok(f) => f,
+        Err(j) => return j,
+    };
+    let client = match shared_client().await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let bytes = match client.export(&DocumentId(parsed.doc_id.clone()), fmt).await {
+        Ok(b) => b,
+        Err(e) => return error_to_json(e),
+    };
+    let byte_len = bytes.len();
+    // Filename: prefer the export format's typical extension so downstream
+    // consumers (and humans) get a sensible name.
+    let ext = match fmt {
+        crate::gdocs::domain::types::ExportFormat::Docx => "docx",
+        crate::gdocs::domain::types::ExportFormat::Pdf => "pdf",
+        crate::gdocs::domain::types::ExportFormat::Markdown => "md",
+        crate::gdocs::domain::types::ExportFormat::Txt => "txt",
+        crate::gdocs::domain::types::ExportFormat::Rtf => "rtf",
+        crate::gdocs::domain::types::ExportFormat::Epub => "epub",
+        crate::gdocs::domain::types::ExportFormat::Odt => "odt",
+        crate::gdocs::domain::types::ExportFormat::Html => "zip", // bundle of HTML+assets
+    };
+    let filename = format!("{}.{}", parsed.doc_id, ext);
+    let mime = fmt.mime().to_string();
+    match executor
+        .register_attachment_bytes(bytes, mime.clone(), filename.clone())
+        .await
+    {
+        Ok(attachment_id) => serde_json::json!({
+            "ok": true,
+            "format": parsed.format,
+            "byte_len": byte_len,
+            "attachment_id": attachment_id,
+            "mime_type": mime,
+            "filename": filename,
+        }),
+        Err(e) => serde_json::json!({
+            "error": "attachment_register_failed",
+            "message": e,
+            "format": parsed.format,
+            "byte_len": byte_len,
+        }),
     }
 }
 

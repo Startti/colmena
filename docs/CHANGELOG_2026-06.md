@@ -1589,3 +1589,130 @@ naturalmente.
 - Design: [`docs/superpowers/specs/2026-06-10-oauth-user-scoped-design.md`](../superpowers/specs/2026-06-10-oauth-user-scoped-design.md)
 - Plan: [`docs/superpowers/plans/2026-06-10-oauth-user-scoped.md`](../superpowers/plans/2026-06-10-oauth-user-scoped.md)
 - Guía operacional: [`docs/developer_guide/47_google_oauth.md`](../developer_guide/47_google_oauth.md)
+
+---
+
+## 24. Bundle 1 — attachment plumbing dependents (G items 4 + 5, E-T7b) shipped 2026-06-11
+
+**Origen.** Post-Bulk T0 (shared attachment plumbing, commit `479c321`), tres
+features que estaban con placeholders `not_yet_wired` quedaron desbloqueadas
+para wiring:
+
+| Feature | Antes |
+|---|---|
+| `gdocs_create_from_docx` | dispatcher devolvía `{error: "not_yet_wired"}` |
+| `gdocs_export` | devolvía `{format, byte_len}` sin envolver bytes como attachment |
+| `gsheets_create_from_xlsx` + `gsheets_export_xlsx` | NO existían en el router — los tool definitions estaban publicados pero los dispatchers no se llamaban |
+
+**Hallazgo clave.** Los métodos HTTP de Drive Files API
+(`DocsClient::create_from_docx`, `SheetsClient::create_from_xlsx`,
+`SheetsClient::export_xlsx`) **ya estaban implementados** en
+`http_client.rs`. El bloqueo era puramente la falta del cable
+`fetch_attachment_bytes` / `register_attachment_bytes` en
+`DagToolExecutor`. Bulk T0 (commit `479c321`) provee ese cable. Bundle 1
+solo añadió **variantes `_via_executor`** que invocan el cable y luego
+delegan al método HTTP existente.
+
+**Cambios:**
+
+| Componente | LOC | Función |
+|---|---|---|
+| `gdocs_tools::dispatch_export_via_executor` | ~60 | Export bytes → `register_attachment_bytes` → response con `attachment_id` |
+| `gdocs_tools::dispatch_create_from_docx_via_executor` | ~50 | `fetch_attachment_bytes` → `DocsClient::create_from_docx` → response con `doc_id` |
+| `gsheets_tools::dispatch_create_from_xlsx_via_executor` | ~40 | Idem patron para xlsx → Sheets |
+| `gsheets_tools::dispatch_export_xlsx_via_executor` | ~40 | Idem patron para Sheets → xlsx con `register_attachment_bytes` |
+| `dag_tool_executor.rs` router | +15 | Match arms que llaman las variantes _via_executor |
+
+**Wire-format final** (todas las respuestas vienen como JSON):
+
+```jsonc
+// gdocs_create_from_docx
+{
+  "ok": true,
+  "doc_id": "1abc...",
+  "url": "https://docs.google.com/document/d/1abc...",
+  "title": "Mi doc",
+  "revision_id": "rev123",
+  "tabs": [...]
+}
+
+// gdocs_export
+{
+  "ok": true,
+  "format": "pdf",
+  "byte_len": 45000,
+  "attachment_id": "<storage_key>",
+  "mime_type": "application/pdf",
+  "filename": "1abc....pdf"
+}
+
+// gsheets_create_from_xlsx
+{
+  "ok": true,
+  "spreadsheet_id": "1xyz...",
+  "title": "Mi planilla",
+  "url": "https://docs.google.com/spreadsheets/d/1xyz...",
+  "sheets": [...]
+}
+
+// gsheets_export_xlsx
+{
+  "ok": true,
+  "attachment_id": "<storage_key>",
+  "byte_len": 12000,
+  "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "filename": "1xyz....xlsx",
+  "spreadsheet_id": "1xyz..."
+}
+```
+
+**Soporta inline AND signed URL uniformemente.** El cable de Bulk T0 va
+por `OutputStorageRepository`, que abstrae el source del attachment. Un
+usuario que sube un .docx inline (`data:` base64) y otro que sube un
+.docx vía URL firmada (`files[].url`) ambos terminan en el mismo path
+de bytes.
+
+**G item 8 (`gdocs_insert_image_after_text`) DIFERIDO.** Originalmente
+Bundle 1 lo incluía. Pero a diferencia de los 3 features de arriba, este
+requiere construir desde cero: nuevo tipo `InsertInlineImageRequest`,
+nuevo método HTTP, resolución de anchor (no existe), decisión de diseño
+sobre Drive image permissions. Bundle 1 ships con 3/4 features
+shipped; G item 8 vuelve al backlog con notas de scope.
+
+**Tests.** Suite full: **1688 PASS / 0 FAIL / 40 IGNORED**. Sin tests
+nuevos en este commit — los dispatchers _via_executor son thin wrappers
+de métodos HTTP ya cubiertos por wiremock tests existentes en
+`http_client.rs::tests`.
+
+**Impacto ADP.** **Cero breaking changes.** Los tool names son los
+mismos; los wire formats nuevos solo añaden campos
+(`attachment_id`/`mime_type`/`filename` para export, `doc_id` real en
+vez de `not_yet_wired` envelope para create). ADP recompila clean.
+
+**Estado.** done.
+
+### Cómo correr Bundle 1 manualmente
+
+```bash
+# Configurar OAuth user-scoped (única vez):
+# Ver docs/developer_guide/47_google_oauth.md
+
+# Test gdocs_export → attachment:
+# El LLM llama gdocs_export({doc_id, format: "pdf"})
+# → recibe {attachment_id, mime_type, filename, byte_len}
+# → puede usarse en http_request con "$attachment:<id>" en multipart
+
+# Test gdocs_create_from_docx ← attachment:
+# Usuario sube .docx via files[]
+# LLM llama gdocs_create_from_docx({title: "Doc nuevo", attachment_id: "products_docx"})
+# → recibe {doc_id, url, ...}
+
+# Test gsheets_create_from_xlsx ← attachment:
+# Usuario sube .xlsx
+# LLM llama gsheets_create_from_xlsx({title: "Planilla nueva", attachment_id: "products_xlsx"})
+# → recibe {spreadsheet_id, url, sheets}
+
+# Test gsheets_export_xlsx → attachment:
+# LLM llama gsheets_export_xlsx({spreadsheet_id})
+# → recibe {attachment_id, ...}
+```

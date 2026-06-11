@@ -1040,6 +1040,13 @@ impl DagToolExecutor {
                 GSHEETS_SET_RANGE_TOOL, TOOL_GSHEETS_RUN_PYTHON,
             };
 
+            // E-T7b (Bundle 1, 2026-06-10): xlsx tool constants for the
+            // create_from_xlsx + export_xlsx pair that now go through
+            // via_executor variants using the shared attachment plumbing.
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::gsheets_tools::{
+                dispatch_create_from_xlsx_via_executor, dispatch_export_xlsx_via_executor,
+                TOOL_CREATE_FROM_XLSX, TOOL_EXPORT_XLSX,
+            };
             let name = tool_call.function.name.as_str();
             let is_gsheets_tool = matches!(
                 name,
@@ -1051,6 +1058,8 @@ impl DagToolExecutor {
                     || n == GSHEETS_SET_CELL_TOOL
                     || n == GSHEETS_SET_RANGE_TOOL
                     || n == TOOL_GSHEETS_RUN_PYTHON
+                    || n == TOOL_CREATE_FROM_XLSX
+                    || n == TOOL_EXPORT_XLSX
             );
 
             if is_gsheets_tool {
@@ -1077,6 +1086,12 @@ impl DagToolExecutor {
                     n if n == GSHEETS_SET_CELL_TOOL => dispatch_gsheets_set_cell(args).await,
                     n if n == GSHEETS_SET_RANGE_TOOL => dispatch_gsheets_set_range(args).await,
                     n if n == TOOL_GSHEETS_RUN_PYTHON => dispatch_gsheets_run_python(args).await,
+                    n if n == TOOL_CREATE_FROM_XLSX => {
+                        dispatch_create_from_xlsx_via_executor(self, args).await
+                    }
+                    n if n == TOOL_EXPORT_XLSX => {
+                        dispatch_export_xlsx_via_executor(self, args).await
+                    }
                     other => serde_json::json!({
                         "error": "unknown_gsheets_tool",
                         "message": format!("router matched gsheets prefix but no dispatch arm for `{other}` — this is a bug in dag_tool_executor"),
@@ -1112,9 +1127,8 @@ impl DagToolExecutor {
             use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
                 dispatch_gdocs_acknowledge_human_changes, dispatch_gdocs_add_tab,
                 dispatch_gdocs_append_markdown, dispatch_gdocs_apply_edits, dispatch_gdocs_create,
-                dispatch_gdocs_create_from_docx, dispatch_gdocs_create_from_markdown,
-                dispatch_gdocs_create_named_range, dispatch_gdocs_delete_text,
-                dispatch_gdocs_export, dispatch_gdocs_insert_after_text,
+                dispatch_gdocs_create_from_markdown, dispatch_gdocs_create_named_range,
+                dispatch_gdocs_delete_text, dispatch_gdocs_insert_after_text,
                 dispatch_gdocs_insert_before_text, dispatch_gdocs_insert_between,
                 dispatch_gdocs_list_named_ranges, dispatch_gdocs_list_tabs,
                 dispatch_gdocs_read_as_markdown, dispatch_gdocs_read_outline,
@@ -1187,10 +1201,21 @@ impl DagToolExecutor {
                         dispatch_gdocs_create_from_markdown(args, session_id).await
                     }
                     n if n == GDOCS_CREATE_FROM_DOCX_TOOL => {
-                        dispatch_gdocs_create_from_docx(args, session_id).await
+                        // Bundle 1 (G item 4, 2026-06-10): via_executor path
+                        // fetches the docx bytes from the attachment catalog
+                        // and uploads to Drive with mime conversion.
+                        use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::gdocs_tools::dispatch_create_from_docx_via_executor;
+                        dispatch_create_from_docx_via_executor(self, args, session_id).await
                     }
                     n if n == GDOCS_SHARE_TOOL => dispatch_gdocs_share(args, session_id).await,
-                    n if n == GDOCS_EXPORT_TOOL => dispatch_gdocs_export(args, session_id).await,
+                    n if n == GDOCS_EXPORT_TOOL => {
+                        // Bundle 1 (G item 5, 2026-06-10): wire export through
+                        // the via_executor variant so the bytes get registered
+                        // as a new attachment and the LLM receives a usable
+                        // `attachment_id` instead of a raw byte_len.
+                        use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::gdocs_tools::dispatch_export_via_executor;
+                        dispatch_export_via_executor(self, args, session_id).await
+                    }
                     n if n == GDOCS_LIST_TABS_TOOL => {
                         dispatch_gdocs_list_tabs(args, session_id).await
                     }

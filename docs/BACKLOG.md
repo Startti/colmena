@@ -609,14 +609,13 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
 > - Guía operacional del OAuth:
 >   [`docs/developer_guide/47_google_oauth.md`](developer_guide/47_google_oauth.md).
 
-- [ ] **E-T7b — xlsx attachment plumbing** (deferred from E-T7). The 2 xlsx
-  dispatchers (`gsheets_create_from_xlsx`, `gsheets_export_xlsx`) need
-  attachment-byte fetcher AND register-bytes-as-attachment path. Neither
-  exists today as a tool-dispatcher-accessible helper. Either thread an
-  attachment fetcher/registrar into `DagToolExecutor`, OR add a new
-  sentinel mechanism so the LLM loop handles attachment I/O on the
-  dispatcher's behalf. Tool definitions are already published in
-  `enabled_tools` so once the plumbing exists, agents see no API change.
+- [x] **E-T7b — xlsx attachment plumbing** — SHIPPED 2026-06-11 (Bundle 1).
+  `gsheets_create_from_xlsx` y `gsheets_export_xlsx` ahora corren a
+  través de dispatchers `_via_executor` que usan la shared attachment
+  plumbing (Bulk T0): fetch_attachment_bytes para import,
+  register_attachment_bytes para export. Los métodos HTTP de Drive
+  Files API ya estaban implementados — solo se necesitó wiring.
+  Commit: ver §24 de CHANGELOG_2026-06.md.
 - [ ] **`gsheets_list_spreadsheets()`** — Drive discovery scoped to a
   shared folder. Needs `drive.metadata.readonly` scope and a
   folder-filter mechanism so the agent doesn't see the whole Drive.
@@ -722,15 +721,19 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
   pero la response incluye `pending_markdown_seed: true` y el contenido
   no se aplica. Implementar: post-creación del tab, llamar el converter
   + `batch_update` con `tabId` del nuevo tab. ~30 LOC en el dispatcher.
-- [ ] **`dispatch_create_from_docx` attachment plumbing** — el dispatcher
-  devuelve `not_yet_wired`. Necesita attachment-byte fetcher
-  threaded a `DagToolExecutor` (mismo bloqueo que E-T7b en gsheets).
-  Una vez fixed, ambos features (gsheets + gdocs) se desbloquean
-  simultáneamente.
-- [ ] **`dispatch_export` attachment wrapping** — hoy devuelve
-  `{format, byte_len}`. Falta envolver los bytes en un attachment
-  registrado para que downstream pueda re-compartirlo. Mismo plumbing
-  que E-T7b (register-bytes path).
+- [x] **`dispatch_create_from_docx` attachment plumbing** — SHIPPED
+  2026-06-11 (Bundle 1). Nueva variante `dispatch_create_from_docx_via_executor`
+  que llama `executor.fetch_attachment_bytes(attachment_id)` y sube los
+  bytes a Drive con conversión mime → Google Doc. El método HTTP
+  `DocsClient::create_from_docx` ya estaba implementado. Wire en el
+  router. Commit: ver §24 de CHANGELOG_2026-06.md.
+- [x] **`dispatch_export` attachment wrapping** — SHIPPED 2026-06-11
+  (Bundle 1). Nueva variante `dispatch_export_via_executor` que
+  exporta los bytes desde Drive y los registra como attachment via
+  `executor.register_attachment_bytes`. La response incluye
+  `attachment_id`, `mime_type` y `filename`; el LLM puede pasar el id
+  a downstream tools o vía `$attachment:<id>` en http_request. Commit:
+  ver §24 de CHANGELOG_2026-06.md.
 - [ ] **`mode: "suggest"`** — `writeControl.suggestionsEnabled` (parámetro
   aceptado pero no-op en v1; el agente recibe un warning si lo pasa).
 - [ ] **Surgical table-cell edits** (`gdocs_set_table_cell`,
@@ -739,8 +742,23 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
   pero el agente no puede editar celdas individuales sin un round-trip
   manual.
 - [ ] **`gdocs_insert_image_after_text`** (sabores `attachment_id` + URL).
-  Hoy no existe — markdown images en inserts pasan como lossy. Requiere
-  attachment fetcher (shared root con `create_from_docx`).
+  Hoy no existe — markdown images en inserts pasan como lossy. **Status:
+  bigger than initially scoped.** Bundle 1 (2026-06-11) había planeado
+  incluirlo, pero a diferencia de items 4+5 (donde los métodos HTTP ya
+  existían), este requiere construir desde cero: nuevo tipo
+  `InsertInlineImageRequest` en `gdocs::domain::types`, nuevo método
+  `DocsClient::insert_inline_image_after_text` que (a) resuelve el
+  anchor con la misma lógica de `replace_text`/`apply_edits`, (b) emite
+  un `documents.batchUpdate` con `InsertInlineImageRequest`. **Design
+  decision pendiente sobre el `attachment_id` path**: el URI que Docs
+  acepta debe ser una URL públicamente accesible. Hay 3 caminos:
+  (i) v1 URL-only — el LLM provee una URL pública directamente,
+  attachment_id queda para v1.1; (ii) attachment_id solo cuando el
+  source es `SignedUrl` (Drive/GCS) — se pasa la signed URL al Docs
+  API; (iii) attachment_id completo — subir bytes a Drive como image,
+  configurar permisos públicos, usar la Drive URL. Caminos (i) y (ii)
+  son ~2-3h cada uno; (iii) es ~6-8h por la dance de permisos. Cuando
+  se retome, decidir scope antes de codear.
 - [ ] **Drive Comments API** — mensajería humano ↔ agente in-doc
   (`gdocs_add_comment`, `gdocs_resolve_comment`, `gdocs_list_comments`).
   Útil para el flujo de revisión donde el humano deja TODO comments y

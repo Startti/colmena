@@ -497,6 +497,100 @@ pub async fn dispatch_set_range(args: serde_json::Value) -> serde_json::Value {
 // Note: create_from_xlsx + export_xlsx need attachment plumbing — wired
 // in E-T7 (router) where the attachment resolver lives.
 
+// E-T7b (Bundle 1, 2026-06-10) — production via_executor variants that
+// use the shared attachment plumbing (Bulk T0).
+
+/// Fetch a registered `.xlsx` attachment from the conversation catalog,
+/// upload to Drive with mime conversion to a native Google Spreadsheet.
+pub async fn dispatch_create_from_xlsx_via_executor(
+    executor: &crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    let parsed: CreateFromXlsxArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return serde_json::json!({"error": "invalid_args", "message": e.to_string()}),
+    };
+    let stored = match executor.fetch_attachment_bytes(&parsed.attachment_id).await {
+        Ok(b) => b,
+        Err(e) => {
+            return serde_json::json!({
+                "error": "attachment_fetch_failed",
+                "message": e,
+                "attachment_id": parsed.attachment_id,
+            });
+        }
+    };
+    let client = match build_client() {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    use crate::gsheets::domain::SheetsClient;
+    match client.create_from_xlsx(&parsed.title, stored.bytes).await {
+        Ok(meta) => serde_json::json!({
+            "ok": true,
+            "spreadsheet_id": meta.spreadsheet_id.0,
+            "title": meta.title,
+            "url": format!("https://docs.google.com/spreadsheets/d/{}", meta.spreadsheet_id.0),
+            "sheets": meta.sheets,
+        }),
+        Err(e) => serde_json::json!({
+            "error": "sheets_create_from_xlsx_failed",
+            "message": e.to_string(),
+        }),
+    }
+}
+
+/// Export a spreadsheet as `.xlsx` and register the bytes as a new
+/// attachment so the LLM receives an `attachment_id` it can pass to
+/// downstream tools or share via `$attachment:<id>`.
+pub async fn dispatch_export_xlsx_via_executor(
+    executor: &crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    let parsed: ExportXlsxArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return serde_json::json!({"error": "invalid_args", "message": e.to_string()}),
+    };
+    let client = match build_client() {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    use crate::gsheets::domain::{SheetsClient, SpreadsheetId};
+    let bytes = match client
+        .export_xlsx(&SpreadsheetId(parsed.spreadsheet_id.clone()))
+        .await
+    {
+        Ok(b) => b,
+        Err(e) => {
+            return serde_json::json!({
+                "error": "sheets_export_xlsx_failed",
+                "message": e.to_string(),
+            });
+        }
+    };
+    let byte_len = bytes.len();
+    let filename = format!("{}.xlsx", parsed.spreadsheet_id);
+    let mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string();
+    match executor
+        .register_attachment_bytes(bytes, mime.clone(), filename.clone())
+        .await
+    {
+        Ok(attachment_id) => serde_json::json!({
+            "ok": true,
+            "attachment_id": attachment_id,
+            "byte_len": byte_len,
+            "mime_type": mime,
+            "filename": filename,
+            "spreadsheet_id": parsed.spreadsheet_id,
+        }),
+        Err(e) => serde_json::json!({
+            "error": "attachment_register_failed",
+            "message": e,
+            "byte_len": byte_len,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
