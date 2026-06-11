@@ -36,6 +36,11 @@ impl OpenAiAdapter {
         }
     }
 
+    /// The configured endpoint. Exposed for tests and diagnostics.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     fn build_messages(&self, request: &LlmRequest) -> Result<Vec<serde_json::Value>, LlmError> {
         let mut out = Vec::with_capacity(request.messages().len());
         for msg in request.messages() {
@@ -932,6 +937,18 @@ impl OpenAiAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_uses_production_default() {
+        let a = OpenAiAdapter::new();
+        assert_eq!(a.base_url(), "https://api.openai.com/v1");
+    }
+
+    #[test]
+    fn with_base_url_overrides() {
+        let a = OpenAiAdapter::with_base_url("http://127.0.0.1:4000/v1".to_string());
+        assert_eq!(a.base_url(), "http://127.0.0.1:4000/v1");
+    }
 
     #[test]
     fn responses_serializes_uploaded_pdf_with_file_id() {
