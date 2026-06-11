@@ -553,6 +553,99 @@ impl SheetsClient for GoogleSheetsHttpClient {
         Ok(bytes.to_vec())
     }
 
+    async fn list_spreadsheets<'a>(
+        &self,
+        filter: &crate::gsheets::domain::types::SpreadsheetListFilter<'a>,
+    ) -> Result<crate::gsheets::domain::types::SpreadsheetListResult, SheetsError> {
+        use crate::gsheets::domain::types::{SpreadsheetListItem, SpreadsheetListResult};
+        // Build the Drive `q` parameter as `and`-joined predicates.
+        let mut q_parts: Vec<String> = vec![
+            "mimeType='application/vnd.google-apps.spreadsheet'".into(),
+            "trashed=false".into(),
+        ];
+        if let Some(query) = filter.query.filter(|s| !s.trim().is_empty()) {
+            let safe = query.replace('\'', "\\'");
+            q_parts.push(format!("name contains '{safe}'"));
+        }
+        if let Some(folder) = filter.parent_folder_id.filter(|s| !s.is_empty()) {
+            let safe = folder.replace('\'', "\\'");
+            q_parts.push(format!("'{safe}' in parents"));
+        }
+        if let Some(after) = filter.modified_after.filter(|s| !s.is_empty()) {
+            let safe = after.replace('\'', "\\'");
+            q_parts.push(format!("modifiedTime >= '{safe}'"));
+        }
+        let q = q_parts.join(" and ");
+        let limit = filter.limit.unwrap_or(20).clamp(1, 100);
+        let fields = "nextPageToken,files(id,name,modifiedTime,owners(emailAddress))";
+
+        let mut url = format!(
+            "{}?q={}&pageSize={}&fields={}&orderBy=modifiedTime desc",
+            self.drive_base,
+            urlencoding::encode(&q),
+            limit,
+            urlencoding::encode(fields),
+        );
+        if let Some(pt) = filter.page_token.filter(|s| !s.is_empty()) {
+            url.push_str("&pageToken=");
+            url.push_str(&urlencoding::encode(pt));
+        }
+        let j = self.get_json(&url).await?;
+
+        let files = j
+            .get("files")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut spreadsheets = Vec::with_capacity(files.len());
+        for f in files {
+            let spreadsheet_id = f
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| SheetsError::Internal("file missing id".into()))?
+                .to_string();
+            let name = f
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(untitled)")
+                .to_string();
+            let modified_time = f
+                .get("modifiedTime")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let owners: Vec<String> = f
+                .get("owners")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|o| {
+                            o.get("emailAddress")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            spreadsheets.push(SpreadsheetListItem {
+                spreadsheet_id: SpreadsheetId(spreadsheet_id.clone()),
+                name,
+                url: format!("https://docs.google.com/spreadsheets/d/{spreadsheet_id}"),
+                modified_time,
+                owners,
+            });
+        }
+        let next_page_token = j
+            .get("nextPageToken")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .filter(|s| !s.is_empty());
+        Ok(SpreadsheetListResult {
+            spreadsheets,
+            next_page_token,
+        })
+    }
+
     async fn add_sheet(&self, id: &SpreadsheetId, name: &str) -> Result<SheetMeta, SheetsError> {
         let url = format!("{}/{}:batchUpdate", self.sheets_base, id.0);
         let body = serde_json::json!({

@@ -20,6 +20,16 @@ pub trait SheetsClient: Send + Sync {
 
     async fn export_xlsx(&self, id: &SpreadsheetId) -> Result<Vec<u8>, SheetsError>;
 
+    /// Drive discovery — return the spreadsheets the OAuth user can see,
+    /// filtered by `filter`. Used by `gsheets_list_spreadsheets`.
+    ///
+    /// Symmetric to `DocsClient::list_documents`. Hits the same Drive
+    /// endpoint with `mimeType='application/vnd.google-apps.spreadsheet'`.
+    async fn list_spreadsheets<'a>(
+        &self,
+        filter: &crate::gsheets::domain::types::SpreadsheetListFilter<'a>,
+    ) -> Result<crate::gsheets::domain::types::SpreadsheetListResult, SheetsError>;
+
     async fn list_sheets(&self, id: &SpreadsheetId) -> Result<Vec<SheetMeta>, SheetsError>;
 
     async fn add_sheet(&self, id: &SpreadsheetId, name: &str) -> Result<SheetMeta, SheetsError>;

@@ -54,6 +54,8 @@ pub const TOOL_STYLE_TEXT: &str = "gdocs_style_text";
 pub const TOOL_CREATE_NAMED_RANGE: &str = "gdocs_create_named_range";
 pub const TOOL_REPLACE_NAMED_RANGE: &str = "gdocs_replace_named_range";
 pub const TOOL_ACKNOWLEDGE_HUMAN_CHANGES: &str = "gdocs_acknowledge_human_changes";
+/// Bundle 2A (2026-06-11): Drive discovery.
+pub const TOOL_LIST_DOCUMENTS: &str = "gdocs_list_documents";
 
 // ── Process-wide singletons ───────────────────────────────────────────
 
@@ -476,6 +478,36 @@ pub fn tool_share() -> ToolDefinition {
     )
 }
 
+/// Bundle 2A (2026-06-11): Args for [`TOOL_LIST_DOCUMENTS`]. All fields
+/// optional; the dispatcher clamps `limit` to `[1, 100]`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListDocumentsArgs {
+    /// Substring match against the document name. Drive `name contains`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    /// Restrict results to a single Drive folder. Folder must contain
+    /// the doc as a direct child (no recursion).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_folder_id: Option<String>,
+    /// RFC 3339 lower bound (`modifiedTime >= ...`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_after: Option<String>,
+    /// Page size. Default 20, max 100.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Pagination cursor from a prior call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_token: Option<String>,
+}
+
+pub fn tool_list_documents() -> ToolDefinition {
+    super::build_synthetic_tool_with_summary::<ListDocumentsArgs>(
+        TOOL_LIST_DOCUMENTS,
+        text::tool_description(TOOL_LIST_DOCUMENTS),
+        text::tool_summary(TOOL_LIST_DOCUMENTS),
+    )
+}
+
 pub fn tool_export() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<ExportArgs>(
         TOOL_EXPORT,
@@ -647,6 +679,7 @@ pub fn build_all_gdocs_tools() -> Vec<ToolDefinition> {
         tool_create_named_range(),
         tool_replace_named_range(),
         tool_acknowledge_human_changes(),
+        tool_list_documents(),
     ]
 }
 
@@ -788,6 +821,36 @@ pub async fn dispatch_create_from_docx_via_executor(
             "title": meta.title,
             "revision_id": meta.revision_id.0,
             "tabs": meta.tabs,
+        }),
+        Err(e) => error_to_json(e),
+    }
+}
+
+/// Bundle 2A (2026-06-11) — Drive discovery dispatcher.
+pub async fn dispatch_list_documents(
+    args: serde_json::Value,
+    _session_id: &str,
+) -> serde_json::Value {
+    let parsed: ListDocumentsArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return invalid_args(e),
+    };
+    let client = match shared_client().await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let filter = crate::gdocs::domain::types::DocumentListFilter {
+        query: parsed.query.as_deref(),
+        parent_folder_id: parsed.parent_folder_id.as_deref(),
+        modified_after: parsed.modified_after.as_deref(),
+        limit: parsed.limit,
+        page_token: parsed.page_token.as_deref(),
+    };
+    match client.list_documents(&filter).await {
+        Ok(res) => serde_json::json!({
+            "ok": true,
+            "documents": res.documents,
+            "next_page_token": res.next_page_token,
         }),
         Err(e) => error_to_json(e),
     }
@@ -1567,9 +1630,10 @@ mod tests {
     }
 
     #[test]
-    fn build_all_returns_22_tools() {
+    fn build_all_returns_23_tools() {
         let tools = build_all_gdocs_tools();
-        assert_eq!(tools.len(), 22);
+        // 22 tools v1 + gdocs_list_documents (Bundle 2A, 2026-06-11) = 23
+        assert_eq!(tools.len(), 23);
     }
 
     #[test]

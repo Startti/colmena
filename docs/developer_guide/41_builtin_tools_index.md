@@ -11,7 +11,7 @@ For the YAML registry that backs this index, see
 For toolkit packages (`enabled_tools: ["gsheets"]` shortcut), see
 [40_toolkit_packages.md](40_toolkit_packages.md).
 
-## gsheets (10 tools)
+## gsheets (11 tools)
 
 | Tool | Summary | Detailed docs |
 |---|---|---|
@@ -19,6 +19,7 @@ For toolkit packages (`enabled_tools: ["gsheets"]` shortcut), see
 | `gsheets_create_from_xlsx` | Upload a local .xlsx attachment and convert it into a new Google Sheet | [§39](39_gsheets.md) |
 | `gsheets_export_xlsx` | Download an existing Google Sheet as .xlsx bytes attachment | [§39](39_gsheets.md) |
 | `gsheets_list_sheets` | List every tab (sheet) inside a spreadsheet by ID | [§39](39_gsheets.md) |
+| `gsheets_list_spreadsheets` | Discover Google Spreadsheets visible to the OAuth user — optionally filtered by name, folder, or modified-after date | [§39](39_gsheets.md) |
 | `gsheets_add_sheet` | Create a new tab inside an existing spreadsheet | [§39](39_gsheets.md) |
 | `gsheets_delete_sheet` | Permanently delete a tab from a spreadsheet | [§39](39_gsheets.md) |
 | `gsheets_read` | Read a cell range from a tab; supports formatted, unformatted, and formula render modes | [§39](39_gsheets.md) |
@@ -74,7 +75,7 @@ computation server-side (run_python) instead of dumping every row.
 | `sql_inspect_attachment` | Open a registered CSV/XLSX attachment and report its header, sample rows, total row count, and inferred column types — without forcing the LLM to read every row | [§23](23_sql_node.md#bulk-insert-from-attachment-shipped-2026-06-09) |
 | `sql_bulk_insert_from_attachment` | Stream a CSV attachment into a Postgres table via COPY FROM STDIN — bypasses the LLM context for the rows and runs orders of magnitude faster than per-row INSERT | [§23](23_sql_node.md#bulk-insert-from-attachment-shipped-2026-06-09) |
 
-## gdocs (22 tools)
+## gdocs (23 tools)
 
 Content-addressed surgical editing — the LLM specifies WHAT to change
 (text, heading, named range) and never computes UTF-16 indices.
@@ -108,6 +109,7 @@ Detailed docs: [§45 — Google Docs integration](45_gdocs.md). Design spec:
 | `gdocs_create_named_range` | Declare a named range over a paragraph for stable addressing | [§45](45_gdocs.md) |
 | `gdocs_replace_named_range` | Overwrite the contents of a named range | [§45](45_gdocs.md) |
 | `gdocs_acknowledge_human_changes` | Acknowledge concurrent human edits and reset the co-edit cursor | [§45](45_gdocs.md) |
+| `gdocs_list_documents` | Discover Google Docs visible to the OAuth user — optionally filtered by name, folder, or modified-after date | [§45](45_gdocs.md) |
 
 ## Toolkit packages
 

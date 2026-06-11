@@ -139,6 +139,43 @@ pub struct SpreadsheetMeta {
     pub sheets: Vec<SheetMeta>,
 }
 
+/// One entry in the `list_spreadsheets` response. Like `DocumentListItem`
+/// but scoped to spreadsheets. Only the fields the LLM cares about are
+/// surfaced; downstream tools that need more metadata call
+/// `list_sheets()` or `read_range()`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpreadsheetListItem {
+    pub spreadsheet_id: SpreadsheetId,
+    pub name: String,
+    pub url: String,
+    /// RFC 3339 timestamp from Drive (`modifiedTime`).
+    pub modified_time: String,
+    /// Owner email addresses. Empty for Shared Drive files.
+    #[serde(default)]
+    pub owners: Vec<String>,
+}
+
+/// Result of `list_spreadsheets`. `next_page_token` is `Some(...)` when
+/// more results are available — the LLM passes it back as `page_token`
+/// in the next call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpreadsheetListResult {
+    pub spreadsheets: Vec<SpreadsheetListItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
+}
+
+/// Filter args for `list_spreadsheets`. Symmetric to `DocumentListFilter`
+/// in the gdocs subsystem.
+#[derive(Debug, Clone, Default)]
+pub struct SpreadsheetListFilter<'a> {
+    pub query: Option<&'a str>,
+    pub parent_folder_id: Option<&'a str>,
+    pub modified_after: Option<&'a str>,
+    pub limit: Option<u32>,
+    pub page_token: Option<&'a str>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

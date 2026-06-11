@@ -330,19 +330,22 @@ pub use gsheets_tools::{
     dispatch_add_sheet as dispatch_gsheets_add_sheet,
     dispatch_create_spreadsheet as dispatch_gsheets_create_spreadsheet,
     dispatch_delete_sheet as dispatch_gsheets_delete_sheet,
-    dispatch_list_sheets as dispatch_gsheets_list_sheets, dispatch_read as dispatch_gsheets_read,
-    dispatch_set_cell as dispatch_gsheets_set_cell,
+    dispatch_list_sheets as dispatch_gsheets_list_sheets,
+    dispatch_list_spreadsheets as dispatch_gsheets_list_spreadsheets,
+    dispatch_read as dispatch_gsheets_read, dispatch_set_cell as dispatch_gsheets_set_cell,
     dispatch_set_range as dispatch_gsheets_set_range, tool_add_sheet as gsheets_tool_add_sheet,
     tool_create_from_xlsx as gsheets_tool_create_from_xlsx,
     tool_create_spreadsheet as gsheets_tool_create_spreadsheet,
     tool_delete_sheet as gsheets_tool_delete_sheet, tool_export_xlsx as gsheets_tool_export_xlsx,
-    tool_list_sheets as gsheets_tool_list_sheets, tool_read as gsheets_tool_read,
+    tool_list_sheets as gsheets_tool_list_sheets,
+    tool_list_spreadsheets as gsheets_tool_list_spreadsheets, tool_read as gsheets_tool_read,
     tool_set_cell as gsheets_tool_set_cell, tool_set_range as gsheets_tool_set_range,
     TOOL_ADD_SHEET as GSHEETS_ADD_SHEET_TOOL,
     TOOL_CREATE_FROM_XLSX as GSHEETS_CREATE_FROM_XLSX_TOOL,
     TOOL_CREATE_SPREADSHEET as GSHEETS_CREATE_SPREADSHEET_TOOL,
     TOOL_DELETE_SHEET as GSHEETS_DELETE_SHEET_TOOL, TOOL_EXPORT_XLSX as GSHEETS_EXPORT_XLSX_TOOL,
-    TOOL_LIST_SHEETS as GSHEETS_LIST_SHEETS_TOOL, TOOL_READ as GSHEETS_READ_TOOL,
+    TOOL_LIST_SHEETS as GSHEETS_LIST_SHEETS_TOOL,
+    TOOL_LIST_SPREADSHEETS as GSHEETS_LIST_SPREADSHEETS_TOOL, TOOL_READ as GSHEETS_READ_TOOL,
     TOOL_SET_CELL as GSHEETS_SET_CELL_TOOL, TOOL_SET_RANGE as GSHEETS_SET_RANGE_TOOL,
 };
 
@@ -359,6 +362,7 @@ pub use gdocs_tools::{
     dispatch_insert_after_text as dispatch_gdocs_insert_after_text,
     dispatch_insert_before_text as dispatch_gdocs_insert_before_text,
     dispatch_insert_between as dispatch_gdocs_insert_between,
+    dispatch_list_documents as dispatch_gdocs_list_documents,
     dispatch_list_named_ranges as dispatch_gdocs_list_named_ranges,
     dispatch_list_tabs as dispatch_gdocs_list_tabs,
     dispatch_read_as_markdown as dispatch_gdocs_read_as_markdown,
@@ -394,6 +398,7 @@ pub use gdocs_tools::{
     TOOL_INSERT_AFTER_TEXT as GDOCS_INSERT_AFTER_TEXT_TOOL,
     TOOL_INSERT_BEFORE_TEXT as GDOCS_INSERT_BEFORE_TEXT_TOOL,
     TOOL_INSERT_BETWEEN as GDOCS_INSERT_BETWEEN_TOOL,
+    TOOL_LIST_DOCUMENTS as GDOCS_LIST_DOCUMENTS_TOOL,
     TOOL_LIST_NAMED_RANGES as GDOCS_LIST_NAMED_RANGES_TOOL, TOOL_LIST_TABS as GDOCS_LIST_TABS_TOOL,
     TOOL_READ_AS_MARKDOWN as GDOCS_READ_AS_MARKDOWN_TOOL,
     TOOL_READ_OUTLINE as GDOCS_READ_OUTLINE_TOOL,
@@ -442,12 +447,13 @@ mod text_coverage_tests {
     /// Returns every synthetic ToolDefinition the colmena library registers,
     /// excluding describe_tool (dynamic per-turn construction).
     fn all_synthetic_tools() -> Vec<ToolDefinition> {
-        // gsheets — 9 tools + gsheets_run_python
+        // gsheets — 10 tools + gsheets_run_python
         let mut tools = vec![
             super::gsheets_tools::tool_create_spreadsheet(),
             super::gsheets_tools::tool_create_from_xlsx(),
             super::gsheets_tools::tool_export_xlsx(),
             super::gsheets_tools::tool_list_sheets(),
+            super::gsheets_tools::tool_list_spreadsheets(),
             super::gsheets_tools::tool_add_sheet(),
             super::gsheets_tools::tool_delete_sheet(),
             super::gsheets_tools::tool_read(),

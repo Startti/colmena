@@ -54,6 +54,19 @@ pub trait DocsClient: Send + Sync {
     /// Grant access to `email` with the requested `role`.
     async fn share(&self, id: &DocumentId, email: &str, role: ShareRole) -> Result<(), DocsError>;
 
+    /// Drive discovery — return the documents the OAuth user can see,
+    /// filtered by `filter`. Used by `gdocs_list_documents`.
+    ///
+    /// Implementation hits `files.list?q=mimeType='application/vnd.google-apps.document'`
+    /// with the filter fragments appended via `and`. The OAuth user-scoped
+    /// account (`agents@startti.co` in the canonical deploy) only sees
+    /// documents shared with it OR owned by it — there is no Drive-wide
+    /// visibility.
+    async fn list_documents<'a>(
+        &self,
+        filter: &crate::gdocs::domain::types::DocumentListFilter<'a>,
+    ) -> Result<crate::gdocs::domain::types::DocumentListResult, DocsError>;
+
     /// Export the doc as bytes in the requested format. The dispatcher
     /// layer wraps the result as a colmena attachment.
     async fn export(&self, id: &DocumentId, format: ExportFormat) -> Result<Vec<u8>, DocsError>;

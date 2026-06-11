@@ -31,6 +31,8 @@ use serde::Deserialize;
 pub const TOOL_CREATE_SPREADSHEET: &str = "gsheets_create_spreadsheet";
 pub const TOOL_CREATE_FROM_XLSX: &str = "gsheets_create_from_xlsx";
 pub const TOOL_EXPORT_XLSX: &str = "gsheets_export_xlsx";
+/// Bundle 2A (2026-06-11): Drive discovery scoped to spreadsheets.
+pub const TOOL_LIST_SPREADSHEETS: &str = "gsheets_list_spreadsheets";
 pub const TOOL_LIST_SHEETS: &str = "gsheets_list_sheets";
 pub const TOOL_ADD_SHEET: &str = "gsheets_add_sheet";
 pub const TOOL_DELETE_SHEET: &str = "gsheets_delete_sheet";
@@ -54,6 +56,27 @@ pub struct CreateFromXlsxArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ExportXlsxArgs {
     pub spreadsheet_id: String,
+}
+
+/// Bundle 2A (2026-06-11): Args for [`TOOL_LIST_SPREADSHEETS`]. Mirrors
+/// the gdocs `ListDocumentsArgs` shape.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListSpreadsheetsArgs {
+    /// Substring match against the spreadsheet name. Drive `name contains`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    /// Restrict results to a single Drive folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_folder_id: Option<String>,
+    /// RFC 3339 lower bound (`modifiedTime >= ...`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_after: Option<String>,
+    /// Page size. Default 20, max 100.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Pagination cursor from a prior call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -206,6 +229,14 @@ pub fn tool_export_xlsx() -> ToolDefinition {
     )
 }
 
+pub fn tool_list_spreadsheets() -> ToolDefinition {
+    super::build_synthetic_tool_with_summary::<ListSpreadsheetsArgs>(
+        TOOL_LIST_SPREADSHEETS,
+        text::tool_description(TOOL_LIST_SPREADSHEETS),
+        text::tool_summary(TOOL_LIST_SPREADSHEETS),
+    )
+}
+
 pub fn tool_list_sheets() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<ListSheetsArgs>(
         TOOL_LIST_SHEETS,
@@ -288,6 +319,40 @@ pub async fn dispatch_list_sheets(args: serde_json::Value) -> serde_json::Value 
         Err(e) => return e,
     };
     dispatch_list_sheets_with_client(args, &client).await
+}
+
+/// Bundle 2A (2026-06-11) — Drive discovery dispatcher.
+pub async fn dispatch_list_spreadsheets_with_client(
+    args: serde_json::Value,
+    client: &dyn SheetsClient,
+) -> serde_json::Value {
+    let parsed: ListSpreadsheetsArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return serde_json::json!({"error": "invalid_args", "message": e.to_string()}),
+    };
+    let filter = crate::gsheets::domain::types::SpreadsheetListFilter {
+        query: parsed.query.as_deref(),
+        parent_folder_id: parsed.parent_folder_id.as_deref(),
+        modified_after: parsed.modified_after.as_deref(),
+        limit: parsed.limit,
+        page_token: parsed.page_token.as_deref(),
+    };
+    match client.list_spreadsheets(&filter).await {
+        Ok(res) => serde_json::json!({
+            "ok": true,
+            "spreadsheets": res.spreadsheets,
+            "next_page_token": res.next_page_token,
+        }),
+        Err(e) => error_to_json(e),
+    }
+}
+
+pub async fn dispatch_list_spreadsheets(args: serde_json::Value) -> serde_json::Value {
+    let client = match build_client() {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    dispatch_list_spreadsheets_with_client(args, &client).await
 }
 
 pub async fn dispatch_create_spreadsheet_with_client(
@@ -623,6 +688,12 @@ mod tests {
             Err(SheetsError::Internal("not used".into()))
         }
         async fn export_xlsx(&self, _id: &SpreadsheetId) -> Result<Vec<u8>, SheetsError> {
+            Err(SheetsError::Internal("not used".into()))
+        }
+        async fn list_spreadsheets<'a>(
+            &self,
+            _filter: &crate::gsheets::domain::types::SpreadsheetListFilter<'a>,
+        ) -> Result<crate::gsheets::domain::types::SpreadsheetListResult, SheetsError> {
             Err(SheetsError::Internal("not used".into()))
         }
         async fn add_sheet(&self, _id: &SpreadsheetId, _n: &str) -> Result<SheetMeta, SheetsError> {

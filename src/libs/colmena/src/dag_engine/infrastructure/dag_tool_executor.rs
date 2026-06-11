@@ -1047,6 +1047,9 @@ impl DagToolExecutor {
                 dispatch_create_from_xlsx_via_executor, dispatch_export_xlsx_via_executor,
                 TOOL_CREATE_FROM_XLSX, TOOL_EXPORT_XLSX,
             };
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
+                dispatch_gsheets_list_spreadsheets, GSHEETS_LIST_SPREADSHEETS_TOOL,
+            };
             let name = tool_call.function.name.as_str();
             let is_gsheets_tool = matches!(
                 name,
@@ -1060,6 +1063,7 @@ impl DagToolExecutor {
                     || n == TOOL_GSHEETS_RUN_PYTHON
                     || n == TOOL_CREATE_FROM_XLSX
                     || n == TOOL_EXPORT_XLSX
+                    || n == GSHEETS_LIST_SPREADSHEETS_TOOL
             );
 
             if is_gsheets_tool {
@@ -1091,6 +1095,9 @@ impl DagToolExecutor {
                     }
                     n if n == TOOL_EXPORT_XLSX => {
                         dispatch_export_xlsx_via_executor(self, args).await
+                    }
+                    n if n == GSHEETS_LIST_SPREADSHEETS_TOOL => {
+                        dispatch_gsheets_list_spreadsheets(args).await
                     }
                     other => serde_json::json!({
                         "error": "unknown_gsheets_tool",
@@ -1139,10 +1146,10 @@ impl DagToolExecutor {
                 GDOCS_CREATE_FROM_MARKDOWN_TOOL, GDOCS_CREATE_NAMED_RANGE_TOOL, GDOCS_CREATE_TOOL,
                 GDOCS_DELETE_TEXT_TOOL, GDOCS_EXPORT_TOOL, GDOCS_INSERT_AFTER_TEXT_TOOL,
                 GDOCS_INSERT_BEFORE_TEXT_TOOL, GDOCS_INSERT_BETWEEN_TOOL,
-                GDOCS_LIST_NAMED_RANGES_TOOL, GDOCS_LIST_TABS_TOOL, GDOCS_READ_AS_MARKDOWN_TOOL,
-                GDOCS_READ_OUTLINE_TOOL, GDOCS_REPLACE_NAMED_RANGE_TOOL,
-                GDOCS_REPLACE_SECTION_TOOL, GDOCS_REPLACE_TEXT_TOOL, GDOCS_SHARE_TOOL,
-                GDOCS_STYLE_TEXT_TOOL,
+                GDOCS_LIST_DOCUMENTS_TOOL, GDOCS_LIST_NAMED_RANGES_TOOL, GDOCS_LIST_TABS_TOOL,
+                GDOCS_READ_AS_MARKDOWN_TOOL, GDOCS_READ_OUTLINE_TOOL,
+                GDOCS_REPLACE_NAMED_RANGE_TOOL, GDOCS_REPLACE_SECTION_TOOL,
+                GDOCS_REPLACE_TEXT_TOOL, GDOCS_SHARE_TOOL, GDOCS_STYLE_TEXT_TOOL,
             };
 
             let name = tool_call.function.name.as_str();
@@ -1154,6 +1161,7 @@ impl DagToolExecutor {
                     || n == GDOCS_SHARE_TOOL
                     || n == GDOCS_EXPORT_TOOL
                     || n == GDOCS_LIST_TABS_TOOL
+                    || n == GDOCS_LIST_DOCUMENTS_TOOL
                     || n == GDOCS_ADD_TAB_TOOL
                     || n == GDOCS_READ_AS_MARKDOWN_TOOL
                     || n == GDOCS_READ_OUTLINE_TOOL
@@ -1218,6 +1226,11 @@ impl DagToolExecutor {
                     }
                     n if n == GDOCS_LIST_TABS_TOOL => {
                         dispatch_gdocs_list_tabs(args, session_id).await
+                    }
+                    n if n == GDOCS_LIST_DOCUMENTS_TOOL => {
+                        // Bundle 2A (2026-06-11): Drive discovery for documents.
+                        use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::dispatch_gdocs_list_documents;
+                        dispatch_gdocs_list_documents(args, session_id).await
                     }
                     n if n == GDOCS_ADD_TAB_TOOL => dispatch_gdocs_add_tab(args, session_id).await,
                     n if n == GDOCS_READ_AS_MARKDOWN_TOOL => {

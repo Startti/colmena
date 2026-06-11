@@ -123,3 +123,41 @@ gsheets_run_python:
     batchUpdate, instead of replacing 12K cells.
 
     For more patterns and pitfalls, load the `gsheets-table-exploration` skill (single-table inspection) or `gsheets-cross-sheet-analysis` skill (joins, comparisons).
+
+gsheets_list_spreadsheets:
+  summary: Discover Google Spreadsheets visible to the OAuth user (agents@startti.co) — optionally filtered by name, folder, or modified-after date
+  description: |
+    Drive discovery for spreadsheets. Returns the spreadsheets the OAuth
+    user can see (own + shared), in `modifiedTime desc` order, with
+    pagination.
+
+    All args are optional. An empty call returns the 20 most-recently-modified
+    spreadsheets visible to the agent account.
+
+    Args:
+      - `query` (optional): substring filter against the spreadsheet name.
+        Drive `name contains` semantics. Examples: "Inventario", "Q3 2026".
+      - `parent_folder_id` (optional): restrict to a single Drive folder.
+        Folder must contain the file as a direct child (no recursion).
+      - `modified_after` (optional): RFC 3339 timestamp lower bound for
+        `modifiedTime`. Example: "2026-06-01T00:00:00Z".
+      - `limit` (optional): page size, default 20, max 100.
+      - `page_token` (optional): cursor from a prior call to fetch the
+        next page.
+
+    Returns `{ok, spreadsheets: [{spreadsheet_id, name, url, modified_time, owners}], next_page_token}`.
+    `next_page_token` is present only when more results are available.
+    `owners` is a list of email addresses (may be empty for Shared Drive
+    files where ownership belongs to the organization).
+
+    Typical workflow:
+      1. User: "buscame el inventario de productos y agregale los nuevos"
+      2. LLM: gsheets_list_spreadsheets({query: "inventario"})
+         → recibe {spreadsheets: [{spreadsheet_id: "1xyz", name: "Inventario Productos 2026"}]}
+      3. LLM: gsheets_list_sheets({spreadsheet_id: "1xyz"})
+         → recibe tabs available
+      4. LLM continúa con set_range / batch_update_cells / etc.
+
+    The agent account only sees files that have been shared with it OR are
+    owned by it. To make a new spreadsheet visible to the agent, share it
+    with the share email shown in the agent's catalog prelude.

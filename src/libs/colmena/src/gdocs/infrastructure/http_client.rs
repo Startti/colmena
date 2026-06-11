@@ -612,6 +612,115 @@ impl DocsClient for GoogleDocsHttpClient {
         Ok(())
     }
 
+    async fn list_documents<'a>(
+        &self,
+        filter: &crate::gdocs::domain::types::DocumentListFilter<'a>,
+    ) -> Result<crate::gdocs::domain::types::DocumentListResult, DocsError> {
+        use crate::gdocs::domain::types::{DocumentListItem, DocumentListResult};
+        // Build the Drive `q` parameter as `and`-joined predicates.
+        let mut q_parts: Vec<String> = vec![
+            "mimeType='application/vnd.google-apps.document'".into(),
+            "trashed=false".into(),
+        ];
+        if let Some(query) = filter.query.filter(|s| !s.trim().is_empty()) {
+            // Escape single quotes inside the user query so Drive's `q`
+            // parser does not break.
+            let safe = query.replace('\'', "\\'");
+            q_parts.push(format!("name contains '{safe}'"));
+        }
+        if let Some(folder) = filter.parent_folder_id.filter(|s| !s.is_empty()) {
+            let safe = folder.replace('\'', "\\'");
+            q_parts.push(format!("'{safe}' in parents"));
+        }
+        if let Some(after) = filter.modified_after.filter(|s| !s.is_empty()) {
+            let safe = after.replace('\'', "\\'");
+            q_parts.push(format!("modifiedTime >= '{safe}'"));
+        }
+        let q = q_parts.join(" and ");
+        let limit = filter.limit.unwrap_or(20).clamp(1, 100);
+        let url = format!("{}/files", self.base_drive);
+        // Fields list (smallest subset that lets us populate
+        // DocumentListItem) — Drive bills nothing extra and the response
+        // is smaller.
+        let fields = "nextPageToken,files(id,name,modifiedTime,owners(emailAddress))";
+        let url_for_req = url.clone();
+        let q_for_req = q.clone();
+        let fields_for_req = fields.to_string();
+        let page_token_for_req = filter.page_token.map(String::from);
+        let resp = self
+            .send_with_retry(move |c, t| {
+                let mut req = c.request(Method::GET, &url_for_req).bearer_auth(t).query(&[
+                    ("q", q_for_req.as_str()),
+                    ("pageSize", &limit.to_string()),
+                    ("fields", fields_for_req.as_str()),
+                    ("orderBy", "modifiedTime desc"),
+                ]);
+                if let Some(ref pt) = page_token_for_req {
+                    req = req.query(&[("pageToken", pt.as_str())]);
+                }
+                req
+            })
+            .await?;
+        let resp = self.map_status(resp, "files.list (documents)").await?;
+        let j: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| DocsError::Http(format!("files.list json: {e}")))?;
+
+        let files = j
+            .get("files")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut documents = Vec::with_capacity(files.len());
+        for f in files {
+            let doc_id = f
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| DocsError::Http("file missing id".into()))?
+                .to_string();
+            let name = f
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(untitled)")
+                .to_string();
+            let modified_time = f
+                .get("modifiedTime")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let owners: Vec<String> = f
+                .get("owners")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|o| {
+                            o.get("emailAddress")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            documents.push(DocumentListItem {
+                doc_id: DocumentId(doc_id.clone()),
+                name,
+                url: format!("https://docs.google.com/document/d/{doc_id}"),
+                modified_time,
+                owners,
+            });
+        }
+        let next_page_token = j
+            .get("nextPageToken")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .filter(|s| !s.is_empty());
+        Ok(DocumentListResult {
+            documents,
+            next_page_token,
+        })
+    }
+
     async fn export(&self, id: &DocumentId, format: ExportFormat) -> Result<Vec<u8>, DocsError> {
         // Manually encode the MIME — / and + need percent-encoding.
         // Safe for every MIME in `ExportFormat::mime()` (they only

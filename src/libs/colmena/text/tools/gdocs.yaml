@@ -223,3 +223,36 @@ gdocs_acknowledge_human_changes:
     cursor to it. Use this after the co-edit guard returns
     `human_changes_pending` and the agent has decided to proceed despite
     overlapping human edits. Returns `{ok: true, revision_id_now}`.
+
+gdocs_list_documents:
+  summary: Discover Google Docs visible to the OAuth user (agents@startti.co) — optionally filtered by name, folder, or modified-after date
+  description: |
+    Drive discovery for documents. Returns the docs the OAuth user can see
+    (own + shared), in `modifiedTime desc` order, with pagination.
+
+    All args are optional. An empty call returns the 20 most-recently-modified
+    documents visible to the agent account.
+
+    Args:
+      - `query` (optional): substring filter against the document name.
+        Drive `name contains` semantics. Examples: "Plan Q3", "Onboarding".
+      - `parent_folder_id` (optional): restrict to a single Drive folder.
+        Folder must contain the file as a direct child (no recursion).
+      - `modified_after` (optional): RFC 3339 timestamp lower bound.
+        Example: "2026-06-01T00:00:00Z".
+      - `limit` (optional): page size, default 20, max 100.
+      - `page_token` (optional): cursor from a prior call.
+
+    Returns `{ok, documents: [{doc_id, name, url, modified_time, owners}], next_page_token}`.
+    `owners` is a list of email addresses (may be empty for Shared Drive
+    files where ownership belongs to the organization).
+
+    Typical workflow:
+      1. User: "buscame el plan Q3 y agregale una sección sobre OKRs"
+      2. LLM: gdocs_list_documents({query: "Plan Q3"})
+         → recibe {documents: [{doc_id: "1abc", name: "Plan Q3 2026"}]}
+      3. LLM: gdocs_apply_edits({doc_id: "1abc", edits: [{insert_after_text: {anchor: "OKR section", text: "..."}}]})
+
+    The agent account only sees files that have been shared with it OR are
+    owned by it. To make a new doc visible to the agent, share it with the
+    share email shown in the agent's catalog prelude.

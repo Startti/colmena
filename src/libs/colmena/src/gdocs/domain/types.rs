@@ -27,6 +27,50 @@ pub struct TabId(pub String);
 #[serde(transparent)]
 pub struct RevisionId(pub String);
 
+/// One entry in the `list_documents` response. Surfaces just the fields
+/// the LLM cares about (id, name, url, modified time, owner emails);
+/// downstream tools that need more metadata can call `get()` with the
+/// returned `doc_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentListItem {
+    pub doc_id: DocumentId,
+    pub name: String,
+    pub url: String,
+    /// RFC 3339 timestamp from Drive (`modifiedTime`).
+    pub modified_time: String,
+    /// Owner email addresses. Empty when Drive does not surface owners
+    /// (e.g. files in a Shared Drive where ownership belongs to the org).
+    #[serde(default)]
+    pub owners: Vec<String>,
+}
+
+/// Result of `list_documents`. `next_page_token` is `Some(...)` when more
+/// results are available — the LLM passes it back as `page_token` in the
+/// next call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentListResult {
+    pub documents: Vec<DocumentListItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
+}
+
+/// Filter args for `list_documents`. All fields optional; an empty filter
+/// returns the most-recently-modified documents the OAuth user can see.
+#[derive(Debug, Clone, Default)]
+pub struct DocumentListFilter<'a> {
+    /// Substring match against `name`. Drive uses `contains` semantics.
+    pub query: Option<&'a str>,
+    /// Limit to a specific Drive folder. Folder must contain the doc as
+    /// direct child (no recursion).
+    pub parent_folder_id: Option<&'a str>,
+    /// RFC 3339 lower bound on `modifiedTime`. Drive supports `>=` filter.
+    pub modified_after: Option<&'a str>,
+    /// Page size. Clamped to `[1, 100]` by the implementation.
+    pub limit: Option<u32>,
+    /// Pagination cursor from a prior call.
+    pub page_token: Option<&'a str>,
+}
+
 /// Where to look for the `find` text. `All` is doc-wide (default).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

@@ -1716,3 +1716,74 @@ vez de `not_yet_wired` envelope para create). ADP recompila clean.
 # LLM llama gsheets_export_xlsx({spreadsheet_id})
 # → recibe {attachment_id, ...}
 ```
+
+---
+
+## 25. Bundle 2A — Drive discovery (gdocs_list_documents + gsheets_list_spreadsheets) shipped 2026-06-11
+
+**Origen.** Post-OAuth migration (commit `c5ad3c6`, 2026-06-10), discovery
+finalmente tiene sentido real: `agents@startti.co` tiene Drive útil con
+docs/spreadsheets compartidos (la SA vieja tenía Drive vacío y quota 0).
+
+**Fix shipped.** Dos tools nuevos para Drive discovery:
+
+| Tool | Endpoint | Devuelve |
+|---|---|---|
+| `gdocs_list_documents` | Drive `files.list?q=mimeType='application/vnd.google-apps.document'` | `Vec<DocumentListItem>` + `next_page_token` |
+| `gsheets_list_spreadsheets` | Drive `files.list?q=mimeType='application/vnd.google-apps.spreadsheet'` | `Vec<SpreadsheetListItem>` + `next_page_token` |
+
+**Args (idéntico shape para ambos):**
+
+| Field | Tipo | Descripción |
+|---|---|---|
+| `query` | string? | Substring match en `name` (Drive `name contains`) |
+| `parent_folder_id` | string? | Limitar a folder específico (sin recursion) |
+| `modified_after` | string? | RFC 3339 timestamp lower bound (`modifiedTime >= ...`) |
+| `limit` | u32? | Page size, default 20, max 100 |
+| `page_token` | string? | Pagination cursor |
+
+**Response shape:**
+
+```jsonc
+{
+  "ok": true,
+  "documents": [   // o "spreadsheets"
+    {
+      "doc_id": "1abc...",
+      "name": "Plan Q3 2026",
+      "url": "https://docs.google.com/document/d/1abc...",
+      "modified_time": "2026-06-05T14:23:00Z",
+      "owners": ["humano@cliente.com"]
+    }
+  ],
+  "next_page_token": "..."  // Some(...) cuando hay más
+}
+```
+
+**Sin breaking changes.** Solo wire + nuevos métodos. Tools opt-in vía
+`enabled_tools` / `tool_configurations`. ADP worker recompila clean.
+
+**Cambios:**
+
+| Componente | LOC | Función |
+|---|---|---|
+| `gdocs::domain::types::DocumentListItem/Result/Filter` | ~50 | Types públicos |
+| `DocsClient::list_documents` (trait + HTTP impl) | ~110 | Drive `files.list?q=...&pageSize=...&fields=...&orderBy=...` con quoting safe |
+| `gsheets::domain::types::SpreadsheetListItem/Result/Filter` | ~50 | Types simétricos |
+| `SheetsClient::list_spreadsheets` (trait + HTTP impl) | ~100 | Idem patrón |
+| `gdocs_tools::ListDocumentsArgs + tool_list_documents + dispatch_list_documents` | ~60 | Builder + dispatcher |
+| `gsheets_tools::ListSpreadsheetsArgs + tool_list_spreadsheets + dispatch_list_spreadsheets[_with_client]` | ~70 | Idem |
+| `dag_tool_executor.rs` router | +20 | 2 match arms |
+| `mod.rs` re-exports + `all_synthetic_tools()` | +6 | Coverage |
+| `text/tools/gsheets.yaml`, `gdocs.yaml` | +80 | YAML entries |
+| `41_builtin_tools_index.md` | +2 | Index rows + counts |
+
+**Tests.** Suite full: **1760 PASS / 0 FAIL / 92 IGNORED**. `build_all_returns_23_tools`
+ajustado (era 22). Coverage test `index_doc_covers_all_registered_tools` PASS.
+
+**Estado.** done.
+
+**Próximo (Bundle 2B, deferred):** 5 tools de permissions —
+`drive_list_permissions`, `gsheets_share`, `gdocs_unshare`,
+`gsheets_unshare`, `gsheets_list_permissions` /
+`gdocs_list_permissions`. Comparten endpoint `drive.permissions.*`.
