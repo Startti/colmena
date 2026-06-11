@@ -29,6 +29,14 @@ pub struct RegisteredArtifact {
     /// observer attach errors are logged but don't abort artifact
     /// creation.
     _recalc_sub: Option<yrs::Subscription>,
+    /// JoinHandle for the detached `save_meta` task spawned by
+    /// `get_or_create` (the meta file is written off the hot path so
+    /// `get_or_create` stays sync). `shutdown_all` and `delete` drain
+    /// this before tearing down so the meta.json always lands on disk
+    /// before the tokio runtime drops the task — fixes a race where
+    /// phase 2 `load_from_disk` saw a missing meta.json on slow
+    /// filesystems (ext4 in CI) and skipped the artifact entirely.
+    meta_save: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl RegisteredArtifact {
@@ -87,6 +95,9 @@ impl DocRegistry {
                     snapshot: tokio::sync::Mutex::new(snapshot),
                     meta,
                     _recalc_sub: recalc_sub,
+                    // load_from_disk found an existing meta.json; no
+                    // background save was launched for this entry.
+                    meta_save: tokio::sync::Mutex::new(None),
                 }),
             );
             loaded += 1;
@@ -121,14 +132,23 @@ impl DocRegistry {
                     updated_at: now,
                     sheet_count: 0,
                 };
-                // Save the initial meta best-effort in a background task.
-                {
+                // Save the initial meta off the hot path. The JoinHandle is
+                // captured into `meta_save` so `shutdown_all`/`delete` can
+                // await it before the tokio runtime drops, guaranteeing the
+                // meta.json reaches disk even on slow filesystems.
+                let meta_save_handle = {
                     let storage = self.storage.clone();
                     let meta_clone = meta.clone();
                     tokio::spawn(async move {
-                        let _ = storage.save_meta(&meta_clone).await;
-                    });
-                }
+                        if let Err(e) = storage.save_meta(&meta_clone).await {
+                            tracing::warn!(
+                                artifact_id = %meta_clone.artifact_id,
+                                error = %e,
+                                "save_meta failed during get_or_create",
+                            );
+                        }
+                    })
+                };
                 Arc::new(RegisteredArtifact {
                     doc,
                     dirty,
@@ -136,6 +156,7 @@ impl DocRegistry {
                     snapshot: tokio::sync::Mutex::new(snapshot),
                     meta,
                     _recalc_sub: recalc_sub,
+                    meta_save: tokio::sync::Mutex::new(Some(meta_save_handle)),
                 })
             })
             .clone()
@@ -165,6 +186,11 @@ impl DocRegistry {
         let entries: Vec<Arc<RegisteredArtifact>> =
             self.docs.iter().map(|r| r.value().clone()).collect();
         for entry in entries {
+            // Drain the meta.json save task first so a fresh runtime
+            // reloading from this storage_root sees the artifact.
+            if let Some(handle) = entry.meta_save.lock().await.take() {
+                let _ = handle.await;
+            }
             let mut guard = entry.snapshot.lock().await;
             guard.shutdown().await;
         }
@@ -172,6 +198,9 @@ impl DocRegistry {
 
     pub async fn delete(&self, id: &ArtifactId) -> Result<(), StorageError> {
         if let Some((_, entry)) = self.docs.remove(&id.to_string()) {
+            if let Some(handle) = entry.meta_save.lock().await.take() {
+                let _ = handle.await;
+            }
             let mut guard = entry.snapshot.lock().await;
             guard.shutdown().await;
         }
