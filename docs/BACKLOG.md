@@ -638,7 +638,12 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
 - [ ] **Per-call credential overrides** — a graph could provide a different
   SA for different spreadsheets, useful for multi-tenant scenarios.
 - [ ] **Apps Script execution** from colmena (a single new tool calling
-  `scripts.run`).
+  `scripts.run`). **DEPRIORIZADO 2026-06-11** — el código es trivial (~1 tool,
+  ~1d) pero requiere fricción operacional alta (scope OAuth nuevo
+  `script.scripts.execute` → re-consent de `agents@startti.co` → update Secret
+  Manager → redeploy worker) y NO hay caso de uso concreto todavía. Retomar
+  solo cuando aparezca un cliente con una macro Apps Script real que el agente
+  deba invocar. Era "Bundle 4B"; Bundle 4A (Drive Comments) ya shipped.
 
 ---
 
@@ -789,6 +794,9 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
   + ajustar offsets del contenido posterior. Esfuerzo: ~4-5h. No es
   quick win; queda al backlog con scope clarificado.
 - [ ] **Ejecución de Apps Script** desde colmena (`scripts.run`).
+  **DEPRIORIZADO 2026-06-11** — ver nota completa en la sección "Subsystem E v1.1"
+  (mismo item). Diferido hasta que haya un caso de uso real; requiere
+  re-consent OAuth + redeploy.
 - [ ] **Drive Revisions restore** (rollback a una revisión previa).
 - [ ] **Math expressions en markdown** — hoy pasan como `$…$` literal.
 
