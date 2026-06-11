@@ -717,10 +717,16 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
   CHANGELOG §17. Residuales para v1.2: detección solo-estilo, diff
   intra-paragraph carácter-perfecto, atribución a usuario (sin Google
   per-edit log → permanente null).
-- [ ] **`add_tab` markdown seeding** — hoy el arg `markdown` se acepta
-  pero la response incluye `pending_markdown_seed: true` y el contenido
-  no se aplica. Implementar: post-creación del tab, llamar el converter
-  + `batch_update` con `tabId` del nuevo tab. ~30 LOC en el dispatcher.
+- [x] **`add_tab` markdown seeding** — SHIPPED 2026-06-11 (Bundle 3).
+  Post-creación del tab, el dispatcher llama
+  `replace_section::run_append_markdown` con el `tab_id` del nuevo tab
+  (reusa la primitive existente del converter + batch_update). La
+  response cambió de `pending_markdown_seed: true` a `markdown_seeded:
+  true|false`; un seed fallido después de crear el tab surface un
+  `markdown_seed_error` con el error envelope tradicional para que el
+  LLM sepa que el tab existe pero el contenido no landeó. Cero
+  breaking changes — agentes que solo usaban `add_tab` sin markdown
+  no notan diferencia.
 - [x] **`dispatch_create_from_docx` attachment plumbing** — SHIPPED
   2026-06-11 (Bundle 1). Nueva variante `dispatch_create_from_docx_via_executor`
   que llama `executor.fetch_attachment_bytes(attachment_id)` y sube los
@@ -770,7 +776,18 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
 - [ ] **Markdown tables en insert/replace** — requiere round-trip snapshot
   para computar índices de celda. Hoy `gdocs_insert_*`,
   `gdocs_replace_section`, `gdocs_append_markdown` y `gdocs_apply_edits`
-  rechazan markdown con tablas (`invalid_args`).
+  rechazan markdown con tablas (`invalid_args`) vía
+  `reject_table_markdown` en `insert.rs` y `replace_section.rs`.
+  **Status revisado en Bundle 3 (2026-06-11):** se evaluó incluirlo como
+  quick win pero no califica. El converter `markdown_to_docs_ops` YA
+  emite `insertTable` + `insertText` por celda (líneas 536-583), pero el
+  cursor math post-tabla es heurística (`1 + rows*cols*2 + rows`) y NO
+  matchea el modelo real del Docs API. Para contenido posterior a la
+  tabla, los índices quedarían mal. El fix correcto = pipeline de 2
+  batchUpdates: (1) emit `insertTable` + capture nuevo state vía
+  snapshot read; (2) issue `insertText` cell-by-cell con índices reales
+  + ajustar offsets del contenido posterior. Esfuerzo: ~4-5h. No es
+  quick win; queda al backlog con scope clarificado.
 - [ ] **Ejecución de Apps Script** desde colmena (`scripts.run`).
 - [ ] **Drive Revisions restore** (rollback a una revisión previa).
 - [ ] **Math expressions en markdown** — hoy pasan como `$…$` literal.

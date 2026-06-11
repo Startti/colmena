@@ -1087,16 +1087,67 @@ pub async fn dispatch_add_tab(args: serde_json::Value, session_id: &str) -> serd
             // its insert_index against a stale snapshot that lacks
             // the new tab and the markdown would land in the wrong
             // tab (Google defaults to tab 1 when tabId is unknown).
-            shared_cache().await.invalidate(session_id, &doc_id);
+            let cache = shared_cache().await;
+            cache.invalidate(session_id, &doc_id);
+
+            // Bundle 3 (G item 3, 2026-06-11): markdown seeding for new tabs.
+            // If the caller provided `markdown`, run append_markdown against
+            // the newly-created tab so the content lands in one tool call
+            // instead of forcing the LLM to do add_tab + append_markdown.
+            let markdown_seeded = if let Some(md) = parsed.markdown.as_ref() {
+                if md.trim().is_empty() {
+                    // Empty markdown → nothing to seed. Surface a true so the
+                    // LLM doesn't think the seed silently failed.
+                    true
+                } else {
+                    let revisions = match shared_revs().await {
+                        Ok(r) => r,
+                        Err(e) => return e,
+                    };
+                    let sa = std::env::var("COLMENA_GDOCS_SA_EMAIL").ok();
+                    let ctx = co_edit_guard::GuardContext {
+                        client: client.as_ref(),
+                        cache: cache.as_ref(),
+                        revisions: revisions.as_ref(),
+                        session_id,
+                        sa_email: sa.as_deref(),
+                    };
+                    let input = replace_section::AppendMarkdownInput {
+                        new_markdown: md.clone(),
+                        tab_id: Some(tab.tab_id.clone()),
+                    };
+                    match replace_section::run_append_markdown(&ctx, &doc_id, input).await {
+                        Ok(_) => true,
+                        Err(e) => {
+                            // Seed failed AFTER the tab was created. Return a
+                            // partial success surface so the LLM knows the
+                            // tab exists but the markdown didn't land.
+                            return serde_json::json!({
+                                "ok": true,
+                                "tab_id": tab.tab_id.0,
+                                "title": tab.title,
+                                "index": tab.index,
+                                "parent_tab_id": tab.parent_tab_id.map(|t| t.0),
+                                "markdown_seeded": false,
+                                "markdown_seed_error": error_to_json(e),
+                            });
+                        }
+                    }
+                }
+            } else {
+                false
+            };
+
             serde_json::json!({
                 "ok": true,
                 "tab_id": tab.tab_id.0,
                 "title": tab.title,
                 "index": tab.index,
                 "parent_tab_id": tab.parent_tab_id.map(|t| t.0),
-                // markdown seeding for new tabs is deferred to v1.1 — surface
-                // the unused arg back so the LLM can see it was acknowledged.
-                "pending_markdown_seed": parsed.markdown.is_some(),
+                // Bundle 3 (G item 3, 2026-06-11): replaced
+                // `pending_markdown_seed: true` placeholder with the actual
+                // outcome of the seed attempt.
+                "markdown_seeded": markdown_seeded,
             })
         }
         Err(e) => error_to_json(e),

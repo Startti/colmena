@@ -1879,3 +1879,90 @@ totalmente cubiertos. Próximos bundles del backlog:
 - Bundle 3 — markdown content quick wins (~1d)
 - Bundle 4 — Comments + Apps Script (~3d)
 - Bundle 5-8 — table cells / formatting / suggest / webhooks
+
+---
+
+## 27. Bundle 3 — `add_tab` markdown seeding (G item 3) shipped 2026-06-11
+
+**Origen.** Backlog G v1.1 item 3: hoy `gdocs_add_tab` con el arg `markdown`
+acepta el contenido pero devuelve `pending_markdown_seed: true` y el tab
+queda vacío. El LLM tenía que hacer dos calls (`add_tab` + `append_markdown`)
+para crear un tab con contenido.
+
+**Fix shipped.** `dispatch_add_tab` ahora invoca
+`replace_section::run_append_markdown` con el `tab_id` recién creado cuando
+el caller proveyó `markdown` no-vacío. Reusa toda la infra existente del
+converter de markdown + batchUpdate + co-edit guard.
+
+**Antes:**
+```jsonc
+// LLM call
+{"name": "gdocs_add_tab", "arguments": {
+  "doc_id": "1abc...",
+  "title": "Nueva sección",
+  "markdown": "# Intro\n\nContenido inicial"
+}}
+
+// Response
+{
+  "ok": true,
+  "tab_id": "t.xyz",
+  "title": "Nueva sección",
+  ...
+  "pending_markdown_seed": true   // ← placeholder, contenido NO landeó
+}
+```
+
+**Después:**
+```jsonc
+// Mismo LLM call
+
+// Response
+{
+  "ok": true,
+  "tab_id": "t.xyz",
+  "title": "Nueva sección",
+  ...
+  "markdown_seeded": true   // ← contenido sí landeó
+}
+```
+
+**Failure-mode handling.** Si la creación del tab tiene éxito pero el seed
+falla post-creación, el dispatcher surface una response de éxito parcial
+para que el LLM no piense que el tab no se creó:
+
+```jsonc
+{
+  "ok": true,
+  "tab_id": "t.xyz",
+  ...
+  "markdown_seeded": false,
+  "markdown_seed_error": {"error": ...}   // el error envelope del seed
+}
+```
+
+El LLM puede entonces re-intentar con `gdocs_append_markdown({tab_id: "t.xyz", ...})`.
+
+**Cambios:**
+
+| Componente | LOC | Función |
+|---|---|---|
+| `dispatch_add_tab` | +40 | Llama a `run_append_markdown` post-creación cuando hay markdown; mantiene short-circuit para markdown vacío + failure-mode handling |
+
+**No breaking changes.** Agentes que llamaban `add_tab` SIN markdown no
+notan diferencia. Agentes que pasaban markdown obtienen el shape esperado
+(con `markdown_seeded` en vez del `pending_markdown_seed` placeholder).
+
+**Tests.** Full suite: **1760 PASS / 0 FAIL / 92 IGNORED**. Sin tests
+nuevos en este commit — el dispatcher es wiring de primitives ya cubiertas
+por sus tests propios (replace_section + co-edit guard).
+
+**Markdown tables NO incluidas en este bundle.** Originalmente Bundle 3
+planeaba incluir support para tablas en `insert/replace`. Tras
+investigación quedó claro que NO califica como quick win — el converter
+`markdown_to_docs_ops` ya emite `insertTable` + `insertText` per cell,
+pero el cursor math post-tabla es heurística. El fix correcto requiere
+pipeline de 2 batchUpdates con snapshot intermedio para resolver índices
+reales de celda. Esfuerzo: ~4-5h. Queda al backlog con scope clarificado.
+
+**Estado.** done.
