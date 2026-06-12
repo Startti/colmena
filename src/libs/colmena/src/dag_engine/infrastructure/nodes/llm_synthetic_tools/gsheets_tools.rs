@@ -111,6 +111,9 @@ pub struct ReadArgs {
     pub value_render: Option<String>,
     #[serde(default)]
     pub as_records: bool,
+    /// "markdown" (default) renders a markdown table; "json" returns the
+    /// structured `values` array (honoring `as_records`).
+    pub format: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -673,9 +676,15 @@ pub async fn dispatch_read_with_client(
             r.to_string()
         }
     });
+    let want_markdown = parsed.format.as_deref().unwrap_or("markdown") != "json";
     let opts = ReadOptions {
         value_render: parse_value_render(parsed.value_render.as_deref()),
-        as_records: parsed.as_records,
+        // Markdown needs the 2-D grid (header row); json honors as_records.
+        as_records: if want_markdown {
+            false
+        } else {
+            parsed.as_records
+        },
     };
     match client
         .read_range(
@@ -686,12 +695,26 @@ pub async fn dispatch_read_with_client(
         )
         .await
     {
-        Ok(r) => serde_json::json!({
-            "ok": true,
-            "sheet": r.sheet,
-            "range": r.range,
-            "values": r.values,
-        }),
+        Ok(r) => {
+            let dimensions = compute_dimensions(&r.values);
+            if want_markdown {
+                serde_json::json!({
+                    "ok": true,
+                    "sheet": r.sheet,
+                    "range": r.range,
+                    "dimensions": dimensions,
+                    "markdown": values_to_markdown(&r.values),
+                })
+            } else {
+                serde_json::json!({
+                    "ok": true,
+                    "sheet": r.sheet,
+                    "range": r.range,
+                    "dimensions": dimensions,
+                    "values": r.values,
+                })
+            }
+        }
         Err(e) => error_to_json(e),
     }
 }
@@ -1062,6 +1085,152 @@ mod tests {
             hint.contains("operador"),
             "degraded hint must point to the operator: {hint}"
         );
+    }
+
+    /// A minimal `SheetsClient` that returns a fixed `values` JSON array from
+    /// `read_range` and errors on all other methods. Used by dispatch_read tests.
+    struct ReadClient {
+        values: serde_json::Value,
+    }
+
+    fn mock_client_returning(values: serde_json::Value) -> ReadClient {
+        ReadClient { values }
+    }
+
+    #[async_trait]
+    impl SheetsClient for ReadClient {
+        async fn list_sheets(&self, _id: &SpreadsheetId) -> Result<Vec<SheetMeta>, SheetsError> {
+            Err(SheetsError::Internal("not used".into()))
+        }
+        async fn get_modified_time(
+            &self,
+            _id: &SpreadsheetId,
+        ) -> Result<Option<String>, SheetsError> {
+            Err(SheetsError::Internal("not used".into()))
+        }
+        async fn create_spreadsheet(&self, _title: &str) -> Result<SpreadsheetMeta, SheetsError> {
+            Err(SheetsError::Internal("not used".into()))
+        }
+        async fn create_from_xlsx(
+            &self,
+            _t: &str,
+            _b: Vec<u8>,
+        ) -> Result<SpreadsheetMeta, SheetsError> {
+            Err(SheetsError::Internal("not used".into()))
+        }
+        async fn export_xlsx(&self, _id: &SpreadsheetId) -> Result<Vec<u8>, SheetsError> {
+            Err(SheetsError::Internal("not used".into()))
+        }
+        async fn list_spreadsheets<'a>(
+            &self,
+            _filter: &crate::gsheets::domain::types::SpreadsheetListFilter<'a>,
+        ) -> Result<crate::gsheets::domain::types::SpreadsheetListResult, SheetsError> {
+            Err(SheetsError::Internal("not used".into()))
+        }
+        async fn share(
+            &self,
+            _id: &SpreadsheetId,
+            _email: &str,
+            _role: crate::gsheets::domain::types::ShareRole,
+        ) -> Result<(), SheetsError> {
+            Err(SheetsError::Internal("not used".into()))
+        }
+        async fn list_permissions(
+            &self,
+            _id: &SpreadsheetId,
+        ) -> Result<crate::gsheets::domain::types::PermissionList, SheetsError> {
+            Err(SheetsError::Internal("not used".into()))
+        }
+        async fn delete_permission(
+            &self,
+            _id: &SpreadsheetId,
+            _permission_id: &str,
+        ) -> Result<(), SheetsError> {
+            Err(SheetsError::Internal("not used".into()))
+        }
+        async fn add_sheet(&self, _id: &SpreadsheetId, _n: &str) -> Result<SheetMeta, SheetsError> {
+            Err(SheetsError::Internal("not used".into()))
+        }
+        async fn delete_sheet(&self, _id: &SpreadsheetId, _n: &str) -> Result<(), SheetsError> {
+            Err(SheetsError::Internal("not used".into()))
+        }
+        async fn read_range(
+            &self,
+            _id: &SpreadsheetId,
+            _s: &str,
+            _r: Option<&str>,
+            _o: ReadOptions,
+        ) -> Result<ReadResponse, SheetsError> {
+            Ok(ReadResponse {
+                sheet: "Sheet1".into(),
+                range: "A1:B3".into(),
+                values: self.values.clone(),
+            })
+        }
+        async fn set_cell(
+            &self,
+            _id: &SpreadsheetId,
+            _s: &str,
+            _a: &str,
+            _v: CellValue,
+        ) -> Result<(), SheetsError> {
+            Err(SheetsError::Internal("not used".into()))
+        }
+        async fn set_range(
+            &self,
+            _id: &SpreadsheetId,
+            _s: &str,
+            _a: &str,
+            _v: Vec<Vec<CellValue>>,
+        ) -> Result<SetRangeResponse, SheetsError> {
+            Err(SheetsError::Internal("not used".into()))
+        }
+        async fn batch_update_cells(
+            &self,
+            _id: &SpreadsheetId,
+            _s: &str,
+            _u: Vec<(String, CellValue)>,
+        ) -> Result<SetRangeResponse, SheetsError> {
+            Err(SheetsError::Internal("not used".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_read_defaults_to_markdown_with_dimensions() {
+        // Mock returns the raw 2-D grid for as_records=false.
+        let client = mock_client_returning(serde_json::json!([["name", "qty"], ["apple", 3]]));
+        let args = serde_json::json!({ "spreadsheet_id": "id", "sheet": "Sheet1" });
+        let out = dispatch_read_with_client(args, &client).await;
+        assert_eq!(out["ok"], true);
+        assert_eq!(
+            out["markdown"],
+            "| name | qty |\n| --- | --- |\n| apple | 3 |"
+        );
+        assert_eq!(
+            out["dimensions"],
+            serde_json::json!({ "rows": 2, "columns": 2 })
+        );
+        assert!(
+            out.get("values").is_none(),
+            "markdown mode must not include raw values"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_read_json_format_preserves_values() {
+        let client = mock_client_returning(serde_json::json!([["name", "qty"], ["apple", 3]]));
+        let args =
+            serde_json::json!({ "spreadsheet_id": "id", "sheet": "Sheet1", "format": "json" });
+        let out = dispatch_read_with_client(args, &client).await;
+        assert_eq!(
+            out["values"],
+            serde_json::json!([["name", "qty"], ["apple", 3]])
+        );
+        assert_eq!(
+            out["dimensions"],
+            serde_json::json!({ "rows": 2, "columns": 2 })
+        );
+        assert!(out.get("markdown").is_none());
     }
 
     #[test]
