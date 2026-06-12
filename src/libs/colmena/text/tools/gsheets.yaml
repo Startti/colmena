@@ -33,7 +33,15 @@ gsheets_delete_sheet:
 gsheets_read:
   summary: Read a cell range from a tab; supports formatted, unformatted, and formula render modes
   description: |
-    Read cells from a tab. Defaults: value_render=UNFORMATTED_VALUE (pandas-friendly scalars), as_records=false (2D array). Set value_render='FORMULA' to read formula text instead of evaluated values. Set as_records=true to use the first row as headers and return [{col: val, ...}].
+    Read a sheet and return it as a MARKDOWN TABLE (default) — ideal for reading or
+    showing a table. To read a whole sheet, OMIT `range` (reads the entire used
+    area); pass an A1 `range` only for a subset. The result includes `dimensions`
+    {rows, columns} (the data extent) and the A1 `range`, so you can then read a
+    precise subrange. For structured data (further processing) pass
+    `format: "json"` to get the raw `values` array. NOTE: to COMPARE or cross-
+    reference tables, do NOT read-and-eyeball — use `gsheets_run_python` (code).
+    `gsheets_list_sheets` gives a rough allocated grid size (not the data extent)
+    if you want to gauge a sheet before reading something large.
 
 gsheets_set_cell:
   summary: Write one value or formula into a single cell
