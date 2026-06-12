@@ -1,0 +1,33 @@
+{
+  "_comment": "E2E (manual, live): gdocs_insert_image_after_text path (i) URL-only. The agent reads an OPERATOR-PROVIDED Google Doc (shared as Editor with agents@startti.co), picks an existing text anchor, and inserts a public image right after it via insertInlineImage. Replace <YOUR_DOC_ID> with a real doc id. Auth: OAuth user-scoped, injected in-memory.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/gdocs-insert-image",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Work on Google Doc id <YOUR_DOC_ID>. HARD RULE: do NOT call gdocs_read_as_markdown (it uses Drive export, blocked for shared docs). Steps:\n1. Call gdocs_read_outline on <YOUR_DOC_ID> (this uses the Docs API). Pick a SHORT exact text_preview substring from the first non-empty paragraph as your anchor (copy it verbatim).\n2. Call gdocs_insert_image_after_text with doc_id=<YOUR_DOC_ID>, anchor=<that exact substring>, image_url='https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png'. Do not pass width_pt/height_pt (use native size).\n3. Report the EXACT tool result of step 2 verbatim: the `changes` array, `revision_id_after`, and whether `lossy_conversions` is empty. If it errored, paste the error envelope."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 8,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "You are a precise document editor. Use the gdocs tools. The anchor must be an EXACT verbatim substring of the document's current text. Report tool results verbatim.",
+        "enabled_tools": ["gdocs"]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}

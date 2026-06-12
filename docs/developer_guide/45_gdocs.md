@@ -103,6 +103,21 @@ Ver [40_toolkit_packages.md](40_toolkit_packages.md).
 | `gdocs_read_outline` | Devuelve el outline (paragraph number, kind, preview ~80 chars, tab_id). Siempre desde un `documents.get` fresco. |
 | `gdocs_list_named_ranges` | Lista todos los `namedRange` declarados, con `{named_range_id, name, paragraph_start, paragraph_end}`. |
 
+> **⚠️ Caveat de scope en docs compartidos (hallazgo E2E 2026-06-12).** El
+> refresh token OAuth de `agents@startti.co` está consentido con `drive.file`
+> (per-file), no con `drive` amplio. Consecuencia: las tools que pasan por la
+> **Drive API** — `gdocs_read_as_markdown` / `gdocs_export` (`files.export`) y
+> `gdocs_list_documents` (`files.list`) — fallan con `403 appNotAuthorizedToFile`
+> sobre un doc que el usuario **compartió** con la cuenta (drive.file solo ve
+> archivos creados/abiertos por la app). En cambio, las tools que usan la
+> **Docs API** — `gdocs_read_outline`, `gdocs_insert_*`, `gdocs_replace_*`,
+> `gdocs_apply_edits`, etc. (`documents.get` / `documents.batchUpdate`, scope
+> `documents`) — **sí funcionan** sobre docs compartidos. **Patrón
+> recomendado para editar un doc compartido:** usar `gdocs_read_outline` (no
+> `read_as_markdown`) para ubicar anchors, luego las tools de edición. Para
+> habilitar las tools Drive-based en docs compartidos hay que re-consentir con
+> `drive`/`drive.readonly` — ver BACKLOG.
+
 ### Edición quirúrgica content-addressed
 
 | Tool | Qué hace |

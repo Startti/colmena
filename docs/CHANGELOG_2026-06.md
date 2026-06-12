@@ -2319,8 +2319,20 @@ dev guide §45. 1712 unit tests pass.
 array `gdocs_entries[22]` de `llm.rs` que es el que construye las
 `ToolDefinition` que el LLM ve. Es decir: dispatch-ready pero posiblemente
 **no expuestas** al modelo vía el alias `gdocs`. Flagged para verificación.
+(Confirmado y fixeado en §33.)
 
-**Estado.** done.
+**Verificación E2E live (real Google Docs):** sobre un doc compartido con
+`agents@startti.co`, el agente ubicó un anchor vía `gdocs_read_outline` (Docs
+API) e insertó la imagen pública — change record
+`{kind:insert, after:"[image] https://…googlelogo…", tab_id:"t.0"}` + nuevo
+`revision_id_after`. El `insertInlineImage` fue aceptado por la Docs API real.
+Graph: `tests/graphs/agents/gdocs_insert_image_e2e.json`. **Hallazgo de scope:**
+`gdocs_read_as_markdown`/`gdocs_export`/`gdocs_list_documents` (Drive API,
+`drive.file`) fallan con `403 appNotAuthorizedToFile` en docs compartidos; las
+tools Docs-API (`read_outline`, `insert_*`, `replace_*`) sí funcionan — ver dev
+guide §45 "Caveat de scope en docs compartidos".
+
+**Estado.** done (feature + E2E live verificados).
 
 ---
 
