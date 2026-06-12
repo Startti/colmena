@@ -207,6 +207,74 @@ fn parse_value_render(s: Option<&str>) -> ValueRenderOption {
     }
 }
 
+/// Render a single cell value for a markdown table cell.
+/// null → empty; bool/number → plain repr; string → escape `|` and newlines.
+fn md_cell(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => s.replace('|', "\\|").replace('\n', "<br>"),
+        // Arrays/objects shouldn't appear in a flat sheet cell; stringify defensively.
+        other => other.to_string().replace('|', "\\|").replace('\n', "<br>"),
+    }
+}
+
+/// Convert a 2-D values array (`[[..],[..]]`) into a GitHub markdown table.
+/// First row is the header. Ragged rows are padded to the max column count.
+/// Returns an empty string for an empty range.
+fn values_to_markdown(values: &serde_json::Value) -> String {
+    let rows = match values.as_array() {
+        Some(r) if !r.is_empty() => r,
+        _ => return String::new(),
+    };
+    let width = rows
+        .iter()
+        .map(|row| row.as_array().map(|a| a.len()).unwrap_or(0))
+        .max()
+        .unwrap_or(0);
+    if width == 0 {
+        return String::new();
+    }
+    let render_row = |row: &serde_json::Value| -> String {
+        let cells = row.as_array().cloned().unwrap_or_default();
+        let mut out = String::from("|");
+        for i in 0..width {
+            let cell = cells.get(i).map(md_cell).unwrap_or_default();
+            out.push_str(&format!(" {cell} |"));
+        }
+        out
+    };
+    let mut lines = Vec::with_capacity(rows.len() + 1);
+    lines.push(render_row(&rows[0])); // header
+    lines.push(format!("|{}", " --- |".repeat(width))); // separator
+    for row in &rows[1..] {
+        lines.push(render_row(row));
+    }
+    lines.join("\n")
+}
+
+/// Compute the data extent of a read result: rows = number of returned rows
+/// (includes the header row in 2-D mode), columns = max row width. Works for
+/// both 2-D arrays (cells) and record arrays (object keys).
+fn compute_dimensions(values: &serde_json::Value) -> serde_json::Value {
+    let arr = values.as_array();
+    let rows = arr.map(|a| a.len()).unwrap_or(0);
+    let columns = arr
+        .map(|a| {
+            a.iter()
+                .map(|row| match row {
+                    serde_json::Value::Array(r) => r.len(),
+                    serde_json::Value::Object(o) => o.len(),
+                    _ => 0,
+                })
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    serde_json::json!({ "rows": rows, "columns": columns })
+}
+
 // ── Tool definitions ──────────────────────────────────────────────────
 
 pub fn tool_create_spreadsheet() -> ToolDefinition {
@@ -993,6 +1061,46 @@ mod tests {
         assert!(
             hint.contains("operador"),
             "degraded hint must point to the operator: {hint}"
+        );
+    }
+
+    #[test]
+    fn values_to_markdown_renders_table_with_header() {
+        let v = serde_json::json!([["name", "qty"], ["apple", 3], ["pear", 10]]);
+        let md = values_to_markdown(&v);
+        assert_eq!(
+            md,
+            "| name | qty |\n| --- | --- |\n| apple | 3 |\n| pear | 10 |"
+        );
+    }
+
+    #[test]
+    fn values_to_markdown_pads_ragged_rows_and_renders_types() {
+        // ragged (2nd row shorter), null cell, bool, pipe + newline escaping
+        let v = serde_json::json!([
+            ["a", "b", "c"],
+            [true, serde_json::Value::Null],
+            ["x|y", "line1\nline2", 1.5]
+        ]);
+        let md = values_to_markdown(&v);
+        assert_eq!(
+            md,
+            "| a | b | c |\n| --- | --- | --- |\n| true |  |  |\n| x\\|y | line1<br>line2 | 1.5 |"
+        );
+    }
+
+    #[test]
+    fn values_to_markdown_empty_is_empty_string() {
+        let v = serde_json::json!([]);
+        assert_eq!(values_to_markdown(&v), "");
+    }
+
+    #[test]
+    fn compute_dimensions_uses_max_width_including_header() {
+        let v = serde_json::json!([["a", "b", "c"], [1, 2]]);
+        assert_eq!(
+            compute_dimensions(&v),
+            serde_json::json!({ "rows": 2, "columns": 3 })
         );
     }
 }
