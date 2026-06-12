@@ -2323,3 +2323,38 @@ array `gdocs_entries[22]` de `llm.rs` que es el que construye las
 **Estado.** done.
 
 ---
+
+## 33. Fix — 6 gdocs tools were dispatch-ready but invisible to the LLM (2026-06-12)
+
+**Bug (latent since Bundle 2A/2B/4A):** the LLM-facing exposure of gdocs synthetic
+tools is built in `llm.rs` from two hand-maintained parallel arrays (`all_gdocs`
+names + `gdocs_entries` name→builder). The build loop only emits a `ToolDefinition`
+for tools present in `gdocs_entries`; **there is no by-name fallback**. Bundle
+2A/2B/4A added 6 tools — `gdocs_list_documents`, `gdocs_list_permissions`,
+`gdocs_unshare`, `gdocs_add_comment`, `gdocs_list_comments`,
+`gdocs_resolve_comment` — to `build_all_gdocs_tools()` (collector), the `gdocs`
+toolkit alias, AND the dispatch router, but **NOT** to `gdocs_entries`. Net effect:
+with `enabled_tools: ["gdocs"]` those 6 were dispatch-ready yet never presented to
+the model → effectively unreachable.
+
+**Fix:** added the 6 to both `all_gdocs` (23→29) and `gdocs_entries` (23→29) in
+`llm.rs`, plus the 3 missing `gdocs_tool_*` builder re-export aliases in `mod.rs`
+(`list_documents`, `list_permissions`, `unshare` — the comment trio was already
+re-exported). Added a loud CONTRACT comment at the arrays listing every site that
+must stay in sync. 1712 unit tests pass.
+
+**Verificación E2E live:** agente con `enabled_tools: ["gdocs"]` ahora **ve y
+llama** `gdocs_list_documents` (11 selecciones en el ReAct loop) — antes del fix
+el modelo no podía seleccionarlo porque no estaba en su lista. (El dispatch de
+estos 6 ya estaba probado por los E2E de Bundle 2A/2B/4A.) Graph:
+`tests/graphs/agents/gdocs_exposure_list_documents_e2e.json`.
+
+**Follow-up recomendado (no hecho acá):** hacer estructural el contrato — derivar
+la exposición de `llm.rs` desde una única tabla `(name, builder)` compartida con
+`build_all_gdocs_tools()` para que el drift sea imposible. Se evaluó el refactor
+eager (build-all-then-filter) pero regresaría a construir 29 schemas por turno;
+la tabla de fn-pointers preserva el lazy-build. Ver BACKLOG.
+
+**Estado.** done (exposure fixed + verified; structural refactor deferred).
+
+---

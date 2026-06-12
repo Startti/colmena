@@ -837,6 +837,31 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
 
 ---
 
+## Synthetic-tool exposure — derive llm.rs lists from one shared table (2026-06-12)
+
+- **Origen:** bug encontrado y fixeado el 2026-06-12 (CHANGELOG §33). 6 tools de
+  Bundle 2A/2B/4A quedaron dispatch-ready pero invisibles al LLM porque el array
+  `gdocs_entries` de `llm.rs` no se actualizó junto con `build_all_gdocs_tools()`,
+  el alias del toolkit y el router. No hay fallback by-name → drift silencioso.
+- **Fix aplicado (band-aid):** se agregaron los 6 a `all_gdocs` + `gdocs_entries`
+  + un CONTRACT comment. Funciona pero el contrato sigue siendo manual.
+- **Root-cause fix propuesto:** extraer una única tabla `pub fn
+  gdocs_tool_builder_table() -> [(&'static str, fn() -> ToolDefinition); N]` en
+  `gdocs_tools.rs`, hacer que `build_all_gdocs_tools()` la consuma, y que `llm.rs`
+  derive AMBOS `all_gdocs` (names) y el build-loop de esa tabla. Resultado:
+  exposición ≡ build_all por construcción, drift imposible. Preserva el
+  lazy-build (fn-pointers) — NO el refactor eager que reconstruiría 29 schemas
+  por turno.
+- **Generalizar:** el mismo patrón de arrays paralelos existe para gsheets y
+  crdt_doc en `llm.rs` — mismo riesgo de drift. Aplicar la tabla compartida a las
+  3 familias.
+- **Esfuerzo:** ~2-3h (gdocs) + ~1h cada familia adicional. Agregar un test que
+  asserte `table names == build_all names` por familia.
+- **Cuándo retomar:** próxima vez que se agregue un synthetic tool, o como cleanup
+  de deuda técnica. Bajo riesgo, alto valor de mantenibilidad.
+
+---
+
 ## Toolkit packages v1.1
 
 - [ ] **Auto-inject package description** into agent system message when a

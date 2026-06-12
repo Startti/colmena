@@ -1,0 +1,33 @@
+{
+  "_comment": "E2E (manual, live): proves the Bundle 2A/2B/4A exposure fix (2026-06-12). An agent with enabled_tools=['gdocs'] must be ABLE to call gdocs_list_documents (one of the 6 tools that were dispatch-wired but missing from llm.rs gdocs_entries). With OAuth creds, the tool returns the docs shared with agents@startti.co. Before the fix the LLM never saw the tool. Auth: OAuth user-scoped, injected in-memory.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/gdocs-exposure",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Call the gdocs_list_documents tool to list the Google Docs you can access (no folder filter, limit 10). Then report verbatim how many documents came back and their titles. If you do not have a tool called gdocs_list_documents available, say exactly: 'TOOL NOT AVAILABLE'."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 6,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "You are a Google Workspace assistant. Use the gdocs tools available to you. Report tool results verbatim.",
+        "enabled_tools": ["gdocs"]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}
