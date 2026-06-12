@@ -104,6 +104,7 @@ Detailed docs: [§45 — Google Docs integration](45_gdocs.md). Design spec:
 | `gdocs_insert_after_text` | Insert markdown after a content-addressed anchor | [§45](45_gdocs.md) |
 | `gdocs_insert_before_text` | Insert markdown before a content-addressed anchor | [§45](45_gdocs.md) |
 | `gdocs_insert_between` | Insert markdown between two headings (or after a heading until EOF) | [§45](45_gdocs.md) |
+| `gdocs_insert_image_after_text` | Insert an inline image (by public URL) after a content-addressed anchor | [§45](45_gdocs.md) |
 | `gdocs_delete_text` | Delete one or more occurrences of text (scoped, content-addressed) | [§45](45_gdocs.md) |
 | `gdocs_replace_section` | Replace everything between a heading and the next same-or-higher heading | [§45](45_gdocs.md) |
 | `gdocs_append_markdown` | Append markdown at the end of a Google Doc (or a specific tab) | [§45](45_gdocs.md) |

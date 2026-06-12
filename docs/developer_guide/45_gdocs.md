@@ -111,6 +111,7 @@ Ver [40_toolkit_packages.md](40_toolkit_packages.md).
 | `gdocs_insert_after_text` | Inserta markdown justo después de un anchor (opcionalmente la `occurrence`-ésima coincidencia). |
 | `gdocs_insert_before_text` | Espejo de `insert_after_text`. |
 | `gdocs_insert_between` | Inserta markdown entre dos encabezados. `before_heading` omitido = hasta EOF. |
+| `gdocs_insert_image_after_text` | Inserta una imagen inline justo después de un anchor. `image_url` debe ser una URL http(s) **pública** (PNG/JPEG/GIF, ≤50 MB, ≤2000 chars) — Google la baja server-side. `width_pt`/`height_pt` opcionales. **Path (i) URL-only**: insertar desde `attachment_id` (signed-URL / imagen generada) queda para v1.1. |
 | `gdocs_delete_text` | Borra ocurrencias dentro de `scope`. Mismas opciones de scope/case/occurrence que `replace_text`. |
 | `gdocs_replace_section` | Reemplaza todo entre un heading y el próximo mismo-o-mayor nivel (o EOF). |
 | `gdocs_append_markdown` | Agrega markdown al final del doc o del tab. |

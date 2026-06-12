@@ -38,7 +38,7 @@ pub static TOOLKIT_PACKAGES: &[ToolkitPackage] = &[
     },
     ToolkitPackage {
         alias: "gdocs",
-        description: "Read, write, edit, share, discover, and comment on Google Docs (28 tools)",
+        description: "Read, write, edit, share, discover, and comment on Google Docs (29 tools)",
         tools: &[
             "gdocs_create",
             "gdocs_create_from_markdown",
@@ -54,6 +54,7 @@ pub static TOOLKIT_PACKAGES: &[ToolkitPackage] = &[
             "gdocs_insert_after_text",
             "gdocs_insert_before_text",
             "gdocs_insert_between",
+            "gdocs_insert_image_after_text",
             "gdocs_delete_text",
             "gdocs_replace_section",
             "gdocs_append_markdown",
@@ -155,7 +156,7 @@ mod tests {
     #[test]
     fn gdocs_package_has_all_tools() {
         let pkg = find_package("gdocs").expect("gdocs package must exist");
-        assert_eq!(pkg.tools.len(), 28, "gdocs package must list 28 tools");
+        assert_eq!(pkg.tools.len(), 29, "gdocs package must list 29 tools");
         for required in &[
             "gdocs_create",
             "gdocs_create_from_markdown",
@@ -171,6 +172,7 @@ mod tests {
             "gdocs_insert_after_text",
             "gdocs_insert_before_text",
             "gdocs_insert_between",
+            "gdocs_insert_image_after_text",
             "gdocs_delete_text",
             "gdocs_replace_section",
             "gdocs_append_markdown",

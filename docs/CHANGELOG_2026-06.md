@@ -2286,3 +2286,40 @@ repetición de email / anti-compresión siguen verdes (13 tests del módulo).
 **Estado.** done.
 
 ---
+
+## 32. gdocs_insert_image_after_text — path (i) URL-only inline image insert (2026-06-12)
+
+Quick win (🟢): nuevo tool `gdocs_insert_image_after_text` que inserta una imagen
+inline justo después de un anchor content-addressed. `image_url` debe ser una URL
+http(s) **pública** (PNG/JPEG/GIF, ≤50 MB, ≤2000 chars) — Google baja los bytes
+server-side. `width_pt`/`height_pt` opcionales (PT); omitidos → tamaño nativo.
+
+**Hallazgo que simplificó el scope:** NO hizo falta un método nuevo en
+`DocsClient`. `insert.rs` ya resuelve el anchor a un índice (`find_anchor`) y
+emite un `Request` JSON genérico vía `DocsClient::batch_update`; insertar imagen
+es el mismo patrón con un request `insertInlineImage` en vez de `insertText`.
+Reusa `find_anchor` + `apply_and_finalize`.
+
+**Scope path (i) URL-only.** Insertar desde un `attachment_id` (signed-URL o
+imagen generada que requiere subir bytes a Drive) queda como follow-up v1.1 —
+ver BACKLOG. `validate_image_url` rechaza non-http / attachment-ids / URLs >2000
+chars con un mensaje accionable.
+
+**Wiring (espejo de `insert_after_text`):** `insert.rs` (use case + helpers +
+7 tests), `gdocs_tools.rs` (const + args + tool builder + dispatcher +
+`build_all_gdocs_tools` 28→29), router en `dag_tool_executor.rs` (is_gdocs_tool
++ match), `mod.rs` re-exports, `llm.rs` exposure (`gdocs_entries` 22→23),
+`toolkit_packages.rs` (alias `gdocs` 28→29), `text/tools/gdocs.yaml`, índice §41,
+dev guide §45. 1712 unit tests pass.
+
+**Nota — gap encontrado (separado, no fixeado acá):** las herramientas de Bundle
+2A/2B/4A (`gdocs_list_documents`, `gdocs_list_permissions`, `gdocs_unshare`,
+`gdocs_add_comment`, `gdocs_list_comments`, `gdocs_resolve_comment`) están en
+`build_all_gdocs_tools()` (28) y en el router de dispatch, pero **NO** en el
+array `gdocs_entries[22]` de `llm.rs` que es el que construye las
+`ToolDefinition` que el LLM ve. Es decir: dispatch-ready pero posiblemente
+**no expuestas** al modelo vía el alias `gdocs`. Flagged para verificación.
+
+**Estado.** done.
+
+---

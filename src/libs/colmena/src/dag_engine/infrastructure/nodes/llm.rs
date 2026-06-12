@@ -2406,26 +2406,26 @@ impl ExecutableNode for LlmNode {
                 gdocs_tool_create_from_docx, gdocs_tool_create_from_markdown,
                 gdocs_tool_create_named_range, gdocs_tool_delete_text, gdocs_tool_export,
                 gdocs_tool_insert_after_text, gdocs_tool_insert_before_text,
-                gdocs_tool_insert_between, gdocs_tool_list_named_ranges, gdocs_tool_list_tabs,
-                gdocs_tool_read_as_markdown, gdocs_tool_read_outline,
-                gdocs_tool_replace_named_range, gdocs_tool_replace_section,
-                gdocs_tool_replace_text, gdocs_tool_share, gdocs_tool_style_text,
-                GDOCS_ACKNOWLEDGE_HUMAN_CHANGES_TOOL, GDOCS_ADD_TAB_TOOL,
+                gdocs_tool_insert_between, gdocs_tool_insert_image_after_text,
+                gdocs_tool_list_named_ranges, gdocs_tool_list_tabs, gdocs_tool_read_as_markdown,
+                gdocs_tool_read_outline, gdocs_tool_replace_named_range,
+                gdocs_tool_replace_section, gdocs_tool_replace_text, gdocs_tool_share,
+                gdocs_tool_style_text, GDOCS_ACKNOWLEDGE_HUMAN_CHANGES_TOOL, GDOCS_ADD_TAB_TOOL,
                 GDOCS_APPEND_MARKDOWN_TOOL, GDOCS_APPLY_EDITS_TOOL, GDOCS_CREATE_FROM_DOCX_TOOL,
                 GDOCS_CREATE_FROM_MARKDOWN_TOOL, GDOCS_CREATE_NAMED_RANGE_TOOL, GDOCS_CREATE_TOOL,
                 GDOCS_DELETE_TEXT_TOOL, GDOCS_EXPORT_TOOL, GDOCS_INSERT_AFTER_TEXT_TOOL,
                 GDOCS_INSERT_BEFORE_TEXT_TOOL, GDOCS_INSERT_BETWEEN_TOOL,
-                GDOCS_LIST_NAMED_RANGES_TOOL, GDOCS_LIST_TABS_TOOL, GDOCS_READ_AS_MARKDOWN_TOOL,
-                GDOCS_READ_OUTLINE_TOOL, GDOCS_REPLACE_NAMED_RANGE_TOOL,
-                GDOCS_REPLACE_SECTION_TOOL, GDOCS_REPLACE_TEXT_TOOL, GDOCS_SHARE_TOOL,
-                GDOCS_STYLE_TEXT_TOOL,
+                GDOCS_INSERT_IMAGE_AFTER_TEXT_TOOL, GDOCS_LIST_NAMED_RANGES_TOOL,
+                GDOCS_LIST_TABS_TOOL, GDOCS_READ_AS_MARKDOWN_TOOL, GDOCS_READ_OUTLINE_TOOL,
+                GDOCS_REPLACE_NAMED_RANGE_TOOL, GDOCS_REPLACE_SECTION_TOOL,
+                GDOCS_REPLACE_TEXT_TOOL, GDOCS_SHARE_TOOL, GDOCS_STYLE_TEXT_TOOL,
             };
             // Silence the unused-import lint — we only import the dispatch
             // symbol here so the compiler enforces the link in the
             // generated re-export block; it's not called from this file.
             let _ = _dispatch_unused;
 
-            let all_gdocs: [&str; 22] = [
+            let all_gdocs: [&str; 23] = [
                 GDOCS_CREATE_TOOL,
                 GDOCS_CREATE_FROM_MARKDOWN_TOOL,
                 GDOCS_CREATE_FROM_DOCX_TOOL,
@@ -2440,6 +2440,7 @@ impl ExecutableNode for LlmNode {
                 GDOCS_INSERT_AFTER_TEXT_TOOL,
                 GDOCS_INSERT_BEFORE_TEXT_TOOL,
                 GDOCS_INSERT_BETWEEN_TOOL,
+                GDOCS_INSERT_IMAGE_AFTER_TEXT_TOOL,
                 GDOCS_DELETE_TEXT_TOOL,
                 GDOCS_REPLACE_SECTION_TOOL,
                 GDOCS_APPEND_MARKDOWN_TOOL,
@@ -2457,7 +2458,7 @@ impl ExecutableNode for LlmNode {
             let (wants, excludes) =
                 resolve_synthetic_enabled_tools(enabled_tools_config, &all_gdocs);
 
-            let gdocs_entries: [(&str, fn() -> crate::llm::domain::ToolDefinition); 22] = [
+            let gdocs_entries: [(&str, fn() -> crate::llm::domain::ToolDefinition); 23] = [
                 (GDOCS_CREATE_TOOL, gdocs_tool_create),
                 (
                     GDOCS_CREATE_FROM_MARKDOWN_TOOL,
@@ -2475,6 +2476,10 @@ impl ExecutableNode for LlmNode {
                 (GDOCS_INSERT_AFTER_TEXT_TOOL, gdocs_tool_insert_after_text),
                 (GDOCS_INSERT_BEFORE_TEXT_TOOL, gdocs_tool_insert_before_text),
                 (GDOCS_INSERT_BETWEEN_TOOL, gdocs_tool_insert_between),
+                (
+                    GDOCS_INSERT_IMAGE_AFTER_TEXT_TOOL,
+                    gdocs_tool_insert_image_after_text,
+                ),
                 (GDOCS_DELETE_TEXT_TOOL, gdocs_tool_delete_text),
                 (GDOCS_REPLACE_SECTION_TOOL, gdocs_tool_replace_section),
                 (GDOCS_APPEND_MARKDOWN_TOOL, gdocs_tool_append_markdown),

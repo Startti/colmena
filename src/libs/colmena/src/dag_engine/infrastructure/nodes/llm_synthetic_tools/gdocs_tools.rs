@@ -46,6 +46,7 @@ pub const TOOL_REPLACE_TEXT: &str = "gdocs_replace_text";
 pub const TOOL_INSERT_AFTER_TEXT: &str = "gdocs_insert_after_text";
 pub const TOOL_INSERT_BEFORE_TEXT: &str = "gdocs_insert_before_text";
 pub const TOOL_INSERT_BETWEEN: &str = "gdocs_insert_between";
+pub const TOOL_INSERT_IMAGE_AFTER_TEXT: &str = "gdocs_insert_image_after_text";
 pub const TOOL_DELETE_TEXT: &str = "gdocs_delete_text";
 pub const TOOL_REPLACE_SECTION: &str = "gdocs_replace_section";
 pub const TOOL_APPEND_MARKDOWN: &str = "gdocs_append_markdown";
@@ -368,6 +369,22 @@ pub struct InsertBeforeTextArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct InsertImageAfterTextArgs {
+    pub doc_id: String,
+    /// Anchor text to locate; the image is inserted right after the match.
+    pub anchor: String,
+    /// Publicly-accessible image URL (PNG/JPEG/GIF). Google fetches it
+    /// server-side, so it must be reachable without auth.
+    pub image_url: String,
+    pub occurrence: Option<u32>,
+    /// Optional render width in points (PT).
+    pub width_pt: Option<f64>,
+    /// Optional render height in points (PT).
+    pub height_pt: Option<f64>,
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct InsertBetweenArgs {
     pub doc_id: String,
     pub after_heading: String,
@@ -680,6 +697,14 @@ pub fn tool_insert_after_text() -> ToolDefinition {
     )
 }
 
+pub fn tool_insert_image_after_text() -> ToolDefinition {
+    super::build_synthetic_tool_with_summary::<InsertImageAfterTextArgs>(
+        TOOL_INSERT_IMAGE_AFTER_TEXT,
+        text::tool_description(TOOL_INSERT_IMAGE_AFTER_TEXT),
+        text::tool_summary(TOOL_INSERT_IMAGE_AFTER_TEXT),
+    )
+}
+
 pub fn tool_insert_before_text() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<InsertBeforeTextArgs>(
         TOOL_INSERT_BEFORE_TEXT,
@@ -779,6 +804,7 @@ pub fn build_all_gdocs_tools() -> Vec<ToolDefinition> {
         tool_insert_after_text(),
         tool_insert_before_text(),
         tool_insert_between(),
+        tool_insert_image_after_text(),
         tool_delete_text(),
         tool_replace_section(),
         tool_append_markdown(),
@@ -1460,6 +1486,45 @@ pub async fn dispatch_insert_after_text(
     }
 }
 
+pub async fn dispatch_insert_image_after_text(
+    args: serde_json::Value,
+    session_id: &str,
+) -> serde_json::Value {
+    let parsed: InsertImageAfterTextArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return invalid_args(e),
+    };
+    let client = match shared_client().await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let cache = shared_cache().await;
+    let revisions = match shared_revs().await {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let sa = std::env::var("COLMENA_GDOCS_SA_EMAIL").ok();
+    let ctx = co_edit_guard::GuardContext {
+        client: client.as_ref(),
+        cache: cache.as_ref(),
+        revisions: revisions.as_ref(),
+        session_id,
+        sa_email: sa.as_deref(),
+    };
+    let input = insert::InsertImageAfterTextInput {
+        anchor: parsed.anchor,
+        image_url: parsed.image_url,
+        occurrence: parsed.occurrence,
+        width_pt: parsed.width_pt,
+        height_pt: parsed.height_pt,
+    };
+    let doc_id = DocumentId(parsed.doc_id);
+    match insert::run_insert_image_after_text(&ctx, &doc_id, input).await {
+        Ok(r) => edit_result_to_json(r),
+        Err(e) => error_to_json(e),
+    }
+}
+
 pub async fn dispatch_insert_before_text(
     args: serde_json::Value,
     session_id: &str,
@@ -1922,12 +1987,13 @@ mod tests {
     }
 
     #[test]
-    fn build_all_returns_28_tools() {
+    fn build_all_returns_29_tools() {
         let tools = build_all_gdocs_tools();
         // 22 v1 + 1 Bundle 2A (list_documents) + 2 Bundle 2B
         // (list_permissions, unshare) + 3 Bundle 4A
-        // (add_comment, list_comments, resolve_comment) = 28.
-        assert_eq!(tools.len(), 28);
+        // (add_comment, list_comments, resolve_comment)
+        // + 1 (gdocs_insert_image_after_text, 2026-06-12) = 29.
+        assert_eq!(tools.len(), 29);
     }
 
     #[test]

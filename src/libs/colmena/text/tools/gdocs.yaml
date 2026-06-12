@@ -147,6 +147,24 @@ gdocs_insert_between:
     Errors: `invalid_args` (heading not found, table markdown),
     `human_changes_pending`.
 
+gdocs_insert_image_after_text:
+  summary: Insert an inline image (by public URL) after a content-addressed anchor
+  description: |
+    Locate `anchor` in the doc (optionally the `occurrence`-th match) and
+    insert an inline image immediately after it. `image_url` must be a
+    PUBLICLY-ACCESSIBLE http(s) URL (PNG/JPEG/GIF, ≤50 MB, ≤2000 chars) —
+    Google fetches the bytes server-side, so it must be reachable without
+    auth. Optional `width_pt` / `height_pt` set the render size in points;
+    omit both to use the image's native size.
+
+    NOTE: inserting from an `attachment_id` (a signed-URL attachment or a
+    generated image) is not supported yet — that path is deferred to v1.1.
+    For now, give a public URL (e.g. one returned by an upstream
+    `http_request` or hosted by the user).
+
+    Errors: `text_not_found`, `invalid_args` (non-http URL, attachment_id,
+    URL too long), `human_changes_pending`.
+
 gdocs_delete_text:
   summary: Delete one or more occurrences of text (scoped, content-addressed)
   description: |

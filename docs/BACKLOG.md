@@ -46,7 +46,7 @@ CRDT-specific. Ver banner detallado al inicio del bloque CRDT.
 | ✅ ~~`last_modified` en error `SheetExists`~~ — SHIPPED 2026-06-11 (§30) | ~15 min | Med — el LLM evalúa mejor si es seguro overwrite | [§30](CHANGELOG_2026-06.md) |
 | ✅ ~~`gsheets_run_python` / `crdt` aliases~~ — SHIPPED 2026-06-11 (§30) | ~30 LOC | Med — ergonomía LLM, menos errores de args | [§30](CHANGELOG_2026-06.md) |
 | ✅ ~~`diff_writer` límite de 26 columnas~~ — SHIPPED 2026-06-11 (§30) | small | Low — corrección edge-case | [§30](CHANGELOG_2026-06.md) |
-| `gdocs_insert_image` (path i/ii: URL o signed-URL) | ~2-3h | Med — cierra gap lossy de imágenes markdown | [gdocs_insert_image_after_text](#subsystem-g-v11-google-docs) |
+| ✅ ~~`gdocs_insert_image` path (i) URL-only~~ — SHIPPED 2026-06-12 (§32); paths ii/iii (attachment) → v1.1 | ~2h | Med — cierra gap lossy de imágenes markdown | [§32](CHANGELOG_2026-06.md) |
 | Math expressions en gdocs markdown | small | Low — niche | [Subsystem G v1.1](#subsystem-g-v11-google-docs) |
 
 ### 🟡 Medium bets — desbloquean workflows reales
@@ -795,24 +795,17 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
   las convierte nativamente desde markdown en `create_from_markdown`)
   pero el agente no puede editar celdas individuales sin un round-trip
   manual.
-- [ ] **`gdocs_insert_image_after_text`** (sabores `attachment_id` + URL).
-  Hoy no existe — markdown images en inserts pasan como lossy. **Status:
-  bigger than initially scoped.** Bundle 1 (2026-06-11) había planeado
-  incluirlo, pero a diferencia de items 4+5 (donde los métodos HTTP ya
-  existían), este requiere construir desde cero: nuevo tipo
-  `InsertInlineImageRequest` en `gdocs::domain::types`, nuevo método
-  `DocsClient::insert_inline_image_after_text` que (a) resuelve el
-  anchor con la misma lógica de `replace_text`/`apply_edits`, (b) emite
-  un `documents.batchUpdate` con `InsertInlineImageRequest`. **Design
-  decision pendiente sobre el `attachment_id` path**: el URI que Docs
-  acepta debe ser una URL públicamente accesible. Hay 3 caminos:
-  (i) v1 URL-only — el LLM provee una URL pública directamente,
-  attachment_id queda para v1.1; (ii) attachment_id solo cuando el
-  source es `SignedUrl` (Drive/GCS) — se pasa la signed URL al Docs
-  API; (iii) attachment_id completo — subir bytes a Drive como image,
-  configurar permisos públicos, usar la Drive URL. Caminos (i) y (ii)
-  son ~2-3h cada uno; (iii) es ~6-8h por la dance de permisos. Cuando
-  se retome, decidir scope antes de codear.
+- [x] **`gdocs_insert_image_after_text`** — **path (i) URL-only SHIPPED
+  2026-06-12** (CHANGELOG §32). El tool inserta una imagen inline tras un
+  anchor; `image_url` debe ser una URL http(s) pública. **Hallazgo:** NO
+  hizo falta un método nuevo en `DocsClient` ni `InsertInlineImageRequest`
+  en domain — `insert.rs` reusa `find_anchor` + `apply_and_finalize` y
+  emite un request `insertInlineImage` vía el `batch_update` genérico.
+  **Pendiente v1.1 (paths ii/iii):** insertar desde `attachment_id` —
+  (ii) cuando el source es `SignedUrl` (Drive/GCS) se pasa la signed URL
+  al Docs API (~2-3h, requiere un helper executor attachment→signed-URL);
+  (iii) attachment con source `Path`/`Inline` (imágenes generadas) — subir
+  bytes a Drive como image, permisos públicos, usar la Drive URL (~6-8h).
 - [x] **Drive Comments API** — SHIPPED 2026-06-11 (Bundle 4A, commit
   `92b89c5`): `gdocs_add_comment` + `gdocs_list_comments` +
   `gdocs_resolve_comment`. Mensajería humano ↔ agente in-doc para el
