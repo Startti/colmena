@@ -77,6 +77,117 @@ Same shape as `crdt_doc_*` analysis (subsystem F). Skill
 `gsheets-cross-sheet-analysis` documents 6 patterns
 (`pattern-a-cell-diff` through `pattern-f-conditional-transform`).
 
+## Lectura: tabla markdown por defecto + dimensiones
+
+`gsheets_read` devuelve una **tabla markdown** por defecto (ideal para
+mostrar el contenido al usuario o inspeccionarlo visualmente). Omitir
+`range` lee la hoja entera (el área usada); pasar un `range` en notación
+A1 limita la lectura a ese subconjunto.
+
+La respuesta incluye siempre el campo `dimensions {rows, columns}` con la
+extensión real de los datos devueltos (máximo ancho de fila, incluyendo la
+cabecera). Esto permite consultar primero sin `range` para conocer el tamaño
+y luego leer un subconjunto preciso si la hoja es grande.
+
+```json
+{
+  "spreadsheet_id": "<id>",
+  "sheet": "Ventas"
+}
+```
+
+Respuesta típica:
+
+```json
+{
+  "ok": true,
+  "sheet": "Ventas",
+  "range": "A1:D201",
+  "dimensions": { "rows": 201, "columns": 4 },
+  "markdown": "| producto | qty | precio | total |\n| --- | --- | --- | --- |\n| ..."
+}
+```
+
+Para obtener los datos en formato estructurado (p.ej. para enviarlos como
+argumento a otra herramienta) pasa `format: "json"` — la respuesta incluye
+el array `values` (respetando `as_records`) en lugar del campo `markdown`:
+
+```json
+{
+  "spreadsheet_id": "<id>",
+  "sheet": "Ventas",
+  "format": "json",
+  "as_records": true
+}
+```
+
+> **Regla:** para *comparar* dos tablas no leas markdown y coteja
+> visualmente — usa `gsheets_run_python` (código determinista). La sección
+> siguiente explica cómo.
+
+## Comparación de tablas (código, no cotejo visual)
+
+Cuando necesites comparar, cruzar o deduplicar tablas usa
+`gsheets_run_python`. El modelo escribe código pandas que corre en el
+servidor — los datos nunca pasan por el contexto del LLM.
+
+Un `binding` tiene dos formas posibles:
+
+| Forma | Campos requeridos | Cuándo usarla |
+|---|---|---|
+| **SHEET** | `var`, `spreadsheet_id`, `sheet`, `range?` | La tabla vive en Google Sheets |
+| **INLINE** | `var`, `data: [...]` | La tabla la produjo el modelo (p.ej. extraída de una imagen o construida en texto). `data` es un array de objetos `{col: val}` o un array 2-D con cabecera en la primera fila. |
+
+Dentro del sandbox Python cada binding queda disponible como variable
+`<var>` (lista de dicts). Construye un DataFrame con `pd.DataFrame(<var>)`.
+
+### Receta A — imagen vs hoja (inline + sheet binding)
+
+La tabla extraída de la imagen se pasa como `data` inline; la hoja de
+referencia se carga como binding de hoja. Se compara con tolerancia
+numérica para evitar errores de redondeo:
+
+```json
+{
+  "bindings": [
+    {
+      "var": "img_table",
+      "data": [
+        {"nutriente": "Proteínas", "g": 12},
+        {"nutriente": "Grasas",    "g": 3},
+        {"nutriente": "Carbohid.", "g": 40}
+      ]
+    },
+    {
+      "var": "ref_table",
+      "spreadsheet_id": "<id>",
+      "sheet": "Nutricional"
+    }
+  ],
+  "code": "import pandas as pd\ndf_img = pd.DataFrame(img_table)\ndf_ref = pd.DataFrame(ref_table)\nmerged = df_img.merge(df_ref, on='nutriente', suffixes=('_img','_ref'))\nmerged['diff'] = (merged['g_img'] - merged['g_ref']).abs()\noutput = merged[merged['diff'] > 0.5][['nutriente','g_img','g_ref','diff']].to_dict('records')"
+}
+```
+
+### Receta B — hoja vs hoja (dos sheet bindings)
+
+```json
+{
+  "bindings": [
+    {"var": "hoja_a", "spreadsheet_id": "<id>", "sheet": "Datos_A"},
+    {"var": "hoja_b", "spreadsheet_id": "<id>", "sheet": "Datos_B"}
+  ],
+  "code": "import pandas as pd\ndf_a = pd.DataFrame(hoja_a)\ndf_b = pd.DataFrame(hoja_b)\ndiff = df_a.merge(df_b, on='sku', how='outer', indicator=True)\noutput = diff[diff['_merge'] != 'both'][['sku','_merge']].to_dict('records')"
+}
+```
+
+Para diferencias grandes, escribe las filas en una hoja de resultados con
+`output_sheets` (las filas nunca vuelven por el modelo):
+
+```python
+output_sheets = {"Diferencias": pd.DataFrame(diff)}
+output = {"total_diff": len(diff)}
+```
+
 ## Bulk analysis without LLM cost: `gsheets_run_python` (E-T14)
 
 `gsheets_read` is fine for inspection (< 50 rows) but burns context
