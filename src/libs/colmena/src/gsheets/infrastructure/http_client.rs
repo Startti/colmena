@@ -914,7 +914,7 @@ fn quote_sheet_for_range(sheet: &str) -> String {
 ///   record.
 /// - Rows with FEWER cells than headers: missing cells become
 ///   `Value::Null`.
-fn rectangle_to_records(rect: &Value) -> Value {
+pub(crate) fn rectangle_to_records(rect: &Value) -> Value {
     let Some(rows) = rect.as_array() else {
         return Value::Array(Vec::new());
     };

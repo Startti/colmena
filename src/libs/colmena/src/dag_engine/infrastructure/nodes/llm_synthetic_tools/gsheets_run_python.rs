@@ -14,7 +14,7 @@
 use crate::dag_engine::infrastructure::nodes::python_node::execute_sandboxed_helper;
 use crate::gsheets::domain::{ReadOptions, ReadResponse, SheetsClient, SpreadsheetId};
 use crate::gsheets::infrastructure::config::GSheetsConfig;
-use crate::gsheets::infrastructure::http_client::GoogleSheetsHttpClient;
+use crate::gsheets::infrastructure::http_client::{rectangle_to_records, GoogleSheetsHttpClient};
 use crate::llm::domain::tools::ToolDefinition;
 use crate::text;
 use futures::future::join_all;
@@ -340,6 +340,24 @@ pub async fn dispatch_gsheets_run_python_with_client(
         };
         inputs.insert(var, records);
     }
+
+    // Inline `data` bindings: normalize to records and inject like sheet bindings.
+    for b in parsed.bindings.iter().filter(|b| b.data.is_some()) {
+        let raw = b.data.clone().unwrap(); // validated to be an array
+                                           // Accept records (array of objects) as-is; convert a 2-D array
+                                           // (first row = header) to records to match the sheet shape.
+        let records = match raw.as_array().and_then(|a| a.first()) {
+            Some(serde_json::Value::Array(_)) => rectangle_to_records(&raw),
+            _ => raw, // array of objects, or empty array
+        };
+        let columns = extract_columns(&records);
+        loaded_columns.insert(
+            b.var.clone(),
+            serde_json::Value::Array(columns.into_iter().map(serde_json::Value::String).collect()),
+        );
+        inputs.insert(b.var.clone(), records);
+    }
+
     let loaded_columns = serde_json::Value::Object(loaded_columns);
     // Make column metadata available to the sandbox too (mirrors
     // crdt_doc_run_python's `loaded_sheet_columns` helper).
@@ -1696,6 +1714,66 @@ mod tests {
         let out = dispatch_gsheets_run_python_with_client(client, args).await;
         assert_eq!(out["error"], "invalid_args");
         assert!(out["message"].as_str().unwrap().contains("exactly one"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_inline_data_binding_reaches_sandbox() {
+        pyo3::prepare_freethreaded_python();
+        // No sheet fetch needed; client can be any mock.
+        let client = test_client_empty().await;
+        let args = serde_json::json!({
+            "bindings": [{ "var": "img", "data": [{"nutrient": "Protein", "g": 12}, {"nutrient": "Fat", "g": 3}] }],
+            "code": "output = {'rows': len(img), 'first': img[0]['nutrient']}"
+        });
+        let out = dispatch_gsheets_run_python_with_client(client, args).await;
+        // loaded_columns is populated for inline bindings even when pandas fails.
+        // Assert this BEFORE the pandas-skip guard so missing inline-loop is caught.
+        assert!(
+            out.get("loaded_columns")
+                .and_then(|lc| lc.get("img"))
+                .and_then(|v| v.as_array())
+                .map(|a| a.contains(&serde_json::json!("nutrient")))
+                .unwrap_or(false),
+            "loaded_columns.img must contain 'nutrient'; got: {out}"
+        );
+        if let Some(err) = out.get("error").and_then(|v| v.as_str()) {
+            if err.contains("No module named 'pandas'") {
+                eprintln!("SKIPPED (no pandas in test env): {err}");
+                return;
+            }
+            panic!("unexpected error: {out}");
+        }
+        assert_eq!(out["output"]["rows"], 2);
+        assert_eq!(out["output"]["first"], "Protein");
+    }
+
+    #[tokio::test]
+    async fn dispatch_inline_2d_array_is_converted_to_records() {
+        pyo3::prepare_freethreaded_python();
+        let client = test_client_empty().await;
+        let args = serde_json::json!({
+            "bindings": [{ "var": "t", "data": [["nutrient", "g"], ["Protein", 12]] }],
+            "code": "output = {'rows': len(t), 'g': t[0]['g']}"
+        });
+        let out = dispatch_gsheets_run_python_with_client(client, args).await;
+        // loaded_columns must contain "g" from the 2-D header row.
+        assert!(
+            out.get("loaded_columns")
+                .and_then(|lc| lc.get("t"))
+                .and_then(|v| v.as_array())
+                .map(|a| a.contains(&serde_json::json!("g")))
+                .unwrap_or(false),
+            "loaded_columns.t must contain 'g'; got: {out}"
+        );
+        if let Some(err) = out.get("error").and_then(|v| v.as_str()) {
+            if err.contains("No module named 'pandas'") {
+                eprintln!("SKIPPED (no pandas in test env): {err}");
+                return;
+            }
+            panic!("unexpected error: {out}");
+        }
+        assert_eq!(out["output"]["rows"], 1);
+        assert_eq!(out["output"]["g"], 12);
     }
 
     /// `a1_addr` is what computes the header read range in `fetch_tab_meta`.
