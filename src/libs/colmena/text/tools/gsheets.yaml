@@ -56,28 +56,23 @@ gsheets_set_range:
 gsheets_run_python:
   summary: Run sandboxed pandas analysis over sheet ranges loaded directly by the dispatcher (rows never pass through the LLM)
   description: |
-    Run sandboxed Python (pandas/numpy/scipy.stats) over data loaded directly from Google Sheets. Rows NEVER pass through the LLM — only the final `output`. Use this for any analysis over more than ~50 rows.
+    Run sandboxed pandas (pd), numpy (np), scipy.stats over one or more tables.
+    USE THIS TO COMPARE / cross-reference / dedupe / diff tables — load each table
+    as a binding and compare in code; do NOT compare values by eye.
 
-    ## Arguments
+    A binding is either a SHEET source ({var, spreadsheet_id, sheet, range?}) or an
+    INLINE source ({var, data: [...]}). Inline `data` is an array of {col: val}
+    objects (or a 2-D array with a header row) — use it to pass a table you produced,
+    e.g. one you extracted from an image. Each binding becomes a Python list of dicts
+    under `var`; do `df = pd.DataFrame(var)`.
 
-    - `bindings`: ARRAY of objects (NOT a dict, NOT a string). Each object has `var` (Python variable name), `spreadsheet_id`, `sheet`, optional `range`. The dispatcher fetches each binding in parallel.
-    - `code`: Python source string. Each binding's `var` becomes a Python global holding a list of dicts (the sheet's rows). Build DataFrames inside the code with `pd.DataFrame(<var>)`.
-    - `write_to_spreadsheet` (optional string): Spreadsheet ID where new tabs go when the code assigns `output_sheets`.
-
-    ## Example call (copy this EXACT shape)
-
-    ```json
-    {
-      "bindings": [
-        {"var": "products", "spreadsheet_id": "1abc...", "sheet": "products"},
-        {"var": "sales",    "spreadsheet_id": "1xyz...", "sheet": "sales"}
-      ],
-      "code": "import pandas as pd\nprods = pd.DataFrame(products)\nsold  = pd.DataFrame(sales)\nmerged = sold.merge(prods, on='product_id', how='left')\noutput = {'rows': len(merged)}",
-      "write_to_spreadsheet": "1xyz..."
-    }
-    ```
-
-    ⚠️ Common LLM mistake: passing `bindings` as a dict like `{"products": "...", "sales": "..."}`. That FAILS validation with `invalid type: map, expected a sequence`. Always use an ARRAY of objects with explicit `var`, `spreadsheet_id`, `sheet` keys.
+    Recipe — image vs sheet: extract the table from the image yourself, pass it as an
+    inline `data` binding, pass the sheet as a sheet binding, then compare with
+    pandas — normalize names/units and compare numbers WITH A TOLERANCE (e.g.
+    abs(a-b) <= 0.5, or within ±5%). Recipe — sheet vs sheet: two sheet bindings →
+    df_a.merge(df_b, on=key) or df_a.compare(df_b). Define `output` as a small
+    summary; for large diffs write rows back via `output_sheets` (rows never return
+    through the model).
 
     ## Multi-sheet write-back (large results stay out of the LLM)
 
