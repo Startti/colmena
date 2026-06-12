@@ -83,22 +83,26 @@ pub struct GsheetsRunPythonArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GsheetsBinding {
-    /// Python variable name to bind the records to (e.g. "products",
-    /// "sales"). Must be a non-empty identifier-shaped string.
-    /// Accepts UX aliases `binding_name` and `name` because LLMs (especially
-    /// Gemini-2.5-pro) often hallucinate these alternate field names instead
-    /// of `var`.
+    /// Python variable name to bind the records to (e.g. "products").
+    /// Accepts UX aliases `binding_name` and `name`.
     #[serde(alias = "binding_name", alias = "name")]
     pub var: String,
-    /// Spreadsheet ID (the chunk between `/d/` and `/edit` in the
-    /// Google Sheets URL).
-    pub spreadsheet_id: String,
-    /// Tab name (e.g. "Sheet1", "Hoja 1"). Accepts UX alias `sheet_name`.
-    #[serde(alias = "sheet_name")]
-    pub sheet: String,
-    /// Optional A1 range (e.g. "A1:H5001"). Omit to read the entire tab.
+    /// Spreadsheet ID. Required for a SHEET binding; omit for an inline `data`
+    /// binding.
+    #[serde(default)]
+    pub spreadsheet_id: Option<String>,
+    /// Tab name. Required for a SHEET binding; omit for an inline `data` binding.
+    #[serde(default, alias = "sheet_name")]
+    pub sheet: Option<String>,
+    /// Optional A1 range (sheet bindings only). Omit to read the entire tab.
     #[serde(default)]
     pub range: Option<String>,
+    /// Inline table data (an array of `{col: val}` objects, OR a 2-D array
+    /// whose first row is the header). When present, this binding is NOT
+    /// fetched from Google — the data is used directly. Use this to pass a
+    /// table the model produced (e.g. extracted from an image) as an operand.
+    #[serde(default)]
+    pub data: Option<serde_json::Value>,
 }
 
 // ── Flexible bindings deserializer ───────────────────────────────────
@@ -255,24 +259,53 @@ pub async fn dispatch_gsheets_run_python_with_client(
         }
     }
 
-    // 2. Fetch every binding in parallel. `read_range` with
-    //    `as_records=true` returns the per-tab records shape already
-    //    keyed by header row — exactly what pandas wants.
-    let fetches = parsed.bindings.iter().map(|b| {
-        let client = client.clone();
-        let opts = ReadOptions {
-            value_render: crate::gsheets::domain::ValueRenderOption::UnformattedValue,
-            as_records: true,
-        };
-        let ss = SpreadsheetId(b.spreadsheet_id.clone());
-        let sheet = b.sheet.clone();
-        let range = b.range.clone();
-        let var = b.var.clone();
-        async move {
-            let res = client.read_range(&ss, &sheet, range.as_deref(), opts).await;
-            (var, res)
+    // Each binding must have EXACTLY ONE source: a sheet (spreadsheet_id + sheet)
+    // OR inline `data`. Reject both/neither so the LLM gets a clear signal.
+    for b in &parsed.bindings {
+        let has_sheet = b.spreadsheet_id.is_some() && b.sheet.is_some();
+        let has_data = b.data.is_some();
+        if has_sheet == has_data {
+            return serde_json::json!({
+                "error": "invalid_args",
+                "message": format!(
+                    "binding '{}' must have exactly one source: either \
+                     `spreadsheet_id` + `sheet`, or inline `data`",
+                    b.var
+                ),
+            });
         }
-    });
+        if let Some(d) = &b.data {
+            if !d.is_array() {
+                return serde_json::json!({
+                    "error": "invalid_args",
+                    "message": format!("binding '{}' inline `data` must be a JSON array", b.var),
+                });
+            }
+        }
+    }
+
+    // 2. Fetch only the SHEET bindings in parallel. Inline (`data`) bindings
+    //    are resolved directly below — no network.
+    let fetches = parsed
+        .bindings
+        .iter()
+        .filter(|b| b.data.is_none())
+        .map(|b| {
+            let client = client.clone();
+            let opts = ReadOptions {
+                value_render: crate::gsheets::domain::ValueRenderOption::UnformattedValue,
+                as_records: true,
+            };
+            // safe: validation guarantees sheet bindings have these
+            let ss = SpreadsheetId(b.spreadsheet_id.clone().unwrap());
+            let sheet = b.sheet.clone().unwrap();
+            let range = b.range.clone();
+            let var = b.var.clone();
+            async move {
+                let res = client.read_range(&ss, &sheet, range.as_deref(), opts).await;
+                (var, res)
+            }
+        });
     let results: Vec<(String, Result<ReadResponse, _>)> = join_all(fetches).await;
 
     // 3. Build the sandbox inputs map + a side-table of column names per
@@ -1140,7 +1173,7 @@ mod tests {
         });
         let parsed: GsheetsBinding = serde_json::from_value(json).expect("must parse with aliases");
         assert_eq!(parsed.var, "products");
-        assert_eq!(parsed.sheet, "products");
+        assert_eq!(parsed.sheet.as_deref(), Some("products"));
     }
 
     #[test]
@@ -1165,7 +1198,7 @@ mod tests {
         let parsed: GsheetsBinding =
             serde_json::from_value(json).expect("canonical names still work");
         assert_eq!(parsed.var, "x");
-        assert_eq!(parsed.sheet, "Sheet1");
+        assert_eq!(parsed.sheet.as_deref(), Some("Sheet1"));
     }
 
     #[test]
@@ -1261,8 +1294,8 @@ mod tests {
         let parsed: GsheetsRunPythonArgs = serde_json::from_value(json).expect("must parse");
         assert_eq!(parsed.bindings.len(), 1);
         assert_eq!(parsed.bindings[0].var, "products");
-        assert_eq!(parsed.bindings[0].sheet, "products");
-        assert_eq!(parsed.bindings[0].spreadsheet_id, "abc");
+        assert_eq!(parsed.bindings[0].sheet.as_deref(), Some("products"));
+        assert_eq!(parsed.bindings[0].spreadsheet_id.as_deref(), Some("abc"));
     }
 
     // ── multi-sheet write-back tests ──────────────────────────────────────
@@ -1618,6 +1651,51 @@ mod tests {
         assert_eq!(wrote[0]["error"], "SheetExists");
         let advice = wrote[0]["advice"].as_str().unwrap();
         assert!(advice.contains("Existing"));
+    }
+
+    /// Build a minimal wiremock-backed client that will never receive any
+    /// sheet-fetch requests (used by inline-data tests that exercise
+    /// pre-fetch validation only).
+    async fn test_client_empty() -> Arc<dyn SheetsClient> {
+        let server = MockServer::start().await;
+        let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
+        client.token_test_seed("fake-bearer-token").await;
+        // The _server is intentionally dropped here — no mocks are mounted, and
+        // inline tests never reach the fetch loop, so the mock server isn't needed.
+        Arc::new(client)
+    }
+
+    #[test]
+    fn binding_inline_data_parses() {
+        let v = serde_json::json!({ "var": "t", "data": [{"a": 1}] });
+        let b: GsheetsBinding = serde_json::from_value(v).unwrap();
+        assert_eq!(b.var, "t");
+        assert!(b.data.is_some());
+        assert!(b.spreadsheet_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_rejects_binding_with_both_sources() {
+        let client = test_client_empty().await; // any mock; validation happens pre-fetch
+        let args = serde_json::json!({
+            "bindings": [{ "var": "t", "spreadsheet_id": "x", "sheet": "S", "data": [{"a":1}] }],
+            "code": "output = 1"
+        });
+        let out = dispatch_gsheets_run_python_with_client(client, args).await;
+        assert_eq!(out["error"], "invalid_args");
+        assert!(out["message"].as_str().unwrap().contains("exactly one"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_rejects_binding_with_no_source() {
+        let client = test_client_empty().await;
+        let args = serde_json::json!({
+            "bindings": [{ "var": "t" }],
+            "code": "output = 1"
+        });
+        let out = dispatch_gsheets_run_python_with_client(client, args).await;
+        assert_eq!(out["error"], "invalid_args");
+        assert!(out["message"].as_str().unwrap().contains("exactly one"));
     }
 
     /// `a1_addr` is what computes the header read range in `fetch_tab_meta`.
