@@ -1,0 +1,55 @@
+{
+  "comment": "E2E regression: Gemini agent with an http_request tool whose body has a NESTED ARRAY param (body.tags with items). Before the parse_node_schema fix this raised Gemini 400 'properties[tags].items: missing field'. Must now run cleanly: Gemini accepts the tool, calls submit_tags, httpbin echoes the array.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/nested_array",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Submit tags for the item 'colmena'. Use exactly these tags: 'rust', 'agents', 'dag'. Call the submit_tags tool, then confirm what you submitted."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "temperature": 0.0,
+        "system_message": "You submit tags for items. Always use the submit_tags tool (never answer from memory). After the tool returns, confirm the item name and the list of tags you submitted.",
+        "enabled_tools": ["submit_tags"],
+        "tool_configurations": {
+          "submit_tags": {
+            "name": "submit_tags",
+            "node_type": "http_request",
+            "description": "Submit a list of tags for an item to the API.",
+            "node_schema": {
+              "base_url": { "type": "string", "fixed": "https://httpbin.org" },
+              "endpoint": { "type": "string", "fixed": "/post" },
+              "method": { "type": "string", "fixed": "POST" },
+              "body": {
+                "type": "object",
+                "properties": {
+                  "item": { "type": "string", "required": true, "description": "The item name." },
+                  "tags": {
+                    "type": "array",
+                    "required": true,
+                    "description": "The list of tags for the item.",
+                    "items": { "type": "string", "description": "A single tag." }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}

@@ -263,6 +263,51 @@ pub struct ParsedNodeSchema {
     pub param_to_container: HashMap<String, String>,
 }
 
+/// Populate `prop.items` from `field.items` when `field_type` is `"array"`.
+///
+/// Both OpenAI and Gemini's strict tool-schema validators reject array
+/// parameters that lack an `items` clause, so arrays MUST declare it. Used by
+/// BOTH the top-level and container-child branches of [`parse_node_schema`] so
+/// nested arrays (e.g. `body.attachments` on an `http_request` tool) get the
+/// same treatment as top-level ones. `field_label` is the field's path, used in
+/// error messages (e.g. `"rows"` or `"body.attachments"`). No-op for non-arrays.
+fn apply_array_items(
+    prop: &mut ParameterProperty,
+    field: &NodeSchemaField,
+    field_type: &str,
+    field_label: &str,
+) -> Result<(), String> {
+    if field_type != "array" {
+        return Ok(());
+    }
+    let items_field = field.items.as_ref().ok_or_else(|| {
+        format!(
+            "node_schema field '{}' has type 'array' but no 'items' was specified. \
+             Add e.g. \"items\": {{ \"type\": \"object\" }} for lists of objects, \
+             or \"items\": {{ \"type\": \"string\" }} for lists of strings.",
+            field_label
+        )
+    })?;
+    // `items` describes what each element looks like to the LLM — so its `type`
+    // is mandatory for the same reason as the field's own `type`.
+    let items_type = items_field.field_type.as_ref().ok_or_else(|| {
+        format!(
+            "node_schema field '{}' has type 'array' but `items.type` is missing. \
+             Add e.g. \"items\": {{ \"type\": \"string\" }}.",
+            field_label
+        )
+    })?;
+    let mut items_prop = ParameterProperty::new(
+        items_type.clone(),
+        items_field.description.clone().unwrap_or_default(),
+    );
+    if let Some(pattern) = &items_field.pattern {
+        items_prop = items_prop.with_pattern(pattern.clone());
+    }
+    prop.items = Some(Box::new(items_prop));
+    Ok(())
+}
+
 /// Parse a [`NodeSchema`] into the components needed by `generate_tool_definition()` and `execute()`.
 ///
 /// Iterates over each top-level entry and handles three cases:
@@ -351,6 +396,16 @@ pub fn parse_node_schema(schema: &NodeSchema) -> Result<ParsedNodeSchema, String
                         prop = prop.with_pattern(pattern.clone());
                     }
 
+                    // Nested arrays need `items` too — same rule as top-level.
+                    // (Previously omitted here, which dropped `items` for array
+                    // fields inside a container and broke Gemini/OpenAI tools.)
+                    apply_array_items(
+                        &mut prop,
+                        child_field,
+                        child_type,
+                        &format!("{}.{}", top_key, child_key),
+                    )?;
+
                     container_children.push((
                         child_key.clone(),
                         top_key.clone(),
@@ -385,38 +440,10 @@ pub fn parse_node_schema(schema: &NodeSchema) -> Result<ParsedNodeSchema, String
                 prop = prop.with_pattern(pattern.clone());
             }
 
-            // Array fields MUST declare items — OpenAI's strict tool-schema
-            // validator rejects array schemas without an `items` clause, and
-            // silently defaulting would hide the mismatch when an author
-            // intended e.g. `array of strings` but the LLM emits objects.
-            // Fail fast with a message that points to the exact remedy.
-            if top_type == "array" {
-                let items_field = top_field.items.as_ref().ok_or_else(|| {
-                    format!(
-                        "node_schema field '{}' has type 'array' but no 'items' was specified. \
-                         Add e.g. \"items\": {{ \"type\": \"object\" }} for lists of objects, \
-                         or \"items\": {{ \"type\": \"string\" }} for lists of strings.",
-                        top_key
-                    )
-                })?;
-                // `items` describes what each element looks like to the LLM — so
-                // its `type` is mandatory for the same reason as top-level fields.
-                let items_type = items_field.field_type.as_ref().ok_or_else(|| {
-                    format!(
-                        "node_schema field '{}' has type 'array' but `items.type` is missing. \
-                         Add e.g. \"items\": {{ \"type\": \"string\" }}.",
-                        top_key
-                    )
-                })?;
-                let mut items_prop = ParameterProperty::new(
-                    items_type.clone(),
-                    items_field.description.clone().unwrap_or_default(),
-                );
-                if let Some(pattern) = &items_field.pattern {
-                    items_prop = items_prop.with_pattern(pattern.clone());
-                }
-                prop.items = Some(Box::new(items_prop));
-            }
+            // Array fields MUST declare `items` (OpenAI/Gemini strict
+            // validators reject arrays without it). Shared with the
+            // container-child branch so both paths stay consistent.
+            apply_array_items(&mut prop, top_field, top_type, top_key)?;
 
             llm_properties.insert(top_key.clone(), prop);
 
@@ -665,6 +692,73 @@ mod tests {
         let items = prop.items.as_ref().unwrap();
         assert_eq!(items.property_type, "string");
         assert_eq!(items.description, "Una etiqueta");
+    }
+
+    #[test]
+    fn test_parse_node_schema_container_array_propagates_items() {
+        // Regression: an LLM-visible array field nested inside a CONTAINER
+        // (e.g. `body.attachments` in an http_request tool) must propagate its
+        // `items` to the exposed ParameterProperty — exactly like a top-level
+        // array. Previously the container-child branch dropped `items`, so
+        // Gemini/OpenAI rejected the tool with
+        // `properties[<field>].items: missing field`.
+        let schema = serde_json::from_value::<NodeSchema>(json!({
+            "body": {
+                "type": "object",
+                "properties": {
+                    "attachments": {
+                        "type": "array",
+                        "required": false,
+                        "description": "Files to send",
+                        "items": { "type": "object", "description": "A file ref" }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let parsed = parse_node_schema(&schema).unwrap();
+        // Unique child key → exposed flat as "attachments".
+        let prop = parsed
+            .llm_properties
+            .get("attachments")
+            .expect("nested array child must be exposed");
+        assert_eq!(prop.property_type, "array");
+        let items = prop
+            .items
+            .as_ref()
+            .expect("items must be propagated for a container-nested array");
+        assert_eq!(items.property_type, "object");
+    }
+
+    #[test]
+    fn test_parse_node_schema_container_array_requires_items() {
+        // Consistency with top-level arrays: a nested array WITHOUT `items`
+        // fails fast at parse time (naming the dotted path) instead of silently
+        // producing an invalid tool schema that the provider later rejects.
+        let schema = serde_json::from_value::<NodeSchema>(json!({
+            "body": {
+                "type": "object",
+                "properties": {
+                    "attachments": {
+                        "type": "array",
+                        "required": false,
+                        "description": "Files to send"
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let err = parse_node_schema(&schema).expect_err("nested array without items must fail");
+        assert!(
+            err.contains("body.attachments"),
+            "error must name the dotted path, got: {err}"
+        );
+        assert!(
+            err.contains("items"),
+            "error must mention items, got: {err}"
+        );
     }
 
     #[test]
