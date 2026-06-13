@@ -1,0 +1,24 @@
+{
+  "comment": "E2E: gsheets_read returns a MARKDOWN table + dimensions; whole-sheet via omitting range. Replace <YOUR_SPREADSHEET_ID> with a sheet shared (Editor) to the OAuth user and run per the gsheets E2E runbook (Secret Manager creds + PYTHONPATH for embedded python). Verifies Part B.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": { "path": "/x", "method": "POST", "test_payload": {
+        "prompt": "Use this exact spreadsheet_id (copy character-by-character): <YOUR_SPREADSHEET_ID>\nStep 1: call gsheets_list_sheets with that spreadsheet_id.\nStep 2: for each tab, call gsheets_read with that spreadsheet_id and the tab name, omitting range.\nReport each tab's name, dimensions, and markdown table."
+      }}
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "temperature": 0,
+        "system_message": "You inspect Google Sheets with the gsheets tools. Always copy the spreadsheet_id verbatim.",
+        "enabled_tools": ["gsheets"]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [ { "from": "trigger", "to": "agent" }, { "from": "agent", "to": "log" } ]
+}

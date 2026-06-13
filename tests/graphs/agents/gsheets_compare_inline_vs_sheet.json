@@ -1,0 +1,24 @@
+{
+  "comment": "E2E: code-based comparison via gsheets_run_python with a polymorphic binding set — one INLINE data binding (a table the model 'extracted from an image') + one SHEET binding. pandas computes the diff deterministically. Replace <YOUR_SPREADSHEET_ID> and <TAB_NAME>; run per the gsheets E2E runbook. Verifies Part A (inline + sheet bindings + comparison).",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": { "path": "/x", "method": "POST", "test_payload": {
+        "prompt": "I extracted this nutritional table from an IMAGE (label -> value):\n[{\"label\": \"Calorías (kcal)\", \"value\": 116}, {\"label\": \"Carbohidratos totales\", \"value\": \"5 g\"}]\n\nCompare it against tab '<TAB_NAME>' of spreadsheet_id (copy EXACTLY): <YOUR_SPREADSHEET_ID> (a label->value table, range 'A2:B').\n\nCall gsheets_run_python ONCE with TWO bindings: (1) INLINE {\"var\":\"img\",\"data\":[{\"label\":\"Calorías (kcal)\",\"value\":116},{\"label\":\"Carbohidratos totales\",\"value\":\"5 g\"}]} ; (2) SHEET {\"var\":\"sheet\",\"spreadsheet_id\":\"<YOUR_SPREADSHEET_ID>\",\"sheet\":\"<TAB_NAME>\",\"range\":\"A2:B\"}. Code: scols=_gsheets_loaded_columns['sheet']; slab,sval=scols[0],scols[1]; dsheet={str(r[slab]):str(r[sval]) for r in sheet}; dimg={str(r['label']):str(r['value']) for r in img}; diffs=[{'label':k,'image':dimg[k],'sheet':dsheet.get(k)} for k in dimg if str(dimg[k])!=str(dsheet.get(k))]; output={'differences':diffs,'img_rows':len(img),'sheet_rows':len(sheet)}. Report the differences in plain language."
+      }}
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "temperature": 0,
+        "system_message": "You compare a table extracted from an image against a Google Sheet using gsheets_run_python (pandas) — pass the image table as an INLINE data binding and the sheet as a sheet binding. Follow the provided code pattern verbatim.",
+        "enabled_tools": ["gsheets"]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [ { "from": "trigger", "to": "agent" }, { "from": "agent", "to": "log" } ]
+}
