@@ -97,8 +97,25 @@ fn read_client_email_from_json(path: &Path) -> Option<String> {
 /// share instruction is the load-bearing part of this prelude — without
 /// it the user has no way to know the agent needs to be granted access,
 /// so they paste an ID and get `PermissionDenied`. Don't soften this.
+/// Workflow guidance appended to the prelude whenever any gsheets/gdocs tool is
+/// active: how to understand a sheet's shape BEFORE reading or comparing it.
+/// Scoped to spreadsheet work ("una planilla"); harmless for gdocs-only agents.
+const SHEET_WORKFLOW_PRELUDE: &str = "### Entender una hoja ANTES de leerla o compararla\n\
+     Antes de operar sobre una planilla, entendé su forma: leéla primero con \
+     `gsheets_read` (devuelve una tabla markdown + `dimensions` {filas, columnas}). \
+     El encabezado NO siempre está en la primera fila — puede haber filas de título \
+     arriba, o ser una tabla clave→valor sin encabezados clásicos. Usá ese preview \
+     para ubicar dónde empiezan el header y los datos reales.\n\
+     Para COMPARAR o analizar datos, hacelo en CÓDIGO con `gsheets_run_python` \
+     (nunca comparando a ojo): cargá cada tabla como un binding (una hoja, o datos \
+     inline via `data:` — p.ej. una tabla que extrajiste de una imagen) y arrancá \
+     el `range` de cada binding de hoja en la fila del header/datos real, para que \
+     los registros tomen las claves correctas.\n\
+     Celdas combinadas (merged): Google deja el valor SOLO en la celda superior \
+     izquierda; las demás del bloque vienen vacías.";
+
 pub fn build_google_workspace_prelude(sa_email: Option<&str>) -> String {
-    match sa_email {
+    let base = match sa_email {
         Some(email) => format!(
             "## Acceso a Google Workspace\n\
              Tenés tools de Google Docs y/o Sheets habilitadas. Para operar sobre \
@@ -150,7 +167,8 @@ pub fn build_google_workspace_prelude(sa_email: Option<&str>) -> String {
              instrucciones: pedirle el ID y avisarle que debe compartir el doc como \
              Editor."
             .to_string(),
-    }
+    };
+    format!("{base}\n\n{SHEET_WORKFLOW_PRELUDE}")
 }
 
 /// True when the LLM's exposed-tools list contains any `gsheets_*` or
@@ -207,6 +225,36 @@ mod tests {
             );
             // The create tools must be named so the LLM knows what to avoid by default.
             assert!(out.contains("gsheets_create_spreadsheet") || out.contains("gdocs_create"));
+        }
+    }
+
+    #[test]
+    fn prelude_includes_understand_sheet_workflow_in_both_variants() {
+        for out in [
+            build_google_workspace_prelude(Some("agents@startti.co")),
+            build_google_workspace_prelude(None),
+        ] {
+            let lower = out.to_lowercase();
+            // Read first to understand the sheet shape.
+            assert!(
+                out.contains("gsheets_read"),
+                "prelude must tell the LLM to read the sheet first"
+            );
+            // The header is not always the first row.
+            assert!(
+                lower.contains("no siempre está en la primera fila"),
+                "prelude must warn the header is not always row 1"
+            );
+            // Compare in code, not by eye.
+            assert!(
+                out.contains("gsheets_run_python") && lower.contains("a ojo"),
+                "prelude must steer comparisons to code (gsheets_run_python), not eyeballing"
+            );
+            // Merged-cell behavior.
+            assert!(
+                lower.contains("merged") || lower.contains("combinadas"),
+                "prelude must note merged-cell behavior"
+            );
         }
     }
 
