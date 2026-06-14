@@ -62,8 +62,20 @@ gsheets_run_python:
   summary: Run sandboxed pandas analysis over sheet ranges loaded directly by the dispatcher (rows never pass through the LLM)
   description: |
     Run sandboxed pandas (pd), numpy (np), scipy.stats over one or more tables.
+
+    ⚠️ KNOW THE COLUMNS FIRST. Binding a sheet loads its ROWS for computation — it
+    does NOT tell you the schema. If you don't already know the table's real column
+    names and what each column holds, read it FIRST with `gsheets_read`. Never guess
+    column names or what a term means (e.g. "frutas" is almost certainly a value in
+    a `Categoria` column, not part of the product name). Guessing silently produces
+    wrong results — a filter that matches 0 rows, or the wrong rows, with no error.
+
+    ⚠️ SANITY-CHECK THE ROW COUNT. If a filter/groupby/mask matches 0 rows (or far
+    fewer than you expected), do NOT report success — that is a signal you
+    misunderstood the data. Read the table, find the right column/value, and redo it.
+
     USE THIS TO COMPARE / cross-reference / dedupe / diff tables — load each table
-    as a binding and compare in code; do NOT compare values by eye.
+    as a binding and compute in code; do NOT compare values by eye.
 
     A binding is either a SHEET source ({var, spreadsheet_id, sheet, range?}) or an
     INLINE source ({var, data: [...]}). Inline `data` is an array of {col: val}
