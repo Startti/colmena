@@ -77,7 +77,10 @@ Expected: FAIL — `cannot find function tool_call_signature in this scope`.
 
 - [ ] **Step 3: Implement the helpers**
 
-Add at module level (not inside `impl`):
+Add at module level (not inside `impl`). The `#[allow(dead_code)]` is temporary —
+under `warnings = "deny"` these helpers are unused outside tests until Task 4
+wires them into the loop, which removes the attribute. Add it to **both**
+`tool_call_signature` and `canonical_json`.
 
 ```rust
 /// Canonical `(name, arguments)` signature used to detect repeated tool calls.
@@ -85,6 +88,7 @@ Add at module level (not inside `impl`):
 /// collapse to one key. Invalid-JSON arguments fall back to the raw string.
 /// The `\u{0}` separator cannot appear in a JSON token, so name and args never
 /// collide.
+#[allow(dead_code)] // removed in Task 4 when the loop guard uses it
 fn tool_call_signature(name: &str, arguments: &str) -> String {
     let canon = serde_json::from_str::<serde_json::Value>(arguments)
         .map(|v| canonical_json(&v))
@@ -93,6 +97,7 @@ fn tool_call_signature(name: &str, arguments: &str) -> String {
 }
 
 /// Deterministic, key-sorted serialization of a JSON value (for signatures only).
+#[allow(dead_code)] // removed in Task 4 when the loop guard uses it
 fn canonical_json(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::Object(map) => {
@@ -1018,9 +1023,11 @@ Replace the final `Err(LlmError::MaxIterationsReached { max: max_iter })` (line 
         Ok(response)
 ```
 
-- [ ] **Step 8: Remove the temporary `#[allow(dead_code)]` from Task 2**
+- [ ] **Step 8: Remove the temporary `#[allow(dead_code)]` attributes**
 
-The two text consts are now used — delete both `#[allow(dead_code)]` attributes added in Task 2 Step 4.
+All four are now used by the loop — delete the `#[allow(dead_code)]` from
+`tool_call_signature` and `canonical_json` (Task 1) and from both text consts
+`REPEAT_NUDGE_TEXT` / `RESCUE_SYNTHESIS_TEXT` (Task 2 Step 4).
 
 - [ ] **Step 9: Run the tests**
 
