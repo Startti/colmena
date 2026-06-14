@@ -192,10 +192,6 @@ impl AgentService {
                 max = max_iter,
                 "agent_service: iteration start"
             );
-            // Signal start of a new message/iteration
-            if let Some(callback) = &on_token {
-                (callback)(LlmStreamPart::LlmMessageStart);
-            }
 
             // A. Call LLM with tools
             let should_stream = on_token.is_some();
@@ -310,116 +306,11 @@ impl AgentService {
                 }
             }
 
-            // Decide between call() and stream()
-            let mut completion_usage = None;
-            let mut response = if let Some(callback) = &on_token {
-                let stream = self.llm_repository.stream(request).await?;
-                use futures::StreamExt;
-                // Pin stream
-                let mut stream = stream;
-
-                let mut full_content = String::new();
-                let mut full_thinking = String::new();
-                let mut captured_provider = config.provider().clone();
-                let mut captured_req_id = crate::llm::domain::LlmRequestId::new();
-                let mut accumulated_tool_calls: std::collections::HashMap<usize, ToolCall> =
-                    std::collections::HashMap::new();
-
-                while let Some(chunk_result) = stream.next().await {
-                    match chunk_result {
-                        Ok(chunk) => {
-                            captured_req_id = chunk.request_id().clone();
-                            captured_provider = chunk.provider().clone();
-
-                            // Forward the part to the callback
-                            (callback)(chunk.part().clone());
-
-                            // Accumulate state for returning LlmResponse
-                            match chunk.part() {
-                                LlmStreamPart::Content(c) => {
-                                    full_content.push_str(c);
-                                }
-                                LlmStreamPart::ThinkingContent(c) => {
-                                    full_thinking.push_str(c);
-                                }
-                                LlmStreamPart::ToolCallChunk(tc) => {
-                                    let entry = accumulated_tool_calls
-                                        .entry(tc.index)
-                                        .or_insert_with(|| {
-                                            ToolCall::new(
-                                                tc.id.clone(),
-                                                crate::llm::domain::FunctionCall::new(
-                                                    tc.name.clone(),
-                                                    String::new(),
-                                                ),
-                                            )
-                                        });
-                                    if !tc.id.is_empty() && entry.id.is_empty() {
-                                        entry.id = tc.id.clone();
-                                    }
-                                    if !tc.name.is_empty() && entry.function.name.is_empty() {
-                                        entry.function.name = tc.name.clone();
-                                    }
-                                    entry.function.arguments.push_str(&tc.args_chunk);
-                                }
-                                LlmStreamPart::Usage(u) => {
-                                    completion_usage = Some(u.clone());
-                                }
-                                LlmStreamPart::ThinkingStart
-                                | LlmStreamPart::ThinkingEnd
-                                | LlmStreamPart::LlmToolCallStart(_)
-                                | LlmStreamPart::LlmToolCallFinish(_)
-                                | LlmStreamPart::LlmMessageStart
-                                | LlmStreamPart::LlmMessageFinish(_) => {}
-                            }
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-
-                let mut final_response =
-                    LlmResponse::new(captured_req_id, full_content, captured_provider)?;
-
-                if !full_thinking.is_empty() {
-                    final_response = final_response.with_thinking_content(full_thinking);
-                }
-
-                if !accumulated_tool_calls.is_empty() {
-                    let tools: Vec<ToolCall> = accumulated_tool_calls.into_values().collect();
-                    final_response = final_response.with_tool_calls(tools);
-                }
-
-                if let Some(usage) = &completion_usage {
-                    final_response = final_response.with_usage(usage.clone());
-                }
-
-                final_response
-            } else {
-                let res = self.llm_repository.call(request).await?;
-                completion_usage = res.usage().cloned();
-                res
-            };
-
-            // Signal end of message/iteration
-            if let Some(callback) = &on_token {
-                (callback)(LlmStreamPart::LlmMessageFinish(completion_usage));
-            }
+            let (mut response, _completion_usage) =
+                self.invoke_llm(request, &on_token, &config).await?;
 
             // Accumulate usage for this step
-            if let Some(usage) = response.usage() {
-                cumulative_usage.prompt_tokens += usage.prompt_tokens;
-                cumulative_usage.completion_tokens += usage.completion_tokens;
-                cumulative_usage.total_tokens += usage.total_tokens;
-                if let Some(t) = usage.thinking_tokens {
-                    *cumulative_usage.thinking_tokens.get_or_insert(0) += t;
-                }
-                if let Some(cr) = usage.cache_read_tokens {
-                    *cumulative_usage.cache_read_tokens.get_or_insert(0) += cr;
-                }
-                if let Some(cw) = usage.cache_write_tokens {
-                    *cumulative_usage.cache_write_tokens.get_or_insert(0) += cw;
-                }
-            }
+            accumulate_usage(&mut cumulative_usage, &response);
 
             // B. Save assistant response to memory
             self.conversation_repository
@@ -658,6 +549,119 @@ impl AgentService {
         }
 
         Err(LlmError::MaxIterationsReached { max: max_iter })
+    }
+
+    /// One LLM round-trip (stream or call) for `request`. Emits the
+    /// `LlmMessageStart`/`LlmMessageFinish` bracket and forwards every stream
+    /// part to `on_token` when present. Returns the assembled response and its
+    /// completion usage.
+    async fn invoke_llm(
+        &self,
+        request: LlmRequest,
+        on_token: &Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>>,
+        config: &LlmConfig,
+    ) -> Result<(LlmResponse, Option<LlmUsage>), LlmError> {
+        if let Some(callback) = on_token {
+            (callback)(LlmStreamPart::LlmMessageStart);
+        }
+
+        let mut completion_usage = None;
+        let response = if let Some(callback) = on_token {
+            let stream = self.llm_repository.stream(request).await?;
+            use futures::StreamExt;
+            let mut stream = stream;
+
+            let mut full_content = String::new();
+            let mut full_thinking = String::new();
+            let mut captured_provider = config.provider().clone();
+            let mut captured_req_id = crate::llm::domain::LlmRequestId::new();
+            let mut accumulated_tool_calls: std::collections::HashMap<usize, ToolCall> =
+                std::collections::HashMap::new();
+
+            while let Some(chunk_result) = stream.next().await {
+                match chunk_result {
+                    Ok(chunk) => {
+                        captured_req_id = chunk.request_id().clone();
+                        captured_provider = chunk.provider().clone();
+                        (callback)(chunk.part().clone());
+                        match chunk.part() {
+                            LlmStreamPart::Content(c) => full_content.push_str(c),
+                            LlmStreamPart::ThinkingContent(c) => full_thinking.push_str(c),
+                            LlmStreamPart::ToolCallChunk(tc) => {
+                                let entry = accumulated_tool_calls
+                                    .entry(tc.index)
+                                    .or_insert_with(|| {
+                                        ToolCall::new(
+                                            tc.id.clone(),
+                                            crate::llm::domain::FunctionCall::new(
+                                                tc.name.clone(),
+                                                String::new(),
+                                            ),
+                                        )
+                                    });
+                                if !tc.id.is_empty() && entry.id.is_empty() {
+                                    entry.id = tc.id.clone();
+                                }
+                                if !tc.name.is_empty() && entry.function.name.is_empty() {
+                                    entry.function.name = tc.name.clone();
+                                }
+                                entry.function.arguments.push_str(&tc.args_chunk);
+                            }
+                            LlmStreamPart::Usage(u) => completion_usage = Some(u.clone()),
+                            LlmStreamPart::ThinkingStart
+                            | LlmStreamPart::ThinkingEnd
+                            | LlmStreamPart::LlmToolCallStart(_)
+                            | LlmStreamPart::LlmToolCallFinish(_)
+                            | LlmStreamPart::LlmMessageStart
+                            | LlmStreamPart::LlmMessageFinish(_) => {}
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+
+            let mut final_response =
+                LlmResponse::new(captured_req_id, full_content, captured_provider)?;
+            if !full_thinking.is_empty() {
+                final_response = final_response.with_thinking_content(full_thinking);
+            }
+            if !accumulated_tool_calls.is_empty() {
+                let tools: Vec<ToolCall> = accumulated_tool_calls.into_values().collect();
+                final_response = final_response.with_tool_calls(tools);
+            }
+            if let Some(usage) = &completion_usage {
+                final_response = final_response.with_usage(usage.clone());
+            }
+            final_response
+        } else {
+            let res = self.llm_repository.call(request).await?;
+            completion_usage = res.usage().cloned();
+            res
+        };
+
+        if let Some(callback) = on_token {
+            (callback)(LlmStreamPart::LlmMessageFinish(completion_usage.clone()));
+        }
+
+        Ok((response, completion_usage))
+    }
+}
+
+/// Fold one response's usage into the running cumulative usage.
+fn accumulate_usage(cumulative: &mut LlmUsage, response: &LlmResponse) {
+    if let Some(usage) = response.usage() {
+        cumulative.prompt_tokens += usage.prompt_tokens;
+        cumulative.completion_tokens += usage.completion_tokens;
+        cumulative.total_tokens += usage.total_tokens;
+        if let Some(t) = usage.thinking_tokens {
+            *cumulative.thinking_tokens.get_or_insert(0) += t;
+        }
+        if let Some(cr) = usage.cache_read_tokens {
+            *cumulative.cache_read_tokens.get_or_insert(0) += cr;
+        }
+        if let Some(cw) = usage.cache_write_tokens {
+            *cumulative.cache_write_tokens.get_or_insert(0) += cw;
+        }
     }
 }
 
