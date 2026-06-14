@@ -32,6 +32,18 @@ const COMPACT_SUMMARY_MAX_LINES: usize = 100;
 /// Per-line truncation when building summary lines (chars, not tokens).
 const COMPACT_SUMMARY_LINE_MAX_CHARS: usize = 180;
 
+/// LLM-facing text shown when a tool call with an identical `(name+args)`
+/// signature is repeated (loop guard). The prior result is prepended to this.
+#[allow(dead_code)] // removed in Task 4 when the loop guard uses it
+const REPEAT_NUDGE_TEXT: &str =
+    include_str!("../../../text/prompts/agent_loop/repeat_nudge.md");
+
+/// LLM-facing instruction for the forced final synthesis ("rescue"). Appended
+/// as a user message before the terminal, tool-less LLM call.
+#[allow(dead_code)] // removed in Task 4 when the loop guard uses it
+const RESCUE_SYNTHESIS_TEXT: &str =
+    include_str!("../../../text/prompts/agent_loop/rescue_synthesis.md");
+
 /// A closure that derives the tool list to send on each ReAct iteration from
 /// the current message history. Used to implement lazy tool loading without
 /// teaching `AgentService` about lazy mode itself.

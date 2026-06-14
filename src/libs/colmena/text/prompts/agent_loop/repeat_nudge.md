@@ -1,0 +1,1 @@
+Ya llamaste esta herramienta con exactamente los mismos argumentos; su resultado está arriba. No repitas la misma llamada: usá ese resultado, o si necesitás algo distinto cambiá los argumentos, probá otra herramienta, o respondé directamente.
