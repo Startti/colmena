@@ -6,16 +6,19 @@ an HTTP server that exposes webhook endpoints defined in a DAG.
 
 To test:
 1. Run this script
-2. In another terminal, send a POST request:
-   curl -X POST http://localhost:3000/hello -H "Content-Type: application/json" -d '{"name": "World"}'
+2. In another terminal, send a POST request to the webhook path declared in the
+   graph ("/power"); the payload's "input" is raised to the 3rd power:
+   curl -X POST http://localhost:3000/power -H "Content-Type: application/json" -d '{"input": 10}'
+   # => 1000
 """
 
 import colmena
 import sys
 
 def main():
-    # Path to the DAG file with webhook triggers
-    dag_file = "tests/basic_webhook.json"
+    # Path to the DAG file with webhook triggers.
+    # power_webhook.json: trigger_webhook "/power" -> exponential^3 -> log. No API keys needed.
+    dag_file = "tests/graphs/basic/power_webhook.json"
     port = 3000
     
     print(f"🌐 Starting DAG server: {dag_file}")
