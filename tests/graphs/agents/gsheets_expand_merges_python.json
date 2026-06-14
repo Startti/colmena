@@ -1,0 +1,24 @@
+{
+  "comment": "E2E: gsheets_run_python loads 'Ventas' into a DataFrame and groups by Categoria summing Monto. Pre-feature, the merged 'Frutas'/'Verduras' cells arrive as NaN for the gap rows of each group, so a groupby('Categoria') drops those rows and the totals are wrong. With expand-merges the column is fully populated and the totals are Frutas=350, Verduras=100. The agent must report both totals. Replace <SPREADSHEET_ID> with a real sheet (tab 'Ventas') per the gsheets E2E runbook.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": { "path": "/merges_python", "method": "POST", "test_payload": {
+        "prompt": "Use this exact spreadsheet_id (copy character-by-character): <SPREADSHEET_ID>\nEn la hoja 'Ventas' de esa planilla, sumá el Monto por Categoria usando código. Llamá gsheets_run_python con un binding SHEET {var:'v', spreadsheet_id:'<SPREADSHEET_ID>', sheet:'Ventas'} y código: import pandas as pd; df=pd.DataFrame(v); output=df.groupby('Categoria')['Monto'].sum().to_dict(). Decime el total de cada categoria."
+      }}
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "temperature": 0,
+        "system_message": "Sos un analista de datos. Copiá el spreadsheet_id verbatim. Para procesar la hoja 'Ventas' usá gsheets_run_python: cargá la hoja como DataFrame, agrupá por 'Categoria' y sumá 'Monto'. Respondé con el total de cada categoria.",
+        "enabled_tools": ["gsheets"]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [ { "from": "trigger", "to": "agent" }, { "from": "agent", "to": "log" } ]
+}
