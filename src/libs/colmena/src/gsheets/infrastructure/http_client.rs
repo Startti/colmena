@@ -3,10 +3,12 @@
 
 use crate::gsheets::domain::{
     CellValue, ReadOptions, ReadResponse, SetRangeResponse, SheetId, SheetMeta, SheetsClient,
-    SheetsError, SpreadsheetId, SpreadsheetMeta,
+    SheetsError, SpreadsheetId, SpreadsheetMeta, ValueRenderOption,
 };
 use crate::gsheets::infrastructure::auth::TokenProvider;
 use crate::gsheets::infrastructure::config::GSheetsConfig;
+#[allow(unused_imports)]
+use crate::gsheets::infrastructure::merge_fill::{forward_fill_merges, MergeRect};
 use async_trait::async_trait;
 use reqwest::{Client, StatusCode};
 use serde_json::Value;
@@ -903,6 +905,124 @@ fn quote_sheet_for_range(sheet: &str) -> String {
     }
 }
 
+/// Google `ExtendedValue` → scalar JSON. `ExtendedValue` is a one-of:
+/// `{numberValue | stringValue | boolValue | formulaValue | errorValue}`.
+/// Empty / unknown ⇒ `Null`. Error cells surface their `type` string
+/// (e.g. `"#REF!"`).
+#[allow(dead_code)]
+fn extended_value_to_scalar(ev: &Value) -> Value {
+    if let Some(n) = ev.get("numberValue") {
+        n.clone()
+    } else if let Some(s) = ev.get("stringValue") {
+        s.clone()
+    } else if let Some(b) = ev.get("boolValue") {
+        b.clone()
+    } else if let Some(f) = ev.get("formulaValue") {
+        f.clone()
+    } else if let Some(e) = ev.get("errorValue") {
+        Value::String(
+            e.get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("ERROR")
+                .to_string(),
+        )
+    } else {
+        Value::Null
+    }
+}
+
+/// Map one grid `CellData` to the scalar JSON the read pipeline expects,
+/// honoring the requested render option. Mirrors what `values.get` returned:
+/// numbers as JSON numbers, strings as strings, booleans as bools, empty as
+/// `Null`.
+#[allow(dead_code)]
+fn cell_scalar(cell: &Value, render: ValueRenderOption) -> Value {
+    match render {
+        ValueRenderOption::FormattedValue => {
+            cell.get("formattedValue").cloned().unwrap_or(Value::Null)
+        }
+        ValueRenderOption::UnformattedValue => cell
+            .get("effectiveValue")
+            .map(extended_value_to_scalar)
+            .unwrap_or(Value::Null),
+        ValueRenderOption::Formula => match cell.get("userEnteredValue") {
+            // Formula cells: the user-entered formula text. Non-formula
+            // cells: their literal user-entered value.
+            Some(uev) => match uev.get("formulaValue") {
+                Some(f) => f.clone(),
+                None => extended_value_to_scalar(uev),
+            },
+            None => Value::Null,
+        },
+    }
+}
+
+/// Parse the first sheet's first `GridData` block from a `spreadsheets.get`
+/// response into a RECTANGULAR grid of scalar values plus the block's absolute
+/// top-left offset `(row_offset, col_offset)`. Rows are padded to a uniform
+/// width so forward-fill can reach every cell of a merge.
+#[allow(dead_code)]
+fn parse_grid_block(body: &Value, render: ValueRenderOption) -> (Vec<Vec<Value>>, usize, usize) {
+    let block = body
+        .get("sheets")
+        .and_then(|s| s.as_array())
+        .and_then(|s| s.first())
+        .and_then(|s| s.get("data"))
+        .and_then(|d| d.as_array())
+        .and_then(|d| d.first());
+    let Some(block) = block else {
+        return (Vec::new(), 0, 0);
+    };
+    let row_offset = block.get("startRow").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let col_offset = block
+        .get("startColumn")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let mut grid: Vec<Vec<Value>> = block
+        .get("rowData")
+        .and_then(|r| r.as_array())
+        .map(|rows| {
+            rows.iter()
+                .map(|row| {
+                    row.get("values")
+                        .and_then(|v| v.as_array())
+                        .map(|cells| cells.iter().map(|c| cell_scalar(c, render)).collect())
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let width = grid.iter().map(Vec::len).max().unwrap_or(0);
+    for row in &mut grid {
+        row.resize(width, Value::Null);
+    }
+    (grid, row_offset, col_offset)
+}
+
+/// Parse the first sheet's `merges` array into `MergeRect`s. Absent ⇒ empty.
+#[allow(dead_code)]
+fn parse_merges(body: &Value) -> Vec<MergeRect> {
+    body.get("sheets")
+        .and_then(|s| s.as_array())
+        .and_then(|s| s.first())
+        .and_then(|s| s.get("merges"))
+        .and_then(|m| m.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|m| MergeRect {
+                    start_row: m.get("startRowIndex").and_then(Value::as_u64).unwrap_or(0) as usize,
+                    end_row: m.get("endRowIndex").and_then(Value::as_u64).unwrap_or(0) as usize,
+                    start_col: m
+                        .get("startColumnIndex")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as usize,
+                    end_col: m.get("endColumnIndex").and_then(Value::as_u64).unwrap_or(0) as usize,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Convert a `[[col_header,...], [v1, v2, ...], ...]` rectangle into
 /// `[{col_header: v1, ...}, ...]`. The first row is taken as headers.
 ///
@@ -986,6 +1106,121 @@ mod tests {
         assert_eq!(resp.sheet, "Sheet1");
         assert_eq!(resp.range, "Sheet1!A1:B2");
         assert_eq!(resp.values, serde_json::json!([["x", 1], ["y", 2]]));
+    }
+
+    fn sample_grid_body() -> serde_json::Value {
+        // Two rows: header "Cat"/"N", then a row where Cat is empty (a merge
+        // gap) and N=5. A merges entry covers A1:A2 (the Cat column).
+        serde_json::json!({
+            "sheets": [{
+                "data": [{
+                    "startRow": 0,
+                    "startColumn": 0,
+                    "rowData": [
+                        {"values": [
+                            {"effectiveValue": {"stringValue": "Cat"}, "formattedValue": "Cat",
+                             "userEnteredValue": {"stringValue": "Cat"}},
+                            {"effectiveValue": {"stringValue": "N"}, "formattedValue": "N",
+                             "userEnteredValue": {"stringValue": "N"}}
+                        ]},
+                        {"values": [
+                            {},
+                            {"effectiveValue": {"numberValue": 5.0}, "formattedValue": "5",
+                             "userEnteredValue": {"numberValue": 5.0}}
+                        ]}
+                    ]
+                }],
+                "merges": [
+                    {"startRowIndex": 0, "endRowIndex": 2, "startColumnIndex": 0, "endColumnIndex": 1}
+                ]
+            }]
+        })
+    }
+
+    #[test]
+    fn parse_grid_block_unformatted_maps_effective_value() {
+        let body = sample_grid_body();
+        let (grid, ro, co) = parse_grid_block(&body, ValueRenderOption::UnformattedValue);
+        assert_eq!(ro, 0);
+        assert_eq!(co, 0);
+        assert_eq!(
+            grid,
+            vec![
+                vec![serde_json::json!("Cat"), serde_json::json!("N")],
+                vec![serde_json::json!(null), serde_json::json!(5.0)],
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_grid_block_formatted_uses_formatted_value() {
+        let body = sample_grid_body();
+        let (grid, _, _) = parse_grid_block(&body, ValueRenderOption::FormattedValue);
+        // Number 5 surfaces as its formatted string "5".
+        assert_eq!(grid[1][1], serde_json::json!("5"));
+    }
+
+    #[test]
+    fn parse_grid_block_formula_prefers_formula_value() {
+        let body = serde_json::json!({
+            "sheets": [{
+                "data": [{"startRow": 0, "startColumn": 0, "rowData": [
+                    {"values": [
+                        {"userEnteredValue": {"formulaValue": "=SUM(B:B)"},
+                         "effectiveValue": {"numberValue": 7.0}, "formattedValue": "7"}
+                    ]}
+                ]}],
+                "merges": []
+            }]
+        });
+        let (grid, _, _) = parse_grid_block(&body, ValueRenderOption::Formula);
+        assert_eq!(grid[0][0], serde_json::json!("=SUM(B:B)"));
+    }
+
+    #[test]
+    fn parse_merges_reads_rectangles() {
+        let body = sample_grid_body();
+        let merges = parse_merges(&body);
+        assert_eq!(merges.len(), 1);
+        assert_eq!(
+            merges[0],
+            MergeRect {
+                start_row: 0,
+                end_row: 2,
+                start_col: 0,
+                end_col: 1
+            }
+        );
+    }
+
+    #[test]
+    fn parse_grid_block_no_merges_is_plain_rectangle() {
+        // Regression guard: a body with no merges parses to the same logical
+        // 2-D values the old values.get path produced.
+        let body = serde_json::json!({
+            "sheets": [{
+                "data": [{"startRow": 0, "startColumn": 0, "rowData": [
+                    {"values": [
+                        {"effectiveValue": {"stringValue": "x"}},
+                        {"effectiveValue": {"numberValue": 1.0}}
+                    ]},
+                    {"values": [
+                        {"effectiveValue": {"stringValue": "y"}},
+                        {"effectiveValue": {"numberValue": 2.0}}
+                    ]}
+                ]}],
+                "merges": []
+            }]
+        });
+        let (grid, _, _) = parse_grid_block(&body, ValueRenderOption::UnformattedValue);
+        assert_eq!(
+            grid,
+            vec![
+                vec![serde_json::json!("x"), serde_json::json!(1.0)],
+                vec![serde_json::json!("y"), serde_json::json!(2.0)],
+            ]
+        );
+        assert!(parse_merges(&body).is_empty());
     }
 
     #[tokio::test]
