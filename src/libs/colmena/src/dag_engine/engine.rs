@@ -303,17 +303,41 @@ impl ColmenaEngine {
         })
     }
 
+    /// Runs a graph to completion and returns the single final output.
+    ///
+    /// `DagRunUseCase::execute()` is a deprecated stub that panics; the
+    /// single-turn contract is now satisfied by draining `execute_stream` and
+    /// returning the output carried by the terminal `GraphFinish` event — the
+    /// same path the CLI and SSE server use. Errors emitted by the stream are
+    /// propagated as `DagError`.
     pub async fn run_dag(
         &self,
         graph: Graph,
         resume_session_id: Option<String>,
         resume_answer: Option<String>,
         include_extra_info: bool,
-        _agent_session_id: Option<String>,
+        agent_session_id: Option<String>,
     ) -> Result<Value, DagError> {
-        self.use_case
-            .execute(graph, resume_session_id, resume_answer, include_extra_info)
-            .await
+        use crate::dag_engine::domain::events::DagExecutionEvent;
+        use futures::StreamExt;
+
+        let stream = self.execute_stream(
+            graph,
+            resume_session_id,
+            resume_answer,
+            include_extra_info,
+            None,
+            agent_session_id,
+        );
+        tokio::pin!(stream);
+
+        let mut final_output = Value::Null;
+        while let Some(result) = stream.next().await {
+            if let DagExecutionEvent::GraphFinish { output } = result? {
+                final_output = output;
+            }
+        }
+        Ok(final_output)
     }
 
     pub fn execute_stream(
