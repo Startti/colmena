@@ -561,6 +561,144 @@ Focus on: 1) Auth flaws, 2) Input validation, 3) Output encoding. Rate severity.
 
 ---
 
+## 🔄 Guarda de bucle y rescate (loop guard + rescue)
+
+> **Aplica solo a nodos `llm_call`** con tool calling habilitado. Los nodos
+> de un solo turno (`planner`, `reactor`, `critic`, `orchestrator`,
+> `extract_with_schema`) no son afectados — siempre ejecutan exactamente un turno.
+
+### Motivación
+
+El bucle ReAct de un agente puede atascarse repitiendo la misma llamada de
+herramienta indefinidamente (mismo tool + mismos argumentos una y otra vez).
+El parámetro `max_iterations` solía contar *turnos totales* y mataba agentes
+productivos demasiado pronto — un agente que leer cuatro sheets y iteraba pandas
+agotaba el límite aunque estuviera haciendo progreso real.
+
+La nueva semántica mide **lo que importa**: repeticiones *consecutivas* de la
+*misma* firma `(nombre + argumentos)`. El conteo se reinicia en el instante en
+que el modelo emite cualquier llamada distinta.
+
+---
+
+### Parámetro `max_iterations` — nuevo significado (presupuesto de bucle)
+
+| Aspecto | Antes (< 2026-06-14) | Ahora |
+|---|---|---|
+| Qué cuenta | Turnos totales del LLM | Repeticiones *consecutivas* de la misma firma `(nombre+args)` |
+| Default | 10 | **3** |
+| Nombre interno | `max_iterations` | `max_tool_repeats` (interno; la clave JSON pública es la misma: `max_iterations`) |
+
+```json
+// Ejemplo: la guarda por defecto permite 3 repeticiones consecutivas
+{
+  "config": {
+    "max_iterations": 3
+  }
+}
+```
+
+Un grafo legacy con `max_iterations: 10` ahora permite 10 repeticiones
+consecutivas de una firma — estrictamente más permisivo que antes; nunca muere
+antes de tiempo.
+
+---
+
+### Mecánica de repetición (default `max_iterations = 3`)
+
+| Repetición consecutiva | Acción |
+|---|---|
+| **1ª vez** | Ejecuta la herramienta normalmente; guarda el resultado. |
+| **2ª vez (nudge)** | **No re-ejecuta**; devuelve el resultado anterior + una línea de redirección: *"Ya llamaste esta herramienta con estos argumentos — usá ese resultado o probá algo diferente."* |
+| **3ª vez (rescate)** | Dispara la síntesis forzada (ver abajo). |
+
+> **Valores `< 2`:** la primera llamada de una firma siempre se ejecuta (el
+> chequeo de rescate vive dentro de "es repetición"), así que `max_iterations: 0`
+> o `1` se comportan igual que `2` — 1 ejecución + 1 nudge y luego rescate. No
+> bloquean la primera llamada ni causan bucles; simplemente no hay un valor
+> "bloquear de entrada".
+
+La firma es `canonical_string(nombre, argumentos)` con las claves de objetos
+ordenadas recursivamente, de modo que dos llamadas semánticamente idénticas con
+campos en distinto orden colapsan a la misma firma.
+
+**Reinicio del contador:** cualquier firma distinta reinicia el contador a cero.
+Ejemplo: `A,A,B,A` — la segunda racha de `A` parte de cero porque `B` la cortó;
+la guarda nunca se activa.
+
+**Múltiples tool calls en un turno:** cada llamada se evalúa independientemente.
+Si alguna alcanza el umbral de rescate, el engine termina de responder a *todas*
+las llamadas de ese turno (para mantener el historial válido) y luego inicia la
+síntesis.
+
+---
+
+### Techo duro de turnos (`COLMENA_HARD_TURN_CAP`)
+
+Independiente de la guarda de bucle existe un **techo absoluto de turnos** por
+ejecución:
+
+- **Variable de entorno:** `COLMENA_HARD_TURN_CAP` (entero positivo)
+- **Fallback:** `50` turnos si la variable no está seteada
+- **No configurable desde el JSON del grafo** (es un límite operacional, no de agente)
+
+El techo evita que un agente que llama tools distintas (sin activar la guarda de
+bucle) consuma recursos ilimitados. Cuando lo alcanza, también dispara la síntesis
+forzada.
+
+Los nodos de un solo turno (`planner`, `reactor`, `critic`, `orchestrator`,
+`extract_with_schema`) setean internamente `max_turns = 1`, preservando su
+comportamiento anterior sin cambios.
+
+---
+
+### Rescate — síntesis forzada
+
+Cuando se activa la guarda de bucle **o** se alcanza el techo de turnos, en lugar
+de retornar un error, el engine realiza **una llamada LLM final sin herramientas**
+con la instrucción:
+
+> *"Llegaste al límite. Dá tu mejor respuesta final con lo que ya tenés y aclará
+> qué quedó incompleto."*
+
+- La respuesta de síntesis se **persiste en memoria conversacional** y se retorna
+  como `Ok(respuesta)` — una respuesta exitosa normal.
+- Si `stream: true` está habilitado, la síntesis también se transmite en streaming.
+- La llamada de síntesis **no cuenta** contra el techo de turnos.
+- El error `MaxIterationsReached` sigue existiendo en el enum `LlmError` para
+  compatibilidad, pero **ya no se retorna** en el flujo normal.
+
+---
+
+### Resumen de flujos
+
+```
+Turno N — modelo emite tool call con firma S
+│
+├─ ¿S == firma actual de la racha?
+│   ├─ No  → reiniciar racha (streak=1), ejecutar tool
+│   └─ Sí  → streak++
+│               ├─ streak < max_iterations → nudge (no re-ejecuta)
+│               └─ streak >= max_iterations → RESCATE → síntesis forzada → Ok(respuesta)
+│
+└─ ¿turno N >= COLMENA_HARD_TURN_CAP?
+    └─ Sí → RESCATE → síntesis forzada → Ok(respuesta)
+```
+
+---
+
+### Textos LLM-facing (registro `text/`)
+
+Los mensajes que el modelo recibe durante nudge y rescate viven en el registro
+de texto (no hardcodeados en Rust):
+
+- Nudge: `text/prompts/agent_loop/repeat_nudge.md`
+- Rescate: `text/prompts/agent_loop/rescue_synthesis.md`
+
+Para personalizar los mensajes, editar esos archivos — no se requieren cambios en Rust.
+
+---
+
 ## 🛠️ Troubleshooting
 
 ### **"Missing 'provider' in inputs or config"**

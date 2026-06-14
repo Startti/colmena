@@ -32,6 +32,15 @@ const COMPACT_SUMMARY_MAX_LINES: usize = 100;
 /// Per-line truncation when building summary lines (chars, not tokens).
 const COMPACT_SUMMARY_LINE_MAX_CHARS: usize = 180;
 
+/// LLM-facing text shown when a tool call with an identical `(name+args)`
+/// signature is repeated (loop guard). The prior result is prepended to this.
+const REPEAT_NUDGE_TEXT: &str = include_str!("../../../text/prompts/agent_loop/repeat_nudge.md");
+
+/// LLM-facing instruction for the forced final synthesis ("rescue"). Appended
+/// as a user message before the terminal, tool-less LLM call.
+const RESCUE_SYNTHESIS_TEXT: &str =
+    include_str!("../../../text/prompts/agent_loop/rescue_synthesis.md");
+
 /// A closure that derives the tool list to send on each ReAct iteration from
 /// the current message history. Used to implement lazy tool loading without
 /// teaching `AgentService` about lazy mode itself.
@@ -62,7 +71,13 @@ pub struct AgentRunParams<'a> {
     pub config: LlmConfig,
     pub tools: Vec<ToolDefinition>,
     pub tool_executor: &'a dyn ToolExecutor,
-    pub max_iterations: Option<usize>,
+    /// Maximum number of times one `(name+args)` tool-call signature may be
+    /// emitted **consecutively** before the loop guard rescues (forced final
+    /// synthesis). The public `max_iterations` config key feeds this. Default 3.
+    pub max_tool_repeats: Option<usize>,
+    /// Hard ceiling on total LLM turns for this run. `None` → resolved from env
+    /// `COLMENA_HARD_TURN_CAP` (fallback 50). Single-shot callers pass `Some(1)`.
+    pub max_turns: Option<usize>,
     pub on_token: Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>>,
     /// Optional dynamic tools provider, called fresh at each ReAct iteration.
     /// When `Some`, its return value REPLACES `tools` for that iteration.
@@ -108,7 +123,8 @@ impl AgentService {
     /// # Returns
     /// Final response from the LLM after tool execution
     pub async fn run<'a>(&self, params: AgentRunParams<'a>) -> Result<LlmResponse, LlmError> {
-        let max_iter = params.max_iterations.unwrap_or(10);
+        let max_tool_repeats = params.max_tool_repeats.unwrap_or(3);
+        let max_turns = params.max_turns.unwrap_or_else(default_hard_turn_cap);
         let session_id = params.session_id;
         let prompt = params.prompt;
         let config = params.config;
@@ -172,18 +188,23 @@ impl AgentService {
         let mut all_tool_calls_executed = Vec::new();
         let mut cumulative_content = String::new();
 
-        // 3. ReAct Loop
-        for _iteration in 0..max_iter {
+        // Loop-guard streak: counts CONSECUTIVE repeats of one signature, and
+        // resets the moment a different signature appears (the model made
+        // progress). `streak_first` is the raw output of this streak's one real
+        // execution, echoed back in a nudge.
+        let mut streak_sig: Option<String> = None;
+        let mut streak_count: u32 = 0;
+        let mut streak_first = String::new();
+
+        // 3. ReAct Loop — bounded by the per-run turn ceiling. Productive work
+        //    is gated by the loop guard below, not by turns.
+        for _iteration in 0..max_turns {
             tracing::info!(
                 target: "colmena::agent",
                 iteration = _iteration,
-                max = max_iter,
+                max = max_turns,
                 "agent_service: iteration start"
             );
-            // Signal start of a new message/iteration
-            if let Some(callback) = &on_token {
-                (callback)(LlmStreamPart::LlmMessageStart);
-            }
 
             // A. Call LLM with tools
             let should_stream = on_token.is_some();
@@ -298,116 +319,11 @@ impl AgentService {
                 }
             }
 
-            // Decide between call() and stream()
-            let mut completion_usage = None;
-            let mut response = if let Some(callback) = &on_token {
-                let stream = self.llm_repository.stream(request).await?;
-                use futures::StreamExt;
-                // Pin stream
-                let mut stream = stream;
-
-                let mut full_content = String::new();
-                let mut full_thinking = String::new();
-                let mut captured_provider = config.provider().clone();
-                let mut captured_req_id = crate::llm::domain::LlmRequestId::new();
-                let mut accumulated_tool_calls: std::collections::HashMap<usize, ToolCall> =
-                    std::collections::HashMap::new();
-
-                while let Some(chunk_result) = stream.next().await {
-                    match chunk_result {
-                        Ok(chunk) => {
-                            captured_req_id = chunk.request_id().clone();
-                            captured_provider = chunk.provider().clone();
-
-                            // Forward the part to the callback
-                            (callback)(chunk.part().clone());
-
-                            // Accumulate state for returning LlmResponse
-                            match chunk.part() {
-                                LlmStreamPart::Content(c) => {
-                                    full_content.push_str(c);
-                                }
-                                LlmStreamPart::ThinkingContent(c) => {
-                                    full_thinking.push_str(c);
-                                }
-                                LlmStreamPart::ToolCallChunk(tc) => {
-                                    let entry = accumulated_tool_calls
-                                        .entry(tc.index)
-                                        .or_insert_with(|| {
-                                            ToolCall::new(
-                                                tc.id.clone(),
-                                                crate::llm::domain::FunctionCall::new(
-                                                    tc.name.clone(),
-                                                    String::new(),
-                                                ),
-                                            )
-                                        });
-                                    if !tc.id.is_empty() && entry.id.is_empty() {
-                                        entry.id = tc.id.clone();
-                                    }
-                                    if !tc.name.is_empty() && entry.function.name.is_empty() {
-                                        entry.function.name = tc.name.clone();
-                                    }
-                                    entry.function.arguments.push_str(&tc.args_chunk);
-                                }
-                                LlmStreamPart::Usage(u) => {
-                                    completion_usage = Some(u.clone());
-                                }
-                                LlmStreamPart::ThinkingStart
-                                | LlmStreamPart::ThinkingEnd
-                                | LlmStreamPart::LlmToolCallStart(_)
-                                | LlmStreamPart::LlmToolCallFinish(_)
-                                | LlmStreamPart::LlmMessageStart
-                                | LlmStreamPart::LlmMessageFinish(_) => {}
-                            }
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-
-                let mut final_response =
-                    LlmResponse::new(captured_req_id, full_content, captured_provider)?;
-
-                if !full_thinking.is_empty() {
-                    final_response = final_response.with_thinking_content(full_thinking);
-                }
-
-                if !accumulated_tool_calls.is_empty() {
-                    let tools: Vec<ToolCall> = accumulated_tool_calls.into_values().collect();
-                    final_response = final_response.with_tool_calls(tools);
-                }
-
-                if let Some(usage) = &completion_usage {
-                    final_response = final_response.with_usage(usage.clone());
-                }
-
-                final_response
-            } else {
-                let res = self.llm_repository.call(request).await?;
-                completion_usage = res.usage().cloned();
-                res
-            };
-
-            // Signal end of message/iteration
-            if let Some(callback) = &on_token {
-                (callback)(LlmStreamPart::LlmMessageFinish(completion_usage));
-            }
+            let (mut response, _completion_usage) =
+                self.invoke_llm(request, &on_token, &config).await?;
 
             // Accumulate usage for this step
-            if let Some(usage) = response.usage() {
-                cumulative_usage.prompt_tokens += usage.prompt_tokens;
-                cumulative_usage.completion_tokens += usage.completion_tokens;
-                cumulative_usage.total_tokens += usage.total_tokens;
-                if let Some(t) = usage.thinking_tokens {
-                    *cumulative_usage.thinking_tokens.get_or_insert(0) += t;
-                }
-                if let Some(cr) = usage.cache_read_tokens {
-                    *cumulative_usage.cache_read_tokens.get_or_insert(0) += cr;
-                }
-                if let Some(cw) = usage.cache_write_tokens {
-                    *cumulative_usage.cache_write_tokens.get_or_insert(0) += cw;
-                }
-            }
+            accumulate_usage(&mut cumulative_usage, &response);
 
             // B. Save assistant response to memory
             self.conversation_repository
@@ -435,8 +351,65 @@ impl AgentService {
                     return Ok(response);
                 }
 
-                // D. Execute each tool call
+                // D. Execute each tool call (with consecutive-streak loop guard)
+                let mut rescue = false;
                 for tool_call in tool_calls {
+                    let sig = tool_call_signature(
+                        &tool_call.function.name,
+                        &tool_call.function.arguments,
+                    );
+                    if streak_sig.as_deref() == Some(sig.as_str()) {
+                        streak_count += 1;
+                    } else {
+                        streak_sig = Some(sig.clone());
+                        streak_count = 1;
+                        streak_first.clear();
+                    }
+                    let count = streak_count;
+
+                    // Repeated signature in a row (streak >= 2): nudge or rescue.
+                    if count > 1 {
+                        // `streak_first` is empty when the streak's first call
+                        // took an early-return path that never stored a result
+                        // (e.g. a repeated `load_attachment`, whose content was
+                        // already injected for that turn). The bare redirect is
+                        // the right nudge there — there is no prior result to echo.
+                        let body = if streak_first.is_empty() {
+                            REPEAT_NUDGE_TEXT.to_string()
+                        } else {
+                            format!("{streak_first}\n\n{REPEAT_NUDGE_TEXT}")
+                        };
+
+                        if let Some(callback) = &on_token {
+                            (callback)(LlmStreamPart::LlmToolCallStart(tool_call.clone()));
+                            (callback)(LlmStreamPart::LlmToolCallFinish(ToolResult {
+                                tool_call_id: tool_call.id.clone(),
+                                output: body.clone(),
+                                success: true,
+                                error: None,
+                            }));
+                        }
+
+                        let mut nudged_call = tool_call.clone();
+                        nudged_call.response = Some(serde_json::Value::String(body.clone()));
+                        all_tool_calls_executed.push(nudged_call);
+
+                        let tool_message = LlmMessage::tool(tool_call.id.clone(), body)?;
+                        messages.push(tool_message.clone());
+                        self.conversation_repository
+                            .add_message(session_id, tool_message)
+                            .await?;
+
+                        if count >= max_tool_repeats as u32 {
+                            // Loop guard tripped: still answer the rest of this
+                            // turn's tool ids (done by continuing the loop), then
+                            // break to synthesis after the for-loop.
+                            rescue = true;
+                        }
+                        continue;
+                    }
+
+                    // Streak start (count == 1): real execution (existing path).
                     let mut executed_call = tool_call.clone();
 
                     // Notify start of execution
@@ -615,6 +588,10 @@ impl AgentService {
                         }
                     }
 
+                    // Store this streak's first result so a later repeat can
+                    // echo it in the nudge.
+                    streak_first = result.output.clone();
+
                     // Populate tool call output tracker
                     let parsed_output = serde_json::from_str::<serde_json::Value>(&result.output)
                         .unwrap_or_else(|_| serde_json::Value::String(result.output.clone()));
@@ -634,6 +611,10 @@ impl AgentService {
                         .add_message(session_id, tool_message)
                         .await?;
                 }
+
+                if rescue {
+                    break;
+                }
                 continue;
             } else {
                 response = response.with_usage(cumulative_usage);
@@ -645,7 +626,205 @@ impl AgentService {
             }
         }
 
-        Err(LlmError::MaxIterationsReached { max: max_iter })
+        // Reached here by the hard turn ceiling OR a loop-guard `break`.
+        // Forced final synthesis ("rescue"): one terminal, tool-less LLM call.
+        tracing::info!(
+            target: "colmena::agent",
+            "agent_service: forced final synthesis (rescue)"
+        );
+        messages.push(LlmMessage::user(RESCUE_SYNTHESIS_TEXT.to_string())?);
+
+        let request_messages =
+            compact_old_load_skill_in_history(&messages, COMPACT_LOAD_SKILL_KEEP_RECENT_MSGS);
+        let request_messages = compact_history_to_summary(
+            &request_messages,
+            COMPACT_SUMMARY_KEEP_FIRST_MSGS,
+            COMPACT_SUMMARY_KEEP_RECENT_MSGS,
+            COMPACT_SUMMARY_MAX_LINES,
+            COMPACT_SUMMARY_LINE_MAX_CHARS,
+        );
+        let should_stream = on_token.is_some();
+        // No tools on the request → the model cannot call a tool.
+        let request = LlmRequest::new(request_messages, config.clone(), should_stream)?;
+        let (mut response, _usage) = self.invoke_llm(request, &on_token, &config).await?;
+
+        accumulate_usage(&mut cumulative_usage, &response);
+        self.conversation_repository
+            .add_message(session_id, response.message().clone())
+            .await?;
+
+        let content = response.content();
+        if !content.is_empty() {
+            if !cumulative_content.is_empty() {
+                cumulative_content.push_str("\n\n");
+            }
+            cumulative_content.push_str(content);
+        }
+
+        response = response.with_usage(cumulative_usage);
+        response = response.with_content(cumulative_content);
+        if !all_tool_calls_executed.is_empty() {
+            response = response.with_tool_calls(all_tool_calls_executed);
+        }
+        Ok(response)
+    }
+
+    /// One LLM round-trip (stream or call) for `request`. Emits the
+    /// `LlmMessageStart`/`LlmMessageFinish` bracket and forwards every stream
+    /// part to `on_token` when present. Returns the assembled response and its
+    /// completion usage.
+    async fn invoke_llm(
+        &self,
+        request: LlmRequest,
+        on_token: &Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>>,
+        config: &LlmConfig,
+    ) -> Result<(LlmResponse, Option<LlmUsage>), LlmError> {
+        if let Some(callback) = on_token {
+            (callback)(LlmStreamPart::LlmMessageStart);
+        }
+
+        let mut completion_usage = None;
+        let response = if let Some(callback) = on_token {
+            let stream = self.llm_repository.stream(request).await?;
+            use futures::StreamExt;
+            let mut stream = stream;
+
+            let mut full_content = String::new();
+            let mut full_thinking = String::new();
+            let mut captured_provider = config.provider().clone();
+            let mut captured_req_id = crate::llm::domain::LlmRequestId::new();
+            let mut accumulated_tool_calls: std::collections::HashMap<usize, ToolCall> =
+                std::collections::HashMap::new();
+
+            while let Some(chunk_result) = stream.next().await {
+                match chunk_result {
+                    Ok(chunk) => {
+                        captured_req_id = chunk.request_id().clone();
+                        captured_provider = chunk.provider().clone();
+                        (callback)(chunk.part().clone());
+                        match chunk.part() {
+                            LlmStreamPart::Content(c) => full_content.push_str(c),
+                            LlmStreamPart::ThinkingContent(c) => full_thinking.push_str(c),
+                            LlmStreamPart::ToolCallChunk(tc) => {
+                                let entry =
+                                    accumulated_tool_calls.entry(tc.index).or_insert_with(|| {
+                                        ToolCall::new(
+                                            tc.id.clone(),
+                                            crate::llm::domain::FunctionCall::new(
+                                                tc.name.clone(),
+                                                String::new(),
+                                            ),
+                                        )
+                                    });
+                                if !tc.id.is_empty() && entry.id.is_empty() {
+                                    entry.id = tc.id.clone();
+                                }
+                                if !tc.name.is_empty() && entry.function.name.is_empty() {
+                                    entry.function.name = tc.name.clone();
+                                }
+                                entry.function.arguments.push_str(&tc.args_chunk);
+                            }
+                            LlmStreamPart::Usage(u) => completion_usage = Some(u.clone()),
+                            LlmStreamPart::ThinkingStart
+                            | LlmStreamPart::ThinkingEnd
+                            | LlmStreamPart::LlmToolCallStart(_)
+                            | LlmStreamPart::LlmToolCallFinish(_)
+                            | LlmStreamPart::LlmMessageStart
+                            | LlmStreamPart::LlmMessageFinish(_) => {}
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+
+            let mut final_response =
+                LlmResponse::new(captured_req_id, full_content, captured_provider)?;
+            if !full_thinking.is_empty() {
+                final_response = final_response.with_thinking_content(full_thinking);
+            }
+            if !accumulated_tool_calls.is_empty() {
+                let tools: Vec<ToolCall> = accumulated_tool_calls.into_values().collect();
+                final_response = final_response.with_tool_calls(tools);
+            }
+            if let Some(usage) = &completion_usage {
+                final_response = final_response.with_usage(usage.clone());
+            }
+            final_response
+        } else {
+            let res = self.llm_repository.call(request).await?;
+            completion_usage = res.usage().cloned();
+            res
+        };
+
+        if let Some(callback) = on_token {
+            (callback)(LlmStreamPart::LlmMessageFinish(completion_usage.clone()));
+        }
+
+        Ok((response, completion_usage))
+    }
+}
+
+/// Default hard ceiling on total LLM turns, read from env `COLMENA_HARD_TURN_CAP`
+/// (positive integer), falling back to 50. Pure cost/termination backstop —
+/// reaching it triggers the same forced-synthesis rescue as the loop guard.
+fn default_hard_turn_cap() -> usize {
+    std::env::var("COLMENA_HARD_TURN_CAP")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(50)
+}
+
+/// Fold one response's usage into the running cumulative usage.
+fn accumulate_usage(cumulative: &mut LlmUsage, response: &LlmResponse) {
+    if let Some(usage) = response.usage() {
+        cumulative.prompt_tokens += usage.prompt_tokens;
+        cumulative.completion_tokens += usage.completion_tokens;
+        cumulative.total_tokens += usage.total_tokens;
+        if let Some(t) = usage.thinking_tokens {
+            *cumulative.thinking_tokens.get_or_insert(0) += t;
+        }
+        if let Some(cr) = usage.cache_read_tokens {
+            *cumulative.cache_read_tokens.get_or_insert(0) += cr;
+        }
+        if let Some(cw) = usage.cache_write_tokens {
+            *cumulative.cache_write_tokens.get_or_insert(0) += cw;
+        }
+    }
+}
+
+/// Canonical `(name, arguments)` signature used to detect repeated tool calls.
+/// Object keys are sorted recursively so `{"a":1,"b":2}` and `{"b":2,"a":1}`
+/// collapse to one key. Invalid-JSON arguments fall back to the raw string.
+/// The `\u{0}` separator cannot appear in a JSON token, so name and args never
+/// collide.
+fn tool_call_signature(name: &str, arguments: &str) -> String {
+    let canon = serde_json::from_str::<serde_json::Value>(arguments)
+        .map(|v| canonical_json(&v))
+        .unwrap_or_else(|_| arguments.to_string());
+    format!("{name}\u{0}{canon}")
+}
+
+/// Deterministic, key-sorted serialization of a JSON value (for signatures only).
+fn canonical_json(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let inner: Vec<String> = keys
+                .into_iter()
+                .map(|k| {
+                    let key = serde_json::to_string(k).unwrap_or_default();
+                    format!("{}:{}", key, canonical_json(&map[k]))
+                })
+                .collect();
+            format!("{{{}}}", inner.join(","))
+        }
+        serde_json::Value::Array(arr) => {
+            let inner: Vec<String> = arr.iter().map(canonical_json).collect();
+            format!("[{}]", inner.join(","))
+        }
+        other => other.to_string(),
     }
 }
 
@@ -1005,6 +1184,7 @@ mod tests {
 
     use mockall::mock;
     use mockall::predicate::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     // ── Cache-safe temporal strip-on-load (2026-06-11) ──────────────────────
@@ -1035,6 +1215,41 @@ mod tests {
         let sys = "## Tools\nAvailable: add.\n\n---\nmore stable content";
         let out = strip_leading_temporal_block(sys);
         assert_eq!(out, sys);
+    }
+
+    // ── Per-signature loop guard: canonical tool-call signature ─────────────
+
+    #[test]
+    fn tool_call_signature_is_key_order_independent() {
+        let a = tool_call_signature("read", r#"{"a":1,"b":2}"#);
+        let b = tool_call_signature("read", r#"{"b":2,"a":1}"#);
+        assert_eq!(a, b, "object key order must not change the signature");
+    }
+
+    #[test]
+    fn tool_call_signature_is_name_and_args_sensitive() {
+        assert_ne!(
+            tool_call_signature("read", r#"{"a":1}"#),
+            tool_call_signature("write", r#"{"a":1}"#),
+            "different tool names must differ"
+        );
+        assert_ne!(
+            tool_call_signature("read", r#"{"range":"A1"}"#),
+            tool_call_signature("read", r#"{"range":"B2"}"#),
+            "different args must differ"
+        );
+    }
+
+    #[test]
+    fn tool_call_signature_handles_nested_and_invalid_json() {
+        // nested object key order also normalized
+        let a = tool_call_signature("t", r#"{"x":{"p":1,"q":2}}"#);
+        let b = tool_call_signature("t", r#"{"x":{"q":2,"p":1}}"#);
+        assert_eq!(a, b);
+        // invalid JSON falls back to the raw string (still deterministic)
+        let c = tool_call_signature("t", "not json");
+        let d = tool_call_signature("t", "not json");
+        assert_eq!(c, d);
     }
 
     // ── F-T14 step A2: skill-out-of-history compaction tests ────────────────
@@ -1539,7 +1754,8 @@ mod tests {
                 config: create_config(),
                 tools: vec![],
                 tool_executor: &mock_tool_exec,
-                max_iterations: None,
+                max_tool_repeats: None,
+                max_turns: None,
                 on_token: None,
                 tools_provider: None,
                 attachment_resolver: None,
@@ -1642,7 +1858,8 @@ mod tests {
                 config: create_config(),
                 tools: vec![], // Tools list doesn't matter for mock
                 tool_executor: &mock_tool_exec,
-                max_iterations: None,
+                max_tool_repeats: None,
+                max_turns: None,
                 on_token: None,
                 tools_provider: None,
                 attachment_resolver: None,
@@ -1704,7 +1921,8 @@ mod tests {
                 config: create_config(),
                 tools: vec![],
                 tool_executor: &mock_tool_exec,
-                max_iterations: None,
+                max_tool_repeats: None,
+                max_turns: None,
                 on_token: None,
                 tools_provider: None,
                 attachment_resolver: None,
@@ -1716,12 +1934,41 @@ mod tests {
         assert_eq!(result.unwrap().content(), "Resumed answer");
     }
 
+    fn loop_tool_call(args: &str) -> ToolCall {
+        ToolCall {
+            id: "call_loop".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "loop".to_string(),
+                arguments: args.to_string(),
+            },
+            response: None,
+        }
+    }
+
+    fn text_response(text: &str) -> LlmResponse {
+        LlmResponse::new(
+            LlmRequestId::from_string("req".to_string()).unwrap(),
+            text.to_string(),
+            LlmProvider::new(
+                ProviderKind::OpenAi,
+                "key".to_string(),
+                Some("gpt-4".to_string()),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn tool_call_response(call: ToolCall) -> LlmResponse {
+        text_response("").with_tool_calls(vec![call])
+    }
+
     #[tokio::test]
-    async fn test_agent_service_max_iterations() {
+    async fn repeated_signature_nudges_then_rescues_with_synthesis() {
         let mut mock_llm = MockLlmRepo::new();
         let mut mock_conv = MockConversationRepo::new();
         let mut mock_tool_exec = MockToolExec::new();
-
         let key = test_key();
 
         mock_conv.expect_get_by_id().returning(|k| {
@@ -1732,52 +1979,40 @@ mod tests {
         });
         mock_conv.expect_add_message().returning(|_, _| Ok(()));
 
-        mock_tool_exec.expect_execute().returning(|call| {
+        // The tool must be executed EXACTLY ONCE despite 3 identical requests:
+        // occurrence 1 executes, 2 is nudged, 3 triggers rescue (no execution).
+        mock_tool_exec.expect_execute().times(1).returning(|call| {
             Ok(ToolResult {
                 tool_call_id: call.id.clone(),
                 success: true,
-                output: "loop".to_string(),
+                output: "first-result".to_string(),
                 error: None,
             })
         });
 
-        // Always return tool call
-        mock_llm.expect_call().returning(|_| {
-            let tool_call = ToolCall {
-                id: "call_loop".to_string(),
-                call_type: "function".to_string(),
-                function: FunctionCall {
-                    name: "loop".to_string(),
-                    arguments: "{}".to_string(),
-                },
-                response: None,
-            };
-
-            Ok(LlmResponse::new(
-                LlmRequestId::from_string("req-loop".to_string()).unwrap(),
-                "".to_string(),
-                LlmProvider::new(
-                    ProviderKind::OpenAi,
-                    "key".to_string(),
-                    Some("gpt-4".to_string()),
-                )
-                .unwrap(),
-            )
-            .unwrap()
-            .with_tool_calls(vec![tool_call]))
+        // Calls 1-3 → identical tool call; call 4 (synthesis, tool-less) → final text.
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        mock_llm.expect_call().returning(move |_req| {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            if n < 3 {
+                Ok(tool_call_response(loop_tool_call("{}")))
+            } else {
+                Ok(text_response("Best-effort final answer."))
+            }
         });
 
         let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
-
         let result = service
             .run(AgentRunParams {
                 session_id: &key,
-                prompt: Some("Loop me".to_string()),
+                prompt: Some("loop me".to_string()),
                 messages: None,
                 config: create_config(),
                 tools: vec![],
                 tool_executor: &mock_tool_exec,
-                max_iterations: Some(3), // Max 3 iterations
+                max_tool_repeats: Some(3),
+                max_turns: None,
                 on_token: None,
                 tools_provider: None,
                 attachment_resolver: None,
@@ -1785,10 +2020,400 @@ mod tests {
             })
             .await;
 
-        assert!(matches!(
-            result,
-            Err(LlmError::MaxIterationsReached { max: 3 })
-        ));
+        assert!(result.is_ok(), "rescue must return Ok, not Err");
+        assert_eq!(result.unwrap().content(), "Best-effort final answer.");
+    }
+
+    #[tokio::test]
+    async fn distinct_signatures_are_never_nudged() {
+        let mut mock_llm = MockLlmRepo::new();
+        let mut mock_conv = MockConversationRepo::new();
+        let mut mock_tool_exec = MockToolExec::new();
+        let key = test_key();
+
+        mock_conv.expect_get_by_id().returning(|k| {
+            Ok(Conversation {
+                key: k.clone(),
+                messages: vec![],
+            })
+        });
+        mock_conv.expect_add_message().returning(|_, _| Ok(()));
+
+        // 5 DISTINCT calls all execute (no nudge), then a final text answer.
+        mock_tool_exec.expect_execute().times(5).returning(|call| {
+            Ok(ToolResult {
+                tool_call_id: call.id.clone(),
+                success: true,
+                output: "ok".to_string(),
+                error: None,
+            })
+        });
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        mock_llm.expect_call().returning(move |_req| {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            if n < 5 {
+                Ok(tool_call_response(loop_tool_call(&format!(
+                    "{{\"i\":{n}}}"
+                ))))
+            } else {
+                Ok(text_response("done"))
+            }
+        });
+
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let result = service
+            .run(AgentRunParams {
+                session_id: &key,
+                prompt: Some("go".to_string()),
+                messages: None,
+                config: create_config(),
+                tools: vec![],
+                tool_executor: &mock_tool_exec,
+                max_tool_repeats: Some(3),
+                max_turns: None,
+                on_token: None,
+                tools_provider: None,
+                attachment_resolver: None,
+                agent_session_id: None,
+            })
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().content(), "done");
+    }
+
+    #[tokio::test]
+    async fn streak_resets_when_a_different_signature_appears() {
+        // Sequence A, A, B, A: the first A-run reaches 2 (nudge) but never 3
+        // because B resets the streak; the final A starts a fresh run. No rescue
+        // from the loop guard — the model ends with a normal text answer.
+        let mut mock_llm = MockLlmRepo::new();
+        let mut mock_conv = MockConversationRepo::new();
+        let mut mock_tool_exec = MockToolExec::new();
+        let key = test_key();
+
+        mock_conv.expect_get_by_id().returning(|k| {
+            Ok(Conversation {
+                key: k.clone(),
+                messages: vec![],
+            })
+        });
+        mock_conv.expect_add_message().returning(|_, _| Ok(()));
+
+        // A executes (turn 0), A nudged (turn 1, no exec), B executes (turn 2),
+        // A executes again (turn 3, fresh streak) → 3 real executions total.
+        mock_tool_exec.expect_execute().times(3).returning(|call| {
+            Ok(ToolResult {
+                tool_call_id: call.id.clone(),
+                success: true,
+                output: "ok".to_string(),
+                error: None,
+            })
+        });
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        mock_llm.expect_call().returning(move |_req| {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            match n {
+                0 | 1 | 3 => Ok(tool_call_response(loop_tool_call("{}"))), // A
+                2 => Ok(tool_call_response(ToolCall {
+                    id: "call_b".to_string(),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "other".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                    response: None,
+                })), // B (different signature → resets streak)
+                _ => Ok(text_response("finished")),
+            }
+        });
+
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let result = service
+            .run(AgentRunParams {
+                session_id: &key,
+                prompt: Some("vary".to_string()),
+                messages: None,
+                config: create_config(),
+                tools: vec![],
+                tool_executor: &mock_tool_exec,
+                max_tool_repeats: Some(3),
+                max_turns: None,
+                on_token: None,
+                tools_provider: None,
+                attachment_resolver: None,
+                agent_session_id: None,
+            })
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().content(), "finished");
+    }
+
+    #[tokio::test]
+    async fn max_turns_ceiling_triggers_synthesis_not_error() {
+        let mut mock_llm = MockLlmRepo::new();
+        let mut mock_conv = MockConversationRepo::new();
+        let mut mock_tool_exec = MockToolExec::new();
+        let key = test_key();
+
+        mock_conv.expect_get_by_id().returning(|k| {
+            Ok(Conversation {
+                key: k.clone(),
+                messages: vec![],
+            })
+        });
+        mock_conv.expect_add_message().returning(|_, _| Ok(()));
+
+        // Every turn makes a DISTINCT call (never nudged) so only the turn ceiling
+        // can stop the loop. With max_turns = 4: 4 executions, then synthesis.
+        mock_tool_exec.expect_execute().times(4).returning(|call| {
+            Ok(ToolResult {
+                tool_call_id: call.id.clone(),
+                success: true,
+                output: "ok".to_string(),
+                error: None,
+            })
+        });
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        mock_llm.expect_call().returning(move |_req| {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            if n < 4 {
+                Ok(tool_call_response(loop_tool_call(&format!(
+                    "{{\"i\":{n}}}"
+                ))))
+            } else {
+                Ok(text_response("capped answer"))
+            }
+        });
+
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let result = service
+            .run(AgentRunParams {
+                session_id: &key,
+                prompt: Some("loop forever".to_string()),
+                messages: None,
+                config: create_config(),
+                tools: vec![],
+                tool_executor: &mock_tool_exec,
+                max_tool_repeats: Some(3),
+                max_turns: Some(4),
+                on_token: None,
+                tools_provider: None,
+                attachment_resolver: None,
+                agent_session_id: None,
+            })
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "hitting the turn ceiling must synthesize, not error"
+        );
+        assert_eq!(result.unwrap().content(), "capped answer");
+    }
+
+    #[tokio::test]
+    async fn single_shot_max_turns_one_returns_directly() {
+        // The single-shot callers pass max_turns: Some(1). A turn-1 text answer
+        // (no tools) returns normally — the loop guard never engages.
+        let mut mock_llm = MockLlmRepo::new();
+        let mut mock_conv = MockConversationRepo::new();
+        let mock_tool_exec = MockToolExec::new();
+        let key = test_key();
+
+        mock_conv.expect_get_by_id().returning(|k| {
+            Ok(Conversation {
+                key: k.clone(),
+                messages: vec![],
+            })
+        });
+        mock_conv.expect_add_message().returning(|_, _| Ok(()));
+        mock_llm
+            .expect_call()
+            .times(1)
+            .returning(|_| Ok(text_response("one shot")));
+
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let result = service
+            .run(AgentRunParams {
+                session_id: &key,
+                prompt: Some("answer once".to_string()),
+                messages: None,
+                config: create_config(),
+                tools: vec![],
+                tool_executor: &mock_tool_exec,
+                max_tool_repeats: None,
+                max_turns: Some(1),
+                on_token: None,
+                tools_provider: None,
+                attachment_resolver: None,
+                agent_session_id: None,
+            })
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().content(), "one shot");
+    }
+
+    #[tokio::test]
+    async fn two_identical_calls_in_one_turn_nudges_the_second() {
+        // A SINGLE assistant turn emits the same `(name+args)` signature twice
+        // (distinct tool_call_ids). The streak updates per processed tool call,
+        // so the first runs and the second is nudged WITHIN the same turn — the
+        // tool executes exactly once. The next turn answers with text.
+        let mut mock_llm = MockLlmRepo::new();
+        let mut mock_conv = MockConversationRepo::new();
+        let mut mock_tool_exec = MockToolExec::new();
+        let key = test_key();
+
+        mock_conv.expect_get_by_id().returning(|k| {
+            Ok(Conversation {
+                key: k.clone(),
+                messages: vec![],
+            })
+        });
+        mock_conv.expect_add_message().returning(|_, _| Ok(()));
+
+        // Only the first of the two identical calls executes.
+        mock_tool_exec.expect_execute().times(1).returning(|call| {
+            Ok(ToolResult {
+                tool_call_id: call.id.clone(),
+                success: true,
+                output: "ok".to_string(),
+                error: None,
+            })
+        });
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        mock_llm.expect_call().returning(move |_req| {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                let twin = |id: &str| ToolCall {
+                    id: id.to_string(),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "loop".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                    response: None,
+                };
+                Ok(text_response("").with_tool_calls(vec![twin("c1"), twin("c2")]))
+            } else {
+                Ok(text_response("done"))
+            }
+        });
+
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let result = service
+            .run(AgentRunParams {
+                session_id: &key,
+                prompt: Some("twin".to_string()),
+                messages: None,
+                config: create_config(),
+                tools: vec![],
+                tool_executor: &mock_tool_exec,
+                max_tool_repeats: Some(3),
+                max_turns: None,
+                on_token: None,
+                tools_provider: None,
+                attachment_resolver: None,
+                agent_session_id: None,
+            })
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().content(), "done");
+    }
+
+    #[tokio::test]
+    async fn three_identical_calls_in_one_turn_rescue_intra_turn() {
+        // A SINGLE assistant turn emits the same `(name+args)` signature THREE
+        // times (distinct tool_call_ids). The streak climbs 1→2→3 WITHIN the one
+        // turn: 1st executes, 2nd is nudged, 3rd hits max_tool_repeats and flags
+        // `rescue`. After the inner tool loop the `if rescue { break; }` exits the
+        // turn loop and the forced tool-less synthesis runs, returned as Ok. The
+        // tool executes exactly once; every tool_call_id is still answered.
+        let mut mock_llm = MockLlmRepo::new();
+        let mut mock_conv = MockConversationRepo::new();
+        let mut mock_tool_exec = MockToolExec::new();
+        let key = test_key();
+
+        mock_conv.expect_get_by_id().returning(|k| {
+            Ok(Conversation {
+                key: k.clone(),
+                messages: vec![],
+            })
+        });
+        mock_conv.expect_add_message().returning(|_, _| Ok(()));
+
+        // Only the first of the three identical calls executes.
+        mock_tool_exec.expect_execute().times(1).returning(|call| {
+            Ok(ToolResult {
+                tool_call_id: call.id.clone(),
+                success: true,
+                output: "ok".to_string(),
+                error: None,
+            })
+        });
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        mock_llm.expect_call().returning(move |_req| {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                let triplet = |id: &str| ToolCall {
+                    id: id.to_string(),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "loop".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                    response: None,
+                };
+                Ok(text_response("").with_tool_calls(vec![
+                    triplet("c1"),
+                    triplet("c2"),
+                    triplet("c3"),
+                ]))
+            } else {
+                // The post-rescue forced synthesis is tool-less → return text.
+                Ok(text_response("best effort after intra-turn rescue"))
+            }
+        });
+
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let result = service
+            .run(AgentRunParams {
+                session_id: &key,
+                prompt: Some("triple".to_string()),
+                messages: None,
+                config: create_config(),
+                tools: vec![],
+                tool_executor: &mock_tool_exec,
+                max_tool_repeats: Some(3),
+                max_turns: None,
+                on_token: None,
+                tools_provider: None,
+                attachment_resolver: None,
+                agent_session_id: None,
+            })
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "intra-turn rescue must synthesize, not error"
+        );
+        assert_eq!(
+            result.unwrap().content(),
+            "best effort after intra-turn rescue"
+        );
     }
 
     /// When a tool returns `__colmena_status: "SUSPENDED"` the agent service must
@@ -1866,7 +2491,8 @@ mod tests {
                 config: create_config(),
                 tools: vec![],
                 tool_executor: &mock_tool_exec,
-                max_iterations: None,
+                max_tool_repeats: None,
+                max_turns: None,
                 on_token: None,
                 tools_provider: None,
                 attachment_resolver: None,
@@ -2006,7 +2632,8 @@ mod tests {
             config: create_config(),
             tools: vec![],
             tool_executor: &SentinelExec,
-            max_iterations: Some(5),
+            max_tool_repeats: Some(5),
+            max_turns: None,
             on_token: None,
             tools_provider: None,
             attachment_resolver: Some(Arc::new(FakeResolver)),
@@ -2160,7 +2787,8 @@ mod tests {
             config: create_config(),
             tools: vec![],
             tool_executor: &SentinelExec,
-            max_iterations: Some(5),
+            max_tool_repeats: Some(5),
+            max_turns: None,
             on_token: Some(on_token),
             tools_provider: None,
             attachment_resolver: Some(Arc::new(FakeResolver)),
@@ -2315,7 +2943,8 @@ mod tests {
             config: create_config(),
             tools: vec![],
             tool_executor: &SentinelExec,
-            max_iterations: Some(5),
+            max_tool_repeats: Some(5),
+            max_turns: None,
             on_token: None,
             tools_provider: None,
             attachment_resolver: Some(Arc::new(FakeResolver)),

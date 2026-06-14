@@ -2336,6 +2336,69 @@ guide §45 "Caveat de scope en docs compartidos".
 
 ---
 
+## 34. Agent loop guard + graceful rescue (2026-06-14)
+
+**Qué cambió.** El bucle ReAct del agente ya no muere con `Err(MaxIterationsReached)`.
+En su lugar, dos mecanismos coordinados garantizan que el agente siempre devuelva
+una respuesta útil:
+
+1. **Guarda de bucle por firma** (`max_tool_repeats`). La clave pública
+   `max_iterations` ya no cuenta *turnos totales* — ahora es el presupuesto de
+   *repeticiones consecutivas* de la misma firma `(nombre + argumentos)`. Default
+   **3**. El contador se reinicia a cero cada vez que el modelo emite una firma
+   distinta (cualquier progreso real). Mecánica con el default:
+
+   | Repetición consecutiva | Acción |
+   |---|---|
+   | 1ª (primera vez) | Ejecuta la herramienta; guarda resultado. |
+   | 2ª (nudge) | **No re-ejecuta**; devuelve resultado anterior + línea de redirección. |
+   | 3ª (rescate) | Dispara síntesis forzada. |
+
+2. **Techo duro de turnos** (`COLMENA_HARD_TURN_CAP`, default `50`). Variable de
+   entorno — no configurable desde el JSON del grafo. Cuando se alcanza, también
+   dispara la síntesis forzada. Los nodos de un solo turno (`planner`, `reactor`,
+   `critic`, `orchestrator`, `extract_with_schema`) setean internamente
+   `max_turns = 1`, preservando su comportamiento de un único turno.
+
+**Rescate (síntesis forzada).** Cuando cualquiera de los dos límites se activa,
+el engine hace **una llamada LLM final sin herramientas** con la instrucción de
+dar la mejor respuesta posible con el contexto acumulado. Esa respuesta se
+persiste en memoria conversacional y se retorna como `Ok(respuesta)`.
+`MaxIterationsReached` sigue en el enum `LlmError` por compatibilidad, pero
+**ya no se retorna** en el flujo normal del bucle.
+
+**Por qué importa.** Antes del cambio, un agente productivo (sheets + pandas,
+FRIKO comparison) podía agotar `max_iterations: 10` en turns legítimos y
+fallar en seco — el usuario recibía un error, no una respuesta. Ahora el mismo
+agente recibe un nudge si repite y una respuesta de síntesis si alcanza cualquier
+límite. Un grafo legacy con `max_iterations: 10` permite ahora 10 repeticiones
+consecutivas + techo de 50 turnos — siempre más permisivo, nunca muere antes.
+
+**Textos LLM-facing** (mensajes de nudge y rescate) en el registro de texto:
+`text/prompts/agent_loop/repeat_nudge.md` y `rescue_synthesis.md`.
+
+**Documentación de referencia.**
+- Dev guide: nuevo §"Guarda de bucle y rescate" en
+  [`docs/developer_guide/14_llm_deep_dive.md`](developer_guide/14_llm_deep_dive.md)
+- Spec:
+  [`docs/superpowers/specs/2026-06-13-agent-loop-guard-and-rescue-design.md`](superpowers/specs/2026-06-13-agent-loop-guard-and-rescue-design.md)
+
+**Commits (feat/agent-loop-guard-rescue).** Ver `git log --oneline feat/agent-loop-guard-rescue`.
+
+**Impacto ADP.**
+- La clave pública `max_iterations` en los grafos/config del agente es la misma —
+  **ADP no necesita cambiar ningún grafo**.
+- El worker ADP debe ser verificado para cualquier dependencia en `MaxIterationsReached`
+  (`apps/service/ia/platform/{worker,api}/src/`). En todos los casos documentados el
+  worker solo propaga el `Result<_, LlmError>` — recibir `Ok` donde antes llegaba
+  `Err` es estrictamente mejor — pero la sweep es obligatoria antes del merge a
+  `develop` por la disciplina de breaking-change.
+- Wire-format del SSE sin cambios. ADP worker recompila clean.
+
+**Estado.** done.
+
+---
+
 ## 33. Fix — 6 gdocs tools were dispatch-ready but invisible to the LLM (2026-06-12)
 
 **Bug (latent since Bundle 2A/2B/4A):** the LLM-facing exposure of gdocs synthetic

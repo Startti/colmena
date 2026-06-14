@@ -1,0 +1,1 @@
+Llegaste al límite de pasos de esta tarea y no podés llamar más herramientas. Con la información que ya reuniste, dá tu mejor respuesta final ahora y aclará explícitamente qué quedó incompleto o sin verificar.

@@ -1,0 +1,43 @@
+{
+  "comment": "E2E for the per-signature loop guard + graceful rescue. The agent is told a job is processing and to poll poll_job (an http_request tool with a FIXED endpoint, no LLM params -> identical signature every call) until the response contains 'status: done' — which never happens (httpbin/uuid returns a random uuid, no status). With max_iterations=3 (the consecutive-repeat budget) the identical call must: 1st execute, 2nd get nudged, 3rd trigger the forced final synthesis. The run MUST end with a normal Ok answer (the agent explains it never saw 'done'), NOT MaxIterationsReached, and NOT a long flail.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/loop_guard",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "El job ya está procesándose. Llamá a la herramienta poll_job para ver su estado. Si la respuesta no incluye 'status: done', el job todavía no terminó: volvé a llamar a poll_job exactamente igual (mismos argumentos) hasta que el estado sea 'done'. No inventes el estado."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "temperature": 0.0,
+        "max_iterations": 3,
+        "system_message": "Sos un asistente que monitorea un job. Para conocer el estado SIEMPRE usá la herramienta poll_job; nunca inventes el estado. Si no llegás a 'status: done', explicá claramente al usuario lo que observaste.",
+        "tool_configurations": {
+          "poll_job": {
+            "name": "poll_job",
+            "node_type": "http_request",
+            "description": "Consulta el estado actual del job y devuelve la respuesta del servidor.",
+            "node_schema": {
+              "base_url": { "type": "string", "fixed": "https://httpbin.org" },
+              "endpoint": { "type": "string", "fixed": "/uuid" },
+              "method": { "type": "string", "fixed": "GET" }
+            }
+          }
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}

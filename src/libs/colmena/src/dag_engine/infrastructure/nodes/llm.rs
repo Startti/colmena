@@ -1246,20 +1246,22 @@ impl ExecutableNode for LlmNode {
             llm_config = llm_config.with_thinking_budget(thinking_budget as u32);
         }
 
-        // Maximum iterations of the ReAct agent loop. Each iteration is one LLM
-        // call. Hitting this limit returns MaxIterationsReached. Reads from
-        // inputs first (dynamic from upstream), then config, defaulting to 10.
-        let max_iterations: usize = inputs
+        // The public `max_iterations` key now drives the consecutive-repeat loop
+        // guard (max_tool_repeats), NOT a turn cap. The hard turn ceiling is
+        // resolved from env (COLMENA_HARD_TURN_CAP, default 50) inside
+        // AgentService via `max_turns: None` below. Reads inputs first (dynamic
+        // from upstream), then config, defaulting to 3.
+        let max_tool_repeats: usize = inputs
             .get("max_iterations")
             .and_then(|v| v.as_u64())
             .or_else(|| config.get("max_iterations").and_then(|v| v.as_u64()))
             .map(|n| n as usize)
-            .unwrap_or(10);
+            .unwrap_or(3);
 
         tracing::info!(
             target: "colmena::llm",
-            max_iterations,
-            "llm_call_max_iterations_resolved"
+            max_tool_repeats,
+            "llm_call_max_tool_repeats_resolved"
         );
 
         let mut messages = Vec::new();
@@ -2851,7 +2853,8 @@ impl ExecutableNode for LlmNode {
                 config: llm_config,
                 tools,
                 tool_executor: &tool_executor,
-                max_iterations: Some(max_iterations),
+                max_tool_repeats: Some(max_tool_repeats),
+                max_turns: None,
                 on_token,
                 tools_provider,
                 attachment_resolver: attachment_registry.as_ref().map(|reg| {
@@ -2873,7 +2876,8 @@ impl ExecutableNode for LlmNode {
                 config: llm_config,
                 tools,
                 tool_executor: &tool_executor,
-                max_iterations: Some(max_iterations),
+                max_tool_repeats: Some(max_tool_repeats),
+                max_turns: None,
                 on_token,
                 tools_provider,
                 attachment_resolver: attachment_registry.as_ref().map(|reg| {
