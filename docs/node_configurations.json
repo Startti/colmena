@@ -1418,10 +1418,10 @@
         "max_iterations": {
           "type": "integer",
           "required": false,
-          "default": 10,
-          "description": "Hard ceiling on the number of LLM call iterations within a single agent invocation (the ReAct loop). Each iteration is one LLM call plus any tool executions. The agent terminates with `LlmError::MaxIterationsReached` if exceeded. Increase if your agent legitimately needs more reasoning steps.",
+          "default": 3,
+          "description": "Consecutive-repeat budget for the ReAct loop guard (since 2026-06-14 this NO LONGER caps total turns). Counts how many times in a row the agent may emit the SAME tool call signature (name + arguments); the count resets the moment it emits a different call. With the default 3: 1st identical call executes, 2nd is nudged (tool not re-executed; prior result + a redirect are returned), 3rd triggers a graceful forced final synthesis (a tool-less LLM call returned as a normal answer) — the agent NO LONGER errors with MaxIterationsReached. The hard ceiling on total turns is separate and NOT graph-configurable (env COLMENA_HARD_TURN_CAP, default 50). Values < 2 behave as 2 (the first call always executes). Raise this only if an agent legitimately needs to repeat the exact same call more times before being redirected.",
           "validation": { "min": 1 },
-          "example": 10
+          "example": 3
         },
         "stream": {
           "type": "boolean",
