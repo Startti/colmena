@@ -27,9 +27,11 @@ turn** (`for _iteration in 0..max_iter`, default 10). Two problems:
 limit is reached, force a final answer ("rescue") instead of erroring.
 
 **Key realization.** The danger `max_iterations` really guards against is a
-**loop** (the agent calling the *same* tool with the *same* args, not learning).
-Distinct calls — even many — are progress and should be free. A separate, high,
-background turn ceiling remains as the pure cost/termination backstop.
+**loop** (the agent calling the *same* tool with the *same* args **in a row**, not
+learning). Distinct calls — even many — are progress and should be free, and a
+*streak* of repeats resets the moment the model does something different. A
+separate, high, background turn ceiling remains as the pure cost/termination
+backstop.
 
 ---
 
@@ -37,20 +39,38 @@ background turn ceiling remains as the pure cost/termination backstop.
 
 | Concept | Before | After |
 |---|---|---|
-| Public key `max_iterations` (graph/ADP) | hard cap on LLM **turns**, default 10 | **loop budget**: max repeats of one `(name+args)` signature, default **3** |
-| Hard turn ceiling | == `max_iterations` (configurable) | **internal constant `HARD_TURN_CAP = 50`** (background, not configurable) |
+| Public key `max_iterations` (graph/ADP) | hard cap on LLM **turns**, default 10 | **loop budget**: max *consecutive* repeats of one `(name+args)` signature, default **3** (→ `AgentRunParams.max_tool_repeats`) |
+| Hard turn ceiling | == `max_iterations` (configurable) | per-run `AgentRunParams.max_turns`; default from **env `COLMENA_HARD_TURN_CAP` (fallback 50)**; not graph-configurable |
 | Exhaustion outcome | `Err(MaxIterationsReached)` | **forced final synthesis** → `Ok(response)` |
 
 - The **same** JSON key `max_iterations` keeps flowing from ADP; only its *effect*
   changes (now controls repeats, not turns). ADP touches nothing.
-- A legacy graph with `max_iterations: 10` now allows 10 repeats of a signature
-  *plus* the 50-turn ceiling → strictly more permissive, never dies early.
+- A legacy graph with `max_iterations: 10` now allows 10 consecutive repeats of a
+  signature *plus* the 50-turn ceiling → strictly more permissive, never dies early.
 - **No explicit `max_tool_repeats` key** in the graph (decided). The internal
   param is named `max_tool_repeats`; it is fed solely from `max_iterations`.
 
+### 2.1 Two knobs, six callers
+
+`AgentService.run` is used by **six** nodes, not just `llm_call`: `planner`,
+`reactor`, `critic`, `orchestrator`, and `extract_with_schema` all run the loop
+too — and all five pass `max_iterations: Some(1)` today, meaning **single-shot**
+(exactly one turn, no tool loop). The redesign must preserve that.
+
+So `AgentRunParams` carries **two** independent knobs:
+
+| Field | Meaning | Default | Who sets it |
+|---|---|---|---|
+| `max_tool_repeats: Option<usize>` | loop-guard streak budget | 3 | `llm_call` (from public `max_iterations`) |
+| `max_turns: Option<usize>` | hard turn ceiling for this run | env `COLMENA_HARD_TURN_CAP` / 50 | the 5 single-shot nodes set `Some(1)`; `llm_call` leaves `None` |
+
+The single-shot nodes set `max_turns: Some(1)` and leave `max_tool_repeats` at
+default (irrelevant — one turn can't repeat). With no tools they return on turn 1
+exactly as before; the loop guard never engages for them.
+
 ---
 
-## 3. Loop detector (per-signature)
+## 3. Loop detector (per-signature **streak**)
 
 ### 3.1 Signature
 
@@ -58,31 +78,38 @@ background turn ceiling remains as the pure cost/termination backstop.
 **recursively sorted object keys** so semantically-identical calls collapse to one
 key regardless of field order. Helper: `tool_call_signature(name, &args) -> String`.
 
-### 3.2 State
+### 3.2 State (consecutive streak, resets on change)
 
-In the loop, a map keyed by signature:
+The guard counts **consecutive** repeats of the current signature. State is a
+single streak, **not** a lifetime map:
 
 ```rust
-struct SigEntry { count: u32, first_result: serde_json::Value }
-let mut seen: HashMap<String, SigEntry> = HashMap::new();
+let mut streak_sig: Option<String> = None;  // signature of the current streak
+let mut streak_count: u32 = 0;               // how many times in a row
+let mut streak_first: String = String::new();// raw output of this streak's 1st exec
 ```
 
-`count` increments each time the LLM **emits** that signature. `first_result`
-stores the result of the one real execution, so a nudge can echo it.
+Per processed tool call with signature `S`: if `S == streak_sig` → `streak_count
++= 1`; else → **reset** (`streak_sig = S`, `streak_count = 1`, clear
+`streak_first`). So emitting *any* different signature resets the counter — that
+is the "reset when the model changes what it's doing" behavior. Example
+`A,B,A,B,B,C,B,C`: B peaks at a streak of **2** (one nudge), then `C` resets it —
+never accumulates to 4.
 
 ### 3.3 Per tool-call decision (default `max_tool_repeats = 3`)
 
-When the LLM emits a tool call with signature `S`:
+After updating the streak for signature `S`:
 
-| Occurrence | `count` after inc | Action |
-|---|---|---|
-| 1st | 1 | **Execute** the tool, store `first_result`, push real tool result. |
-| 2nd | 2 | `2 < 3` → **nudge**: do NOT execute; push a tool result = `first_result` + redirect text. |
-| 3rd | 3 | `3 >= 3` → flag **rescue**. |
+| `streak_count` | Action |
+|---|---|
+| 1 | **Execute** the tool, store `streak_first`, push real tool result. |
+| 2 | `2 < 3` → **nudge**: do NOT execute; push `streak_first` + redirect text. |
+| 3 | `3 >= 3` → flag **rescue**. |
 
-Rule: `count >= max_tool_repeats` → rescue; otherwise if `count > 1` → nudge;
-else execute. So with the default a signature gets exactly **one real call + one
-nudge, then rescue** ("nudge en la 2ª, rescate en la 3ª").
+Rule: `streak_count >= max_tool_repeats` → rescue; else if `streak_count >= 2` →
+nudge; else execute. Default ⇒ **one real call + one nudge, then rescue** ("nudge
+en la 2ª, rescate en la 3ª"). A pure 2-cycle (`A,B,A,B,…`) never trips the guard
+(each streak is 1) — the `max_turns` ceiling catches it with a graceful synthesis.
 
 ### 3.4 Nudge mechanics
 
@@ -92,7 +119,7 @@ nudge, then rescue** ("nudge en la 2ª, rescate en la 3ª").
   is the **prior result** plus a redirect line drawn from the text registry, e.g.:
   *"Ya llamaste esta tool con estos argumentos; el resultado está arriba. Usalo o
   probá algo distinto — no repitas la misma llamada."*
-- The turn still counts toward `HARD_TURN_CAP` (the LLM consumed a turn).
+- The turn still counts toward `max_turns` (the LLM consumed a turn).
 
 ### 3.5 Multiple tool calls in one turn
 
@@ -107,8 +134,8 @@ break to synthesis.
 
 Two triggers, one unified outcome:
 
-1. A signature reaches `max_tool_repeats` (loop guard), **or**
-2. The turn loop reaches `HARD_TURN_CAP` (50).
+1. A signature streak reaches `max_tool_repeats` (loop guard), **or**
+2. The turn loop reaches `max_turns` (env `COLMENA_HARD_TURN_CAP` / 50).
 
 On either, instead of `Err`:
 
@@ -116,7 +143,7 @@ On either, instead of `Err`:
   **tools removed from the request** (not merely `tool_choice: none`), plus a
   final instruction message from the text registry: *"Llegaste al límite. Dá tu
   mejor respuesta final con lo que ya tenés y aclará qué quedó incompleto."*
-- This terminal call **does not count** toward `HARD_TURN_CAP`.
+- This terminal call **does not count** toward `max_turns`.
 - If `on_token` is set, the synthesis **streams** like a normal final turn.
 - Persist the synthesis message to `conversation_repository`; return it as
   `Ok(response)` (with the accumulated `all_tool_calls_executed` attached as today).
@@ -130,15 +157,20 @@ error propagates as usual.
 ## 5. Config wiring
 
 - `AgentRunParams.max_iterations` field is **renamed** to `max_tool_repeats:
-  Option<usize>` (internal name approved). Default applied in the loop:
-  `unwrap_or(3)`.
+  Option<usize>` (default in the loop: `unwrap_or(3)`), and a **new** field
+  `max_turns: Option<usize>` is added (default resolved from env).
 - `llm.rs` stops treating `max_iterations` as a turn cap. It reads the same JSON
   key (`inputs["max_iterations"]` → `config["max_iterations"]`, default 3) and
-  assigns it to `params.max_tool_repeats`. Both `AgentRunParams` construction
-  sites updated. The `llm_call_max_iterations_resolved` log relabels to reflect
-  the new meaning.
-- The turn loop becomes `for _iteration in 0..HARD_TURN_CAP` with
-  `const HARD_TURN_CAP: usize = 50;` in `agent_service.rs`. Not read from config.
+  assigns it to `params.max_tool_repeats`, leaving `max_turns: None` (→ env/50).
+  Both its `AgentRunParams` construction sites updated; the
+  `llm_call_max_iterations_resolved` log relabels.
+- The **5 single-shot callers** (`planner`, `reactor`, `critic`, `orchestrator`,
+  `extract_with_schema`) change `max_iterations: Some(1)` →
+  `max_turns: Some(1), max_tool_repeats: None`, preserving one-turn behavior.
+- The turn loop becomes `for _iteration in 0..max_turns` where
+  `let max_turns = params.max_turns.unwrap_or_else(default_hard_turn_cap);` and
+  `fn default_hard_turn_cap()` reads `COLMENA_HARD_TURN_CAP` (positive usize),
+  falling back to `50`.
 
 ---
 
@@ -186,10 +218,13 @@ Both Spanish-first (matches agent usage), model-agnostic, concise.
   absent from the synthesis request.
 - Distinct signatures (same tool, different args) → **never** nudged across many
   turns.
-- `HARD_TURN_CAP` reached with all-distinct calls → forced synthesis (`Ok`).
+- **Streak reset:** `A,A,B,A` → the second `A`-run starts fresh (the `B` resets
+  the streak); never rescues.
+- `max_turns` reached with all-distinct calls → forced synthesis (`Ok`).
 - Synthesis call does not count toward the ceiling; streams when `on_token` set.
 - `max_tool_repeats` wiring: value flows from node `config.max_iterations`;
-  absent → default 3.
+  absent → default 3. `max_turns: Some(1)` → single-shot (one turn) behavior.
+- `default_hard_turn_cap()` honors `COLMENA_HARD_TURN_CAP` and falls back to 50.
 - Rewrite `test_agent_service_max_iterations` to the new `Ok`-synthesis contract.
 
 **E2E (real, save SSE to `/tmp/colmena_e2e/`):**
@@ -204,21 +239,26 @@ Both Spanish-first (matches agent usage), model-agnostic, concise.
 
 ## 9. Files (anticipated)
 
-- `src/libs/colmena/src/llm/application/agent_service.rs` — `HARD_TURN_CAP`,
-  `tool_call_signature`, `seen` map + nudge/rescue logic, forced synthesis,
-  `AgentRunParams` field rename, updated tests.
+- `src/libs/colmena/src/llm/application/agent_service.rs` — `default_hard_turn_cap`,
+  `tool_call_signature`, streak state + nudge/rescue logic, forced synthesis,
+  `AgentRunParams` field rename + new `max_turns`, updated tests.
 - `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs` — read
-  `max_iterations` → `max_tool_repeats` (default 3), drop turn-cap usage, update
+  `max_iterations` → `max_tool_repeats` (default 3), `max_turns: None`, update
   both `AgentRunParams` sites + the resolved-value log.
+- `src/.../nodes/{planner,reactor,critic,orchestrator}.rs` and
+  `nodes/util/extract_with_schema.rs` — `max_iterations: Some(1)` →
+  `max_turns: Some(1), max_tool_repeats: None` (preserve single-shot).
 - `text/prompts/agent_loop/repeat_nudge.*`, `rescue_synthesis.*` — new LLM text.
 - `docs/developer_guide/14_llm_deep_dive.md` — document the new `max_iterations`
-  semantics (loop budget) + the 50-turn background ceiling + rescue behavior.
+  semantics (loop budget) + the env-backed turn ceiling + rescue behavior.
 
 ---
 
 ## 10. Out of scope
 
-- A configurable hard turn ceiling — intentionally a fixed background constant.
+- A **graph/ADP-configurable** turn ceiling — the ceiling is env-only
+  (`COLMENA_HARD_TURN_CAP`) plus the internal `max_turns: Some(1)` single-shot
+  override; it is intentionally not exposed in graph JSON.
 - `terminated_by` response metadata — deferred (see §6) unless ADP requests it.
 - Detecting "same call, different wording" (semantic dedup) — signature is exact
   `(name+args)`; fuzzy matching is explicitly not attempted.

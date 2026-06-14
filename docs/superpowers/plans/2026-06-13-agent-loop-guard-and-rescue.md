@@ -4,7 +4,7 @@
 
 **Goal:** Replace the per-turn `max_iterations` cap with a per-signature loop guard (nudge on repeated identical tool calls) plus a graceful "rescue" (forced final synthesis) so productive multi-step agents never die prematurely or return a bare error.
 
-**Architecture:** In `agent_service.rs` the ReAct loop bound becomes a fixed background constant `HARD_TURN_CAP = 50`. The public `max_iterations` config key is re-purposed to drive a new `max_tool_repeats` budget (default 3): when the LLM emits the same `(name+args)` signature twice it gets a "nudge" tool result (prior result + redirect, tool NOT re-executed); on the 3rd it triggers rescue. Both the loop guard and the turn ceiling end in one terminal LLM call with tools removed ("give your best final answer") returned as `Ok`, never `Err(MaxIterationsReached)`.
+**Architecture:** In `agent_service.rs` the ReAct loop bound becomes a per-run `max_turns` whose default is read from env `COLMENA_HARD_TURN_CAP` (fallback 50). The public `max_iterations` config key is re-purposed to drive a new `max_tool_repeats` budget (default 3): when the LLM emits the same `(name+args)` signature **consecutively** (a streak that resets the moment a different signature appears) it gets a "nudge" on the 2nd (prior result + redirect, tool NOT re-executed) and triggers rescue on the 3rd. Both the loop guard and the turn ceiling end in one terminal LLM call with tools removed ("give your best final answer") returned as `Ok`, never `Err(MaxIterationsReached)`. `AgentService.run` is used by **six** nodes; the five single-shot ones (`planner`, `reactor`, `critic`, `orchestrator`, `extract_with_schema`) set `max_turns: Some(1)` to keep their one-turn behavior.
 
 **Tech Stack:** Rust, `serde_json`, `mockall` (test mocks), `tokio`, `include_str!` text registry.
 
@@ -17,7 +17,8 @@
 | `src/libs/colmena/src/llm/application/agent_service.rs` | The ReAct loop | signature helpers, `invoke_llm`/`accumulate_usage` extraction, loop guard + nudge + rescue, field rename, tests |
 | `src/libs/colmena/text/prompts/agent_loop/repeat_nudge.md` | LLM-facing nudge text | new |
 | `src/libs/colmena/text/prompts/agent_loop/rescue_synthesis.md` | LLM-facing rescue instruction | new |
-| `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs` | Node wiring | read `max_iterations` → `max_tool_repeats`, update 2 construction sites + log |
+| `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs` | Node wiring | read `max_iterations` → `max_tool_repeats`, `max_turns: None`, update 2 construction sites + log |
+| `nodes/{planner,reactor,critic,orchestrator}.rs`, `nodes/util/extract_with_schema.rs` | Single-shot callers | `max_iterations: Some(1)` → `max_turns: Some(1), max_tool_repeats: None` |
 | `docs/developer_guide/14_llm_deep_dive.md` | LLM node docs | document new semantics |
 | `docs/CHANGELOG_*.md` | Change log | add entry |
 
@@ -358,7 +359,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ## Task 4: Loop guard, nudge, rescue + field rename
 
-**Goal:** the behavioral core. Rename the param, add the `HARD_TURN_CAP` constant, implement per-signature nudge, and replace the terminal `Err` with forced synthesis.
+**Goal:** the behavioral core. Rename the param + add `max_turns`, add the `default_hard_turn_cap()` env helper, implement the consecutive-streak nudge, and replace the terminal `Err` with forced synthesis.
 
 **Files:**
 - Modify: `src/libs/colmena/src/llm/application/agent_service.rs`
@@ -439,6 +440,7 @@ async fn repeated_signature_nudges_then_rescues_with_synthesis() {
             tools: vec![],
             tool_executor: &mock_tool_exec,
             max_tool_repeats: Some(3),
+            max_turns: None,
             on_token: None,
             tools_provider: None,
             attachment_resolver: None,
@@ -493,6 +495,7 @@ async fn distinct_signatures_are_never_nudged() {
             tools: vec![],
             tool_executor: &mock_tool_exec,
             max_tool_repeats: Some(3),
+            max_turns: None,
             on_token: None,
             tools_provider: None,
             attachment_resolver: None,
@@ -505,7 +508,10 @@ async fn distinct_signatures_are_never_nudged() {
 }
 
 #[tokio::test]
-async fn hard_turn_cap_triggers_synthesis_not_error() {
+async fn streak_resets_when_a_different_signature_appears() {
+    // Sequence A, A, B, A: the first A-run reaches 2 (nudge) but never 3
+    // because B resets the streak; the final A starts a fresh run. No rescue
+    // from the loop guard — the model ends with a normal text answer.
     let mut mock_llm = MockLlmRepo::new();
     let mut mock_conv = MockConversationRepo::new();
     let mut mock_tool_exec = MockToolExec::new();
@@ -516,9 +522,9 @@ async fn hard_turn_cap_triggers_synthesis_not_error() {
     });
     mock_conv.expect_add_message().returning(|_, _| Ok(()));
 
-    // Every turn makes a DISTINCT call (never nudged) so only the 50-turn
-    // ceiling can stop the loop. 50 executions, then synthesis.
-    mock_tool_exec.expect_execute().times(50).returning(|call| {
+    // A executes (turn 0), A nudged (turn 1, no exec), B executes (turn 2),
+    // A executes again (turn 3, fresh streak) → 3 real executions total.
+    mock_tool_exec.expect_execute().times(3).returning(|call| {
         Ok(ToolResult {
             tool_call_id: call.id.clone(),
             success: true,
@@ -531,9 +537,68 @@ async fn hard_turn_cap_triggers_synthesis_not_error() {
     let c = counter.clone();
     mock_llm.expect_call().returning(move |_req| {
         let n = c.fetch_add(1, Ordering::SeqCst);
-        // turns 0..50 return distinct tool calls; turn 50 is the synthesis call
-        // (tool-less) — return text so the result is a clean final answer.
-        if n < 50 {
+        match n {
+            0 | 1 | 3 => Ok(tool_call_response(loop_tool_call("{}"))), // A
+            2 => Ok(tool_call_response(ToolCall {
+                id: "call_b".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall { name: "other".to_string(), arguments: "{}".to_string() },
+                response: None,
+            })), // B (different signature → resets streak)
+            _ => Ok(text_response("finished")),
+        }
+    });
+
+    let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+    let result = service
+        .run(AgentRunParams {
+            session_id: &key,
+            prompt: Some("vary".to_string()),
+            messages: None,
+            config: create_config(),
+            tools: vec![],
+            tool_executor: &mock_tool_exec,
+            max_tool_repeats: Some(3),
+            max_turns: None,
+            on_token: None,
+            tools_provider: None,
+            attachment_resolver: None,
+            agent_session_id: None,
+        })
+        .await;
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap().content(), "finished");
+}
+
+#[tokio::test]
+async fn max_turns_ceiling_triggers_synthesis_not_error() {
+    let mut mock_llm = MockLlmRepo::new();
+    let mut mock_conv = MockConversationRepo::new();
+    let mut mock_tool_exec = MockToolExec::new();
+    let key = test_key();
+
+    mock_conv.expect_get_by_id().returning(|k| {
+        Ok(Conversation { key: k.clone(), messages: vec![] })
+    });
+    mock_conv.expect_add_message().returning(|_, _| Ok(()));
+
+    // Every turn makes a DISTINCT call (never nudged) so only the turn ceiling
+    // can stop the loop. With max_turns = 4: 4 executions, then synthesis.
+    mock_tool_exec.expect_execute().times(4).returning(|call| {
+        Ok(ToolResult {
+            tool_call_id: call.id.clone(),
+            success: true,
+            output: "ok".to_string(),
+            error: None,
+        })
+    });
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let c = counter.clone();
+    mock_llm.expect_call().returning(move |_req| {
+        let n = c.fetch_add(1, Ordering::SeqCst);
+        if n < 4 {
             Ok(tool_call_response(loop_tool_call(&format!("{{\"i\":{n}}}"))))
         } else {
             Ok(text_response("capped answer"))
@@ -550,6 +615,7 @@ async fn hard_turn_cap_triggers_synthesis_not_error() {
             tools: vec![],
             tool_executor: &mock_tool_exec,
             max_tool_repeats: Some(3),
+            max_turns: Some(4),
             on_token: None,
             tools_provider: None,
             attachment_resolver: None,
@@ -559,6 +625,43 @@ async fn hard_turn_cap_triggers_synthesis_not_error() {
 
     assert!(result.is_ok(), "hitting the turn ceiling must synthesize, not error");
     assert_eq!(result.unwrap().content(), "capped answer");
+}
+
+#[tokio::test]
+async fn single_shot_max_turns_one_returns_directly() {
+    // The single-shot callers pass max_turns: Some(1). A turn-1 text answer
+    // (no tools) returns normally — the loop guard never engages.
+    let mut mock_llm = MockLlmRepo::new();
+    let mut mock_conv = MockConversationRepo::new();
+    let mock_tool_exec = MockToolExec::new();
+    let key = test_key();
+
+    mock_conv.expect_get_by_id().returning(|k| {
+        Ok(Conversation { key: k.clone(), messages: vec![] })
+    });
+    mock_conv.expect_add_message().returning(|_, _| Ok(()));
+    mock_llm.expect_call().times(1).returning(|_| Ok(text_response("one shot")));
+
+    let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+    let result = service
+        .run(AgentRunParams {
+            session_id: &key,
+            prompt: Some("answer once".to_string()),
+            messages: None,
+            config: create_config(),
+            tools: vec![],
+            tool_executor: &mock_tool_exec,
+            max_tool_repeats: None,
+            max_turns: Some(1),
+            on_token: None,
+            tools_provider: None,
+            attachment_resolver: None,
+            agent_session_id: None,
+        })
+        .await;
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap().content(), "one shot");
 }
 ```
 
@@ -571,7 +674,7 @@ Replace the entire `test_agent_service_max_iterations` test (lines ~1719–1792)
 Run: `cargo test --lib agent_service`
 Expected: FAIL — `struct AgentRunParams has no field named max_tool_repeats` (and the new tests don't pass yet).
 
-- [ ] **Step 4: Rename the param field**
+- [ ] **Step 4: Rename the param field and add `max_turns`**
 
 In `AgentRunParams` (line ~65), change:
 
@@ -583,86 +686,85 @@ to:
 
 ```rust
     /// Maximum number of times one `(name+args)` tool-call signature may be
-    /// emitted before the loop guard rescues (forced final synthesis). The
-    /// public `max_iterations` config key feeds this. Default 3.
+    /// emitted **consecutively** before the loop guard rescues (forced final
+    /// synthesis). The public `max_iterations` config key feeds this. Default 3.
     pub max_tool_repeats: Option<usize>,
+    /// Hard ceiling on total LLM turns for this run. `None` → resolved from env
+    /// `COLMENA_HARD_TURN_CAP` (fallback 50). Single-shot callers pass `Some(1)`.
+    pub max_turns: Option<usize>,
 ```
 
-Update EVERY remaining `max_iterations:` inside an `AgentRunParams { .. }` literal in this file's tests to `max_tool_repeats:` (the `None` sites at lines ~1542, 1645, 1707, 1869 and the `Some(5)` sites at ~2009, 2163, 2318 — keep their values).
+Now EVERY `AgentRunParams { .. }` literal in this file's tests needs BOTH fields. Update each `max_iterations:` to `max_tool_repeats:` (the `None` sites at lines ~1542, 1645, 1707, 1869 and the `Some(5)` sites at ~2009, 2163, 2318 — keep their values) AND add `max_turns: None,` directly below each. (The new Task-4 tests above already include both fields.)
 
-- [ ] **Step 5: Add the constant and replace the loop header**
+- [ ] **Step 5: Add the env helper, streak state, and loop bound**
 
 Replace line ~111 (`let max_iter = params.max_iterations.unwrap_or(10);`) with:
 
 ```rust
         let max_tool_repeats = params.max_tool_repeats.unwrap_or(3);
+        let max_turns = params.max_turns.unwrap_or_else(default_hard_turn_cap);
 ```
 
-Add near the top consts (after `RESCUE_SYNTHESIS_TEXT`):
+Add at module level (near `accumulate_usage`):
 
 ```rust
-/// Background hard ceiling on total LLM turns in one agent run. Pure
-/// cost/termination backstop — not user-configurable. Reaching it triggers the
-/// same forced-synthesis rescue as the loop guard.
-const HARD_TURN_CAP: usize = 50;
-```
-
-Change the loop header (line ~176) from `for _iteration in 0..max_iter {` to:
-
-```rust
-        // Per-signature repeat counters for the loop guard.
-        let mut seen: HashMap<String, SigEntry> = HashMap::new();
-
-        // 3. ReAct Loop — bounded by the background hard ceiling. Productive
-        //    work is gated by the per-signature loop guard below, not by turns.
-        for _iteration in 0..HARD_TURN_CAP {
-```
-
-And update the tracing at lines ~177–182 to use `max = HARD_TURN_CAP`.
-
-Add the `SigEntry` struct at module level (near `accumulate_usage`):
-
-```rust
-/// Loop-guard bookkeeping for one tool-call signature.
-struct SigEntry {
-    /// How many times the signature has been emitted by the LLM so far.
-    count: u32,
-    /// Raw output of the single real execution, echoed back in nudges.
-    first_result: String,
+/// Default hard ceiling on total LLM turns, read from env `COLMENA_HARD_TURN_CAP`
+/// (positive integer), falling back to 50. Pure cost/termination backstop —
+/// reaching it triggers the same forced-synthesis rescue as the loop guard.
+fn default_hard_turn_cap() -> usize {
+    std::env::var("COLMENA_HARD_TURN_CAP")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(50)
 }
 ```
 
-- [ ] **Step 6: Implement the guard inside the tool loop**
-
-Replace the `// D. Execute each tool call` loop (the `for tool_call in tool_calls { ... }` starting ~line 439, up to and including its trailing `continue;` at ~637) with the version below. It adds a signature check at the top: occurrence 1 executes (existing path, now also storing `first_result`); occurrence `< max_tool_repeats` nudges; occurrence `>= max_tool_repeats` writes a closing tool message, flags rescue, and (after answering every tool id in the turn) breaks to synthesis.
+Change the loop header (line ~176). Replace `for _iteration in 0..max_iter {` with the streak-state declarations + the new bound:
 
 ```rust
-                // D. Execute each tool call (with per-signature loop guard)
+        // Loop-guard streak: counts CONSECUTIVE repeats of one signature, and
+        // resets the moment a different signature appears (the model made
+        // progress). `streak_first` is the raw output of this streak's one real
+        // execution, echoed back in a nudge.
+        let mut streak_sig: Option<String> = None;
+        let mut streak_count: u32 = 0;
+        let mut streak_first = String::new();
+
+        // 3. ReAct Loop — bounded by the per-run turn ceiling. Productive work
+        //    is gated by the loop guard below, not by turns.
+        for _iteration in 0..max_turns {
+```
+
+And update the tracing at lines ~177–182 to use `max = max_turns`. (No `SigEntry` struct — the streak is three locals.)
+
+- [ ] **Step 6: Implement the streak guard inside the tool loop**
+
+Replace the `// D. Execute each tool call` loop (the `for tool_call in tool_calls { ... }` starting ~line 439, up to and including its trailing `continue;` at ~637) with the version below. For each tool call it first updates the streak (same signature → `+1`; different → reset to 1). `streak_count == 1` executes (storing `streak_first`); `>= max_tool_repeats` writes a closing tool message and flags rescue; otherwise (`>= 2`) it nudges. After answering every tool id in the turn, if rescue was flagged it breaks to synthesis.
+
+```rust
+                // D. Execute each tool call (with consecutive-streak loop guard)
                 let mut rescue = false;
                 for tool_call in tool_calls {
                     let sig = tool_call_signature(
                         &tool_call.function.name,
                         &tool_call.function.arguments,
                     );
-                    let count = {
-                        let e = seen.entry(sig.clone()).or_insert(SigEntry {
-                            count: 0,
-                            first_result: String::new(),
-                        });
-                        e.count += 1;
-                        e.count
-                    };
+                    if streak_sig.as_deref() == Some(sig.as_str()) {
+                        streak_count += 1;
+                    } else {
+                        streak_sig = Some(sig.clone());
+                        streak_count = 1;
+                        streak_first.clear();
+                    }
+                    let count = streak_count;
 
-                    // Repeated signature (occurrence >= 2): nudge or rescue.
+                    // Repeated signature in a row (streak >= 2): nudge or rescue.
                     if count > 1 {
-                        let first = seen
-                            .get(&sig)
-                            .map(|e| e.first_result.clone())
-                            .unwrap_or_default();
-                        let body = if first.is_empty() {
+                        let body = if streak_first.is_empty() {
                             REPEAT_NUDGE_TEXT.to_string()
                         } else {
-                            format!("{first}\n\n{REPEAT_NUDGE_TEXT}")
+                            format!("{streak_first}\n\n{REPEAT_NUDGE_TEXT}")
                         };
 
                         if let Some(callback) = &on_token {
@@ -695,7 +797,7 @@ Replace the `// D. Execute each tool call` loop (the `for tool_call in tool_call
                         continue;
                     }
 
-                    // Occurrence 1: real execution (existing path).
+                    // Streak start (count == 1): real execution (existing path).
                     let mut executed_call = tool_call.clone();
 
                     if let Some(callback) = &on_token {
@@ -841,10 +943,9 @@ Replace the `// D. Execute each tool call` loop (the `for tool_call in tool_call
                         }
                     }
 
-                    // Store the first result so future repeats can echo it.
-                    if let Some(e) = seen.get_mut(&sig) {
-                        e.first_result = result.output.clone();
-                    }
+                    // Store this streak's first result so a later repeat can
+                    // echo it in the nudge.
+                    streak_first = result.output.clone();
 
                     let parsed_output = serde_json::from_str::<serde_json::Value>(&result.output)
                         .unwrap_or_else(|_| serde_json::Value::String(result.output.clone()));
@@ -956,10 +1057,10 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 Replace the comment block + `tracing::info!` at lines ~1249–1263 with:
 
 ```rust
-        // The public `max_iterations` key now drives the per-signature loop
-        // guard (max_tool_repeats), NOT a turn cap. The hard turn ceiling is a
-        // fixed background constant inside AgentService. Reads inputs first
-        // (dynamic from upstream), then config, defaulting to 3.
+        // The public `max_iterations` key now drives the consecutive-repeat loop
+        // guard (max_tool_repeats), NOT a turn cap. The hard turn ceiling is
+        // resolved from env inside AgentService (max_turns: None below). Reads
+        // inputs first (dynamic from upstream), then config, defaulting to 3.
         let max_tool_repeats: usize = inputs
             .get("max_iterations")
             .and_then(|v| v.as_u64())
@@ -974,24 +1075,52 @@ Replace the comment block + `tracing::info!` at lines ~1249–1263 with:
         );
 ```
 
-- [ ] **Step 2: Update both `AgentRunParams` construction sites**
+- [ ] **Step 2: Update both `AgentRunParams` construction sites in `llm.rs`**
 
-At lines ~2854 and ~2876, change `max_iterations: Some(max_iterations),` to:
+At lines ~2854 and ~2876, change `max_iterations: Some(max_iterations),` to the two new fields (`llm_call` is multi-turn → `max_turns: None` so the env default applies):
 
 ```rust
                 max_tool_repeats: Some(max_tool_repeats),
+                max_turns: None,
 ```
 
-- [ ] **Step 3: Build**
+- [ ] **Step 3: Update the 5 single-shot callers**
 
-Run: `cargo check --lib`
-Expected: compiles — no remaining references to the old `max_iterations` local or `AgentRunParams.max_iterations`.
+Each of these has exactly one `AgentRunParams { .. }` literal with `max_iterations: Some(1),`. Replace that line with `max_turns: Some(1),\n            max_tool_repeats: None,` (match the file's indentation) to preserve one-turn behavior:
 
-- [ ] **Step 4: Commit**
+- `src/.../nodes/planner.rs:385`
+- `src/.../nodes/reactor.rs:302`
+- `src/.../nodes/critic.rs:265`
+- `src/.../nodes/orchestrator.rs:731`
+- `src/.../nodes/util/extract_with_schema.rs:72`
+
+For example, in `planner.rs`:
+
+```rust
+            max_turns: Some(1),
+            max_tool_repeats: None,
+```
+
+Verify each with:
 
 ```bash
-git add src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs
-git commit -m "feat(agent-loop): wire max_iterations config key to max_tool_repeats
+grep -rn "max_iterations\|max_turns\|max_tool_repeats" \
+  src/libs/colmena/src/dag_engine/infrastructure/nodes/{planner,reactor,critic,orchestrator}.rs \
+  src/libs/colmena/src/dag_engine/infrastructure/nodes/util/extract_with_schema.rs
+```
+
+Expected: no `max_iterations:` left; each file shows `max_turns: Some(1)` + `max_tool_repeats: None`.
+
+- [ ] **Step 4: Build**
+
+Run: `cargo check --lib`
+Expected: compiles — no remaining references to the old `AgentRunParams.max_iterations` field anywhere.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/libs/colmena/src/dag_engine/infrastructure/nodes/
+git commit -m "feat(agent-loop): wire max_iterations to max_tool_repeats; single-shot callers use max_turns
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
@@ -1007,9 +1136,9 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - [ ] **Step 1: Document the new semantics**
 
 Add a subsection to `docs/developer_guide/14_llm_deep_dive.md` (Spanish, matching the file). Cover, in prose:
-- `max_iterations` (config key) ahora controla **repeticiones por firma** `(name+args)`, default **3** — no turnos.
+- `max_iterations` (config key) ahora controla **repeticiones consecutivas por firma** `(name+args)`, default **3** — no turnos. La racha se **resetea** cuando el modelo emite una firma distinta (hace progreso).
 - Mecánica: 1ª ejecución real → 2ª nudge (no re-ejecuta, devuelve el resultado previo + redirección) → 3ª rescate.
-- Techo duro de turnos: constante interna `HARD_TURN_CAP = 50`, no configurable.
+- Techo duro de turnos: por-run `max_turns`, default vía env **`COLMENA_HARD_TURN_CAP` (fallback 50)**, no configurable desde el grafo. Los nodos single-shot (planner/reactor/critic/orchestrator/extract_with_schema) lo fijan en 1.
 - Rescate = síntesis final forzada (una llamada sin tools), devuelta como respuesta normal; ya **no** hay `Err(MaxIterationsReached)` por el camino normal.
 
 - [ ] **Step 2: Add a CHANGELOG entry**
@@ -1073,7 +1202,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ## Self-Review notes
 
-- **Spec coverage:** §2 remap → Tasks 4+5; §3 loop detector → Task 4 Step 6; §4 rescue → Task 4 Step 7; §5 wiring → Task 5; §6 ADP sweep → Task 7 Step 1; §7 text registry → Task 2; §8 testing → Task 4 + Task 7; docs → Task 6.
-- **No new public key** (`max_tool_repeats` is internal; only `max_iterations` is read) — matches the decision.
-- **Type consistency:** `SigEntry { count: u32, first_result: String }`, `tool_call_signature(&str,&str)->String`, `accumulate_usage(&mut LlmUsage,&LlmResponse)`, `invoke_llm(LlmRequest,&Option<...>,&LlmConfig)->Result<(LlmResponse,Option<LlmUsage>)>`, `AgentRunParams.max_tool_repeats: Option<usize>`, `HARD_TURN_CAP: usize = 50` — all referenced consistently.
-- **`count >= max_tool_repeats as u32`** with default 3 → execute(1), nudge(2), rescue(3): matches "nudge en la 2ª, rescate en la 3ª".
+- **Spec coverage:** §2 remap + §2.1 two-knob/six-caller → Task 4 (field + `max_turns`) + Task 5 (llm.rs + 5 single-shot callers); §3 streak loop detector → Task 4 Steps 5–6; §4 rescue → Task 4 Step 7; §5 wiring (incl. `default_hard_turn_cap` env) → Task 4 Step 5 + Task 5; §6 ADP sweep → Task 7 Step 1; §7 text registry → Task 2; §8 testing (streak reset, max_turns ceiling, single-shot) → Task 4 + Task 7; docs → Task 6.
+- **No new public key** (`max_tool_repeats`/`max_turns` are internal `AgentRunParams` fields; only `max_iterations` is read from the graph; ceiling is env-only) — matches the decision.
+- **Six callers covered:** `llm_call` (Task 5 Step 2) + `planner`/`reactor`/`critic`/`orchestrator`/`extract_with_schema` (Task 5 Step 3); all test literals get both new fields (Task 4 Step 4).
+- **Type consistency:** streak locals `streak_sig: Option<String>` / `streak_count: u32` / `streak_first: String`, `tool_call_signature(&str,&str)->String`, `default_hard_turn_cap()->usize`, `accumulate_usage(&mut LlmUsage,&LlmResponse)`, `invoke_llm(LlmRequest,&Option<...>,&LlmConfig)->Result<(LlmResponse,Option<LlmUsage>)>`, `AgentRunParams.max_tool_repeats: Option<usize>` + `max_turns: Option<usize>` — all referenced consistently. No `SigEntry` struct (streak is three locals).
+- **`count >= max_tool_repeats as u32`** (where `count` is the consecutive `streak_count`) with default 3 → execute(1), nudge(2), rescue(3): matches "nudge en la 2ª, rescate en la 3ª". A different signature resets the streak before it reaches 3.
