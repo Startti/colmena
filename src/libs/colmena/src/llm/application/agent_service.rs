@@ -649,6 +649,43 @@ impl AgentService {
     }
 }
 
+/// Canonical `(name, arguments)` signature used to detect repeated tool calls.
+/// Object keys are sorted recursively so `{"a":1,"b":2}` and `{"b":2,"a":1}`
+/// collapse to one key. Invalid-JSON arguments fall back to the raw string.
+/// The `\u{0}` separator cannot appear in a JSON token, so name and args never
+/// collide.
+#[allow(dead_code)] // removed in Task 4 when the loop guard uses it
+fn tool_call_signature(name: &str, arguments: &str) -> String {
+    let canon = serde_json::from_str::<serde_json::Value>(arguments)
+        .map(|v| canonical_json(&v))
+        .unwrap_or_else(|_| arguments.to_string());
+    format!("{name}\u{0}{canon}")
+}
+
+/// Deterministic, key-sorted serialization of a JSON value (for signatures only).
+#[allow(dead_code)] // removed in Task 4 when the loop guard uses it
+fn canonical_json(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let inner: Vec<String> = keys
+                .into_iter()
+                .map(|k| {
+                    let key = serde_json::to_string(k).unwrap_or_default();
+                    format!("{}:{}", key, canonical_json(&map[k]))
+                })
+                .collect();
+            format!("{{{}}}", inner.join(","))
+        }
+        serde_json::Value::Array(arr) => {
+            let inner: Vec<String> = arr.iter().map(canonical_json).collect();
+            format!("[{}]", inner.join(","))
+        }
+        other => other.to_string(),
+    }
+}
+
 /// Compact `load_skill` tool results that are older than `keep_recent_msgs`
 /// into a short marker. Returns a new Vec — never mutates the input.
 ///
@@ -1035,6 +1072,41 @@ mod tests {
         let sys = "## Tools\nAvailable: add.\n\n---\nmore stable content";
         let out = strip_leading_temporal_block(sys);
         assert_eq!(out, sys);
+    }
+
+    // ── Per-signature loop guard: canonical tool-call signature ─────────────
+
+    #[test]
+    fn tool_call_signature_is_key_order_independent() {
+        let a = tool_call_signature("read", r#"{"a":1,"b":2}"#);
+        let b = tool_call_signature("read", r#"{"b":2,"a":1}"#);
+        assert_eq!(a, b, "object key order must not change the signature");
+    }
+
+    #[test]
+    fn tool_call_signature_is_name_and_args_sensitive() {
+        assert_ne!(
+            tool_call_signature("read", r#"{"a":1}"#),
+            tool_call_signature("write", r#"{"a":1}"#),
+            "different tool names must differ"
+        );
+        assert_ne!(
+            tool_call_signature("read", r#"{"range":"A1"}"#),
+            tool_call_signature("read", r#"{"range":"B2"}"#),
+            "different args must differ"
+        );
+    }
+
+    #[test]
+    fn tool_call_signature_handles_nested_and_invalid_json() {
+        // nested object key order also normalized
+        let a = tool_call_signature("t", r#"{"x":{"p":1,"q":2}}"#);
+        let b = tool_call_signature("t", r#"{"x":{"q":2,"p":1}}"#);
+        assert_eq!(a, b);
+        // invalid JSON falls back to the raw string (still deterministic)
+        let c = tool_call_signature("t", "not json");
+        let d = tool_call_signature("t", "not json");
+        assert_eq!(c, d);
     }
 
     // ── F-T14 step A2: skill-out-of-history compaction tests ────────────────
