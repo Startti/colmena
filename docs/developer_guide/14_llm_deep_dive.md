@@ -612,6 +612,12 @@ antes de tiempo.
 | **2ª vez (nudge)** | **No re-ejecuta**; devuelve el resultado anterior + una línea de redirección: *"Ya llamaste esta herramienta con estos argumentos — usá ese resultado o probá algo diferente."* |
 | **3ª vez (rescate)** | Dispara la síntesis forzada (ver abajo). |
 
+> **Valores `< 2`:** la primera llamada de una firma siempre se ejecuta (el
+> chequeo de rescate vive dentro de "es repetición"), así que `max_iterations: 0`
+> o `1` se comportan igual que `2` — 1 ejecución + 1 nudge y luego rescate. No
+> bloquean la primera llamada ni causan bucles; simplemente no hay un valor
+> "bloquear de entrada".
+
 La firma es `canonical_string(nombre, argumentos)` con las claves de objetos
 ordenadas recursivamente, de modo que dos llamadas semánticamente idénticas con
 campos en distinto orden colapsan a la misma firma.

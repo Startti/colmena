@@ -369,6 +369,11 @@ impl AgentService {
 
                     // Repeated signature in a row (streak >= 2): nudge or rescue.
                     if count > 1 {
+                        // `streak_first` is empty when the streak's first call
+                        // took an early-return path that never stored a result
+                        // (e.g. a repeated `load_attachment`, whose content was
+                        // already injected for that turn). The bare redirect is
+                        // the right nudge there — there is no prior result to echo.
                         let body = if streak_first.is_empty() {
                             REPEAT_NUDGE_TEXT.to_string()
                         } else {
