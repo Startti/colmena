@@ -7,7 +7,6 @@ use crate::gsheets::domain::{
 };
 use crate::gsheets::infrastructure::auth::TokenProvider;
 use crate::gsheets::infrastructure::config::GSheetsConfig;
-#[allow(unused_imports)]
 use crate::gsheets::infrastructure::merge_fill::{forward_fill_merges, MergeRect};
 use async_trait::async_trait;
 use reqwest::{Client, StatusCode};
@@ -331,23 +330,27 @@ impl SheetsClient for GoogleSheetsHttpClient {
             Some(r) => format!("{quoted_sheet}!{r}"),
             None => quoted_sheet,
         };
+        // Approach B: one spreadsheets.get with includeGridData brings the cell
+        // values AND the merge rectangles together — so we forward-fill merged
+        // cells without a second round-trip and without a stale cache. See
+        // docs/superpowers/specs/2026-06-14-gsheets-expand-merges-design.md.
+        let fields = "sheets(data(startRow,startColumn,rowData(values(\
+            formattedValue,effectiveValue,userEnteredValue))),merges)";
         let url = format!(
-            "{}/{}/values/{}?valueRenderOption={}",
+            "{}/{}?ranges={}&includeGridData=true&fields={}",
             self.sheets_base,
             id.0,
             urlencoding::encode(&full_range),
-            opts.value_render.as_api_str()
+            urlencoding::encode(fields),
         );
         let body = self.get_json(&url).await?;
-        let returned_range = body
-            .get("range")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&full_range)
-            .to_string();
-        let raw_values = body
-            .get("values")
-            .cloned()
-            .unwrap_or(Value::Array(Vec::new()));
+
+        let (mut grid, row_offset, col_offset) = parse_grid_block(&body, opts.value_render);
+        let merges = parse_merges(&body);
+        forward_fill_merges(&mut grid, &merges, row_offset, col_offset);
+
+        // Re-shape into the [[...]] rectangle the downstream pipeline expects.
+        let raw_values = Value::Array(grid.into_iter().map(Value::Array).collect());
         let values = if opts.as_records {
             rectangle_to_records(&raw_values)
         } else {
@@ -355,7 +358,11 @@ impl SheetsClient for GoogleSheetsHttpClient {
         };
         Ok(ReadResponse {
             sheet: sheet.to_string(),
-            range: returned_range,
+            // Echo the requested range. For an explicit range this matches the
+            // old behavior (e.g. "Sheet1!A1:B2"); for a whole-sheet read it is
+            // the sheet name — the data extent is still surfaced via the
+            // caller's `dimensions` (computed from `values`).
+            range: full_range,
             values,
         })
     }
@@ -909,7 +916,6 @@ fn quote_sheet_for_range(sheet: &str) -> String {
 /// `{numberValue | stringValue | boolValue | formulaValue | errorValue}`.
 /// Empty / unknown ⇒ `Null`. Error cells surface their `type` string
 /// (e.g. `"#REF!"`).
-#[allow(dead_code)]
 fn extended_value_to_scalar(ev: &Value) -> Value {
     if let Some(n) = ev.get("numberValue") {
         n.clone()
@@ -935,7 +941,6 @@ fn extended_value_to_scalar(ev: &Value) -> Value {
 /// honoring the requested render option. Mirrors what `values.get` returned:
 /// numbers as JSON numbers, strings as strings, booleans as bools, empty as
 /// `Null`.
-#[allow(dead_code)]
 fn cell_scalar(cell: &Value, render: ValueRenderOption) -> Value {
     match render {
         ValueRenderOption::FormattedValue => {
@@ -961,7 +966,6 @@ fn cell_scalar(cell: &Value, render: ValueRenderOption) -> Value {
 /// response into a RECTANGULAR grid of scalar values plus the block's absolute
 /// top-left offset `(row_offset, col_offset)`. Rows are padded to a uniform
 /// width so forward-fill can reach every cell of a merge.
-#[allow(dead_code)]
 fn parse_grid_block(body: &Value, render: ValueRenderOption) -> (Vec<Vec<Value>>, usize, usize) {
     let block = body
         .get("sheets")
@@ -1000,7 +1004,6 @@ fn parse_grid_block(body: &Value, render: ValueRenderOption) -> (Vec<Vec<Value>>
 }
 
 /// Parse the first sheet's `merges` array into `MergeRect`s. Absent ⇒ empty.
-#[allow(dead_code)]
 fn parse_merges(body: &Value) -> Vec<MergeRect> {
     body.get("sheets")
         .and_then(|s| s.as_array())
@@ -1083,13 +1086,25 @@ mod tests {
     async fn read_range_returns_2d_array_for_unformatted() {
         let (server, client) = setup_mock().await;
 
+        // Approach B: read goes through spreadsheets.get (path = /{id}), not
+        // /values/{range}. Returns grid data + (here, empty) merges.
         Mock::given(method("GET"))
-            .and(path_regex(r"/abc/values/Sheet1%21A1%3AB2"))
+            .and(path_regex(r"/abc$"))
             .and(header("authorization", "Bearer fake-bearer-token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "range": "Sheet1!A1:B2",
-                "majorDimension": "ROWS",
-                "values": [["x", 1], ["y", 2]],
+                "sheets": [{
+                    "data": [{"startRow": 0, "startColumn": 0, "rowData": [
+                        {"values": [
+                            {"effectiveValue": {"stringValue": "x"}},
+                            {"effectiveValue": {"numberValue": 1.0}}
+                        ]},
+                        {"values": [
+                            {"effectiveValue": {"stringValue": "y"}},
+                            {"effectiveValue": {"numberValue": 2.0}}
+                        ]}
+                    ]}],
+                    "merges": []
+                }]
             })))
             .mount(&server)
             .await;
@@ -1105,7 +1120,54 @@ mod tests {
             .expect("read ok");
         assert_eq!(resp.sheet, "Sheet1");
         assert_eq!(resp.range, "Sheet1!A1:B2");
-        assert_eq!(resp.values, serde_json::json!([["x", 1], ["y", 2]]));
+        assert_eq!(resp.values, serde_json::json!([["x", 1.0], ["y", 2.0]]));
+    }
+
+    #[tokio::test]
+    async fn read_range_forward_fills_merged_cells() {
+        let (server, client) = setup_mock().await;
+
+        // Column A (Cat) merged A1:A3 with anchor "Fruit"; rows 2-3 empty in A.
+        Mock::given(method("GET"))
+            .and(path_regex(r"/abc$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sheets": [{
+                    "data": [{"startRow": 0, "startColumn": 0, "rowData": [
+                        {"values": [
+                            {"effectiveValue": {"stringValue": "Fruit"}},
+                            {"effectiveValue": {"numberValue": 10.0}}
+                        ]},
+                        {"values": [
+                            {},
+                            {"effectiveValue": {"numberValue": 20.0}}
+                        ]},
+                        {"values": [
+                            {},
+                            {"effectiveValue": {"numberValue": 30.0}}
+                        ]}
+                    ]}],
+                    "merges": [
+                        {"startRowIndex": 0, "endRowIndex": 3, "startColumnIndex": 0, "endColumnIndex": 1}
+                    ]
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let resp = client
+            .read_range(
+                &SpreadsheetId("abc".into()),
+                "Sheet1",
+                None,
+                ReadOptions::default(),
+            )
+            .await
+            .expect("read ok");
+        // The anchor "Fruit" is propagated down the whole merge.
+        assert_eq!(
+            resp.values,
+            serde_json::json!([["Fruit", 10.0], ["Fruit", 20.0], ["Fruit", 30.0]])
+        );
     }
 
     fn sample_grid_body() -> serde_json::Value {
@@ -1406,10 +1468,15 @@ mod tests {
             .up_to_n_times(1)
             .mount(&server)
             .await;
+        // Approach B: success response is spreadsheets.get format, not values.get.
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "range": "Sheet1!A1",
-                "values": [["ok"]],
+                "sheets": [{
+                    "data": [{"startRow": 0, "startColumn": 0, "rowData": [
+                        {"values": [{"effectiveValue": {"stringValue": "ok"}}]}
+                    ]}],
+                    "merges": []
+                }]
             })))
             .mount(&server)
             .await;
