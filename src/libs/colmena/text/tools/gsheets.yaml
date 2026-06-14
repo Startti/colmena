@@ -43,6 +43,11 @@ gsheets_read:
     `gsheets_list_sheets` gives a rough allocated grid size (not the data extent)
     if you want to gauge a sheet before reading something large.
 
+    MERGED CELLS: merged cells are auto-expanded on read — every cell of a merge
+    returns the merge's value (the top-left anchor), not a blank. Repeated values
+    down a column or across a row may therefore reflect a merged region, not
+    duplicated data.
+
 gsheets_set_cell:
   summary: Write one value or formula into a single cell
   description: |
@@ -128,6 +133,11 @@ gsheets_run_python:
     batchUpdate, instead of replacing 12K cells.
 
     For more patterns and pitfalls, load the `gsheets-table-exploration` skill (single-table inspection) or `gsheets-cross-sheet-analysis` skill (joins, comparisons).
+
+    MERGED CELLS: sheets are loaded with merged cells already forward-filled, so
+    a column that was visually merged (e.g. a category spanning several rows)
+    arrives fully populated — groupby/join/compare work directly, with no NaN
+    gaps to fill yourself.
 
 gsheets_list_spreadsheets:
   summary: Discover Google Spreadsheets visible to the OAuth user (agents@startti.co) — optionally filtered by name, folder, or modified-after date

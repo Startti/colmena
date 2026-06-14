@@ -1,0 +1,24 @@
+{
+  "comment": "E2E: read a real sheet with vertical merges in column A via gsheets_read. The agent must report the Categoria for the 'Pera' row. Pre-feature, A4 would be blank (merge gap) and the agent could not answer; with expand-merges the read returns 'Frutas' in every row of the merge, so the agent answers 'Frutas'. Replace <SPREADSHEET_ID> with a real sheet (tab 'Ventas') per the gsheets E2E runbook (Secret Manager creds + PYTHONPATH for embedded python).",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": { "path": "/merges_read", "method": "POST", "test_payload": {
+        "prompt": "Use this exact spreadsheet_id (copy character-by-character): <SPREADSHEET_ID>\nEn la hoja 'Ventas' de esa planilla, leé la tabla completa con gsheets_read (omití range) y decime exactamente a qué Categoria pertenece el producto 'Pera'. Respondé solo con el nombre de la categoria."
+      }}
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "temperature": 0,
+        "system_message": "Sos un asistente que lee Google Sheets con las herramientas gsheets. Copiá el spreadsheet_id verbatim. No inventes datos; respondé en base a lo que leés.",
+        "enabled_tools": ["gsheets"]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [ { "from": "trigger", "to": "agent" }, { "from": "agent", "to": "log" } ]
+}

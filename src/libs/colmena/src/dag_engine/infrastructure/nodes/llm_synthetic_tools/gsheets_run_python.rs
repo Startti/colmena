@@ -1038,7 +1038,7 @@ fn a1_addr(col_index: usize, row_index: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path_regex};
+    use wiremock::matchers::{method, path_regex, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn mock_with_two_sheets() -> (MockServer, Arc<GoogleSheetsHttpClient>) {
@@ -1046,32 +1046,48 @@ mod tests {
         let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
         client.token_test_seed("fake-bearer-token").await;
 
-        // Products!A1:C3 → records: [{sku, qty}, ...] (2 rows + header).
+        // Products — Approach B: spreadsheets.get with includeGridData.
         Mock::given(method("GET"))
-            .and(path_regex(r"/sp_p/values/Products"))
+            .and(path_regex(r"/sp_p$"))
+            .and(query_param("includeGridData", "true"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "range": "Products!A1:C3",
-                "majorDimension": "ROWS",
-                "values": [
-                    ["sku",   "qty"],
-                    ["a-1",   10],
-                    ["a-2",   20],
-                ],
+                "sheets": [{"data": [{"startRow": 0, "startColumn": 0, "rowData": [
+                    {"values": [
+                        {"effectiveValue": {"stringValue": "sku"}},
+                        {"effectiveValue": {"stringValue": "qty"}}
+                    ]},
+                    {"values": [
+                        {"effectiveValue": {"stringValue": "a-1"}},
+                        {"effectiveValue": {"numberValue": 10.0}}
+                    ]},
+                    {"values": [
+                        {"effectiveValue": {"stringValue": "a-2"}},
+                        {"effectiveValue": {"numberValue": 20.0}}
+                    ]}
+                ]}], "merges": []}]
             })))
             .mount(&server)
             .await;
 
-        // Sales!A1:C3 → records: [{sku, sold}, ...].
+        // Sales — Approach B: spreadsheets.get with includeGridData.
         Mock::given(method("GET"))
-            .and(path_regex(r"/sp_s/values/Sales"))
+            .and(path_regex(r"/sp_s$"))
+            .and(query_param("includeGridData", "true"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "range": "Sales!A1:C3",
-                "majorDimension": "ROWS",
-                "values": [
-                    ["sku",   "sold"],
-                    ["a-1",   3],
-                    ["a-2",   7],
-                ],
+                "sheets": [{"data": [{"startRow": 0, "startColumn": 0, "rowData": [
+                    {"values": [
+                        {"effectiveValue": {"stringValue": "sku"}},
+                        {"effectiveValue": {"stringValue": "sold"}}
+                    ]},
+                    {"values": [
+                        {"effectiveValue": {"stringValue": "a-1"}},
+                        {"effectiveValue": {"numberValue": 3.0}}
+                    ]},
+                    {"values": [
+                        {"effectiveValue": {"stringValue": "a-2"}},
+                        {"effectiveValue": {"numberValue": 7.0}}
+                    ]}
+                ]}], "merges": []}]
             })))
             .mount(&server)
             .await;
@@ -1329,17 +1345,25 @@ mod tests {
         let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
         client.token_test_seed("fake-bearer-token").await;
 
-        // Binding: Products tab on spreadsheet "ws_w".
+        // Binding: Products tab on spreadsheet "ws_w" — Approach B.
         Mock::given(method("GET"))
-            .and(path_regex(r"/ws_w/values/Products"))
+            .and(path_regex(r"/ws_w$"))
+            .and(query_param("includeGridData", "true"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "range": "Products!A1:B3",
-                "majorDimension": "ROWS",
-                "values": [
-                    ["sku", "qty"],
-                    ["a-1", 10],
-                    ["a-2", 20],
-                ],
+                "sheets": [{"data": [{"startRow": 0, "startColumn": 0, "rowData": [
+                    {"values": [
+                        {"effectiveValue": {"stringValue": "sku"}},
+                        {"effectiveValue": {"stringValue": "qty"}}
+                    ]},
+                    {"values": [
+                        {"effectiveValue": {"stringValue": "a-1"}},
+                        {"effectiveValue": {"numberValue": 10.0}}
+                    ]},
+                    {"values": [
+                        {"effectiveValue": {"stringValue": "a-2"}},
+                        {"effectiveValue": {"numberValue": 20.0}}
+                    ]}
+                ]}], "merges": []}]
             })))
             .mount(&server)
             .await;
@@ -1429,16 +1453,21 @@ mod tests {
         let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
         client.token_test_seed("fake-bearer-token").await;
 
-        // Binding: Whatever tab on spreadsheet "ws_c".
+        // Binding: Whatever tab on spreadsheet "ws_c" — Approach B.
         Mock::given(method("GET"))
-            .and(path_regex(r"/ws_c/values/Whatever"))
+            .and(path_regex(r"/ws_c$"))
+            .and(query_param("includeGridData", "true"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "range": "Whatever!A1:B2",
-                "majorDimension": "ROWS",
-                "values": [
-                    ["id", "val"],
-                    [1, 99],
-                ],
+                "sheets": [{"data": [{"startRow": 0, "startColumn": 0, "rowData": [
+                    {"values": [
+                        {"effectiveValue": {"stringValue": "id"}},
+                        {"effectiveValue": {"stringValue": "val"}}
+                    ]},
+                    {"values": [
+                        {"effectiveValue": {"numberValue": 1.0}},
+                        {"effectiveValue": {"numberValue": 99.0}}
+                    ]}
+                ]}], "merges": []}]
             })))
             .mount(&server)
             .await;
@@ -1532,19 +1561,30 @@ mod tests {
         let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
         client.token_test_seed("fake-token").await;
 
-        // (a) read_range mock — returns current "Sales" with 3 rows.
+        // (a) read_range mock — Approach B: returns current "Sales" with 3 rows.
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path_regex(r"/ss_u/values/Sales"))
+            .and(wiremock::matchers::path_regex(r"/ss_u$"))
+            .and(query_param("includeGridData", "true"))
             .respond_with(
                 wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "range": "Sales!A1:C4",
-                    "majorDimension": "ROWS",
-                    "values": [
-                        ["id", "price"],
-                        ["a",  10],
-                        ["b",  20],
-                        ["c",  30],
-                    ],
+                    "sheets": [{"data": [{"startRow": 0, "startColumn": 0, "rowData": [
+                        {"values": [
+                            {"effectiveValue": {"stringValue": "id"}},
+                            {"effectiveValue": {"stringValue": "price"}}
+                        ]},
+                        {"values": [
+                            {"effectiveValue": {"stringValue": "a"}},
+                            {"effectiveValue": {"numberValue": 10.0}}
+                        ]},
+                        {"values": [
+                            {"effectiveValue": {"stringValue": "b"}},
+                            {"effectiveValue": {"numberValue": 20.0}}
+                        ]},
+                        {"values": [
+                            {"effectiveValue": {"stringValue": "c"}},
+                            {"effectiveValue": {"numberValue": 30.0}}
+                        ]}
+                    ]}], "merges": []}]
                 })),
             )
             .mount(&server)
@@ -1605,9 +1645,12 @@ mod tests {
         let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
         client.token_test_seed("fake-token").await;
 
-        // list_sheets — "Existing" already there.
+        // list_sheets — "Existing" already there (no includeGridData param).
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path_regex(r"/ss_f\?"))
+            .and(wiremock::matchers::path_regex(r"/ss_f$"))
+            .and(wiremock::matchers::query_param_is_missing(
+                "includeGridData",
+            ))
             .respond_with(
                 wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "sheets": [{
@@ -1621,14 +1664,19 @@ mod tests {
             .mount(&server)
             .await;
 
-        // read_range (for header columns) — used by fail-error builder.
+        // read_range (binding + header columns) — Approach B (includeGridData=true).
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path_regex(r"/ss_f/values/Existing"))
+            .and(wiremock::matchers::path_regex(r"/ss_f$"))
+            .and(query_param("includeGridData", "true"))
             .respond_with(
                 wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "range": "Existing!A1:Z1",
-                    "majorDimension": "ROWS",
-                    "values": [["a","b","c"]],
+                    "sheets": [{"data": [{"startRow": 0, "startColumn": 0, "rowData": [
+                        {"values": [
+                            {"effectiveValue": {"stringValue": "a"}},
+                            {"effectiveValue": {"stringValue": "b"}},
+                            {"effectiveValue": {"stringValue": "c"}}
+                        ]}
+                    ]}], "merges": []}]
                 })),
             )
             .mount(&server)
@@ -1805,9 +1853,12 @@ mod tests {
         // 30-column header — proves the range went past Z.
         let header: Vec<String> = (0..30).map(|i| format!("c{i}")).collect();
 
-        // list_sheets (cols=30) + modifiedTime served from one mock.
+        // list_sheets — no includeGridData (returns sheet metadata only).
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path_regex(r"/ss_w\?"))
+            .and(wiremock::matchers::path_regex(r"/ss_w$"))
+            .and(wiremock::matchers::query_param_is_missing(
+                "includeGridData",
+            ))
             .respond_with(
                 wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "sheets": [{
@@ -1822,13 +1873,22 @@ mod tests {
             .mount(&server)
             .await;
 
+        // read_range (binding + header fetch) — Approach B: includeGridData=true.
+        // 30-column header row; the binding data rows are omitted (empty DataFrame
+        // is sufficient — the test only cares that the collision envelope has all
+        // 30 column names).
+        let header_values: Vec<serde_json::Value> = header
+            .iter()
+            .map(|h| serde_json::json!({"effectiveValue": {"stringValue": h}}))
+            .collect();
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path_regex(r"/ss_w/values/Wide"))
+            .and(wiremock::matchers::path_regex(r"/ss_w$"))
+            .and(query_param("includeGridData", "true"))
             .respond_with(
                 wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "range": "Wide!A1:AD1",
-                    "majorDimension": "ROWS",
-                    "values": [header],
+                    "sheets": [{"data": [{"startRow": 0, "startColumn": 0, "rowData": [
+                        {"values": header_values}
+                    ]}], "merges": []}]
                 })),
             )
             .mount(&server)
@@ -1879,38 +1939,44 @@ mod tests {
         let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
         client.token_test_seed("fake-token").await;
 
-        // Binding read — provides the Python var `x` to the sandbox.
+        // list_sheets — "Existing" already there (no includeGridData param).
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path_regex(r"/ss_a/values/Existing"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "range": "Existing!A1:B2",
-                    "majorDimension": "ROWS",
-                    "values": [
-                        ["id", "val"],
-                        [1, 99],
-                    ],
-                })),
-            )
-            .mount(&server)
-            .await;
-
-        // list_sheets — "Existing" already there (triggers collision check).
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path_regex(r"/ss_a\?"))
+            .and(wiremock::matchers::path_regex(r"/ss_a$"))
+            .and(wiremock::matchers::query_param_is_missing(
+                "includeGridData",
+            ))
             .respond_with(
                 wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "sheets": [{"properties": {"sheetId": 1, "title": "Existing", "index": 0,
-                        "gridProperties": {"rowCount": 1, "columnCount": 1}}}]
+                        "gridProperties": {"rowCount": 2, "columnCount": 2}}}]
                 })),
             )
             .mount(&server)
             .await;
 
-        // Header read (A1:Z1) — needed by fetch_tab_meta to get column names.
-        // The path_regex for /ss_a/values/Existing above matches both the
-        // binding read and the header read; wiremock uses the first matching
-        // mock so this is OK — both return the same rows/header shape.
+        // Binding read + header read — Approach B (includeGridData=true).
+        // Both reads (binding var `x` and fetch_tab_meta header) share this mock.
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(r"/ss_a$"))
+            .and(query_param("includeGridData", "true"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "sheets": [{"data": [{"startRow": 0, "startColumn": 0, "rowData": [
+                        {"values": [
+                            {"effectiveValue": {"stringValue": "id"}},
+                            {"effectiveValue": {"stringValue": "val"}}
+                        ]},
+                        {"values": [
+                            {"effectiveValue": {"numberValue": 1.0}},
+                            {"effectiveValue": {"numberValue": 99.0}}
+                        ]}
+                    ]}], "merges": []}]
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        // Header read (A1:A1) — already served by the includeGridData mock above.
 
         // add_sheet for "Existing (2)".
         wiremock::Mock::given(wiremock::matchers::method("POST"))
