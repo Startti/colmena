@@ -2433,3 +2433,57 @@ la tabla de fn-pointers preserva el lazy-build. Ver BACKLOG.
 **Estado.** done (exposure fixed + verified; structural refactor deferred).
 
 ---
+
+## 35. gsheets expand-merges — forward-fill de celdas combinadas en lectura (2026-06-14)
+
+**Qué cambió.** Al leer un Google Sheet, las celdas combinadas (merged cells)
+ahora se rellenan automáticamente: cada celda de un merge devuelve el valor del
+ancla (top-left), no un hueco. Antes, `spreadsheets.values.get` devolvía el valor
+solo en la celda ancla y el resto del rectángulo venía vacío/`null`, lo que rompía
+**en silencio** un `groupby`/`join`/comparación sobre una columna con merges
+(p.ej. una "Categoria" que visualmente abarca varias filas llegaba a pandas como
+1 valor + N `NaN`).
+
+**Cómo.** `SheetsClient::read_range` pasó de `spreadsheets.values.get` a
+`spreadsheets.get` con `includeGridData=true` (**Approach B**): una sola llamada
+trae valores **y** rectángulos de merge juntos — fresco en cada lectura, sin
+cache (otros editores podrían cambiar la estructura de merges durante el run) y
+sin round-trip extra. El forward-fill vive en un módulo puro nuevo
+`gsheets/infrastructure/merge_fill.rs` (`forward_fill_merges`). Como las dos
+superficies LLM (`gsheets_read` y `gsheets_run_python`) llaman a `read_range`,
+**ambas heredan el fill sin lógica propia**.
+
+**Decisiones (always-on, sin flag).** Una celda combinada *realmente* contiene
+ese valor en todo su span, así que rellenar **es** mostrar la verdad del sheet —
+no hay flag de opt-out ni cache. Sub-rangos que cortan un merge: **B1** — solo se
+rellena con anclas presentes en la grilla devuelta; si el ancla cae fuera del
+rango leído, esas celdas quedan vacías (igual que antes), caso de borde
+improbable.
+
+**Mapeo de render options** (1:1 con campos de `CellData`): `FormattedValue` →
+`formattedValue`; `UnformattedValue` → `effectiveValue`; `Formula` →
+`userEnteredValue.formulaValue` (o el literal si no es fórmula).
+
+**Cambio menor de comportamiento.** `ReadResponse.range` en lecturas de sheet
+completo ahora es el nombre de la hoja en vez del extent A1 de Google; el extent
+sigue disponible vía `dimensions` (calculado de `values`).
+
+**Compat / ADP.** Sin break de API Rust — firma de `read_range`/`ReadOptions`/
+`ReadResponse` intacta (cambio interno del adapter). El output observable cambia
+(celdas antes vacías ahora traen valor) — intencional, solo afecta lo que ve el
+LLM. ADP no requiere cambios.
+
+**Documentación de referencia.**
+- Spec: [`docs/superpowers/specs/2026-06-14-gsheets-expand-merges-design.md`](superpowers/specs/2026-06-14-gsheets-expand-merges-design.md)
+- Plan: [`docs/superpowers/plans/2026-06-14-gsheets-expand-merges.md`](superpowers/plans/2026-06-14-gsheets-expand-merges.md)
+
+**Verificación E2E live (Google Sheets real).** Sheet `colmena_expand_merges_e2e`
+(tab `Ventas`, columna Categoria con merges verticales Frutas A2:A4 / Verduras
+A5:A6). `gsheets_read` → el agente responde "Frutas" para la fila Pera (antes:
+hueco). `gsheets_run_python` con `groupby('Categoria')['Monto'].sum()` → totales
+correctos **Frutas=350 / Verduras=100** (sin fill darían 100/30). Grafos:
+`tests/graphs/agents/gsheets_expand_merges_{read,python}.json`.
+
+**Estado.** done (unit + E2E verificados contra Google real).
+
+---
