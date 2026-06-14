@@ -2851,7 +2851,8 @@ impl ExecutableNode for LlmNode {
                 config: llm_config,
                 tools,
                 tool_executor: &tool_executor,
-                max_iterations: Some(max_iterations),
+                max_tool_repeats: Some(max_iterations),
+                max_turns: None,
                 on_token,
                 tools_provider,
                 attachment_resolver: attachment_registry.as_ref().map(|reg| {
@@ -2873,7 +2874,8 @@ impl ExecutableNode for LlmNode {
                 config: llm_config,
                 tools,
                 tool_executor: &tool_executor,
-                max_iterations: Some(max_iterations),
+                max_tool_repeats: Some(max_iterations),
+                max_turns: None,
                 on_token,
                 tools_provider,
                 attachment_resolver: attachment_registry.as_ref().map(|reg| {
