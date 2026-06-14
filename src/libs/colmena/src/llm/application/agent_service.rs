@@ -2327,6 +2327,90 @@ mod tests {
         assert_eq!(result.unwrap().content(), "done");
     }
 
+    #[tokio::test]
+    async fn three_identical_calls_in_one_turn_rescue_intra_turn() {
+        // A SINGLE assistant turn emits the same `(name+args)` signature THREE
+        // times (distinct tool_call_ids). The streak climbs 1→2→3 WITHIN the one
+        // turn: 1st executes, 2nd is nudged, 3rd hits max_tool_repeats and flags
+        // `rescue`. After the inner tool loop the `if rescue { break; }` exits the
+        // turn loop and the forced tool-less synthesis runs, returned as Ok. The
+        // tool executes exactly once; every tool_call_id is still answered.
+        let mut mock_llm = MockLlmRepo::new();
+        let mut mock_conv = MockConversationRepo::new();
+        let mut mock_tool_exec = MockToolExec::new();
+        let key = test_key();
+
+        mock_conv.expect_get_by_id().returning(|k| {
+            Ok(Conversation {
+                key: k.clone(),
+                messages: vec![],
+            })
+        });
+        mock_conv.expect_add_message().returning(|_, _| Ok(()));
+
+        // Only the first of the three identical calls executes.
+        mock_tool_exec.expect_execute().times(1).returning(|call| {
+            Ok(ToolResult {
+                tool_call_id: call.id.clone(),
+                success: true,
+                output: "ok".to_string(),
+                error: None,
+            })
+        });
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        mock_llm.expect_call().returning(move |_req| {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                let triplet = |id: &str| ToolCall {
+                    id: id.to_string(),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "loop".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                    response: None,
+                };
+                Ok(text_response("").with_tool_calls(vec![
+                    triplet("c1"),
+                    triplet("c2"),
+                    triplet("c3"),
+                ]))
+            } else {
+                // The post-rescue forced synthesis is tool-less → return text.
+                Ok(text_response("best effort after intra-turn rescue"))
+            }
+        });
+
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let result = service
+            .run(AgentRunParams {
+                session_id: &key,
+                prompt: Some("triple".to_string()),
+                messages: None,
+                config: create_config(),
+                tools: vec![],
+                tool_executor: &mock_tool_exec,
+                max_tool_repeats: Some(3),
+                max_turns: None,
+                on_token: None,
+                tools_provider: None,
+                attachment_resolver: None,
+                agent_session_id: None,
+            })
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "intra-turn rescue must synthesize, not error"
+        );
+        assert_eq!(
+            result.unwrap().content(),
+            "best effort after intra-turn rescue"
+        );
+    }
+
     /// When a tool returns `__colmena_status: "SUSPENDED"` the agent service must
     /// stop iterating, persist only the assistant message (not a tool message), and
     /// return an `LlmResponse` whose `suspend()` is `Some`.
