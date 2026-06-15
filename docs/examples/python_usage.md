@@ -290,7 +290,11 @@ print(catalogo)                            # -> [{"name", "description", "requir
 
 ---
 
-## 📄 `colmena.documents` (hojas CRDT)
+## 📄 `colmena.documents` (hojas CRDT) — 🚧 en progreso
+
+> **El subsistema CRDT aún está en desarrollo.** El submódulo `colmena.documents` es funcional pero
+> su superficie y su modelo de ejecución pueden cambiar; trátalo como experimental hasta que CRDT se
+> cierre.
 
 El submódulo `colmena.documents` expone operaciones sobre hojas de cálculo CRDT en proceso:
 
@@ -307,12 +311,13 @@ colmena.documents.write_sheet(artifact_id, sheet_id,
 El paquete repo-side `colmena_documents` (en `python/colmena_documents/`) añade ergonomía
 **pandas** encima (read/write con DataFrames). No se publica en el wheel; es un helper del repo.
 
-> ⚠️ **Limitación actual (runtime):** `colmena.documents` requiere un runtime tokio activo en el
-> contexto de Python; desde un script Python normal lanza
+> ⚠️ **Limitación actual (CRDT en progreso):** `colmena.documents` requiere un runtime tokio activo
+> en el contexto de Python; desde un script Python normal lanza
 > `RuntimeError: no tokio runtime available`. A diferencia de `call`/`run_dag` (que crean su propio
-> runtime), este submódulo aún no lo hace. Darle un runtime propio es un follow-up pendiente
-> (ver [`audit_python_bindings.md`](../developer_guide/audit_python_bindings.md), P2). Hoy es usable
-> desde contextos que ya tienen runtime tokio (p.ej. el CLI), no desde Python plano.
+> runtime), este submódulo aún no lo hace. **No es un descuido puntual sino parte del estado WIP de
+> CRDT** — darle un runtime propio se abordará cuando el subsistema CRDT se termine (ver
+> [`audit_python_bindings.md`](../developer_guide/audit_python_bindings.md)). Hoy es usable desde
+> contextos que ya tienen runtime tokio (p.ej. el CLI), no desde Python plano.
 
 ## 📦 Identidad del paquete
 

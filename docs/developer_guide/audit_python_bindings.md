@@ -179,12 +179,20 @@ P1 cubre ahora la superficie DAG documentada y testeada.
 
 **Hallazgo (P2): `colmena.documents` no es usable desde Python plano** — lanza
 `RuntimeError: no tokio runtime available` (a diferencia de `call`/`run_dag` que crean su propio
-runtime). Documentado como limitación. Fix = darle runtime propio; encaja en el ítem de runtime
-(deferido por decisión del usuario). Por eso `test_crdt_documents_roundtrip` falla sin runtime.
+runtime). **Decisión (2026-06-15): se deja documentado como limitación porque el subsistema CRDT
+está en progreso** — darle runtime propio se abordará cuando CRDT se cierre (el modelo de runtime
+podría cambiar al terminarlo, así que arreglarlo ahora sería prematuro). Por eso
+`test_crdt_documents_roundtrip` (Python) se salta/falla sin runtime ambiente.
+
+> ⚠️ Nota para evitar confusión futura: esto es **distinto** de los 2 tests Rust
+> `crdt_doc_tools::tests::{get_recent_changes_empty_then_populated, list_my_artifacts_returns_session_artifacts}`.
+> Esos pasan en CI (store in-memory) y **solo fallan localmente si se corre con `DATABASE_URL`
+> seteado** (empuja el change-tracker store a Postgres local con schema drift). No son un fallo real
+> ni tienen relación con el runtime de Python.
 
 **Deferido (decisión del usuario):** unificar el modelo de runtime tokio (incluye habilitar
-`colmena.documents` desde Python plano). Resta también (opcional): `run_dag`/return dict en vez de
-JSON string, tool-calling programático.
+`colmena.documents` desde Python plano, atado al cierre de CRDT). Resta también (opcional):
+`run_dag`/return dict en vez de JSON string, tool-calling programático.
 
 (plan original abajo)
 
