@@ -106,13 +106,24 @@ const SHEET_WORKFLOW_PRELUDE: &str = "### Entender una hoja ANTES de leerla o co
      El encabezado NO siempre está en la primera fila — puede haber filas de título \
      arriba, o ser una tabla clave→valor sin encabezados clásicos. Usá ese preview \
      para ubicar dónde empiezan el header y los datos reales.\n\
+     Esto vale TAMBIÉN cuando vas a procesar con `gsheets_run_python`: bindear una \
+     hoja carga sus FILAS para el código, pero NO te dice el esquema. Si no conocés \
+     las columnas reales y qué significa cada una, leé la tabla PRIMERO con \
+     `gsheets_read` — nunca adivines nombres de columnas ni qué quiere decir un \
+     término (p.ej. \"frutas\" casi seguro es un valor de una columna `Categoria`, \
+     no parte del nombre del producto).\n\
      Para COMPARAR o analizar datos, hacelo en CÓDIGO con `gsheets_run_python` \
      (nunca comparando a ojo): cargá cada tabla como un binding (una hoja, o datos \
      inline via `data:` — p.ej. una tabla que extrajiste de una imagen) y arrancá \
      el `range` de cada binding de hoja en la fila del header/datos real, para que \
      los registros tomen las claves correctas.\n\
+     Si un filtro/groupby matchea 0 filas (o muchas menos de las esperadas), NO \
+     reportes éxito: es señal de que malinterpretaste los datos; leé la tabla y \
+     reconsiderá.\n\
      Celdas combinadas (merged): Google deja el valor SOLO en la celda superior \
-     izquierda; las demás del bloque vienen vacías.";
+     izquierda; las demás del bloque vienen vacías (al leer con `gsheets_read` o \
+     bindear en `gsheets_run_python` se rellenan automáticamente con el valor del \
+     ancla).";
 
 pub fn build_google_workspace_prelude(sa_email: Option<&str>) -> String {
     let base = match sa_email {
