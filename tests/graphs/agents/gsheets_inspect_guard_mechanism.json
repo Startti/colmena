@@ -1,5 +1,5 @@
 {
-  "comment": "MECHANISM test for the inspect-before-python guard (deterministic intercept). The prompt forces gsheets_run_python WITHOUT a prior gsheets_read, so the guard MUST intercept the first call with an  envelope (markdown preview of 'Ventas'); the agent then re-calls and, having seen the real Categoria column, applies +10 to the 3 frutas. Distinct from gsheets_inspect_guard_e2e.json (which uses a realistic vague prompt where flash often reads first on its own, so the guard acts as a backstop). Replace <SPREADSHEET_ID> per the gsheets E2E runbook.",
+  "comment": "MECHANISM test for the inspect-before-python guard (deterministic intercept). The prompt forces gsheets_run_python WITHOUT a prior gsheets_read, so the guard MUST intercept the first call with an inspect_first envelope (markdown preview of 'Ventas'); the agent then re-calls and, having seen the real Categoria column, applies +10 to the 3 frutas. Distinct from gsheets_inspect_guard_e2e.json (which uses a realistic vague prompt where flash often reads first on its own, so the guard acts as a backstop). Replace <SPREADSHEET_ID> per the gsheets E2E runbook.",
   "nodes": {
     "trigger": {
       "type": "trigger_webhook",
