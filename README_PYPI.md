@@ -114,7 +114,7 @@ HTTP requests, control flow, human-in-the-loop, and more. Run a graph from Pytho
 import colmena
 import json
 
-# run_dag returns a JSON string; parse it into a dict.
+# run_dag accepts a file path or an in-memory graph dict; returns a JSON string.
 result_json = colmena.run_dag("path/to/graph.json")
 result = json.loads(result_json)
 print(result)

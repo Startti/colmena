@@ -37,13 +37,19 @@ Firma completa:
 
 ```python
 colmena.run_dag(
-    file_path,                  # ruta al grafo JSON
+    graph,                      # ruta al grafo JSON (str) O el grafo en memoria (dict)
     resume_id=None,             # session_id de un run suspendido a reanudar (fallback de agent_session_id)
     resume_answer=None,         # respuesta en formato Q/A canónico (ver "Suspend → Resume")
     inject_payload=None,        # dict inyectado como payload del trigger (ver "inject_payload")
     include_extra_info=False,   # incluye metadata (usage, tool_calls, ...) en el output
     agent_session_id=None,      # id estable de sesión de agente (memoria, resume, secure values)
 ) -> str                        # JSON string; lanza colmena.DagException en error
+```
+
+`graph` acepta tanto una ruta a archivo como un grafo dict en memoria (sin escribirlo a disco):
+
+```python
+colmena.run_dag({"nodes": {...}, "edges": [...]})   # mismo dict que validate_graph
 ```
 
 El resultado contiene la salida de cada nodo más `__colmena_session_id`. Ejemplo

@@ -228,7 +228,7 @@ Firma completa:
 
 ```python
 colmena.run_dag(
-    file_path,                  # ruta al grafo JSON
+    graph,                      # ruta al grafo JSON (str) O el grafo en memoria (dict)
     resume_id=None,             # id de resume para flujos suspend/resume
     resume_answer=None,         # respuesta en formato Q/A canónico (ver guía de suspend)
     inject_payload=None,        # dict inyectado como payload inicial del trigger
@@ -236,6 +236,9 @@ colmena.run_dag(
     agent_session_id=None,      # id estable de sesión de agente (memoria, resume, secure values)
 )
 ```
+
+`graph` puede ser una ruta a archivo **o** un dict en memoria — `colmena.run_dag({"nodes": {...}, "edges": [...]})`
+corre el grafo sin escribirlo a disco.
 
 > Para flujos con estado entre ejecuciones (suspend/resume, memoria conversacional), pasa siempre un
 > `agent_session_id` estable.

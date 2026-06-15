@@ -21,7 +21,7 @@ Este directorio contiene los tests automatizados para los bindings de Python.
 ### Archivos de Test Actuales:
 
 -   `test_complex_scenarios.py`: Valida lógica de negocio, validación de roles y llamadas reales.
--   `test_streaming_scenarios.py`: Verifica la integridad de chunks en flujos de streaming síncronos.
+-   `test_streaming_scenarios.py`: Verifica la integridad de chunks en flujos de streaming asíncrono (`await llm.stream(...)` + `async for`).
 -   `test_async_mock_streaming.py`: **(Nuevo v0.3.0)** Valida el comportamiento asíncrono (`async for`) de los bindings utilizando proveedores mockeados.
 -   `test_mock_streaming.py`: Versión síncrona de tests con mocks para mayor velocidad en CI.
 
@@ -68,16 +68,15 @@ async def test_streaming_async():
     """Prueba el nuevo iterador asíncrono de streaming."""
     llm = colmena.ColmenaLlm()
     messages = [{"role": "user", "content": "Hola"}]
-    
-    # El iterador soporta 'async for'
-    stream = llm.stream(messages, provider="openai")
-    
+
+    # stream() devuelve un awaitable: await primero, luego 'async for'
+    stream = await llm.stream(messages, provider="openai")
+
     chunks = []
     async for chunk in stream:
         chunks.append(chunk)
-        
+
     assert len(chunks) > 0
-    assert "Hola" in "".join(chunks)
 ```
 
 ## Mejores Prácticas
