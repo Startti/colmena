@@ -19,6 +19,28 @@ pub async fn run_dag(
     include_extra_info: bool,
     agent_session_id: Option<String>,
 ) -> Result<Value, Box<dyn std::error::Error>> {
+    let file_content = tokio::fs::read_to_string(&file_path).await?;
+    run_dag_from_str(
+        file_content,
+        resume_id,
+        resume_answer,
+        inject_payload,
+        include_extra_info,
+        agent_session_id,
+    )
+    .await
+}
+
+/// Like [`run_dag`] but takes the graph as a JSON string already in memory,
+/// skipping the file read. Backs the Python `run_dag(dict)` entry point.
+pub async fn run_dag_from_str(
+    graph_json: String,
+    resume_id: Option<String>,
+    resume_answer: Option<String>,
+    inject_payload: Option<Value>,
+    include_extra_info: bool,
+    agent_session_id: Option<String>,
+) -> Result<Value, Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
     let engine_config = crate::dag_engine::engine::EngineConfig::from_env()
@@ -29,9 +51,8 @@ pub async fn run_dag(
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
     let result: Result<Value, Box<dyn std::error::Error>> = async {
-        // Load and execute the graph
-        let file_content = tokio::fs::read_to_string(&file_path).await?;
-        let mut graph: Graph = serde_json::from_str(&file_content)?;
+        // Parse and execute the graph
+        let mut graph: Graph = serde_json::from_str(&graph_json)?;
         graph
             .validate()
             .map_err(|e| Box::<dyn std::error::Error>::from(format!("Invalid graph: {}", e)))?;

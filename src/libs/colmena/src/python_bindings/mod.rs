@@ -273,16 +273,35 @@ impl ColmenaLlm {
 create_exception!(colmena, DagException, PyException);
 
 #[pyfunction]
-#[pyo3(signature = (file_path, resume_id=None, resume_answer=None, inject_payload=None, include_extra_info=false, agent_session_id=None))]
+#[pyo3(signature = (graph, resume_id=None, resume_answer=None, inject_payload=None, include_extra_info=false, agent_session_id=None))]
 fn run_dag(
     py: Python,
-    file_path: String,
+    graph: pyo3::Bound<'_, pyo3::PyAny>,
     resume_id: Option<String>,
     resume_answer: Option<String>,
     inject_payload: Option<pyo3::Bound<'_, pyo3::PyAny>>,
     include_extra_info: bool,
     agent_session_id: Option<String>,
 ) -> PyResult<String> {
+    // `graph` is either a path to a JSON file (str) or an in-memory graph (dict).
+    enum GraphSource {
+        Path(String),
+        Json(String),
+    }
+    let source = if let Ok(path) = graph.extract::<String>() {
+        GraphSource::Path(path)
+    } else {
+        let value: serde_json::Value = pythonize::depythonize_bound(graph).map_err(|e| {
+            DagException::new_err(format!(
+                "graph must be a file-path string or a graph dict: {}",
+                e
+            ))
+        })?;
+        GraphSource::Json(
+            serde_json::to_string(&value).map_err(|e| DagException::new_err(e.to_string()))?,
+        )
+    };
+
     let inject_payload_val: Option<serde_json::Value> = match inject_payload {
         Some(obj) => Some(
             pythonize::depythonize_bound(obj).map_err(|e| DagException::new_err(e.to_string()))?,
@@ -294,16 +313,31 @@ fn run_dag(
             tokio::runtime::Runtime::new().map_err(|e| DagException::new_err(e.to_string()))?;
 
         rt.block_on(async {
-            match crate::dag_engine::api::run_dag(
-                file_path,
-                resume_id,
-                resume_answer,
-                inject_payload_val,
-                include_extra_info,
-                agent_session_id,
-            )
-            .await
-            {
+            let exec = match source {
+                GraphSource::Path(p) => {
+                    crate::dag_engine::api::run_dag(
+                        p,
+                        resume_id,
+                        resume_answer,
+                        inject_payload_val,
+                        include_extra_info,
+                        agent_session_id,
+                    )
+                    .await
+                }
+                GraphSource::Json(j) => {
+                    crate::dag_engine::api::run_dag_from_str(
+                        j,
+                        resume_id,
+                        resume_answer,
+                        inject_payload_val,
+                        include_extra_info,
+                        agent_session_id,
+                    )
+                    .await
+                }
+            };
+            match exec {
                 Ok(result) => serde_json::to_string_pretty(&result)
                     .map_err(|e| DagException::new_err(e.to_string())),
                 Err(e) => Err(DagException::new_err(e.to_string())),
@@ -365,9 +399,7 @@ impl Registry {
             })
             .collect();
         let value = serde_json::Value::Array(entries);
-        pythonize::pythonize(py, &value)
-            .map(|b| b.into())
-            .map_err(|e| DagException::new_err(e.to_string()))
+        pythonize::pythonize(py, &value).map_err(|e| DagException::new_err(e.to_string()))
     }
 }
 

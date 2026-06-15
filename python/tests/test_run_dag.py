@@ -78,10 +78,23 @@ def test_run_dag_returns_final_output(tmp_path):
     assert "__colmena_session_id" in result
 
 
+def test_run_dag_accepts_inmemory_dict():
+    """run_dag runs a graph dict directly, with no file written to disk."""
+    result = json.loads(colmena.run_dag(POWER_GRAPH))
+    assert result["pow_step"]["output"] == 125.0
+    assert result["log_result"] == 125.0
+
+
 def test_run_dag_missing_file_raises():
     """A non-existent graph file raises DagException, not a panic."""
     with pytest.raises(colmena.DagException):
         colmena.run_dag("does/not/exist.json")
+
+
+def test_run_dag_rejects_garbage_arg():
+    """A non-str / non-dict graph argument raises DagException."""
+    with pytest.raises(colmena.DagException):
+        colmena.run_dag(12345)
 
 
 def test_validate_graph_accepts_valid_dict():
