@@ -155,9 +155,15 @@ ignoraba). Sin cambio de firma → ADP no afectado. Verificado: `cargo check --f
 **Tests añadidos:** `python/tests/test_run_dag.py` — `run_dag` (output final + archivo inexistente →
 `DagException`), `validate_graph` (válido/ inválido), `default_registry().node_types()`. 5/5 pasan.
 
-Pendiente de P1:
-- Guía "Colmena DAG desde Python" (doc de usuario dedicada).
-- Tests de suspend→resume (Q/A), `inject_payload`, `serve_dag` smoke.
+**Completado en P1 (2026-06-15):**
+- ✅ Guía de usuario dedicada [`48_python_dag.md`](48_python_dag.md) (run_dag, validate_graph,
+  serve_dag, inject_payload, suspend→resume, registro) + indexada en `DEVELOPER_GUIDE.md`.
+- ✅ Tests: `test_run_dag.py` ampliado con `inject_payload` (webhook → 343) y suspend→resume
+  (skipif sin `DATABASE_URL`); nuevo `test_serve_dag.py` (smoke webhook out-of-process → 343).
+  8 tests en total, todos verdes (verificado E2E con servicios reales).
+
+P1 cubre ahora la superficie DAG documentada y testeada. Lo que resta es P2 (ergonomía):
+type stubs `.pyi`, `run_dag` con dict en memoria, doc de `colmena.documents`, runtime unificado.
 
 (plan original abajo)
 
