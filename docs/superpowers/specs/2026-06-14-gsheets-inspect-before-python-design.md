@@ -86,6 +86,30 @@ modelo barato (flash). Si flash igual falla tras el cambio, se documenta y se
 evalúa algo estructural en un follow-up — pero el texto es el primer movimiento
 correcto y el de mayor leverage.
 
+### Resultado de la verificación (2026-06-14, sheet real con merges)
+
+Mismo prompt vago ("subí 10 al monto de todas las frutas y guardá"), las nuevas
+instrucciones in-binary:
+
+| | flash (pre-fix) | **flash (post-fix)** | **gemini-2.5-pro (post-fix)** |
+|---|---|---|---|
+| ¿Lee la tabla primero? | ❌ | ❌ | ✅ (`gsheets_read` → `run_python`) |
+| ¿Falso éxito? | ⚠️ casi (reporta "actualizó frutas") | ✅ **ya no** — frena en 0 filas y ofrece inspeccionar | ✅ |
+| Resultado en el sheet | ❌ 0 cambios | ❌ 0 cambios (pide ayuda) | ✅ **Manzana 110 / Banana 210 / Pera 60** |
+
+**Conclusión:** las instrucciones son **correctas** — gemini-2.5-pro las siguió
+al pie de la letra (narró *"necesito leer la hoja para entender la estructura...
+los nombres de las columnas"*, citando #1). El fallo residual de flash es un
+**techo de capacidad**, no un defecto de la instrucción. La regla detective (#2)
+**sí** mejora flash: elimina el peor caso (falso éxito silencioso) — ahora flash
+frena y pregunta en vez de reportar un cambio que no hizo.
+
+**Implicancia de producto:** para manipulación autónoma de Excels complejos
+conviene un modelo capaz (pro); flash es seguro para leer/mostrar pero riesgoso
+para modificar a ciegas. Un guard estructural que fuerce a flash a reconocer el
+esquema antes de operar queda como follow-up opcional (fuera de alcance de este
+fix de texto).
+
 ## Impacto / compat
 
 Solo texto LLM-facing. Sin cambios de API, sin impacto en ADP. Cambia lo que el

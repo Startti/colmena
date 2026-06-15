@@ -2487,3 +2487,39 @@ correctos **Frutas=350 / Verduras=100** (sin fill darían 100/30). Grafos:
 **Estado.** done (unit + E2E verificados contra Google real).
 
 ---
+
+## 36. gsheets — instrucción "inspeccioná la tabla antes de correr python" (2026-06-14)
+
+**Qué cambió.** Texto LLM-facing de gsheets para cerrar un fallo silencioso: con
+un pedido vago ("subí 10 al monto de todas las frutas") un agente iba directo a
+`gsheets_run_python` y **adivinaba la semántica** de los datos (filtraba
+`Producto` por nombre en vez de la columna `Categoria`), matcheando 0 filas pero
+reportándolo como éxito — sin ningún error.
+
+**Causa raíz.** Contradicción entre dos capas always-on: el Google Workspace
+prelude decía "leéla primero con `gsheets_read`", mientras la descripción de
+`gsheets_run_python` implicaba autosuficiencia ("load each table as a binding").
+El agente le creyó a la descripción de la tool.
+
+**Cómo.** Dos instrucciones complementarias en la descripción de
+`gsheets_run_python` (`gsheets.yaml`): **preventiva** (KNOW THE COLUMNS FIRST —
+bindear carga las FILAS, no el esquema; leé primero si no conocés las columnas) +
+**detective** (SANITY-CHECK ROW COUNT — 0 filas matcheadas ⇒ no reportes éxito,
+reconsiderá). Alineación del `SHEET_WORKFLOW_PRELUDE`
+(`google_workspace_prelude.rs`) para que el "read first" aplique explícitamente
+al path de `gsheets_run_python` y para sumar la regla de 0 filas; la nota de
+merged-cells se actualizó al nuevo auto forward-fill (§35).
+
+**Verificación (sheet real con merges).** Las instrucciones son correctas:
+gemini-2.5-pro las siguió al pie de la letra (leyó la tabla, entendió la columna
+`Categoria`, aplicó +10 a las 3 frutas → 110/210/60). El fallo residual de
+gemini-2.5-flash es **techo de capacidad**, no defecto de instrucción — pero la
+regla detective igual mejora flash: elimina el falso éxito silencioso (ahora
+frena y ofrece inspeccionar). Guard estructural para flash = follow-up opcional.
+
+**Compat.** Solo texto LLM-facing. Sin cambios de API, sin impacto en ADP. Spec:
+[`docs/superpowers/specs/2026-06-14-gsheets-inspect-before-python-design.md`](superpowers/specs/2026-06-14-gsheets-inspect-before-python-design.md).
+
+**Estado.** done.
+
+---
