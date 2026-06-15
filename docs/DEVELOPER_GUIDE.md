@@ -26,6 +26,7 @@ Las secciones están organizadas por **tema**, no por orden numérico. Los prefi
 
 - [**Testing**](./developer_guide/05_testing.md) — Estrategia, patrones de mocking, comandos (cargo test --verbose vs --lib, `#[ignore]`, deny-warnings).
 - [**Testing en Python**](./developer_guide/05a_python_testing.md) — Organización y ejecución de la suite de tests Python.
+- [**Motor DAG desde Python**](./developer_guide/48_python_dag.md) — `run_dag`, `validate_graph`, `serve_dag`, `inject_payload`, suspend→resume e introspección del registro vía las bindings PyO3.
 - [**Performance**](./developer_guide/06a_performance.md) — Cómo medir y optimizar.
 - [**Troubleshooting**](./developer_guide/18_troubleshooting.md) — Errores frecuentes del engine y bindings, con causas y fixes.
 

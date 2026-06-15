@@ -1,926 +1,398 @@
-# 🐍 Ejemplos de Uso en Python - Colmena
+# 🐍 Ejemplos de Uso en Python — Colmena
 
-Esta guía contiene ejemplos prácticos y completos de cómo usar Colmena en Python.
+Guía práctica de cómo usar Colmena desde Python. **Todos los ejemplos coinciden con la API real**
+expuesta por las bindings PyO3 (`src/libs/colmena/src/python_bindings/mod.rs`).
+
+> El paquete se instala como `colmena-ai` (`pip install colmena-ai`) pero **el módulo a importar es
+> `colmena`**.
 
 ## 📋 Tabla de Contenidos
 
 - [Configuración Inicial](#configuración-inicial)
-- [Ejemplos Básicos](#ejemplos-básicos)
-- [Ejemplos Avanzados](#ejemplos-avanzados)
-- [Casos de Uso Reales](#casos-de-uso-reales)
-- [Mejores Prácticas](#mejores-prácticas)
-- [Recetas Útiles](#recetas-útiles)
+- [LLM: llamadas directas](#llm-llamadas-directas)
+- [Streaming (async)](#streaming-async)
+- [Conversaciones](#conversaciones)
+- [Health checks y providers](#health-checks-y-providers)
+- [Motor DAG desde Python](#motor-dag-desde-python)
+- [Manejo de errores](#manejo-de-errores)
+- [Buenas prácticas](#buenas-prácticas)
+
+---
 
 ## ⚙️ Configuración Inicial
 
-### Importar Colmena
+### Importar e inicializar
 
 ```python
 import colmena
-import os
-from typing import List, Dict, Optional
 
-# Inicializar la librería
 llm = colmena.ColmenaLlm()
 ```
 
-### Configurar API Keys
+`ColmenaLlm()` carga automáticamente las API keys desde el entorno al construirse.
 
-```python
-# Método 1: Variables de entorno (recomendado)
-os.environ['OPENAI_API_KEY'] = 'tu-openai-key'
-os.environ['GEMINI_API_KEY'] = 'tu-gemini-key'
-os.environ['ANTHROPIC_API_KEY'] = 'tu-anthropic-key'
+### API Keys
 
-# Método 2: Configuración directa (para desarrollo)
-OPENAI_KEY = "tu-openai-key"
-GEMINI_KEY = "tu-gemini-key"
-ANTHROPIC_KEY = "tu-anthropic-key"
+```bash
+# Recomendado: variables de entorno
+export OPENAI_API_KEY="sk-..."
+export GEMINI_API_KEY="AIza..."
+export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-## 🚀 Ejemplos Básicos
+Para sobrescribir la key en una llamada puntual, usa `LlmConfigOptions.api_key` (ver abajo).
 
-### 1. Primera Llamada Simple
+### Strings de provider
+
+El parámetro `provider` acepta exactamente: `"openai"`, `"google"` (Gemini), `"anthropic"` y `"mock"`.
+
+> ⚠️ Es `"google"`, **no** `"gemini"`.
+
+---
+
+## 🚀 LLM: llamadas directas
+
+`call()` recibe:
+- `messages`: lista de **dicts** `{"role": str, "content": str}` (roles: `system`, `user`, `assistant`).
+- `provider`: string del proveedor.
+- `options`: objeto `LlmConfigOptions` opcional con modelo y parámetros de sampling.
+
+Devuelve la respuesta como `str`.
 
 ```python
 import colmena
 
-def primera_llamada():
-    """Ejemplo más básico posible"""
-    llm = colmena.ColmenaLlm()
+llm = colmena.ColmenaLlm()
 
-    response = llm.call(
-        messages=["Hola, ¿cómo estás?"],
-        provider="google",
-        api_key="tu-gemini-api-key"
-    )
+opts = colmena.LlmConfigOptions()
+opts.model = "gemini-2.5-flash"
+opts.temperature = 0.7
 
-    print(f"Respuesta: {response}")
-
-# Ejecutar
-primera_llamada()
+respuesta = llm.call(
+    messages=[{"role": "user", "content": "Hola, ¿cómo estás?"}],
+    provider="google",
+    options=opts,
+)
+print(respuesta)
 ```
 
-### 2. Llamada con Configuración
+### Configuración completa con `LlmConfigOptions`
+
+Todos los parámetros de modelo/sampling viven en `LlmConfigOptions` y se pasan vía `options=`
+(no existen kwargs sueltos como `model=` o `temperature=` en `call`):
 
 ```python
-def llamada_configurada():
-    """Llamada con parámetros de configuración"""
-    llm = colmena.ColmenaLlm()
+opts = colmena.LlmConfigOptions()
+opts.api_key = "sk-..."         # opcional: override por llamada (si no, se toma del entorno)
+opts.model = "gpt-4o"
+opts.temperature = 0.8          # creatividad (0.0 - 2.0)
+opts.max_tokens = 200           # longitud máxima de la respuesta
+opts.top_p = 0.9                # nucleus sampling
+opts.frequency_penalty = 0.5    # reduce repetición
+opts.presence_penalty = 0.5     # fomenta temas nuevos
 
-    response = llm.call(
-        messages=["Escribe un poema corto sobre Rust"],
-        provider="openai",
-        model="gpt-4",
-        api_key="tu-openai-key",
-        temperature=0.8,      # Más creatividad
-        max_tokens=200,       # Respuesta corta
-        top_p=0.9            # Diversidad en la selección
-    )
-
-    print(f"Poema generado:\n{response}")
-
-llamada_configurada()
+respuesta = llm.call(
+    messages=[{"role": "user", "content": "Escribe un poema corto sobre Rust"}],
+    provider="openai",
+    options=opts,
+)
+print(respuesta)
 ```
 
-### 3. Comparar Proveedores
+Campos disponibles: `api_key`, `model`, `temperature`, `max_tokens`, `top_p`, `frequency_penalty`,
+`presence_penalty`. Lo que no se asigna usa los defaults del proveedor.
+
+### Mensaje de sistema + usuario
 
 ```python
+respuesta = llm.call(
+    messages=[
+        {"role": "system", "content": "Eres un experto en Rust que responde en español."},
+        {"role": "user", "content": "¿Qué ventajas tiene Rust sobre Python?"},
+    ],
+    provider="google",
+)
+print(respuesta)
+```
+
+### Comparar proveedores
+
+```python
+import colmena
+
 def comparar_proveedores():
-    """Comparar respuestas de diferentes proveedores"""
     llm = colmena.ColmenaLlm()
-    pregunta = "¿Qué ventajas tiene Rust sobre Python?"
+    pregunta = [{"role": "user", "content": "¿Qué es Rust en una frase?"}]
 
-    proveedores = [
-        ("openai", "gpt-4", "tu-openai-key"),
-        ("google", "gemini-2.5-flash", "tu-gemini-key"),
-        ("anthropic", "claude-3-sonnet-20240229", "tu-anthropic-key")
-    ]
-
-    for provider, model, api_key in proveedores:
+    for provider in ("openai", "google", "anthropic"):
         try:
-            response = llm.call(
-                messages=[pregunta],
-                provider=provider,
-                model=model,
-                api_key=api_key
-            )
-            print(f"\n🤖 {provider.upper()}:")
-            print(f"{response[:200]}...")
+            respuesta = llm.call(messages=pregunta, provider=provider)
+            print(f"\n🤖 {provider.upper()}:\n{respuesta[:200]}...")
         except colmena.LlmException as e:
             print(f"❌ Error con {provider}: {e}")
 
 comparar_proveedores()
 ```
 
-## 🌊 Streaming
+---
 
-### 4. Streaming Básico
+## 🌊 Streaming (async)
 
-```python
-def streaming_basico():
-    """Ejemplo de streaming con output en tiempo real"""
-    llm = colmena.ColmenaLlm()
-
-    print("🤖 Generando historia...")
-
-    chunks = llm.stream(
-        messages=["Cuenta una historia corta sobre un robot que aprende a programar"],
-        provider="google",
-        api_key="tu-gemini-key"
-    )
-
-    print("\n📖 Historia:")
-    for chunk in chunks:
-        print(chunk, end="", flush=True)
-
-    print("\n\n✅ Historia completada!")
-
-streaming_basico()
-```
-
-### 5. Streaming con Control
+`stream()` devuelve un **iterador asíncrono**. Debe consumirse con `async for` dentro de un event loop
+— no es síncrono.
 
 ```python
-import time
+import asyncio
+import colmena
 
-def streaming_controlado():
-    """Streaming con control de velocidad y paradas"""
+async def historia():
     llm = colmena.ColmenaLlm()
-
-    chunks = llm.stream(
-        messages=["Explica paso a paso cómo compilar un proyecto Rust"],
+    # stream() devuelve un awaitable; hay que await-earlo para obtener el iterador async.
+    stream = await llm.stream(
+        messages=[{"role": "user", "content": "Cuenta una historia corta sobre un robot programador"}],
         provider="openai",
-        model="gpt-4",
-        api_key="tu-openai-key"
     )
-
-    print("🔧 Explicación paso a paso:\n")
-
-    chunk_count = 0
-    for chunk in chunks:
+    async for chunk in stream:
         print(chunk, end="", flush=True)
+    print()
 
-        chunk_count += 1
-        if chunk_count % 10 == 0:  # Pausa cada 10 chunks
-            time.sleep(0.1)
-
-    print("\n\n✅ Explicación completada!")
-
-streaming_controlado()
+asyncio.run(historia())
 ```
+
+`llm.stream(...)` devuelve un `Future`: primero `await` para obtener el iterador y luego `async for`.
+Cada `chunk` es un `str` con el fragmento de texto. Los errores durante el streaming se propagan como
+`colmena.LlmException` al iterar.
+
+---
 
 ## 🗣️ Conversaciones
 
-### 6. Conversación Simple
+El historial se mantiene como una lista de dicts `{"role", "content"}`, alternando `user` y `assistant`:
 
 ```python
-def conversacion_simple():
-    """Mantener contexto en múltiples intercambios"""
-    llm = colmena.ColmenaLlm()
+import colmena
 
-    # Historial de conversación
-    mensajes = [
-        "Hola, soy un desarrollador Python que quiere aprender Rust",
-        "¿Por dónde debería empezar?",
-        "¿Qué herramientas necesito instalar?"
+def conversacion():
+    llm = colmena.ColmenaLlm()
+    historial = [
+        {"role": "system", "content": "Eres un mentor de programación conciso."},
+        {"role": "user", "content": "Soy dev Python y quiero aprender Rust. ¿Por dónde empiezo?"},
     ]
 
-    response = llm.call(
-        messages=mensajes,
-        provider="anthropic",
-        api_key="tu-anthropic-key",
-        temperature=0.7
-    )
+    respuesta = llm.call(messages=historial, provider="anthropic")
+    print("🤖", respuesta)
 
-    print("🤖 Asistente:")
-    print(response)
+    # Agregar la respuesta al historial y continuar
+    historial.append({"role": "assistant", "content": respuesta})
+    historial.append({"role": "user", "content": "¿Qué herramientas debo instalar?"})
 
-conversacion_simple()
-```
+    print("🤖", llm.call(messages=historial, provider="anthropic"))
 
-### 7. Conversación Interactiva
-
-```python
-def conversacion_interactiva():
-    """Conversación interactiva con el usuario"""
-    llm = colmena.ColmenaLlm()
-    historial = []
-
-    print("🤖 ¡Hola! Soy tu asistente de programación. Escribe 'salir' para terminar.")
-
-    while True:
-        # Obtener input del usuario
-        user_input = input("\n👤 Tú: ")
-
-        if user_input.lower() in ['salir', 'exit', 'quit']:
-            print("👋 ¡Hasta luego!")
-            break
-
-        # Agregar mensaje del usuario al historial
-        historial.append(user_input)
-
-        try:
-            # Generar respuesta
-            response = llm.call(
-                messages=historial,
-                provider="google",
-                api_key="tu-gemini-key",
-                temperature=0.7
-            )
-
-            # Mostrar respuesta
-            print(f"\n🤖 Asistente: {response}")
-
-            # Agregar respuesta del asistente al historial
-            historial.append(response)
-
-        except colmena.LlmException as e:
-            print(f"❌ Error: {e}")
-            # No agregar al historial si hay error
-
-# conversacion_interactiva()  # Descomenta para ejecutar
-```
-
-## 👁️ Visión y Soporte de Documentos
-
-Colmena permite enviar archivos multimedia (imágenes y documentos) a los modelos. Puedes pasar los archivos mediante una ruta local o directamente como datos Base64.
-
-### 8. Análisis de Imágenes y PDFs
-
-```python
-def analizar_archivos():
-    """Análisis coordinado de imágenes y documentos"""
-    llm = colmena.ColmenaLlm()
-
-    # Ejemplo 1: Imagen por ruta local
-    response_img = llm.call(
-        messages=["¿Qué hay en esta imagen?"],
-        provider="google",
-        api_key="tu-gemini-key",
-        files=[
-            {
-                "mime_type": "image/jpeg",
-                "path": "docs/assets/diagrama.jpg"
-            }
-        ]
-    )
-    print(f"Análisis Imagen: {response_img}")
-
-    # Ejemplo 2: PDF nativo para OpenAI
-    # Nota: OpenAI usa automáticamente el Responses API para PDFs
-    response_pdf = llm.call(
-        messages=["Resume los puntos clave de este contrato"],
-        provider="openai",
-        model="gpt-4o",
-        api_key="tu-openai-key",
-        files=[
-            {
-                "mime_type": "application/pdf",
-                "filename": "contrato_v1.pdf",
-                "path": "tests/dags/sample.pdf"
-            }
-        ]
-    )
-    print(f"Resumen PDF: {response_pdf}")
-
-analizar_archivos()
-```
-
-### 9. Envío de Archivos vía Base64
-
-Útil cuando los archivos vienen de un buffer en memoria o cargados desde una base de datos.
-
-```python
-import base64
-
-def enviar_archivo_base64():
-    """Envío de archivos sin usar el sistema de ficheros"""
-    llm = colmena.ColmenaLlm()
-
-    # Supongamos que tenemos los bytes de un PDF
-    pdf_bytes = b"%PDF-1.4..." 
-    pdf_b64 = base64.b64encode(pdf_bytes).decode('utf-8')
-
-    response = llm.call(
-        messages=["¿A qué fecha corresponde este documento?"],
-        provider="openai",
-        api_key="tu-openai-key",
-        files=[
-            {
-                "mime_type": "application/pdf",
-                "filename": "documento_memoria.pdf",
-                "data": pdf_b64
-            }
-        ]
-    )
-    print(f"Respuesta: {response}")
-
-enviar_archivo_base64()
-```
-
-## 🧠 Casos de Uso Avanzados
-
-### 10. Análisis de Código
-
-```python
-def analizar_codigo():
-    """Usar IA para analizar y mejorar código"""
-
-    codigo_python = """
-def calcular_fibonacci(n):
-    if n <= 1:
-        return n
-    else:
-        return calcular_fibonacci(n-1) + calcular_fibonacci(n-2)
-
-# Usar la función
-resultado = calcular_fibonacci(10)
-print(resultado)
-"""
-
-    llm = colmena.ColmenaLlm()
-
-    prompt = f"""
-Analiza este código Python y sugiere mejoras:
-
-```python
-{codigo_python}
-```
-
-Por favor proporciona:
-1. Análisis del algoritmo
-2. Problemas de performance
-3. Versión optimizada
-4. Explicación de las mejoras
-"""
-
-    response = llm.call(
-        messages=[prompt],
-        provider="openai",
-        model="gpt-4",
-        api_key="tu-openai-key",
-        temperature=0.3  # Menos creatividad, más precisión
-    )
-
-    print("🔍 Análisis de Código:")
-    print(response)
-
-analizar_codigo()
-```
-
-### 11. Generación de Documentación
-
-```python
-def generar_documentacion():
-    """Generar documentación automática para funciones"""
-
-    funcion_rust = """
-pub fn merge_sort<T: Ord + Clone>(arr: &mut [T]) {
-    let len = arr.len();
-    if len <= 1 {
-        return;
-    }
-
-    let mid = len / 2;
-    let mut left = arr[0..mid].to_vec();
-    let mut right = arr[mid..].to_vec();
-
-    merge_sort(&mut left);
-    merge_sort(&mut right);
-
-    merge(&left, &right, arr);
-}
-"""
-
-    llm = colmena.ColmenaLlm()
-
-    prompt = f"""
-Genera documentación completa para esta función Rust:
-
-```rust
-{funcion_rust}
-```
-
-Incluye:
-1. Descripción de la función
-2. Parámetros
-3. Valor de retorno
-4. Complejidad temporal
-5. Ejemplo de uso
-6. Notas sobre performance
-"""
-
-    response = llm.call(
-        messages=[prompt],
-        provider="anthropic",
-        api_key="tu-anthropic-key",
-        temperature=0.2
-    )
-
-    print("📖 Documentación Generada:")
-    print(response)
-
-generar_documentacion()
-```
-
-### 12. Traductor de Código
-
-```python
-def traducir_codigo():
-    """Traducir código entre lenguajes"""
-
-    codigo_python = """
-class CalculadoraBasica:
-    def __init__(self):
-        self.historial = []
-
-    def sumar(self, a, b):
-        resultado = a + b
-        self.historial.append(f"{a} + {b} = {resultado}")
-        return resultado
-
-    def obtener_historial(self):
-        return self.historial.copy()
-
-# Uso
-calc = CalculadoraBasica()
-print(calc.sumar(5, 3))
-print(calc.obtener_historial())
-"""
-
-    llm = colmena.ColmenaLlm()
-
-    prompt = f"""
-Traduce este código Python a Rust manteniendo la misma funcionalidad:
-
-```python
-{codigo_python}
-```
-
-Requisitos:
-1. Usar structs e impl en lugar de clases
-2. Manejar ownership apropiadamente
-3. Usar tipos seguros
-4. Incluir comentarios explicativos
-5. Seguir convenciones de Rust
-"""
-
-    response = llm.call(
-        messages=[prompt],
-        provider="google",
-        api_key="tu-gemini-key",
-        temperature=0.3
-    )
-
-    print("🔄 Código Traducido:")
-    print(response)
-
-traducir_codigo()
-```
-
-## 🛠️ Utilidades Prácticas
-
-### 13. Wrapper con Manejo de Errors
-
-```python
-class ColmenaWrapper:
-    """Wrapper con manejo robusto de errores"""
-
-    def __init__(self):
-        self.llm = colmena.ColmenaLlm()
-        self.default_config = {
-            "temperature": 0.7,
-            "max_tokens": 1000,
-        }
-
-    def call_safe(self, messages, provider, api_key=None, **kwargs):
-        """Llamada con manejo de errores y reintentos"""
-
-        # Combinar configuración por defecto con parámetros
-        config = {**self.default_config, **kwargs}
-
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                response = self.llm.call(
-                    messages=messages,
-                    provider=provider,
-                    api_key=api_key,
-                    **config
-                )
-                return {"success": True, "response": response, "error": None}
-
-            except colmena.LlmException as e:
-                error_msg = str(e)
-
-                # Diferentes estrategias según el error
-                if "rate limit" in error_msg.lower():
-                    wait_time = 2 ** attempt  # Backoff exponencial
-                    print(f"⏳ Rate limit alcanzado, esperando {wait_time}s...")
-                    time.sleep(wait_time)
-                    continue
-                elif "api key" in error_msg.lower():
-                    return {"success": False, "response": None, "error": "API key inválida"}
-                else:
-                    return {"success": False, "response": None, "error": error_msg}
-
-            except Exception as e:
-                return {"success": False, "response": None, "error": f"Error inesperado: {e}"}
-
-        return {"success": False, "response": None, "error": "Máximo de reintentos alcanzado"}
-
-    def stream_safe(self, messages, provider, api_key=None, **kwargs):
-        """Streaming con manejo de errores"""
-        config = {**self.default_config, **kwargs}
-
-        try:
-            return self.llm.stream(
-                messages=messages,
-                provider=provider,
-                api_key=api_key,
-                **config
-            )
-        except Exception as e:
-            print(f"❌ Error en streaming: {e}")
-            return None
-
-# Ejemplo de uso
-def usar_wrapper():
-    wrapper = ColmenaWrapper()
-
-    result = wrapper.call_safe(
-        messages=["Explica qué es PyO3"],
-        provider="google",
-        api_key="tu-gemini-key"
-    )
-
-    if result["success"]:
-        print(f"✅ Respuesta: {result['response']}")
-    else:
-        print(f"❌ Error: {result['error']}")
-
-usar_wrapper()
-```
-
-### 12. Sistema de Cache
-
-```python
-import hashlib
-import json
-import os
-from pathlib import Path
-
-class ColmenaCache:
-    """Sistema de cache para respuestas de Colmena"""
-
-    def __init__(self, cache_dir="./cache"):
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(exist_ok=True)
-        self.llm = colmena.ColmenaLlm()
-
-    def _get_cache_key(self, messages, provider, **kwargs):
-        """Generar clave de cache basada en parámetros"""
-        # Crear un hash de los parámetros
-        data = {
-            "messages": messages,
-            "provider": provider,
-            **kwargs
-        }
-        json_str = json.dumps(data, sort_keys=True)
-        return hashlib.md5(json_str.encode()).hexdigest()
-
-    def _get_cache_path(self, cache_key):
-        """Obtener ruta del archivo de cache"""
-        return self.cache_dir / f"{cache_key}.json"
-
-    def call_cached(self, messages, provider, api_key=None, use_cache=True, **kwargs):
-        """Llamada con cache automático"""
-
-        if use_cache:
-            cache_key = self._get_cache_key(messages, provider, **kwargs)
-            cache_path = self._get_cache_path(cache_key)
-
-            # Verificar si existe en cache
-            if cache_path.exists():
-                with open(cache_path, 'r', encoding='utf-8') as f:
-                    cached_data = json.load(f)
-                print(f"📄 Respuesta obtenida del cache")
-                return cached_data["response"]
-
-        # Si no está en cache, hacer llamada real
-        try:
-            response = self.llm.call(
-                messages=messages,
-                provider=provider,
-                api_key=api_key,
-                **kwargs
-            )
-
-            # Guardar en cache si está habilitado
-            if use_cache:
-                cache_data = {
-                    "messages": messages,
-                    "provider": provider,
-                    "response": response,
-                    "timestamp": time.time()
-                }
-                with open(cache_path, 'w', encoding='utf-8') as f:
-                    json.dump(cache_data, f, ensure_ascii=False, indent=2)
-                print(f"💾 Respuesta guardada en cache")
-
-            return response
-
-        except Exception as e:
-            print(f"❌ Error en llamada: {e}")
-            raise
-
-    def clear_cache(self):
-        """Limpiar todo el cache"""
-        for cache_file in self.cache_dir.glob("*.json"):
-            cache_file.unlink()
-        print("🗑️ Cache limpiado")
-
-    def cache_stats(self):
-        """Estadísticas del cache"""
-        cache_files = list(self.cache_dir.glob("*.json"))
-        total_size = sum(f.stat().st_size for f in cache_files)
-
-        print(f"📊 Estadísticas del Cache:")
-        print(f"   Archivos: {len(cache_files)}")
-        print(f"   Tamaño total: {total_size / 1024:.2f} KB")
-
-# Ejemplo de uso
-def usar_cache():
-    cache = ColmenaCache()
-
-    # Primera llamada (se guarda en cache)
-    response1 = cache.call_cached(
-        messages=["¿Qué es Rust?"],
-        provider="google",
-        api_key="tu-gemini-key"
-    )
-
-    # Segunda llamada (se obtiene del cache)
-    response2 = cache.call_cached(
-        messages=["¿Qué es Rust?"],
-        provider="google",
-        api_key="tu-gemini-key"
-    )
-
-    cache.cache_stats()
-
-usar_cache()
-```
-
-### 15. Batch Processing
-
-```python
-import concurrent.futures
-from typing import List, Dict
-
-def procesar_lote():
-    """Procesar múltiples consultas en paralelo"""
-
-    llm = colmena.ColmenaLlm()
-
-    # Lista de consultas a procesar
-    consultas = [
-        {
-            "id": "rust_basics",
-            "messages": ["¿Cuáles son los conceptos básicos de Rust?"],
-            "provider": "google"
-        },
-        {
-            "id": "python_vs_rust",
-            "messages": ["Compara Python y Rust para desarrollo web"],
-            "provider": "openai",
-            "model": "gpt-4"
-        },
-        {
-            "id": "async_programming",
-            "messages": ["Explica programación asíncrona en Rust"],
-            "provider": "anthropic"
-        }
-    ]
-
-    def procesar_consulta(consulta):
-        """Procesar una consulta individual"""
-        try:
-            response = llm.call(
-                messages=consulta["messages"],
-                provider=consulta["provider"],
-                model=consulta.get("model", ""),
-                api_key=f"tu-{consulta['provider']}-key",
-                temperature=0.7
-            )
-
-            return {
-                "id": consulta["id"],
-                "success": True,
-                "response": response,
-                "error": None
-            }
-
-        except Exception as e:
-            return {
-                "id": consulta["id"],
-                "success": False,
-                "response": None,
-                "error": str(e)
-            }
-
-    # Procesar en paralelo
-    print("🔄 Procesando consultas en paralelo...")
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        # Enviar todas las consultas
-        futures = {
-            executor.submit(procesar_consulta, consulta): consulta["id"]
-            for consulta in consultas
-        }
-
-        # Recoger resultados
-        resultados = {}
-        for future in concurrent.futures.as_completed(futures):
-            resultado = future.result()
-            resultados[resultado["id"]] = resultado
-
-            if resultado["success"]:
-                print(f"✅ {resultado['id']}: Completado")
-            else:
-                print(f"❌ {resultado['id']}: Error - {resultado['error']}")
-
-    # Mostrar resultados
-    print("\n📋 Resultados:")
-    for consulta_id, resultado in resultados.items():
-        if resultado["success"]:
-            print(f"\n🔍 {consulta_id}:")
-            print(f"{resultado['response'][:150]}...")
-
-procesar_lote()
-```
-
-## 📝 Mejores Prácticas
-
-### 14. Configuración de Producción
-
-```python
-import logging
-from dataclasses import dataclass
-from typing import Optional
-
-@dataclass
-class ColmenaConfig:
-    """Configuración robusta para producción"""
-    openai_key: Optional[str] = None
-    gemini_key: Optional[str] = None
-    anthropic_key: Optional[str] = None
-    default_provider: str = "google"
-    default_temperature: float = 0.7
-    default_max_tokens: int = 1000
-    enable_logging: bool = True
-    log_level: str = "INFO"
-
-class ColmenaProduction:
-    """Clase para uso en producción"""
-
-    def __init__(self, config: ColmenaConfig):
-        self.config = config
-        self.llm = colmena.ColmenaLlm()
-
-        # Configurar logging
-        if config.enable_logging:
-            logging.basicConfig(
-                level=getattr(logging, config.log_level),
-                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-            self.logger = logging.getLogger('colmena')
-        else:
-            self.logger = None
-
-    def _log(self, level: str, message: str):
-        """Log interno"""
-        if self.logger:
-            getattr(self.logger, level)(message)
-
-    def call(self, messages, provider=None, **kwargs):
-        """Llamada con configuración de producción"""
-
-        # Usar proveedor por defecto si no se especifica
-        if provider is None:
-            provider = self.config.default_provider
-
-        # Obtener API key
-        api_key = kwargs.get('api_key')
-        if not api_key:
-            key_map = {
-                'openai': self.config.openai_key,
-                'google': self.config.gemini_key,
-                'anthropic': self.config.anthropic_key
-            }
-            api_key = key_map.get(provider)
-
-            if not api_key:
-                raise ValueError(f"No API key configurada para {provider}")
-
-        # Aplicar configuración por defecto
-        call_kwargs = {
-            'temperature': self.config.default_temperature,
-            'max_tokens': self.config.default_max_tokens,
-            **kwargs,
-            'api_key': api_key
-        }
-
-        self._log('info', f"Llamada a {provider} con {len(messages)} mensajes")
-
-        try:
-            response = self.llm.call(
-                messages=messages,
-                provider=provider,
-                **call_kwargs
-            )
-
-            self._log('info', f"Respuesta exitosa de {provider} ({len(response)} caracteres)")
-            return response
-
-        except Exception as e:
-            self._log('error', f"Error en llamada a {provider}: {e}")
-            raise
-
-# Configuración y uso
-def ejemplo_produccion():
-    config = ColmenaConfig(
-        gemini_key="tu-gemini-key",
-        openai_key="tu-openai-key",
-        default_provider="google",
-        enable_logging=True
-    )
-
-    colmena_prod = ColmenaProduction(config)
-
-    try:
-        response = colmena_prod.call(
-            messages=["Explica arquitectura hexagonal brevemente"]
-        )
-        print(f"Respuesta: {response}")
-    except Exception as e:
-        print(f"Error: {e}")
-
-ejemplo_produccion()
-```
-
-## 🎯 Recetas Rápidas
-
-### One-liners Útiles
-
-```python
-# Respuesta rápida
-respuesta = colmena.ColmenaLlm().call(["Tu pregunta"], "google", api_key="key")
-
-# Streaming en una línea
-list(colmena.ColmenaLlm().stream(["Cuenta algo"], "google", api_key="key"))
-
-# Comparar proveedores rápidamente
-[colmena.ColmenaLlm().call(["¿Qué es Rust?"], p, api_key="key") for p in ["openai", "google"]]
-```
-
-### Scripts de Utilidad
-
-```python
-# test_providers.py - Verificar todos los proveedores
-def test_all_providers():
-    providers = {
-        "openai": "tu-openai-key",
-        "google": "tu-gemini-key",
-        "anthropic": "tu-anthropic-key"
-    }
-
-    llm = colmena.ColmenaLlm()
-
-    for provider, key in providers.items():
-        try:
-            response = llm.call(["Test"], provider, api_key=key)
-            print(f"✅ {provider}: OK")
-        except:
-            print(f"❌ {provider}: FAIL")
-
-# benchmark.py - Medir performance
-import time
-
-def benchmark_provider(provider, api_key, iterations=5):
-    llm = colmena.ColmenaLlm()
-    times = []
-
-    for i in range(iterations):
-        start = time.time()
-        llm.call([f"Test {i}"], provider, api_key=api_key)
-        times.append(time.time() - start)
-
-    avg_time = sum(times) / len(times)
-    print(f"{provider}: {avg_time:.2f}s promedio")
+conversacion()
 ```
 
 ---
 
-**🐝 Colmena** - *Potenciando el desarrollo de IA con Python y Rust*
+## 🩺 Health checks y providers
+
+```python
+import colmena
+
+llm = colmena.ColmenaLlm()
+
+print(llm.get_providers())          # -> lista de proveedores disponibles, p.ej. ["openai", "google", ...]
+print(llm.health_check("google"))   # -> bool
+```
+
+---
+
+## 🧩 Motor DAG desde Python
+
+Más allá de llamadas sueltas, Colmena ejecuta **workflows de agentes definidos como grafos JSON**
+(nodos LLM, tools, HTTP, control de flujo, human-in-the-loop, etc.).
+
+### Ejecutar un grafo: `run_dag`
+
+Devuelve un **JSON string**; parséalo con `json.loads`.
+
+```python
+import colmena
+import json
+
+result_json = colmena.run_dag("tests/graphs/basic/power.json")
+result = json.loads(result_json)
+print(json.dumps(result, indent=2))
+```
+
+Firma completa:
+
+```python
+colmena.run_dag(
+    graph,                      # ruta al grafo JSON (str) O el grafo en memoria (dict)
+    resume_id=None,             # id de resume para flujos suspend/resume
+    resume_answer=None,         # respuesta en formato Q/A canónico (ver guía de suspend)
+    inject_payload=None,        # dict inyectado como payload inicial del trigger
+    include_extra_info=False,   # incluye metadata extra en el resultado
+    agent_session_id=None,      # id estable de sesión de agente (memoria, resume, secure values)
+)
+```
+
+`graph` puede ser una ruta a archivo **o** un dict en memoria — `colmena.run_dag({"nodes": {...}, "edges": [...]})`
+corre el grafo sin escribirlo a disco.
+
+> Para flujos con estado entre ejecuciones (suspend/resume, memoria conversacional), pasa siempre un
+> `agent_session_id` estable.
+
+### Validar un grafo en memoria: `validate_graph`
+
+Acepta un **dict** y lanza `colmena.DagException` si el grafo no es válido.
+
+```python
+import colmena
+
+graph = {
+    "nodes": {
+        "start":      {"type": "mock_input", "config": {"input": 5}},
+        "pow_step":   {"type": "exponential", "config": {"exponent": 3}},
+        "log_result": {"type": "log"},
+    },
+    "edges": [
+        {"from": "start", "to": "pow_step"},
+        {"from": "pow_step", "to": "log_result"},
+    ],
+}
+
+colmena.validate_graph(graph)  # OK -> None ; inválido -> DagException
+print("Grafo válido ✅")
+```
+
+### Servir webhooks: `serve_dag`
+
+Levanta un servidor HTTP que expone los webhooks declarados en el grafo. **Es bloqueante.**
+
+```python
+import colmena
+
+# El grafo declara un trigger_webhook en "/power".
+# POST http://localhost:8080/power  con  {"input": 10}  -> 1000
+colmena.serve_dag("tests/graphs/basic/power_webhook.json", host="0.0.0.0", port=8080)
+```
+
+### Inspeccionar el registro de nodos: `default_registry`
+
+```python
+import colmena
+
+reg = colmena.default_registry()
+print(reg.node_types())                    # -> lista de node types registrados
+
+# Catálogo de sub-tools de un toolkit (sin conexión a DB)
+catalogo = reg.toolkit_catalog("api_explorer", {})
+print(catalogo)                            # -> [{"name", "description", "required"}, ...]
+```
+
+---
+
+## 📄 `colmena.documents` (hojas CRDT) — 🚧 en progreso
+
+> **El subsistema CRDT aún está en desarrollo.** El submódulo `colmena.documents` es funcional pero
+> su superficie y su modelo de ejecución pueden cambiar; trátalo como experimental hasta que CRDT se
+> cierre.
+
+El submódulo `colmena.documents` expone operaciones sobre hojas de cálculo CRDT en proceso:
+
+```python
+import colmena
+
+colmena.documents.add_sheet(artifact_id, name)              # -> sheet_id (str)
+colmena.documents.list_sheets(artifact_id)                  # -> [{"sheet_id", "name"}, ...]
+colmena.documents.read_sheet(artifact_id, sheet_id)         # -> {"A1": valor, "B2": valor, ...}
+colmena.documents.write_sheet(artifact_id, sheet_id,
+                              columns, rows, mode="replace") # mode: "replace" | "append"
+```
+
+El paquete repo-side `colmena_documents` (en `python/colmena_documents/`) añade ergonomía
+**pandas** encima (read/write con DataFrames). No se publica en el wheel; es un helper del repo.
+
+> ⚠️ **Limitación actual (CRDT en progreso):** `colmena.documents` requiere un runtime tokio activo
+> en el contexto de Python; desde un script Python normal lanza
+> `RuntimeError: no tokio runtime available`. A diferencia de `call`/`run_dag` (que crean su propio
+> runtime), este submódulo aún no lo hace. **No es un descuido puntual sino parte del estado WIP de
+> CRDT** — darle un runtime propio se abordará cuando el subsistema CRDT se termine (ver
+> [`audit_python_bindings.md`](../developer_guide/audit_python_bindings.md)). Hoy es usable desde
+> contextos que ya tienen runtime tokio (p.ej. el CLI), no desde Python plano.
+
+## 📦 Identidad del paquete
+
+- **`colmena-ai`** — nombre en PyPI (`pip install colmena-ai`).
+- **`colmena`** — módulo a importar; es la extensión nativa (Rust/PyO3). Incluye el submódulo
+  `colmena.documents` y, desde 0.4.0, type stubs (`colmena/__init__.pyi` + `py.typed`).
+- **`colmena_documents`** — wrapper pandas puro-Python en el repo (`python/colmena_documents/`),
+  **no** incluido en el wheel publicado.
+
+## 🛡️ Manejo de errores
+
+Las funciones de LLM lanzan `colmena.LlmException`; las del motor DAG lanzan `colmena.DagException`.
+
+```python
+import colmena
+
+llm = colmena.ColmenaLlm()
+
+try:
+    respuesta = llm.call(
+        messages=[{"role": "user", "content": "Explica qué es PyO3"}],
+        provider="google",
+    )
+    print(respuesta)
+except colmena.LlmException as e:
+    print(f"❌ Error de LLM: {e}")
+
+try:
+    colmena.run_dag("grafo_inexistente.json")
+except colmena.DagException as e:
+    print(f"❌ Error de DAG: {e}")
+```
+
+### Wrapper con reintentos (patrón útil)
+
+```python
+import time
+import colmena
+
+class ColmenaWrapper:
+    def __init__(self):
+        self.llm = colmena.ColmenaLlm()
+
+    def call_safe(self, messages, provider, options=None, max_retries=3):
+        for attempt in range(max_retries):
+            try:
+                resp = self.llm.call(messages=messages, provider=provider, options=options)
+                return {"success": True, "response": resp, "error": None}
+            except colmena.LlmException as e:
+                msg = str(e).lower()
+                if "rate limit" in msg:
+                    time.sleep(2 ** attempt)   # backoff exponencial
+                    continue
+                return {"success": False, "response": None, "error": str(e)}
+        return {"success": False, "response": None, "error": "max retries reached"}
+
+wrapper = ColmenaWrapper()
+print(wrapper.call_safe([{"role": "user", "content": "Hola"}], "google"))
+```
+
+---
+
+## 📝 Buenas prácticas
+
+1. **Mensajes como dicts**: `messages` siempre es `list[dict]` con keys `role` y `content`. Si falta
+   alguna, se lanza `LlmException`.
+2. **Config vía `LlmConfigOptions`**: modelo y sampling van en el objeto `options`, no como kwargs.
+3. **Streaming es async**: usa `async for` dentro de un event loop (`asyncio.run`).
+4. **Provider `"google"`** para Gemini, nunca `"gemini"`.
+5. **DAG con estado**: pasa `agent_session_id` estable para suspend/resume y memoria.
+6. **`run_dag` devuelve JSON string**: recuerda `json.loads` sobre el resultado.
+
+---
+
+**🐝 Colmena** — *Orquestación de agentes de IA en Rust, con bindings nativos de Python.*

@@ -11,8 +11,9 @@ import sys
 from pathlib import Path
 
 def main():
-    # Path to the DAG file (relative to project root)
-    dag_file = "tests/power.json"
+    # Path to the DAG file (relative to project root).
+    # power.json: mock_input 5 -> exponential^3 -> log  (=> 125). No API keys needed.
+    dag_file = "tests/graphs/basic/power.json"
     
     print(f"🚀 Running DAG: {dag_file}")
     print("-" * 50)

@@ -12,13 +12,13 @@ import os
 
 def main():
     # Check if API key is set
-    if not os.getenv("OPENAI_API_KEY"):
-        print("⚠️  Warning: OPENAI_API_KEY not set. LLM calls may fail.")
+    if not os.getenv("GEMINI_API_KEY"):
+        print("⚠️  Warning: GEMINI_API_KEY not set. LLM calls may fail.")
         print("   Set it in your .env file or environment variables.")
         print()
-    
-    # Path to the DAG file with LLM and tools
-    dag_file = "tests/agent_with_tools.json"
+
+    # Path to the DAG file with an LLM agent + tools (uses google/gemini-2.5-flash)
+    dag_file = "tests/graphs/agents/agent_with_tools_gemini.json"
     
     print(f"🤖 Running LLM DAG: {dag_file}")
     print("-" * 50)

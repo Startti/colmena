@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "colmena-ai"
 description = "High-performance Rust library for multi-provider LLM orchestration with native Python bindings"
-version = "0.3.0"
+version = "0.4.0"
 readme = "README_PYPI.md"
 license = {text = "MIT"}
 
@@ -51,6 +51,8 @@ Issues = "https://github.com/Startti/colmena/issues"
 module-name = "colmena"
 features = ["pyo3/extension-module", "python"]
 manifest-path = "src/libs/colmena/Cargo.toml"
+# Ship PEP 561 type stubs (colmena.pyi + py.typed) alongside the compiled module.
+python-source = "stubs"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

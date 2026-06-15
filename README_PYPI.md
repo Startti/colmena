@@ -1,16 +1,17 @@
 # 🐝 Colmena AI - Multi-Provider LLM Orchestration Library
 
-A **high-performance** Rust library for AI agent orchestration with native Python bindings. Colmena provides a unified interface for multiple LLM providers with both synchronous and streaming support.
+A **high-performance** Rust library for AI agent orchestration with native Python bindings. Colmena
+provides a unified interface for multiple LLM providers (synchronous calls + async streaming) **and** a
+JSON-defined DAG engine for running multi-step agent workflows.
 
 ## ✨ Features
 
 - **🔌 Multi-Provider Support**: Native support for OpenAI, Google Gemini, and Anthropic Claude
-- **⚡ Streaming Responses**: Real-time text generation with chunk-by-chunk delivery
-- **🦀 Rust Performance**: Native Rust implementation compiled with PyO3 (zero Python overhead)
+- **🧩 DAG Orchestration**: Run multi-node agent graphs (LLM + tools + control flow) from JSON
+- **⚡ Async Streaming**: Real-time, chunk-by-chunk generation via `async for`
+- **🦀 Rust Performance**: Native Rust implementation compiled with PyO3
 - **🏗️ Clean Architecture**: Hexagonal architecture for maximum extensibility
-- **🔧 Flexible Configuration**: API keys from environment variables or direct values
-- **🛡️ Robust Error Handling**: Type-safe error management and recovery
-- **🔒 Type Safety**: Compile-time guarantees from Rust's type system
+- **🔧 Flexible Configuration**: API keys from environment variables or per-call overrides
 
 ## 🚀 Quick Start
 
@@ -20,78 +21,149 @@ A **high-performance** Rust library for AI agent orchestration with native Pytho
 pip install colmena-ai
 ```
 
-### Basic Usage
+The import name is `colmena` (the PyPI package is `colmena-ai`):
 
 ```python
-from colmena import ColmenaLlm
+import colmena
+```
 
-# Initialize the library
-llm = ColmenaLlm()
+### Basic Usage — a single LLM call
 
-# Simple synchronous call
+`call()` takes **messages as a list of `{"role", "content"}` dicts**, a `provider` string, and an optional
+`LlmConfigOptions` object for model/sampling parameters. It returns the response text as a `str`.
+
+```python
+import colmena
+
+llm = colmena.ColmenaLlm()
+
+opts = colmena.LlmConfigOptions()
+opts.model = "gemini-2.5-flash"
+opts.temperature = 0.7
+
 response = llm.call(
-    messages=[
-        {"role": "user", "content": "What is the capital of France?"}
-    ],
-    provider="openai",
-    model="gpt-4o",
-    temperature=0.7
+    messages=[{"role": "user", "content": "What is the capital of France?"}],
+    provider="google",          # one of: "openai", "google", "anthropic"
+    options=opts,
 )
 
 print(response)
-# Output: "The capital of France is Paris."
+# "The capital of France is Paris."
 ```
 
-### Streaming Responses
+> **Provider strings:** use `"google"` for Gemini (not `"gemini"`), plus `"openai"` and `"anthropic"`.
+
+### Streaming Responses (async)
+
+`stream()` returns an **async iterator** — consume it with `async for` inside an event loop:
 
 ```python
-from colmena import ColmenaLlm
+import asyncio
+import colmena
 
-llm = ColmenaLlm()
+async def main():
+    llm = colmena.ColmenaLlm()
+    # stream() returns an awaitable; await it to get the async iterator.
+    stream = await llm.stream(
+        messages=[{"role": "user", "content": "Tell me a short story about AI"}],
+        provider="anthropic",
+    )
+    async for chunk in stream:
+        print(chunk, end="", flush=True)
 
-# Stream responses in real-time
-for chunk in llm.stream(
-    messages=["Tell me a story about AI"],
-    provider="anthropic",
-    model="claude-3-sonnet-20240229"
-):
-    print(chunk, end="", flush=True)
+asyncio.run(main())
 ```
 
-### Multiple Providers
+### Configuration with `LlmConfigOptions`
+
+All model and sampling parameters live on `LlmConfigOptions` and are passed via `options=`:
 
 ```python
-from colmena import ColmenaLlm
+import colmena
 
-llm = ColmenaLlm()
+llm = colmena.ColmenaLlm()
 
-# OpenAI
-openai_response = llm.call(
-    messages=[{"role": "user", "content": "Hello!"}],
+opts = colmena.LlmConfigOptions()
+opts.api_key = "sk-..."        # optional per-call override (else taken from env)
+opts.model = "gpt-4o"
+opts.temperature = 0.7         # creativity (0.0 - 2.0)
+opts.max_tokens = 500          # maximum response length
+opts.top_p = 0.9               # nucleus sampling
+opts.frequency_penalty = 0.5   # reduce repetition
+opts.presence_penalty = 0.5    # encourage new topics
+
+response = llm.call(
+    messages=[
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Explain quantum computing"},
+    ],
     provider="openai",
-    model="gpt-4o"
-)
-
-# Google Gemini
-gemini_response = llm.call(
-    messages=[{"role": "user", "content": "Hello!"}],
-    provider="gemini",
-    model="gemini-pro"
-)
-
-# Anthropic Claude
-claude_response = llm.call(
-    messages=[{"role": "user", "content": "Hello!"}],
-    provider="anthropic",
-    model="claude-3-sonnet-20240229"
+    options=opts,
 )
 ```
+
+Available fields on `LlmConfigOptions`: `api_key`, `model`, `temperature`, `max_tokens`, `top_p`,
+`frequency_penalty`, `presence_penalty`. Any field left unset falls back to provider defaults.
+
+## 🧩 DAG Orchestration
+
+Beyond single calls, Colmena runs **agent workflows defined as JSON graphs** — LLM nodes, tool calls,
+HTTP requests, control flow, human-in-the-loop, and more. Run a graph from Python with `run_dag()`:
+
+```python
+import colmena
+import json
+
+# run_dag accepts a file path or an in-memory graph dict; returns a JSON string.
+result_json = colmena.run_dag("path/to/graph.json")
+result = json.loads(result_json)
+print(result)
+```
+
+Validate a graph (as an in-memory dict) before running it:
+
+```python
+import colmena
+
+graph = {
+    "nodes": {
+        "start":     {"type": "mock_input", "config": {"input": 5}},
+        "pow_step":  {"type": "exponential", "config": {"exponent": 3}},
+        "log_result": {"type": "log"},
+    },
+    "edges": [
+        {"from": "start", "to": "pow_step"},
+        {"from": "pow_step", "to": "log_result"},
+    ],
+}
+
+colmena.validate_graph(graph)   # raises colmena.DagException if invalid
+```
+
+Serve a graph's webhook triggers as an HTTP API (blocking call):
+
+```python
+import colmena
+
+# Exposes the webhook paths declared in the graph (e.g. POST /power).
+colmena.serve_dag("path/to/graph_with_webhook.json", host="0.0.0.0", port=8080)
+```
+
+Inspect the node registry without a database connection:
+
+```python
+import colmena
+
+reg = colmena.default_registry()
+print(reg.node_types())   # -> list of registered node type names
+```
+
+`run_dag` also accepts `resume_id`, `resume_answer`, `inject_payload`, `include_extra_info`, and
+`agent_session_id` for suspend/resume and stateful agent flows.
 
 ## 🔑 Configuration
 
-### Environment Variables
-
-Set API keys as environment variables:
+### Environment Variables (recommended)
 
 ```bash
 export OPENAI_API_KEY="sk-..."
@@ -99,56 +171,46 @@ export GEMINI_API_KEY="AIza..."
 export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-### Direct API Keys
+`ColmenaLlm()` loads these automatically at construction. To override per call, set
+`LlmConfigOptions.api_key`.
 
-Or pass them directly:
+## 📦 Models
+
+Pass any model id your provider supports via `LlmConfigOptions.model`. Commonly used:
+
+- **OpenAI** (`provider="openai"`): `gpt-4o`, `gpt-4o-mini`
+- **Google Gemini** (`provider="google"`): `gemini-2.5-flash`, `gemini-2.5-pro`
+- **Anthropic Claude** (`provider="anthropic"`): `claude-3-5-sonnet-20241022`
+
+If `model` is unset, each provider falls back to its own default.
+
+## 🔍 Error Handling
+
+LLM calls raise `colmena.LlmException`; DAG functions raise `colmena.DagException`:
 
 ```python
-llm.call(
-    messages=[{"role": "user", "content": "Hello"}],
-    provider="openai",
-    api_key="sk-...",  # Direct API key
-    model="gpt-4o"
-)
+import colmena
+
+llm = colmena.ColmenaLlm()
+
+try:
+    response = llm.call(
+        messages=[{"role": "user", "content": "Hello"}],
+        provider="openai",
+    )
+except colmena.LlmException as e:
+    print(f"LLM error: {e}")
 ```
 
-## 📦 Supported Models
-
-### OpenAI
-- `gpt-4o` (default)
-- `gpt-4-turbo`
-- `gpt-3.5-turbo`
-
-### Google Gemini
-- `gemini-pro` (default)
-- `gemini-2.0-flash-exp`
-- `gemini-1.5-pro`
-
-### Anthropic Claude
-- `claude-3-sonnet-20240229` (default)
-- `claude-3-opus-20240229`
-- `claude-3-haiku-20240307`
-
-## 🎯 Advanced Configuration
+## 🧪 Health Checks
 
 ```python
-from colmena import ColmenaLlm
+import colmena
 
-llm = ColmenaLlm()
+llm = colmena.ColmenaLlm()
 
-response = llm.call(
-    messages=[
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "Explain quantum computing"}
-    ],
-    provider="openai",
-    model="gpt-4o",
-    temperature=0.7,        # Creativity (0.0 - 2.0)
-    max_tokens=500,         # Maximum response length
-    top_p=0.9,              # Nucleus sampling
-    frequency_penalty=0.5,  # Reduce repetition
-    presence_penalty=0.5    # Encourage new topics
-)
+print(llm.get_providers())          # -> list of available provider names
+print(llm.health_check("openai"))   # -> bool
 ```
 
 ## 🏗️ Architecture
@@ -157,59 +219,13 @@ Colmena is built using **Hexagonal Architecture** (Ports and Adapters):
 
 - **Domain Layer**: Pure business logic and interfaces
 - **Application Layer**: Use cases and orchestration
-- **Infrastructure Layer**: Provider adapters (OpenAI, Gemini, Anthropic)
-
-This design ensures:
-- Easy to add new LLM providers
-- Testable and maintainable code
-- Clear separation of concerns
-
-## 🔍 Error Handling
-
-```python
-from colmena import ColmenaLlm
-
-llm = ColmenaLlm()
-
-try:
-    response = llm.call(
-        messages=[{"role": "user", "content": "Hello"}],
-        provider="openai"
-    )
-except Exception as e:
-    print(f"Error: {e}")
-    # Handle error appropriately
-```
-
-## 🧪 Health Checks
-
-```python
-from colmena import ColmenaLlm
-
-llm = ColmenaLlm()
-
-# Check if a provider is available
-is_healthy = llm.health_check("openai")
-print(f"OpenAI is {'available' if is_healthy else 'unavailable'}")
-```
-
-## 🌟 Why Colmena?
-
-1. **Performance**: Native Rust implementation, no Python overhead
-2. **Unified API**: One interface for all LLM providers
-3. **Type Safety**: Compile-time guarantees from Rust
-4. **Extensible**: Easy to add new providers following hexagonal architecture
-5. **Production Ready**: Robust error handling and testing
+- **Infrastructure Layer**: Provider adapters (OpenAI, Gemini, Anthropic) + DAG nodes
 
 ## 📚 Documentation
 
 - [GitHub Repository](https://github.com/Startti/colmena)
 - [Developer Guide](https://github.com/Startti/colmena/tree/main/docs/developer_guide)
 - [Architecture Details](https://github.com/Startti/colmena/blob/main/docs/dds/ARQUITECTURA_HEXAGONAL_GUIA.md)
-
-## 🤝 Contributing
-
-Contributions are welcome! Please see our [Contributing Guide](https://github.com/Startti/colmena/blob/main/docs/developer_guide/08_contributing.md).
 
 ## 📄 License
 
