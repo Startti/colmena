@@ -51,6 +51,8 @@ Issues = "https://github.com/Startti/colmena/issues"
 module-name = "colmena"
 features = ["pyo3/extension-module", "python"]
 manifest-path = "src/libs/colmena/Cargo.toml"
+# Ship PEP 561 type stubs (colmena.pyi + py.typed) alongside the compiled module.
+python-source = "stubs"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

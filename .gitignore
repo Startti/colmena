@@ -64,3 +64,6 @@ Desktop.ini
 *.swo
 *~
 .venv.py39.bak/
+
+# maturin editable build artifact (compiled extension placed in the stubs package)
+stubs/colmena/*.so
