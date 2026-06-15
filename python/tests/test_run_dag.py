@@ -9,6 +9,8 @@ API keys and no network.
 """
 
 import json
+import os
+import uuid
 
 import colmena
 import pytest
@@ -23,6 +25,38 @@ POWER_GRAPH = {
     "edges": [
         {"from": "start", "to": "pow_step"},
         {"from": "pow_step", "to": "log_result"},
+    ],
+}
+
+# Same math, but fed by a trigger_webhook so `inject_payload` has a node to land on.
+WEBHOOK_GRAPH = {
+    "nodes": {
+        "trigger": {
+            "type": "trigger_webhook",
+            "config": {"path": "/power", "test_payload": {"input": 10}},
+        },
+        "pow_step": {"type": "exponential", "config": {"exponent": 3}},
+        "log_result": {"type": "log"},
+    },
+    "edges": [
+        {"from": "trigger", "to": "pow_step"},
+        {"from": "pow_step", "to": "log_result"},
+    ],
+}
+
+# input -> suspend(approve_continue) -> log. Run 1 suspends; run 2 resumes.
+SUSPEND_GRAPH = {
+    "nodes": {
+        "start": {"type": "input", "config": {"msg": "step 1"}},
+        "controller": {
+            "type": "suspend",
+            "config": {"id": "approve_continue", "question": "Approve?"},
+        },
+        "final": {"type": "log"},
+    },
+    "edges": [
+        {"from": "start", "to": "controller"},
+        {"from": "controller", "to": "final"},
     ],
 }
 
@@ -68,3 +102,39 @@ def test_default_registry_lists_node_types():
     # Nodes used by the test graph must be registered.
     for nt in ("mock_input", "exponential", "log"):
         assert nt in node_types
+
+
+def test_run_dag_inject_payload(tmp_path):
+    """inject_payload lands on the trigger_webhook node as the incoming payload."""
+    result = json.loads(
+        colmena.run_dag(
+            _write_graph(tmp_path, WEBHOOK_GRAPH),
+            inject_payload={"input": 7},
+        )
+    )
+    # The injected payload drives the computation: 7 ** 3 == 343.
+    assert result["trigger"]["input"] == 7
+    assert result["pow_step"]["output"] == 343.0
+
+
+@pytest.mark.skipif(
+    not os.getenv("DATABASE_URL"),
+    reason="suspend/resume persists DAG state across runs — requires DATABASE_URL",
+)
+def test_run_dag_suspend_then_resume(tmp_path):
+    """A suspend node pauses run 1; run 2 resumes it via a stable agent_session_id."""
+    graph_path = _write_graph(tmp_path, SUSPEND_GRAPH)
+    agent = f"py_test_suspend_{uuid.uuid4().hex}"
+
+    # Run 1 — suspends at the `approve_continue` node.
+    suspended = json.loads(colmena.run_dag(graph_path, agent_session_id=agent))
+    assert suspended["__colmena_status"] == "SUSPENDED"
+    assert suspended["questions"][0]["id"] == "approve_continue"
+
+    # Run 2 — resume with the canonical Q/A answer format, keyed by agent_session_id.
+    answer = "Q[approve_continue]: Approve?\nA[approve_continue]: yes, approved"
+    resumed = json.loads(
+        colmena.run_dag(graph_path, resume_answer=answer, agent_session_id=agent)
+    )
+    assert resumed["controller"]["status"] == "resumed"
+    assert resumed["final"] == "yes, approved"
