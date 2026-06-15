@@ -125,6 +125,14 @@ pub struct DagToolExecutor {
     /// binary base64 in the LLM context never makes sense — it just burns
     /// tokens and risks tripping the model's TPM rate limit.
     max_tool_result_bytes: usize,
+    /// Per-turn set of sheets the agent has already read, keyed
+    /// `"spreadsheet_id::sheet"`. Populated when `gsheets_read` succeeds (and
+    /// when the inspect guard surfaces a preview). Checked before
+    /// `gsheets_run_python` executes: any bound sheet not in here triggers the
+    /// inspect-first interception. The executor is built once per `llm_call`
+    /// execution, so this set is naturally per-turn (no cross-turn persistence —
+    /// consistent with the no-cache stance of expand-merges).
+    gsheets_seen_sheets: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 /// Default per-string cap for tool results (50 KB). Above this, the string is
@@ -202,6 +210,7 @@ impl DagToolExecutor {
             conversation_repository: None,
             conversation_key: None,
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_STRING_BYTES,
+            gsheets_seen_sheets: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -222,6 +231,75 @@ impl DagToolExecutor {
     pub fn with_max_tool_result_bytes(mut self, max: usize) -> Self {
         self.max_tool_result_bytes = max;
         self
+    }
+
+    /// Mark a sheet as read this turn (idempotent).
+    fn mark_gsheets_sheet_seen(&self, spreadsheet_id: &str, sheet: &str) {
+        use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::gsheets_inspect_guard::sheet_key;
+        self.gsheets_seen_sheets
+            .lock()
+            .unwrap()
+            .insert(sheet_key(spreadsheet_id, sheet));
+    }
+
+    /// Inspect-before-python guard. If every sheet binding in `args` was already
+    /// read this turn (or there are none), dispatch `gsheets_run_python`
+    /// normally. Otherwise short-circuit: read a bounded markdown preview of each
+    /// unread sheet, mark it seen, and return an `inspect_first` envelope WITHOUT
+    /// running the code, forcing the agent to re-call with informed code.
+    async fn gsheets_run_python_guarded(&self, args: serde_json::Value) -> serde_json::Value {
+        use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::dispatch_gsheets_read;
+        use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::dispatch_gsheets_run_python;
+        use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::gsheets_inspect_guard::{
+            columns_from_markdown_header, truncate_markdown_preview, unseen_sheet_bindings,
+        };
+
+        let unseen = {
+            let seen = self.gsheets_seen_sheets.lock().unwrap();
+            unseen_sheet_bindings(&args, &seen)
+        };
+        if unseen.is_empty() {
+            return dispatch_gsheets_run_python(args).await;
+        }
+
+        let mut inspected = serde_json::Map::new();
+        for b in &unseen {
+            let read_args = serde_json::json!({
+                "spreadsheet_id": b.spreadsheet_id,
+                "sheet": b.sheet,
+                "range": b.range.clone().unwrap_or_else(|| "1:6".to_string()),
+                "format": "markdown",
+            });
+            let read_res = dispatch_gsheets_read(read_args).await;
+            // If the preview read itself errored (missing sheet / permission),
+            // surface that — run_python would have failed too.
+            if matches!(&read_res, serde_json::Value::Object(m) if m.contains_key("error")) {
+                return read_res;
+            }
+            let md_full = read_res
+                .get("markdown")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let preview = truncate_markdown_preview(md_full, 5);
+            let columns = columns_from_markdown_header(&preview);
+            inspected.insert(
+                b.var.clone(),
+                serde_json::json!({
+                    "spreadsheet_id": b.spreadsheet_id,
+                    "sheet": b.sheet,
+                    "columns": columns,
+                    "preview_markdown": preview,
+                }),
+            );
+            self.mark_gsheets_sheet_seen(&b.spreadsheet_id, &b.sheet);
+        }
+
+        serde_json::json!({
+            "status": "inspect_first",
+            "inspected_sheets": inspected,
+            "advice": "Antes de correr código sobre una hoja hay que conocer sus columnas reales. Acá está el preview (primeras filas) de cada hoja. Volvé a llamar gsheets_run_python con el MISMO código, corregido si hace falta para usar estas columnas/valores reales (p.ej. filtrar por la columna correcta, no adivinar nombres).",
+            "next_action": "re-call gsheets_run_python"
+        })
     }
 
     /// Builder: attach a SecureValueService + session_id for secret injection.
@@ -1034,8 +1112,8 @@ impl DagToolExecutor {
             use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
                 dispatch_gsheets_add_sheet, dispatch_gsheets_create_spreadsheet,
                 dispatch_gsheets_delete_sheet, dispatch_gsheets_list_sheets, dispatch_gsheets_read,
-                dispatch_gsheets_run_python, dispatch_gsheets_set_cell, dispatch_gsheets_set_range,
-                GSHEETS_ADD_SHEET_TOOL, GSHEETS_CREATE_SPREADSHEET_TOOL, GSHEETS_DELETE_SHEET_TOOL,
+                dispatch_gsheets_set_cell, dispatch_gsheets_set_range, GSHEETS_ADD_SHEET_TOOL,
+                GSHEETS_CREATE_SPREADSHEET_TOOL, GSHEETS_DELETE_SHEET_TOOL,
                 GSHEETS_LIST_SHEETS_TOOL, GSHEETS_READ_TOOL, GSHEETS_SET_CELL_TOOL,
                 GSHEETS_SET_RANGE_TOOL, TOOL_GSHEETS_RUN_PYTHON,
             };
@@ -1091,10 +1169,27 @@ impl DagToolExecutor {
                     n if n == GSHEETS_DELETE_SHEET_TOOL => {
                         dispatch_gsheets_delete_sheet(args).await
                     }
-                    n if n == GSHEETS_READ_TOOL => dispatch_gsheets_read(args).await,
+                    n if n == GSHEETS_READ_TOOL => {
+                        let ss = args
+                            .get("spreadsheet_id")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let sheet = args.get("sheet").and_then(|v| v.as_str()).map(String::from);
+                        let r = dispatch_gsheets_read(args).await;
+                        let is_err =
+                            matches!(&r, serde_json::Value::Object(m) if m.contains_key("error"));
+                        if !is_err {
+                            if let (Some(ss), Some(sheet)) = (ss, sheet) {
+                                self.mark_gsheets_sheet_seen(&ss, &sheet);
+                            }
+                        }
+                        r
+                    }
                     n if n == GSHEETS_SET_CELL_TOOL => dispatch_gsheets_set_cell(args).await,
                     n if n == GSHEETS_SET_RANGE_TOOL => dispatch_gsheets_set_range(args).await,
-                    n if n == TOOL_GSHEETS_RUN_PYTHON => dispatch_gsheets_run_python(args).await,
+                    n if n == TOOL_GSHEETS_RUN_PYTHON => {
+                        self.gsheets_run_python_guarded(args).await
+                    }
                     n if n == TOOL_CREATE_FROM_XLSX => {
                         dispatch_create_from_xlsx_via_executor(self, args).await
                     }
