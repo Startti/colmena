@@ -63,7 +63,8 @@ import colmena
 
 async def main():
     llm = colmena.ColmenaLlm()
-    stream = llm.stream(
+    # stream() returns an awaitable; await it to get the async iterator.
+    stream = await llm.stream(
         messages=[{"role": "user", "content": "Tell me a short story about AI"}],
         provider="anthropic",
     )

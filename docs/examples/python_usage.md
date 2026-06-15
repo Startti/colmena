@@ -147,9 +147,10 @@ import colmena
 
 async def historia():
     llm = colmena.ColmenaLlm()
-    stream = llm.stream(
+    # stream() devuelve un awaitable; hay que await-earlo para obtener el iterador async.
+    stream = await llm.stream(
         messages=[{"role": "user", "content": "Cuenta una historia corta sobre un robot programador"}],
-        provider="google",
+        provider="openai",
     )
     async for chunk in stream:
         print(chunk, end="", flush=True)
@@ -158,6 +159,7 @@ async def historia():
 asyncio.run(historia())
 ```
 
+`llm.stream(...)` devuelve un `Future`: primero `await` para obtener el iterador y luego `async for`.
 Cada `chunk` es un `str` con el fragmento de texto. Los errores durante el streaming se propagan como
 `colmena.LlmException` al iterar.
 
@@ -287,6 +289,38 @@ print(catalogo)                            # -> [{"name", "description", "requir
 ```
 
 ---
+
+## 📄 `colmena.documents` (hojas CRDT)
+
+El submódulo `colmena.documents` expone operaciones sobre hojas de cálculo CRDT en proceso:
+
+```python
+import colmena
+
+colmena.documents.add_sheet(artifact_id, name)              # -> sheet_id (str)
+colmena.documents.list_sheets(artifact_id)                  # -> [{"sheet_id", "name"}, ...]
+colmena.documents.read_sheet(artifact_id, sheet_id)         # -> {"A1": valor, "B2": valor, ...}
+colmena.documents.write_sheet(artifact_id, sheet_id,
+                              columns, rows, mode="replace") # mode: "replace" | "append"
+```
+
+El paquete repo-side `colmena_documents` (en `python/colmena_documents/`) añade ergonomía
+**pandas** encima (read/write con DataFrames). No se publica en el wheel; es un helper del repo.
+
+> ⚠️ **Limitación actual (runtime):** `colmena.documents` requiere un runtime tokio activo en el
+> contexto de Python; desde un script Python normal lanza
+> `RuntimeError: no tokio runtime available`. A diferencia de `call`/`run_dag` (que crean su propio
+> runtime), este submódulo aún no lo hace. Darle un runtime propio es un follow-up pendiente
+> (ver [`audit_python_bindings.md`](../developer_guide/audit_python_bindings.md), P2). Hoy es usable
+> desde contextos que ya tienen runtime tokio (p.ej. el CLI), no desde Python plano.
+
+## 📦 Identidad del paquete
+
+- **`colmena-ai`** — nombre en PyPI (`pip install colmena-ai`).
+- **`colmena`** — módulo a importar; es la extensión nativa (Rust/PyO3). Incluye el submódulo
+  `colmena.documents` y, desde 0.4.0, type stubs (`colmena/__init__.pyi` + `py.typed`).
+- **`colmena_documents`** — wrapper pandas puro-Python en el repo (`python/colmena_documents/`),
+  **no** incluido en el wheel publicado.
 
 ## 🛡️ Manejo de errores
 

@@ -162,8 +162,29 @@ ignoraba). Sin cambio de firma → ADP no afectado. Verificado: `cargo check --f
   (skipif sin `DATABASE_URL`); nuevo `test_serve_dag.py` (smoke webhook out-of-process → 343).
   8 tests en total, todos verdes (verificado E2E con servicios reales).
 
-P1 cubre ahora la superficie DAG documentada y testeada. Lo que resta es P2 (ergonomía):
-type stubs `.pyi`, `run_dag` con dict en memoria, doc de `colmena.documents`, runtime unificado.
+P1 cubre ahora la superficie DAG documentada y testeada.
+
+**Completado en P2 (2026-06-15):**
+- ✅ **Type stubs**: `stubs/colmena/__init__.pyi` + `py.typed`, empaquetados vía
+  `[tool.maturin] python-source = "stubs"`. Verificado: el wheel incluye `colmena/__init__.pyi` +
+  `colmena/py.typed`, y `mypy` consume las firmas (autocompletado + type-check). Stub clave: `stream`
+  devuelve `Awaitable[LlmStream]` (hay que `await`).
+- ✅ **`run_dag` acepta dict en memoria** además de path. Refactor de `api::run_dag` (extrae
+  `run_dag_from_str`, firma de `run_dag(file_path)` intacta → Node no afectado); binding `run_dag`
+  acepta `str | dict`. Tests: dict directo (125) + arg basura → `DagException`. 9/9 en `test_run_dag.py`.
+- ✅ **Doc de `colmena.documents`** + wrapper pandas + identidad de paquete
+  (`colmena-ai`/`colmena`/`colmena_documents`) en `python_usage.md`.
+- ✅ **Bug de doc P0 corregido**: `stream` requiere `await` (devuelve `Future`) — README_PYPI y
+  python_usage decían `stream = llm.stream(...)` sin await. Verificado E2E (openai: 8 chunks).
+
+**Hallazgo (P2): `colmena.documents` no es usable desde Python plano** — lanza
+`RuntimeError: no tokio runtime available` (a diferencia de `call`/`run_dag` que crean su propio
+runtime). Documentado como limitación. Fix = darle runtime propio; encaja en el ítem de runtime
+(deferido por decisión del usuario). Por eso `test_crdt_documents_roundtrip` falla sin runtime.
+
+**Deferido (decisión del usuario):** unificar el modelo de runtime tokio (incluye habilitar
+`colmena.documents` desde Python plano). Resta también (opcional): `run_dag`/return dict en vez de
+JSON string, tool-calling programático.
 
 (plan original abajo)
 
