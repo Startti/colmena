@@ -1,0 +1,24 @@
+{
+  "comment": "MECHANISM test for the inspect-before-python guard (deterministic intercept). The prompt forces gsheets_run_python WITHOUT a prior gsheets_read, so the guard MUST intercept the first call with an  envelope (markdown preview of 'Ventas'); the agent then re-calls and, having seen the real Categoria column, applies +10 to the 3 frutas. Distinct from gsheets_inspect_guard_e2e.json (which uses a realistic vague prompt where flash often reads first on its own, so the guard acts as a backstop). Replace <SPREADSHEET_ID> per the gsheets E2E runbook.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": { "path": "/inspect_guard_mech", "method": "POST", "test_payload": {
+        "prompt": "Use this exact spreadsheet_id (copy character-by-character): <SPREADSHEET_ID>\nNO leas la hoja antes. Llamá DIRECTAMENTE a gsheets_run_python (sin gsheets_read previo) con binding {var:'v', spreadsheet_id:'<SPREADSHEET_ID>', sheet:'Ventas'} y write_to_spreadsheet:'<SPREADSHEET_ID>', y en el código sumá 10 al Monto de las frutas. Guardá el cambio."
+      }}
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "temperature": 0,
+        "system_message": "Asistente de Google Sheets. Copiá el spreadsheet_id verbatim.",
+        "enabled_tools": ["gsheets"]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [ { "from": "trigger", "to": "agent" }, { "from": "agent", "to": "log" } ]
+}

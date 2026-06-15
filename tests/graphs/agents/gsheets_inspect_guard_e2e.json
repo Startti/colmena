@@ -1,0 +1,24 @@
+{
+  "comment": "E2E: the inspect-before-python guard makes a weak model safe. With a VAGUE prompt ('subí 10 al monto de todas las frutas'), flash used to go straight to gsheets_run_python and guess the semantics (filtering Producto by name -> 0 rows). With the guard, the first run_python is intercepted with an `inspect_first` envelope carrying a markdown preview of 'Ventas'; the agent re-calls with code using the real Categoria column and applies +10 to the 3 frutas (Manzana/Banana/Pera). Replace <SPREADSHEET_ID> with a real sheet (tab 'Ventas', column A 'Categoria' merged) per the gsheets E2E runbook (Secret Manager creds + PYTHONPATH for embedded python).",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": { "path": "/inspect_guard", "method": "POST", "test_payload": {
+        "prompt": "Use this exact spreadsheet_id (copy character-by-character): <SPREADSHEET_ID>\nEn la hoja 'Ventas' de esa planilla, subí 10 al monto de todas las frutas y guardá el cambio en la misma hoja. Avisame qué cambiaste."
+      }}
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "temperature": 0,
+        "system_message": "Sos un asistente que trabaja con Google Sheets. Copiá el spreadsheet_id verbatim. No inventes datos.",
+        "enabled_tools": ["gsheets"]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [ { "from": "trigger", "to": "agent" }, { "from": "agent", "to": "log" } ]
+}
