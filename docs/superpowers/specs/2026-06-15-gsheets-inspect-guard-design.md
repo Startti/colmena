@@ -81,7 +81,7 @@ columnas, no un range exacto).
       "preview_markdown": "| Categoria | Producto | Monto |\n| --- | --- | --- |\n| Frutas | Manzana | 100 |\n| Frutas | Banana | 200 |\n| Frutas | Pera | 50 |\n| Verduras | Lechuga | 30 |\n| Verduras | Tomate | 70 |"
     }
   },
-  "advice": "Antes de correr código sobre una hoja hay que conocer sus columnas reales. Acá está el preview (primeras 6 filas). Volvé a llamar gsheets_run_python con el MISMO código, corregido si hace falta para usar estas columnas/valores reales (p.ej. filtrar por la columna correcta, no adivinar nombres).",
+  "advice": "Antes de correr código sobre una hoja hay que conocer sus columnas reales. Acá está el preview (primeras filas) de cada hoja. Volvé a llamar gsheets_run_python con el MISMO código, corregido si hace falta para usar estas columnas/valores reales (p.ej. filtrar por la columna correcta, no adivinar nombres).",
   "next_action": "re-call gsheets_run_python"
 }
 ```
@@ -101,6 +101,12 @@ columnas, no un range exacto).
 - **Multi-binding mixto** (algunas vistas, otras no): preview solo de las no-vistas;
   igual se short-circuitea (el agente re-llama y ya están todas marcadas).
 - **Inline-only** (sin bindings de hoja): nunca intercepta; ejecuta normal.
+- **Binding con `var` vacío/duplicado:** el guard corre ANTES de la validación de
+  `dispatch_gsheets_run_python` (que rechaza `var` vacío/duplicado). Si el agente
+  manda un binding malformado, el guard lee el preview y lo keyea bajo `""` (o
+  colisiona duplicados) y devuelve `inspect_first` marcando la hoja vista — el
+  `invalid_args` real recién aparece en la re-llamada (la hoja ya está vista →
+  ejecuta → valida). Cosmético: un turno extra, sin loop ni panic.
 
 ## Fuera de alcance (YAGNI)
 
