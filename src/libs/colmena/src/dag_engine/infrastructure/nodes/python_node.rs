@@ -2,7 +2,7 @@ use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use async_trait::async_trait;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
-use pythonize::{depythonize_bound, pythonize};
+use pythonize::{depythonize, pythonize};
 use serde_json::{json, Value};
 use std::error::Error as StdError;
 use std::sync::Arc;
@@ -49,11 +49,13 @@ except SyntaxError as _e:
 "#;
 
 fn validate_sandbox(py: Python<'_>, code: &str) -> Result<Option<String>, String> {
-    let locals = PyDict::new_bound(py);
+    let locals = PyDict::new(py);
     locals
-        .set_item("_code_to_validate", PyString::new_bound(py, code))
+        .set_item("_code_to_validate", PyString::new(py, code))
         .map_err(|e| format!("Validator setup error: {e}"))?;
-    py.run_bound(SANDBOX_VALIDATOR, Some(&locals), Some(&locals))
+    let validator_c = std::ffi::CString::new(SANDBOX_VALIDATOR)
+        .map_err(|e| format!("Validator setup error: {e}"))?;
+    py.run(validator_c.as_c_str(), Some(&locals), Some(&locals))
         .map_err(|e| format!("Validator execution error: {e}"))?;
     match locals.get_item("_violation") {
         Ok(Some(v)) if !v.is_none() => {
@@ -100,7 +102,7 @@ pub fn execute_sandboxed_helper(
     _timeout_secs: u64,
     inputs: &serde_json::Map<String, Value>,
 ) -> Result<PythonRunResult, String> {
-    Python::with_gil(|py| -> Result<PythonRunResult, String> {
+    Python::attach(|py| -> Result<PythonRunResult, String> {
         // 1. Sandbox AST validation (only in restricted mode).
         if sandbox_mode == "restricted" {
             if let Some(violation) = validate_sandbox(py, code)? {
@@ -110,7 +112,7 @@ pub fn execute_sandboxed_helper(
 
         // 2. Build a single namespace dict used as both globals and locals,
         // matching PythonNode::execute semantics exactly.
-        let locals = PyDict::new_bound(py);
+        let locals = PyDict::new(py);
         for (key, value) in inputs.iter() {
             let py_val = pythonize(py, value)
                 .map_err(|e| format!("Failed to convert input '{}' to Python: {}", key, e))?;
@@ -122,12 +124,8 @@ pub fn execute_sandboxed_helper(
         // 3. Set up stdout capture via sys.stdout = io.StringIO().
         // Orchestrated from Rust so it works even in restricted mode (no
         // `import sys` in user code required).
-        let sys_module = py
-            .import_bound("sys")
-            .map_err(|e| format!("import sys: {e}"))?;
-        let io_module = py
-            .import_bound("io")
-            .map_err(|e| format!("import io: {e}"))?;
+        let sys_module = py.import("sys").map_err(|e| format!("import sys: {e}"))?;
+        let io_module = py.import("io").map_err(|e| format!("import io: {e}"))?;
         let stdout_capture = io_module
             .call_method0("StringIO")
             .map_err(|e| format!("create StringIO: {e}"))?;
@@ -139,7 +137,9 @@ pub fn execute_sandboxed_helper(
             .map_err(|e| format!("redirect stdout: {e}"))?;
 
         // 4. Execute user code.
-        let exec_result = py.run_bound(code, Some(&locals), Some(&locals));
+        let code_c = std::ffi::CString::new(code)
+            .map_err(|e| format!("Python execution error: invalid code string: {e}"))?;
+        let exec_result = py.run(code_c.as_c_str(), Some(&locals), Some(&locals));
 
         // 5. Always restore stdout BEFORE returning, regardless of exec result.
         let _ = sys_module.setattr("stdout", original_stdout);
@@ -159,7 +159,7 @@ pub fn execute_sandboxed_helper(
         // Python ↔ JSON boundary rationale (no auto-coercion).
         let output = match locals.get_item("output") {
             Ok(Some(output_obj)) => {
-                let val: Value = depythonize_bound(output_obj)
+                let val: Value = depythonize(&output_obj)
                     .map_err(|e| format!("Failed to convert Python 'output' to JSON: {}", e))?;
                 Some(val)
             }
@@ -316,7 +316,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_python_math_logic() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let node = PythonNode;
         let mut inputs = HashMap::new();
         inputs.insert("x".to_string(), json!(10));
@@ -332,7 +332,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_python_imports() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let node = PythonNode;
         let inputs = HashMap::new();
         let config = json!({ "code": "import math\noutput = math.sqrt(16)" });
@@ -346,7 +346,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_allows_clean_code() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let node = PythonNode;
         let inputs = HashMap::new();
         let config = json!({ "code": "output = 2 + 2", "sandbox_mode": "restricted" });
@@ -360,7 +360,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_allows_whitelisted_import() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let node = PythonNode;
         let inputs = HashMap::new();
         let config = json!({
@@ -377,7 +377,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_blocks_os_import() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let node = PythonNode;
         let inputs = HashMap::new();
         let config = json!({
@@ -396,7 +396,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_blocks_open_builtin() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let node = PythonNode;
         let inputs = HashMap::new();
         let config = json!({
@@ -414,7 +414,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_blocks_eval() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let node = PythonNode;
         let inputs = HashMap::new();
         let config = json!({
@@ -432,7 +432,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_none_mode_allows_os() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let node = PythonNode;
         let inputs = HashMap::new();
         let config = json!({
@@ -449,7 +449,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_default_mode_allows_os() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let node = PythonNode;
         let inputs = HashMap::new();
         let config = json!({
@@ -474,8 +474,8 @@ mod tests {
 
     #[test]
     fn restricted_mode_allows_pandas_import() {
-        pyo3::prepare_freethreaded_python();
-        pyo3::Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
             let result = validate_sandbox(py, "import pandas as pd\noutput = 1");
             match result {
                 Ok(None) => {} // OK — no violation
@@ -487,8 +487,8 @@ mod tests {
 
     #[test]
     fn restricted_mode_allows_numpy_import() {
-        pyo3::prepare_freethreaded_python();
-        pyo3::Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
             let result = validate_sandbox(py, "import numpy as np\noutput = 1");
             match result {
                 Ok(None) => {}
@@ -499,8 +499,8 @@ mod tests {
 
     #[test]
     fn restricted_mode_allows_scipy_stats_import() {
-        pyo3::prepare_freethreaded_python();
-        pyo3::Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
             let result = validate_sandbox(py, "from scipy import stats\noutput = 1");
             match result {
                 Ok(None) => {}
@@ -511,8 +511,8 @@ mod tests {
 
     #[test]
     fn restricted_mode_still_rejects_requests_import() {
-        pyo3::prepare_freethreaded_python();
-        pyo3::Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
             let result = validate_sandbox(py, "import requests\noutput = 1");
             match result {
                 Ok(Some(_)) => {} // OK — violation reported
@@ -523,7 +523,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_skips_reserved_keys_as_python_vars() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let node = PythonNode;
         let mut inputs = HashMap::new();
         inputs.insert("x".to_string(), json!(7));

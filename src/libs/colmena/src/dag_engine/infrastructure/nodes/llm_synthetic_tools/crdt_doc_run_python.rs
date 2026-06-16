@@ -592,7 +592,7 @@ mod tests {
     #[tokio::test]
     async fn multi_sheet_output_sheets_writes_three_new_tabs() {
         // Ensure the Python interpreter is ready (same pattern as python_node tests).
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
 
         // Build in-memory runtime + artifact with one sheet "src" (3 rows).
         let rt = make_runtime().await;
@@ -681,7 +681,7 @@ output = {{"done": True}}
 
     #[tokio::test]
     async fn update_in_place_patches_only_changed_cells_in_crdt() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let rt = make_runtime().await;
         let id = ArtifactId::new();
         let _ = rt.registry.get_or_create(&id, "workbook");

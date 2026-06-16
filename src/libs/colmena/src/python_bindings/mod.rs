@@ -9,7 +9,7 @@ use pyo3::{
     exceptions::{PyException, PyStopAsyncIteration},
     types::PyDict,
 };
-use pyo3_asyncio_0_21::tokio::future_into_py;
+use pyo3_async_runtimes::tokio::future_into_py;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -34,7 +34,7 @@ impl PyLlmStream {
         slf
     }
 
-    fn __anext__<'py>(slf: PyRefMut<'_, Self>, py: Python<'py>) -> PyResult<Option<PyObject>> {
+    fn __anext__<'py>(slf: PyRefMut<'_, Self>, py: Python<'py>) -> PyResult<Option<Py<PyAny>>> {
         let stream = Arc::clone(&slf.stream);
         let future = async move {
             let mut stream = stream.lock().await;
@@ -52,7 +52,7 @@ impl PyLlmStream {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Default)]
 pub struct LlmConfigOptions {
     #[pyo3(get, set)]
@@ -100,7 +100,7 @@ impl ColmenaLlm {
     pub fn call(
         &self,
         py: Python,
-        messages: Vec<&PyDict>,
+        messages: Vec<Bound<'_, PyDict>>,
         provider: &str,
         options: Option<LlmConfigOptions>,
     ) -> PyResult<String> {
@@ -154,7 +154,7 @@ impl ColmenaLlm {
             options.presence_penalty,
         )?;
 
-        py.allow_threads(move || {
+        py.detach(move || {
             let rt =
                 tokio::runtime::Runtime::new().map_err(|e| LlmException::new_err(e.to_string()))?;
             rt.block_on(async {
@@ -172,10 +172,10 @@ impl ColmenaLlm {
     pub fn stream(
         &self,
         py: Python,
-        messages: Vec<&PyDict>,
+        messages: Vec<Bound<'_, PyDict>>,
         provider: &str,
         options: Option<LlmConfigOptions>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let provider_kind = ProviderKind::from_str(provider)?;
         let container = self
             .containers
@@ -249,7 +249,7 @@ impl ColmenaLlm {
             .containers
             .get(provider)
             .ok_or_else(|| LlmException::new_err(format!("Provider {} not found", provider)))?;
-        py.allow_threads(|| {
+        py.detach(|| {
             let rt =
                 tokio::runtime::Runtime::new().map_err(|e| LlmException::new_err(e.to_string()))?;
             rt.block_on(async {
@@ -291,7 +291,7 @@ fn run_dag(
     let source = if let Ok(path) = graph.extract::<String>() {
         GraphSource::Path(path)
     } else {
-        let value: serde_json::Value = pythonize::depythonize_bound(graph).map_err(|e| {
+        let value: serde_json::Value = pythonize::depythonize(&graph).map_err(|e| {
             DagException::new_err(format!(
                 "graph must be a file-path string or a graph dict: {}",
                 e
@@ -303,12 +303,12 @@ fn run_dag(
     };
 
     let inject_payload_val: Option<serde_json::Value> = match inject_payload {
-        Some(obj) => Some(
-            pythonize::depythonize_bound(obj).map_err(|e| DagException::new_err(e.to_string()))?,
-        ),
+        Some(obj) => {
+            Some(pythonize::depythonize(&obj).map_err(|e| DagException::new_err(e.to_string()))?)
+        }
         None => None,
     };
-    py.allow_threads(move || {
+    py.detach(move || {
         let rt =
             tokio::runtime::Runtime::new().map_err(|e| DagException::new_err(e.to_string()))?;
 
@@ -352,7 +352,7 @@ fn run_dag(
 #[pyfunction]
 fn validate_graph(graph: pyo3::Bound<'_, pyo3::PyAny>) -> PyResult<()> {
     let v: serde_json::Value =
-        pythonize::depythonize_bound(graph).map_err(|e| DagException::new_err(e.to_string()))?;
+        pythonize::depythonize(&graph).map_err(|e| DagException::new_err(e.to_string()))?;
     let _: crate::dag_engine::domain::graph::Graph = serde_json::from_value(v)
         .map_err(|e| DagException::new_err(format!("invalid graph: {}", e)))?;
     Ok(())
@@ -379,10 +379,10 @@ impl Registry {
         py: Python<'_>,
         node_type: &str,
         config: pyo3::Bound<'_, pyo3::PyAny>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         use crate::dag_engine::application::ports::NodeRegistryPort;
-        let cfg: serde_json::Value = pythonize::depythonize_bound(config)
-            .map_err(|e| DagException::new_err(e.to_string()))?;
+        let cfg: serde_json::Value =
+            pythonize::depythonize(&config).map_err(|e| DagException::new_err(e.to_string()))?;
         let tk = self
             .inner
             .get_toolkit_node(node_type)
@@ -399,7 +399,9 @@ impl Registry {
             })
             .collect();
         let value = serde_json::Value::Array(entries);
-        pythonize::pythonize(py, &value).map_err(|e| DagException::new_err(e.to_string()))
+        pythonize::pythonize(py, &value)
+            .map(|b| b.unbind())
+            .map_err(|e| DagException::new_err(e.to_string()))
     }
 }
 
@@ -510,7 +512,7 @@ fn default_registry() -> PyResult<Registry> {
 #[pyfunction]
 #[pyo3(signature = (file_path, host="0.0.0.0".to_string(), port=8080))]
 fn serve_dag(py: Python, file_path: String, host: String, port: u16) -> PyResult<()> {
-    py.allow_threads(move || {
+    py.detach(move || {
         let rt =
             tokio::runtime::Runtime::new().map_err(|e| DagException::new_err(e.to_string()))?;
 
@@ -523,12 +525,11 @@ fn serve_dag(py: Python, file_path: String, host: String, port: u16) -> PyResult
 }
 
 #[pymodule]
-#[allow(deprecated)]
-fn colmena(_py: Python, m: &PyModule) -> PyResult<()> {
+fn colmena(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // LLM bindings
     m.add_class::<ColmenaLlm>()?;
     m.add_class::<LlmConfigOptions>()?;
-    m.add("LlmException", _py.get_type_bound::<LlmException>())?;
+    m.add("LlmException", _py.get_type::<LlmException>())?;
 
     // DAG Engine bindings
     m.add_function(wrap_pyfunction!(run_dag, m)?)?;
@@ -536,7 +537,7 @@ fn colmena(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(validate_graph, m)?)?;
     m.add_function(wrap_pyfunction!(default_registry, m)?)?;
     m.add_class::<Registry>()?;
-    m.add("DagException", _py.get_type_bound::<DagException>())?;
+    m.add("DagException", _py.get_type::<DagException>())?;
 
     // CRDT documents bindings (v1)
     crdt_documents::register(m)?;
