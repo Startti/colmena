@@ -359,6 +359,56 @@ impl ColmenaEngine {
         )
     }
 
+    /// Streams a graph's execution as **SSE-mapped parts** — the Vercel-AI-SDK
+    /// style `{ "type": ... }` payloads produced by [`SseMapper`], identical to
+    /// what the HTTP `serve_dag` endpoint streams. One mapper per stream; a
+    /// single engine event may expand to several parts.
+    ///
+    /// Takes `Arc<Self>` so the returned stream is `'static` (owns the engine)
+    /// and calls [`shutdown`](Self::shutdown) once the graph finishes. Backs the
+    /// Python `stream_dag` async iterator.
+    pub fn stream_sse_parts(
+        self: std::sync::Arc<Self>,
+        graph: Graph,
+        resume_session_id: Option<String>,
+        resume_answer: Option<String>,
+        include_extra_info: bool,
+        agent_session_id: Option<String>,
+    ) -> impl Stream<Item = Result<Value, DagError>> + Send + 'static {
+        use crate::dag_engine::sse_mapper::SseMapper;
+        use futures::StreamExt;
+        async_stream::stream! {
+            let mut mapper = SseMapper::new();
+            {
+                let inner = self.execute_stream(
+                    graph,
+                    resume_session_id,
+                    resume_answer,
+                    include_extra_info,
+                    None,
+                    agent_session_id,
+                );
+                futures::pin_mut!(inner);
+                while let Some(result) = inner.next().await {
+                    match result {
+                        Ok(event) => {
+                            for part in mapper.map(&event) {
+                                yield Ok(part);
+                            }
+                        }
+                        Err(e) => yield Err(e),
+                    }
+                }
+            }
+            // Graph finished — close pools, then drop the engine Arc so the
+            // LocalHttp storage adapter (bound port) is released now rather than
+            // whenever Python GCs the PyDagStream. Mirrors `run_dag`, where the
+            // engine is dropped at end of call.
+            self.shutdown().await;
+            drop(self);
+        }
+    }
+
     pub fn registry_metrics(&self) -> RegistryMetrics {
         self.registry.snapshot_metrics()
     }

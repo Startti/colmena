@@ -150,6 +150,85 @@ pub async fn run_dag_from_str(
     result
 }
 
+/// Streams a DAG file's execution as SSE-mapped parts (the same `{type, ...}`
+/// payloads the HTTP `serve_dag` endpoint emits). Backs the Python `stream_dag`
+/// async iterator. The returned stream owns the engine and shuts it down when
+/// the graph finishes.
+pub async fn stream_dag(
+    file_path: String,
+    resume_id: Option<String>,
+    resume_answer: Option<String>,
+    inject_payload: Option<Value>,
+    include_extra_info: bool,
+    agent_session_id: Option<String>,
+) -> Result<
+    impl futures::Stream<Item = Result<Value, crate::dag_engine::domain::error::DagError>> + Send,
+    Box<dyn std::error::Error>,
+> {
+    let file_content = tokio::fs::read_to_string(&file_path).await?;
+    stream_dag_from_str(
+        file_content,
+        resume_id,
+        resume_answer,
+        inject_payload,
+        include_extra_info,
+        agent_session_id,
+    )
+    .await
+}
+
+/// Like [`stream_dag`] but takes the graph as an in-memory JSON string.
+pub async fn stream_dag_from_str(
+    graph_json: String,
+    resume_id: Option<String>,
+    resume_answer: Option<String>,
+    inject_payload: Option<Value>,
+    include_extra_info: bool,
+    agent_session_id: Option<String>,
+) -> Result<
+    impl futures::Stream<Item = Result<Value, crate::dag_engine::domain::error::DagError>> + Send,
+    Box<dyn std::error::Error>,
+> {
+    dotenvy::dotenv().ok();
+
+    let engine_config = crate::dag_engine::engine::EngineConfig::from_env()
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    let engine = Arc::new(
+        crate::dag_engine::engine::ColmenaEngine::new(engine_config)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?,
+    );
+
+    let mut graph: Graph = serde_json::from_str(&graph_json)?;
+    graph
+        .validate()
+        .map_err(|e| Box::<dyn std::error::Error>::from(format!("Invalid graph: {}", e)))?;
+
+    // Inject payload into trigger nodes, mirroring `run_dag_from_str`.
+    if let Some(payload) = inject_payload {
+        for (_, node) in graph.nodes.iter_mut() {
+            if node.node_type == "trigger_webhook"
+                || node.node_type == "input"
+                || node.node_type == "mock_input"
+            {
+                if node.config.is_null() {
+                    node.config = serde_json::json!({});
+                }
+                node.config["__payload__"] = payload.clone();
+            }
+        }
+    }
+
+    Ok(engine.stream_sse_parts(
+        graph,
+        resume_id,
+        resume_answer,
+        include_extra_info,
+        agent_session_id,
+    ))
+}
+
 /// Serve a DAG as an HTTP API
 pub async fn serve_dag(
     file_path: String,
