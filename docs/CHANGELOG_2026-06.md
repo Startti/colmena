@@ -2523,3 +2523,37 @@ frena y ofrece inspeccionar). Guard estructural para flash = follow-up opcional.
 **Estado.** done.
 
 ---
+
+## 37. gsheets — guard estructural "inspeccioná antes de correr python" (2026-06-15)
+
+**Qué cambió.** Follow-up estructural de §36 (el fix de texto). El `DagToolExecutor`
+ahora **intercepta** el primer `gsheets_run_python` que bindea una hoja **no leída
+en este turno**: en vez de ejecutar el código a ciegas, devuelve un envelope
+`inspect_first` con un **preview markdown acotado** (header + 5 filas) de cada hoja
+no-vista, y obliga al agente a re-llamar con código informado. Garantiza que el
+agente vea las columnas reales **independiente de la capacidad del modelo** — cierra
+el techo de capacidad que el fix de texto (§36) no podía superar en gemini-2.5-flash.
+
+**Cómo.** Read-state per-turno (`gsheets_seen_sheets: Mutex<HashSet<String>>` keyed
+`"spreadsheet_id::sheet"`) en `DagToolExecutor` — el executor se construye una vez
+por ejecución de `llm_call`, así que el set es naturalmente per-turno (sin
+persistencia cross-turno; consistente con el no-cache de §35). `gsheets_read` (éxito)
+marca la hoja vista; `gsheets_run_python` chequea sus bindings de hoja antes de
+ejecutar. El intercept reusa `dispatch_gsheets_read` para el preview (markdown, con
+expand-merges ya aplicado) y lo trunca a 6 filas. Bindings inline (`data:`) se
+ignoran; el envelope no lleva clave `error` (el agente lo trata como informativo y
+re-llama). No-loop: el intercept marca la hoja antes de devolver. Helpers puros en
+módulo nuevo `gsheets_inspect_guard.rs`.
+
+**Límite honesto.** El guard garantiza que el agente VEA la tabla, no que use las
+columnas bien. Combinado con la regla detective de texto (§36, 0 filas → pará) la red
+es fuerte, pero no es garantía del 100% en un modelo débil.
+
+**Compat.** Cambio de comportamiento de `gsheets_run_python` (intercepta el primer
+uso ciego). Aditivo desde la API Rust; el envelope es un tool result nuevo que el
+agente maneja en-loop, no cruza el borde SSE de forma que requiera cambios en ADP.
+Spec: [`docs/superpowers/specs/2026-06-15-gsheets-inspect-guard-design.md`](superpowers/specs/2026-06-15-gsheets-inspect-guard-design.md).
+
+**Estado.** done (unit + E2E verificados).
+
+---

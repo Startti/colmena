@@ -11,6 +11,7 @@ pub mod diff_writer;
 pub mod document_tools;
 pub mod gdocs_tools;
 pub mod google_workspace_prelude;
+pub mod gsheets_inspect_guard;
 pub mod gsheets_run_python;
 pub mod gsheets_tools;
 pub mod lazy_tools_catalog;
