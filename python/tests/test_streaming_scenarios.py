@@ -15,12 +15,12 @@ except ImportError:
     colmena = None
 
 # --- Test Configuration ---
-GEMINI_PROVIDER = "gemini"
+GEMINI_PROVIDER = "google"  # provider id is "google" (not "gemini")
 GEMINI_MODEL = "gemini-2.5-flash"
 OPENAI_PROVIDER = "openai"
 OPENAI_MODEL = "gpt-4o-mini"
 ANTHROPIC_PROVIDER = "anthropic"
-ANTHROPIC_MODEL = "claude-3-haiku-20240307"
+ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 
 
 @pytest.mark.skipif(
