@@ -120,9 +120,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // pyo3 is always linked (the python_script node uses it). The cfg-gated
     // `python` feature is for the PyO3 *bindings* layer (exposing Rust types
     // to Python), not for the engine's own use of Python. Always call
-    // `prepare_freethreaded_python()` so python_script works in the standalone
-    // CLI without `--features python`.
-    pyo3::prepare_freethreaded_python();
+    // `Python::initialize()` (pyo3 0.29; was `prepare_freethreaded_python()`)
+    // so python_script works in the standalone CLI without `--features python`.
+    pyo3::Python::initialize();
 
     let cli = Cli::parse();
 

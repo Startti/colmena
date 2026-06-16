@@ -16,6 +16,7 @@ use crate::crdt_documents::{ArtifactId, CrdtDocumentsRuntime};
 use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use pyo3::IntoPyObjectExt;
 use std::sync::Arc;
 
 static RUNTIME: OnceCell<Arc<CrdtDocumentsRuntime>> = OnceCell::new();
@@ -48,7 +49,7 @@ fn parse_id(s: &str) -> PyResult<ArtifactId> {
 
 #[pyfunction]
 #[allow(deprecated)]
-fn list_sheets(py: Python<'_>, artifact_id: &str) -> PyResult<PyObject> {
+fn list_sheets(py: Python<'_>, artifact_id: &str) -> PyResult<Py<PyAny>> {
     let rt = runtime()?;
     let id = parse_id(artifact_id)?;
     let Some(entry) = rt.registry.get(&id) else {
@@ -62,12 +63,12 @@ fn list_sheets(py: Python<'_>, artifact_id: &str) -> PyResult<PyObject> {
         d.set_item("name", s["name"].as_str().unwrap_or(""))?;
         out.append(d)?;
     }
-    Ok(out.into_py(py))
+    out.into_py_any(py)
 }
 
 #[pyfunction]
 #[allow(deprecated)]
-fn read_sheet(py: Python<'_>, artifact_id: &str, sheet_id: &str) -> PyResult<PyObject> {
+fn read_sheet(py: Python<'_>, artifact_id: &str, sheet_id: &str) -> PyResult<Py<PyAny>> {
     let rt = runtime()?;
     let id = parse_id(artifact_id)?;
     let Some(entry) = rt.registry.get(&id) else {
@@ -86,15 +87,15 @@ fn read_sheet(py: Python<'_>, artifact_id: &str, sheet_id: &str) -> PyResult<PyO
     let cells = sheet["cells"].as_object().cloned().unwrap_or_default();
     let d = PyDict::new(py);
     for (addr, v) in cells {
-        let py_val: PyObject = match v {
-            serde_json::Value::String(s) => s.into_py(py),
-            serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0).into_py(py),
-            serde_json::Value::Bool(b) => b.into_py(py),
+        let py_val: Py<PyAny> = match v {
+            serde_json::Value::String(s) => s.into_py_any(py)?,
+            serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0).into_py_any(py)?,
+            serde_json::Value::Bool(b) => b.into_py_any(py)?,
             _ => py.None(),
         };
         d.set_item(addr, py_val)?;
     }
-    Ok(d.into_py(py))
+    d.into_py_any(py)
 }
 
 #[pyfunction]
@@ -132,7 +133,7 @@ fn write_sheet(
     artifact_id: &str,
     sheet_id: &str,
     columns: Vec<String>,
-    rows: Vec<Vec<PyObject>>,
+    rows: Vec<Vec<Py<PyAny>>>,
     mode: &str,
 ) -> PyResult<()> {
     let rt = runtime()?;
@@ -191,7 +192,7 @@ fn col_letter(mut col: u32) -> String {
     s
 }
 
-fn pyobj_to_json(py: Python<'_>, obj: &PyObject) -> PyResult<serde_json::Value> {
+fn pyobj_to_json(py: Python<'_>, obj: &Py<PyAny>) -> PyResult<serde_json::Value> {
     let bound = obj.bind(py);
     if bound.is_none() {
         return Ok(serde_json::Value::Null);
@@ -209,14 +210,13 @@ fn pyobj_to_json(py: Python<'_>, obj: &PyObject) -> PyResult<serde_json::Value> 
 }
 
 /// Register the `documents` submodule on the parent `colmena` module.
-#[allow(deprecated)]
-pub fn register(parent: &PyModule) -> PyResult<()> {
+pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
     let m = PyModule::new(py, "documents")?;
-    m.add_function(wrap_pyfunction!(list_sheets, m)?)?;
-    m.add_function(wrap_pyfunction!(read_sheet, m)?)?;
-    m.add_function(wrap_pyfunction!(add_sheet, m)?)?;
-    m.add_function(wrap_pyfunction!(write_sheet, m)?)?;
-    parent.add_submodule(m)?;
+    m.add_function(wrap_pyfunction!(list_sheets, &m)?)?;
+    m.add_function(wrap_pyfunction!(read_sheet, &m)?)?;
+    m.add_function(wrap_pyfunction!(add_sheet, &m)?)?;
+    m.add_function(wrap_pyfunction!(write_sheet, &m)?)?;
+    parent.add_submodule(&m)?;
     Ok(())
 }

@@ -1097,7 +1097,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_runs_pandas_over_two_bindings_in_parallel() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let (_server, client) = mock_with_two_sheets().await;
         let args = serde_json::json!({
             "bindings": [
@@ -1131,7 +1131,7 @@ mod tests {
 
     #[tokio::test]
     async fn python_keyerror_returns_loaded_columns_for_self_correction() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let (_server, client) = mock_with_two_sheets().await;
         let args = serde_json::json!({
             "bindings": [
@@ -1339,7 +1339,7 @@ mod tests {
     /// calls, `wrote_sheets` has 3 entries, no `error`.
     #[tokio::test]
     async fn multi_sheet_write_back_three_tabs() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
 
         let server = MockServer::start().await;
         let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
@@ -1447,7 +1447,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use wiremock::Respond;
 
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
 
         let server = MockServer::start().await;
         let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
@@ -1555,7 +1555,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_in_place_writes_only_changed_cells() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
 
         let server = wiremock::MockServer::start().await;
         let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
@@ -1639,7 +1639,7 @@ mod tests {
 
     #[tokio::test]
     async fn replace_mode_default_fail_returns_sheet_exists() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
 
         let server = wiremock::MockServer::start().await;
         let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
@@ -1766,7 +1766,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_inline_data_binding_reaches_sandbox() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         // No sheet fetch needed; client can be any mock.
         let client = test_client_empty().await;
         let args = serde_json::json!({
@@ -1797,7 +1797,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_inline_2d_array_is_converted_to_records() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let client = test_client_empty().await;
         let args = serde_json::json!({
             "bindings": [{ "var": "t", "data": [["nutrient", "g"], ["Protein", 12]] }],
@@ -1844,7 +1844,7 @@ mod tests {
     /// `modifiedTime`.
     #[tokio::test]
     async fn fail_envelope_has_wide_columns_and_last_modified() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
 
         let server = wiremock::MockServer::start().await;
         let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
@@ -1933,7 +1933,7 @@ mod tests {
         // With fixed_config.on_existing_sheet="auto_suffix", colliding
         // "Existing" should write to "Existing (2)" silently — same as
         // pre-spec behavior.
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
 
         let server = wiremock::MockServer::start().await;
         let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());

@@ -24,7 +24,7 @@ async fn cross_sheet_row_diff_via_clone_plus_run_python() {
     // Ensure the embedded Python interpreter is initialized BEFORE the sandbox
     // helper spawns a blocking task that calls into pyo3 (the `auto-initialize`
     // feature is intentionally off for this crate). Safe to call repeatedly.
-    pyo3::prepare_freethreaded_python();
+    pyo3::Python::initialize();
 
     // Force the in-memory ChangeTrackerStore for this test even when the test
     // harness was invoked with a Postgres `DATABASE_URL` in the environment
