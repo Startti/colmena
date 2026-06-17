@@ -1634,7 +1634,9 @@ impl ExecutableNode for LlmNode {
                     // provider_file_id is left empty — the load_attachment
                     // resolver detects the empty id and serves the bytes inline
                     // from OutputStorageRepository instead of via file_id.
-                    FileSource::InlineBytes { .. } if is_text_like(&file.mime_type) => String::new(),
+                    FileSource::InlineBytes { .. } if is_text_like(&file.mime_type) => {
+                        String::new()
+                    }
                     _ => continue, // Not uploaded yet — skip registration this pass.
                 };
 
