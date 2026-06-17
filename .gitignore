@@ -70,3 +70,6 @@ stubs/colmena/*.so
 
 # Node.js dependencies (TS bindings)
 node_modules/
+
+# Compiled napi binaries (built by CD per-platform; never commit)
+*.node
