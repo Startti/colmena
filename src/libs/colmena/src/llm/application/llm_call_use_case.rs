@@ -302,14 +302,20 @@ impl LlmCallUseCase {
 
                 // Text-like attachments (markdown, JSON, CSV, code, …) skip the
                 // provider Files API entirely. Their content is sent inline to
-                // the model (a `data:`/`input_file` part on the current turn,
-                // and re-injected via `load_attachment` on later turns) so no
-                // `provider_file_id` is needed. This keeps Colmena working
+                // the model (a `data:`/`input_file` part on the current turn) so
+                // no `provider_file_id` is needed. This keeps Colmena working
                 // behind an OpenAI-compatible proxy that has no `/v1/files`
                 // backend — uploading would fail and abort the whole request.
-                // We keep `retained_inline_bytes` so the node's Step-3
-                // auto-register can persist the bytes to OutputStorageRepository
-                // (so load_attachment can serve them on later turns).
+                //
+                // NOTE: `LlmCallUseCase` has NO Step-3. Persisting the bytes to
+                // OutputStorageRepository and registering the catalog row
+                // (both required for later-turn `load_attachment` re-serving)
+                // happen ONLY in the DAG `LlmNode` Step-3
+                // (dag_engine/infrastructure/nodes/llm.rs). A caller that uses
+                // `LlmCallUseCase` directly (not via the node) gets the inline
+                // text on THIS turn but NO later-turn re-serving. We still keep
+                // `retained_inline_bytes` here so the node's Step-3 can persist
+                // them when this resolution does run inside the node.
                 if crate::llm::domain::is_text_like(&file.mime_type) {
                     crate::colmena_log!(
                         "[file-resolve] '{}' is inline TEXT ({}, {} B); skipping {} Files API \

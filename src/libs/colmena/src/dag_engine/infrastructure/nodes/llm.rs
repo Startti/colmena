@@ -1661,6 +1661,30 @@ impl ExecutableNode for LlmNode {
                     None
                 };
 
+                // Text-like inline attachments have NO provider_file_id fallback:
+                // load_attachment can only serve them via storage_key. If byte
+                // persistence failed (storage_key is None), registering the
+                // catalog row would write a permanently-unresolvable entry
+                // (empty provider_file_id AND no storage_key) — load_attachment
+                // would error "has no provider_file_id and no storage_key".
+                // Skip registration in that case so a transient storage hiccup
+                // can't strand the attachment forever. Binary/non-empty
+                // provider_file_id rows are unaffected: they keep their real
+                // file id as a fallback and still register even if storage failed.
+                if !should_register_attachment_row(&provider_file_id, &storage_key) {
+                    tracing::warn!(
+                        target: "colmena::attachment",
+                        event = "attachment.registration_skipped",
+                        agent_session_id = %sid,
+                        document_id = %document_id,
+                        mime = %file.mime_type,
+                        filename = %file.filename,
+                        "skipping catalog registration for text attachment {}: byte persistence failed; the model will not see this document this turn",
+                        document_id
+                    );
+                    continue;
+                }
+
                 let origin = crate::llm::domain::attachments::origin::USER_UPLOAD.to_string();
                 let input = UpsertAttachmentInput {
                     agent_session_id: sid.clone(),
@@ -3650,6 +3674,23 @@ pub(crate) fn parse_file_entries(
 ///      still registered, but downstream `$attachment:<id>` consumers will
 ///      not resolve it).
 ///
+/// Decide whether a resolved attachment should be registered in the catalog.
+///
+/// A text-like inline attachment is registered with an EMPTY `provider_file_id`
+/// (it is never uploaded to the provider Files API) and is resolvable ONLY via
+/// its `storage_key`. If byte persistence failed (`storage_key` is `None`), the
+/// row would have neither a `provider_file_id` nor a `storage_key`, so
+/// `load_attachment` could never resolve it — it would error with "has no
+/// provider_file_id and no storage_key". Registering such a row turns a
+/// transient storage hiccup into a permanently-unreadable attachment, so we
+/// skip it.
+///
+/// Binary / provider-uploaded attachments keep their real `provider_file_id`
+/// as a fallback, so they are always registered even when storage failed.
+fn should_register_attachment_row(provider_file_id: &str, storage_key: &Option<String>) -> bool {
+    !(provider_file_id.is_empty() && storage_key.is_none())
+}
+
 /// Returns `None` on any failure (logged at warn level); persistence is
 /// best-effort — the LLM call must continue even when storage is offline.
 async fn persist_attachment_bytes(
@@ -4348,6 +4389,152 @@ mod resolver_tests {
             other => panic!("expected InlineBytes from storage, got {other:?}"),
         }
         assert_eq!(file.mime_type, "text/markdown");
+    }
+
+    #[tokio::test]
+    async fn step3_text_persist_success_registers_row_with_storage_key_and_empty_file_id() {
+        // (b) Step-3 for a text inline attachment, when persistence SUCCEEDS,
+        // registers a catalog row with an EMPTY provider_file_id AND a
+        // non-empty storage_key. We replicate the node's Step-3 sequence:
+        // persist bytes via persist_attachment_bytes (real storage), apply the
+        // should_register_attachment_row gate, then upsert into a real registry
+        // — and assert the persisted row's shape. Mirrors the setup/mocks of
+        // resolver_serves_text_from_storage_without_provider_file_id.
+        use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
+        use crate::llm::domain::AttachmentRegistry;
+        use crate::llm::domain::ProviderKind;
+        use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+        use crate::storage::domain::OutputStorageRepository;
+        use crate::storage::infrastructure::LocalCacheStorageAdapter;
+        use std::sync::Arc;
+
+        let storage: Arc<dyn OutputStorageRepository> = Arc::new(LocalCacheStorageAdapter::new());
+        let registry: Arc<dyn AttachmentRegistry> = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+
+        let body = b"# notes\ninline text body".to_vec();
+        // Text-like inline attachment → provider_file_id is left empty (never
+        // uploaded to the Files API), exactly as the node's Step-3 sets it.
+        let provider_file_id = String::new();
+
+        // Step-3: persist bytes (succeeds with LocalCacheStorageAdapter).
+        let storage_key = persist_attachment_bytes(
+            storage.as_ref(),
+            Some(body.as_slice()),
+            &AttachmentSource::Inline,
+            "text/markdown",
+            "notes.md",
+            "agent_1",
+            "doc-text-ok",
+        )
+        .await;
+        assert!(
+            storage_key.is_some(),
+            "precondition: persistence must succeed for the (b) case"
+        );
+
+        // Step-3 gate: must register because storage_key is Some.
+        assert!(should_register_attachment_row(
+            &provider_file_id,
+            &storage_key
+        ));
+        registry
+            .upsert(UpsertAttachmentInput {
+                agent_session_id: "agent_1".to_string(),
+                document_id: "doc-text-ok".to_string(),
+                provider: ProviderKind::OpenAi,
+                provider_file_id,
+                mime_type: "text/markdown".to_string(),
+                filename: "notes.md".to_string(),
+                size_bytes: Some(body.len() as u64),
+                label: None,
+                description: None,
+                source: AttachmentSource::Inline,
+                storage_key,
+                origin: None,
+            })
+            .await
+            .unwrap();
+
+        let row = registry
+            .lookup("agent_1", "doc-text-ok", ProviderKind::OpenAi)
+            .await
+            .unwrap()
+            .expect("text attachment row must be registered when persistence succeeds");
+        assert!(
+            row.provider_file_id.is_empty(),
+            "text attachment row must have an empty provider_file_id"
+        );
+        assert!(
+            row.storage_key.as_deref().map(|k| !k.is_empty()) == Some(true),
+            "text attachment row must carry a non-empty storage_key, got {:?}",
+            row.storage_key
+        );
+    }
+
+    #[tokio::test]
+    async fn step3_text_persist_failure_does_not_register_row() {
+        // (c) Step-3 for a text inline attachment, when persistence FAILS
+        // (storage returns an error → storage_key None), must NOT register a
+        // catalog row — otherwise we'd write a permanently-unresolvable row
+        // (empty provider_file_id AND no storage_key). We drive the node's
+        // Step-3 sequence with a MockOutputStorageRepository that errors, then
+        // assert the gate skips the upsert and the registry has no row.
+        use crate::llm::domain::attachments::AttachmentSource;
+        use crate::llm::domain::AttachmentRegistry;
+        use crate::llm::domain::ProviderKind;
+        use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+        use crate::storage::domain::{MockOutputStorageRepository, StorageError};
+        use std::sync::Arc;
+
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_store()
+            .times(1)
+            .returning(|_| Err(StorageError::BackendUnavailable("offline".into())));
+
+        let registry: Arc<dyn AttachmentRegistry> = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+
+        let body = b"# notes\ninline text body".to_vec();
+        let provider_file_id = String::new(); // text → never uploaded
+
+        // Step-3: persist bytes → fails → None (best-effort, no propagation).
+        let storage_key = persist_attachment_bytes(
+            &storage,
+            Some(body.as_slice()),
+            &AttachmentSource::Inline,
+            "text/markdown",
+            "notes.md",
+            "agent_1",
+            "doc-text-fail",
+        )
+        .await;
+        assert!(
+            storage_key.is_none(),
+            "precondition: persistence must fail for the (c) case"
+        );
+
+        // Step-3 gate: must NOT register (empty provider_file_id + no storage_key).
+        assert!(
+            !should_register_attachment_row(&provider_file_id, &storage_key),
+            "gate must skip registration for text attachment with failed persistence"
+        );
+        // The node `continue`s here — no upsert. Assert the registry stays empty.
+        let row = registry
+            .lookup("agent_1", "doc-text-fail", ProviderKind::OpenAi)
+            .await
+            .unwrap();
+        assert!(
+            row.is_none(),
+            "no catalog row must be written when text persistence fails (would be unresolvable)"
+        );
     }
 
     #[tokio::test]
