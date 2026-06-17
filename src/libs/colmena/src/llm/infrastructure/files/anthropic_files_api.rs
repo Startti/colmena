@@ -55,6 +55,12 @@ impl AnthropicFilesApiAdapter {
             .build()
             .expect("default reqwest client should build")
     }
+
+    /// The configured endpoint. Exposed for tests and diagnostics; lets
+    /// factory tests assert that env-var overrides are honored.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
 }
 
 #[derive(Debug, Deserialize)]

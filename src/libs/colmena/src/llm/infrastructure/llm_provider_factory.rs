@@ -139,9 +139,13 @@ impl<'a> Drop for OverrideGuard<'a> {
 mod base_url_override_tests {
     use super::*;
     use crate::llm::domain::ProviderKind;
+    use serial_test::serial;
     use std::sync::Mutex;
     // Serializes env-var mutation across tests in this module. Distinct from
-    // the factory's override_lock (which guards set_test_override).
+    // the factory's override_lock (which guards set_test_override). The shared
+    // `#[serial(base_url_env)]` key additionally serializes these against the
+    // files-side `FileProviderFactory::base_url_override_tests`, which mutate
+    // the same process-global BASE_URL env vars.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_clean_env<F: FnOnce()>(f: F) {
@@ -169,6 +173,7 @@ mod base_url_override_tests {
     }
 
     #[test]
+    #[serial(base_url_env)]
     fn none_when_no_env_set() {
         with_clean_env(|| {
             assert_eq!(base_url_override(ProviderKind::Google), None);
@@ -178,6 +183,7 @@ mod base_url_override_tests {
     }
 
     #[test]
+    #[serial(base_url_env)]
     fn per_provider_var_wins() {
         with_clean_env(|| {
             std::env::set_var("GEMINI_BASE_URL", "http://gem");
@@ -206,6 +212,7 @@ mod base_url_override_tests {
     }
 
     #[test]
+    #[serial(base_url_env)]
     fn catchall_used_when_no_per_provider_var() {
         with_clean_env(|| {
             std::env::set_var("COLMENA_LLM_BASE_URL", "http://catchall");
@@ -217,6 +224,7 @@ mod base_url_override_tests {
     }
 
     #[test]
+    #[serial(base_url_env)]
     fn mock_and_generated_never_overridden() {
         with_clean_env(|| {
             std::env::set_var("COLMENA_LLM_BASE_URL", "http://catchall");

@@ -64,6 +64,12 @@ impl GeminiFilesApiAdapter {
             .expect("default reqwest client should build")
     }
 
+    /// The configured endpoint. Exposed for tests and diagnostics; lets
+    /// factory tests assert that env-var overrides are honored.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     async fn start_session(&self, mime_type: &str, filename: &str) -> Result<String, LlmError> {
         let url = format!("{}/upload/v1beta/files?key={}", self.base_url, self.api_key);
         let resp = self
