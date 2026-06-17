@@ -64,5 +64,12 @@ export declare class DagStream implements AsyncIterableIterator<DagEvent> {
     [Symbol.asyncIterator](): AsyncIterableIterator<DagEvent>;
     next(): Promise<IteratorResult<DagEvent>>;
 }
+/** Read-only handle to the node registry (no DB connection). */
+export type Registry = {
+    nodeTypes(): string[];
+    toolkitCatalog(nodeType: string, config: unknown): unknown[];
+};
+/** Build an inspection-only node registry with no database connection. */
+export declare function defaultRegistry(): Registry;
 /** Stream a DAG's execution as typed events (file path or in-memory object). */
 export declare function streamDag(graph: string | GraphObject, resumeId?: string | null, resumeAnswer?: string | null, injectPayload?: unknown, includeExtraInfo?: boolean | null, agentSessionId?: string | null): Promise<DagStream>;

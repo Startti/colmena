@@ -35,12 +35,28 @@ export interface NodeLlmMessage {
   role: string
   content: string
 }
+/**
+ * Builds an inspection-only `HashMapNodeRegistry` with no live DB connections.
+ * `PgPoolRegistry::new` is in-memory; pools are pinned lazily on first use,
+ * which is fine because this registry is only used for introspection.
+ */
+export declare function defaultRegistry(): Registry
 export declare class ColmenaLlm {
   constructor()
   call(messages: Array<NodeLlmMessage>, provider: string, options?: NodeLlmConfigOptions | undefined | null): Promise<string>
   stream(messages: Array<NodeLlmMessage>, provider: string, options?: NodeLlmConfigOptions | undefined | null): Promise<LlmStreamHandle>
   healthCheck(provider: string): Promise<boolean>
   getProviders(): Array<string>
+}
+/** Read-only handle to a `HashMapNodeRegistry`; inspection only, no DB. */
+export declare class Registry {
+  /** Return all registered node type names, sorted alphabetically. */
+  nodeTypes(): Array<string>
+  /**
+   * Return the sub-tool catalog for a toolkit node, given its static config.
+   * Throws if `node_type` is not a registered toolkit node.
+   */
+  toolkitCatalog(nodeType: string, config: any): any
 }
 /**
  * Async-iterator handle over an LLM text stream. Each `pull()` resolves to the

@@ -143,6 +143,17 @@ export class DagStream implements AsyncIterableIterator<DagEvent> {
   }
 }
 
+/** Read-only handle to the node registry (no DB connection). */
+export type Registry = {
+  nodeTypes(): string[];
+  toolkitCatalog(nodeType: string, config: unknown): unknown[];
+};
+
+/** Build an inspection-only node registry with no database connection. */
+export function defaultRegistry(): Registry {
+  return native.defaultRegistry();
+}
+
 /** Stream a DAG's execution as typed events (file path or in-memory object). */
 export async function streamDag(
   graph: string | GraphObject,

@@ -3,8 +3,10 @@
 
 mod dag;
 mod llm;
+mod registry;
 pub mod stream;
 
 pub use dag::*;
 pub use llm::*;
+pub use registry::*;
 pub use stream::*;
