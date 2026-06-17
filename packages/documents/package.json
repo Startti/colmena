@@ -1,0 +1,22 @@
+{
+  "name": "@colmena-ai/documents",
+  "version": "0.3.0",
+  "description": "Polars DataFrame ergonomics over Colmena CRDT sheets",
+  "main": "lib/src/index.js",
+  "types": "lib/src/index.d.ts",
+  "files": ["lib/"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test lib/test/*.js"
+  },
+  "peerDependencies": {
+    "colmena-ai": "^0.3.0"
+  },
+  "dependencies": {
+    "nodejs-polars": "^0.20.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20"
+  }
+}

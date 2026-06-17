@@ -18,7 +18,7 @@ pub async fn run_dag(
     inject_payload: Option<Value>,
     include_extra_info: bool,
     agent_session_id: Option<String>,
-) -> Result<Value, Box<dyn std::error::Error>> {
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let file_content = tokio::fs::read_to_string(&file_path).await?;
     run_dag_from_str(
         file_content,
@@ -40,22 +40,22 @@ pub async fn run_dag_from_str(
     inject_payload: Option<Value>,
     include_extra_info: bool,
     agent_session_id: Option<String>,
-) -> Result<Value, Box<dyn std::error::Error>> {
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     dotenvy::dotenv().ok();
 
     let engine_config = crate::dag_engine::engine::EngineConfig::from_env()
         .await
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
     let engine = crate::dag_engine::engine::ColmenaEngine::new(engine_config)
         .await
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
-    let result: Result<Value, Box<dyn std::error::Error>> = async {
+    let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
         // Parse and execute the graph
         let mut graph: Graph = serde_json::from_str(&graph_json)?;
-        graph
-            .validate()
-            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Invalid graph: {}", e)))?;
+        graph.validate().map_err(|e| {
+            Box::<dyn std::error::Error + Send + Sync>::from(format!("Invalid graph: {}", e))
+        })?;
 
         // If an injected payload was provided (e.g. from a previous loop), inject it into start nodes
         if let Some(payload) = inject_payload {
@@ -141,7 +141,7 @@ pub async fn run_dag_from_str(
                     agent_session_id.clone(),
                 )
                 .await
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
         }
     }
     .await;
@@ -163,7 +163,7 @@ pub async fn stream_dag(
     agent_session_id: Option<String>,
 ) -> Result<
     impl futures::Stream<Item = Result<Value, crate::dag_engine::domain::error::DagError>> + Send,
-    Box<dyn std::error::Error>,
+    Box<dyn std::error::Error + Send + Sync>,
 > {
     let file_content = tokio::fs::read_to_string(&file_path).await?;
     stream_dag_from_str(
@@ -187,23 +187,23 @@ pub async fn stream_dag_from_str(
     agent_session_id: Option<String>,
 ) -> Result<
     impl futures::Stream<Item = Result<Value, crate::dag_engine::domain::error::DagError>> + Send,
-    Box<dyn std::error::Error>,
+    Box<dyn std::error::Error + Send + Sync>,
 > {
     dotenvy::dotenv().ok();
 
     let engine_config = crate::dag_engine::engine::EngineConfig::from_env()
         .await
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
     let engine = Arc::new(
         crate::dag_engine::engine::ColmenaEngine::new(engine_config)
             .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?,
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?,
     );
 
     let mut graph: Graph = serde_json::from_str(&graph_json)?;
-    graph
-        .validate()
-        .map_err(|e| Box::<dyn std::error::Error>::from(format!("Invalid graph: {}", e)))?;
+    graph.validate().map_err(|e| {
+        Box::<dyn std::error::Error + Send + Sync>::from(format!("Invalid graph: {}", e))
+    })?;
 
     // Inject payload into trigger nodes, mirroring `run_dag_from_str`.
     if let Some(payload) = inject_payload {
@@ -234,24 +234,24 @@ pub async fn serve_dag(
     file_path: String,
     host: String,
     port: u16,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     dotenvy::dotenv().ok();
 
     let engine_config = crate::dag_engine::engine::EngineConfig::from_env()
         .await
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
     let engine = Arc::new(
         crate::dag_engine::engine::ColmenaEngine::new(engine_config)
             .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?,
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?,
     );
 
     // Load the graph
     let file_content = tokio::fs::read_to_string(&file_path).await?;
     let graph: Graph = serde_json::from_str(&file_content)?;
-    graph
-        .validate()
-        .map_err(|e| Box::<dyn std::error::Error>::from(format!("Invalid graph: {}", e)))?;
+    graph.validate().map_err(|e| {
+        Box::<dyn std::error::Error + Send + Sync>::from(format!("Invalid graph: {}", e))
+    })?;
     let graph_arc = Arc::new(graph);
 
     // Build the Router dynamically

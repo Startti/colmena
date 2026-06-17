@@ -121,7 +121,7 @@ jobs:
           if [ -n "$FIXES" ]; then CHANGELOG="${CHANGELOG}### 🐛 Bug Fixes\n${FIXES}\n\n"; fi
 
           # Add installation instructions
-          CHANGELOG="${CHANGELOG}## Installation\n\n\`\`\`bash\npip install colmena-ai==${{ steps.version.outputs.new_version }}\n\`\`\`\n\n"
+          CHANGELOG="${CHANGELOG}## Installation\n\n**Python:**\n\`\`\`bash\npip install colmena-ai==${{ steps.version.outputs.new_version }}\n\`\`\`\n\n**Node.js:**\n\`\`\`bash\nnpm install colmena-ai@${{ steps.version.outputs.new_version }}\n\`\`\`\n\n"
 
           # Handle multiline output safely
           EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
@@ -209,24 +209,67 @@ jobs:
           password: ${{ secrets.PYPI_API_TOKEN }}
           packages-dir: dist/
 
+  build-node:
+    name: Build .node on ${{ matrix.settings.target }}
+    needs: release
+    runs-on: ${{ matrix.settings.host }}
+    strategy:
+      matrix:
+        settings:
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - host: macos-latest
+            target: x86_64-apple-darwin
+          - host: macos-latest
+            target: aarch64-apple-darwin
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.release.outputs.new_version }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.settings.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install deps
+        run: npm ci
+      - name: Build native binding
+        run: npx napi build --platform --release --target ${{ matrix.settings.target }} --features node --cargo-cwd src/libs/colmena --cargo-name colmena --cargo-flags="--lib"
+      - name: Upload .node artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-${{ matrix.settings.target }}
+          path: "*.node"
+
   publish-npm:
     name: Publish to NPM
     runs-on: ubuntu-latest
-    needs: [release, build-wheels]
+    needs: [release, build-node]
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
         with:
-          node-version: '20'
+          ref: v${{ needs.release.outputs.new_version }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org/'
-
-      - name: Publish to NPM
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Download all .node artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: node-*
+          path: .
+          merge-multiple: true
+      - name: Build loader + TS facade
         run: |
           npm ci
-          npm publish --access public
+          npx napi build --platform --release --features node --cargo-cwd src/libs/colmena --cargo-name colmena --cargo-flags="--lib"
+          npx tsc -p ts/tsconfig.json
+      - name: Publish
+        run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

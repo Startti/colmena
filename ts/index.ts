@@ -1,0 +1,214 @@
+// The napi loader at the repo root. Built by `napi build`.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const native = require("../index.js");
+
+import { LlmError, DagError } from "./errors";
+export { LlmError, DagError };
+
+function asLlm<T>(p: Promise<T>): Promise<T> {
+  return p.catch((e: unknown) => {
+    throw new LlmError(e instanceof Error ? e.message : String(e));
+  });
+}
+
+function asDag<T>(p: Promise<T>): Promise<T> {
+  return p.catch((e: unknown) => {
+    throw new DagError(e instanceof Error ? e.message : String(e));
+  });
+}
+
+export type NodeLlmConfigOptions = {
+  apiKey?: string;
+  model?: string;
+  temperature?: number;
+  maxTokens?: number;
+  topP?: number;
+  frequencyPenalty?: number;
+  presencePenalty?: number;
+};
+
+export type NodeLlmMessage = { role: string; content: string };
+
+/** Async iterator of text chunks. Use `for await (const chunk of stream)`. */
+export class LlmStream implements AsyncIterableIterator<string> {
+  constructor(private handle: { pull(): Promise<string | null> }) {}
+  [Symbol.asyncIterator](): AsyncIterableIterator<string> {
+    return this;
+  }
+  async next(): Promise<IteratorResult<string>> {
+    const value = await this.handle.pull();
+    return value === null
+      ? { value: undefined, done: true }
+      : { value, done: false };
+  }
+}
+
+/** Multi-provider LLM client. Loads API keys from the environment on construction. */
+export class ColmenaLlm {
+  private inner = new native.ColmenaLlm();
+
+  call(
+    messages: NodeLlmMessage[],
+    provider: string,
+    options?: NodeLlmConfigOptions,
+  ): Promise<string> {
+    return asLlm(this.inner.call(messages, provider, options));
+  }
+
+  async stream(
+    messages: NodeLlmMessage[],
+    provider: string,
+    options?: NodeLlmConfigOptions,
+  ): Promise<LlmStream> {
+    const handle = await asLlm(
+      this.inner.stream(messages, provider, options) as Promise<{ pull(): Promise<string | null> }>,
+    );
+    return new LlmStream(handle);
+  }
+
+  healthCheck(provider: string): Promise<boolean> {
+    return asLlm(this.inner.healthCheck(provider));
+  }
+
+  getProviders(): string[] {
+    return this.inner.getProviders();
+  }
+}
+
+export type GraphObject = Record<string, unknown>;
+
+/** Run a DAG graph (file path or in-memory object); resolves to the final output. */
+export function runDag(
+  graph: string | GraphObject,
+  resumeId?: string | null,
+  resumeAnswer?: string | null,
+  injectPayload?: unknown,
+  includeExtraInfo?: boolean | null,
+  agentSessionId?: string | null,
+): Promise<unknown> {
+  if (typeof graph === "string") {
+    return asDag(
+      native.runDag(graph, resumeId, resumeAnswer, injectPayload, includeExtraInfo, agentSessionId),
+    );
+  }
+  return asDag(
+    native.runDagFromJson(
+      JSON.stringify(graph),
+      resumeId,
+      resumeAnswer,
+      injectPayload,
+      includeExtraInfo,
+      agentSessionId,
+    ),
+  );
+}
+
+/** Serve a graph's webhook triggers as a (blocking) HTTP API. */
+export function serveDag(
+  filePath: string,
+  host?: string | null,
+  port?: number | null,
+): Promise<void> {
+  return asDag(native.serveDag(filePath, host, port));
+}
+
+/** Validate a graph object; throws DagError if it is not a valid graph. */
+export function validateGraph(graph: GraphObject): void {
+  try {
+    native.validateGraph(graph);
+  } catch (e) {
+    throw new DagError(e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** A DAG execution event. `type` discriminates the variant; extra fields vary. */
+export type DagEvent =
+  | { type: "node-start"; [k: string]: unknown }
+  | { type: "node-end"; [k: string]: unknown }
+  | { type: "text-delta"; delta: string; [k: string]: unknown }
+  | { type: "finish"; [k: string]: unknown }
+  | { type: string; [k: string]: unknown };
+
+/** Async iterator of DAG events. Use `for await (const event of stream)`. */
+export class DagStream implements AsyncIterableIterator<DagEvent> {
+  constructor(private handle: { pull(): Promise<DagEvent | null> }) {}
+  [Symbol.asyncIterator](): AsyncIterableIterator<DagEvent> {
+    return this;
+  }
+  async next(): Promise<IteratorResult<DagEvent>> {
+    const value = await this.handle.pull();
+    return value === null
+      ? { value: undefined, done: true }
+      : { value, done: false };
+  }
+}
+
+/** Read-only handle to the node registry (no DB connection). */
+export type Registry = {
+  nodeTypes(): string[];
+  toolkitCatalog(nodeType: string, config: unknown): unknown[];
+};
+
+/** Build an inspection-only node registry with no database connection. */
+export function defaultRegistry(): Registry {
+  return native.defaultRegistry();
+}
+
+export type SheetInfo = { sheetId: string; name: string };
+export type SheetCells = Record<string, string | number | boolean | null>;
+
+/** Raw CRDT-sheet access (zero-deps). For DataFrames use @colmena-ai/documents. */
+export const documents = {
+  listSheets(artifactId: string): Promise<SheetInfo[]> {
+    return asDag(native.documentsListSheets(artifactId)) as Promise<SheetInfo[]>;
+  },
+  readSheet(artifactId: string, sheetId: string): Promise<SheetCells> {
+    return asDag(native.documentsReadSheet(artifactId, sheetId)) as Promise<SheetCells>;
+  },
+  addSheet(artifactId: string, name: string): Promise<string> {
+    return asDag(native.documentsAddSheet(artifactId, name));
+  },
+  writeSheet(
+    artifactId: string,
+    sheetId: string,
+    columns: string[],
+    rows: unknown[][],
+    mode?: "replace" | "append",
+  ): Promise<void> {
+    return asDag(native.documentsWriteSheet(artifactId, sheetId, columns, rows, mode));
+  },
+};
+
+/** Stream a DAG's execution as typed events (file path or in-memory object). */
+export async function streamDag(
+  graph: string | GraphObject,
+  resumeId?: string | null,
+  resumeAnswer?: string | null,
+  injectPayload?: unknown,
+  includeExtraInfo?: boolean | null,
+  agentSessionId?: string | null,
+): Promise<DagStream> {
+  const handle =
+    typeof graph === "string"
+      ? await asDag(
+          native.streamDag(
+            graph,
+            resumeId,
+            resumeAnswer,
+            injectPayload,
+            includeExtraInfo,
+            agentSessionId,
+          ),
+        )
+      : await asDag(
+          native.streamDagFromJson(
+            JSON.stringify(graph),
+            resumeId,
+            resumeAnswer,
+            injectPayload,
+            includeExtraInfo,
+            agentSessionId,
+          ),
+        );
+  return new DagStream(handle as { pull(): Promise<DagEvent | null> });
+}

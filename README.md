@@ -381,6 +381,44 @@ except Exception as e:
     print(f"Error inesperado: {e}")
 ```
 
+## Node.js / TypeScript
+
+Colmena también expone bindings nativos para Node.js compilados con **napi-rs**, sin ningún overhead de FFI.
+
+### Instalación
+
+```bash
+npm install colmena-ai
+```
+
+### Llamada LLM
+
+```ts
+import { ColmenaLlm } from "colmena-ai";
+
+const llm = new ColmenaLlm();
+const text = await llm.call(
+  [{ role: "user", content: "¿Qué es Rust?" }],
+  "google",
+  { model: "gemini-2.5-flash", temperature: 0.7 },
+);
+console.log(text);
+```
+
+### Ejecutar un grafo DAG
+
+```ts
+import { runDag } from "colmena-ai";
+
+// runDag devuelve el valor parseado directamente (no un JSON string como en Python)
+const result = await runDag("tests/graphs/basic/power.json");
+console.log(JSON.stringify(result, null, 2));
+```
+
+Guía completa: [`docs/examples/typescript_usage.md`](docs/examples/typescript_usage.md)
+
+---
+
 ## ⚙️ Uso del Motor DAG
 
 El **DAG Engine** permite crear flujos de trabajo complejos conectando diferentes tipos de nodos en un grafo dirigido acíclico (DAG).
