@@ -139,6 +139,38 @@ Detalles del formato Q/A (id-keyed, orden-independiente, multilínea) y de `secu
 [`44_suspend_node.md`](44_suspend_node.md) y el spec de
 [suspend-qa-response-format](../superpowers/specs/2026-05-08-suspend-qa-response-format-design.md).
 
+## `stream_dag` — consumir los eventos del DAG en proceso
+
+`run_dag` devuelve **solo el resultado final**. Para recibir el play-by-play de los nodos
+(`node-start`, `node-end`, `text-delta`, `tool-input-available`, `finish`, …) **en proceso** (sin
+levantar el servidor HTTP), usa `stream_dag`: un **async iterator** que entrega cada evento ya mapeado
+a SSE como **dict** — el mismo formato que emite `serve_dag` por HTTP.
+
+```python
+import colmena
+
+stream = await colmena.stream_dag("tests/graphs/agents/agent_with_tools_gemini.json",
+                                  agent_session_id="s1")
+async for event in stream:          # cada event es un dict con "type"
+    if event["type"] == "text-delta":
+        print(event["delta"], end="", flush=True)
+    elif event["type"] == "node-end":
+        print(f"\n[nodo {event.get('node_id')} listo]")
+    elif event["type"] == "finish":
+        print("\nOutput final:", event["output"])
+```
+
+- **Firma:** `stream_dag(graph, resume_id=None, resume_answer=None, inject_payload=None,
+  include_extra_info=False, agent_session_id=None)`. `graph` es path **o** dict, igual que `run_dag`.
+- Devuelve un **awaitable** que resuelve al iterador: `stream = await colmena.stream_dag(...)` y luego
+  `async for`. Se agota con el evento `{"type": "finish"}` → `StopAsyncIteration`.
+- Errores (archivo inexistente, grafo inválido, fallo de build) se lanzan como `DagException` al
+  hacer `await`.
+- Cada `stream_dag` levanta su propio engine. El adapter de storage local de dev (`LocalHttp`, cuando
+  `COLMENA_LOCAL` está activo) usa un puerto fijo (`8765`); para correr varios streams en el mismo
+  proceso localmente, usa un puerto efímero con `COLMENA_LOCAL_STORAGE_PORT=0` (o los adapters
+  `LocalCache`/`HttpCallback`). En producción no aplica (no se usa `LocalHttp`).
+
 ## `serve_dag` — servir webhooks como API HTTP
 
 Levanta un servidor que expone cada `trigger_webhook` del grafo como ruta POST. **Es bloqueante**

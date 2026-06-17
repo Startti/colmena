@@ -272,6 +272,50 @@ impl ColmenaLlm {
 
 create_exception!(colmena, DagException, PyException);
 
+/// Owned, `'static` stream of SSE-mapped DAG parts (each a `serde_json::Value`).
+type DagPartStream = std::pin::Pin<
+    Box<
+        dyn futures::Stream<
+                Item = Result<serde_json::Value, crate::dag_engine::domain::error::DagError>,
+            > + Send,
+    >,
+>;
+
+/// Async iterator over a running DAG's SSE-mapped events. Each `__anext__`
+/// yields the next `{ "type": ... }` part as a Python dict; raises
+/// `StopAsyncIteration` when the graph finishes. Built by `stream_dag`.
+#[pyclass]
+struct PyDagStream {
+    stream: Arc<Mutex<DagPartStream>>,
+}
+
+#[pymethods]
+impl PyDagStream {
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __anext__<'py>(slf: PyRefMut<'_, Self>, py: Python<'py>) -> PyResult<Option<Py<PyAny>>> {
+        let stream = Arc::clone(&slf.stream);
+        let future = async move {
+            let mut stream = stream.lock().await;
+            if let Some(result) = stream.next().await {
+                match result {
+                    Ok(part) => Python::attach(|py| {
+                        pythonize::pythonize(py, &part)
+                            .map(|b| b.unbind())
+                            .map_err(|e| DagException::new_err(e.to_string()))
+                    }),
+                    Err(e) => Err(DagException::new_err(e.to_string())),
+                }
+            } else {
+                Err(PyStopAsyncIteration::new_err(()))
+            }
+        };
+        Ok(Some(future_into_py(py, future)?.into()))
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (graph, resume_id=None, resume_answer=None, inject_payload=None, include_extra_info=false, agent_session_id=None))]
 fn run_dag(
@@ -342,6 +386,92 @@ fn run_dag(
                     .map_err(|e| DagException::new_err(e.to_string())),
                 Err(e) => Err(DagException::new_err(e.to_string())),
             }
+        })
+    })
+}
+
+/// Streams a DAG's execution as SSE-mapped events (the `{ "type": ... }` parts
+/// the HTTP server emits), one Python dict per `__anext__`. Returns an awaitable
+/// that resolves to an async iterator:
+///
+/// ```python
+/// stream = await colmena.stream_dag("graph.json", agent_session_id="s1")
+/// async for event in stream:
+///     if event["type"] == "text-delta":
+///         print(event["delta"], end="")
+/// ```
+///
+/// `graph` is a file-path string or an in-memory graph dict (same as `run_dag`).
+#[pyfunction]
+#[pyo3(signature = (graph, resume_id=None, resume_answer=None, inject_payload=None, include_extra_info=false, agent_session_id=None))]
+fn stream_dag<'py>(
+    py: Python<'py>,
+    graph: pyo3::Bound<'py, pyo3::PyAny>,
+    resume_id: Option<String>,
+    resume_answer: Option<String>,
+    inject_payload: Option<pyo3::Bound<'py, pyo3::PyAny>>,
+    include_extra_info: bool,
+    agent_session_id: Option<String>,
+) -> PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
+    // `graph` is either a path to a JSON file (str) or an in-memory graph (dict).
+    enum GraphSource {
+        Path(String),
+        Json(String),
+    }
+    let source = if let Ok(path) = graph.extract::<String>() {
+        GraphSource::Path(path)
+    } else {
+        let value: serde_json::Value = pythonize::depythonize(&graph).map_err(|e| {
+            DagException::new_err(format!(
+                "graph must be a file-path string or a graph dict: {}",
+                e
+            ))
+        })?;
+        GraphSource::Json(
+            serde_json::to_string(&value).map_err(|e| DagException::new_err(e.to_string()))?,
+        )
+    };
+
+    let inject_payload_val: Option<serde_json::Value> = match inject_payload {
+        Some(obj) => {
+            Some(pythonize::depythonize(&obj).map_err(|e| DagException::new_err(e.to_string()))?)
+        }
+        None => None,
+    };
+
+    future_into_py(py, async move {
+        // The two api fns return distinct `impl Stream` opaque types, so box each
+        // arm to the shared `DagPartStream` before the match resolves.
+        let boxed: DagPartStream = match source {
+            GraphSource::Path(p) => {
+                let s = crate::dag_engine::api::stream_dag(
+                    p,
+                    resume_id,
+                    resume_answer,
+                    inject_payload_val,
+                    include_extra_info,
+                    agent_session_id,
+                )
+                .await
+                .map_err(|e| DagException::new_err(e.to_string()))?;
+                Box::pin(s)
+            }
+            GraphSource::Json(j) => {
+                let s = crate::dag_engine::api::stream_dag_from_str(
+                    j,
+                    resume_id,
+                    resume_answer,
+                    inject_payload_val,
+                    include_extra_info,
+                    agent_session_id,
+                )
+                .await
+                .map_err(|e| DagException::new_err(e.to_string()))?;
+                Box::pin(s)
+            }
+        };
+        Ok(PyDagStream {
+            stream: Arc::new(Mutex::new(boxed)),
         })
     })
 }
@@ -533,6 +663,7 @@ fn colmena(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // DAG Engine bindings
     m.add_function(wrap_pyfunction!(run_dag, m)?)?;
+    m.add_function(wrap_pyfunction!(stream_dag, m)?)?;
     m.add_function(wrap_pyfunction!(serve_dag, m)?)?;
     m.add_function(wrap_pyfunction!(validate_graph, m)?)?;
     m.add_function(wrap_pyfunction!(default_registry, m)?)?;

@@ -34,6 +34,16 @@ class LlmStream:
     def __aiter__(self) -> "LlmStream": ...
     async def __anext__(self) -> str: ...
 
+class DagStream:
+    """Async iterator of SSE-mapped DAG events yielded by ``stream_dag``.
+
+    Each item is a dict with a ``type`` (``"node-start"``, ``"node-end"``,
+    ``"text-delta"``, ``"finish"``, ...), identical to the HTTP ``serve_dag`` stream.
+    """
+
+    def __aiter__(self) -> "DagStream": ...
+    async def __anext__(self) -> Dict[str, Any]: ...
+
 class ColmenaLlm:
     """Multi-provider LLM client. Loads API keys from the environment on init."""
 
@@ -80,6 +90,21 @@ def run_dag(
 ) -> str:
     """Run a DAG graph to completion and return the final output as a JSON string.
 
+    ``graph`` is either a path to a JSON file or an in-memory graph dict.
+    """
+
+def stream_dag(
+    graph: Union[str, Dict[str, Any]],
+    resume_id: Optional[str] = ...,
+    resume_answer: Optional[str] = ...,
+    inject_payload: Optional[Any] = ...,
+    include_extra_info: bool = ...,
+    agent_session_id: Optional[str] = ...,
+) -> Awaitable[DagStream]:
+    """Stream a DAG's execution as SSE-mapped events (one dict per ``__anext__``).
+
+    Returns an awaitable that resolves to an async iterator:
+    ``stream = await colmena.stream_dag(...)`` then ``async for event in stream``.
     ``graph`` is either a path to a JSON file or an in-memory graph dict.
     """
 

@@ -266,6 +266,27 @@ colmena.validate_graph(graph)  # OK -> None ; inválido -> DagException
 print("Grafo válido ✅")
 ```
 
+### Consumir eventos en proceso: `stream_dag`
+
+`run_dag` devuelve solo el resultado final. Para recibir los eventos de los nodos en tiempo real
+(`node-start`/`node-end`/`text-delta`/`finish`, formato SSE) **sin** levantar el servidor HTTP, usa
+`stream_dag` (async iterator que entrega cada evento como dict):
+
+```python
+import colmena
+
+stream = await colmena.stream_dag("tests/graphs/agents/agent_with_tools_gemini.json")
+async for event in stream:
+    if event["type"] == "text-delta":
+        print(event["delta"], end="", flush=True)
+    elif event["type"] == "finish":
+        print("\nFinal:", event["output"])
+```
+
+`graph` es path o dict (igual que `run_dag`). Devuelve un awaitable → `stream = await
+colmena.stream_dag(...)` y luego `async for`. Ver detalles en
+[`48_python_dag.md`](../developer_guide/48_python_dag.md).
+
 ### Servir webhooks: `serve_dag`
 
 Levanta un servidor HTTP que expone los webhooks declarados en el grafo. **Es bloqueante.**
