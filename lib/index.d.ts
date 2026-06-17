@@ -30,7 +30,8 @@ export declare class ColmenaLlm {
     healthCheck(provider: string): Promise<boolean>;
     getProviders(): string[];
 }
-/** Run a DAG graph to completion; resolves to the final output value. */
-export declare function runDag(filePath: string, resumeId?: string | null, resumeAnswer?: string | null, injectPayload?: unknown, includeExtraInfo?: boolean | null): Promise<unknown>;
+export type GraphObject = Record<string, unknown>;
+/** Run a DAG graph (file path or in-memory object); resolves to the final output. */
+export declare function runDag(graph: string | GraphObject, resumeId?: string | null, resumeAnswer?: string | null, injectPayload?: unknown, includeExtraInfo?: boolean | null, agentSessionId?: string | null): Promise<unknown>;
 /** Serve a graph's webhook triggers as a (blocking) HTTP API. */
 export declare function serveDag(filePath: string, host?: string | null, port?: number | null): Promise<void>;

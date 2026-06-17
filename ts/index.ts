@@ -75,15 +75,32 @@ export class ColmenaLlm {
   }
 }
 
-/** Run a DAG graph to completion; resolves to the final output value. */
+export type GraphObject = Record<string, unknown>;
+
+/** Run a DAG graph (file path or in-memory object); resolves to the final output. */
 export function runDag(
-  filePath: string,
+  graph: string | GraphObject,
   resumeId?: string | null,
   resumeAnswer?: string | null,
   injectPayload?: unknown,
   includeExtraInfo?: boolean | null,
+  agentSessionId?: string | null,
 ): Promise<unknown> {
-  return asDag(native.runDag(filePath, resumeId, resumeAnswer, injectPayload, includeExtraInfo));
+  if (typeof graph === "string") {
+    return asDag(
+      native.runDag(graph, resumeId, resumeAnswer, injectPayload, includeExtraInfo, agentSessionId),
+    );
+  }
+  return asDag(
+    native.runDagFromJson(
+      JSON.stringify(graph),
+      resumeId,
+      resumeAnswer,
+      injectPayload,
+      includeExtraInfo,
+      agentSessionId,
+    ),
+  );
 }
 
 /** Serve a graph's webhook triggers as a (blocking) HTTP API. */
