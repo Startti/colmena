@@ -71,5 +71,17 @@ export type Registry = {
 };
 /** Build an inspection-only node registry with no database connection. */
 export declare function defaultRegistry(): Registry;
+export type SheetInfo = {
+    sheetId: string;
+    name: string;
+};
+export type SheetCells = Record<string, string | number | boolean | null>;
+/** Raw CRDT-sheet access (zero-deps). For DataFrames use @colmena-ai/documents. */
+export declare const documents: {
+    listSheets(artifactId: string): Promise<SheetInfo[]>;
+    readSheet(artifactId: string, sheetId: string): Promise<SheetCells>;
+    addSheet(artifactId: string, name: string): Promise<string>;
+    writeSheet(artifactId: string, sheetId: string, columns: string[], rows: unknown[][], mode?: "replace" | "append"): Promise<void>;
+};
 /** Stream a DAG's execution as typed events (file path or in-memory object). */
 export declare function streamDag(graph: string | GraphObject, resumeId?: string | null, resumeAnswer?: string | null, injectPayload?: unknown, includeExtraInfo?: boolean | null, agentSessionId?: string | null): Promise<DagStream>;

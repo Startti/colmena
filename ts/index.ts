@@ -154,6 +154,31 @@ export function defaultRegistry(): Registry {
   return native.defaultRegistry();
 }
 
+export type SheetInfo = { sheetId: string; name: string };
+export type SheetCells = Record<string, string | number | boolean | null>;
+
+/** Raw CRDT-sheet access (zero-deps). For DataFrames use @colmena-ai/documents. */
+export const documents = {
+  listSheets(artifactId: string): Promise<SheetInfo[]> {
+    return asDag(native.documentsListSheets(artifactId)) as Promise<SheetInfo[]>;
+  },
+  readSheet(artifactId: string, sheetId: string): Promise<SheetCells> {
+    return asDag(native.documentsReadSheet(artifactId, sheetId)) as Promise<SheetCells>;
+  },
+  addSheet(artifactId: string, name: string): Promise<string> {
+    return asDag(native.documentsAddSheet(artifactId, name));
+  },
+  writeSheet(
+    artifactId: string,
+    sheetId: string,
+    columns: string[],
+    rows: unknown[][],
+    mode?: "replace" | "append",
+  ): Promise<void> {
+    return asDag(native.documentsWriteSheet(artifactId, sheetId, columns, rows, mode));
+  },
+};
+
 /** Stream a DAG's execution as typed events (file path or in-memory object). */
 export async function streamDag(
   graph: string | GraphObject,

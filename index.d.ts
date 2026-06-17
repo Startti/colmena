@@ -22,6 +22,20 @@ export declare function streamDag(filePath: string, resumeId?: string | undefine
  * rather than a file path. Used by the TS facade to support in-memory graph objects.
  */
 export declare function streamDagFromJson(graphJson: string, resumeId?: string | undefined | null, resumeAnswer?: string | undefined | null, injectPayload?: any | undefined | null, includeExtraInfo?: boolean | undefined | null, agentSessionId?: string | undefined | null): Promise<DagStreamHandle>
+/** List all sheets in a CRDT artifact. Returns an array of `{ sheetId, name }` objects. */
+export declare function documentsListSheets(artifactId: string): Promise<any>
+/**
+ * Read all cells in a specific sheet. Returns a cell-addressed map
+ * (`{ "A1": "header", "B1": "other", ... }`), mirroring the Python binding.
+ */
+export declare function documentsReadSheet(artifactId: string, sheetId: string): Promise<any>
+/**
+ * Add a new sheet to a CRDT artifact (creating the artifact if needed).
+ * Returns the new sheet's UUID.
+ */
+export declare function documentsAddSheet(artifactId: string, name: string): Promise<string>
+/** Write column headers + row data to a sheet (mode: "replace" | "append"). */
+export declare function documentsWriteSheet(artifactId: string, sheetId: string, columns: Array<string>, rows: Array<Array<any>>, mode?: string | undefined | null): Promise<void>
 export interface NodeLlmConfigOptions {
   apiKey?: string
   model?: string
