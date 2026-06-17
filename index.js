@@ -310,11 +310,14 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { runDag, runDagFromJson, serveDag, validateGraph, ColmenaLlm, LlmStreamHandle } = nativeBinding
+const { runDag, runDagFromJson, serveDag, validateGraph, streamDag, streamDagFromJson, ColmenaLlm, LlmStreamHandle, DagStreamHandle } = nativeBinding
 
 module.exports.runDag = runDag
 module.exports.runDagFromJson = runDagFromJson
 module.exports.serveDag = serveDag
 module.exports.validateGraph = validateGraph
+module.exports.streamDag = streamDag
+module.exports.streamDagFromJson = streamDagFromJson
 module.exports.ColmenaLlm = ColmenaLlm
 module.exports.LlmStreamHandle = LlmStreamHandle
+module.exports.DagStreamHandle = DagStreamHandle

@@ -12,6 +12,16 @@ export declare function runDagFromJson(graphJson: string, resumeId?: string | un
 export declare function serveDag(filePath: string, host?: string | undefined | null, port?: number | undefined | null): Promise<void>
 /** Validate a graph object; throws `DagError` if it is not a valid graph. */
 export declare function validateGraph(graph: any): void
+/**
+ * Stream a DAG file's execution as SSE-mapped events. Returns a handle whose
+ * `pull()` method yields the next `{ type: ... }` event, or `null` at completion.
+ */
+export declare function streamDag(filePath: string, resumeId?: string | undefined | null, resumeAnswer?: string | undefined | null, injectPayload?: any | undefined | null, includeExtraInfo?: boolean | undefined | null, agentSessionId?: string | undefined | null): Promise<DagStreamHandle>
+/**
+ * Like [`stream_dag`] but accepts an already-serialized JSON string of the graph,
+ * rather than a file path. Used by the TS facade to support in-memory graph objects.
+ */
+export declare function streamDagFromJson(graphJson: string, resumeId?: string | undefined | null, resumeAnswer?: string | undefined | null, injectPayload?: any | undefined | null, includeExtraInfo?: boolean | undefined | null, agentSessionId?: string | undefined | null): Promise<DagStreamHandle>
 export interface NodeLlmConfigOptions {
   apiKey?: string
   model?: string
@@ -40,4 +50,12 @@ export declare class ColmenaLlm {
 export declare class LlmStreamHandle {
   /** Returns the next text chunk, or `null` when the stream is exhausted. */
   pull(): Promise<string | null>
+}
+/**
+ * Async-iterator handle over a running DAG's SSE-mapped events. Each `pull()`
+ * resolves to the next `{ type: ... }` event, or `null` when the graph finishes.
+ */
+export declare class DagStreamHandle {
+  /** Returns the next DAG event, or `null` when the graph finishes. */
+  pull(): Promise<any | null>
 }

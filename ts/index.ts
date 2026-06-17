@@ -120,3 +120,59 @@ export function validateGraph(graph: GraphObject): void {
     throw new DagError(e instanceof Error ? e.message : String(e));
   }
 }
+
+/** A DAG execution event. `type` discriminates the variant; extra fields vary. */
+export type DagEvent =
+  | { type: "node-start"; [k: string]: unknown }
+  | { type: "node-end"; [k: string]: unknown }
+  | { type: "text-delta"; delta: string; [k: string]: unknown }
+  | { type: "finish"; [k: string]: unknown }
+  | { type: string; [k: string]: unknown };
+
+/** Async iterator of DAG events. Use `for await (const event of stream)`. */
+export class DagStream implements AsyncIterableIterator<DagEvent> {
+  constructor(private handle: { pull(): Promise<DagEvent | null> }) {}
+  [Symbol.asyncIterator](): AsyncIterableIterator<DagEvent> {
+    return this;
+  }
+  async next(): Promise<IteratorResult<DagEvent>> {
+    const value = await this.handle.pull();
+    return value === null
+      ? { value: undefined, done: true }
+      : { value, done: false };
+  }
+}
+
+/** Stream a DAG's execution as typed events (file path or in-memory object). */
+export async function streamDag(
+  graph: string | GraphObject,
+  resumeId?: string | null,
+  resumeAnswer?: string | null,
+  injectPayload?: unknown,
+  includeExtraInfo?: boolean | null,
+  agentSessionId?: string | null,
+): Promise<DagStream> {
+  const handle =
+    typeof graph === "string"
+      ? await asDag(
+          native.streamDag(
+            graph,
+            resumeId,
+            resumeAnswer,
+            injectPayload,
+            includeExtraInfo,
+            agentSessionId,
+          ),
+        )
+      : await asDag(
+          native.streamDagFromJson(
+            JSON.stringify(graph),
+            resumeId,
+            resumeAnswer,
+            injectPayload,
+            includeExtraInfo,
+            agentSessionId,
+          ),
+        );
+  return new DagStream(handle as { pull(): Promise<DagEvent | null> });
+}

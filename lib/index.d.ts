@@ -37,3 +37,32 @@ export declare function runDag(graph: string | GraphObject, resumeId?: string | 
 export declare function serveDag(filePath: string, host?: string | null, port?: number | null): Promise<void>;
 /** Validate a graph object; throws DagError if it is not a valid graph. */
 export declare function validateGraph(graph: GraphObject): void;
+/** A DAG execution event. `type` discriminates the variant; extra fields vary. */
+export type DagEvent = {
+    type: "node-start";
+    [k: string]: unknown;
+} | {
+    type: "node-end";
+    [k: string]: unknown;
+} | {
+    type: "text-delta";
+    delta: string;
+    [k: string]: unknown;
+} | {
+    type: "finish";
+    [k: string]: unknown;
+} | {
+    type: string;
+    [k: string]: unknown;
+};
+/** Async iterator of DAG events. Use `for await (const event of stream)`. */
+export declare class DagStream implements AsyncIterableIterator<DagEvent> {
+    private handle;
+    constructor(handle: {
+        pull(): Promise<DagEvent | null>;
+    });
+    [Symbol.asyncIterator](): AsyncIterableIterator<DagEvent>;
+    next(): Promise<IteratorResult<DagEvent>>;
+}
+/** Stream a DAG's execution as typed events (file path or in-memory object). */
+export declare function streamDag(graph: string | GraphObject, resumeId?: string | null, resumeAnswer?: string | null, injectPayload?: unknown, includeExtraInfo?: boolean | null, agentSessionId?: string | null): Promise<DagStream>;
