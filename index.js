@@ -310,8 +310,8 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { ColmenaLlm, runDag, serveDag } = nativeBinding
+const { runDag, serveDag, ColmenaLlm } = nativeBinding
 
-module.exports.ColmenaLlm = ColmenaLlm
 module.exports.runDag = runDag
 module.exports.serveDag = serveDag
+module.exports.ColmenaLlm = ColmenaLlm
