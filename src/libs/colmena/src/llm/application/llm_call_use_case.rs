@@ -299,6 +299,38 @@ impl LlmCallUseCase {
             FileSource::InlineBytes { bytes } => {
                 let bytes_owned = bytes.clone();
                 let retained = bytes.clone();
+
+                // Text-like attachments (markdown, JSON, CSV, code, …) skip the
+                // provider Files API entirely. Their content is sent inline to
+                // the model (a `data:`/`input_file` part on the current turn) so
+                // no `provider_file_id` is needed. This keeps Colmena working
+                // behind an OpenAI-compatible proxy that has no `/v1/files`
+                // backend — uploading would fail and abort the whole request.
+                //
+                // NOTE: `LlmCallUseCase` has NO Step-3. Persisting the bytes to
+                // OutputStorageRepository and registering the catalog row
+                // (both required for later-turn `load_attachment` re-serving)
+                // happen ONLY in the DAG `LlmNode` Step-3
+                // (dag_engine/infrastructure/nodes/llm.rs). A caller that uses
+                // `LlmCallUseCase` directly (not via the node) gets the inline
+                // text on THIS turn but NO later-turn re-serving. We still keep
+                // `retained_inline_bytes` here so the node's Step-3 can persist
+                // them when this resolution does run inside the node.
+                if crate::llm::domain::is_text_like(&file.mime_type) {
+                    crate::colmena_log!(
+                        "[file-resolve] '{}' is inline TEXT ({}, {} B); skipping {} Files API \
+                         (sent inline + served via load_attachment from storage)",
+                        file.filename,
+                        file.mime_type,
+                        bytes_owned.len(),
+                        provider_kind
+                    );
+                    file.retained_inline_bytes = Some(retained);
+                    // Leave source as InlineBytes so the adapter renders the
+                    // bytes inline and Step-3 registers source=Inline.
+                    return Ok(file);
+                }
+
                 crate::colmena_log!(
                     "[file-resolve] '{}' is inline bytes ({}, {} B), uploading to {} Files API",
                     file.filename,

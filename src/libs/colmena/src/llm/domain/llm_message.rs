@@ -103,6 +103,30 @@ impl FileData {
     }
 }
 
+/// Returns `true` for mime types whose content is plain UTF-8 text that an LLM
+/// can read inline (markdown, JSON, CSV, code, etc.).
+///
+/// Why this matters: text-like attachments are sent to the provider as inline
+/// content (a `data:` URI / `input_file` part on the OpenAI Responses API, or
+/// re-injected via `load_attachment`) and therefore do NOT need to be uploaded
+/// to the provider's Files API. Skipping the Files API for text lets Colmena
+/// work behind an OpenAI-compatible proxy that has no `/v1/files` backend — the
+/// upload would otherwise fail and the whole request would error out with
+/// `AllFilesFailedToResolve`. Images/PDFs/binaries are out of scope and keep
+/// using the Files API (they require provider-side file handling).
+///
+/// The mime is normalised (lower-cased, parameters such as `; charset=utf-8`
+/// stripped) before matching so `text/markdown; charset=utf-8` is recognised.
+pub fn is_text_like(mime: &str) -> bool {
+    let base = mime
+        .split(';')
+        .next()
+        .unwrap_or(mime)
+        .trim()
+        .to_ascii_lowercase();
+    base.starts_with("text/") || base == "application/json" || base.ends_with("+json")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(Derivative))]
 #[cfg_attr(test, derivative(PartialEq))]
@@ -247,6 +271,34 @@ mod tests {
             }
             _ => panic!("Expected InvalidMessageRole error"),
         }
+    }
+
+    #[test]
+    fn is_text_like_matches_text_json_and_variants() {
+        // text/*
+        assert!(is_text_like("text/plain"));
+        assert!(is_text_like("text/markdown"));
+        assert!(is_text_like("text/csv"));
+        assert!(is_text_like("text/x-rust"));
+        // application/json + +json suffix
+        assert!(is_text_like("application/json"));
+        assert!(is_text_like("application/vnd.api+json"));
+        // mime parameters are stripped before matching
+        assert!(is_text_like("text/markdown; charset=utf-8"));
+        assert!(is_text_like("TEXT/Markdown"));
+        assert!(is_text_like("application/json ; charset=utf-8"));
+    }
+
+    #[test]
+    fn is_text_like_rejects_binary_mimes() {
+        assert!(!is_text_like("application/pdf"));
+        assert!(!is_text_like("image/png"));
+        assert!(!is_text_like("image/jpeg"));
+        assert!(!is_text_like("application/octet-stream"));
+        assert!(!is_text_like("application/zip"));
+        // application/xml is intentionally out of scope (binary-ish handling
+        // unchanged) — only text/* and *json are short-circuited.
+        assert!(!is_text_like("application/xml"));
     }
 
     #[test]
