@@ -143,17 +143,13 @@ mod base_url_override_tests {
     use crate::llm::infrastructure::files::{
         AnthropicFilesApiAdapter, GeminiFilesApiAdapter, OpenAiFilesApiAdapter,
     };
-    use std::sync::Mutex;
-    // Serializes env-var mutation across tests in this module. Mirrors the
-    // hygiene in `LlmProviderFactory::base_url_override_tests` so parallel
-    // test threads don't clobber each other's env.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use serial_test::serial;
+    // Env-var mutation is serialized across BOTH this module and
+    // `LlmProviderFactory::base_url_override_tests` via the shared
+    // `#[serial(base_url_env)]` key, so chat-side and files-side tests can't
+    // clobber each other's process-global env under parallel `cargo test`.
 
     fn with_clean_env<F: FnOnce()>(f: F) {
-        let _lock = match ENV_LOCK.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
         for k in [
             "OPENAI_BASE_URL",
             "GEMINI_BASE_URL",
@@ -174,6 +170,7 @@ mod base_url_override_tests {
     }
 
     #[test]
+    #[serial(base_url_env)]
     fn none_when_no_env_set() {
         with_clean_env(|| {
             assert_eq!(base_url_override(ProviderKind::Google), None);
@@ -183,6 +180,7 @@ mod base_url_override_tests {
     }
 
     #[test]
+    #[serial(base_url_env)]
     fn per_provider_var_wins() {
         with_clean_env(|| {
             std::env::set_var("GEMINI_BASE_URL", "http://gem");
@@ -211,6 +209,7 @@ mod base_url_override_tests {
     }
 
     #[test]
+    #[serial(base_url_env)]
     fn catchall_used_when_no_per_provider_var() {
         with_clean_env(|| {
             std::env::set_var("COLMENA_LLM_BASE_URL", "http://catchall");
@@ -230,6 +229,7 @@ mod base_url_override_tests {
     }
 
     #[test]
+    #[serial(base_url_env)]
     fn mock_and_generated_never_overridden() {
         with_clean_env(|| {
             std::env::set_var("COLMENA_LLM_BASE_URL", "http://catchall");
@@ -244,6 +244,7 @@ mod base_url_override_tests {
     // `base_url()` getter; `create()` returns a trait object so we
     // reconstruct the concrete type under the same env to inspect it.
     #[test]
+    #[serial(base_url_env)]
     fn create_honors_per_provider_env() {
         with_clean_env(|| {
             std::env::set_var("OPENAI_BASE_URL", "http://proxy-oai");
@@ -271,6 +272,7 @@ mod base_url_override_tests {
     }
 
     #[test]
+    #[serial(base_url_env)]
     fn create_honors_catchall_env() {
         with_clean_env(|| {
             std::env::set_var("COLMENA_LLM_BASE_URL", "http://proxy-all");
@@ -283,6 +285,7 @@ mod base_url_override_tests {
     }
 
     #[test]
+    #[serial(base_url_env)]
     fn create_uses_production_default_with_no_env() {
         with_clean_env(|| {
             assert!(base_url_override(ProviderKind::OpenAi).is_none());
