@@ -1,4 +1,5 @@
 use crate::llm::domain::{MessageRole, ProviderKind};
+use crate::node_bindings::stream::LlmStreamHandle;
 use crate::shared::infrastructure::{ConfigResolver, ServiceContainerFactory};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -93,6 +94,57 @@ impl ColmenaLlm {
             .await
             .map(|res| res.content().to_string())
             .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
+    }
+
+    #[napi]
+    pub async fn stream(
+        &self,
+        messages: Vec<NodeLlmMessage>,
+        provider: String,
+        options: Option<NodeLlmConfigOptions>,
+    ) -> Result<LlmStreamHandle> {
+        let provider_kind = ProviderKind::from_str(&provider)
+            .map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
+        let container = self
+            .containers
+            .get(&provider)
+            .ok_or_else(|| {
+                Error::new(
+                    Status::InvalidArg,
+                    format!("Provider {} not found", provider),
+                )
+            })?
+            .clone();
+
+        let llm_messages: Result<Vec<crate::llm::domain::LlmMessage>> = messages
+            .into_iter()
+            .map(|msg| {
+                let role = MessageRole::from_str(&msg.role)
+                    .map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
+                crate::llm::domain::LlmMessage::new(role, msg.content)
+                    .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
+            })
+            .collect();
+
+        let options = options.unwrap_or_default();
+        let config = ConfigResolver::create_config(
+            provider_kind,
+            options.api_key,
+            options.model,
+            options.temperature.map(|v| v as f32),
+            options.max_tokens,
+            options.top_p.map(|v| v as f32),
+            options.frequency_penalty.map(|v| v as f32),
+            options.presence_penalty.map(|v| v as f32),
+        )
+        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+
+        let stream = container
+            .llm_stream
+            .execute(llm_messages?, config)
+            .await
+            .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+        Ok(LlmStreamHandle::new(stream))
     }
 
     #[napi]

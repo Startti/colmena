@@ -3,6 +3,8 @@
 
 mod dag;
 mod llm;
+pub mod stream;
 
 pub use dag::*;
 pub use llm::*;
+pub use stream::*;

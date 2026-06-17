@@ -16,6 +16,20 @@ export type NodeLlmConfigOptions = {
 
 export type NodeLlmMessage = { role: string; content: string };
 
+/** Async iterator of text chunks. Use `for await (const chunk of stream)`. */
+export class LlmStream implements AsyncIterableIterator<string> {
+  constructor(private handle: { pull(): Promise<string | null> }) {}
+  [Symbol.asyncIterator](): AsyncIterableIterator<string> {
+    return this;
+  }
+  async next(): Promise<IteratorResult<string>> {
+    const value = await this.handle.pull();
+    return value === null
+      ? { value: undefined, done: true }
+      : { value, done: false };
+  }
+}
+
 /** Multi-provider LLM client. Loads API keys from the environment on construction. */
 export class ColmenaLlm {
   private inner = new native.ColmenaLlm();
@@ -26,6 +40,14 @@ export class ColmenaLlm {
     options?: NodeLlmConfigOptions,
   ): Promise<string> {
     return this.inner.call(messages, provider, options);
+  }
+
+  async stream(
+    messages: NodeLlmMessage[],
+    provider: string,
+    options?: NodeLlmConfigOptions,
+  ): Promise<LlmStream> {
+    return new LlmStream(await this.inner.stream(messages, provider, options));
   }
 
   healthCheck(provider: string): Promise<boolean> {

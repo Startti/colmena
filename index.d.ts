@@ -21,6 +21,16 @@ export interface NodeLlmMessage {
 export declare class ColmenaLlm {
   constructor()
   call(messages: Array<NodeLlmMessage>, provider: string, options?: NodeLlmConfigOptions | undefined | null): Promise<string>
+  stream(messages: Array<NodeLlmMessage>, provider: string, options?: NodeLlmConfigOptions | undefined | null): Promise<LlmStreamHandle>
   healthCheck(provider: string): Promise<boolean>
   getProviders(): Array<string>
+}
+/**
+ * Async-iterator handle over an LLM text stream. Each `pull()` resolves to the
+ * next chunk, or `null` when the stream is exhausted. The TS facade attaches
+ * `[Symbol.asyncIterator]` so callers use `for await (const chunk of stream)`.
+ */
+export declare class LlmStreamHandle {
+  /** Returns the next text chunk, or `null` when the stream is exhausted. */
+  pull(): Promise<string | null>
 }

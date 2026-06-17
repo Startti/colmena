@@ -12,10 +12,20 @@ export type NodeLlmMessage = {
     role: string;
     content: string;
 };
+/** Async iterator of text chunks. Use `for await (const chunk of stream)`. */
+export declare class LlmStream implements AsyncIterableIterator<string> {
+    private handle;
+    constructor(handle: {
+        pull(): Promise<string | null>;
+    });
+    [Symbol.asyncIterator](): AsyncIterableIterator<string>;
+    next(): Promise<IteratorResult<string>>;
+}
 /** Multi-provider LLM client. Loads API keys from the environment on construction. */
 export declare class ColmenaLlm {
     private inner;
     call(messages: NodeLlmMessage[], provider: string, options?: NodeLlmConfigOptions): Promise<string>;
+    stream(messages: NodeLlmMessage[], provider: string, options?: NodeLlmConfigOptions): Promise<LlmStream>;
     healthCheck(provider: string): Promise<boolean>;
     getProviders(): string[];
 }
