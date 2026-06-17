@@ -2,7 +2,20 @@
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const native = require("../index.js");
 
-export { LlmError, DagError } from "./errors";
+import { LlmError, DagError } from "./errors";
+export { LlmError, DagError };
+
+function asLlm<T>(p: Promise<T>): Promise<T> {
+  return p.catch((e: unknown) => {
+    throw new LlmError(e instanceof Error ? e.message : String(e));
+  });
+}
+
+function asDag<T>(p: Promise<T>): Promise<T> {
+  return p.catch((e: unknown) => {
+    throw new DagError(e instanceof Error ? e.message : String(e));
+  });
+}
 
 export type NodeLlmConfigOptions = {
   apiKey?: string;
@@ -39,7 +52,7 @@ export class ColmenaLlm {
     provider: string,
     options?: NodeLlmConfigOptions,
   ): Promise<string> {
-    return this.inner.call(messages, provider, options);
+    return asLlm(this.inner.call(messages, provider, options));
   }
 
   async stream(
@@ -47,11 +60,14 @@ export class ColmenaLlm {
     provider: string,
     options?: NodeLlmConfigOptions,
   ): Promise<LlmStream> {
-    return new LlmStream(await this.inner.stream(messages, provider, options));
+    const handle = await asLlm(
+      this.inner.stream(messages, provider, options) as Promise<{ pull(): Promise<string | null> }>,
+    );
+    return new LlmStream(handle);
   }
 
   healthCheck(provider: string): Promise<boolean> {
-    return this.inner.healthCheck(provider);
+    return asLlm(this.inner.healthCheck(provider));
   }
 
   getProviders(): string[] {
@@ -67,7 +83,7 @@ export function runDag(
   injectPayload?: unknown,
   includeExtraInfo?: boolean | null,
 ): Promise<unknown> {
-  return native.runDag(filePath, resumeId, resumeAnswer, injectPayload, includeExtraInfo);
+  return asDag(native.runDag(filePath, resumeId, resumeAnswer, injectPayload, includeExtraInfo));
 }
 
 /** Serve a graph's webhook triggers as a (blocking) HTTP API. */
@@ -76,5 +92,5 @@ export function serveDag(
   host?: string | null,
   port?: number | null,
 ): Promise<void> {
-  return native.serveDag(filePath, host, port);
+  return asDag(native.serveDag(filePath, host, port));
 }

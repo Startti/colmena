@@ -1,4 +1,5 @@
-export { LlmError, DagError } from "./errors";
+import { LlmError, DagError } from "./errors";
+export { LlmError, DagError };
 export type NodeLlmConfigOptions = {
     apiKey?: string;
     model?: string;
