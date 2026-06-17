@@ -35,3 +35,5 @@ export type GraphObject = Record<string, unknown>;
 export declare function runDag(graph: string | GraphObject, resumeId?: string | null, resumeAnswer?: string | null, injectPayload?: unknown, includeExtraInfo?: boolean | null, agentSessionId?: string | null): Promise<unknown>;
 /** Serve a graph's webhook triggers as a (blocking) HTTP API. */
 export declare function serveDag(filePath: string, host?: string | null, port?: number | null): Promise<void>;
+/** Validate a graph object; throws DagError if it is not a valid graph. */
+export declare function validateGraph(graph: GraphObject): void;

@@ -61,3 +61,11 @@ pub async fn serve_dag(file_path: String, host: Option<String>, port: Option<u16
         .await
         .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
 }
+
+/// Validate a graph object; throws `DagError` if it is not a valid graph.
+#[napi]
+pub fn validate_graph(graph: Value) -> Result<()> {
+    let _: crate::dag_engine::domain::graph::Graph = serde_json::from_value(graph)
+        .map_err(|e| Error::new(Status::InvalidArg, format!("invalid graph: {}", e)))?;
+    Ok(())
+}

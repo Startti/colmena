@@ -10,6 +10,8 @@ export declare function runDag(filePath: string, resumeId?: string | undefined |
  */
 export declare function runDagFromJson(graphJson: string, resumeId?: string | undefined | null, resumeAnswer?: string | undefined | null, injectPayload?: any | undefined | null, includeExtraInfo?: boolean | undefined | null, agentSessionId?: string | undefined | null): Promise<any>
 export declare function serveDag(filePath: string, host?: string | undefined | null, port?: number | undefined | null): Promise<void>
+/** Validate a graph object; throws `DagError` if it is not a valid graph. */
+export declare function validateGraph(graph: any): void
 export interface NodeLlmConfigOptions {
   apiKey?: string
   model?: string

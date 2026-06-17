@@ -111,3 +111,12 @@ export function serveDag(
 ): Promise<void> {
   return asDag(native.serveDag(filePath, host, port));
 }
+
+/** Validate a graph object; throws DagError if it is not a valid graph. */
+export function validateGraph(graph: GraphObject): void {
+  try {
+    native.validateGraph(graph);
+  } catch (e) {
+    throw new DagError(e instanceof Error ? e.message : String(e));
+  }
+}
