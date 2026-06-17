@@ -910,6 +910,41 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
             );
         }
 
+        // Text-like inline attachments are stored bytes-only: they were never
+        // uploaded to the provider Files API (no provider_file_id), so we can't
+        // hand back a FileSource::Uploaded. Instead read the bytes back from
+        // OutputStorageRepository and return them as InlineBytes — the adapter
+        // sends text inline (data:/input_file part) which works without any
+        // provider file. This is the load_attachment path for the proxy case.
+        if att.provider_file_id.is_empty() {
+            let storage_key = att.storage_key.as_deref().ok_or_else(|| {
+                format!(
+                    "load_attachment: attachment '{}' has no provider_file_id and no storage_key \
+                     — cannot resolve bytes (text attachment was not persisted)",
+                    document_id
+                )
+            })?;
+            let storage = self.storage.as_ref().ok_or_else(|| {
+                "load_attachment: text attachment stored bytes-only but no \
+                 OutputStorageRepository is wired — cannot resolve content"
+                    .to_string()
+            })?;
+            let stored = storage
+                .read(storage_key)
+                .await
+                .map_err(|e| format!("storage read for storage_key '{storage_key}': {e}"))?;
+            return Ok(Some(FileData {
+                document_id: Some(att.document_id.clone()),
+                mime_type: att.mime_type.clone(),
+                filename: att.filename.clone(),
+                size_hint: att.size_bytes,
+                source: FileSource::InlineBytes {
+                    bytes: stored.bytes,
+                },
+                retained_inline_bytes: None,
+            }));
+        }
+
         // Attempt to use the cached provider_file_id as-is. The provider call
         // itself will surface expiry on use; we treat lookup failure on the
         // provider as a recoverable case ONLY when the source is recoverable.
@@ -1418,6 +1453,36 @@ impl ExecutableNode for LlmNode {
                             let document_id = file.document_id.clone();
                             let size_hint = file.size_hint;
 
+                            // Text-like attachments skip the provider Files API
+                            // (mirrors LlmCallUseCase::resolve_one). Their bytes
+                            // are sent inline to the model and re-served via
+                            // load_attachment from storage, so no
+                            // provider_file_id is needed. Avoids the Files API,
+                            // which fails behind a proxy with no /v1/files
+                            // backend. retained_inline_bytes is kept so Step-3
+                            // can persist to OutputStorageRepository + register.
+                            if crate::llm::domain::is_text_like(&mime_type) {
+                                crate::colmena_log!(
+                                    "[file-resolve-no-cache] '{}' is inline TEXT ({}, {} B); \
+                                     skipping {} Files API (sent inline + load_attachment)",
+                                    filename,
+                                    mime_type,
+                                    bytes_owned.len(),
+                                    provider_kind
+                                );
+                                new_files.push(crate::llm::domain::FileData {
+                                    document_id,
+                                    mime_type,
+                                    filename,
+                                    size_hint,
+                                    source: FileSource::InlineBytes {
+                                        bytes: retained.clone(),
+                                    },
+                                    retained_inline_bytes: Some(retained),
+                                });
+                                continue;
+                            }
+
                             crate::colmena_log!(
                                 "[file-resolve-no-cache] '{}' (inline, {} B) uploading to {} Files API",
                                 filename,
@@ -1511,7 +1576,7 @@ impl ExecutableNode for LlmNode {
         {
             use crate::llm::domain::attachments::generate_attachment_id;
             use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
-            use crate::llm::domain::FileSource;
+            use crate::llm::domain::{is_text_like, FileSource};
 
             let raw_entries: Vec<serde_json::Value> = inputs
                 .get("files")
@@ -1562,6 +1627,14 @@ impl ExecutableNode for LlmNode {
 
                 let provider_file_id = match &file.source {
                     FileSource::Uploaded(r) => r.provider_file_id.clone(),
+                    // Text-like inline attachments are deliberately NOT uploaded
+                    // to the provider Files API (see is_text_like / resolve_one).
+                    // They still get a catalog row + storage bytes so that
+                    // load_attachment can serve them on later turns. The
+                    // provider_file_id is left empty — the load_attachment
+                    // resolver detects the empty id and serves the bytes inline
+                    // from OutputStorageRepository instead of via file_id.
+                    FileSource::InlineBytes { .. } if is_text_like(&file.mime_type) => String::new(),
                     _ => continue, // Not uploaded yet — skip registration this pass.
                 };
 
@@ -4201,6 +4274,78 @@ mod resolver_tests {
             err.contains("OutputStorageRepository"),
             "error message should mention storage: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn resolver_serves_text_from_storage_without_provider_file_id() {
+        // A text attachment is registered with an EMPTY provider_file_id (it was
+        // never uploaded to the Files API) but with a storage_key pointing at
+        // bytes in OutputStorageRepository. load_attachment must read those
+        // bytes back and return them as InlineBytes — no provider file involved.
+        use crate::llm::application::LoadAttachmentResolver;
+        use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
+        use crate::llm::domain::AttachmentRegistry;
+        use crate::llm::domain::ProviderKind;
+        use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+        use crate::storage::domain::{OutputStorageRepository, StoreRequest};
+        use crate::storage::infrastructure::LocalCacheStorageAdapter;
+        use std::sync::Arc;
+
+        let storage: Arc<dyn OutputStorageRepository> = Arc::new(LocalCacheStorageAdapter::new());
+        let body = b"# Q3 report\nNorth America had the highest revenue.".to_vec();
+        let stored = storage
+            .store(StoreRequest {
+                bytes: body.clone(),
+                mime_type: "text/markdown".to_string(),
+                filename: "q3.md".to_string(),
+                session_id: None,
+                agent_session_id: Some("agent_1".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let registry: Arc<dyn AttachmentRegistry> = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        registry
+            .upsert(UpsertAttachmentInput {
+                agent_session_id: "agent_1".to_string(),
+                document_id: "doc-md".to_string(),
+                provider: ProviderKind::OpenAi,
+                provider_file_id: String::new(), // never uploaded
+                mime_type: "text/markdown".to_string(),
+                filename: "q3.md".to_string(),
+                size_bytes: Some(body.len() as u64),
+                label: None,
+                description: None,
+                source: AttachmentSource::Inline,
+                storage_key: Some(stored.storage_key.clone()),
+                origin: None,
+            })
+            .await
+            .unwrap();
+
+        let resolver = AttachmentResolverImpl {
+            registry,
+            provider: ProviderKind::OpenAi,
+            api_key: "dummy".to_string(),
+            storage: Some(storage),
+        };
+
+        let file = resolver
+            .resolve("agent_1", "doc-md")
+            .await
+            .unwrap()
+            .unwrap();
+        match file.source {
+            crate::llm::domain::FileSource::InlineBytes { bytes } => {
+                assert_eq!(bytes, body, "resolver must return the stored text bytes");
+            }
+            other => panic!("expected InlineBytes from storage, got {other:?}"),
+        }
+        assert_eq!(file.mime_type, "text/markdown");
     }
 
     #[tokio::test]

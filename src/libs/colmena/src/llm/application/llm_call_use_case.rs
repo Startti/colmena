@@ -299,6 +299,32 @@ impl LlmCallUseCase {
             FileSource::InlineBytes { bytes } => {
                 let bytes_owned = bytes.clone();
                 let retained = bytes.clone();
+
+                // Text-like attachments (markdown, JSON, CSV, code, …) skip the
+                // provider Files API entirely. Their content is sent inline to
+                // the model (a `data:`/`input_file` part on the current turn,
+                // and re-injected via `load_attachment` on later turns) so no
+                // `provider_file_id` is needed. This keeps Colmena working
+                // behind an OpenAI-compatible proxy that has no `/v1/files`
+                // backend — uploading would fail and abort the whole request.
+                // We keep `retained_inline_bytes` so the node's Step-3
+                // auto-register can persist the bytes to OutputStorageRepository
+                // (so load_attachment can serve them on later turns).
+                if crate::llm::domain::is_text_like(&file.mime_type) {
+                    crate::colmena_log!(
+                        "[file-resolve] '{}' is inline TEXT ({}, {} B); skipping {} Files API \
+                         (sent inline + served via load_attachment from storage)",
+                        file.filename,
+                        file.mime_type,
+                        bytes_owned.len(),
+                        provider_kind
+                    );
+                    file.retained_inline_bytes = Some(retained);
+                    // Leave source as InlineBytes so the adapter renders the
+                    // bytes inline and Step-3 registers source=Inline.
+                    return Ok(file);
+                }
+
                 crate::colmena_log!(
                     "[file-resolve] '{}' is inline bytes ({}, {} B), uploading to {} Files API",
                     file.filename,

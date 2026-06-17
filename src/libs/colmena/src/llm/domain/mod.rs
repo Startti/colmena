@@ -27,7 +27,9 @@ pub use file_provider_factory_port::FileProviderFactoryPort;
 pub use file_provider_repository::{BoxedByteStream, FileProviderRepository};
 pub use llm_config::{LlmConfig, LlmUsage};
 pub use llm_error::LlmError;
-pub use llm_message::{FileData, FileSource, LlmMessage, MessageRole, ProviderFileRef};
+pub use llm_message::{
+    is_text_like, FileData, FileSource, LlmMessage, MessageRole, ProviderFileRef,
+};
 pub use llm_provider::{LlmProvider, ProviderKind};
 #[cfg(test)]
 pub use llm_repository::MockLlmRepository;
