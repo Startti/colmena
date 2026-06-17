@@ -1,0 +1,11 @@
+src/
+docs/
+tests/
+python/
+ts/
+target/
+.github/
+*.rs
+Cargo.toml
+Cargo.lock
+pyproject.toml
