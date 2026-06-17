@@ -7,7 +7,7 @@
   "files": ["lib/"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --test 'lib/test/*.js'"
+    "test": "node --test lib/test/*.js"
   },
   "peerDependencies": {
     "colmena-ai": "^0.3.0"

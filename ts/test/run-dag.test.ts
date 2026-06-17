@@ -14,12 +14,16 @@ const GRAPH = {
   ],
 };
 
-test("runDag accepts an in-memory graph object", async () => {
+// Executing a graph builds a ColmenaEngine, which requires DATABASE_URL.
+// Skip when unset (CI without a Postgres), mirroring the Rust `#[ignore]` DB tests.
+const dbSkip = process.env.DATABASE_URL ? false : "requires DATABASE_URL";
+
+test("runDag accepts an in-memory graph object", { skip: dbSkip }, async () => {
   const result = await runDag(GRAPH);
   assert.ok(result, "expected a result value");
 });
 
-test("runDag still accepts a file path", async () => {
+test("runDag still accepts a file path", { skip: dbSkip }, async () => {
   const result = await runDag("tests/graphs/basic/power.json");
   assert.ok(result);
 });

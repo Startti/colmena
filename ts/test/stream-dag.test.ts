@@ -14,7 +14,11 @@ const GRAPH = {
   ],
 };
 
-test("streamDag yields typed events ending in finish", async () => {
+// Executing a graph builds a ColmenaEngine, which requires DATABASE_URL.
+// Skip when unset (CI without a Postgres), mirroring the Rust `#[ignore]` DB tests.
+const dbSkip = process.env.DATABASE_URL ? false : "requires DATABASE_URL";
+
+test("streamDag yields typed events ending in finish", { skip: dbSkip }, async () => {
   const stream = await streamDag(GRAPH);
   const types: string[] = [];
   for await (const event of stream) {
