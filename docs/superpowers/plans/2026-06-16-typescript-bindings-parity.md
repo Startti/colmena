@@ -57,6 +57,36 @@
 
 ## FASE 0 — Infrastructure
 
+### Task 0.0: Fix non-Send error type in `dag_engine/api.rs` (node feature blocker)
+
+**Discovered during execution:** the `node` Cargo feature does not compile on the current tree. `run_dag` / `run_dag_from_str` use `Box<dyn std::error::Error>` (without `+ Send + Sync`); that error value is held across an `.await` in `run_dag_from_str`, so the future is `!Send`. napi's `execute_tokio_future` requires `Send` futures (PyO3 does not, which is why Python is unaffected). This gates every napi slice.
+
+**Files:**
+- Modify: `src/libs/colmena/src/dag_engine/api.rs`
+
+- [ ] **Step 1: Widen the error type to `Send + Sync`**
+
+In `api.rs`, change every `Box<dyn std::error::Error>` in the `run_dag`, `run_dag_from_str`, `stream_dag`, and `stream_dag_from_str` signatures and bodies (return types, the `let result: Result<Value, Box<dyn std::error::Error>>` binding at ~line 53, and each `Box::new(e) as Box<dyn std::error::Error>` / `Box::<dyn std::error::Error>::from(...)` cast) to `Box<dyn std::error::Error + Send + Sync>`. This coerces cleanly for existing callers that name `Box<dyn Error>`, so it is effectively non-breaking.
+
+- [ ] **Step 2: Verify the node feature compiles**
+
+Run: `cargo build --features node --lib --manifest-path src/libs/colmena/Cargo.toml`
+Expected: compiles with no errors.
+
+- [ ] **Step 3: Verify Python/default build still passes**
+
+Run: `cargo test --verbose` (default features) and `cargo clippy --features node -- -D warnings`
+Expected: pass, no warnings.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/libs/colmena/src/dag_engine/api.rs
+git commit -m "fix(dag): make api error type Send+Sync so node bindings compile"
+```
+
+> **ADP sweep note:** `crate::dag_engine::api::*` signatures change their error bound. Verify the ADP worker (`apps/service/ia/platform/{worker,api}/src/`) does not name `Box<dyn Error>` from these fns before pushing colmena develop. Coercion makes this almost certainly safe.
+
 ### Task 0.1: Split `node_bindings/mod.rs` into per-capability modules
 
 **Files:**
