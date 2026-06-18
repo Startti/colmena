@@ -11,6 +11,11 @@ pub enum DagRunStatus {
     Suspended,
     Completed,
     Failed,
+    /// Terminal state set when a run is hard-stopped by the user (cooperative
+    /// cancellation between nodes). Distinct from `Failed` so callers can tell
+    /// "stopped on purpose" apart from "crashed". A cancelled run is terminal
+    /// and is not resumable.
+    Cancelled,
 }
 
 impl std::fmt::Display for DagRunStatus {
@@ -20,6 +25,7 @@ impl std::fmt::Display for DagRunStatus {
             DagRunStatus::Suspended => "SUSPENDED",
             DagRunStatus::Completed => "COMPLETED",
             DagRunStatus::Failed => "FAILED",
+            DagRunStatus::Cancelled => "CANCELLED",
         };
         write!(f, "{}", s)
     }
@@ -34,6 +40,7 @@ impl std::str::FromStr for DagRunStatus {
             "SUSPENDED" => Ok(DagRunStatus::Suspended),
             "COMPLETED" => Ok(DagRunStatus::Completed),
             "FAILED" => Ok(DagRunStatus::Failed),
+            "CANCELLED" => Ok(DagRunStatus::Cancelled),
             _ => Err(format!("Unknown status: {}", s)),
         }
     }
@@ -104,6 +111,17 @@ pub trait DagStateRepository: Send + Sync {
         &self,
         parent_session_id: &str,
     ) -> Result<Option<String>, DagError>;
+
+    /// Marks every `RUNNING` descendant of `root_session_id` (transitively, via
+    /// `parent_session_id`) as `CANCELLED`. Used when a root run is hard-stopped:
+    /// subgraph children are interrupted by drop-propagation, but their rows are
+    /// left `RUNNING`; this cleans them up so no zombie rows remain.
+    ///
+    /// Returns the number of rows updated. The default impl is a no-op (returns
+    /// `Ok(0)`) so in-memory / test repositories don't need to implement it.
+    async fn cancel_running_descendants(&self, _root_session_id: &str) -> Result<u64, DagError> {
+        Ok(0)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,4 +187,29 @@ pub trait DagTaskMemoryRepository: Send + Sync {
     ) -> Result<(), DagError>;
     async fn get_phase_summaries(&self, session_id: &str)
         -> Result<Vec<DagPhaseSummary>, DagError>;
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::DagRunStatus;
+    use std::str::FromStr;
+
+    #[test]
+    fn cancelled_displays_as_uppercase() {
+        assert_eq!(DagRunStatus::Cancelled.to_string(), "CANCELLED");
+    }
+
+    #[test]
+    fn cancelled_parses_from_str() {
+        assert_eq!(
+            DagRunStatus::from_str("CANCELLED").unwrap(),
+            DagRunStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn cancelled_display_fromstr_roundtrip() {
+        let s = DagRunStatus::Cancelled;
+        assert_eq!(DagRunStatus::from_str(&s.to_string()).unwrap(), s);
+    }
 }

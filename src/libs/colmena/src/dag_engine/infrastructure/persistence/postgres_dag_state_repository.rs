@@ -264,6 +264,34 @@ impl DagStateRepository for PostgresDagStateRepository {
 
         Ok(row_opt.map(|r| r.get::<String, _>("session_id")))
     }
+
+    async fn cancel_running_descendants(&self, root_session_id: &str) -> Result<u64, DagError> {
+        // Walk the parent_session_id chain from the root and flip every still-RUNNING
+        // descendant to CANCELLED in a single statement. The root itself is excluded
+        // (the caller persists the root's CANCELLED state separately).
+        let result = sqlx::query(
+            "WITH RECURSIVE descendants AS ( \
+                 SELECT session_id FROM dag_runs WHERE parent_session_id = $1 \
+                 UNION ALL \
+                 SELECT d.session_id FROM dag_runs d \
+                     JOIN descendants x ON d.parent_session_id = x.session_id \
+             ) \
+             UPDATE dag_runs SET status = 'CANCELLED', updated_at = NOW() \
+              WHERE session_id IN (SELECT session_id FROM descendants) \
+                AND status = 'RUNNING'",
+        )
+        .bind(root_session_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            DagError::StateError(format!(
+                "Database error on cancel_running_descendants: {}",
+                e
+            ))
+        })?;
+
+        Ok(result.rows_affected())
+    }
 }
 
 // ─── DagTaskMemoryRepository ──────────────────────────────────────────────────

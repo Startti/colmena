@@ -79,6 +79,15 @@ pub enum DagExecutionEvent {
     GraphFinish { output: Value },
     #[serde(rename = "error")]
     Error { message: String },
+    /// Terminal event emitted when a run is hard-stopped (cooperative cancellation
+    /// between nodes). `partial_output` carries whatever the last completed node
+    /// produced (or `null`). Consumers should treat this as a stream terminator,
+    /// distinct from `error` (it was intentional, not a failure).
+    #[serde(rename = "cancelled")]
+    Cancelled {
+        reason: Option<String>,
+        partial_output: Value,
+    },
     /// Emitted at the beginning of each loop turn
     #[serde(rename = "turn_start")]
     TurnStart { turn: u32 },
@@ -129,5 +138,37 @@ mod tests {
         let json = serde_json::to_value(&ev).unwrap();
         assert_eq!(json["event"], "tool_described");
         assert_eq!(json["data"]["tool_name"], "search_orders");
+    }
+
+    #[test]
+    fn cancelled_serializes_with_event_tag() {
+        let ev = DagExecutionEvent::Cancelled {
+            reason: Some("user requested stop".to_string()),
+            partial_output: serde_json::json!({ "n1": { "output": 42 } }),
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["event"], "cancelled");
+        assert_eq!(json["data"]["reason"], "user requested stop");
+        assert_eq!(json["data"]["partial_output"]["n1"]["output"], 42);
+    }
+
+    #[test]
+    fn cancelled_roundtrips() {
+        let ev = DagExecutionEvent::Cancelled {
+            reason: None,
+            partial_output: serde_json::Value::Null,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: DagExecutionEvent = serde_json::from_str(&json).unwrap();
+        match back {
+            DagExecutionEvent::Cancelled {
+                reason,
+                partial_output,
+            } => {
+                assert!(reason.is_none());
+                assert!(partial_output.is_null());
+            }
+            other => panic!("expected Cancelled, got {:?}", other),
+        }
     }
 }

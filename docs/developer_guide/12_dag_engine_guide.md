@@ -1308,6 +1308,43 @@ Ver la spec completa en `docs/superpowers/specs/2026-04-20-connection-pool-manag
 5. **Un `ColmenaEngine` por proceso**: No instancies múltiples engines — compartirían DB pero no el registry, anulando el beneficio de reuso de pools.
 6. **Siempre llama `engine.shutdown().await`** antes de salir, incluso en error paths.
 
+## 🛑 Hard Stop / Cancelación de un grafo en ejecución
+
+Un grafo en curso puede cancelarse de forma **cooperativa y limpia** mediante un
+`tokio_util::sync::CancellationToken`:
+
+```rust
+use tokio_util::sync::CancellationToken;
+
+let token = CancellationToken::new();
+let stream = engine.execute_stream_cancellable(
+    graph, None, None, false, None, Some(chat), token.clone(),
+);
+// Desde otro task / endpoint:
+token.cancel(); // hard-stop
+```
+
+Semántica:
+- **Entre nodos**: al dispararse el token, el grafo se detiene **antes de iniciar el
+  siguiente nodo**; el nodo en vuelo se **dropea** (las ops async tipo `reqwest`/`sqlx`
+  abortan en su próximo await).
+- Persiste un estado terminal **`CANCELLED`** con los outputs parciales y la cola restante.
+- Emite un evento terminal **`DagExecutionEvent::Cancelled { reason, partial_output }`**,
+  que el `SseMapper` traduce a un frame `cancelled` (UX) seguido de `finish` (terminador).
+- Subgrafos: los hijos se interrumpen por **drop-propagation** desde la raíz y sus filas
+  `RUNNING` se marcan `CANCELLED` vía `cancel_running_descendants` (CTE recursivo sobre
+  `parent_session_id`).
+
+Limitaciones conocidas:
+- `python_script` y demás nodos `spawn_blocking` (pyo3) **corren hasta su propio timeout**;
+  no se matan a media ejecución (su resultado se descarta). El grafo igual no arranca el
+  siguiente nodo.
+- Los writers desprendidos del nodo LLM (`tokio::spawn` de persistencia) terminan solos;
+  son idempotentes/benignos.
+- `CANCELLED` es **terminal y no resumible** — para continuar, iniciar una nueva ejecución.
+
+`engine.execute_stream(...)` (6 args, sin token) sigue disponible y completa normalmente.
+
 ## 📚 Más Información
 
 - **[20_orchestrator_architecture.md](./20_orchestrator_architecture.md)** — Guía completa del orchestrator: HITL, bridge tasks, fases, critic feedback loop y replanning dinámico con diagramas Mermaid

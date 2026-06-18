@@ -135,6 +135,10 @@ impl DagRunUseCase {
     }
 
     /// Executes the graph and streams events for each step.
+    // Mirrors the established positional streaming API; `cancel_token` is the
+    // minimal cooperative-cancellation handle. Bundling into a params struct
+    // would be a larger, inconsistent refactor of this hot path.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_stream(
         self,
         graph: Graph,
@@ -146,6 +150,11 @@ impl DagRunUseCase {
         path_prefix: Option<String>,
         // Conversation handle. `None` for legacy runs.
         agent_session_id: Option<String>,
+        // Cooperative cancellation handle. When fired, the loop stops between
+        // nodes (dropping the in-flight node future), persists `Cancelled`, marks
+        // running descendants, and yields a terminal `Cancelled` event. `None`
+        // disables cancellation (e.g. CLI/serve internal call sites).
+        cancel_token: Option<tokio_util::sync::CancellationToken>,
     ) -> impl futures::Stream<
         Item = Result<crate::dag_engine::domain::events::DagExecutionEvent, DagError>,
     > {
@@ -289,6 +298,38 @@ impl DagRunUseCase {
 
             // Start cyclic execution loop
             while let Some(node_id) = active_queue.pop_front() {
+
+                // ── Hard-stop check (between nodes) ────────────────────────────────
+                // If cancellation was requested, stop before starting this node:
+                // persist a terminal CANCELLED state (with the remaining queue and
+                // partial outputs), clean up any RUNNING descendants, emit the
+                // terminal `Cancelled` event, and end the stream.
+                if cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+                    let mut remaining = active_queue.clone();
+                    remaining.push_front(node_id.clone());
+                    if let Some(repo) = &self.state_repository {
+                        let state = DagRunState {
+                            session_id: session_id.clone(),
+                            agent_session_id: active_agent_session_id.clone(),
+                            parent_session_id: parent_session_id_for_save.clone(),
+                            graph_json: serde_json::to_value(&graph).unwrap_or(Value::Null),
+                            all_outputs: all_outputs.clone(),
+                            global_shared_state: global_shared_state.clone(),
+                            execution_history: execution_history.clone(),
+                            global_calls: global_calls.clone(),
+                            caller_specific_calls: caller_specific_calls.clone(),
+                            active_queue: remaining,
+                            status: DagRunStatus::Cancelled,
+                        };
+                        repo.save(&state).await?;
+                        let _ = repo.cancel_running_descendants(&session_id).await;
+                    }
+                    yield DagExecutionEvent::Cancelled {
+                        reason: None,
+                        partial_output: serde_json::to_value(&all_outputs).unwrap_or(Value::Null),
+                    };
+                    return;
+                }
 
                 // 1. Check if node has all required inputs before acting on it
                 // Ignore cyclic loopback edges because they shouldn't block the node from starting its very first turn
@@ -475,6 +516,15 @@ impl DagRunUseCase {
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
                 let observer = Arc::new(ChannelObserver { tx });
 
+                // Snapshot the shared state before the node mutably borrows it, so the
+                // mid-node cancellation arm can persist a coherent (pre-node) state.
+                // Only taken when a cancel token is wired, to avoid the clone otherwise.
+                let global_state_snapshot = if cancel_token.is_some() {
+                    global_shared_state.clone()
+                } else {
+                    Value::Null
+                };
+
                 let output = {
                     let execution_future = node_impl.execute(&inputs, &node_config_value, &mut global_shared_state, Some(observer));
                     tokio::pin!(execution_future);
@@ -484,6 +534,48 @@ impl DagRunUseCase {
                         tokio::select! {
                             res = &mut execution_future, if output_opt.is_none() => {
                                 output_opt = Some(res);
+                            }
+                            // ── Hard-stop check (mid-node) ─────────────────────────
+                            // Cancellation requested while the node is in flight. We
+                            // drop `execution_future` by returning, which aborts the
+                            // in-flight async work (reqwest/sqlx abort at their next
+                            // await; blocking spawn_blocking threads run to their own
+                            // timeout but their result is discarded). Persist CANCELLED
+                            // and emit the terminal event.
+                            _ = async {
+                                match &cancel_token {
+                                    Some(t) => t.cancelled().await,
+                                    None => std::future::pending::<()>().await,
+                                }
+                            } => {
+                                let mut remaining = active_queue.clone();
+                                remaining.push_front(node_id.clone());
+                                if let Some(repo) = &self.state_repository {
+                                    let state = DagRunState {
+                                        session_id: session_id.clone(),
+                                        agent_session_id: active_agent_session_id.clone(),
+                                        parent_session_id: parent_session_id_for_save.clone(),
+                                        graph_json: serde_json::to_value(&graph).unwrap_or(Value::Null),
+                                        all_outputs: all_outputs.clone(),
+                                        global_shared_state: global_state_snapshot.clone(),
+                                        execution_history: execution_history.clone(),
+                                        global_calls: global_calls.clone(),
+                                        caller_specific_calls: caller_specific_calls.clone(),
+                                        active_queue: remaining,
+                                        status: DagRunStatus::Cancelled,
+                                    };
+                                    // Best-effort: `?` can't propagate out of a select! arm,
+                                    // and a save failure must not prevent us from stopping.
+                                    if let Err(e) = repo.save(&state).await {
+                                        eprintln!("⚠️ Failed to persist CANCELLED state: {}", e);
+                                    }
+                                    let _ = repo.cancel_running_descendants(&session_id).await;
+                                }
+                                yield DagExecutionEvent::Cancelled {
+                                    reason: None,
+                                    partial_output: serde_json::to_value(&all_outputs).unwrap_or(Value::Null),
+                                };
+                                return;
                             }
                             event_opt = rx.recv() => {
                                 match event_opt {
@@ -970,6 +1062,9 @@ impl SubGraphExecutorPort for DagRunUseCase {
             true,
             path_prefix,
             agent_session_id,
+            // Subgraph children are interrupted via drop-propagation from the
+            // root, then cleaned up by cancel_running_descendants. No token here.
+            None,
         ));
 
         let mut final_out = Value::Null;
@@ -1027,6 +1122,7 @@ impl SubGraphExecutorPort for DagRunUseCase {
             true,
             path_prefix,
             agent_session_id.or(state.agent_session_id),
+            None,
         ));
 
         let mut final_out = Value::Null;
