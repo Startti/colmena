@@ -289,6 +289,38 @@ impl SseMapper {
                 "type": "error",
                 "errorText": message
             })),
+            DagExecutionEvent::Cancelled {
+                reason,
+                partial_output,
+            } => {
+                // Close any still-open text blocks before terminating.
+                for part_id in self.text_block_ids.values() {
+                    parts.push(json!({ "type": "text-end", "id": part_id }));
+                }
+                self.text_block_ids.clear();
+                self.seen_top_tool_ids.clear();
+                self.seen_sub_tool_ids.clear();
+
+                // UX frame: explicit "stopped by user" signal for the frontend.
+                parts.push(json!({
+                    "type": "cancelled",
+                    "reason": reason,
+                    "output": partial_output
+                }));
+
+                // Terminator the frontend already respects (closes the stream).
+                let usage_obj = json!({
+                    "promptTokens": self.total_prompt_tokens,
+                    "completionTokens": self.total_completion_tokens,
+                    "totalTokens": self.total_prompt_tokens + self.total_completion_tokens + self.total_thinking_tokens
+                });
+                Some(json!({
+                    "type": "finish",
+                    "finishReason": "cancelled",
+                    "usage": usage_obj,
+                    "output": partial_output
+                }))
+            }
             DagExecutionEvent::SkillLoaded {
                 node_id,
                 tool_id,
@@ -601,5 +633,29 @@ mod tests {
             "subgraph tool-input-start must not be suppressed by top-level seen_tool_ids"
         );
         assert_eq!(sub_parts[0]["type"], "subgraph-tool-input-start");
+    }
+
+    #[test]
+    fn cancelled_maps_to_cancelled_then_finish() {
+        let mut mapper = SseMapper::new();
+        let ev = DagExecutionEvent::Cancelled {
+            reason: Some("stopped".into()),
+            partial_output: json!({ "n1": { "output": 1 } }),
+        };
+        let parts = mapper.map(&ev);
+
+        // Expect a UX `cancelled` frame followed by a `finish` terminator.
+        let cancelled = parts
+            .iter()
+            .find(|p| p["type"] == "cancelled")
+            .expect("must emit a cancelled frame");
+        assert_eq!(cancelled["reason"], "stopped");
+        assert_eq!(cancelled["output"]["n1"]["output"], 1);
+
+        let finish = parts
+            .iter()
+            .find(|p| p["type"] == "finish")
+            .expect("must emit a finish terminator");
+        assert_eq!(finish["finishReason"], "cancelled");
     }
 }

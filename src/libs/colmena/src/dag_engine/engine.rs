@@ -340,6 +340,10 @@ impl ColmenaEngine {
         Ok(final_output)
     }
 
+    /// Streams a graph's execution as raw [`DagExecutionEvent`]s (no cancellation).
+    ///
+    /// Backward-compatible 6-arg API. For hard-stop support use
+    /// [`execute_stream_cancellable`](Self::execute_stream_cancellable).
     pub fn execute_stream(
         &self,
         graph: Graph,
@@ -356,6 +360,47 @@ impl ColmenaEngine {
             include_extra_info,
             path_prefix,
             agent_session_id,
+            None,
+        )
+    }
+
+    /// Streams a graph's execution as raw [`DagExecutionEvent`]s with cooperative
+    /// hard-stop support.
+    ///
+    /// When `cancel_token` fires, the run stops between nodes (dropping the
+    /// in-flight node future), persists a terminal `Cancelled` state, marks any
+    /// `RUNNING` subgraph descendants as `CANCELLED`, and yields a terminal
+    /// [`DagExecutionEvent::Cancelled`] before ending the stream.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let token = tokio_util::sync::CancellationToken::new();
+    /// let stream = engine.execute_stream_cancellable(
+    ///     graph, None, None, false, None, Some(chat), token.clone(),
+    /// );
+    /// // From elsewhere: token.cancel();  // hard-stops the run
+    /// ```
+    // Mirrors `execute_stream`'s positional API plus the cancel handle; a params
+    // struct would create an inconsistent dual API for the same operation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_stream_cancellable(
+        &self,
+        graph: Graph,
+        resume_session_id: Option<String>,
+        resume_answer: Option<String>,
+        include_extra_info: bool,
+        path_prefix: Option<String>,
+        agent_session_id: Option<String>,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> impl Stream<Item = Result<DagExecutionEvent, DagError>> + Send + '_ {
+        (*self.use_case).clone().execute_stream(
+            graph,
+            resume_session_id,
+            resume_answer,
+            include_extra_info,
+            path_prefix,
+            agent_session_id,
+            Some(cancel_token),
         )
     }
 
