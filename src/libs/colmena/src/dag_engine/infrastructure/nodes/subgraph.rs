@@ -396,6 +396,53 @@ mod subgraph_depth_guard_tests {
         assert!(!SubGraphNode::depth_exceeded(&inputs));
         assert!(!SubGraphNode::depth_exceeded(&NodeInputs::new())); // default 0
     }
+
+    #[tokio::test]
+    async fn execute_rejects_when_depth_at_limit() {
+        use crate::dag_engine::domain::node::ExecutableNode;
+        let node = SubGraphNode::new();
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert("__colmena_subgraph_depth".to_string(), json!(5));
+        // child_graph_inline present to prove the guard fires BEFORE graph loading
+        // and before the SubGraphExecutorPort is even needed.
+        inputs.insert(
+            "child_graph_inline".to_string(),
+            json!({ "nodes": {}, "edges": [] }),
+        );
+        let cfg = json!({});
+        let mut gs = json!({});
+        let err = node
+            .execute(&inputs, &cfg, &mut gs, None)
+            .await
+            .expect_err("execute must reject at depth == MAX before running the child");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("MAX_SUBGRAPH_TOOL_DEPTH") || msg.contains("nesting exceeded"),
+            "error must mention the depth limit; got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_does_not_reject_below_limit_guard_passes() {
+        // At depth 4 the guard must NOT fire. We can't run the full child without an
+        // executor, so we assert the error is NOT the depth-guard error (it will fail
+        // later for a different reason — missing executor/graph — which is fine).
+        use crate::dag_engine::domain::node::ExecutableNode;
+        let node = SubGraphNode::new();
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert("__colmena_subgraph_depth".to_string(), json!(4));
+        let cfg = json!({});
+        let mut gs = json!({});
+        let res = node.execute(&inputs, &cfg, &mut gs, None).await;
+        if let Err(e) = res {
+            let msg = e.to_string();
+            assert!(
+                !msg.contains("MAX_SUBGRAPH_TOOL_DEPTH") && !msg.contains("nesting exceeded"),
+                "at depth 4 the failure must NOT be the depth guard; got: {msg}"
+            );
+        }
+        // Ok is also acceptable (won't happen without an executor, but we don't assert it).
+    }
 }
 
 #[cfg(test)]
