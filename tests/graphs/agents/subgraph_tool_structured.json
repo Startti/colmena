@@ -30,6 +30,9 @@
             "node_type": "subgraph",
             "description": "Consulta el clima de una ciudad en una fecha dada.",
             "node_schema": {
+              "child_graph_path": {
+                "fixed": "./tests/graphs/agents/sub/weather_echo.json"
+              },
               "ciudad": {
                 "type": "string",
                 "required": true,
@@ -41,9 +44,6 @@
                 "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
                 "description": "Fecha en formato YYYY-MM-DD"
               }
-            },
-            "fixed_config": {
-              "child_graph_path": "./tests/graphs/agents/sub/weather_echo.json"
             }
           }
         }

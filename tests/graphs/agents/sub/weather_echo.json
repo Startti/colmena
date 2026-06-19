@@ -12,7 +12,8 @@
         "provider": "google",
         "model": "gemini-2.5-flash",
         "api_key": "${GEMINI_API_KEY}",
-        "system_message": "Reporta un clima plausible para {{ciudad}} en la fecha {{fecha}} en una frase.",
+        "system_message": "Eres un meteorólogo conciso. Responde en una sola frase.",
+        "prompt": "Reporta un clima plausible para {{ciudad}} en la fecha {{fecha}}.",
         "stream": false
       }
     },
