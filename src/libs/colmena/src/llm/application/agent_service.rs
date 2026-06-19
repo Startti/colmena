@@ -7,11 +7,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Number of trailing messages to keep verbatim when compacting old
-/// `load_skill` tool results in the request. `keep_recent_msgs = 8` covers
-/// roughly the last 3 ReAct turns (assistant + 1-2 tool results per turn);
-/// anything older with `load_skill` content is replaced by a short marker.
+/// discovery/scaffolding tool results (e.g. `load_skill`, `describe_tool`)
+/// in the request. `keep_recent_msgs = 8` covers roughly the last 3 ReAct
+/// turns (assistant + 1-2 tool results per turn); anything older with a
+/// discovery-tool result is replaced by a short marker.
 /// Set to `usize::MAX` to disable.
-const COMPACT_LOAD_SKILL_KEEP_RECENT_MSGS: usize = 8;
+const DISCOVERY_KEEP_RECENT_MSGS: usize = 8;
+
+/// Nombres de tools de "andamiaje" (discovery/scaffolding del lazy loading + skills).
+/// Sus resultados viejos se colapsan a markers (recuperables re-llamando la tool).
+const DISCOVERY_TOOL_NAMES: &[&str] = &["load_skill", "describe_tool"];
 
 /// F-T15 — Rolling summary parameters (append-only, line-per-message).
 /// When `messages.len() > KEEP_FIRST + KEEP_RECENT + 1`, the middle slice gets
@@ -213,10 +218,11 @@ impl AgentService {
                 None => tools.clone(),
             };
             // F-T14 step A2 — skill-out-of-history.
-            // Compact load_skill tool results older than 8 msgs into markers.
+            // Compact discovery/scaffolding tool results (load_skill, describe_tool)
+            // older than 8 msgs into markers.
             // Persistence in `conversation_repository` is unchanged.
             let request_messages =
-                compact_old_load_skill_in_history(&messages, COMPACT_LOAD_SKILL_KEEP_RECENT_MSGS);
+                compact_discovery_tools_in_history(&messages, DISCOVERY_KEEP_RECENT_MSGS);
 
             // F-T15 — rolling summary. Replace the middle of history
             // (between KEEP_FIRST and KEEP_RECENT) with a single System
@@ -246,10 +252,8 @@ impl AgentService {
                 // Dump the FULLY-COMPACTED messages (after A2 + F-T15) — these
                 // are what actually gets sent over the wire. Persisted history
                 // in conversation_repository keeps the originals for recall.
-                let after_a2 = compact_old_load_skill_in_history(
-                    &messages,
-                    COMPACT_LOAD_SKILL_KEEP_RECENT_MSGS,
-                );
+                let after_a2 =
+                    compact_discovery_tools_in_history(&messages, DISCOVERY_KEEP_RECENT_MSGS);
                 let msgs_to_dump = compact_history_to_summary(
                     &after_a2,
                     COMPACT_SUMMARY_KEEP_FIRST_MSGS,
@@ -635,7 +639,7 @@ impl AgentService {
         messages.push(LlmMessage::user(RESCUE_SYNTHESIS_TEXT.to_string())?);
 
         let request_messages =
-            compact_old_load_skill_in_history(&messages, COMPACT_LOAD_SKILL_KEEP_RECENT_MSGS);
+            compact_discovery_tools_in_history(&messages, DISCOVERY_KEEP_RECENT_MSGS);
         let request_messages = compact_history_to_summary(
             &request_messages,
             COMPACT_SUMMARY_KEEP_FIRST_MSGS,
@@ -864,15 +868,19 @@ fn strip_leading_temporal_block(content: &str) -> String {
     }
 }
 
-/// Detection: for each Tool message, find the matching Assistant message that
-/// emitted the tool call by `tool_call_id` and check whether the function name
-/// was `load_skill`. Only matches by exact function name — `crdt_doc_*` tool
-/// results stay intact (they're either tiny or stateful and worth re-sending).
+/// Compact old discovery/scaffolding tool results into short markers.
+///
+/// Discovery tools (`load_skill`, `describe_tool`) emit large results that are
+/// only useful immediately after the call. Once older than `keep_recent_msgs`,
+/// their Tool messages are replaced by a one-line marker that tells the model
+/// it can re-call the tool to re-read. Non-discovery tool results
+/// (`crdt_doc_*`, `sql_query`, etc.) stay intact — they're either small or
+/// stateful.
 ///
 /// Provider-agnostic: each provider adapter serializes `LlmMessage` to its
 /// own request format; the compact marker is just a Tool message with shorter
 /// content, so no adapter changes needed.
-fn compact_old_load_skill_in_history(
+fn compact_discovery_tools_in_history(
     messages: &[LlmMessage],
     keep_recent_msgs: usize,
 ) -> Vec<LlmMessage> {
@@ -881,29 +889,27 @@ fn compact_old_load_skill_in_history(
         return out;
     }
 
-    // Build: tool_call_id → load_skill arguments (only for load_skill calls).
-    let mut load_skill_calls: HashMap<String, String> = HashMap::new();
+    // tool_call_id → (tool_name, arguments) para las discovery tools.
+    let mut discovery_calls: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
     for msg in out.iter() {
-        let Some(tcs) = msg.tool_calls() else {
-            continue;
-        };
-        for tc in tcs {
-            if tc.function.name == "load_skill" {
-                load_skill_calls.insert(tc.id.clone(), tc.function.arguments.clone());
+        if let Some(tcs) = msg.tool_calls() {
+            for tc in tcs {
+                if DISCOVERY_TOOL_NAMES.contains(&tc.function.name.as_str()) {
+                    discovery_calls.insert(
+                        tc.id.clone(),
+                        (tc.function.name.clone(), tc.function.arguments.clone()),
+                    );
+                }
             }
         }
     }
-
-    if load_skill_calls.is_empty() {
+    if discovery_calls.is_empty() {
         return out;
     }
 
     let boundary = out.len().saturating_sub(keep_recent_msgs);
-
-    // Two-phase scan: collect indices that need rewriting first (immutable
-    // borrow), then mutate (mutable borrow). Avoids the needless-range-loop
-    // lint without losing clarity.
-    let mut to_compact: Vec<(usize, String, String)> = Vec::new();
+    let mut to_compact: Vec<(usize, String)> = Vec::new();
     for (i, msg) in out.iter().enumerate().take(boundary) {
         if msg.role() != &MessageRole::Tool {
             continue;
@@ -911,37 +917,23 @@ fn compact_old_load_skill_in_history(
         let Some(tcid) = msg.tool_call_id().map(|s| s.to_string()) else {
             continue;
         };
-        let Some(args) = load_skill_calls.get(&tcid) else {
+        let Some((name, _args)) = discovery_calls.get(&tcid) else {
             continue;
         };
-        // Skip already-marked messages (idempotent).
-        if msg.content().starts_with("[skill ") && msg.content().ends_with(']') {
+        // Idempotente: saltar los ya marcados.
+        if msg.content().starts_with("[tool '") && msg.content().ends_with(']') {
             continue;
         }
-        to_compact.push((i, tcid, args.clone()));
+        to_compact.push((i, name.clone()));
     }
 
-    for (i, tcid, args) in to_compact {
+    for (i, name) in to_compact {
         let original_size = out[i].content().len();
-
-        // Parse args to make the marker descriptive (best-effort).
-        let marker = match serde_json::from_str::<serde_json::Value>(&args) {
-            Ok(v) => {
-                let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("?");
-                match v.get("reference").and_then(|x| x.as_str()) {
-                    Some(r) => format!(
-                        "[skill '{name}' (ref={r}) loaded earlier ({original_size} chars). \
-                         Call load_skill again to re-read.]"
-                    ),
-                    None => format!(
-                        "[skill '{name}' loaded earlier ({original_size} chars). \
-                         Call load_skill again to re-read.]"
-                    ),
-                }
-            }
-            Err(_) => format!("[skill loaded earlier ({original_size} chars)]"),
-        };
-
+        let tcid = out[i].tool_call_id().unwrap_or("unknown").to_string();
+        let marker = format!(
+            "[tool '{name}' result loaded earlier ({original_size} chars). \
+             Call {name} again to re-read.]"
+        );
         if let Ok(new_msg) = LlmMessage::tool(tcid, marker) {
             out[i] = new_msg;
         }
@@ -968,9 +960,9 @@ fn compact_old_load_skill_in_history(
 /// dropped data still lives in `conversation_repository` and can be recalled
 /// individually by turn number — only the eager summary view is bounded.
 ///
-/// Composition: this runs AFTER `compact_old_load_skill_in_history` so any
-/// load_skill markers in the middle slice are already small (the marker text
-/// goes into the summary line directly, no double work).
+/// Composition: this runs AFTER `compact_discovery_tools_in_history` so any
+/// discovery-tool markers in the middle slice are already small (the marker
+/// text goes into the summary line directly, no double work).
 fn compact_history_to_summary(
     messages: &[LlmMessage],
     keep_first: usize,
@@ -1271,7 +1263,7 @@ mod tests {
             LlmMessage::user("hi".to_string()).unwrap(),
             LlmMessage::assistant("ok".to_string()).unwrap(),
         ];
-        let out = compact_old_load_skill_in_history(&msgs, 10);
+        let out = compact_discovery_tools_in_history(&msgs, 10);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].content(), "hi");
         assert_eq!(out[1].content(), "ok");
@@ -1285,7 +1277,7 @@ mod tests {
         for i in 0..11 {
             msgs.push(LlmMessage::tool(format!("t{i}"), format!("payload {i}")).unwrap());
         }
-        let out = compact_old_load_skill_in_history(&msgs, 3);
+        let out = compact_discovery_tools_in_history(&msgs, 3);
         assert_eq!(out.len(), msgs.len());
         for (a, b) in out.iter().zip(msgs.iter()) {
             assert_eq!(a.content(), b.content());
@@ -1329,21 +1321,23 @@ mod tests {
         }
         assert_eq!(msgs.len(), 12);
 
-        let out = compact_old_load_skill_in_history(&msgs, 4);
+        let out = compact_discovery_tools_in_history(&msgs, 4);
         assert_eq!(out.len(), 12);
 
         // msg[2] (load_skill foo result) is at index 2, boundary = 12 - 4 = 8 → compacted.
         assert!(
             out[2]
                 .content()
-                .starts_with("[skill 'foo' loaded earlier ("),
+                .starts_with("[tool 'load_skill' result loaded earlier ("),
             "expected marker; got: {}",
             out[2].content()
         );
-        // msg[4] (load_skill bar ref1 result) at index 4 → compacted with reference.
+        // msg[4] (load_skill bar ref1 result) at index 4 → also compacted.
         assert!(
-            out[4].content().contains("(ref=ref1)"),
-            "expected ref marker; got: {}",
+            out[4]
+                .content()
+                .starts_with("[tool 'load_skill' result loaded earlier ("),
+            "expected marker; got: {}",
             out[4].content()
         );
         // Marker much shorter than original
@@ -1374,7 +1368,7 @@ mod tests {
         msgs.push(LlmMessage::assistant("ack".to_string()).unwrap());
         assert_eq!(msgs.len(), 10);
 
-        let out = compact_old_load_skill_in_history(&msgs, 4);
+        let out = compact_discovery_tools_in_history(&msgs, 4);
         // msg[8] is the tool result for "recent" load — index 8 >= boundary 6 → NOT compacted.
         assert_eq!(out[8].content(), "FRESH SKILL BODY");
     }
@@ -1400,7 +1394,7 @@ mod tests {
         for i in 0..10 {
             msgs.push(LlmMessage::assistant(format!("filler {i}")).unwrap());
         }
-        let out = compact_old_load_skill_in_history(&msgs, 4);
+        let out = compact_discovery_tools_in_history(&msgs, 4);
         // msg[1] (crdt_doc_run_python result) stays untouched.
         assert_eq!(out[1].content(), "{\"output\": \"pandas result\"}");
     }
@@ -1419,7 +1413,7 @@ mod tests {
         msgs.push(
             LlmMessage::tool(
                 "c".to_string(),
-                "[skill 'x' loaded earlier (1234 chars). Call load_skill again to re-read.]"
+                "[tool 'load_skill' result loaded earlier (1234 chars). Call load_skill again to re-read.]"
                     .to_string(),
             )
             .unwrap(),
@@ -1427,9 +1421,32 @@ mod tests {
         for i in 0..10 {
             msgs.push(LlmMessage::assistant(format!("filler {i}")).unwrap());
         }
-        let out = compact_old_load_skill_in_history(&msgs, 4);
+        let out = compact_discovery_tools_in_history(&msgs, 4);
         // Already a marker → not re-marked (would show "(NaN chars)" or grow).
         assert_eq!(out[1].content(), msgs[1].content());
+    }
+
+    #[test]
+    fn discovery_compaction_markers_old_describe_tool() {
+        let mut msgs = vec![
+            LlmMessage::user("hola".into()).unwrap(),
+            LlmMessage::assistant_with_tool_calls(
+                String::new(),
+                vec![tool_call("c1", "describe_tool", r#"{"name":"sql_query"}"#)],
+            )
+            .unwrap(),
+            LlmMessage::tool(
+                "c1".to_string(),
+                "# sql_query\n\n<schema gigante...>".repeat(50),
+            )
+            .unwrap(),
+        ];
+        for i in 0..9 {
+            msgs.push(LlmMessage::user(format!("relleno {i}")).unwrap());
+        }
+        let out = compact_discovery_tools_in_history(&msgs, DISCOVERY_KEEP_RECENT_MSGS);
+        assert!(out[2].content().starts_with("[tool 'describe_tool'"));
+        assert!(out[2].content().len() < 120);
     }
 
     // ── F-T15: compact_history_to_summary tests ─────────────────────────────
