@@ -14,6 +14,14 @@ const SCAN_ROWS_FOR_COLUMNS: usize = 50;
 const MAX_INLINE_FIELDS: usize = 6;
 const FIELD_VALUE_CHARS: usize = 40;
 const DIGEST_CEILING_CHARS: usize = 400;
+const IDENTITY_KEYS_NAME: &[&str] = &["name", "title", "label"];
+const IDENTITY_KEYS_TYPE: &[&str] = &["type", "kind"];
+// Budget = how many nested object levels below the row may be searched for an
+// identifier. With the check-keys-then-gate ordering of `find_identifier`, a
+// value of 1 reaches `data.label` (level 2 from the row) but stops before any
+// deeper key, which is exactly what the canvas/list digests need.
+const IDENTITY_SEARCH_DEPTH: usize = 1;
+const IDENTITY_SAMPLE_ROWS: usize = 3;
 
 /// Returns a one-line structured digest of a tool result if `content` is
 /// recognizably structured JSON (object, array-of-objects, or scalar array);
@@ -72,19 +80,17 @@ fn digest_object(v: &Value) -> Option<String> {
         match val {
             Value::Array(a) => {
                 fields.push(format!("{k}[{}]", a.len()));
-                let is_obj_array =
-                    !a.is_empty() && a.iter().take(SCAN_ROWS_FOR_COLUMNS).all(Value::is_object);
-                if is_obj_array {
-                    let better = drill
-                        .as_ref()
-                        .map(|(_, prev)| a.len() > prev.len())
-                        .unwrap_or(true);
-                    if better {
-                        drill = Some((k.clone(), a));
-                    }
+                consider_drill(k, val, &mut drill);
+            }
+            Value::Object(o) => {
+                fields.push(format!("{k}{{{}}}", o.len()));
+                // Peek one level into nested objects for a dominant
+                // array-of-objects so wrapped payloads (e.g. `{"data":{"rows":[…]}}`)
+                // still drill down.
+                for (nk, nv) in o.iter() {
+                    consider_drill(nk, nv, &mut drill);
                 }
             }
-            Value::Object(o) => fields.push(format!("{k}{{{}}}", o.len())),
             scalar => {
                 fields.push(k.clone());
                 if inline.len() < MAX_INLINE_FIELDS {
@@ -103,8 +109,28 @@ fn digest_object(v: &Value) -> Option<String> {
         for agg in numeric_aggregates(a, &cols) {
             s.push_str(&format!(" · {agg}"));
         }
+        if let Some(sample) = nominal_sample(a, &cols) {
+            s.push_str(&format!(" · muestra: {sample}"));
+        }
     }
     Some(s)
+}
+
+/// If `v` is a non-empty array-of-objects longer than the current `drill`
+/// candidate, make it the new drill target (keyed by `k`).
+fn consider_drill<'a>(k: &str, v: &'a Value, drill: &mut Option<(String, &'a Vec<Value>)>) {
+    if let Value::Array(a) = v {
+        let is_obj_array =
+            !a.is_empty() && a.iter().take(SCAN_ROWS_FOR_COLUMNS).all(Value::is_object);
+        if is_obj_array
+            && drill
+                .as_ref()
+                .map(|(_, p)| a.len() > p.len())
+                .unwrap_or(true)
+        {
+            *drill = Some((k.to_string(), a));
+        }
+    }
 }
 
 /// Union of object keys across the first `SCAN_ROWS_FOR_COLUMNS` rows, in
@@ -141,8 +167,16 @@ fn sample_rows(arr: &[Value], cols: &[String]) -> Vec<String> {
                     .iter()
                     .take(MAX_INLINE_FIELDS)
                     .filter_map(|c| {
-                        map.get(c.as_str())
-                            .map(|v| format!("{c}:{}", scalar_str(v)))
+                        map.get(c.as_str()).map(|v| {
+                            let rendered = match v {
+                                Value::Object(o) => {
+                                    find_identifier(o, IDENTITY_KEYS_NAME, IDENTITY_SEARCH_DEPTH)
+                                        .unwrap_or_else(|| scalar_str(v))
+                                }
+                                _ => scalar_str(v),
+                            };
+                            format!("{c}:{rendered}")
+                        })
                     })
                     .collect();
                 format!("{{{}}}", fields.join(", "))
@@ -201,6 +235,74 @@ fn scalar_str(v: &Value) -> String {
         Value::Object(o) => return format!("{{{}}}", o.len()),
     };
     cap(&raw, FIELD_VALUE_CHARS)
+}
+
+/// Shallow priority search for the first SCALAR value whose key is in `keys`,
+/// checking the requested keys at this level first, then recursing into
+/// object-valued fields up to `depth`. Deterministic (serde_json preserves
+/// key order). Returns the scalar rendered via `scalar_str`.
+fn find_identifier(
+    map: &serde_json::Map<String, Value>,
+    keys: &[&str],
+    depth: usize,
+) -> Option<String> {
+    for k in keys {
+        if let Some(v) = map.get(*k) {
+            if !v.is_object() && !v.is_array() {
+                return Some(scalar_str(v));
+            }
+        }
+    }
+    if depth == 0 {
+        return None;
+    }
+    for (_k, v) in map.iter() {
+        if let Value::Object(child) = v {
+            if let Some(found) = find_identifier(child, keys, depth - 1) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// Compact nominal label for a row object: `<type> "<name>"` when both are
+/// found (shallow), else whichever is present, else `col:value` for the first
+/// scalar column, else None.
+fn row_label(row: &Value, cols: &[String]) -> Option<String> {
+    let map = row.as_object()?;
+    let name = find_identifier(map, IDENTITY_KEYS_NAME, IDENTITY_SEARCH_DEPTH);
+    let kind = find_identifier(map, IDENTITY_KEYS_TYPE, IDENTITY_SEARCH_DEPTH);
+    match (kind, name) {
+        (Some(k), Some(n)) => Some(format!("{k} \"{n}\"")),
+        (Some(k), None) => Some(k),
+        (None, Some(n)) => Some(format!("\"{n}\"")),
+        (None, None) => cols.iter().find_map(|c| {
+            map.get(c.as_str()).and_then(|v| {
+                (!v.is_object() && !v.is_array()).then(|| format!("{c}:{}", scalar_str(v)))
+            })
+        }),
+    }
+}
+
+/// Nominal preview of the first rows: `[lbl0, lbl1, lbl2, … +N]`. None if no row
+/// yields a label.
+fn nominal_sample(arr: &[Value], cols: &[String]) -> Option<String> {
+    let labels: Vec<String> = arr
+        .iter()
+        .take(IDENTITY_SAMPLE_ROWS)
+        .filter_map(|r| row_label(r, cols))
+        .collect();
+    if labels.is_empty() {
+        return None;
+    }
+    let extra = arr.len().saturating_sub(labels.len());
+    let suffix = if extra > 0 {
+        format!(", … +{extra}")
+    } else {
+        String::new()
+    };
+    Some(format!("[{}{}]", labels.join(", "), suffix))
 }
 
 /// Char-safe truncation with an ellipsis. Safe to truncate a digest because
@@ -337,5 +439,89 @@ mod tests {
         let d = digest_tool_result(content).expect("structured");
         assert!(d.contains("rows[2] cols: sku, qty"), "got: {d}");
         assert!(d.contains("qty: min 5 max 12"), "got: {d}");
+    }
+
+    #[test]
+    fn drill_down_shows_nominal_row_labels() {
+        let content = r#"{
+            "kind":"group",
+            "nodes":[
+                {"id":"a","type":"webSearch","data":{"label":"Web Search"}},
+                {"id":"b","type":"llmCall","data":{"label":"Tool-using Agent"}},
+                {"id":"c","type":"apiCall","data":{"label":"test_run_agent"}},
+                {"id":"d","type":"apiCall","data":{"label":"resolve_built_agent"}}
+            ]
+        }"#;
+        let d = digest_tool_result(content).expect("structured");
+        assert!(
+            d.contains("nodes[4] cols: id, type, data"),
+            "drill cols: {d}"
+        );
+        assert!(
+            d.contains(r#"muestra: [webSearch "Web Search""#),
+            "nominal sample missing: {d}"
+        );
+        assert!(
+            d.contains(r#"llmCall "Tool-using Agent""#),
+            "type+label combo missing: {d}"
+        );
+        assert!(d.contains("+1"), "overflow marker missing: {d}");
+    }
+
+    #[test]
+    fn tabular_sample_renders_object_column_identifier() {
+        let content = r#"[
+            {"order_id":"8842","customer":{"name":"Ana Perez","tier":"pro"},"total":1284},
+            {"order_id":"8843","customer":{"name":"Beto Ruiz","tier":"free"},"total":99}
+        ]"#;
+        let d = digest_tool_result(content).expect("structured");
+        assert!(
+            d.contains("customer:Ana Perez"),
+            "object identifier missing: {d}"
+        );
+        assert!(
+            !d.contains("customer:{2}"),
+            "should not show opaque marker: {d}"
+        );
+    }
+
+    #[test]
+    fn row_label_falls_back_to_first_scalar_when_no_identifier() {
+        let content = r#"{"data":{"rows":[{"v":1,"w":2},{"v":3,"w":4}]}}"#;
+        let d = digest_tool_result(content).expect("structured");
+        assert!(d.contains("muestra: [v:1"), "scalar fallback missing: {d}");
+    }
+
+    #[test]
+    fn identifier_search_respects_depth_budget() {
+        let content = r#"{"items":[
+            {"k":1,"a":{"b":{"name":"too deep"}}},
+            {"k":2,"a":{"b":{"name":"also deep"}}}
+        ]}"#;
+        let d = digest_tool_result(content).expect("structured");
+        assert!(
+            !d.contains("too deep"),
+            "should not reach depth-3 identifier: {d}"
+        );
+        assert!(
+            d.contains("muestra: [k:1"),
+            "should fall back to first scalar: {d}"
+        );
+    }
+
+    #[test]
+    fn nominal_label_caps_long_name() {
+        let huge = "x".repeat(10_000);
+        let content = format!(
+            r#"{{"nodes":[{{"type":"llmCall","data":{{"label":"{huge}"}}}},{{"type":"webSearch","data":{{"label":"short"}}}}]}}"#
+        );
+        let d = digest_tool_result(&content).expect("structured");
+        // The 10k-char name must be capped (FIELD_VALUE_CHARS=40) — the digest stays bounded.
+        assert!(
+            d.chars().count() <= 400,
+            "digest exceeded ceiling: {} chars",
+            d.chars().count()
+        );
+        assert!(!d.contains(&"x".repeat(60)), "long name was not capped");
     }
 }

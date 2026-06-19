@@ -360,7 +360,7 @@ NL con pérdida se genera un **digest determinista** que conserva la FORMA:
 - **Array de objetos** (p.ej. `sql_query`, listas de una API):
   `600 filas · cols: month, region, revenue, units · muestra: {month:2026-01, region:Norte, …}; {…} · revenue: min 12000 max 480000`
 - **Objeto** (p.ej. detalle de un pedido):
-  `objeto · campos: order_id, status, total, items[8], shipping_address · status=en transito, total=340 · items[8] cols: sku, qty`
+  `objeto · campos: order_id, status, total, items[8], shipping_address · order_id=5512, status=en transito, total=340 · items[8] cols: sku, qty`
 - **Array de escalares:** `40 elementos · muestra: [0, 1, 2, …]`
 
 El digest **no usa LLM, no se cachea y no toca la DB** (es determinista y barato,
@@ -373,6 +373,14 @@ semántico normal.
 las columnas; el modelo no sabe que existía `revenue` ni `margin`, así que alucina
 o no sabe que puede recuperar. El digest preserva el esquema → el modelo decide
 con precisión si responde del digest o hace `recall_history` del detalle.
+
+**v1.2 — mapa nominal (2026-06-19).** El drill-down ya no muestra solo nombres de
+columna: lista la *identidad* de cada fila (`<type> "<name>"`), sacando campos
+`name`/`title`/`label` + `type`/`kind` de la fila o **un nivel** dentro de columnas-objeto
+(alcanza p.ej. `data.label`). Así, el resultado de un `load_canvas` envejecido se ve como
+`nodes[17] … muestra: [llmCall "Tool-using Agent", webSearch "Web Search", …]` y el modelo
+sabe qué nodo es cuál sin recuperar. Identificadores más profundos que un hop → marcador +
+`recall_history` (degradación elegante).
 
 ### Ejemplo del bloque que recibe el modelo
 
