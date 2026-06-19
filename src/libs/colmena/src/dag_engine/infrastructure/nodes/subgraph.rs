@@ -310,17 +310,29 @@ mod subgraph_tool_input_config_tests {
     #[test]
     fn reads_path_from_inputs_when_config_empty() {
         let mut inputs: NodeInputs = NodeInputs::new();
-        inputs.insert("child_graph_path".to_string(), json!("./agents/weather_agent.json"));
+        inputs.insert(
+            "child_graph_path".to_string(),
+            json!("./agents/weather_agent.json"),
+        );
         let config = json!({});
-        assert_eq!(resolve_graph_source(&inputs, &config), Some(json!("./agents/weather_agent.json")));
+        assert_eq!(
+            resolve_graph_source(&inputs, &config),
+            Some(json!("./agents/weather_agent.json"))
+        );
     }
 
     #[test]
     fn config_takes_precedence_over_inputs_for_inline() {
         let mut inputs: NodeInputs = NodeInputs::new();
-        inputs.insert("child_graph_inline".to_string(), json!({ "from": "inputs" }));
+        inputs.insert(
+            "child_graph_inline".to_string(),
+            json!({ "from": "inputs" }),
+        );
         let config = json!({ "child_graph_inline": { "from": "config" } });
-        assert_eq!(resolve_graph_source(&inputs, &config), Some(json!({ "from": "config" })));
+        assert_eq!(
+            resolve_graph_source(&inputs, &config),
+            Some(json!({ "from": "config" }))
+        );
     }
 
     #[test]
@@ -338,7 +350,10 @@ mod subgraph_tool_input_config_tests {
     fn returns_none_when_neither_config_nor_inputs_has_source() {
         let inputs: NodeInputs = NodeInputs::new();
         let config = json!({});
-        assert_eq!(SubGraphNode::resolve_child_graph_source(&inputs, &config), None);
+        assert_eq!(
+            SubGraphNode::resolve_child_graph_source(&inputs, &config),
+            None
+        );
     }
 }
 

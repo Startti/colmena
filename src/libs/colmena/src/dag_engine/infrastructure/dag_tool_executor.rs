@@ -1815,7 +1815,12 @@ impl DagToolExecutor {
         let mut state = serde_json::json!({});
 
         let result = node
-            .execute(&inputs, &node_exec_config, &mut state, self.observer.clone())
+            .execute(
+                &inputs,
+                &node_exec_config,
+                &mut state,
+                self.observer.clone(),
+            )
             .await;
 
         // SECURE VALUES (Task 11): mask decrypted secrets back to their handles

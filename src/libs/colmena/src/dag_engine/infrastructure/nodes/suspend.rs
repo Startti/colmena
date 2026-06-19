@@ -288,7 +288,10 @@ mod tests {
         let node = SuspendNode;
         let mut inputs: NodeInputs = NodeInputs::new();
         inputs.insert("id".to_string(), json!("reserva_num_personas"));
-        inputs.insert("question".to_string(), json!("¿Cuántas personas asistirán?"));
+        inputs.insert(
+            "question".to_string(),
+            json!("¿Cuántas personas asistirán?"),
+        );
         let cfg = json!({}); // empty, as in the tool path
         let mut gs = json!({});
         let out = node
@@ -296,7 +299,10 @@ mod tests {
             .await
             .expect("must suspend cleanly");
         assert_eq!(out["questions"][0]["id"], "reserva_num_personas");
-        assert_eq!(out["questions"][0]["question"], "¿Cuántas personas asistirán?");
+        assert_eq!(
+            out["questions"][0]["question"],
+            "¿Cuántas personas asistirán?"
+        );
     }
 
     #[tokio::test]
@@ -306,7 +312,10 @@ mod tests {
         inputs.insert("id".to_string(), json!("from_inputs"));
         let cfg = json!({ "id": "from_config", "question": "Q?" });
         let mut gs = json!({});
-        let out = node.execute(&inputs, &cfg, &mut gs, None).await.expect("ok");
+        let out = node
+            .execute(&inputs, &cfg, &mut gs, None)
+            .await
+            .expect("ok");
         assert_eq!(out["questions"][0]["id"], "from_config");
     }
 
