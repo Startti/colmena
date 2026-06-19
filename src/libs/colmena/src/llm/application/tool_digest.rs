@@ -80,17 +80,7 @@ fn digest_object(v: &Value) -> Option<String> {
         match val {
             Value::Array(a) => {
                 fields.push(format!("{k}[{}]", a.len()));
-                let is_obj_array =
-                    !a.is_empty() && a.iter().take(SCAN_ROWS_FOR_COLUMNS).all(Value::is_object);
-                if is_obj_array {
-                    let better = drill
-                        .as_ref()
-                        .map(|(_, prev)| a.len() > prev.len())
-                        .unwrap_or(true);
-                    if better {
-                        drill = Some((k.clone(), a));
-                    }
-                }
+                consider_drill(k, val, &mut drill);
             }
             Value::Object(o) => {
                 fields.push(format!("{k}{{{}}}", o.len()));
@@ -98,19 +88,7 @@ fn digest_object(v: &Value) -> Option<String> {
                 // array-of-objects so wrapped payloads (e.g. `{"data":{"rows":[…]}}`)
                 // still drill down.
                 for (nk, nv) in o.iter() {
-                    if let Value::Array(a) = nv {
-                        let is_obj_array = !a.is_empty()
-                            && a.iter().take(SCAN_ROWS_FOR_COLUMNS).all(Value::is_object);
-                        if is_obj_array {
-                            let better = drill
-                                .as_ref()
-                                .map(|(_, prev)| a.len() > prev.len())
-                                .unwrap_or(true);
-                            if better {
-                                drill = Some((nk.clone(), a));
-                            }
-                        }
-                    }
+                    consider_drill(nk, nv, &mut drill);
                 }
             }
             scalar => {
@@ -136,6 +114,23 @@ fn digest_object(v: &Value) -> Option<String> {
         }
     }
     Some(s)
+}
+
+/// If `v` is a non-empty array-of-objects longer than the current `drill`
+/// candidate, make it the new drill target (keyed by `k`).
+fn consider_drill<'a>(k: &str, v: &'a Value, drill: &mut Option<(String, &'a Vec<Value>)>) {
+    if let Value::Array(a) = v {
+        let is_obj_array =
+            !a.is_empty() && a.iter().take(SCAN_ROWS_FOR_COLUMNS).all(Value::is_object);
+        if is_obj_array
+            && drill
+                .as_ref()
+                .map(|(_, p)| a.len() > p.len())
+                .unwrap_or(true)
+        {
+            *drill = Some((k.to_string(), a));
+        }
+    }
 }
 
 /// Union of object keys across the first `SCAN_ROWS_FOR_COLUMNS` rows, in
@@ -512,5 +507,21 @@ mod tests {
             d.contains("muestra: [k:1"),
             "should fall back to first scalar: {d}"
         );
+    }
+
+    #[test]
+    fn nominal_label_caps_long_name() {
+        let huge = "x".repeat(10_000);
+        let content = format!(
+            r#"{{"nodes":[{{"type":"llmCall","data":{{"label":"{huge}"}}}},{{"type":"webSearch","data":{{"label":"short"}}}}]}}"#
+        );
+        let d = digest_tool_result(&content).expect("structured");
+        // The 10k-char name must be capped (FIELD_VALUE_CHARS=40) — the digest stays bounded.
+        assert!(
+            d.chars().count() <= 400,
+            "digest exceeded ceiling: {} chars",
+            d.chars().count()
+        );
+        assert!(!d.contains(&"x".repeat(60)), "long name was not capped");
     }
 }
