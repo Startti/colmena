@@ -21,16 +21,26 @@ use std::sync::Arc;
 
 pub const TOOL_RECALL_HISTORY: &str = "recall_history";
 
-/// Per-call output cap so a recall can never blow up the agent's context.
-/// Matches `crdt_doc_run_python`'s output cap.
-const RECALL_OUTPUT_CHAR_CAP: usize = 10 * 1024;
+/// Tamaño de página por defecto (chars) cuando el caller no pasa `limit`.
+const RECALL_PAGE_DEFAULT_CHARS: usize = 8 * 1024;
+
+/// Techo duro por página, aun si el caller pide un `limit` mayor.
+const RECALL_PAGE_MAX_CHARS: usize = 16 * 1024;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RecallHistoryArgs {
     /// Persisted turn index — the same number that appears as `[T<n>]` in the
-    /// rolling-summary System message earlier in your context. 0 is the first
-    /// message of the conversation.
+    /// Conversation summary earlier in your context. 0 is the first message.
     pub turn: usize,
+    /// Character offset to start reading from (default 0). Use the `next_offset`
+    /// returned by a previous call to page through a large message.
+    #[serde(default)]
+    pub offset: usize,
+    /// Max characters to return in this page. Defaults to a bounded page size
+    /// and is clamped to a hard per-call ceiling. Page again with `offset` to
+    /// read more.
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 pub fn tool_recall_history() -> ToolDefinition {
@@ -74,26 +84,18 @@ pub async fn dispatch_recall_history(
 
     let msg = &conv.messages[parsed.turn];
 
-    // Truncate content if it exceeds the cap. Marker tells the agent the cut
-    // happened so it knows there's more.
     let raw_content = msg.content();
-    let (content_out, truncated) = if raw_content.len() > RECALL_OUTPUT_CHAR_CAP {
-        let mut end = RECALL_OUTPUT_CHAR_CAP;
-        while end > 0 && !raw_content.is_char_boundary(end) {
-            end -= 1;
-        }
-        (
-            format!(
-                "{}…[recall truncated at {} chars; original was {} chars]",
-                &raw_content[..end],
-                RECALL_OUTPUT_CHAR_CAP,
-                raw_content.len(),
-            ),
-            true,
-        )
-    } else {
-        (raw_content.to_string(), false)
-    };
+    let total_chars = raw_content.chars().count();
+
+    let start = parsed.offset.min(total_chars);
+    let page = parsed
+        .limit
+        .unwrap_or(RECALL_PAGE_DEFAULT_CHARS)
+        .clamp(1, RECALL_PAGE_MAX_CHARS);
+    let end = start.saturating_add(page).min(total_chars);
+
+    let content_out: String = raw_content.chars().skip(start).take(end - start).collect();
+    let next_offset: Option<usize> = if end < total_chars { Some(end) } else { None };
 
     let role_str = match msg.role() {
         MessageRole::User => "User",
@@ -106,6 +108,10 @@ pub async fn dispatch_recall_history(
         "turn": parsed.turn,
         "role": role_str,
         "content": content_out,
+        "offset": start,
+        "returned_chars": end - start,
+        "total_chars": total_chars,
+        "next_offset": next_offset,
     });
 
     if let Some(tcid) = msg.tool_call_id() {
@@ -123,9 +129,6 @@ pub async fn dispatch_recall_history(
             })
             .collect();
         out["tool_calls"] = serde_json::Value::Array(calls);
-    }
-    if truncated {
-        out["_truncated"] = serde_json::json!(true);
     }
 
     out
@@ -211,14 +214,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recall_truncates_oversized_content() {
-        let huge = "x".repeat(RECALL_OUTPUT_CHAR_CAP + 1000);
+    async fn recall_paginates_large_content() {
+        let huge = "x".repeat(20_000);
         let msgs = vec![LlmMessage::user(huge).unwrap()];
         let repo: Arc<dyn ConversationRepository> = Arc::new(StubRepo { msgs });
+        let k = key();
+
+        let p1 = dispatch_recall_history(&repo, &k, serde_json::json!({"turn": 0})).await;
+        assert_eq!(p1["total_chars"], 20_000);
+        assert_eq!(p1["offset"], 0);
+        assert_eq!(p1["returned_chars"], 8_192);
+        assert_eq!(p1["next_offset"], 8_192);
+        assert_eq!(p1["content"].as_str().unwrap().chars().count(), 8_192);
+        assert!(p1.get("_truncated").is_none());
+
+        let p2 =
+            dispatch_recall_history(&repo, &k, serde_json::json!({"turn": 0, "offset": 8_192}))
+                .await;
+        assert_eq!(p2["offset"], 8_192);
+        assert_eq!(p2["returned_chars"], 8_192);
+        assert_eq!(p2["next_offset"], 16_384);
+
+        let p3 =
+            dispatch_recall_history(&repo, &k, serde_json::json!({"turn": 0, "offset": 16_384}))
+                .await;
+        assert_eq!(p3["offset"], 16_384);
+        assert_eq!(p3["returned_chars"], 3_616);
+        assert_eq!(p3["next_offset"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn recall_small_content_single_page() {
+        let msgs = vec![LlmMessage::user("hi".to_string()).unwrap()];
+        let repo: Arc<dyn ConversationRepository> = Arc::new(StubRepo { msgs });
         let r = dispatch_recall_history(&repo, &key(), serde_json::json!({"turn": 0})).await;
-        let content = r["content"].as_str().unwrap();
-        assert!(content.contains("recall truncated at"));
-        assert_eq!(r["_truncated"], true);
+        assert_eq!(r["content"], "hi");
+        assert_eq!(r["total_chars"], 2);
+        assert_eq!(r["returned_chars"], 2);
+        assert_eq!(r["next_offset"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn recall_clamps_limit_to_max() {
+        let huge = "y".repeat(50_000);
+        let msgs = vec![LlmMessage::user(huge).unwrap()];
+        let repo: Arc<dyn ConversationRepository> = Arc::new(StubRepo { msgs });
+        let r = dispatch_recall_history(
+            &repo,
+            &key(),
+            serde_json::json!({"turn": 0, "limit": 1_000_000}),
+        )
+        .await;
+        assert_eq!(r["returned_chars"], 16_384);
+        assert_eq!(r["next_offset"], 16_384);
     }
 
     #[tokio::test]
