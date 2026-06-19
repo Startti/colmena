@@ -21,10 +21,12 @@ use std::sync::Arc;
 
 pub const TOOL_RECALL_HISTORY: &str = "recall_history";
 
-/// Tamaño de página por defecto (chars) cuando el caller no pasa `limit`.
+/// Default page size (chars) when the caller does not pass `limit`. Bounds each
+/// recall so it never floods the agent's context; full content is recovered by
+/// paging with `offset`/`next_offset`.
 const RECALL_PAGE_DEFAULT_CHARS: usize = 8 * 1024;
 
-/// Techo duro por página, aun si el caller pide un `limit` mayor.
+/// Hard per-page ceiling, even if the caller requests a larger `limit`.
 const RECALL_PAGE_MAX_CHARS: usize = 16 * 1024;
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -86,6 +88,14 @@ pub async fn dispatch_recall_history(
 
     let raw_content = msg.content();
     let total_chars = raw_content.chars().count();
+
+    if parsed.offset > total_chars {
+        return serde_json::json!({
+            "error": "offset_out_of_range",
+            "requested_offset": parsed.offset,
+            "total_chars": total_chars,
+        });
+    }
 
     let start = parsed.offset.min(total_chars);
     let page = parsed
@@ -267,6 +277,18 @@ mod tests {
         .await;
         assert_eq!(r["returned_chars"], 16_384);
         assert_eq!(r["next_offset"], 16_384);
+    }
+
+    #[tokio::test]
+    async fn recall_offset_past_end_returns_error() {
+        let msgs = vec![LlmMessage::user("short".to_string()).unwrap()];
+        let repo: Arc<dyn ConversationRepository> = Arc::new(StubRepo { msgs });
+        let r =
+            dispatch_recall_history(&repo, &key(), serde_json::json!({"turn": 0, "offset": 999}))
+                .await;
+        assert_eq!(r["error"], "offset_out_of_range");
+        assert_eq!(r["requested_offset"], 999);
+        assert_eq!(r["total_chars"], 5);
     }
 
     #[tokio::test]
