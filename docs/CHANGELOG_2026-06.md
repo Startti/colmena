@@ -2694,7 +2694,7 @@ solo nombres de columna, para que el modelo sepa *cuál* registro es cuál sin r
   el *contenido* del string del digest. ADP no afectado.
 
 Ejemplo real (resultado de un `load_canvas` del creador-de-agentes):
-`objeto · campos: kind, nodes[4] · kind=group · nodes[4] cols: id, type, data · muestra: [webSearch "Web Search", llmCall "Tool-using Agent", … +1]`
+`objeto · campos: kind, nodes[4] · kind=group · nodes[4] cols: id, type, data · muestra: [webSearch "Web Search", llmCall "Tool-using Agent", apiCall "test_run_agent", … +1]`
 
 **Documentación de referencia.**
 - Plan: [`docs/superpowers/plans/2026-06-19-tool-digest-v1-2-identifier-drill.md`](superpowers/plans/2026-06-19-tool-digest-v1-2-identifier-drill.md)

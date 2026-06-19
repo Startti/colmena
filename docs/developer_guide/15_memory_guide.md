@@ -360,7 +360,7 @@ NL con pérdida se genera un **digest determinista** que conserva la FORMA:
 - **Array de objetos** (p.ej. `sql_query`, listas de una API):
   `600 filas · cols: month, region, revenue, units · muestra: {month:2026-01, region:Norte, …}; {…} · revenue: min 12000 max 480000`
 - **Objeto** (p.ej. detalle de un pedido):
-  `objeto · campos: order_id, status, total, items[8], shipping_address · status=en transito, total=340 · items[8] cols: sku, qty`
+  `objeto · campos: order_id, status, total, items[8], shipping_address · order_id=5512, status=en transito, total=340 · items[8] cols: sku, qty`
 - **Array de escalares:** `40 elementos · muestra: [0, 1, 2, …]`
 
 El digest **no usa LLM, no se cachea y no toca la DB** (es determinista y barato,

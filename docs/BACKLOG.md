@@ -1406,7 +1406,7 @@ de anónimo a nominal.
 
 ```
 hoy (v1.1):  nodes[17] cols: id, type, position, measured, sortIndex, data
-v1.2:        nodes[17]: [llmCall "Tool-using Agent", webSearch "Web Search", … +15]
+v1.2:        nodes[17] cols: id, type, position, measured, sortIndex, data · muestra: [llmCall "Tool-using Agent", webSearch "Web Search", apiCall "test_run_agent", … +14]
 ```
 
 **Caso real que lo motiva.** El `creador de agentes` de ADP: su tool `load_canvas`
@@ -1419,9 +1419,10 @@ lista nominal directo. También aplica a "lista de órdenes con `customer.name`"
 identificador puede estar a distinta profundidad desde la fila:
 `nodes[i].type` (hop 0, ya es columna), `nodes[i].data.label` (hop 1, lo que v1.2
 busca alcanzar), `nodes[i].data.config.title` (hop 2+), `…tools[3].name`
-(tabla-dentro-de-tabla). v1.2 **debe** usar un presupuesto pequeño: buscar una
-llave identificadora conocida hasta **profundidad ~2**, primer match gana, con el
-techo de `DIGEST_CEILING_CHARS` como backstop duro. Más profundo = marcador +
+(tabla-dentro-de-tabla). v1.2 usa un presupuesto pequeño: buscar una
+llave identificadora conocida hasta **1 hop** dentro de columnas-objeto
+(`IDENTITY_SEARCH_DEPTH = 1`, alcanza `data.label` pero no más profundo), primer
+match gana, con el techo de `DIGEST_CEILING_CHARS` como backstop duro. Más profundo = marcador +
 `recall` (degradación elegante). Razón: cada nivel extra multiplica la salida y
 amenaza tamaño/determinismo. **Nota:** v1.1 ya maneja JSON arbitrariamente profundo
 sin romperse (no recursa; lo profundo aparece como marcador `{N}`/`[N]`); v1.2 solo
