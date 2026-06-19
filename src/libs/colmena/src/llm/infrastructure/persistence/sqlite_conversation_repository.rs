@@ -25,7 +25,7 @@ impl ConversationRepository for SqliteConversationRepository {
                 "SELECT role, content, tool_call_id, tool_calls, created_at \
                  FROM llm_node_history \
                  WHERE agent_session_id = ? AND node_id = ? \
-                 ORDER BY created_at ASC",
+                 ORDER BY created_at ASC, id ASC",
             )
             .bind(&agent.0)
             .bind(&key.node_id.0)
@@ -36,7 +36,7 @@ impl ConversationRepository for SqliteConversationRepository {
                 "SELECT role, content, tool_call_id, tool_calls, created_at \
                  FROM llm_node_history \
                  WHERE session_id = ? AND node_id = ? \
-                 ORDER BY created_at ASC",
+                 ORDER BY created_at ASC, id ASC",
             )
             .bind(&key.session_id.0)
             .bind(&key.node_id.0)
@@ -163,7 +163,7 @@ impl ConversationRepository for SqliteConversationRepository {
                 "SELECT role, content, tool_call_id, tool_calls, summary \
                  FROM llm_node_history \
                  WHERE agent_session_id = ? AND node_id = ? \
-                 ORDER BY created_at ASC",
+                 ORDER BY created_at ASC, id ASC",
             )
             .bind(&agent.0)
             .bind(&key.node_id.0)
@@ -174,7 +174,7 @@ impl ConversationRepository for SqliteConversationRepository {
                 "SELECT role, content, tool_call_id, tool_calls, summary \
                  FROM llm_node_history \
                  WHERE session_id = ? AND node_id = ? \
-                 ORDER BY created_at ASC",
+                 ORDER BY created_at ASC, id ASC",
             )
             .bind(&key.session_id.0)
             .bind(&key.node_id.0)
@@ -240,7 +240,7 @@ impl ConversationRepository for SqliteConversationRepository {
                  WHERE id = (\
                      SELECT id FROM llm_node_history \
                      WHERE agent_session_id = ? AND node_id = ? \
-                     ORDER BY created_at ASC LIMIT 1 OFFSET ?\
+                     ORDER BY created_at ASC, id ASC LIMIT 1 OFFSET ?\
                  )",
             )
             .bind(summary)
@@ -255,7 +255,7 @@ impl ConversationRepository for SqliteConversationRepository {
                  WHERE id = (\
                      SELECT id FROM llm_node_history \
                      WHERE session_id = ? AND node_id = ? \
-                     ORDER BY created_at ASC LIMIT 1 OFFSET ?\
+                     ORDER BY created_at ASC, id ASC LIMIT 1 OFFSET ?\
                  )",
             )
             .bind(summary)
