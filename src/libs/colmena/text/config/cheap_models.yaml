@@ -1,0 +1,8 @@
+# Modelo barato/rápido por provider para tareas internas de resumen
+# (compactación de historial, catálogo de attachments).
+# Editá acá; override en runtime con COLMENA_CHEAP_MODEL_<PROVIDER>
+# (p.ej. COLMENA_CHEAP_MODEL_GOOGLE=gemini-2.5-flash).
+# Regla de proyecto: gemini-2.5-flash, NUNCA gemini-1.5-flash.
+openai: gpt-4o-mini
+google: gemini-2.5-flash
+anthropic: claude-haiku-4-5-20251001

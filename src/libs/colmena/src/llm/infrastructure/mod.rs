@@ -1,6 +1,7 @@
 pub mod anthropic_adapter;
 pub mod attachment_summary;
 pub mod attachments;
+pub mod cheap_models;
 pub mod elevenlabs_tts_adapter;
 pub mod files;
 pub mod gemini_adapter;
@@ -14,6 +15,7 @@ pub mod scripted_adapter;
 pub mod tts_provider_factory;
 
 pub use anthropic_adapter::AnthropicAdapter;
+pub use cheap_models::cheap_model_for;
 pub use elevenlabs_tts_adapter::ElevenLabsTtsAdapter;
 pub use gemini_adapter::GeminiAdapter;
 pub use google_tts_adapter::GoogleTtsAdapter;
