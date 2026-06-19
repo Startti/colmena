@@ -98,6 +98,7 @@ pub fn recent_boundary_by_tokens(
     b
 }
 
+use crate::llm::application::tool_digest::digest_tool_result;
 use crate::llm::domain::{
     ConversationKey, ConversationRepository, MessageSummarizer, StoredMessage,
 };
@@ -190,6 +191,16 @@ pub async fn build_compacted_messages(
                     format!("[T{idx}] AGENT llamó {}", calls.join("; "))
                 } else if rendered_size(msg) < SUMMARY_SKIP_THRESHOLD_CHARS {
                     format!("[T{idx}] {}: {}", role_tag(msg), msg.content())
+                } else if let Some(d) = matches!(msg.role(), MessageRole::Tool)
+                    .then(|| digest_tool_result(msg.content()))
+                    .flatten()
+                {
+                    // Structured tool result → deterministic digest. No LLM, no cache;
+                    // the full result is recoverable verbatim via recall_history (lossless).
+                    format!(
+                        "[T{idx}] {}: {d} · recall_history(turn={idx}) para el detalle",
+                        role_tag(msg)
+                    )
                 } else if let Some(cached) = stored[idx].summary.as_deref() {
                     format!("[T{idx}] {}: {}", role_tag(msg), cached)
                 } else if let (Some(sz), true) =
@@ -339,6 +350,18 @@ mod tests {
         }
     }
 
+    struct FailSummarizer;
+    #[async_trait]
+    impl MessageSummarizer for FailSummarizer {
+        async fn summarize(
+            &self,
+            _text: &str,
+            _t: usize,
+        ) -> Result<String, crate::llm::domain::LlmError> {
+            panic!("summarizer must NOT be called for a structured tool result");
+        }
+    }
+
     fn ckey() -> ConversationKey {
         ConversationKey {
             session_id: SessionId("s".into()),
@@ -386,5 +409,69 @@ mod tests {
         let out =
             build_compacted_messages(&stored, &k, repo.as_ref(), None, RECENT_TOKEN_BUDGET).await;
         assert_eq!(out.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn structured_tool_result_becomes_digest_without_calling_summarizer() {
+        let repo = Arc::new(InMemoryConversationRepository::new());
+        let k = ckey();
+
+        // idx 0,1 = keep_first (short user msgs).
+        repo.add_message(&k, LlmMessage::user("x".into()).unwrap())
+            .await
+            .unwrap();
+        repo.add_message(&k, LlmMessage::user("x".into()).unwrap())
+            .await
+            .unwrap();
+        // idx 2 = a large structured tool result (≥250 chars) → must become a digest.
+        let rows: Vec<String> = (0..8)
+            .map(|i| {
+                format!(
+                    r#"{{"region":"R{i}","revenue":{},"units":{}}}"#,
+                    100_000 + i * 1000,
+                    500 + i * 10
+                )
+            })
+            .collect();
+        let tool_content = format!("[{}]", rows.join(","));
+        assert!(tool_content.len() >= 250);
+        repo.add_message(&k, LlmMessage::tool("call_1".into(), tool_content).unwrap())
+            .await
+            .unwrap();
+        // idx 3,4,5 = short recents.
+        for _ in 0..3 {
+            repo.add_message(&k, LlmMessage::user("x".into()).unwrap())
+                .await
+                .unwrap();
+        }
+
+        let stored = repo.get_with_summaries(&k).await.unwrap();
+        let fail: Arc<dyn MessageSummarizer> = Arc::new(FailSummarizer);
+
+        // Tiny budget pushes the tool result (idx 2) into the old zone.
+        let out = build_compacted_messages(&stored, &k, repo.as_ref(), Some(&fail), 5).await;
+
+        let summary = out
+            .iter()
+            .find(|m| m.role() == &MessageRole::System)
+            .expect("summary block present");
+        let body = summary.content();
+        assert!(body.contains("[T2]"), "digest turn tag missing: {body}");
+        assert!(body.contains("8 filas"), "row count missing: {body}");
+        assert!(
+            body.contains("cols: region, revenue, units"),
+            "columns missing: {body}"
+        );
+        assert!(
+            body.contains("recall_history(turn=2)"),
+            "recall hint missing: {body}"
+        );
+
+        // The structured tool result must NOT have been persisted as a summary.
+        let after = repo.get_with_summaries(&k).await.unwrap();
+        assert_eq!(
+            after[2].summary, None,
+            "digest must not be cached in summary column"
+        );
     }
 }
