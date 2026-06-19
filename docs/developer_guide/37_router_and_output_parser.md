@@ -228,6 +228,36 @@ El router emite **múltiples puertos**, uno por rama declarada + `__decision`. S
 - En Mode B, dentro de cada puerto de rama tenés `{ input, extracted }` → podés re-leer la extracción sin re-llamar al LLM.
 - En Mode A, dentro de cada puerto tenés `{ input }` solamente (no hay extracción).
 
+### Qué recibe exactamente el nodo downstream — auto-unwrap del payload
+
+El payload de cada rama es un objeto envuelto (`{ input }` en Mode A, `{ input, extracted }` en Mode B), **no** el valor crudo. Cuando conectás `from: "router.<rama>"` a `to: "<nodo>"` **sin** especificar el puerto destino, el engine intenta desempacarlo automáticamente (*smart extraction*, `run_use_case.rs:974-982`):
+
+1. Mira el `default_input()` del nodo destino (ej. `"input"` para `log`, `llm_call`, etc.).
+2. Si el payload es un objeto **y tiene una clave con ese mismo nombre**, le pasa solo el valor interno.
+3. Si **no** tiene esa clave, le pasa el objeto **entero** `{ input, extracted }`.
+
+Como la clave del payload del router es `input`, esto define una regla simple:
+
+| Nodo destino | `from: "router.<rama>"` directo |
+|---|---|
+| Su puerto por defecto se llama **`input`** (la mayoría: `log`, `llm_call`, `output_parser`, …) | ✅ El engine desempaca `input` solo |
+| Su puerto por defecto **NO** es `input` (ej. `add` espera `a`/`b`) | ⚠️ Recibe el objeto `{ input, extracted }` completo bajo su puerto → casi nunca es lo que querés |
+| El nodo **no declara** `default_input()` | ❌ No le entra nada |
+
+**Patrón seguro (recomendado): sé explícito en ambos lados.** Desempacá con dotted path en `from` y nombrá el puerto en `to`:
+
+```jsonc
+{ "from": "router.sales.input", "to": "siguiente_nodo.input" }
+```
+
+Así el destino recibe el valor interno limpio sin depender de la heurística. Es justo lo que hace `router_chained.json` al encadenar dos routers:
+
+```jsonc
+{ "from": "intent_router.question.input", "to": "question_lang_router.input" }
+```
+
+> **Regla práctica:** podés conectar el router a casi cualquier nodo, pero usá `router.<rama>.input → nodo.<puerto>` para evitar los dos casos problemáticos (nodos cuyo puerto no se llama `input`, o nodos sin `default_input()`).
+
 ---
 
 ## Output: el port `__decision`

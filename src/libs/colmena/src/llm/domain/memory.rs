@@ -28,6 +28,14 @@ pub struct Conversation {
     pub messages: Vec<LlmMessage>,
 }
 
+/// Un mensaje persistido junto con su resumen cacheado (si existe).
+/// `summary == None` → aún no resumido (o por debajo del umbral → verbatim).
+#[derive(Debug, Clone)]
+pub struct StoredMessage {
+    pub message: LlmMessage,
+    pub summary: Option<String>,
+}
+
 #[async_trait]
 pub trait ConversationRepository: Send + Sync {
     /// Loads all messages for the given thread.
@@ -43,4 +51,32 @@ pub trait ConversationRepository: Send + Sync {
 
     /// Deletes all messages for the given thread (matches the same filter as `get_by_id`).
     async fn delete(&self, key: &ConversationKey) -> Result<(), LlmError>;
+
+    /// Como `get_by_id`, pero devuelve cada mensaje junto a su `summary` cacheado.
+    /// Default: delega en `get_by_id` con summaries en `None` (impls de DB lo overridean).
+    async fn get_with_summaries(
+        &self,
+        key: &ConversationKey,
+    ) -> Result<Vec<StoredMessage>, LlmError> {
+        let conv = self.get_by_id(key).await?;
+        Ok(conv
+            .messages
+            .into_iter()
+            .map(|message| StoredMessage {
+                message,
+                summary: None,
+            })
+            .collect())
+    }
+
+    /// Persiste el `summary` del mensaje en la posición `ordinal` (0-based en orden `created_at`).
+    /// Default: no-op (impls de DB lo overridean).
+    async fn set_summary(
+        &self,
+        _key: &ConversationKey,
+        _ordinal: usize,
+        _summary: &str,
+    ) -> Result<(), LlmError> {
+        Ok(())
+    }
 }

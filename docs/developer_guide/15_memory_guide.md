@@ -315,6 +315,98 @@ cat .env | grep DATABASE_URL
 # DATABASE_URL="postgresql://..."
 ```
 
+## 🗜️ Compactación y recuperación de memoria
+
+A medida que una conversación crece, reenviar todo el historial en cada turno es
+caro y eventualmente excede la ventana de contexto del modelo. El `llm_call`
+**compacta el historial automáticamente** al cargar cada run — manteniendo los
+turnos recientes completos y condensando los viejos en un resumen direccionable,
+sin perder nada (el original siempre vive en la DB).
+
+### Cuándo y cómo se compacta
+
+- **Cuándo:** una sola vez, **al cargar el run** (lazy). Nunca por iteración del
+  loop ReAct, y el bloque compactado queda fijo durante el run (cache-friendly).
+- **Recientes (full):** los últimos mensajes que entran en un presupuesto de
+  ~2.500 tokens van **completos**, alineados a límites de turno (no se parte un
+  par `assistant(tool_calls)+tool`).
+- **Primeros 2 (full):** el mensaje inicial del usuario (el objetivo) y el
+  `system_message` se preservan completos.
+- **Medio (resumido):** todo lo que queda entre medio se colapsa en **un** mensaje
+  `system` titulado `## Conversation summary`, con **una línea `[Tn]` por mensaje**.
+
+### Política por rol / tipo de mensaje
+
+Cada línea del resumen se construye según el rol — **nunca se trunca por
+caracteres ni se persiste nada truncado**:
+
+| Tipo de mensaje | Cómo aparece en el resumen |
+|---|---|
+| Texto (user/assistant) `< 250` chars | **Verbatim** (ya es conciso; sin llamada LLM) |
+| Texto (user/assistant) `≥ 250` chars | **Resumen semántico** (~250 chars) generado por un modelo barato y **cacheado** |
+| `assistant` con `tool_calls` | Línea estructural: `AGENT llamó <tool>(<args>)` |
+| Resultado de `tool` | Verbatim si `< 250`, si no resumen semántico |
+| Andamiaje (`load_skill`, `describe_tool`, `load_attachment`) viejo | Marker corto (re-llamar la tool para releer) |
+
+El resumen semántico de cada mensaje se calcula **una sola vez** y se guarda en la
+columna `summary` de `llm_node_history`; los loads siguientes lo reusan desde la DB.
+
+### Ejemplo del bloque que recibe el modelo
+
+```text
+## Conversation summary (older turns)
+Cada línea es un mensaje anterior. El [Tn] es el índice de turno: usá
+recall_history(turn=N) para releer el original completo.
+
+[T2] AGENT llamó current_time({})
+[T3] TOOL: {"output":"2026-06-19T13:43:07+00:00"}
+[T4] AGENT: Son las 13:43:07 UTC del 19 de junio de 2026.
+[T5] USER: Importante: el código de proyecto es PRJ-9931 y el presupuesto es 47800 dólares...
+[T8] AGENT: La multiplicación (125x8=1000) es clave en presupuestos para escalar costos...
+[T10] AGENT: Presupuestar SW (PRJ-9931): WBS, estima esfuerzo, contingencia 10-20%; el estimado $50.6K supera los $47.8K aprobados...
+```
+
+### Recuperación verbatim — `recall_history`
+
+Cada línea lleva su `[Tn]`, donde `n` es el **índice de turno** (ordinal del
+mensaje en la DB, estable porque la historia es append-only). El agente recupera
+el contenido **original y completo** de cualquier turno con la tool sintética
+`recall_history(turn=N)` (siempre expuesta). Para artefactos grandes, el resultado
+viene **paginado**: cada llamada devuelve `content` + `offset` + `returned_chars` +
+`total_chars` + `next_offset`; si `next_offset` no es `null`, se vuelve a llamar
+con ese `offset` hasta reconstruir todo el mensaje verbatim.
+
+> **Garantía:** la compactación solo afecta lo que se le **envía** al modelo. La
+> tabla `llm_node_history` siempre guarda el `content` **completo**; nada truncado
+> se persiste, y todo es recuperable por turno.
+
+### Modelo del summarizer (cadena de resolución)
+
+El resumen semántico usa un modelo barato/rápido, resuelto en este orden:
+
+1. **`summary_model`** en el `config` del nodo `llm_call` (override por grafo).
+2. Env **`COLMENA_CHEAP_MODEL_<PROVIDER>`** (runtime, sin recompilar) — ej.
+   `COLMENA_CHEAP_MODEL_GOOGLE=gemini-2.5-flash`.
+3. El registro versionado **`src/libs/colmena/text/config/cheap_models.yaml`**
+   (default por provider: Google→`gemini-2.5-flash`, OpenAI→`gpt-4o-mini`,
+   Anthropic→`claude-haiku-4-5-…`).
+
+Siempre usa el **mismo provider** que la llamada principal (reusa su `api_key`).
+La llamada de resumen es one-shot y **no** entra a `llm_node_history`.
+
+### Parámetros (defaults)
+
+| Parámetro | Default | Qué controla |
+|---|---|---|
+| Umbral verbatim | `250` chars | Por debajo → se manda tal cual, sin resumir |
+| Target del resumen | `~250` chars | Pedido por prompt (no hard-cut) |
+| Ventana de recientes | `~2.500` tokens | Cuánto historial reciente va completo |
+| Primeros completos | `2` | Objetivo original + system |
+| Máx. líneas del resumen | `100` | Tope del bloque (las más viejas se omiten, recuperables) |
+
+Diseño completo:
+[`docs/superpowers/specs/2026-06-18-conversation-semantic-summary-design.md`](../superpowers/specs/2026-06-18-conversation-semantic-summary-design.md).
+
 ## 📚 Más Información
 
 Ver la [Guía Completa del DAG Engine](./12_dag_engine_guide.md) para:

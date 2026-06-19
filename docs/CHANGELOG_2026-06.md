@@ -2558,7 +2558,45 @@ Spec: [`docs/superpowers/specs/2026-06-15-gsheets-inspect-guard-design.md`](supe
 
 ---
 
-## 38. Subgrafos / LLMs como tools — agents-as-tools (2026-06-19)
+## 38. Memoria conversacional — resumen semántico por rol + recall lossless (2026-06-19)
+
+**Qué cambió.** El historial del `llm_call` ya no se trunca por caracteres. Al cargar
+cada run (lazy, una sola vez) se compacta: los turnos recientes (presupuesto ~2.500
+tokens) y los primeros 2 van **completos**; los del medio se colapsan en un mensaje
+`system` `## Conversation summary` con **una línea `[Tn]` por mensaje** según política
+por rol — texto `<250` chars verbatim, texto `≥250` **resumen semántico** (modelo
+barato, cacheado en la nueva columna `summary` de `llm_node_history`), `tool_calls`
+como línea estructural, y andamiaje viejo (`load_skill`/`describe_tool`/`load_attachment`)
+como marker. `recall_history` ahora es **lossless y paginado** (`offset`/`limit`/
+`next_offset`, sin el viejo cap de 10 KB) → cualquier turno (incl. artefactos grandes)
+se reconstruye verbatim. Nuevo registro editable `text/config/cheap_models.yaml`
+(provider→modelo barato) con cadena de resolución `summary_model` (config) > env
+`COLMENA_CHEAP_MODEL_<PROVIDER>` > yaml.
+
+**Por qué importa.** El truncado a 180 chars cortaba por posición (no por relevancia),
+se recomputaba en cada iteración y no sintetizaba. Ahora el modelo conserva el hilo de
+la conversación al crecer, sin perder direccionabilidad: cada `[Tn]` mapea al ordinal
+de DB y se recupera verbatim. Verificado E2E: en una charla de 15 mensajes con tools, el
+modelo recuperó un dato del medio vía `recall_history(turn=5)` y respondió correcto.
+
+**Compatibilidad.** Aditivo: migración `summary TEXT` nullable (pg + sqlite); métodos
+nuevos del trait `ConversationRepository` (`get_with_summaries`/`set_summary`) con default
+impls; `AgentService::with_message_summarizer` builder aditivo. **No rompe la API pública**
+→ seguro para el worker de ADP. Si `llm_node_history` está espejada en el schema Prisma de
+ADP, agregar la columna `summary` como follow-up.
+
+**Documentación de referencia.**
+- Spec: [`docs/superpowers/specs/2026-06-18-conversation-semantic-summary-design.md`](superpowers/specs/2026-06-18-conversation-semantic-summary-design.md)
+- Planes: [`docs/superpowers/plans/2026-06-18-*`](superpowers/plans/) (recall-pagination, cheap-models, summary-column-and-repo, semantic-summary-core)
+- Dev guide: [`developer_guide/15_memory_guide.md`](developer_guide/15_memory_guide.md) §"Compactación y recuperación de memoria"
+
+**Commits.** PR [#108](https://github.com/Startti/colmena/pull/108) (`8794ea0`..`4c20d638`).
+
+**Estado.** done (1788 unit tests + E2E real con gemini-2.5-flash + Postgres).
+
+---
+
+## 39. Subgrafos / LLMs como tools — agents-as-tools (2026-06-19)
 
 **Qué cambió.** `node_type: "subgraph"` ahora es válido en `tool_configurations`,
 así un `llm_call` puede exponer un grafo hijo existente (`child_graph_path`) o un

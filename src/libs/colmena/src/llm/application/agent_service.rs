@@ -3,34 +3,19 @@ use crate::llm::domain::{
     LlmRepository, LlmRequest, LlmResponse, LlmStreamPart, LlmUsage, MessageRole, ToolCall,
     ToolDefinition, ToolExecutor, ToolResult,
 };
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Number of trailing messages to keep verbatim when compacting old
-/// `load_skill` tool results in the request. `keep_recent_msgs = 8` covers
-/// roughly the last 3 ReAct turns (assistant + 1-2 tool results per turn);
-/// anything older with `load_skill` content is replaced by a short marker.
+/// discovery/scaffolding tool results (e.g. `load_skill`, `describe_tool`)
+/// in the request. `keep_recent_msgs = 8` covers roughly the last 3 ReAct
+/// turns (assistant + 1-2 tool results per turn); anything older with a
+/// discovery-tool result is replaced by a short marker.
 /// Set to `usize::MAX` to disable.
-const COMPACT_LOAD_SKILL_KEEP_RECENT_MSGS: usize = 8;
+const DISCOVERY_KEEP_RECENT_MSGS: usize = 8;
 
-/// F-T15 — Rolling summary parameters (append-only, line-per-message).
-/// When `messages.len() > KEEP_FIRST + KEEP_RECENT + 1`, the middle slice gets
-/// replaced by a single System message that lists one line per source message
-/// with its persisted-index in [T<idx>] notation. The persisted history
-/// (`conversation_repository`) is unchanged so `recall_history(turn=N)` can
-/// always return the original msg verbatim.
-///
-/// `KEEP_FIRST = 2`: first user prompt + system prelude block (always kept).
-/// `KEEP_RECENT = 5`: last 5 messages stay verbatim (recent context the model
-///   is actively processing).
-/// `SUMMARY_MAX_LINES = 100`: cap on summary length; older lines are dropped
-///   (the data still lives in `conversation_repository` for recall).
-const COMPACT_SUMMARY_KEEP_FIRST_MSGS: usize = 2;
-const COMPACT_SUMMARY_KEEP_RECENT_MSGS: usize = 5;
-const COMPACT_SUMMARY_MAX_LINES: usize = 100;
-
-/// Per-line truncation when building summary lines (chars, not tokens).
-const COMPACT_SUMMARY_LINE_MAX_CHARS: usize = 180;
+/// Nombres de tools de "andamiaje" (discovery/scaffolding del lazy loading + skills).
+/// Sus resultados viejos se colapsan a markers (recuperables re-llamando la tool).
+const DISCOVERY_TOOL_NAMES: &[&str] = &["load_skill", "describe_tool"];
 
 /// LLM-facing text shown when a tool call with an identical `(name+args)`
 /// signature is repeated (loop guard). The prior result is prepended to this.
@@ -102,6 +87,7 @@ pub struct AgentRunParams<'a> {
 pub struct AgentService {
     llm_repository: Arc<dyn LlmRepository>,
     conversation_repository: Arc<dyn ConversationRepository>,
+    message_summarizer: Option<std::sync::Arc<dyn crate::llm::domain::MessageSummarizer>>,
 }
 
 impl AgentService {
@@ -112,7 +98,17 @@ impl AgentService {
         Self {
             llm_repository,
             conversation_repository,
+            message_summarizer: None,
         }
+    }
+
+    /// Inject the cheap-model summarizer used to compact old history at load.
+    pub fn with_message_summarizer(
+        mut self,
+        summarizer: std::sync::Arc<dyn crate::llm::domain::MessageSummarizer>,
+    ) -> Self {
+        self.message_summarizer = Some(summarizer);
+        self
     }
 
     /// Run the agent with tool execution capabilities
@@ -135,9 +131,11 @@ impl AgentService {
         let params_resolver = params.attachment_resolver;
         let params_agent_session_id = params.agent_session_id;
 
-        // 1. Load conversation history
-        let conversation = self.conversation_repository.get_by_id(session_id).await?;
-        let mut messages = conversation.messages;
+        // 1. Load conversation history (with cached per-message summaries).
+        let stored_loaded = self
+            .conversation_repository
+            .get_with_summaries(session_id)
+            .await?;
 
         // 1b. Migration shim (2026-06-11): conversations persisted BEFORE the
         // cache-safe temporal fix carry the `## Temporal & Geographic Context`
@@ -146,22 +144,23 @@ impl AgentService {
         // loaded pre-fix system would produce a stale duplicate. Strip the
         // leading temporal block from any system message loaded from history.
         // New conversations never hit this (their persisted system has no
-        // temporal block). Drops a system message that was ONLY temporal.
-        messages = messages
+        // temporal block).
+        //
+        // Non-dropping shim: NEVER remove an element so ordinals stay aligned
+        // with the DB / `recall_history`. Only rewrite a System message when the
+        // strip yields a NON-empty result that differs from the original.
+        let mut messages: Vec<LlmMessage> = stored_loaded
             .into_iter()
-            .filter_map(|msg| {
-                if msg.role() == &MessageRole::System {
-                    let stripped = strip_leading_temporal_block(msg.content());
-                    if stripped.trim().is_empty() {
-                        None
-                    } else if stripped == msg.content() {
-                        Some(msg)
-                    } else {
-                        LlmMessage::system(stripped).ok()
+            .map(|sm| {
+                if sm.message.role() == &MessageRole::System {
+                    let stripped = strip_leading_temporal_block(sm.message.content());
+                    if !stripped.trim().is_empty() && stripped != sm.message.content() {
+                        if let Ok(m) = LlmMessage::system(stripped) {
+                            return m;
+                        }
                     }
-                } else {
-                    Some(msg)
                 }
+                sm.message
             })
             .collect();
 
@@ -183,6 +182,27 @@ impl AgentService {
                 .await?;
         }
         // else: prompt is None — continue from existing history (resume path)
+
+        // Compute the compacted base ONCE (Hook C). Reload with summaries so it
+        // sees the just-persisted prompt and any cached summaries. The same
+        // non-dropping temporal strip is applied to `stored_now` before
+        // compaction so legacy conversations (pre-2026-06-11) that baked a
+        // stale `## Temporal & Geographic Context` block into their persisted
+        // System message don't emit it alongside the fresh volatile suffix.
+        let prefix_len = messages.len();
+        let stored_now = self
+            .conversation_repository
+            .get_with_summaries(session_id)
+            .await?;
+        let stored_now = strip_temporal_from_stored(stored_now);
+        let base_compacted = crate::llm::application::history_compaction::build_compacted_messages(
+            &stored_now,
+            session_id,
+            self.conversation_repository.as_ref(),
+            self.message_summarizer.as_ref(),
+            crate::llm::application::history_compaction::RECENT_TOKEN_BUDGET,
+        )
+        .await;
 
         let mut cumulative_usage = LlmUsage::default();
         let mut all_tool_calls_executed = Vec::new();
@@ -212,30 +232,16 @@ impl AgentService {
                 Some(p) => p(&messages),
                 None => tools.clone(),
             };
-            // F-T14 step A2 — skill-out-of-history.
-            // Compact load_skill tool results older than 8 msgs into markers.
-            // Persistence in `conversation_repository` is unchanged.
-            let request_messages =
-                compact_old_load_skill_in_history(&messages, COMPACT_LOAD_SKILL_KEEP_RECENT_MSGS);
-
-            // F-T15 — rolling summary. Replace the middle of history
-            // (between KEEP_FIRST and KEEP_RECENT) with a single System
-            // message containing one summary line per source message,
-            // tagged with the original turn index for recall_history.
+            // Assemble the request from the once-computed semantic-summary base
+            // plus the live tail (NEW turn messages appended this run, at
+            // indices >= prefix_len). Then apply the cheap per-iteration
+            // discovery-tool compaction (load_skill, describe_tool) on top.
             // Persistence in `conversation_repository` is unchanged so
             // `recall_history(turn=N)` always returns the original verbatim.
-            let request_messages = compact_history_to_summary(
-                &request_messages,
-                COMPACT_SUMMARY_KEEP_FIRST_MSGS,
-                COMPACT_SUMMARY_KEEP_RECENT_MSGS,
-                COMPACT_SUMMARY_MAX_LINES,
-                COMPACT_SUMMARY_LINE_MAX_CHARS,
-            );
-
-            let mut request = LlmRequest::new(request_messages, config.clone(), should_stream)?;
-            if !iteration_tools.is_empty() {
-                request = request.with_tools(iteration_tools.clone());
-            }
+            let mut live: Vec<LlmMessage> = base_compacted.clone();
+            live.extend_from_slice(&messages[prefix_len..]);
+            let request_messages =
+                compact_discovery_tools_in_history(&live, DISCOVERY_KEEP_RECENT_MSGS);
 
             // Per-iteration prompt-size diagnostic. Gated by env var so it has
             // ZERO runtime cost when disabled. Used during F-T13/F-T14 to measure
@@ -243,20 +249,11 @@ impl AgentService {
             //   COLMENA_DUMP_PROMPT_SIZES=1  → one-line summary per iteration
             //   COLMENA_DUMP_PROMPT_FULL=1   → full per-message + per-tool breakdown
             if std::env::var("COLMENA_DUMP_PROMPT_SIZES").is_ok() {
-                // Dump the FULLY-COMPACTED messages (after A2 + F-T15) — these
-                // are what actually gets sent over the wire. Persisted history
-                // in conversation_repository keeps the originals for recall.
-                let after_a2 = compact_old_load_skill_in_history(
-                    &messages,
-                    COMPACT_LOAD_SKILL_KEEP_RECENT_MSGS,
-                );
-                let msgs_to_dump = compact_history_to_summary(
-                    &after_a2,
-                    COMPACT_SUMMARY_KEEP_FIRST_MSGS,
-                    COMPACT_SUMMARY_KEEP_RECENT_MSGS,
-                    COMPACT_SUMMARY_MAX_LINES,
-                    COMPACT_SUMMARY_LINE_MAX_CHARS,
-                );
+                // Dump the EXACT messages about to be sent over the wire (the
+                // semantic-summary base + live tail + discovery compaction).
+                // Persisted history in conversation_repository keeps the
+                // originals for recall.
+                let msgs_to_dump = &request_messages;
                 let msgs_json = serde_json::to_string(&msgs_to_dump).unwrap_or_default();
                 let tools_json = serde_json::to_string(&iteration_tools).unwrap_or_default();
                 let n_msgs = msgs_to_dump.len();
@@ -317,6 +314,11 @@ impl AgentService {
                     }
                     eprintln!("──────────────────────────────────────────────\n");
                 }
+            }
+
+            let mut request = LlmRequest::new(request_messages, config.clone(), should_stream)?;
+            if !iteration_tools.is_empty() {
+                request = request.with_tools(iteration_tools.clone());
             }
 
             let (mut response, _completion_usage) =
@@ -634,15 +636,10 @@ impl AgentService {
         );
         messages.push(LlmMessage::user(RESCUE_SYNTHESIS_TEXT.to_string())?);
 
+        let mut live: Vec<LlmMessage> = base_compacted.clone();
+        live.extend_from_slice(&messages[prefix_len..]);
         let request_messages =
-            compact_old_load_skill_in_history(&messages, COMPACT_LOAD_SKILL_KEEP_RECENT_MSGS);
-        let request_messages = compact_history_to_summary(
-            &request_messages,
-            COMPACT_SUMMARY_KEEP_FIRST_MSGS,
-            COMPACT_SUMMARY_KEEP_RECENT_MSGS,
-            COMPACT_SUMMARY_MAX_LINES,
-            COMPACT_SUMMARY_LINE_MAX_CHARS,
-        );
+            compact_discovery_tools_in_history(&live, DISCOVERY_KEEP_RECENT_MSGS);
         let should_stream = on_token.is_some();
         // No tools on the request → the model cannot call a tool.
         let request = LlmRequest::new(request_messages, config.clone(), should_stream)?;
@@ -864,15 +861,45 @@ fn strip_leading_temporal_block(content: &str) -> String {
     }
 }
 
-/// Detection: for each Tool message, find the matching Assistant message that
-/// emitted the tool call by `tool_call_id` and check whether the function name
-/// was `load_skill`. Only matches by exact function name — `crdt_doc_*` tool
-/// results stay intact (they're either tiny or stateful and worth re-sending).
+/// Non-dropping temporal strip over loaded rows: removes a stale leading
+/// `## Temporal & Geographic Context` block from any System message WITHOUT
+/// changing the count/order (so ordinals stay aligned with the DB / recall).
+///
+/// Called on `stored_now` (the reload before compaction) so legacy
+/// conversations never duplicate the stale block alongside the fresh
+/// `volatile_system_suffix` injected per turn.
+fn strip_temporal_from_stored(
+    stored: Vec<crate::llm::domain::StoredMessage>,
+) -> Vec<crate::llm::domain::StoredMessage> {
+    stored
+        .into_iter()
+        .map(|mut sm| {
+            if sm.message.role() == &MessageRole::System {
+                let stripped = strip_leading_temporal_block(sm.message.content());
+                if !stripped.trim().is_empty() && stripped != sm.message.content() {
+                    if let Ok(m) = LlmMessage::system(stripped) {
+                        sm.message = m;
+                    }
+                }
+            }
+            sm
+        })
+        .collect()
+}
+
+/// Compact old discovery/scaffolding tool results into short markers.
+///
+/// Discovery tools (`load_skill`, `describe_tool`) emit large results that are
+/// only useful immediately after the call. Once older than `keep_recent_msgs`,
+/// their Tool messages are replaced by a one-line marker that tells the model
+/// it can re-call the tool to re-read. Non-discovery tool results
+/// (`crdt_doc_*`, `sql_query`, etc.) stay intact — they're either small or
+/// stateful.
 ///
 /// Provider-agnostic: each provider adapter serializes `LlmMessage` to its
 /// own request format; the compact marker is just a Tool message with shorter
 /// content, so no adapter changes needed.
-fn compact_old_load_skill_in_history(
+fn compact_discovery_tools_in_history(
     messages: &[LlmMessage],
     keep_recent_msgs: usize,
 ) -> Vec<LlmMessage> {
@@ -881,29 +908,27 @@ fn compact_old_load_skill_in_history(
         return out;
     }
 
-    // Build: tool_call_id → load_skill arguments (only for load_skill calls).
-    let mut load_skill_calls: HashMap<String, String> = HashMap::new();
+    // tool_call_id → (tool_name, arguments) para las discovery tools.
+    let mut discovery_calls: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
     for msg in out.iter() {
-        let Some(tcs) = msg.tool_calls() else {
-            continue;
-        };
-        for tc in tcs {
-            if tc.function.name == "load_skill" {
-                load_skill_calls.insert(tc.id.clone(), tc.function.arguments.clone());
+        if let Some(tcs) = msg.tool_calls() {
+            for tc in tcs {
+                if DISCOVERY_TOOL_NAMES.contains(&tc.function.name.as_str()) {
+                    discovery_calls.insert(
+                        tc.id.clone(),
+                        (tc.function.name.clone(), tc.function.arguments.clone()),
+                    );
+                }
             }
         }
     }
-
-    if load_skill_calls.is_empty() {
+    if discovery_calls.is_empty() {
         return out;
     }
 
     let boundary = out.len().saturating_sub(keep_recent_msgs);
-
-    // Two-phase scan: collect indices that need rewriting first (immutable
-    // borrow), then mutate (mutable borrow). Avoids the needless-range-loop
-    // lint without losing clarity.
-    let mut to_compact: Vec<(usize, String, String)> = Vec::new();
+    let mut to_compact: Vec<(usize, String)> = Vec::new();
     for (i, msg) in out.iter().enumerate().take(boundary) {
         if msg.role() != &MessageRole::Tool {
             continue;
@@ -911,269 +936,29 @@ fn compact_old_load_skill_in_history(
         let Some(tcid) = msg.tool_call_id().map(|s| s.to_string()) else {
             continue;
         };
-        let Some(args) = load_skill_calls.get(&tcid) else {
+        let Some((name, _args)) = discovery_calls.get(&tcid) else {
             continue;
         };
-        // Skip already-marked messages (idempotent).
-        if msg.content().starts_with("[skill ") && msg.content().ends_with(']') {
+        // Idempotente: saltar los ya marcados.
+        if msg.content().starts_with("[tool '") && msg.content().ends_with(']') {
             continue;
         }
-        to_compact.push((i, tcid, args.clone()));
+        to_compact.push((i, name.clone()));
     }
 
-    for (i, tcid, args) in to_compact {
+    for (i, name) in to_compact {
         let original_size = out[i].content().len();
-
-        // Parse args to make the marker descriptive (best-effort).
-        let marker = match serde_json::from_str::<serde_json::Value>(&args) {
-            Ok(v) => {
-                let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("?");
-                match v.get("reference").and_then(|x| x.as_str()) {
-                    Some(r) => format!(
-                        "[skill '{name}' (ref={r}) loaded earlier ({original_size} chars). \
-                         Call load_skill again to re-read.]"
-                    ),
-                    None => format!(
-                        "[skill '{name}' loaded earlier ({original_size} chars). \
-                         Call load_skill again to re-read.]"
-                    ),
-                }
-            }
-            Err(_) => format!("[skill loaded earlier ({original_size} chars)]"),
-        };
-
+        let tcid = out[i].tool_call_id().unwrap_or("unknown").to_string();
+        let marker = format!(
+            "[tool '{name}' result loaded earlier ({original_size} chars). \
+             Call {name} again to re-read.]"
+        );
         if let Ok(new_msg) = LlmMessage::tool(tcid, marker) {
             out[i] = new_msg;
         }
     }
 
     out
-}
-
-/// F-T15 — Rolling-summary compaction.
-///
-/// When `messages.len() > keep_first + keep_recent + 1`, replace the middle
-/// slice `messages[keep_first .. messages.len()-keep_recent]` with a single
-/// System message containing one summary line per source message. Each line
-/// is tagged with the source message's index (its persisted turn number)
-/// so that the agent can call `recall_history(turn=N)` to retrieve the
-/// original verbatim from the conversation_repository.
-///
-/// The returned Vec is a NEW allocation — the input `messages` slice is not
-/// mutated. The persisted history in `conversation_repository` is not touched
-/// either; this only shapes the LlmRequest sent to the provider.
-///
-/// Cap policy: if more than `max_lines` source messages would be summarized,
-/// drop the OLDEST lines (keep the newest `max_lines` in the summary). The
-/// dropped data still lives in `conversation_repository` and can be recalled
-/// individually by turn number — only the eager summary view is bounded.
-///
-/// Composition: this runs AFTER `compact_old_load_skill_in_history` so any
-/// load_skill markers in the middle slice are already small (the marker text
-/// goes into the summary line directly, no double work).
-fn compact_history_to_summary(
-    messages: &[LlmMessage],
-    keep_first: usize,
-    keep_recent: usize,
-    max_lines: usize,
-    line_max_chars: usize,
-) -> Vec<LlmMessage> {
-    let total = messages.len();
-    let need = keep_first.saturating_add(keep_recent).saturating_add(1);
-    if total < need {
-        return messages.to_vec();
-    }
-    let initial_middle_end = total.saturating_sub(keep_recent);
-    if initial_middle_end <= keep_first {
-        return messages.to_vec();
-    }
-
-    // 2026-06-07 fix: prevent splitting in the middle of an
-    // `assistant(tool_calls) + tool` response sequence. The original logic
-    // could push `assistant(tool_calls)` into `middle` (summarized away) and
-    // leave the matching `tool` responses in `kept_recent` — producing an
-    // orphaned tool sequence that OpenAI rejects with "messages with role
-    // 'tool' must be a response to a preceding message with 'tool_calls'".
-    //
-    // Walk `middle_end` backwards while it points to a Tool message; this
-    // pulls all the contiguous tool responses AND their preceding
-    // assistant(tool_calls) message into `kept_recent`, preserving the pair
-    // invariant required by both Chat Completions and Responses APIs.
-    // See colmena BACKLOG entries "Lazy tool loading — OpenAI message-order
-    // regression al cerrar el turn" and "OpenAI Responses API — input_text
-    // invalid en synthetic-tool path" for the diagnosis trail.
-    let mut middle_end = initial_middle_end;
-    while middle_end > keep_first && matches!(messages[middle_end].role(), MessageRole::Tool) {
-        middle_end -= 1;
-    }
-    if middle_end <= keep_first {
-        return messages.to_vec();
-    }
-    let middle = &messages[keep_first..middle_end];
-    if middle.is_empty() {
-        return messages.to_vec();
-    }
-
-    // Build: tool_call_id → function.name from any Assistant messages we have
-    // seen so far (including ones inside `middle`). The map is best-effort —
-    // if a Tool message references a tool_call_id that's not in any visible
-    // Assistant message, the tool name renders as "?".
-    let mut tool_call_names: HashMap<String, String> = HashMap::new();
-    for msg in messages.iter() {
-        if let Some(tcs) = msg.tool_calls() {
-            for tc in tcs {
-                tool_call_names.insert(tc.id.clone(), tc.function.name.clone());
-            }
-        }
-    }
-
-    // Build one line per message, tagged with its source index.
-    let mut lines: Vec<String> = Vec::with_capacity(middle.len());
-    for (offset, msg) in middle.iter().enumerate() {
-        let idx = keep_first + offset; // persisted turn number
-        lines.push(summary_line_for_message(
-            idx,
-            msg,
-            &tool_call_names,
-            line_max_chars,
-        ));
-    }
-
-    // Apply the max_lines cap by dropping the OLDEST entries first.
-    let lines_dropped = lines.len().saturating_sub(max_lines);
-    let kept_lines: Vec<String> = lines.into_iter().skip(lines_dropped).collect();
-
-    // Render the summary text.
-    let mut summary = String::new();
-    summary.push_str("## Conversation summary (older turns compacted)\n");
-    summary.push_str(
-        "Each line below is one message you sent or received earlier in this conversation. \
-         Numbers in [Tn] are the persisted turn index. To re-read the FULL content of any \
-         turn, call recall_history(turn=N). Use it sparingly — each recall puts the \
-         original message back into your context.\n\n",
-    );
-    if lines_dropped > 0 {
-        summary.push_str(&format!(
-            "(turns {}..{} omitted from summary — still recallable individually)\n",
-            keep_first,
-            keep_first + lines_dropped - 1,
-        ));
-    }
-    for line in &kept_lines {
-        summary.push_str(line);
-        summary.push('\n');
-    }
-
-    // Assemble: kept_first + [System summary] + kept_recent.
-    //
-    // Edge case: if the last kept_first message is already a System, inserting
-    // a NEW System right after it produces consecutive Systems — providers like
-    // Gemini reject this with "Consecutive messages with the same role are not
-    // supported". Merge the summary into that existing System content instead.
-    let mut out: Vec<LlmMessage> = Vec::with_capacity(keep_first + 1 + keep_recent);
-    let prev_is_system =
-        keep_first > 0 && matches!(messages[keep_first - 1].role(), MessageRole::System);
-    if prev_is_system {
-        out.extend(messages[..keep_first - 1].iter().cloned());
-        let combined = format!(
-            "{}\n\n---\n\n{}",
-            messages[keep_first - 1].content(),
-            summary
-        );
-        if let Ok(merged) = LlmMessage::system(combined) {
-            out.push(merged);
-        } else {
-            out.push(messages[keep_first - 1].clone());
-            if let Ok(summary_msg) = LlmMessage::system(summary) {
-                out.push(summary_msg);
-            }
-        }
-    } else {
-        out.extend(messages[..keep_first].iter().cloned());
-        if let Ok(summary_msg) = LlmMessage::system(summary) {
-            out.push(summary_msg);
-        }
-    }
-    out.extend(messages[middle_end..].iter().cloned());
-
-    // Safety: if the FIRST message of the kept-recent window is a Tool
-    // without its matching Assistant in the kept window OR in the kept-first
-    // slice, some providers reject the request. Walk backwards from the
-    // window boundary to include the parent Assistant if needed.
-    //
-    // We don't do this expansion here for v1 — the typical case (keep_recent=5
-    // covering ~1-2 turns of Assistant+Tool pairs) is well-formed. If smoke
-    // hits a provider rejection, this is the place to add the guard.
-
-    out
-}
-
-/// Render one source message as one line for the rolling summary.
-/// Output shape:
-///   `[T<idx>] USER: <content>`
-///   `[T<idx>] AGENT said: <content>; called <tool>(<args>); ...`
-///   `[T<idx>] TOOL(<name>) → <content>`
-fn summary_line_for_message(
-    idx: usize,
-    msg: &LlmMessage,
-    tool_call_names: &HashMap<String, String>,
-    max_chars: usize,
-) -> String {
-    let truncate_inline = |s: &str, cap: usize| -> String {
-        if s.chars().count() <= cap {
-            s.to_string()
-        } else {
-            let mut end = cap;
-            // walk back to a char boundary
-            while end > 0 && !s.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!("{}…", &s[..end])
-        }
-    };
-
-    match msg.role() {
-        MessageRole::User => format!(
-            "[T{idx}] USER: {}",
-            truncate_inline(msg.content(), max_chars)
-        ),
-        MessageRole::System => format!(
-            "[T{idx}] SYSTEM: {}",
-            truncate_inline(msg.content(), max_chars)
-        ),
-        MessageRole::Assistant => {
-            let mut parts: Vec<String> = Vec::new();
-            let text = msg.content().trim();
-            if !text.is_empty() {
-                parts.push(format!("said: {}", truncate_inline(text, max_chars / 2)));
-            }
-            if let Some(tcs) = msg.tool_calls() {
-                for tc in tcs {
-                    parts.push(format!(
-                        "called {}({})",
-                        tc.function.name,
-                        truncate_inline(&tc.function.arguments, max_chars / 2),
-                    ));
-                }
-            }
-            if parts.is_empty() {
-                format!("[T{idx}] AGENT (empty)")
-            } else {
-                format!("[T{idx}] AGENT {}", parts.join("; "))
-            }
-        }
-        MessageRole::Tool => {
-            let tcid = msg.tool_call_id().unwrap_or("?");
-            let name = tool_call_names
-                .get(tcid)
-                .cloned()
-                .unwrap_or_else(|| "?".to_string());
-            format!(
-                "[T{idx}] TOOL({name}) → {}",
-                truncate_inline(msg.content(), max_chars),
-            )
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1185,7 +970,55 @@ mod tests {
     use mockall::mock;
     use mockall::predicate::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+
+    /// Configures a `MockConversationRepo` backed by shared, mutable state so
+    /// that `get_with_summaries` reflects messages appended via `add_message`.
+    /// The agent loop reloads history (via `get_with_summaries`) twice — once at
+    /// load, once to build the compacted base — so a stateless snapshot mock
+    /// would return stale (e.g. pre-prompt) history on the second read. This
+    /// helper persists appends so both reads see the up-to-date conversation.
+    ///
+    /// Returns the shared state handle so callers can inspect/assert what was
+    /// persisted. `add_message` is left WITHOUT a `.times()` constraint here;
+    /// callers that assert a precise persisted count should inspect the returned
+    /// `Vec` instead.
+    fn stateful_conv_mock(
+        initial: Vec<LlmMessage>,
+    ) -> (MockConversationRepo, Arc<Mutex<Vec<LlmMessage>>>) {
+        let state = Arc::new(Mutex::new(initial));
+        let mut mock = MockConversationRepo::new();
+
+        let s_get = state.clone();
+        mock.expect_get_with_summaries().returning(move |_| {
+            Ok(s_get
+                .lock()
+                .unwrap()
+                .iter()
+                .cloned()
+                .map(|message| StoredMessage {
+                    message,
+                    summary: None,
+                })
+                .collect())
+        });
+
+        let s_by_id = state.clone();
+        mock.expect_get_by_id().returning(move |k| {
+            Ok(Conversation {
+                key: k.clone(),
+                messages: s_by_id.lock().unwrap().clone(),
+            })
+        });
+
+        let s_add = state.clone();
+        mock.expect_add_message().returning(move |_, msg| {
+            s_add.lock().unwrap().push(msg);
+            Ok(())
+        });
+
+        (mock, state)
+    }
 
     // ── Cache-safe temporal strip-on-load (2026-06-11) ──────────────────────
 
@@ -1215,6 +1048,31 @@ mod tests {
         let sys = "## Tools\nAvailable: add.\n\n---\nmore stable content";
         let out = strip_leading_temporal_block(sys);
         assert_eq!(out, sys);
+    }
+
+    #[test]
+    fn strip_temporal_from_stored_strips_legacy_system_keeps_count() {
+        use crate::llm::domain::StoredMessage;
+        let legacy_sys = "## Temporal & Geographic Context\n\
+                          Current date and time: 2026-06-11T10:00:00-05:00\n\
+                          Locale: es-CO\n\n---\n## Tools\nAvailable: add.";
+        let stored = vec![
+            StoredMessage {
+                message: LlmMessage::user("hi".into()).unwrap(),
+                summary: None,
+            },
+            StoredMessage {
+                message: LlmMessage::system(legacy_sys.to_string()).unwrap(),
+                summary: None,
+            },
+        ];
+        let out = strip_temporal_from_stored(stored);
+        assert_eq!(out.len(), 2, "count preserved (no drop)");
+        assert!(!out[1]
+            .message
+            .content()
+            .contains("Temporal & Geographic Context"));
+        assert!(out[1].message.content().contains("## Tools"));
     }
 
     // ── Per-signature loop guard: canonical tool-call signature ─────────────
@@ -1271,7 +1129,7 @@ mod tests {
             LlmMessage::user("hi".to_string()).unwrap(),
             LlmMessage::assistant("ok".to_string()).unwrap(),
         ];
-        let out = compact_old_load_skill_in_history(&msgs, 10);
+        let out = compact_discovery_tools_in_history(&msgs, 10);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].content(), "hi");
         assert_eq!(out[1].content(), "ok");
@@ -1285,7 +1143,7 @@ mod tests {
         for i in 0..11 {
             msgs.push(LlmMessage::tool(format!("t{i}"), format!("payload {i}")).unwrap());
         }
-        let out = compact_old_load_skill_in_history(&msgs, 3);
+        let out = compact_discovery_tools_in_history(&msgs, 3);
         assert_eq!(out.len(), msgs.len());
         for (a, b) in out.iter().zip(msgs.iter()) {
             assert_eq!(a.content(), b.content());
@@ -1329,21 +1187,23 @@ mod tests {
         }
         assert_eq!(msgs.len(), 12);
 
-        let out = compact_old_load_skill_in_history(&msgs, 4);
+        let out = compact_discovery_tools_in_history(&msgs, 4);
         assert_eq!(out.len(), 12);
 
         // msg[2] (load_skill foo result) is at index 2, boundary = 12 - 4 = 8 → compacted.
         assert!(
             out[2]
                 .content()
-                .starts_with("[skill 'foo' loaded earlier ("),
+                .starts_with("[tool 'load_skill' result loaded earlier ("),
             "expected marker; got: {}",
             out[2].content()
         );
-        // msg[4] (load_skill bar ref1 result) at index 4 → compacted with reference.
+        // msg[4] (load_skill bar ref1 result) at index 4 → also compacted.
         assert!(
-            out[4].content().contains("(ref=ref1)"),
-            "expected ref marker; got: {}",
+            out[4]
+                .content()
+                .starts_with("[tool 'load_skill' result loaded earlier ("),
+            "expected marker; got: {}",
             out[4].content()
         );
         // Marker much shorter than original
@@ -1374,7 +1234,7 @@ mod tests {
         msgs.push(LlmMessage::assistant("ack".to_string()).unwrap());
         assert_eq!(msgs.len(), 10);
 
-        let out = compact_old_load_skill_in_history(&msgs, 4);
+        let out = compact_discovery_tools_in_history(&msgs, 4);
         // msg[8] is the tool result for "recent" load — index 8 >= boundary 6 → NOT compacted.
         assert_eq!(out[8].content(), "FRESH SKILL BODY");
     }
@@ -1400,7 +1260,7 @@ mod tests {
         for i in 0..10 {
             msgs.push(LlmMessage::assistant(format!("filler {i}")).unwrap());
         }
-        let out = compact_old_load_skill_in_history(&msgs, 4);
+        let out = compact_discovery_tools_in_history(&msgs, 4);
         // msg[1] (crdt_doc_run_python result) stays untouched.
         assert_eq!(out[1].content(), "{\"output\": \"pandas result\"}");
     }
@@ -1419,7 +1279,7 @@ mod tests {
         msgs.push(
             LlmMessage::tool(
                 "c".to_string(),
-                "[skill 'x' loaded earlier (1234 chars). Call load_skill again to re-read.]"
+                "[tool 'load_skill' result loaded earlier (1234 chars). Call load_skill again to re-read.]"
                     .to_string(),
             )
             .unwrap(),
@@ -1427,229 +1287,33 @@ mod tests {
         for i in 0..10 {
             msgs.push(LlmMessage::assistant(format!("filler {i}")).unwrap());
         }
-        let out = compact_old_load_skill_in_history(&msgs, 4);
+        let out = compact_discovery_tools_in_history(&msgs, 4);
         // Already a marker → not re-marked (would show "(NaN chars)" or grow).
         assert_eq!(out[1].content(), msgs[1].content());
     }
 
-    // ── F-T15: compact_history_to_summary tests ─────────────────────────────
-
     #[test]
-    fn summary_noop_when_history_below_threshold() {
-        let msgs = vec![
-            LlmMessage::user("u".to_string()).unwrap(),
-            LlmMessage::system("s".to_string()).unwrap(),
-            LlmMessage::assistant("a".to_string()).unwrap(),
-            LlmMessage::user("b".to_string()).unwrap(),
+    fn discovery_compaction_markers_old_describe_tool() {
+        let mut msgs = vec![
+            LlmMessage::user("hola".into()).unwrap(),
+            LlmMessage::assistant_with_tool_calls(
+                String::new(),
+                vec![tool_call("c1", "describe_tool", r#"{"name":"sql_query"}"#)],
+            )
+            .unwrap(),
+            LlmMessage::tool(
+                "c1".to_string(),
+                "# sql_query\n\n<schema gigante...>".repeat(50),
+            )
+            .unwrap(),
         ];
-        // keep_first=2, keep_recent=5 → need=8; msgs.len()=4 < 8 → no compaction
-        let out = compact_history_to_summary(&msgs, 2, 5, 100, 180);
-        assert_eq!(out.len(), 4);
-        for (a, b) in out.iter().zip(msgs.iter()) {
-            assert_eq!(a.content(), b.content());
+        for i in 0..9 {
+            msgs.push(LlmMessage::user(format!("relleno {i}")).unwrap());
         }
+        let out = compact_discovery_tools_in_history(&msgs, DISCOVERY_KEEP_RECENT_MSGS);
+        assert!(out[2].content().starts_with("[tool 'describe_tool'"));
+        assert!(out[2].content().len() < 120);
     }
-
-    #[test]
-    #[allow(clippy::vec_init_then_push)]
-    fn summary_replaces_middle_with_one_system_message() {
-        // Build: 12 msgs total — first 2 (User, System), 5 middle that will be
-        // summarized, then 5 recent that stay verbatim.
-        let mut msgs = Vec::new();
-        msgs.push(LlmMessage::user("original prompt".to_string()).unwrap());
-        msgs.push(LlmMessage::system("prelude".to_string()).unwrap());
-        // 5 middle msgs (indices 2-6)
-        msgs.push(
-            LlmMessage::assistant_with_tool_calls(
-                String::new(),
-                vec![tool_call("c1", "crdt_doc_list_sheets", "{}")],
-            )
-            .unwrap(),
-        );
-        msgs.push(LlmMessage::tool("c1".to_string(), "{\"sheets\":[\"a\"]}".to_string()).unwrap());
-        msgs.push(LlmMessage::assistant("thinking text".to_string()).unwrap());
-        msgs.push(
-            LlmMessage::assistant_with_tool_calls(
-                String::new(),
-                vec![tool_call("c2", "crdt_doc_read", "{\"sheet_id\":\"a\"}")],
-            )
-            .unwrap(),
-        );
-        msgs.push(LlmMessage::tool("c2".to_string(), "{\"v\":42}".to_string()).unwrap());
-        // 5 recent msgs (indices 7-11)
-        for i in 0..5 {
-            msgs.push(LlmMessage::assistant(format!("recent {i}")).unwrap());
-        }
-        assert_eq!(msgs.len(), 12);
-
-        let out = compact_history_to_summary(&msgs, 2, 5, 100, 180);
-        // Result: first 1 (User) + 1 merged System (prelude + summary) + 5 recent = 7 msgs.
-        // The summary gets merged INTO the existing System (msg[1]) to avoid
-        // consecutive-System rejections from providers like Gemini.
-        assert_eq!(out.len(), 7);
-        assert_eq!(out[0].content(), "original prompt");
-        // out[1] is the merged System: prelude content + summary
-        assert_eq!(out[1].role(), &MessageRole::System);
-        let merged = out[1].content();
-        assert!(merged.starts_with("prelude"));
-        assert!(merged.contains("## Conversation summary"));
-        // Contains turn tags for the summarized middle (indices 2..7)
-        assert!(merged.contains("[T2]"));
-        assert!(merged.contains("[T3]"));
-        assert!(merged.contains("[T4]"));
-        assert!(merged.contains("[T5]"));
-        assert!(merged.contains("[T6]"));
-        // Tool name resolved correctly
-        assert!(merged.contains("crdt_doc_list_sheets"));
-        assert!(merged.contains("crdt_doc_read"));
-        // Mentions recall_history
-        assert!(merged.contains("recall_history"));
-        // Recent 5 messages verbatim (start at out[2] since merged System is at out[1])
-        for i in 0..5 {
-            assert_eq!(out[2 + i].content(), format!("recent {i}"));
-        }
-    }
-
-    #[test]
-    #[allow(clippy::vec_init_then_push)]
-    fn summary_caps_at_max_lines_dropping_oldest() {
-        // 50 middle msgs, max_lines=10 → only newest 10 lines stay, the rest
-        // gets noted as "turns N..M omitted from summary".
-        let mut msgs = Vec::new();
-        msgs.push(LlmMessage::user("u".to_string()).unwrap());
-        msgs.push(LlmMessage::system("s".to_string()).unwrap());
-        for i in 0..50 {
-            msgs.push(LlmMessage::assistant(format!("middle msg {i}")).unwrap());
-        }
-        for i in 0..5 {
-            msgs.push(LlmMessage::assistant(format!("recent {i}")).unwrap());
-        }
-        let out = compact_history_to_summary(&msgs, 2, 5, 10, 180);
-        // Merged into msg[1] (System): User + merged System + 5 recent = 7
-        assert_eq!(out.len(), 1 + 1 + 5);
-        let summary = out[1].content();
-        // The dropped-range marker is present
-        assert!(
-            summary.contains("omitted from summary"),
-            "expected omitted marker; summary was:\n{summary}"
-        );
-        // Latest 10 of the middle should be in the summary (indices 42..51)
-        assert!(summary.contains("[T42]"));
-        assert!(summary.contains("[T51]"));
-        // Earliest middle msgs should NOT be in the summary
-        assert!(!summary.contains("[T2]"));
-        assert!(!summary.contains("[T5]"));
-    }
-
-    #[test]
-    #[allow(clippy::vec_init_then_push)]
-    fn summary_never_orphans_tool_message_after_compaction() {
-        // REGRESSION TEST (2026-06-07): the original implementation could leave
-        // orphaned `tool` messages at the start of `kept_recent` when the
-        // boundary fell inside an {assistant.tool_calls, tool, tool, ...}
-        // sequence. OpenAI Chat Completions rejected with "messages with role
-        // 'tool' must be a response to a preceding message with 'tool_calls'";
-        // OpenAI Responses API rejected with content-type mismatch. Both were
-        // caused by the same orphaning behavior in compact_history_to_summary.
-        //
-        // Construct the exact lazy_tools scenario observed in E2E Phase 1.2:
-        // 1 assistant message with 5 parallel tool_calls, followed by 5 tool
-        // responses. With keep_first=2, keep_recent=5, the boundary falls
-        // BETWEEN the assistant (which would be summarized) and the tools
-        // (which would land in kept_recent, orphaned).
-        let mut msgs = Vec::new();
-        msgs.push(LlmMessage::user("the prompt".to_string()).unwrap());
-        msgs.push(LlmMessage::system("system prelude".to_string()).unwrap());
-        // 1 assistant with 5 parallel tool_calls (would land at index 2)
-        msgs.push(
-            LlmMessage::assistant_with_tool_calls(
-                String::new(),
-                vec![
-                    tool_call("c1", "current_time", "{}"),
-                    tool_call("c2", "describe_tool", "{\"name\":\"multiply\"}"),
-                    tool_call("c3", "describe_tool", "{\"name\":\"add\"}"),
-                    tool_call("c4", "add", "{\"a\":25,\"b\":17}"),
-                    tool_call("c5", "multiply", "{\"a\":42,\"b\":3}"),
-                ],
-            )
-            .unwrap(),
-        );
-        // 5 tool responses (indices 3-7)
-        for (id, payload) in [
-            ("c1", "{\"now\":\"2026-06-07T...\"}"),
-            ("c2", "{\"description\":\"...\"}"),
-            ("c3", "{\"description\":\"...\"}"),
-            ("c4", "{\"output\":42}"),
-            ("c5", "{\"output\":126}"),
-        ] {
-            msgs.push(LlmMessage::tool(id.to_string(), payload.to_string()).unwrap());
-        }
-        assert_eq!(msgs.len(), 8);
-
-        let out = compact_history_to_summary(&msgs, 2, 5, 100, 180);
-
-        // The fix should pull the assistant message INTO kept_recent (so it
-        // precedes its tool responses), preserving the pair invariant.
-        // Walk the output and verify: every Tool message has an Assistant
-        // with tool_calls before it (possibly with intermediate tools).
-        for (i, msg) in out.iter().enumerate() {
-            if matches!(msg.role(), MessageRole::Tool) {
-                // Find the preceding non-Tool message.
-                let mut j = i;
-                while j > 0 && matches!(out[j - 1].role(), MessageRole::Tool) {
-                    j -= 1;
-                }
-                assert!(
-                    j > 0,
-                    "tool message at index {i} has no preceding non-Tool message; \
-                     this would trigger OpenAI rejection"
-                );
-                let preceding = &out[j - 1];
-                assert!(
-                    matches!(preceding.role(), MessageRole::Assistant)
-                        && preceding.tool_calls().is_some(),
-                    "tool message at index {i} is preceded by a {:?} (not assistant.tool_calls); \
-                     this is the orphaned-tool bug this test protects against",
-                    preceding.role()
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn summary_line_formats_per_role() {
-        let tool_names: HashMap<String, String> = HashMap::new();
-        let user_msg = LlmMessage::user("hello".to_string()).unwrap();
-        let line = summary_line_for_message(0, &user_msg, &tool_names, 180);
-        assert!(line.starts_with("[T0] USER: hello"));
-
-        let asst_text = LlmMessage::assistant("thinking aloud".to_string()).unwrap();
-        let line = summary_line_for_message(3, &asst_text, &tool_names, 180);
-        assert!(line.starts_with("[T3] AGENT said:"));
-        assert!(line.contains("thinking aloud"));
-
-        let mut tool_names = HashMap::new();
-        tool_names.insert("c1".to_string(), "crdt_doc_run_python".to_string());
-        let tool_msg =
-            LlmMessage::tool("c1".to_string(), "{\"output\":\"42\"}".to_string()).unwrap();
-        let line = summary_line_for_message(7, &tool_msg, &tool_names, 180);
-        assert!(line.starts_with("[T7] TOOL(crdt_doc_run_python) → "));
-        assert!(line.contains("42"));
-    }
-
-    #[test]
-    fn summary_line_truncates_long_content_safely() {
-        let tool_names = HashMap::new();
-        let long = "x".repeat(500);
-        let user_msg = LlmMessage::user(long.clone()).unwrap();
-        let line = summary_line_for_message(0, &user_msg, &tool_names, 100);
-        // Expect ~ "[T0] USER: <100 chars>…"
-        assert!(line.contains('…'));
-        // Length is roughly bounded — definitely less than the original 500
-        assert!(line.chars().count() < 200);
-    }
-
-    // ──────────────────────────────────────────────────────────────────────
 
     // Mock LlmRepository
     mock! {
@@ -1671,6 +1335,8 @@ mod tests {
             async fn get_by_id(&self, key: &ConversationKey) -> Result<Conversation, LlmError>;
             async fn add_message(&self, key: &ConversationKey, message: LlmMessage) -> Result<(), LlmError>;
             async fn delete(&self, key: &ConversationKey) -> Result<(), LlmError>;
+            async fn get_with_summaries(&self, key: &ConversationKey) -> Result<Vec<StoredMessage>, LlmError>;
+            async fn set_summary(&self, key: &ConversationKey, ordinal: usize, summary: &str) -> Result<(), LlmError>;
         }
     }
 
@@ -1706,28 +1372,13 @@ mod tests {
     #[tokio::test]
     async fn test_agent_service_simple_response_no_tools() {
         let mut mock_llm = MockLlmRepo::new();
-        let mut mock_conv = MockConversationRepo::new();
         let mock_tool_exec = MockToolExec::new();
 
         let key = test_key();
         let prompt = "Hello".to_string();
 
-        // Setup Conversation Repo
-        mock_conv
-            .expect_get_by_id()
-            .with(eq(key.clone()))
-            .times(1)
-            .returning(|k| {
-                Ok(Conversation {
-                    key: k.clone(),
-                    messages: vec![],
-                })
-            });
-
-        mock_conv
-            .expect_add_message()
-            .times(2) // 1 user message, 1 assistant message
-            .returning(|_, _| Ok(()));
+        // Setup Conversation Repo (stateful so the loop's reload sees the prompt)
+        let (mock_conv, conv_state) = stateful_conv_mock(vec![]);
 
         // Setup LLM Repo
         mock_llm.expect_call().times(1).returning(|_| {
@@ -1765,26 +1416,20 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap().content(), "Hi there!");
+        // 1 user message + 1 assistant message persisted.
+        assert_eq!(conv_state.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
     async fn test_agent_service_with_tool_call() {
         let mut mock_llm = MockLlmRepo::new();
-        let mut mock_conv = MockConversationRepo::new();
         let mut mock_tool_exec = MockToolExec::new();
 
         let key = test_key();
         let prompt = "Add 2+2".to_string();
 
-        // Setup Conversation Repo
-        mock_conv.expect_get_by_id().returning(|k| {
-            Ok(Conversation {
-                key: k.clone(),
-                messages: vec![],
-            })
-        });
-
-        mock_conv.expect_add_message().returning(|_, _| Ok(()));
+        // Setup Conversation Repo (stateful so the loop's reload sees the prompt)
+        let (mock_conv, _conv_state) = stateful_conv_mock(vec![]);
 
         // Setup Tool Executor
         mock_tool_exec.expect_execute().times(1).returning(|call| {
@@ -1877,24 +1522,16 @@ mod tests {
     #[tokio::test]
     async fn run_with_no_prompt_continues_from_existing_messages() {
         let mut mock_llm = MockLlmRepo::new();
-        let mut mock_conv = MockConversationRepo::new();
         let mock_tool_exec = MockToolExec::new();
 
         let key = test_key();
 
-        // Conversation already has a prior user message (simulating resume)
-        mock_conv.expect_get_by_id().times(1).returning(|k| {
-            Ok(Conversation {
-                key: k.clone(),
-                messages: vec![LlmMessage::user("original question".to_string()).unwrap()],
-            })
-        });
-
-        // Only the assistant reply must be persisted — no new user message
-        mock_conv
-            .expect_add_message()
-            .times(1) // exactly 1: the assistant response
-            .returning(|_, _| Ok(()));
+        // Conversation already has a prior user message (simulating resume).
+        // Stateful so the loop's reload sees the same history.
+        let (mock_conv, conv_state) =
+            stateful_conv_mock(vec![
+                LlmMessage::user("original question".to_string()).unwrap()
+            ]);
 
         // LLM returns a simple final answer
         mock_llm.expect_call().times(1).returning(|_| {
@@ -1932,6 +1569,10 @@ mod tests {
 
         assert!(result.is_ok(), "run with None prompt must succeed");
         assert_eq!(result.unwrap().content(), "Resumed answer");
+        // No new user message persisted: original user + assistant reply only.
+        let state = conv_state.lock().unwrap();
+        assert_eq!(state.len(), 2, "only the assistant reply must be appended");
+        assert_eq!(state[1].role(), &MessageRole::Assistant);
     }
 
     fn loop_tool_call(args: &str) -> ToolCall {
@@ -1967,17 +1608,11 @@ mod tests {
     #[tokio::test]
     async fn repeated_signature_nudges_then_rescues_with_synthesis() {
         let mut mock_llm = MockLlmRepo::new();
-        let mut mock_conv = MockConversationRepo::new();
         let mut mock_tool_exec = MockToolExec::new();
         let key = test_key();
 
-        mock_conv.expect_get_by_id().returning(|k| {
-            Ok(Conversation {
-                key: k.clone(),
-                messages: vec![],
-            })
-        });
-        mock_conv.expect_add_message().returning(|_, _| Ok(()));
+        // Stateful conv mock so the loop's reload sees the persisted prompt.
+        let (mock_conv, _conv_state) = stateful_conv_mock(vec![]);
 
         // The tool must be executed EXACTLY ONCE despite 3 identical requests:
         // occurrence 1 executes, 2 is nudged, 3 triggers rescue (no execution).
@@ -2027,17 +1662,11 @@ mod tests {
     #[tokio::test]
     async fn distinct_signatures_are_never_nudged() {
         let mut mock_llm = MockLlmRepo::new();
-        let mut mock_conv = MockConversationRepo::new();
         let mut mock_tool_exec = MockToolExec::new();
         let key = test_key();
 
-        mock_conv.expect_get_by_id().returning(|k| {
-            Ok(Conversation {
-                key: k.clone(),
-                messages: vec![],
-            })
-        });
-        mock_conv.expect_add_message().returning(|_, _| Ok(()));
+        // Stateful conv mock so the loop's reload sees the persisted prompt.
+        let (mock_conv, _conv_state) = stateful_conv_mock(vec![]);
 
         // 5 DISTINCT calls all execute (no nudge), then a final text answer.
         mock_tool_exec.expect_execute().times(5).returning(|call| {
@@ -2090,17 +1719,11 @@ mod tests {
         // because B resets the streak; the final A starts a fresh run. No rescue
         // from the loop guard — the model ends with a normal text answer.
         let mut mock_llm = MockLlmRepo::new();
-        let mut mock_conv = MockConversationRepo::new();
         let mut mock_tool_exec = MockToolExec::new();
         let key = test_key();
 
-        mock_conv.expect_get_by_id().returning(|k| {
-            Ok(Conversation {
-                key: k.clone(),
-                messages: vec![],
-            })
-        });
-        mock_conv.expect_add_message().returning(|_, _| Ok(()));
+        // Stateful conv mock so the loop's reload sees the persisted prompt.
+        let (mock_conv, _conv_state) = stateful_conv_mock(vec![]);
 
         // A executes (turn 0), A nudged (turn 1, no exec), B executes (turn 2),
         // A executes again (turn 3, fresh streak) → 3 real executions total.
@@ -2157,17 +1780,11 @@ mod tests {
     #[tokio::test]
     async fn max_turns_ceiling_triggers_synthesis_not_error() {
         let mut mock_llm = MockLlmRepo::new();
-        let mut mock_conv = MockConversationRepo::new();
         let mut mock_tool_exec = MockToolExec::new();
         let key = test_key();
 
-        mock_conv.expect_get_by_id().returning(|k| {
-            Ok(Conversation {
-                key: k.clone(),
-                messages: vec![],
-            })
-        });
-        mock_conv.expect_add_message().returning(|_, _| Ok(()));
+        // Stateful conv mock so the loop's reload sees the persisted prompt.
+        let (mock_conv, _conv_state) = stateful_conv_mock(vec![]);
 
         // Every turn makes a DISTINCT call (never nudged) so only the turn ceiling
         // can stop the loop. With max_turns = 4: 4 executions, then synthesis.
@@ -2223,17 +1840,10 @@ mod tests {
         // The single-shot callers pass max_turns: Some(1). A turn-1 text answer
         // (no tools) returns normally — the loop guard never engages.
         let mut mock_llm = MockLlmRepo::new();
-        let mut mock_conv = MockConversationRepo::new();
         let mock_tool_exec = MockToolExec::new();
         let key = test_key();
 
-        mock_conv.expect_get_by_id().returning(|k| {
-            Ok(Conversation {
-                key: k.clone(),
-                messages: vec![],
-            })
-        });
-        mock_conv.expect_add_message().returning(|_, _| Ok(()));
+        let (mock_conv, _conv_state) = stateful_conv_mock(vec![]);
         mock_llm
             .expect_call()
             .times(1)
@@ -2268,17 +1878,11 @@ mod tests {
         // so the first runs and the second is nudged WITHIN the same turn — the
         // tool executes exactly once. The next turn answers with text.
         let mut mock_llm = MockLlmRepo::new();
-        let mut mock_conv = MockConversationRepo::new();
         let mut mock_tool_exec = MockToolExec::new();
         let key = test_key();
 
-        mock_conv.expect_get_by_id().returning(|k| {
-            Ok(Conversation {
-                key: k.clone(),
-                messages: vec![],
-            })
-        });
-        mock_conv.expect_add_message().returning(|_, _| Ok(()));
+        // Stateful conv mock so the loop's reload sees the persisted prompt.
+        let (mock_conv, _conv_state) = stateful_conv_mock(vec![]);
 
         // Only the first of the two identical calls executes.
         mock_tool_exec.expect_execute().times(1).returning(|call| {
@@ -2341,17 +1945,11 @@ mod tests {
         // turn loop and the forced tool-less synthesis runs, returned as Ok. The
         // tool executes exactly once; every tool_call_id is still answered.
         let mut mock_llm = MockLlmRepo::new();
-        let mut mock_conv = MockConversationRepo::new();
         let mut mock_tool_exec = MockToolExec::new();
         let key = test_key();
 
-        mock_conv.expect_get_by_id().returning(|k| {
-            Ok(Conversation {
-                key: k.clone(),
-                messages: vec![],
-            })
-        });
-        mock_conv.expect_add_message().returning(|_, _| Ok(()));
+        // Stateful conv mock so the loop's reload sees the persisted prompt.
+        let (mock_conv, _conv_state) = stateful_conv_mock(vec![]);
 
         // Only the first of the three identical calls executes.
         mock_tool_exec.expect_execute().times(1).returning(|call| {
@@ -2422,28 +2020,17 @@ mod tests {
     #[tokio::test]
     async fn detects_suspended_tool_result_and_short_circuits() {
         let mut mock_llm = MockLlmRepo::new();
-        let mut mock_conv = MockConversationRepo::new();
         let mut mock_tool_exec = MockToolExec::new();
 
         let key = test_key();
         let prompt = "hello".to_string();
 
-        // Conversation starts empty
-        mock_conv.expect_get_by_id().times(1).returning(|k| {
-            Ok(Conversation {
-                key: k.clone(),
-                messages: vec![],
-            })
-        });
-
-        // Exactly 2 add_message calls:
+        // Conversation starts empty; stateful so the loop's reload sees the
+        // persisted prompt. We assert the persisted count at the end:
         //   1. user message
-        //   2. assistant message (with tool_calls) — already persisted before the tool loop
+        //   2. assistant message (with tool_calls) — persisted before the loop
         // The tool result must NOT be persisted (we short-circuit before that).
-        mock_conv
-            .expect_add_message()
-            .times(2)
-            .returning(|_, _| Ok(()));
+        let (mock_conv, conv_state) = stateful_conv_mock(vec![]);
 
         // LLM returns a response with one tool call
         mock_llm.expect_call().times(1).returning(|_| {
@@ -2513,6 +2100,9 @@ mod tests {
             .expect("questions must be an array");
         assert_eq!(questions.len(), 1);
         assert_eq!(questions[0]["id"], "q1");
+
+        // Only user + assistant(tool_calls) persisted — tool result NOT saved.
+        assert_eq!(conv_state.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -2561,14 +2151,31 @@ mod tests {
             .unwrap())
         });
 
-        // In-memory conversation repo.
-        mock_conv.expect_get_by_id().returning(|key| {
+        // In-memory conversation repo. Reads reflect what was persisted so the
+        // loop's reload (get_with_summaries) sees the prompt.
+        let persisted: Arc<Mutex<Vec<LlmMessage>>> = Arc::new(Mutex::new(Vec::new()));
+        let persisted_for_get = persisted.clone();
+        mock_conv.expect_get_by_id().returning(move |key| {
             Ok(Conversation {
                 key: key.clone(),
-                messages: vec![],
+                messages: persisted_for_get.lock().unwrap().clone(),
             })
         });
-        let persisted: Arc<Mutex<Vec<LlmMessage>>> = Arc::new(Mutex::new(Vec::new()));
+        let persisted_for_summaries = persisted.clone();
+        mock_conv
+            .expect_get_with_summaries()
+            .returning(move |_key| {
+                Ok(persisted_for_summaries
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .cloned()
+                    .map(|message| StoredMessage {
+                        message,
+                        summary: None,
+                    })
+                    .collect())
+            });
         let persisted_for_mock = persisted.clone();
         mock_conv.expect_add_message().returning(move |_k, m| {
             persisted_for_mock.lock().unwrap().push(m);
@@ -2722,13 +2329,35 @@ mod tests {
             Ok(Box::pin(s) as LlmStream)
         });
 
-        mock_conv.expect_get_by_id().returning(|key| {
+        // Reads reflect persisted messages so the loop's reload sees the prompt.
+        let persisted: Arc<Mutex<Vec<LlmMessage>>> = Arc::new(Mutex::new(Vec::new()));
+        let persisted_for_get = persisted.clone();
+        mock_conv.expect_get_by_id().returning(move |key| {
             Ok(Conversation {
                 key: key.clone(),
-                messages: vec![],
+                messages: persisted_for_get.lock().unwrap().clone(),
             })
         });
-        mock_conv.expect_add_message().returning(|_k, _m| Ok(()));
+        let persisted_for_summaries = persisted.clone();
+        mock_conv
+            .expect_get_with_summaries()
+            .returning(move |_key| {
+                Ok(persisted_for_summaries
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .cloned()
+                    .map(|message| StoredMessage {
+                        message,
+                        summary: None,
+                    })
+                    .collect())
+            });
+        let persisted_for_mock = persisted.clone();
+        mock_conv.expect_add_message().returning(move |_k, m| {
+            persisted_for_mock.lock().unwrap().push(m);
+            Ok(())
+        });
 
         struct SentinelExec;
         #[async_trait::async_trait]
@@ -2875,13 +2504,29 @@ mod tests {
             .unwrap())
         });
 
-        mock_conv.expect_get_by_id().returning(|key| {
+        let persisted: Arc<Mutex<Vec<LlmMessage>>> = Arc::new(Mutex::new(Vec::new()));
+        let persisted_for_get = persisted.clone();
+        mock_conv.expect_get_by_id().returning(move |key| {
             Ok(Conversation {
                 key: key.clone(),
-                messages: vec![],
+                messages: persisted_for_get.lock().unwrap().clone(),
             })
         });
-        let persisted: Arc<Mutex<Vec<LlmMessage>>> = Arc::new(Mutex::new(Vec::new()));
+        let persisted_for_summaries = persisted.clone();
+        mock_conv
+            .expect_get_with_summaries()
+            .returning(move |_key| {
+                Ok(persisted_for_summaries
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .cloned()
+                    .map(|message| StoredMessage {
+                        message,
+                        summary: None,
+                    })
+                    .collect())
+            });
         let persisted_for_mock = persisted.clone();
         mock_conv.expect_add_message().returning(move |_k, m| {
             persisted_for_mock.lock().unwrap().push(m);
