@@ -2220,7 +2220,26 @@ impl ExecutableNode for LlmNode {
         // tool_executor could wire it for the recall_history dispatch. Reuse
         // the same Arc here for AgentService — both must read/write to the
         // same backing store.
-        let agent_service = AgentService::new(llm_repo_arc, conversation_repo.clone());
+        // Cheap-model summarizer for at-load history compaction. Node may override
+        // the model via `summary_model`; otherwise resolve from the cheap-models
+        // registry for this node's provider (reuses the node's api_key).
+        let summary_model = config
+            .get("summary_model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| crate::llm::infrastructure::cheap_model_for(provider_kind.clone()));
+        let message_summarizer: std::sync::Arc<dyn crate::llm::domain::MessageSummarizer> =
+            std::sync::Arc::new(
+                crate::llm::infrastructure::message_summarizer::LlmMessageSummarizer::new(
+                    LlmProviderFactory::create(provider_kind.clone()),
+                    provider_kind.clone(),
+                    api_key.clone(),
+                    summary_model,
+                    std::time::Duration::from_secs(10),
+                ),
+            );
+        let agent_service = AgentService::new(llm_repo_arc, conversation_repo.clone())
+            .with_message_summarizer(message_summarizer);
 
         // Resume path — when re-entered with `__colmena_resume_answer`, the
         // assistant message that requested the SUSPENDED tool was already
