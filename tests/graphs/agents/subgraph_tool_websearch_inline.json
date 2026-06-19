@@ -1,0 +1,70 @@
+{
+  "comment": "T2 — LLM-as-tool inline + web search. Parent llm_call exposes an INLINE child graph (single llm_call with a tavily_client tool) as the tool `investigar_web` via node_type: subgraph + fixed_config.child_graph_inline. Validates Forma B (spec section 4.2).",
+  "metadata": {
+    "category": "agents",
+    "features": ["subgraph_as_tool", "child_graph_inline", "tavily_client", "llm_call"],
+    "requires_env": ["GEMINI_API_KEY", "TAVILY_API_KEY"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/subgraph_tool_websearch_inline",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Investiga cuál es la capital de Australia y dime el dato verificado."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "system_message": "Eres un coordinador. Cuando necesites datos verificados de la web, delega al sub-agente investigador usando la tool `investigar_web`. Luego reporta el dato verificado al usuario.",
+        "stream": false,
+        "tool_configurations": {
+          "investigar_web": {
+            "name": "investigar_web",
+            "node_type": "subgraph",
+            "description": "Investiga un tema en la web y devuelve un resumen citado.",
+            "fixed_config": {
+              "child_graph_inline": {
+                "nodes": {
+                  "agent": {
+                    "type": "llm_call",
+                    "config": {
+                      "provider": "google",
+                      "model": "gemini-2.5-flash",
+                      "api_key": "${GEMINI_API_KEY}",
+                      "system_message": "Investiga el siguiente tema y devuelve un resumen citado: {{task}}",
+                      "stream": false,
+                      "tool_configurations": {
+                        "web": {
+                          "name": "web",
+                          "node_type": "tavily_client",
+                          "node_config": { "api_key": "${TAVILY_API_KEY}" },
+                          "expose_sub_tools": "all"
+                        }
+                      }
+                    }
+                  },
+                  "out": { "type": "output" }
+                },
+                "edges": [{ "from": "agent", "to": "out" }]
+              }
+            }
+          }
+        }
+      }
+    },
+    "out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent.result", "to": "out" }
+  ]
+}

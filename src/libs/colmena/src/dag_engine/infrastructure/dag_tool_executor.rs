@@ -72,6 +72,10 @@ pub struct DagToolExecutor {
     /// metadata so the enclosing LlmNode can emit SSE events.
     skill_repository: Option<Arc<dyn crate::skills::domain::SkillRepository>>,
     skill_observer: Option<SkillObserver>,
+    /// Optional observer threaded into tool-invoked nodes so they can emit SSE
+    /// events (notably `subgraph` emitting `subgraph-*` child events). When
+    /// `None`, tool-invoked nodes run silently (legacy behavior).
+    observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     /// Optional documents context. When present, the executor intercepts the
     /// seven `document_*` synthetic tool calls and dispatches them to the
     /// underlying `DocumentRuntime` use cases instead of the normal
@@ -133,6 +137,9 @@ pub struct DagToolExecutor {
     /// execution, so this set is naturally per-turn (no cross-turn persistence —
     /// consistent with the no-cache stance of expand-merges).
     gsheets_seen_sheets: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Current subgraph-tool nesting depth, threaded from the parent llm_call so
+    /// tool-invoked subgraphs receive `depth` and can enforce the recursion limit.
+    subgraph_depth: u64,
 }
 
 /// Default per-string cap for tool results (50 KB). Above this, the string is
@@ -142,6 +149,18 @@ pub struct DagToolExecutor {
 pub const DEFAULT_MAX_TOOL_RESULT_STRING_BYTES: usize = 50 * 1024;
 
 impl DagToolExecutor {
+    /// Deterministic ephemeral path qualifier for a node invoked as a tool.
+    ///
+    /// Derived from the `tool_call.id` so it is stable across a suspend/resume
+    /// cycle (the same pending tool call is replayed with the same id), which
+    /// keeps a tool-invoked node's conversational memory (subgraph child, or a
+    /// bare llm_call) scoped consistently. It is
+    /// unique per tool call, so two calls to the same subgraph-tool do NOT share
+    /// memory (stateless isolation).
+    fn ephemeral_subgraph_path(tool_call_id: &str) -> String {
+        format!("tool/{tool_call_id}")
+    }
+
     /// Resolve `${var}` and `${context.var}` placeholders in a string value
     /// using values from the inputs map. Only resolves keys present in `inputs`;
     /// unrecognized placeholders are left as-is.
@@ -201,6 +220,7 @@ impl DagToolExecutor {
             agent_session_id: None,
             skill_repository: None,
             skill_observer: None,
+            observer: None,
             documents_context: None,
             crdt_docs_context: None,
             describe_tool_lookup: None,
@@ -211,7 +231,14 @@ impl DagToolExecutor {
             conversation_key: None,
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_STRING_BYTES,
             gsheets_seen_sheets: std::sync::Mutex::new(std::collections::HashSet::new()),
+            subgraph_depth: 0,
         }
+    }
+
+    /// Set the current subgraph nesting depth (0 at the top level).
+    pub fn with_subgraph_depth(mut self, depth: u64) -> Self {
+        self.subgraph_depth = depth;
+        self
     }
 
     /// F-T15: wire the conversation repository so `recall_history(turn=N)`
@@ -344,6 +371,16 @@ impl DagToolExecutor {
     /// Attach an observer callback that fires after a successful `load_skill` dispatch.
     pub fn with_skill_observer(mut self, cb: SkillObserver) -> Self {
         self.skill_observer = Some(cb);
+        self
+    }
+
+    /// Thread an `ExecutionObserver` into tool-invoked nodes so their internal
+    /// events (e.g. `subgraph-*`) propagate to the parent stream.
+    pub fn with_observer(
+        mut self,
+        observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+    ) -> Self {
+        self.observer = observer;
         self
     }
 
@@ -642,7 +679,7 @@ impl DagToolExecutor {
 
         let mut state = serde_json::json!({});
         let result = exec_node
-            .execute(&inputs, &node_cfg, &mut state, None)
+            .execute(&inputs, &node_cfg, &mut state, self.observer.clone())
             .await;
 
         match result {
@@ -1722,6 +1759,24 @@ impl DagToolExecutor {
             );
         }
 
+        // Inject a deterministic ephemeral path qualifier so any memory-bearing
+        // node invoked as a tool (subgraph, or a bare llm_call) scopes its
+        // conversational memory per-call (stateless) while remaining stable
+        // across suspend/resume. Engine-authoritative: overwrites any
+        // caller-supplied value. Harmless for nodes that ignore this key.
+        inputs.insert(
+            "__colmena_node_id_path".to_string(),
+            Value::String(Self::ephemeral_subgraph_path(&tool_call.id)),
+        );
+
+        // Inject the current subgraph-tool nesting depth so a `subgraph` node
+        // invoked as a tool can enforce MAX_SUBGRAPH_TOOL_DEPTH. Harmless for
+        // nodes that ignore this key.
+        inputs.insert(
+            "__colmena_subgraph_depth".to_string(),
+            Value::Number(self.subgraph_depth.into()),
+        );
+
         // Convert HashMap to NodeInputs (which is just HashMap<String, Value>)
         // SECURE VALUES: decrypt <value_N> placeholders before sending to the node.
         // The applied map `(decrypted_value → handle)` will be used by the outbound
@@ -1760,7 +1815,12 @@ impl DagToolExecutor {
         let mut state = serde_json::json!({});
 
         let result = node
-            .execute(&inputs, &node_exec_config, &mut state, None)
+            .execute(
+                &inputs,
+                &node_exec_config,
+                &mut state,
+                self.observer.clone(),
+            )
             .await;
 
         // SECURE VALUES (Task 11): mask decrypted secrets back to their handles
@@ -3123,6 +3183,36 @@ mod tests {
             "execute_inner must not inject __colmena_session_id when session_id is None"
         );
     }
+
+    struct TestObs;
+    impl crate::dag_engine::domain::observer::ExecutionObserver for TestObs {
+        fn on_event(&self, _event: crate::dag_engine::domain::observer::NodeEvent) {}
+    }
+
+    #[test]
+    fn with_observer_stores_the_observer() {
+        let registry = Arc::new(MockRegistry::new());
+        let exec = DagToolExecutor::new(registry, HashMap::new());
+        assert!(exec.observer.is_none(), "fresh executor has no observer");
+
+        let obs: Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver> =
+            Arc::new(TestObs);
+        let exec = exec.with_observer(Some(obs));
+        assert!(
+            exec.observer.is_some(),
+            "with_observer must store the observer"
+        );
+    }
+
+    #[test]
+    fn with_subgraph_depth_stores_value() {
+        let registry = Arc::new(MockRegistry::new());
+        let exec = DagToolExecutor::new(registry, HashMap::new());
+        assert_eq!(exec.subgraph_depth, 0, "fresh executor starts at depth 0");
+
+        let exec = exec.with_subgraph_depth(2);
+        assert_eq!(exec.subgraph_depth, 2);
+    }
 }
 
 #[cfg(test)]
@@ -3760,5 +3850,26 @@ mod scrubber_tests {
         let v = json!("data:text/plain,hello world");
         let out = DagToolExecutor::scrub_value_for_llm(v.clone(), 1_000);
         assert_eq!(out, v);
+    }
+}
+
+#[cfg(test)]
+mod ephemeral_path_tests {
+    use super::*;
+
+    #[test]
+    fn ephemeral_path_is_deterministic_from_tool_call_id() {
+        assert_eq!(
+            DagToolExecutor::ephemeral_subgraph_path("call_abc123"),
+            "tool/call_abc123"
+        );
+        assert_eq!(
+            DagToolExecutor::ephemeral_subgraph_path("call_abc123"),
+            DagToolExecutor::ephemeral_subgraph_path("call_abc123")
+        );
+        assert_ne!(
+            DagToolExecutor::ephemeral_subgraph_path("call_1"),
+            DagToolExecutor::ephemeral_subgraph_path("call_2")
+        );
     }
 }

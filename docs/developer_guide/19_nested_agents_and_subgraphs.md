@@ -118,6 +118,73 @@ toda la jerarquía.
 
 ---
 
+## Subgrafo como Tool (agents-as-tools)
+
+Además de dispararse por *edges* del DAG, un grafo hijo (o un `llm_call` inline)
+puede exponerse como **una sola tool** de un `llm_call`. La diferencia clave es
+**quién decide cuándo se ejecuta**:
+
+- **Nodo `subgraph` clásico** — lo dispara un edge del DAG (determinista).
+- **Orchestrator** — un Planner decide y planifica las tareas por adelantado.
+- **Subgrafo como tool** — el **LLM padre decide en su propio loop** de
+  tool-calling cuándo invocarlo, igual que con cualquier otra tool. Es el patrón
+  *agents-as-tools*: tomar un agente ya construido (con sus tools, RAG y memoria)
+  y ofrecérselo a otro agente como una capability más.
+
+### Declaración
+
+Se declara con `node_type: "subgraph"` dentro de `tool_configurations`. La fuente
+del grafo hijo va en `fixed_config`, ya sea `child_graph_path` (reusar un grafo
+existente) o `child_graph_inline` (un `llm_call` declarado en línea):
+
+```json
+"tool_configurations": {
+  "buscar_jurisprudencia": {
+    "name": "buscar_jurisprudencia",
+    "description": "Busca y resume jurisprudencia relevante sobre un tema legal.",
+    "node_type": "subgraph",
+    "fixed_config": {
+      "child_graph_path": "./agents/legal_research_agent.json"
+    }
+  }
+}
+```
+
+> `child_graph_path` / `child_graph_inline` son plumbing estático del subgraph,
+> por eso van en `fixed_config` y nunca en `node_schema`.
+
+### Entrada
+
+Por defecto el LLM ve un único parámetro `task` (string), que se inyecta como
+`{{task}}` en el `global_shared_state` del hijo. Para entrada estructurada,
+declara un `node_schema` y cada campo se inyecta como variable del hijo
+(`{{ciudad}}`, `{{fecha}}`, etc.). Las claves internas (`__colmena_*`, `__node_id`)
+se filtran del mapeo IN.
+
+### Comportamiento
+
+- **Stateless por llamada** — cada invocación arranca con memoria vacía. El
+  aislamiento se logra con un *path qualifier* efímero derivado del
+  `tool_call_id`; dos llamadas a la misma tool no comparten memoria. Por ser
+  determinista del `tool_call_id`, el resume HITL reconstruye el mismo scope.
+- **HITL (suspend/resume)** — si el sub-agente se suspende para preguntar al
+  usuario, el `SUSPENDED` hace *bubble-up* por el loop de tools del padre
+  reusando los mismos rieles que cualquier otra tool. El resume reanuda al hijo
+  en esa misma tool call (incluido multi-suspend anidado).
+- **Streaming transparente** — los pasos internos del hijo se emiten al stream
+  del padre con prefijo `subgraph-*`.
+- **Guard de profundidad** — máximo 5 niveles de subgraph-as-tool anidados
+  (`MAX_SUBGRAPH_TOOL_DEPTH`); más allá retorna un error claro para evitar
+  recursión infinita.
+
+Spec de diseño completa (decisiones, arquitectura del flujo con/sin HITL,
+ejemplos de las dos formas de declaración):
+[`docs/superpowers/specs/2026-06-18-subgraph-as-tool-design.md`](../superpowers/specs/2026-06-18-subgraph-as-tool-design.md).
+La referencia de configuración por nodo vive en `docs/node_as_tools_reference.json`
+(clave `node_types_as_tools.subgraph`).
+
+---
+
 ## Propagación de Suspensión HITL
 
 Cuando un grafo hijo se suspende, el nodo `subgraph` propaga el estado `SUSPENDED` hacia arriba en la jerarquía.

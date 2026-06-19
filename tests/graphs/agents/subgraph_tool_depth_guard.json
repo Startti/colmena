@@ -1,0 +1,72 @@
+{
+  "comment": "T7 — depth guard. The subgraph tool `delegar` uses child_graph_inline whose llm_call ALSO exposes a subgraph tool pointing back to THIS file (subgraph_tool_depth_guard.json), creating a self-referential cycle. The prompt encourages repeated delegation so nesting grows. This graph is DESIGNED to hit MAX_SUBGRAPH_TOOL_DEPTH=5 and error gracefully rather than recurse forever.",
+  "metadata": {
+    "category": "agents",
+    "features": ["subgraph_as_tool", "depth_guard", "recursion", "llm_call"],
+    "requires_env": ["GEMINI_API_KEY"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/subgraph_tool_depth_guard",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Delega esta tarea al sub-agente, y pídele que a su vez la delegue, repetidamente, hasta resolverla: cuenta hasta 100 delegando de uno en uno."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "system_message": "Eres un coordinador recursivo. Para resolver la tarea, delégala al sub-agente usando la tool `delegar`, indicándole que él también la delegue de nuevo. Continúa delegando hasta resolverla.",
+        "stream": false,
+        "tool_configurations": {
+          "delegar": {
+            "name": "delegar",
+            "node_type": "subgraph",
+            "description": "Delega la tarea a un sub-agente que a su vez la delega recursivamente.",
+            "fixed_config": {
+              "child_graph_inline": {
+                "nodes": {
+                  "agent": {
+                    "type": "llm_call",
+                    "config": {
+                      "provider": "google",
+                      "model": "gemini-2.5-flash",
+                      "api_key": "${GEMINI_API_KEY}",
+                      "system_message": "Eres un sub-agente recursivo. Resuelve la tarea delegándola de nuevo con la tool `delegar`, indicando que el siguiente también delegue. Tarea: {{task}}",
+                      "stream": false,
+                      "tool_configurations": {
+                        "delegar": {
+                          "name": "delegar",
+                          "node_type": "subgraph",
+                          "description": "Delega la tarea a un sub-agente que a su vez la delega recursivamente.",
+                          "fixed_config": {
+                            "child_graph_path": "./tests/graphs/agents/subgraph_tool_depth_guard.json"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "out": { "type": "output" }
+                },
+                "edges": [{ "from": "agent", "to": "out" }]
+              }
+            }
+          }
+        }
+      }
+    },
+    "out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent.result", "to": "out" }
+  ]
+}

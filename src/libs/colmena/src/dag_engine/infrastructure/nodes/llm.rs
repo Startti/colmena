@@ -2109,6 +2109,16 @@ impl ExecutableNode for LlmNode {
             // resolve secrets persisted under the same chat across ephemeral
             // session_id boundaries. Always pass — None preserves legacy behavior.
             executor = executor.with_agent_session_id(agent_session_id_str.clone());
+            // Thread the parent observer so tool-invoked subgraphs emit subgraph-* events.
+            executor = executor.with_observer(_observer.clone());
+            // Read the inbound subgraph-tool nesting depth (0 at the top level) and
+            // thread it into the executor so tool-invoked subgraphs receive it and
+            // can enforce MAX_SUBGRAPH_TOOL_DEPTH.
+            let inbound_depth = inputs
+                .get("__colmena_subgraph_depth")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            executor = executor.with_subgraph_depth(inbound_depth);
             if let Some(ctx) = documents_context.clone() {
                 executor = executor.with_documents(ctx);
             }

@@ -1,0 +1,47 @@
+{
+  "comment": "T6 — stateless isolation. Parent llm_call is instructed to call the SAME subgraph tool `memoria_agente` twice in one turn: first to store a secret number, then to recall it. Because each subgraph-tool invocation is stateless (ephemeral path qualifier per tool_call_id), the second call does NOT know about the first. We expect the agent to report that the second call could not recall the number.",
+  "metadata": {
+    "category": "agents",
+    "features": ["subgraph_as_tool", "stateless_isolation", "llm_call"],
+    "requires_env": ["GEMINI_API_KEY"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/subgraph_tool_stateless",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Primero dile al agente de memoria que recuerde el número secreto 7. Luego, en una segunda llamada, pregúntale qué número secreto le dijiste. Reporta su segunda respuesta."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "system_message": "Eres un coordinador. Usa la tool `memoria_agente` exactamente como te pida el usuario: primero para guardar y luego, en una llamada separada, para recordar. Reporta fielmente lo que devuelva la segunda llamada.",
+        "stream": false,
+        "tool_configurations": {
+          "memoria_agente": {
+            "name": "memoria_agente",
+            "node_type": "subgraph",
+            "description": "Delega una tarea a un sub-agente de memoria que devuelve una respuesta concisa.",
+            "fixed_config": {
+              "child_graph_path": "./tests/graphs/agents/sub/echo_capability.json"
+            }
+          }
+        }
+      }
+    },
+    "out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent.result", "to": "out" }
+  ]
+}

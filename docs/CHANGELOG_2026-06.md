@@ -2595,3 +2595,54 @@ ADP, agregar la columna `summary` como follow-up.
 **Estado.** done (1788 unit tests + E2E real con gemini-2.5-flash + Postgres).
 
 ---
+
+## 39. Subgrafos / LLMs como tools — agents-as-tools (2026-06-19)
+
+**Qué cambió.** `node_type: "subgraph"` ahora es válido en `tool_configurations`,
+así un `llm_call` puede exponer un grafo hijo existente (`child_graph_path`) o un
+`llm_call` inline (`child_graph_inline`) como una sola tool que el LLM decide invocar
+en su loop (patrón agents-as-tools). Entrada por defecto: un único `task` string
+(inyectado como `{{task}}` en el hijo); estructurada vía `node_schema`. Memoria
+**stateless por llamada** (path qualifier efímero determinista derivado del
+`tool_call_id`). Streaming **transparente** (eventos `subgraph-*` del hijo se emiten al
+stream del padre). **HITL completo** (el sub-agente puede suspender; el `SUSPENDED`
+hace bubble-up por el loop de tools y el resume reanuda al hijo en la misma tool call).
+Guard de recursión `MAX_SUBGRAPH_TOOL_DEPTH = 5`.
+
+**Por qué importa.** Cierra el hueco entre "nodos hoja como tools", el nodo `subgraph`
+(disparado por edges, determinista) y el `orchestrator` (Planner por adelantado): ahora
+el LLM decide en su loop reutilizar una capability ya construida sin reescribirla.
+
+**Gaps cerrados (descubiertos vs el código real).**
+- `SubGraphNode` lee `child_graph_path`/`inline` desde `inputs` (el tool path mergea
+  `fixed_config` en inputs y pasa `config={}`), fallback a `config` (camino por-edges intacto).
+- `SubGraphNode::schema()` expone `task` por defecto (el builder de tools lee `schema["inputs"]`).
+- `DagToolExecutor` inyecta `__colmena_node_id_path = tool/<tool_call_id>` (determinista,
+  clave para que el resume HITL reconstruya el scope) y `__colmena_subgraph_depth`.
+- Observer enhebrado en el tool path (`with_observer`) → streaming `subgraph-*`.
+- **Bonus `suspend`:** el nodo `suspend` ahora resuelve `id`/`question`/`options` desde
+  `inputs` (helper `cfg_or_input`), habilitando `suspend` como tool — requisito para que
+  un sub-agente decida preguntarle al usuario.
+
+**Hallazgos del E2E.** (1) Con `node_schema` presente el executor ignora `fixed_config`,
+así que `child_graph_path` debe ir DENTRO de `node_schema` como `fixed`. (2) Un hijo con
+entrada estructurada necesita un `prompt` explícito que template las variables (el
+`llm_call` usa el input `task` como prompt implícito y en structured no hay `task`).
+
+**Documentación de referencia.**
+- Spec: [`docs/superpowers/specs/2026-06-18-subgraph-as-tool-design.md`](superpowers/specs/2026-06-18-subgraph-as-tool-design.md)
+- Plan: [`docs/superpowers/plans/2026-06-18-subgraph-as-tool.md`](superpowers/plans/2026-06-18-subgraph-as-tool.md)
+- Dev guide §19: [`docs/developer_guide/19_nested_agents_and_subgraphs.md`](developer_guide/19_nested_agents_and_subgraphs.md) ("Subgrafo como Tool")
+- Schema de tools: [`docs/node_as_tools_reference.json`](node_as_tools_reference.json) (entry `subgraph` + whitelist)
+- Grafos E2E: `tests/graphs/agents/subgraph_tool_*.json` + `tests/graphs/agents/sub/`
+
+**Commits.** `bcfec6c`..`969abbaf` (rango en `claude/magical-banzai-7af56a`).
+
+**Compat.** Puramente aditivo: nuevos builders (`with_observer`, `with_subgraph_depth`),
+campos privados, una const. `ExecutableNode::execute` sin cambios de firma. ADP no afectado
+(el frontend ya renderiza `subgraph-*`).
+
+**Estado.** done (1794 unit tests + clippy limpio; E2E T1–T7 verificados contra
+gemini-2.5-flash + Tavily, incl. ciclo HITL suspend→resume real).
+
+---
