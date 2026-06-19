@@ -300,7 +300,7 @@ mod tests {
             .collect();
         let classes = vec![ValueClass::Content; 6];
         let b = recent_boundary_by_tokens(&msgs, &classes, 250);
-        assert!(b >= 3 && b <= 4, "boundary fue {b}");
+        assert!((3..=4).contains(&b), "boundary fue {b}");
     }
 
     #[test]

@@ -1,13 +1,16 @@
 //! F-T15: `recall_history` synthetic LLM tool.
 //!
 //! Lets the agent re-read the FULL ORIGINAL content of a single past message
-//! by its persisted turn index. Designed to compose with the rolling-summary
-//! compaction in `agent_service::compact_history_to_summary`: when older
-//! turns are collapsed to one-line summaries, the agent calls this tool with
-//! the `[T<n>]` index from the summary to retrieve the verbatim message.
+//! by its persisted turn index. Designed to compose with the per-message
+//! semantic summary built by
+//! `crate::llm::application::history_compaction::build_compacted_messages`:
+//! when older turns are compressed into `[T<n>]` one-liners inside the
+//! "## Conversation summary" system message, the agent calls this tool with
+//! the corresponding index to retrieve the verbatim original.
 //!
-//! Scope is intentionally narrow (only `turn=N`, no filter/search) to keep
-//! each call bounded — see the F-T15 design note for the rationale.
+//! Scope is intentionally narrow (only `turn=N` + optional `offset`/`limit`
+//! paging) to keep each call bounded — see the F-T15 design note for the
+//! rationale.
 //!
 //! Wiring lives in `dag_tool_executor`: a `with_conversation_history(repo, key)`
 //! builder sets the dependencies; the dispatch arm intercepts the tool name
