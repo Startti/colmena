@@ -46,6 +46,23 @@ impl SubGraphNode {
         }
         None
     }
+
+    /// Maximum nesting depth for subgraphs invoked as LLM tools. Beyond this the
+    /// node fails fast to prevent runaway recursion from a misconfigured graph.
+    pub const MAX_SUBGRAPH_TOOL_DEPTH: u64 = 5;
+
+    /// Current subgraph-tool depth from inputs (0 when absent).
+    fn current_depth(inputs: &NodeInputs) -> u64 {
+        inputs
+            .get("__colmena_subgraph_depth")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+    }
+
+    /// True when invoking another subgraph at this depth would exceed the limit.
+    fn depth_exceeded(inputs: &NodeInputs) -> bool {
+        Self::current_depth(inputs) >= Self::MAX_SUBGRAPH_TOOL_DEPTH
+    }
 }
 
 #[async_trait::async_trait]
@@ -93,6 +110,15 @@ impl ExecutableNode for SubGraphNode {
         } else {
             Some(parent_path.clone())
         };
+
+        if Self::depth_exceeded(inputs) {
+            return Err(format!(
+                "Subgraph-as-tool nesting exceeded MAX_SUBGRAPH_TOOL_DEPTH ({}). \
+                 Check for a subgraph tool that references itself or a cycle of agents.",
+                Self::MAX_SUBGRAPH_TOOL_DEPTH
+            )
+            .into());
+        }
 
         // --- 1. RESUME PROPAGATION ---
         // If the parent was suspended in this node, it receives __colmena_resume_answer.
@@ -177,6 +203,15 @@ impl ExecutableNode for SubGraphNode {
                 child_state_obj.insert(k.clone(), v.clone());
             }
         }
+        // Propagate (depth+1) into the child so nested subgraph tools can enforce
+        // the limit. Inserted AFTER the loop on purpose: the loop filters out
+        // every __colmena_* key, so this is the only way the depth survives into
+        // the child's global state.
+        let next_depth = Self::current_depth(inputs) + 1;
+        child_state_obj.insert(
+            "__colmena_subgraph_depth".to_string(),
+            serde_json::json!(next_depth),
+        );
         let child_state = Value::Object(child_state_obj);
 
         // Emit subgraph node-start boundary event (only when called by orchestrator)
@@ -330,5 +365,35 @@ mod subgraph_schema_tests {
             desc.contains("string"),
             "task description must hint type 'string' for the builder; got: {desc:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod subgraph_depth_guard_tests {
+    use super::*;
+    use crate::dag_engine::domain::node::NodeInputs;
+    use serde_json::json;
+
+    #[test]
+    fn max_depth_constant_is_five() {
+        assert_eq!(SubGraphNode::MAX_SUBGRAPH_TOOL_DEPTH, 5);
+    }
+
+    #[test]
+    fn depth_at_limit_is_rejected() {
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert("__colmena_subgraph_depth".to_string(), json!(5));
+        assert!(
+            SubGraphNode::depth_exceeded(&inputs),
+            "depth == MAX must be rejected"
+        );
+    }
+
+    #[test]
+    fn depth_below_limit_is_allowed() {
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert("__colmena_subgraph_depth".to_string(), json!(4));
+        assert!(!SubGraphNode::depth_exceeded(&inputs));
+        assert!(!SubGraphNode::depth_exceeded(&NodeInputs::new())); // default 0
     }
 }

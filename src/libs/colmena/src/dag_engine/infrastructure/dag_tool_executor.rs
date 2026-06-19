@@ -137,6 +137,9 @@ pub struct DagToolExecutor {
     /// execution, so this set is naturally per-turn (no cross-turn persistence —
     /// consistent with the no-cache stance of expand-merges).
     gsheets_seen_sheets: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Current subgraph-tool nesting depth, threaded from the parent llm_call so
+    /// tool-invoked subgraphs receive `depth` and can enforce the recursion limit.
+    subgraph_depth: u64,
 }
 
 /// Default per-string cap for tool results (50 KB). Above this, the string is
@@ -228,7 +231,14 @@ impl DagToolExecutor {
             conversation_key: None,
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_STRING_BYTES,
             gsheets_seen_sheets: std::sync::Mutex::new(std::collections::HashSet::new()),
+            subgraph_depth: 0,
         }
+    }
+
+    /// Set the current subgraph nesting depth (0 at the top level).
+    pub fn with_subgraph_depth(mut self, depth: u64) -> Self {
+        self.subgraph_depth = depth;
+        self
     }
 
     /// F-T15: wire the conversation repository so `recall_history(turn=N)`
@@ -1759,6 +1769,14 @@ impl DagToolExecutor {
             Value::String(Self::ephemeral_subgraph_path(&tool_call.id)),
         );
 
+        // Inject the current subgraph-tool nesting depth so a `subgraph` node
+        // invoked as a tool can enforce MAX_SUBGRAPH_TOOL_DEPTH. Harmless for
+        // nodes that ignore this key.
+        inputs.insert(
+            "__colmena_subgraph_depth".to_string(),
+            Value::Number(self.subgraph_depth.into()),
+        );
+
         // Convert HashMap to NodeInputs (which is just HashMap<String, Value>)
         // SECURE VALUES: decrypt <value_N> placeholders before sending to the node.
         // The applied map `(decrypted_value → handle)` will be used by the outbound
@@ -3179,6 +3197,16 @@ mod tests {
             exec.observer.is_some(),
             "with_observer must store the observer"
         );
+    }
+
+    #[test]
+    fn with_subgraph_depth_stores_value() {
+        let registry = Arc::new(MockRegistry::new());
+        let exec = DagToolExecutor::new(registry, HashMap::new());
+        assert_eq!(exec.subgraph_depth, 0, "fresh executor starts at depth 0");
+
+        let exec = exec.with_subgraph_depth(2);
+        assert_eq!(exec.subgraph_depth, 2);
     }
 }
 
