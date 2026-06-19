@@ -853,7 +853,8 @@
       "see_also": "docs/developer_guide/19_nested_agents_and_subgraphs.md — guía de agentes anidados y subgrafos; docs/superpowers/specs/2026-06-18-subgraph-as-tool-design.md — spec de diseño.",
       "special_behaviors": [
         "Entrada por defecto: un único parámetro `task` (string) inyectado como `{{task}}` en el global_state del hijo. Para entrada estructurada, declara `node_schema` y cada campo se inyecta como variable del hijo (`{{campo}}`).",
-        "`child_graph_path` o `child_graph_inline` van en `fixed_config` (plumbing estático del subgraph, NO variable del hijo).",
+        "`child_graph_path` o `child_graph_inline` son plumbing estático del subgraph (NO variable del hijo). Sin `node_schema` van en `fixed_config`; CON `node_schema` deben ir DENTRO de `node_schema` como campo `fixed` (con node_schema presente, el executor construye los inputs SOLO desde node_schema e IGNORA `fixed_config`, así que el path se descarta silenciosamente y el subgraph falla con 'requires child_graph_inline or child_graph_path').",
+        "El grafo hijo que recibe variables estructuradas (sin `task`) necesita un `prompt` explícito que las template (p.ej. `{{ciudad}}`), porque el llm_call usa el input `task` como prompt implícito y en entrada estructurada no hay `task`.",
         "Stateless por llamada: cada invocación arranca con memoria vacía (aislada por un path qualifier efímero derivado del tool_call_id). Dos llamadas a la misma tool no comparten memoria.",
         "HITL soportado: si el sub-agente se suspende (pregunta al usuario), el SUSPENDED hace bubble-up por el loop de tools del padre y el resume reanuda al hijo en esa misma tool call.",
         "Streaming transparente: los pasos internos del hijo se emiten al stream del padre con prefijo `subgraph-*`.",
@@ -916,18 +917,16 @@
               "description": "Consulta el clima de una ciudad en una fecha dada.",
               "node_type": "subgraph",
               "node_schema": {
+                "child_graph_path": { "fixed": "./agents/weather_agent.json" },
                 "ciudad": { "type": "string", "required": true, "description": "Ciudad a consultar" },
-                "fecha":  { "type": "string", "required": true, "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }
-              },
-              "fixed_config": {
-                "child_graph_path": "./agents/weather_agent.json"
+                "fecha":  { "type": "string", "required": true, "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "description": "Fecha YYYY-MM-DD" }
               }
             }
           }
         }
       },
       "tips": [
-        "child_graph_path / child_graph_inline van en fixed_config (plumbing estático), nunca en node_schema. Los campos de entrada del LLM van en node_schema (o el default task).",
+        "Cuando NO usas node_schema (entrada por defecto `task`), child_graph_path / child_graph_inline van en fixed_config. Cuando SÍ usas node_schema (entrada estructurada), deben ir DENTRO de node_schema como campo `fixed`, no en fixed_config (con node_schema presente el executor ignora fixed_config). Los campos de entrada del LLM van en node_schema. El grafo hijo que recibe variables estructuradas necesita un `prompt` explícito que las template (p.ej. {{ciudad}}), porque el llm_call usa el input `task` como prompt implícito y en structured no hay `task`.",
         "El path qualifier efímero se deriva determinísticamente del tool_call_id, por eso el resume HITL reconstruye el mismo scope del hijo — nunca uses un path aleatorio.",
         "La Forma B (child_graph_inline) cubre el caso LLM-como-tool sin necesidad de un node_type llm_call directo: un grafo inline de un solo nodo hereda aislamiento, streaming y HITL."
       ]

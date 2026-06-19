@@ -213,11 +213,9 @@ El LLM ve `{ task: string }`. El hijo recibe `{{task}}` en su `global_shared_sta
     "description": "Consulta el clima de una ciudad en una fecha dada.",
     "node_type": "subgraph",
     "node_schema": {
+      "child_graph_path": { "fixed": "./agents/weather_agent.json" },
       "ciudad": { "type": "string", "required": true, "description": "Ciudad a consultar" },
-      "fecha":  { "type": "string", "required": true, "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }
-    },
-    "fixed_config": {
-      "child_graph_path": "./agents/weather_agent.json"
+      "fecha":  { "type": "string", "required": true, "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "description": "Fecha YYYY-MM-DD" }
     }
   }
 }
@@ -226,9 +224,18 @@ El LLM ve `{ task: string }`. El hijo recibe `{{task}}` en su `global_shared_sta
 El hijo recibe `{{ciudad}}` y `{{fecha}}`. Las claves internas (`__colmena_*`,
 `__node_id`) se filtran del mapeo IN (comportamiento existente del `subgraph`).
 
-> **Regla:** `child_graph_path` / `child_graph_inline` van en `fixed_config` (plumbing
-> estático del subgraph, no variable del hijo). Los campos de entrada del LLM van en
-> `node_schema` (o el default `task`).
+> **Regla (confirmada vía test E2E T3):** cuando usas `node_schema` (entrada
+> estructurada), `child_graph_path` / `child_graph_inline` deben declararse DENTRO
+> de `node_schema` como campo `fixed`, **no** en `fixed_config`. Con `node_schema`
+> presente, el executor construye los inputs del tool SOLO a partir del `node_schema`
+> parseado e **ignora `fixed_config`**; si pones el path ahí se descarta silenciosamente
+> y el subgraph falla con `requires child_graph_inline or child_graph_path`. (Sin
+> `node_schema`, con el `task` por defecto, el path sí va en `fixed_config`.)
+>
+> Además, un grafo hijo que recibe variables estructuradas (sin `task`) necesita un
+> `prompt` explícito que las template (p.ej. `{{ciudad}}`), porque el `llm_call` usa
+> el input `task` como prompt implícito y en entrada estructurada no existe ese `task`
+> — sin `prompt` explícito el LLM hijo no recibe turno de usuario.
 
 ---
 
