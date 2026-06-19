@@ -72,6 +72,10 @@ pub struct DagToolExecutor {
     /// metadata so the enclosing LlmNode can emit SSE events.
     skill_repository: Option<Arc<dyn crate::skills::domain::SkillRepository>>,
     skill_observer: Option<SkillObserver>,
+    /// Optional observer threaded into tool-invoked nodes so they can emit SSE
+    /// events (notably `subgraph` emitting `subgraph-*` child events). When
+    /// `None`, tool-invoked nodes run silently (legacy behavior).
+    observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     /// Optional documents context. When present, the executor intercepts the
     /// seven `document_*` synthetic tool calls and dispatches them to the
     /// underlying `DocumentRuntime` use cases instead of the normal
@@ -213,6 +217,7 @@ impl DagToolExecutor {
             agent_session_id: None,
             skill_repository: None,
             skill_observer: None,
+            observer: None,
             documents_context: None,
             crdt_docs_context: None,
             describe_tool_lookup: None,
@@ -356,6 +361,16 @@ impl DagToolExecutor {
     /// Attach an observer callback that fires after a successful `load_skill` dispatch.
     pub fn with_skill_observer(mut self, cb: SkillObserver) -> Self {
         self.skill_observer = Some(cb);
+        self
+    }
+
+    /// Thread an `ExecutionObserver` into tool-invoked nodes so their internal
+    /// events (e.g. `subgraph-*`) propagate to the parent stream.
+    pub fn with_observer(
+        mut self,
+        observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+    ) -> Self {
+        self.observer = observer;
         self
     }
 
@@ -654,7 +669,7 @@ impl DagToolExecutor {
 
         let mut state = serde_json::json!({});
         let result = exec_node
-            .execute(&inputs, &node_cfg, &mut state, None)
+            .execute(&inputs, &node_cfg, &mut state, self.observer.clone())
             .await;
 
         match result {
@@ -1782,7 +1797,7 @@ impl DagToolExecutor {
         let mut state = serde_json::json!({});
 
         let result = node
-            .execute(&inputs, &node_exec_config, &mut state, None)
+            .execute(&inputs, &node_exec_config, &mut state, self.observer.clone())
             .await;
 
         // SECURE VALUES (Task 11): mask decrypted secrets back to their handles
@@ -3143,6 +3158,26 @@ mod tests {
         assert!(
             output.get("__colmena_session_id").is_none(),
             "execute_inner must not inject __colmena_session_id when session_id is None"
+        );
+    }
+
+    struct TestObs;
+    impl crate::dag_engine::domain::observer::ExecutionObserver for TestObs {
+        fn on_event(&self, _event: crate::dag_engine::domain::observer::NodeEvent) {}
+    }
+
+    #[test]
+    fn with_observer_stores_the_observer() {
+        let registry = Arc::new(MockRegistry::new());
+        let exec = DagToolExecutor::new(registry, HashMap::new());
+        assert!(exec.observer.is_none(), "fresh executor has no observer");
+
+        let obs: Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver> =
+            Arc::new(TestObs);
+        let exec = exec.with_observer(Some(obs));
+        assert!(
+            exec.observer.is_some(),
+            "with_observer must store the observer"
         );
     }
 }
