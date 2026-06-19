@@ -12,4 +12,10 @@ load_attachment:
 recall_history:
   summary: Re-read the original content of one past message by its turn index
   description: |
-    Re-read the FULL original content of one past message by its turn index (the [T<n>] in the Conversation summary). Use sparingly — each call re-loads that message into your context.
+    Re-read the FULL original content of one past message by its turn index (the
+    [T<n>] shown in the Conversation summary earlier in your context). The result
+    is returned in bounded pages: each call gives `content` plus `offset`,
+    `returned_chars`, `total_chars`, and `next_offset`. If `next_offset` is not
+    null, call again with `offset` set to that value to read the next page, until
+    `next_offset` is null. Use this to reconstruct large artifacts (e.g. a graph
+    JSON) verbatim. Call sparingly — each page re-loads content into your context.

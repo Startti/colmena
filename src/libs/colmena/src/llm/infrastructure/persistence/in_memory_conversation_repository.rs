@@ -1,5 +1,5 @@
 use crate::llm::domain::{
-    Conversation, ConversationKey, ConversationRepository, LlmError, LlmMessage,
+    Conversation, ConversationKey, ConversationRepository, LlmError, LlmMessage, StoredMessage,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -9,7 +9,7 @@ use std::sync::Mutex;
 pub struct InMemoryConversationRepository {
     /// Storage indexed by (agent_session_id_or_session_id, node_id) — the
     /// effective key under which messages were appended.
-    inner: Mutex<HashMap<(String, String), Vec<LlmMessage>>>,
+    inner: Mutex<HashMap<(String, String), Vec<StoredMessage>>>,
 }
 
 impl InMemoryConversationRepository {
@@ -30,7 +30,10 @@ impl InMemoryConversationRepository {
 impl ConversationRepository for InMemoryConversationRepository {
     async fn get_by_id(&self, key: &ConversationKey) -> Result<Conversation, LlmError> {
         let map = self.inner.lock().unwrap();
-        let messages = map.get(&Self::lookup_key(key)).cloned().unwrap_or_default();
+        let messages = map
+            .get(&Self::lookup_key(key))
+            .map(|v| v.iter().map(|sm| sm.message.clone()).collect())
+            .unwrap_or_default();
         Ok(Conversation {
             key: key.clone(),
             messages,
@@ -43,13 +46,41 @@ impl ConversationRepository for InMemoryConversationRepository {
         message: LlmMessage,
     ) -> Result<(), LlmError> {
         let mut map = self.inner.lock().unwrap();
-        map.entry(Self::lookup_key(key)).or_default().push(message);
+        map.entry(Self::lookup_key(key))
+            .or_default()
+            .push(StoredMessage {
+                message,
+                summary: None,
+            });
         Ok(())
     }
 
     async fn delete(&self, key: &ConversationKey) -> Result<(), LlmError> {
         let mut map = self.inner.lock().unwrap();
         map.remove(&Self::lookup_key(key));
+        Ok(())
+    }
+
+    async fn get_with_summaries(
+        &self,
+        key: &ConversationKey,
+    ) -> Result<Vec<StoredMessage>, LlmError> {
+        let map = self.inner.lock().unwrap();
+        Ok(map.get(&Self::lookup_key(key)).cloned().unwrap_or_default())
+    }
+
+    async fn set_summary(
+        &self,
+        key: &ConversationKey,
+        ordinal: usize,
+        summary: &str,
+    ) -> Result<(), LlmError> {
+        let mut map = self.inner.lock().unwrap();
+        if let Some(v) = map.get_mut(&Self::lookup_key(key)) {
+            if let Some(sm) = v.get_mut(ordinal) {
+                sm.summary = Some(summary.to_string());
+            }
+        }
         Ok(())
     }
 }
@@ -114,5 +145,23 @@ mod tests {
             conv.messages.is_empty(),
             "responder must not see router's history"
         );
+    }
+
+    #[tokio::test]
+    async fn in_memory_summary_roundtrip() {
+        let repo = InMemoryConversationRepository::new();
+        let key = k(Some("chat_x"), "run_1", "router");
+        repo.add_message(&key, LlmMessage::user("first".into()).unwrap())
+            .await
+            .unwrap();
+        repo.add_message(&key, LlmMessage::assistant("second".into()).unwrap())
+            .await
+            .unwrap();
+        repo.set_summary(&key, 1, "sum2").await.unwrap();
+        let out = repo.get_with_summaries(&key).await.unwrap();
+        assert_eq!(out.len(), 2);
+        assert!(out[0].summary.is_none());
+        assert_eq!(out[1].summary.as_deref(), Some("sum2"));
+        assert_eq!(repo.get_by_id(&key).await.unwrap().messages.len(), 2);
     }
 }
