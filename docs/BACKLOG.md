@@ -1394,7 +1394,9 @@ los tests deberían pasar verde.
 > reciente. Estos dos items son mejoras identificadas durante el diseño/E2E de v1.1,
 > parqueadas a propósito para no sobre-construir.
 
-### v1.2 — drill de campos identificadores (mapa nominal) — *bajo riesgo*
+### v1.2 — drill de campos identificadores (mapa nominal) — ✅ SHIPPED 2026-06-19 (§41)
+
+> **Shipped 2026-06-19** (CHANGELOG §41, commits `72cca71f`/`e37ab309`). Detalle abajo conservado como referencia.
 
 **Qué cambia.** Hoy el digest drillea **un** nivel en el array dominante y lista
 *nombres* de columna; una columna que es objeto queda como marcador opaco

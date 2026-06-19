@@ -374,6 +374,14 @@ las columnas; el modelo no sabe que existía `revenue` ni `margin`, así que alu
 o no sabe que puede recuperar. El digest preserva el esquema → el modelo decide
 con precisión si responde del digest o hace `recall_history` del detalle.
 
+**v1.2 — mapa nominal (2026-06-19).** El drill-down ya no muestra solo nombres de
+columna: lista la *identidad* de cada fila (`<type> "<name>"`), sacando campos
+`name`/`title`/`label` + `type`/`kind` de la fila o **un nivel** dentro de columnas-objeto
+(alcanza p.ej. `data.label`). Así, el resultado de un `load_canvas` envejecido se ve como
+`nodes[17] … muestra: [llmCall "Tool-using Agent", webSearch "Web Search", …]` y el modelo
+sabe qué nodo es cuál sin recuperar. Identificadores más profundos que un hop → marcador +
+`recall_history` (degradación elegante).
+
 ### Ejemplo del bloque que recibe el modelo
 
 ```text

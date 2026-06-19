@@ -2677,3 +2677,31 @@ array de escalares), en lugar de un resumen NL con pérdida.
 **Estado.** done.
 
 ---
+
+## 41. Digest de tool-results v1.2 — drill de identificadores (mapa nominal) — 2026-06-19
+
+El drill-down del digest (v1.1, §40) ahora lista **identidades de fila** en vez de
+solo nombres de columna, para que el modelo sepa *cuál* registro es cuál sin recall.
+
+- Para cada una de las primeras filas, saca un label `<type> "<name>"` buscando
+  campos identificadores (`name`/`title`/`label` y `type`/`kind`) en la fila y
+  **un nivel** dentro de columnas-objeto (presupuesto de profundidad chico → alcanza
+  p.ej. `data.label`, no más profundo). Fallback: primera columna escalar.
+- Las filas de muestra del digest tabular ahora renderizan columnas-objeto por su
+  identificador (`customer:Ana Perez`) en vez del marcador opaco `customer:{2}`.
+- Bonus: el drill detecta arrays-de-objetos anidados un nivel (`{"data":{"rows":[…]}}`).
+- **Determinista, sin LLM, sin cache, sin migración, sin cambio de API** — solo cambia
+  el *contenido* del string del digest. ADP no afectado.
+
+Ejemplo real (resultado de un `load_canvas` del creador-de-agentes):
+`objeto · campos: kind, nodes[4] · kind=group · nodes[4] cols: id, type, data · muestra: [webSearch "Web Search", llmCall "Tool-using Agent", … +1]`
+
+**Documentación de referencia.**
+- Plan: [`docs/superpowers/plans/2026-06-19-tool-digest-v1-2-identifier-drill.md`](superpowers/plans/2026-06-19-tool-digest-v1-2-identifier-drill.md)
+- Módulo: [`src/libs/colmena/src/llm/application/tool_digest.rs`](src/libs/colmena/src/llm/application/tool_digest.rs)
+
+**Tests.** 15 unit en `tool_digest` (incl. drill nominal, identificador de columna-objeto, presupuesto de profundidad, cap de nombre largo).
+
+**Estado.** done.
+
+---

@@ -313,6 +313,10 @@ Dos escenarios distintos:
   (esquema + N filas + muestra + min/max) en vez de prosa NL. Sin LLM, sin
   cache, sin cambio de DB. Resultados NL caen al resumen semántico v1. Ver
   [`docs/superpowers/plans/2026-06-19-tool-result-structured-digest-v1-1.md`](../plans/2026-06-19-tool-result-structured-digest-v1-1.md).
+- **Digest v1.2 — drill de identificadores (mapa nominal) — SHIPPED 2026-06-19:** el
+  drill-down lista identidades de fila (`<type> "<name>"`) en vez de solo columnas, con
+  presupuesto de profundidad de 1 hop. Ver CHANGELOG §41 y
+  [`docs/superpowers/plans/2026-06-19-tool-digest-v1-2-identifier-drill.md`](../plans/2026-06-19-tool-digest-v1-2-identifier-drill.md).
 - **Parte B — `recall_search(query)`:** búsqueda por keyword sobre el `content` full
   (ILIKE/tsvector en PG, FTS5 en SQLite; **sin embeddings**) para el punto ciego de lo no
   citado. Opcional `recall_range(from,to)`. Disparador: medir con Opción A bien citada.
