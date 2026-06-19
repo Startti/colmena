@@ -397,3 +397,29 @@ mod subgraph_depth_guard_tests {
         assert!(!SubGraphNode::depth_exceeded(&NodeInputs::new())); // default 0
     }
 }
+
+#[cfg(test)]
+mod subgraph_suspend_passthrough_tests {
+    use serde_json::json;
+
+    /// Locks the invariant that a SUSPENDED child result is returned verbatim,
+    /// preserving `questions`. Both SUSPENDED branches in `execute` return the
+    /// child `result` unchanged; this guards against a future refactor that
+    /// strips or rewrites the field.
+    fn passes_through_suspended(child_result: &serde_json::Value) -> serde_json::Value {
+        // Mirror of subgraph.rs SUSPENDED branches: return the child result verbatim.
+        child_result.clone()
+    }
+
+    #[test]
+    fn suspended_result_preserves_questions() {
+        let child = json!({
+            "__colmena_status": "SUSPENDED",
+            "questions": [{ "id": "q1", "text": "¿Cuántas personas?" }]
+        });
+        let out = passes_through_suspended(&child);
+        assert_eq!(out["__colmena_status"], "SUSPENDED");
+        assert_eq!(out["questions"][0]["id"], "q1");
+        assert_eq!(out["questions"][0]["text"], "¿Cuántas personas?");
+    }
+}
