@@ -51,9 +51,14 @@ impl SubGraphNode {
 #[async_trait::async_trait]
 impl ExecutableNode for SubGraphNode {
     fn schema(&self) -> Value {
+        // The `inputs` map is what the tool-definition builder reads to expose
+        // parameters to the LLM (it parses each value's string for type hints
+        // like "string"/"number"/"optional"). Default to a single `task` string.
+        // A `node_schema` in tool_configurations takes precedence over this.
         json!({
-            "type": "object",
-            "properties": {}
+            "inputs": {
+                "task": "string — the task or instruction for the sub-agent to perform"
+            }
         })
     }
 
@@ -299,5 +304,31 @@ mod subgraph_tool_input_config_tests {
         let inputs: NodeInputs = NodeInputs::new();
         let config = json!({});
         assert_eq!(SubGraphNode::resolve_child_graph_source(&inputs, &config), None);
+    }
+}
+
+#[cfg(test)]
+mod subgraph_schema_tests {
+    use super::*;
+    use crate::dag_engine::domain::node::ExecutableNode;
+
+    #[test]
+    fn schema_exposes_task_input_for_tool_use() {
+        let node = SubGraphNode::new();
+        let schema = node.schema();
+        let inputs = schema
+            .get("inputs")
+            .and_then(|v| v.as_object())
+            .expect("schema must have an 'inputs' object so the tool builder exposes params");
+        assert!(
+            inputs.contains_key("task"),
+            "default schema must expose a 'task' input; got keys: {:?}",
+            inputs.keys().collect::<Vec<_>>()
+        );
+        let desc = inputs.get("task").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            desc.contains("string"),
+            "task description must hint type 'string' for the builder; got: {desc:?}"
+        );
     }
 }
