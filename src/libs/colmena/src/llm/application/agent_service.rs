@@ -184,13 +184,17 @@ impl AgentService {
         // else: prompt is None — continue from existing history (resume path)
 
         // Compute the compacted base ONCE (Hook C). Reload with summaries so it
-        // sees the just-persisted prompt and any cached summaries; same
-        // non-dropping temporal strip is applied inside build via raw order.
+        // sees the just-persisted prompt and any cached summaries. The same
+        // non-dropping temporal strip is applied to `stored_now` before
+        // compaction so legacy conversations (pre-2026-06-11) that baked a
+        // stale `## Temporal & Geographic Context` block into their persisted
+        // System message don't emit it alongside the fresh volatile suffix.
         let prefix_len = messages.len();
         let stored_now = self
             .conversation_repository
             .get_with_summaries(session_id)
             .await?;
+        let stored_now = strip_temporal_from_stored(stored_now);
         let base_compacted = crate::llm::application::history_compaction::build_compacted_messages(
             &stored_now,
             session_id,
@@ -857,6 +861,32 @@ fn strip_leading_temporal_block(content: &str) -> String {
     }
 }
 
+/// Non-dropping temporal strip over loaded rows: removes a stale leading
+/// `## Temporal & Geographic Context` block from any System message WITHOUT
+/// changing the count/order (so ordinals stay aligned with the DB / recall).
+///
+/// Called on `stored_now` (the reload before compaction) so legacy
+/// conversations never duplicate the stale block alongside the fresh
+/// `volatile_system_suffix` injected per turn.
+fn strip_temporal_from_stored(
+    stored: Vec<crate::llm::domain::StoredMessage>,
+) -> Vec<crate::llm::domain::StoredMessage> {
+    stored
+        .into_iter()
+        .map(|mut sm| {
+            if sm.message.role() == &MessageRole::System {
+                let stripped = strip_leading_temporal_block(sm.message.content());
+                if !stripped.trim().is_empty() && stripped != sm.message.content() {
+                    if let Ok(m) = LlmMessage::system(stripped) {
+                        sm.message = m;
+                    }
+                }
+            }
+            sm
+        })
+        .collect()
+}
+
 /// Compact old discovery/scaffolding tool results into short markers.
 ///
 /// Discovery tools (`load_skill`, `describe_tool`) emit large results that are
@@ -1018,6 +1048,31 @@ mod tests {
         let sys = "## Tools\nAvailable: add.\n\n---\nmore stable content";
         let out = strip_leading_temporal_block(sys);
         assert_eq!(out, sys);
+    }
+
+    #[test]
+    fn strip_temporal_from_stored_strips_legacy_system_keeps_count() {
+        use crate::llm::domain::StoredMessage;
+        let legacy_sys = "## Temporal & Geographic Context\n\
+                          Current date and time: 2026-06-11T10:00:00-05:00\n\
+                          Locale: es-CO\n\n---\n## Tools\nAvailable: add.";
+        let stored = vec![
+            StoredMessage {
+                message: LlmMessage::user("hi".into()).unwrap(),
+                summary: None,
+            },
+            StoredMessage {
+                message: LlmMessage::system(legacy_sys.to_string()).unwrap(),
+                summary: None,
+            },
+        ];
+        let out = strip_temporal_from_stored(stored);
+        assert_eq!(out.len(), 2, "count preserved (no drop)");
+        assert!(!out[1]
+            .message
+            .content()
+            .contains("Temporal & Geographic Context"));
+        assert!(out[1].message.content().contains("## Tools"));
     }
 
     // ── Per-signature loop guard: canonical tool-call signature ─────────────

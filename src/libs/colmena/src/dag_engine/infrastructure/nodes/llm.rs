@@ -2221,12 +2221,10 @@ impl ExecutableNode for LlmNode {
         // the same Arc here for AgentService — both must read/write to the
         // same backing store.
         // Cheap-model summarizer for at-load history compaction. Node may override
-        // the model via `summary_model`; otherwise resolve from the cheap-models
-        // registry for this node's provider (reuses the node's api_key).
-        let summary_model = config
-            .get("summary_model")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+        // the model via `summary_model`; resolution order mirrors the attachment
+        // summarizer: inputs > config > cheap_model_for(provider).
+        let summary_model = summary_model_override
+            .clone()
             .unwrap_or_else(|| crate::llm::infrastructure::cheap_model_for(provider_kind.clone()));
         let message_summarizer: std::sync::Arc<dyn crate::llm::domain::MessageSummarizer> =
             std::sync::Arc::new(
