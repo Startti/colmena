@@ -243,7 +243,7 @@ EOF
 **Files:** `docs/CHANGELOG_2026-06.md`, `docs/developer_guide/15_memory_guide.md`, `docs/superpowers/specs/2026-06-18-conversation-semantic-summary-design.md`, `docs/BACKLOG.md`.
 
 - [ ] Add CHANGELOG `## 41. Digest v1.2 — drill de identificadores (mapa nominal) — 2026-06-19` (append after §40, file convention newest-at-bottom). Describe the nominal sample, depth budget, additive/no-DB/no-API.
-- [ ] In `15_memory_guide.md`, extend the digest subsection with a v1.2 example (`nodes[17]: [llmCall "Tool-using Agent", …]`).
+- [ ] In `15_memory_guide.md`, extend the digest subsection with a v1.2 example (`nodes[17] cols: … · muestra: [llmCall "Tool-using Agent", …]`).
 - [ ] In the spec's enhancements section, mark v1.2 shipped (link the §41 / this plan).
 - [ ] In `BACKLOG.md`, in the "digest enhancements (v1.2, v2)" section, mark the v1.2 subsection `✅ SHIPPED 2026-06-19 (§41)` and KEEP the v2 subsection active.
 - [ ] Commit `docs(memory): document tool-digest v1.2 (identifier drill)`.
