@@ -146,7 +146,8 @@ impl DagToolExecutor {
     ///
     /// Derived from the `tool_call.id` so it is stable across a suspend/resume
     /// cycle (the same pending tool call is replayed with the same id), which
-    /// keeps the sub-agent's internal LLM memory scoped consistently. It is
+    /// keeps a tool-invoked node's conversational memory (subgraph child, or a
+    /// bare llm_call) scoped consistently. It is
     /// unique per tool call, so two calls to the same subgraph-tool do NOT share
     /// memory (stateless isolation).
     fn ephemeral_subgraph_path(tool_call_id: &str) -> String {
@@ -1733,10 +1734,11 @@ impl DagToolExecutor {
             );
         }
 
-        // Inject a deterministic ephemeral path qualifier so a node invoked as a
-        // tool (notably `subgraph`) scopes its child memory per-call (stateless)
-        // while remaining stable across suspend/resume. Engine-authoritative:
-        // overwrites any caller-supplied value.
+        // Inject a deterministic ephemeral path qualifier so any memory-bearing
+        // node invoked as a tool (subgraph, or a bare llm_call) scopes its
+        // conversational memory per-call (stateless) while remaining stable
+        // across suspend/resume. Engine-authoritative: overwrites any
+        // caller-supplied value. Harmless for nodes that ignore this key.
         inputs.insert(
             "__colmena_node_id_path".to_string(),
             Value::String(Self::ephemeral_subgraph_path(&tool_call.id)),
