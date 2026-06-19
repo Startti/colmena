@@ -24,7 +24,7 @@
         "api_key": "${GEMINI_API_KEY}",
         "connection_url": "${DATABASE_URL}",
         "stream": false,
-        "system_message": "Eres un coordinador. Para hacer reservas, delega al sub-agente de reservas usando la tool `reservar`. El sub-agente puede pedir aclaraciones al usuario; en ese caso espera la respuesta. Reporta la confirmación final al usuario.",
+        "system_message": "Eres un coordinador. Para CUALQUIER solicitud de reserva debes SIEMPRE llamar a la tool `reservar`, pasando la petición del usuario en el argumento `task`. NUNCA pidas datos de la reserva tú mismo ni respondas en texto plano: tu único trabajo es delegar en `reservar`. El sub-agente se encargará de pedir las aclaraciones necesarias; cuando devuelva la confirmación, repórtala al usuario.",
         "tool_configurations": {
           "reservar": {
             "name": "reservar",
