@@ -10,6 +10,7 @@ pub mod llm_repository;
 pub mod llm_request;
 pub mod llm_response;
 pub mod memory;
+pub mod message_summarizer;
 pub mod signed_url_fetcher;
 pub mod tool_executor;
 pub mod tools;
@@ -40,6 +41,7 @@ pub use memory::{
     AgentSessionId, Conversation, ConversationKey, ConversationRepository, NodeIdPath, SessionId,
     StoredMessage,
 };
+pub use message_summarizer::MessageSummarizer;
 pub use signed_url_fetcher::SignedUrlFetcher;
 pub use tool_executor::ToolExecutor;
 pub use tools::{

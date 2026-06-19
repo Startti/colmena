@@ -7,6 +7,7 @@ pub mod files;
 pub mod gemini_adapter;
 pub mod google_tts_adapter;
 pub mod llm_provider_factory;
+pub mod message_summarizer;
 pub mod mock_adapter;
 pub mod openai_adapter;
 pub mod openai_tts_adapter;
