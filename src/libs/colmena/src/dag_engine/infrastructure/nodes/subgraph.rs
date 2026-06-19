@@ -24,6 +24,28 @@ impl SubGraphNode {
             executor: Arc::new(OnceLock::new()),
         }
     }
+
+    /// Resolve the child graph source (inline object or path string) for both
+    /// the edge-based path (config) and the tool path (inputs).
+    ///
+    /// Precedence: `config` wins over `inputs` so the legacy edge-based behavior
+    /// is unchanged; the tool path supplies the value via `inputs` (because the
+    /// executor merges `fixed_config` into inputs and passes `config = {}`).
+    fn resolve_child_graph_source(inputs: &NodeInputs, config: &Value) -> Option<Value> {
+        if let Some(inline) = config.get("child_graph_inline") {
+            return Some(inline.clone());
+        }
+        if let Some(path) = config.get("child_graph_path") {
+            return Some(path.clone());
+        }
+        if let Some(inline) = inputs.get("child_graph_inline") {
+            return Some(inline.clone());
+        }
+        if let Some(path) = inputs.get("child_graph_path") {
+            return Some(path.clone());
+        }
+        None
+    }
 }
 
 #[async_trait::async_trait]
@@ -114,9 +136,16 @@ impl ExecutableNode for SubGraphNode {
         }
 
         // --- 2. GRAPH LOADING ---
-        let graph_json = if let Some(inline) = config.get("child_graph_inline") {
-            inline.clone()
-        } else if let Some(path_val) = config.get("child_graph_path").and_then(|v| v.as_str()) {
+        // Source can come from `config` (edge-based path) or `inputs` (tool path,
+        // where the executor merges fixed_config into inputs and passes config={}).
+        let graph_source = Self::resolve_child_graph_source(inputs, config).ok_or(
+            "SubGraphNode requires 'child_graph_inline' or 'child_graph_path' \
+             in config (edge path) or inputs (tool path)",
+        )?;
+
+        let graph_json = if graph_source.is_object() {
+            graph_source
+        } else if let Some(path_val) = graph_source.as_str() {
             let path = std::path::Path::new(path_val);
             if !path.exists() {
                 return Err(format!("child_graph_path not found: {}", path_val).into());
@@ -124,9 +153,7 @@ impl ExecutableNode for SubGraphNode {
             let contents = fs::read_to_string(path).await?;
             serde_json::from_str(&contents)?
         } else {
-            return Err(
-                "SubGraphNode requires 'child_graph_inline' or 'child_graph_path' in config".into(),
-            );
+            return Err("child_graph source must be an inline object or a path string".into());
         };
 
         // Agent name is injected by OrchestratorNode when this subgraph is called as an agent.
@@ -218,5 +245,41 @@ impl ExecutableNode for SubGraphNode {
         }
 
         Ok(final_output)
+    }
+}
+
+#[cfg(test)]
+mod subgraph_tool_input_config_tests {
+    use super::*;
+    use crate::dag_engine::domain::node::NodeInputs;
+    use serde_json::json;
+
+    fn resolve_graph_source(inputs: &NodeInputs, config: &Value) -> Option<Value> {
+        SubGraphNode::resolve_child_graph_source(inputs, config)
+    }
+
+    #[test]
+    fn reads_inline_from_inputs_when_config_empty() {
+        let mut inputs: NodeInputs = NodeInputs::new();
+        let inline = json!({ "nodes": {}, "edges": [] });
+        inputs.insert("child_graph_inline".to_string(), inline.clone());
+        let config = json!({});
+        assert_eq!(resolve_graph_source(&inputs, &config), Some(inline));
+    }
+
+    #[test]
+    fn reads_path_from_inputs_when_config_empty() {
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert("child_graph_path".to_string(), json!("./agents/weather_agent.json"));
+        let config = json!({});
+        assert_eq!(resolve_graph_source(&inputs, &config), Some(json!("./agents/weather_agent.json")));
+    }
+
+    #[test]
+    fn config_takes_precedence_over_inputs_for_inline() {
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert("child_graph_inline".to_string(), json!({ "from": "inputs" }));
+        let config = json!({ "child_graph_inline": { "from": "config" } });
+        assert_eq!(resolve_graph_source(&inputs, &config), Some(json!({ "from": "config" })));
     }
 }
