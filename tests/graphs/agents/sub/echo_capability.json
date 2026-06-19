@@ -1,0 +1,26 @@
+{
+  "comment": "Reusable child graph for subgraph-as-tool tests. Minimal capability: one llm_call that resolves {{task}} and an output node. Stateless per invocation when used as a subgraph tool.",
+  "metadata": {
+    "category": "agents",
+    "features": ["subgraph_child", "llm_call"],
+    "requires_env": ["GEMINI_API_KEY"]
+  },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "system_message": "Eres un asistente conciso. Resuelve esta tarea y responde en una frase: {{task}}",
+        "stream": false
+      }
+    },
+    "out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    { "from": "agent", "to": "out" }
+  ]
+}

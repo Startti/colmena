@@ -1,0 +1,47 @@
+{
+  "comment": "T1 — subgraph-as-tool capability, no HITL. Parent llm_call exposes a child graph (echo_capability.json) as a single tool `consultar_especialista` via node_type: subgraph. The LLM should delegate the task and report the child's concise answer.",
+  "metadata": {
+    "category": "agents",
+    "features": ["subgraph_as_tool", "llm_call", "tool_configurations"],
+    "requires_env": ["GEMINI_API_KEY"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/subgraph_tool_basic",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Pídele al especialista que explique qué es la fotosíntesis en una frase."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "system_message": "Eres un coordinador. Cuando necesites resolver una tarea, delégala al sub-agente especialista usando la tool `consultar_especialista`. Luego reporta su respuesta al usuario.",
+        "stream": false,
+        "tool_configurations": {
+          "consultar_especialista": {
+            "name": "consultar_especialista",
+            "node_type": "subgraph",
+            "description": "Delega una tarea a un sub-agente especialista que devuelve una respuesta concisa.",
+            "fixed_config": {
+              "child_graph_path": "./tests/graphs/agents/sub/echo_capability.json"
+            }
+          }
+        }
+      }
+    },
+    "out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent.result", "to": "out" }
+  ]
+}

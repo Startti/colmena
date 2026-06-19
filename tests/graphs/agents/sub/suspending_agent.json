@@ -1,0 +1,37 @@
+{
+  "comment": "Child agent for T4 (HITL). A reservations llm_call that, before confirming, asks the user a clarifying question by calling the `preguntar_usuario` tool (node_type: suspend). The suspend bubbles up through the parent subgraph tool to the DAG; on resume the child reads the answer and confirms.",
+  "metadata": {
+    "category": "agents",
+    "features": ["subgraph_child", "llm_call", "suspend", "tool_configurations", "hitl"],
+    "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"]
+  },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "stream": false,
+        "system_message": "Eres un agente de reservas. Antes de confirmar, pregunta al usuario cuántas personas asistirán usando la tool `preguntar_usuario`. Una vez tengas la respuesta, confirma la reserva en una frase. Tarea: {{task}}",
+        "tool_configurations": {
+          "preguntar_usuario": {
+            "name": "preguntar_usuario",
+            "node_type": "suspend",
+            "description": "Pausa y le hace una pregunta aclaratoria al usuario. Pasa `question` con la pregunta. Devuelve la respuesta del usuario.",
+            "fixed_config": {
+              "id": "reserva_num_personas"
+            }
+          }
+        }
+      }
+    },
+    "out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    { "from": "agent", "to": "out" }
+  ]
+}

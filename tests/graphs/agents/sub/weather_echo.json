@@ -1,0 +1,26 @@
+{
+  "comment": "Child graph for T3 structured-input test. Receives {{ciudad}} and {{fecha}} from the parent's structured tool schema and reports a plausible weather line.",
+  "metadata": {
+    "category": "agents",
+    "features": ["subgraph_child", "llm_call", "structured_input"],
+    "requires_env": ["GEMINI_API_KEY"]
+  },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "system_message": "Reporta un clima plausible para {{ciudad}} en la fecha {{fecha}} en una frase.",
+        "stream": false
+      }
+    },
+    "out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    { "from": "agent", "to": "out" }
+  ]
+}

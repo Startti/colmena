@@ -1,0 +1,60 @@
+{
+  "comment": "T3 — structured input. Parent llm_call exposes a subgraph tool `consultar_clima` whose node_schema declares structured fields (ciudad, fecha). The child (sub/weather_echo.json) receives {{ciudad}} and {{fecha}}.",
+  "metadata": {
+    "category": "agents",
+    "features": ["subgraph_as_tool", "node_schema", "structured_input", "llm_call"],
+    "requires_env": ["GEMINI_API_KEY"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/subgraph_tool_structured",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "¿Qué clima hará en Bogotá el 2026-07-15?"
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "system_message": "Eres un coordinador. Para consultas de clima, usa la tool `consultar_clima` pasando la ciudad y la fecha en formato YYYY-MM-DD. Luego reporta la respuesta al usuario.",
+        "stream": false,
+        "tool_configurations": {
+          "consultar_clima": {
+            "name": "consultar_clima",
+            "node_type": "subgraph",
+            "description": "Consulta el clima de una ciudad en una fecha dada.",
+            "node_schema": {
+              "ciudad": {
+                "type": "string",
+                "required": true,
+                "description": "Ciudad a consultar"
+              },
+              "fecha": {
+                "type": "string",
+                "required": true,
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                "description": "Fecha en formato YYYY-MM-DD"
+              }
+            },
+            "fixed_config": {
+              "child_graph_path": "./tests/graphs/agents/sub/weather_echo.json"
+            }
+          }
+        }
+      }
+    },
+    "out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent.result", "to": "out" }
+  ]
+}
