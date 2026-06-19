@@ -44,6 +44,9 @@ fn digest_array(arr: &[Value]) -> Option<String> {
         if !sample.is_empty() {
             s.push_str(&format!(" · muestra: {}", sample.join("; ")));
         }
+        for agg in numeric_aggregates(arr, &cols) {
+            s.push_str(&format!(" · {agg}"));
+        }
         return Some(s);
     }
     // Array of scalars (or mixed) → count + small sample.
@@ -97,6 +100,9 @@ fn digest_object(v: &Value) -> Option<String> {
     if let Some((k, a)) = drill {
         let cols = collect_columns(a);
         s.push_str(&format!(" · {k}[{}] cols: {}", a.len(), join_capped(&cols)));
+        for agg in numeric_aggregates(a, &cols) {
+            s.push_str(&format!(" · {agg}"));
+        }
     }
     Some(s)
 }
@@ -143,6 +149,44 @@ fn sample_rows(arr: &[Value], cols: &[String]) -> Vec<String> {
             })
         })
         .collect()
+}
+
+const MAX_AGG_COLS: usize = 3;
+
+/// For up to `MAX_AGG_COLS` numeric columns, compute min/max across all rows.
+fn numeric_aggregates(arr: &[Value], cols: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for c in cols {
+        if out.len() >= MAX_AGG_COLS {
+            break;
+        }
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        let mut any = false;
+        for row in arr {
+            if let Some(n) = row.get(c.as_str()).and_then(Value::as_f64) {
+                any = true;
+                if n < min {
+                    min = n;
+                }
+                if n > max {
+                    max = n;
+                }
+            }
+        }
+        if any {
+            out.push(format!("{c}: min {} max {}", fmt_num(min), fmt_num(max)));
+        }
+    }
+    out
+}
+
+fn fmt_num(n: f64) -> String {
+    if n.fract() == 0.0 && n.abs() < 1e15 {
+        format!("{}", n as i64)
+    } else {
+        format!("{n:.2}")
+    }
 }
 
 fn scalar_str(v: &Value) -> String {
@@ -255,5 +299,25 @@ mod tests {
             d.contains("+8 más"),
             "expected column overflow marker, got: {d}"
         );
+    }
+
+    #[test]
+    fn tabular_digest_includes_numeric_min_max() {
+        let rows = r#"[
+            {"region":"Norte","revenue":420000,"margin":18},
+            {"region":"Sur","revenue":310000,"margin":22},
+            {"region":"Este","revenue":120000,"margin":9}
+        ]"#;
+        let d = digest_tool_result(rows).expect("structured");
+        assert!(d.contains("revenue: min 120000 max 420000"), "got: {d}");
+        assert!(d.contains("margin: min 9 max 22"), "got: {d}");
+    }
+
+    #[test]
+    fn drilled_array_in_object_includes_aggregates() {
+        let content = r#"{"row_count":2,"rows":[{"sku":"A","qty":5},{"sku":"B","qty":12}]}"#;
+        let d = digest_tool_result(content).expect("structured");
+        assert!(d.contains("rows[2] cols: sku, qty"), "got: {d}");
+        assert!(d.contains("qty: min 5 max 12"), "got: {d}");
     }
 }
