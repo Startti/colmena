@@ -351,6 +351,29 @@ caracteres ni se persiste nada truncado**:
 El resumen semántico de cada mensaje se calcula **una sola vez** y se guarda en la
 columna `summary` de `llm_node_history`; los loads siguientes lo reusan desde la DB.
 
+### Digest estructurado de tool-results (v1.1)
+
+Cuando un resultado de tool **estructurado** (JSON: objeto, array de objetos, o
+array de escalares) envejece y sale de la ventana reciente, en vez de un resumen
+NL con pérdida se genera un **digest determinista** que conserva la FORMA:
+
+- **Array de objetos** (p.ej. `sql_query`, listas de una API):
+  `600 filas · cols: month, region, revenue, units · muestra: {month:2026-01, region:Norte, …}; {…} · revenue: min 12000 max 480000`
+- **Objeto** (p.ej. detalle de un pedido):
+  `objeto · campos: order_id, status, total, items[8], shipping_address · status=en transito, total=340 · items[8] cols: sku, qty`
+- **Array de escalares:** `40 elementos · muestra: [0, 1, 2, …]`
+
+El digest **no usa LLM, no se cachea y no toca la DB** (es determinista y barato,
+se recalcula en cada load). La línea cita `recall_history(turn=N)`: el resultado
+completo se recupera **verbatim** (recall lossless). Si el contenido del tool NO
+es JSON estructurado (texto NL de una búsqueda web, etc.), cae al resumen
+semántico normal.
+
+**Por qué importa:** un resumen NL ("devolvió ventas mensuales por región") borra
+las columnas; el modelo no sabe que existía `revenue` ni `margin`, así que alucina
+o no sabe que puede recuperar. El digest preserva el esquema → el modelo decide
+con precisión si responde del digest o hace `recall_history` del detalle.
+
 ### Ejemplo del bloque que recibe el modelo
 
 ```text

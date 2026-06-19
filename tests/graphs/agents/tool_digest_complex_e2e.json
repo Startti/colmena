@@ -1,0 +1,87 @@
+{
+  "comment": "COMPLEX E2E for v1.1 tool-result structured digest. THREE python_script tools return three result SHAPES: (1) sales_by_region = array-of-objects (tabular digest, min/max), (2) get_order = single NESTED object (campos + items[6] drill-down + shipping{2} marker hiding the exact tracking), (3) monthly_revenue = array-of-objects. Across a multi-turn conversation (stable x-agent-session-id) verbose later turns push ALL THREE tool results out of the 2500-token recent window so build_compacted_messages renders them as deterministic digest lines. Final questions force both direct-from-digest answers (worst margin, min month) and lossless recall_history (exact tracking AR-998877-XZ hidden behind shipping{2}).",
+  "metadata": {
+    "category": "agents",
+    "features": ["python_script", "tool_calling", "history_compaction", "tool_digest", "conversation_memory", "recall_history"],
+    "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/tool-digest-complex-e2e",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Traé las ventas por región."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "system_message": "Sos un analista de datos. Cuando el usuario pida un conjunto de datos, llamá la tool relevante UNA sola vez y respondé en base a lo que devuelve. En turnos posteriores seguí respondiendo sobre esos mismos datos sin volver a llamar la tool. Si necesitás el detalle EXACTO de una fila o un campo anidado de un turno anterior (por ejemplo un número de tracking, un email, un valor puntual), usá recall_history(turn=N) para releer el resultado original completo en vez de inventar.",
+        "temperature": 0.0,
+        "stream": false,
+        "max_tokens": 8000,
+        "connection_url": "${DATABASE_URL}",
+        "lazy_tool_loading": false,
+        "tool_configurations": {
+          "sales_by_region": {
+            "name": "sales_by_region",
+            "node_type": "python_script",
+            "description": "Devuelve las ventas por región: lista de filas con region, revenue, units, margin.",
+            "node_schema": {
+              "sandbox_mode":         { "type": "string", "fixed": "restricted" },
+              "sandbox_timeout_secs": { "type": "number", "fixed": 15 },
+              "code": {
+                "type": "string",
+                "fixed": "output = [\n  {'region':'Norte','revenue':420000,'units':1200,'margin':18},\n  {'region':'Sur','revenue':310000,'units':980,'margin':22},\n  {'region':'Este','revenue':120000,'units':540,'margin':9},\n  {'region':'Oeste','revenue':275000,'units':860,'margin':14},\n  {'region':'Centro','revenue':198000,'units':700,'margin':11},\n  {'region':'Litoral','revenue':233000,'units':790,'margin':13},\n  {'region':'Andina','revenue':310500,'units':1010,'margin':16},\n  {'region':'Pampa','revenue':455000,'units':1320,'margin':19},\n  {'region':'Caribe','revenue':165000,'units':610,'margin':8},\n  {'region':'Sierra','revenue':289000,'units':900,'margin':15},\n  {'region':'Costa','revenue':377000,'units':1140,'margin':17},\n  {'region':'Selva','revenue':142000,'units':520,'margin':7}\n]"
+              }
+            }
+          },
+          "get_order": {
+            "name": "get_order",
+            "node_type": "python_script",
+            "description": "Devuelve el detalle completo de un pedido por su order_id: status, total, customer{}, items[] y shipping{}.",
+            "node_schema": {
+              "sandbox_mode":         { "type": "string", "fixed": "restricted" },
+              "sandbox_timeout_secs": { "type": "number", "fixed": 15 },
+              "order_id": {
+                "type": "string",
+                "required": true,
+                "description": "El identificador del pedido a consultar, por ejemplo '8842'."
+              },
+              "code": {
+                "type": "string",
+                "fixed": "output = {\n  'order_id': str(order_id),\n  'status':'in_transit',\n  'total':1284.50,\n  'customer':{'name':'Ana Perez','email':'ana@x.com','tier':'pro'},\n  'items':[\n    {'sku':'KB-01','name':'Teclado','qty':2,'price':80},\n    {'sku':'MS-04','name':'Mouse','qty':1,'price':35},\n    {'sku':'MN-22','name':'Monitor','qty':1,'price':900},\n    {'sku':'CB-09','name':'Cable','qty':3,'price':12},\n    {'sku':'DK-77','name':'Dock','qty':1,'price':150},\n    {'sku':'HP-05','name':'Auriculares','qty':1,'price':120}\n  ],\n  'shipping':{'address':'Av Corrientes 1234, CABA','tracking':'AR-998877-XZ'}\n}"
+              }
+            }
+          },
+          "monthly_revenue": {
+            "name": "monthly_revenue",
+            "node_type": "python_script",
+            "description": "Devuelve los ingresos por mes: lista de filas con month, revenue.",
+            "node_schema": {
+              "sandbox_mode":         { "type": "string", "fixed": "restricted" },
+              "sandbox_timeout_secs": { "type": "number", "fixed": 15 },
+              "code": {
+                "type": "string",
+                "fixed": "output = [\n  {'month':'2026-01','revenue':210000},\n  {'month':'2026-02','revenue':198000},\n  {'month':'2026-03','revenue':225000},\n  {'month':'2026-04','revenue':174000},\n  {'month':'2026-05','revenue':203000},\n  {'month':'2026-06','revenue':188000},\n  {'month':'2026-07','revenue':159000},\n  {'month':'2026-08','revenue':96000},\n  {'month':'2026-09','revenue':167000},\n  {'month':'2026-10','revenue':241000},\n  {'month':'2026-11','revenue':219000},\n  {'month':'2026-12','revenue':256000}\n]"
+              }
+            }
+          }
+        }
+      }
+    },
+    "log": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent",   "to": "log" }
+  ]
+}

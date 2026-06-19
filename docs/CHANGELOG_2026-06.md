@@ -2646,3 +2646,34 @@ campos privados, una const. `ExecutableNode::execute` sin cambios de firma. ADP 
 gemini-2.5-flash + Tavily, incl. ciclo HITL suspend→resume real).
 
 ---
+
+## 40. Digest estructurado de tool-results (v1.1) — 2026-06-19
+
+`build_compacted_messages` ahora renderiza un **digest determinista** para
+mensajes `tool` cuyo contenido es JSON estructurado (objeto, array de objetos,
+array de escalares), en lugar de un resumen NL con pérdida.
+
+- Nuevo módulo puro `llm/application/tool_digest.rs` → `digest_tool_result(content) -> Option<String>`.
+- Digest: esquema (columnas/campos) + N filas + muestra de filas + min/max de
+  hasta 3 columnas numéricas; para objetos: inventario de campos, escalares
+  inline, marcadores de anidados (`items[8]`, `customer{2}`) y drill-down en el
+  array-de-objetos dominante.
+- **Sin LLM, sin cache, sin migración, sin cambio de API pública** — se computa
+  fresco cada load porque es determinista y barato. Resultados de tools en NL
+  (no-JSON) caen al resumen semántico de v1, sin cambios.
+- La línea cita `recall_history(turn=N)`; el resultado completo se recupera
+  verbatim (recall lossless de v1).
+- Motivación: que el modelo conserve la FORMA de los datos (qué columnas/campos
+  existían) al envejecer el mensaje, evitando alucinación o recall a ciegas.
+  Caso real: agente de datos/soporte que reusa campos específicos turnos después.
+
+**Documentación de referencia.**
+- Spec: [`docs/superpowers/specs/2026-06-18-conversation-semantic-summary-design.md`](superpowers/specs/2026-06-18-conversation-semantic-summary-design.md) §"Enhancements futuros"
+- Plan: [`docs/superpowers/plans/2026-06-19-tool-result-structured-digest-v1-1.md`](superpowers/plans/2026-06-19-tool-result-structured-digest-v1-1.md)
+- Dev guide: [`developer_guide/15_memory_guide.md`](developer_guide/15_memory_guide.md) §"Digest estructurado de tool-results (v1.1)"
+
+**Tests.** 11 unit en `tool_digest`, 1 de wiring en `history_compaction`, 2 E2E reales (simple + multi-tool).
+
+**Estado.** done.
+
+---
