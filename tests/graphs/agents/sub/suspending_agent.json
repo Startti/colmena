@@ -21,7 +21,8 @@
             "node_type": "suspend",
             "description": "Pausa y le hace una pregunta aclaratoria al usuario. Pasa `question` con la pregunta. Devuelve la respuesta del usuario.",
             "fixed_config": {
-              "id": "reserva_num_personas"
+              "id": "reserva_num_personas",
+              "question": "¿Cuántas personas asistirán?"
             }
           }
         }
