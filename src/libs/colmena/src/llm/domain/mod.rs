@@ -38,6 +38,7 @@ pub use llm_request::LlmRequest;
 pub use llm_response::{LlmResponse, LlmStreamChunk, LlmStreamPart, SuspendInfo, ToolCallChunk};
 pub use memory::{
     AgentSessionId, Conversation, ConversationKey, ConversationRepository, NodeIdPath, SessionId,
+    StoredMessage,
 };
 pub use signed_url_fetcher::SignedUrlFetcher;
 pub use tool_executor::ToolExecutor;
