@@ -1382,3 +1382,89 @@ los tests deberían pasar verde.
   - Worker Dockerfile en ADP: `/Users/danielgarcia/startti/adp/apps/service/ia/platform/Dockerfile.deps` (a verificar).
   - Cloud Run service: `colmena-worker` en `us-central1`, SA `adp-backend-sa-develop@startti-dev.iam.gserviceaccount.com`.
   - Runbook E2E: Phase 6 en [`verifying_deployed_worker.md`](#phase-6).
+
+---
+
+## Memoria conversacional — digest de tool-results: enhancements (v1.2, v2)
+
+> **Contexto:** el digest estructurado de tool-results **v1.1 shipped 2026-06-19**
+> (CHANGELOG §40, módulo `llm/application/tool_digest.rs`). v1.1 reemplaza el
+> resumen NL con pérdida por un digest determinista (esquema + N filas + muestra +
+> min/max) para resultados de tools estructurados que envejecen fuera de la ventana
+> reciente. Estos dos items son mejoras identificadas durante el diseño/E2E de v1.1,
+> parqueadas a propósito para no sobre-construir.
+
+### v1.2 — drill de campos identificadores (mapa nominal) — *bajo riesgo*
+
+**Qué cambia.** Hoy el digest drillea **un** nivel en el array dominante y lista
+*nombres* de columna; una columna que es objeto queda como marcador opaco
+(`data{2}`). v1.2 saca **1-2 sub-campos identificadores** (heurística:
+`label`/`name`/`title`/`type`/`id`) de esas columnas-objeto, para que el mapa pase
+de anónimo a nominal.
+
+```
+hoy (v1.1):  nodes[17] cols: id, type, position, measured, sortIndex, data
+v1.2:        nodes[17]: [llmCall "Tool-using Agent", webSearch "Web Search", … +15]
+```
+
+**Caso real que lo motiva.** El `creador de agentes` de ADP: su tool `load_canvas`
+devuelve un objeto con `nodes[]` donde cada node tiene `data.label`/`type` anidados.
+Con v1.1, cuando ese resultado envejece, el modelo sabe que hay 17 nodes pero **no
+cuál es cuál** → necesita un `recall_history` solo para el inventario. v1.2 le da la
+lista nominal directo. También aplica a "lista de órdenes con `customer.name`", etc.
+
+**Decisión de diseño — presupuesto de profundidad (cerrada 2026-06-19).** El
+identificador puede estar a distinta profundidad desde la fila:
+`nodes[i].type` (hop 0, ya es columna), `nodes[i].data.label` (hop 1, lo que v1.2
+busca alcanzar), `nodes[i].data.config.title` (hop 2+), `…tools[3].name`
+(tabla-dentro-de-tabla). v1.2 **debe** usar un presupuesto pequeño: buscar una
+llave identificadora conocida hasta **profundidad ~2**, primer match gana, con el
+techo de `DIGEST_CEILING_CHARS` como backstop duro. Más profundo = marcador +
+`recall` (degradación elegante). Razón: cada nivel extra multiplica la salida y
+amenaza tamaño/determinismo. **Nota:** v1.1 ya maneja JSON arbitrariamente profundo
+sin romperse (no recursa; lo profundo aparece como marcador `{N}`/`[N]`); v1.2 solo
+corre la frontera "útil-sin-recall" un nivel para la forma común.
+
+**Esfuerzo.** Chico (~media jornada): solo cambia el *contenido* del string del
+digest en `tool_digest.rs`; no toca el cuándo/dónde, ni el cache, ni el camino
+caliente. Aditivo, sin migración.
+
+**Cuándo retomar.** Cuando el agente creador-de-agentes (u otro agente que reusa
+listas de registros anidados) muestre recalls redundantes solo para listar
+identidades. Trigger concreto: ver en un E2E real que el modelo hace
+`recall_history` para "¿qué nodes/registros hay?".
+
+### v2 — mid-run folding (acotar contexto *dentro* de un run) — *alto impacto, toca el hot path*
+
+**Qué cambia.** Hoy la compactación ocurre **entre turnos** (se calcula una vez al
+cargar el run; los recientes van full durante el turno). v2 plegaría a digest **al
+vuelo durante** un run largo, cuando un resultado de tool del run actual se pasa del
+presupuesto de tokens recientes.
+
+**Caso real que lo motiva.** Un agente con `maxSteps` alto (el creador-de-agentes
+usa 50) que en **un solo turno** llama `load_canvas` (~15 KB) + `create_node` ×17 +
+`create_edge` ×16, cada uno devolviendo JSON. Con v1, todos esos resultados quedan
+full en contexto durante todo el run → la ventana crece sin parar dentro del turno.
+v2 los plegaría a medida que envejecen → contexto acotado incluso a 50 pasos.
+
+**Trade-offs (por qué NO se hizo en v1).**
+1. **Prompt caching.** Los proveedores (Anthropic, Gemini) cachean el prefijo
+   estable. Plegar a mitad de run **cambia el prefijo** → invalida el cache → cada
+   paso siguiente reprocesa sin cache (más latencia/costo). v1 mantiene el prefijo
+   quieto durante el run justamente para preservar el cache.
+2. **Vuelve el cómputo por iteración** que v1 sacó del loop (aunque el digest es
+   barato y determinista, sin LLM).
+3. Toca el contexto que el modelo razona **en vivo**, no historia vieja.
+
+**Esfuerzo.** Medio-alto. Requiere medir el costo de cache real primero.
+
+**Cuándo retomar.** Cuando midamos runs reales donde **un solo turno** desborda la
+ventana de contexto (ej: el builder de 50 pasos, o un agente de datos que en un
+turno corre 20+ queries grandes). Hasta entonces v1 alcanza para el caso común
+(1-3 tool calls por turno, plegados en el próximo load).
+
+**Referencias (ambos).**
+- Spec v1: [`docs/superpowers/specs/2026-06-18-conversation-semantic-summary-design.md`](superpowers/specs/2026-06-18-conversation-semantic-summary-design.md) (§No-objetivos lista v1.1/v2; §Enhancements futuros).
+- Plan v1.1: [`docs/superpowers/plans/2026-06-19-tool-result-structured-digest-v1-1.md`](superpowers/plans/2026-06-19-tool-result-structured-digest-v1-1.md).
+- Módulo: [`src/libs/colmena/src/llm/application/tool_digest.rs`](src/libs/colmena/src/llm/application/tool_digest.rs) (v1.2) y [`history_compaction.rs`](src/libs/colmena/src/llm/application/history_compaction.rs) (v2).
+- CHANGELOG §40 (v1.1 shipped).
