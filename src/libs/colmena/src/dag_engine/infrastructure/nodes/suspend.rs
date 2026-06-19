@@ -21,6 +21,13 @@ use std::sync::Arc;
 ///   Note: `options` is a UX suggestion list — answers on resume are NOT validated against it.
 pub struct SuspendNode;
 
+/// Resolve a suspend config field from `config` first (edge/node usage) then
+/// `inputs` (tool usage, where the executor merges fixed_config/node_schema into
+/// inputs and passes config = {}). config wins so existing node usage is unchanged.
+fn cfg_or_input<'a>(config: &'a Value, inputs: &'a NodeInputs, key: &str) -> Option<&'a Value> {
+    config.get(key).or_else(|| inputs.get(key))
+}
+
 #[async_trait]
 impl ExecutableNode for SuspendNode {
     async fn execute(
@@ -37,9 +44,11 @@ impl ExecutableNode for SuspendNode {
                     "suspend: __colmena_resume_answer must be a string",
                 )
             })?;
-            let id = config.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
-                Box::<dyn Error + Send + Sync>::from("suspend: config.id is required on resume")
-            })?;
+            let id = cfg_or_input(config, inputs, "id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    Box::<dyn Error + Send + Sync>::from("suspend: config.id is required on resume")
+                })?;
             let mut parsed = parse_qa_response(raw, &[id])
                 .map_err(|e| Box::<dyn Error + Send + Sync>::from(format!("suspend: {e}")))?;
             let answer = parsed
@@ -54,14 +63,12 @@ impl ExecutableNode for SuspendNode {
 
         // Suspend path: build canonical question and emit both the legacy `question`
         // string and the canonical `questions` array.
-        let question = config
-            .get("question")
+        let question = cfg_or_input(config, inputs, "question")
             .and_then(|v| v.as_str())
             .unwrap_or("What is your input?")
             .to_string();
 
-        let id = config
-            .get("id")
+        let id = cfg_or_input(config, inputs, "id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| Box::<dyn Error + Send + Sync>::from("suspend: config.id is required"))?
             .to_string();
@@ -72,14 +79,12 @@ impl ExecutableNode for SuspendNode {
             )));
         }
 
-        let question_type = config
-            .get("question_type")
+        let question_type = cfg_or_input(config, inputs, "question_type")
             .and_then(|v| v.as_str())
             .unwrap_or("open")
             .to_string();
 
-        let options: Option<Vec<String>> = config
-            .get("options")
+        let options: Option<Vec<String>> = cfg_or_input(config, inputs, "options")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
 
         let mut question_obj = serde_json::Map::new();
@@ -274,6 +279,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out["answer_received"], "review-app-123");
+    }
+
+    #[tokio::test]
+    async fn suspend_reads_id_and_question_from_inputs_when_config_empty() {
+        // Tool-path usage: executor merges fixed_config/node_schema into inputs
+        // and passes config = {}. The node must still find id + question.
+        let node = SuspendNode;
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert("id".to_string(), json!("reserva_num_personas"));
+        inputs.insert("question".to_string(), json!("¿Cuántas personas asistirán?"));
+        let cfg = json!({}); // empty, as in the tool path
+        let mut gs = json!({});
+        let out = node
+            .execute(&inputs, &cfg, &mut gs, None)
+            .await
+            .expect("must suspend cleanly");
+        assert_eq!(out["questions"][0]["id"], "reserva_num_personas");
+        assert_eq!(out["questions"][0]["question"], "¿Cuántas personas asistirán?");
+    }
+
+    #[tokio::test]
+    async fn config_id_takes_precedence_over_inputs_id() {
+        let node = SuspendNode;
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert("id".to_string(), json!("from_inputs"));
+        let cfg = json!({ "id": "from_config", "question": "Q?" });
+        let mut gs = json!({});
+        let out = node.execute(&inputs, &cfg, &mut gs, None).await.expect("ok");
+        assert_eq!(out["questions"][0]["id"], "from_config");
     }
 
     #[tokio::test]
