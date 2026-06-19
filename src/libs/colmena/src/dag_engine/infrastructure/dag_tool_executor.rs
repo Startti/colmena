@@ -142,6 +142,17 @@ pub struct DagToolExecutor {
 pub const DEFAULT_MAX_TOOL_RESULT_STRING_BYTES: usize = 50 * 1024;
 
 impl DagToolExecutor {
+    /// Deterministic ephemeral path qualifier for a node invoked as a tool.
+    ///
+    /// Derived from the `tool_call.id` so it is stable across a suspend/resume
+    /// cycle (the same pending tool call is replayed with the same id), which
+    /// keeps the sub-agent's internal LLM memory scoped consistently. It is
+    /// unique per tool call, so two calls to the same subgraph-tool do NOT share
+    /// memory (stateless isolation).
+    fn ephemeral_subgraph_path(tool_call_id: &str) -> String {
+        format!("tool/{tool_call_id}")
+    }
+
     /// Resolve `${var}` and `${context.var}` placeholders in a string value
     /// using values from the inputs map. Only resolves keys present in `inputs`;
     /// unrecognized placeholders are left as-is.
@@ -1721,6 +1732,15 @@ impl DagToolExecutor {
                 Value::String(asid.clone()),
             );
         }
+
+        // Inject a deterministic ephemeral path qualifier so a node invoked as a
+        // tool (notably `subgraph`) scopes its child memory per-call (stateless)
+        // while remaining stable across suspend/resume. Engine-authoritative:
+        // overwrites any caller-supplied value.
+        inputs.insert(
+            "__colmena_node_id_path".to_string(),
+            Value::String(Self::ephemeral_subgraph_path(&tool_call.id)),
+        );
 
         // Convert HashMap to NodeInputs (which is just HashMap<String, Value>)
         // SECURE VALUES: decrypt <value_N> placeholders before sending to the node.
@@ -3760,5 +3780,26 @@ mod scrubber_tests {
         let v = json!("data:text/plain,hello world");
         let out = DagToolExecutor::scrub_value_for_llm(v.clone(), 1_000);
         assert_eq!(out, v);
+    }
+}
+
+#[cfg(test)]
+mod ephemeral_path_tests {
+    use super::*;
+
+    #[test]
+    fn ephemeral_path_is_deterministic_from_tool_call_id() {
+        assert_eq!(
+            DagToolExecutor::ephemeral_subgraph_path("call_abc123"),
+            "tool/call_abc123"
+        );
+        assert_eq!(
+            DagToolExecutor::ephemeral_subgraph_path("call_abc123"),
+            DagToolExecutor::ephemeral_subgraph_path("call_abc123")
+        );
+        assert_ne!(
+            DagToolExecutor::ephemeral_subgraph_path("call_1"),
+            DagToolExecutor::ephemeral_subgraph_path("call_2")
+        );
     }
 }
