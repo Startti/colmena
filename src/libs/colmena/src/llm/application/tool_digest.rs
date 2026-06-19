@@ -181,6 +181,8 @@ fn numeric_aggregates(arr: &[Value], cols: &[String]) -> Vec<String> {
     out
 }
 
+/// Note: integers above 2^53 lose precision via the f64 path; the digest is
+/// lossy by design (recall_history is exact).
 fn fmt_num(n: f64) -> String {
     if n.fract() == 0.0 && n.abs() < 1e15 {
         format!("{}", n as i64)
@@ -311,6 +313,22 @@ mod tests {
         let d = digest_tool_result(rows).expect("structured");
         assert!(d.contains("revenue: min 120000 max 420000"), "got: {d}");
         assert!(d.contains("margin: min 9 max 22"), "got: {d}");
+    }
+
+    #[test]
+    fn aggregates_skip_non_numeric_columns_and_handle_partial() {
+        let content = r#"[
+            {"v":10,"note":"a"},
+            {"v":"n/a","note":"b"},
+            {"note":"c"}
+        ]"#;
+        let d = digest_tool_result(content).expect("structured");
+        // `v` is numeric in exactly one row → min==max==10; `note` never numeric → no aggregate.
+        assert!(d.contains("v: min 10 max 10"), "got: {d}");
+        assert!(
+            !d.contains("note: min"),
+            "note must not get an aggregate: {d}"
+        );
     }
 
     #[test]
