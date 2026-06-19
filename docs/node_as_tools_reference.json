@@ -20,7 +20,7 @@
           "type": "string",
           "required": true,
           "description": "DAG node type to execute when the LLM calls this tool. Must be a registered node type.",
-          "valid_values": ["http_request", "socketio_request", "sql_query", "python_script", "add", "subtract", "multiply", "divide", "exponential", "tavily_client"]
+          "valid_values": ["http_request", "socketio_request", "sql_query", "python_script", "add", "subtract", "multiply", "divide", "exponential", "tavily_client", "subgraph"]
         },
         "node_schema": {
           "type": "object",
@@ -845,6 +845,91 @@
         "Use Pattern B only when the transformation is open-ended (filtering, ad-hoc aggregation, JSON reshaping). Always fix sandbox_mode='restricted'.",
         "For tools that need richer Python (numpy, pandas, requests) the python_script node is not the right tool — wrap your service in HTTP and use http_request as a tool.",
         "Test sandboxed graphs locally with: cargo run --bin dag_engine -- run tests/graphs/agents/python_sandbox_tool_test.json"
+      ]
+    },
+
+    "subgraph": {
+      "summary": "Permite usar un grafo hijo existente (child_graph_path) o un llm_call inline (child_graph_inline) como una sola tool (patrón agents-as-tools). El LLM padre decide en su propio loop cuándo invocarlo, a diferencia del nodo subgraph clásico que se dispara por edges del DAG, o del orchestrator que planifica las tareas por adelantado.",
+      "see_also": "docs/developer_guide/19_nested_agents_and_subgraphs.md — guía de agentes anidados y subgrafos; docs/superpowers/specs/2026-06-18-subgraph-as-tool-design.md — spec de diseño.",
+      "special_behaviors": [
+        "Entrada por defecto: un único parámetro `task` (string) inyectado como `{{task}}` en el global_state del hijo. Para entrada estructurada, declara `node_schema` y cada campo se inyecta como variable del hijo (`{{campo}}`).",
+        "`child_graph_path` o `child_graph_inline` van en `fixed_config` (plumbing estático del subgraph, NO variable del hijo).",
+        "Stateless por llamada: cada invocación arranca con memoria vacía (aislada por un path qualifier efímero derivado del tool_call_id). Dos llamadas a la misma tool no comparten memoria.",
+        "HITL soportado: si el sub-agente se suspende (pregunta al usuario), el SUSPENDED hace bubble-up por el loop de tools del padre y el resume reanuda al hijo en esa misma tool call.",
+        "Streaming transparente: los pasos internos del hijo se emiten al stream del padre con prefijo `subgraph-*`.",
+        "Guard de profundidad: máximo 5 niveles de subgraph-as-tool anidados (MAX_SUBGRAPH_TOOL_DEPTH); más allá retorna error claro para evitar recursión infinita."
+      ],
+      "examples": {
+        "forma_a_reusar_grafo_existente": {
+          "description": "Forma A — reusar un grafo hijo ya construido vía child_graph_path. El LLM ve { task: string }; el hijo recibe {{task}} en su global_shared_state.",
+          "tool_configurations_entry": {
+            "buscar_jurisprudencia": {
+              "name": "buscar_jurisprudencia",
+              "description": "Busca y resume jurisprudencia relevante sobre un tema legal.",
+              "node_type": "subgraph",
+              "fixed_config": {
+                "child_graph_path": "./agents/legal_research_agent.json"
+              }
+            }
+          }
+        },
+        "forma_b_llm_as_tool_inline": {
+          "description": "Forma B — LLM-como-tool inline con web search. Un llm_call de un solo nodo declarado vía child_graph_inline, con su propio tavily_client. Hereda gratis aislamiento, streaming y HITL.",
+          "tool_configurations_entry": {
+            "investigar_web": {
+              "name": "investigar_web",
+              "description": "Investiga un tema en la web y devuelve un resumen citado.",
+              "node_type": "subgraph",
+              "fixed_config": {
+                "child_graph_inline": {
+                  "nodes": {
+                    "agent": {
+                      "type": "llm_call",
+                      "config": {
+                        "provider": "google",
+                        "model": "gemini-2.5-flash",
+                        "api_key": "${GEMINI_API_KEY}",
+                        "system_message": "Investiga el siguiente tema y devuelve un resumen citado: {{task}}",
+                        "tool_configurations": {
+                          "web": {
+                            "name": "web",
+                            "node_type": "tavily_client",
+                            "node_config": { "api_key": "${TAVILY_API_KEY}" },
+                            "expose_sub_tools": "all"
+                          }
+                        }
+                      }
+                    },
+                    "out": { "type": "output" }
+                  },
+                  "edges": [{ "from": "agent", "to": "out" }]
+                }
+              }
+            }
+          }
+        },
+        "entrada_estructurada": {
+          "description": "Entrada estructurada vía node_schema. El hijo recibe {{ciudad}} y {{fecha}}. Las claves internas (__colmena_*, __node_id) se filtran del mapeo IN.",
+          "tool_configurations_entry": {
+            "consultar_clima": {
+              "name": "consultar_clima",
+              "description": "Consulta el clima de una ciudad en una fecha dada.",
+              "node_type": "subgraph",
+              "node_schema": {
+                "ciudad": { "type": "string", "required": true, "description": "Ciudad a consultar" },
+                "fecha":  { "type": "string", "required": true, "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }
+              },
+              "fixed_config": {
+                "child_graph_path": "./agents/weather_agent.json"
+              }
+            }
+          }
+        }
+      },
+      "tips": [
+        "child_graph_path / child_graph_inline van en fixed_config (plumbing estático), nunca en node_schema. Los campos de entrada del LLM van en node_schema (o el default task).",
+        "El path qualifier efímero se deriva determinísticamente del tool_call_id, por eso el resume HITL reconstruye el mismo scope del hijo — nunca uses un path aleatorio.",
+        "La Forma B (child_graph_inline) cubre el caso LLM-como-tool sin necesidad de un node_type llm_call directo: un grafo inline de un solo nodo hereda aislamiento, streaming y HITL."
       ]
     },
 
