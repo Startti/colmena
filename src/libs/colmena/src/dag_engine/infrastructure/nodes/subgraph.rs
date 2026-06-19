@@ -282,4 +282,22 @@ mod subgraph_tool_input_config_tests {
         let config = json!({ "child_graph_inline": { "from": "config" } });
         assert_eq!(resolve_graph_source(&inputs, &config), Some(json!({ "from": "config" })));
     }
+
+    #[test]
+    fn config_path_takes_precedence_over_inputs() {
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert("child_graph_path".to_string(), json!("./from_inputs.json"));
+        let config = json!({ "child_graph_path": "./from_config.json" });
+        assert_eq!(
+            SubGraphNode::resolve_child_graph_source(&inputs, &config),
+            Some(json!("./from_config.json"))
+        );
+    }
+
+    #[test]
+    fn returns_none_when_neither_config_nor_inputs_has_source() {
+        let inputs: NodeInputs = NodeInputs::new();
+        let config = json!({});
+        assert_eq!(SubGraphNode::resolve_child_graph_source(&inputs, &config), None);
+    }
 }
