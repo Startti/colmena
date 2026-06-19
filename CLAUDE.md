@@ -371,3 +371,12 @@ For overrides (custom alias, `expose_sub_tools` filtering, `cache_ttl_seconds`, 
   [`ADP_PRISMA_PENDING_TABLES.md`](ADP_PRISMA_PENDING_TABLES.md) §5.
   Spec en
   [`docs/superpowers/specs/2026-06-09-gdocs-paragraph-diff-design.md`](docs/superpowers/specs/2026-06-09-gdocs-paragraph-diff-design.md).
+- **Tool-result structured digest (v1.1) shipped 2026-06-19** — resultados de
+  tools estructurados (JSON object / array-of-objects / scalar array) ahora se
+  compactan como un digest determinista (esquema + N filas + muestra + min/max)
+  en vez de prosa NL, vía `llm/application/tool_digest.rs`. Sin LLM, sin cache,
+  sin migración, sin cambio de API pública (solo el wire-format del bloque de
+  resumen que ve el modelo) → ADP no afectado. Resultados de tools en NL caen al
+  resumen semántico v1. Recall sigue lossless. Spec:
+  [`docs/superpowers/specs/2026-06-18-conversation-semantic-summary-design.md`](docs/superpowers/specs/2026-06-18-conversation-semantic-summary-design.md);
+  plan: [`docs/superpowers/plans/2026-06-19-tool-result-structured-digest-v1-1.md`](docs/superpowers/plans/2026-06-19-tool-result-structured-digest-v1-1.md).

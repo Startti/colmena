@@ -88,7 +88,7 @@ Al construir la línea de cada mensaje de la zona vieja, según rol:
 | `assistant` (texto NL) | `<250` → verbatim; si no → resumen semántico ~250. |
 | `assistant` con `tool_calls` | **Línea estructural**: `llamó <name>(<args>)`. Nunca al summarizer. Si los `args` son enormes, se citan recuperables por recall (no se resumen en prosa). |
 | `tool` result NL/grande | `<250` → verbatim; si no → resumen semántico ~250. |
-| `tool` result **estructurado** (JSON/filas) | **v1:** resumen NL (con pérdida, recuperable). **v1.1:** digest estructurado. |
+| `tool` result **estructurado** (JSON/filas) | **v1.1 (shipped):** digest determinista (esquema + N filas + muestra + min/max), sin LLM. NL cae a resumen semántico. |
 | `system` | En `keep_first` / merge target; no se resume. |
 
 El **trigger de tamaño** se mide sobre la **forma renderizada** del mensaje (content +
@@ -307,8 +307,12 @@ Dos escenarios distintos:
 
 ## Enhancements futuros (fuera de v1)
 
-- **Digest estructurado de tool-results (v1.1):** para `sql_query`/`http_request` con datos,
-  un digest (esquema + N filas + valores clave) en vez de prosa NL.
+- **Digest estructurado de tool-results (v1.1) — SHIPPED 2026-06-19:** para
+  resultados de tools estructurados (JSON object / array-of-objects / scalar
+  array), `tool_digest::digest_tool_result` produce un digest determinista
+  (esquema + N filas + muestra + min/max) en vez de prosa NL. Sin LLM, sin
+  cache, sin cambio de DB. Resultados NL caen al resumen semántico v1. Ver
+  [`docs/superpowers/plans/2026-06-19-tool-result-structured-digest-v1-1.md`](../plans/2026-06-19-tool-result-structured-digest-v1-1.md).
 - **Parte B — `recall_search(query)`:** búsqueda por keyword sobre el `content` full
   (ILIKE/tsvector en PG, FTS5 en SQLite; **sin embeddings**) para el punto ciego de lo no
   citado. Opcional `recall_range(from,to)`. Disparador: medir con Opción A bien citada.
