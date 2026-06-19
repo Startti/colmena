@@ -1,0 +1,48 @@
+{
+  "comment": "T4 — HITL suspend -> resume. Parent llm_call exposes the suspending reservations child (sub/suspending_agent.json) as the tool `reservar`. When the child suspends to ask the user, SUSPENDED bubbles up through the subgraph tool to the parent llm_call and out to the DAG. Run with a stable --agent-session-id, then resume with --answer in Q[reserva_num_personas]: / A[reserva_num_personas]: format.",
+  "metadata": {
+    "category": "agents",
+    "features": ["subgraph_as_tool", "hitl", "suspend", "llm_call"],
+    "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/subgraph_tool_hitl",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Haz una reserva para cenar mañana."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "stream": false,
+        "system_message": "Eres un coordinador. Para CUALQUIER solicitud de reserva debes SIEMPRE llamar a la tool `reservar`, pasando la petición del usuario en el argumento `task`. NUNCA pidas datos de la reserva tú mismo ni respondas en texto plano: tu único trabajo es delegar en `reservar`. El sub-agente se encargará de pedir las aclaraciones necesarias; cuando devuelva la confirmación, repórtala al usuario.",
+        "tool_configurations": {
+          "reservar": {
+            "name": "reservar",
+            "node_type": "subgraph",
+            "description": "Delega la gestión de una reserva a un sub-agente de reservas que puede pedir aclaraciones al usuario antes de confirmar.",
+            "fixed_config": {
+              "child_graph_path": "./tests/graphs/agents/sub/suspending_agent.json"
+            }
+          }
+        }
+      }
+    },
+    "out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent.result", "to": "out" }
+  ]
+}
