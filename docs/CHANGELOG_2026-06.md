@@ -2735,3 +2735,26 @@ exigen roles alternados, así que normalizar a eso es la forma correcta.
 **Estado.** done.
 
 ---
+
+## 43. Resumen de conversación — instrucción anti-alucinación de recall — 2026-06-20
+
+**Qué cambió.** Se reforzó la instrucción del bloque `## Conversation summary
+(older turns)` que se inyecta en el `system` (en `history_compaction.rs`). Antes
+*invitaba* a recuperar ("usá recall_history(turn=N) para releer el original");
+ahora aclara que cada línea es un **RESUMEN, no el contenido completo** y
+**obliga**: "Para CUALQUIER valor exacto, campo, cita textual o dato que no
+aparezca literalmente en estas líneas, DEBÉS llamar recall_history(turn=N) … nunca
+lo inventes ni lo adivines."
+
+**Por qué.** En E2E cloud (2026-06-20) se observó que, al pedir un campo enterrado
+(p.ej. el `systemPrompt` de un nodo, no mostrado en el digest), el modelo **a veces
+alucinaba** un valor genérico en vez de llamar `recall_history` — aunque con un
+nudge explícito recuperaba el original verbatim. La infraestructura (digest +
+recall) estaba bien; faltaba steering. Este cambio cierra ese gap.
+
+- Solo cambia el wire-format del prompt que ve el modelo — sin API/DB/lógica. ADP no afectado.
+- No toca la pista por-línea del digest (`· recall_history(turn=N) para el detalle`).
+
+**Estado.** done.
+
+---

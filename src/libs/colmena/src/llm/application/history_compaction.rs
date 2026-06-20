@@ -236,8 +236,11 @@ pub async fn build_compacted_messages(
 
     let mut summary = String::from("## Conversation summary (older turns)\n");
     summary.push_str(
-        "Cada línea es un mensaje anterior. El [Tn] es el índice de turno: usá \
-         recall_history(turn=N) para releer el original completo.\n\n",
+        "Cada línea es un RESUMEN de un mensaje anterior, NO el contenido completo. \
+         El [Tn] es el índice de turno. Para CUALQUIER valor exacto, campo, cita \
+         textual o dato que no aparezca literalmente en estas líneas, DEBÉS llamar \
+         recall_history(turn=N) para leer el original — nunca lo inventes ni lo \
+         adivines.\n\n",
     );
     if dropped > 0 {
         summary.push_str(&format!(
