@@ -1163,12 +1163,17 @@ Conservado para referencia histórica:
   `llm.rs` construía **una vez al inicio del llm_call** desde
   `attachment_registry.list_for_session(sid)` (un snapshot). No había re-sync
   cuando un tool registraba un attachment mid-loop.
-- **Bonus finding (solo CLI) — AÚN ABIERTO:** el `dag_engine run` local NO cablea el
-  `attachment_registry` en absoluto → ningún tool `fetch_attachment_bytes`
-  resuelve attachments localmente (ni snapshot ni live fallback). Por eso el E2E
-  agente-completo de estos tools debe correr contra el worker desplegado. El wiring
-  del registry en el CLI (`dag_engine/infrastructure/cli/run_command.rs` o equivalente)
-  es un ítem separado y queda pendiente.
+- **Corrección (2026-06-20):** el diagnóstico inicial de que "el CLI local no
+  cablea el registry" era **incorrecto**. El LLM node CONSTRUYE el
+  `attachment_registry` cuando hay `DATABASE_URL` + `--agent-session-id`
+  (`llm.rs` ~línea 1221, Postgres; o SQLite por config). El error original
+  "no attachment_catalog wired" venía de que `fetch_attachment_bytes` solo
+  miraba el snapshot (no el registry) — exactamente lo que arregló este fix.
+  **Verificado LIVE LOCAL (2026-06-20):** el grafo
+  `gdocs_insert_image_from_attachment_e2e.json` (generate_image → gdocs_insert
+  attachment_id, mismo turno) corre **en colmena local** con `DATABASE_URL` +
+  `--agent-session-id` y la imagen generada se resuelve vía el fallback vivo
+  (snapshot miss → registry hit) e inserta OK. No requiere worker.
 
 ---
 

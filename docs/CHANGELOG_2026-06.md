@@ -2822,6 +2822,17 @@ Verificado live: `tests/gdocs_integration_test.rs::image_upload_public_insert_de
 
 **Additive.** `with_attachment_registry` tiene `None` como default. Ninguna ruta existente cambia; ADP no se ve afectado.
 
-**Estado.** done.
+**Verificado LIVE LOCAL (2026-06-20).** El grafo
+`tests/graphs/agents/gdocs_insert_image_from_attachment_e2e.json` corrió en
+colmena local (con `DATABASE_URL` + `--agent-session-id`): el agente generó una
+imagen con `image_generation` (`document_id: img_image_0_*`), la pasó como
+`attachment_id` a `gdocs_insert_image_after_text`, y se resolvió **en el mismo
+turno** vía el fallback vivo (snapshot miss → registry hit) → upload a Drive →
+`insertInlineImage(lh3)` → cleanup. Change record
+`{kind:insert, after:"[image] https://lh3.googleusercontent.com/d/…"}` +
+`revision_id_after` fresco, sin errores. (El registry local se construye en
+`llm.rs` desde `DATABASE_URL`; no requiere el worker desplegado.)
+
+**Estado.** done — verificado live local.
 
 ---
