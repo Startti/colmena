@@ -36,6 +36,7 @@ pub struct StaleAttachmentQuery {
     pub limit: u32,
 }
 
+#[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait AttachmentRegistry: Send + Sync {
     /// Insert or update a registry entry. Idempotent on

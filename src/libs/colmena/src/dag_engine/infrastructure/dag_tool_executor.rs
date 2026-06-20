@@ -113,6 +113,12 @@ pub struct DagToolExecutor {
     /// "not wired" error when this is `None` (e.g. invoked from a graph that
     /// did not configure the storage adapter).
     attachment_storage: Option<Arc<dyn crate::storage::domain::OutputStorageRepository>>,
+    /// Plan A live fallback: when a `document_id` is not in the start-of-turn
+    /// `attachment_catalog` snapshot (e.g. an image generated mid-loop), resolve
+    /// it live via the registry — the same source `http_request`'s
+    /// AttachmentStreamResolver uses. `None` → snapshot-only (legacy).
+    attachment_registry:
+        Option<std::sync::Arc<dyn crate::llm::domain::attachments::AttachmentRegistry>>,
     /// F-T15: per-call wiring for the `recall_history` synthetic tool.
     /// When both fields are populated, the executor intercepts `recall_history`
     /// tool calls and reads the persisted conversation directly. When either is
@@ -227,6 +233,7 @@ impl DagToolExecutor {
             describe_tool_observer: None,
             attachment_catalog: None,
             attachment_storage: None,
+            attachment_registry: None,
             conversation_repository: None,
             conversation_key: None,
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_STRING_BYTES,
@@ -448,6 +455,16 @@ impl DagToolExecutor {
         self
     }
 
+    /// Wire the live attachment registry used as a fallback when a
+    /// `document_id` is absent from the snapshot catalog (mid-turn outputs).
+    pub fn with_attachment_registry(
+        mut self,
+        registry: std::sync::Arc<dyn crate::llm::domain::attachments::AttachmentRegistry>,
+    ) -> Self {
+        self.attachment_registry = Some(registry);
+        self
+    }
+
     /// Fetch the raw bytes of a registered attachment by `document_id`.
     ///
     /// Resolution order:
@@ -476,7 +493,7 @@ impl DagToolExecutor {
              constructing the LLM node."
                 .to_string()
         })?;
-        let storage_key = self.lookup_storage_key(document_id)?;
+        let storage_key = self.lookup_storage_key(document_id).await?;
         storage
             .read(&storage_key)
             .await
@@ -494,7 +511,7 @@ impl DagToolExecutor {
         let storage = self.attachment_storage.as_ref().ok_or_else(|| {
             "attachment_storage not wired (see fetch_attachment_bytes docs).".to_string()
         })?;
-        let storage_key = self.lookup_storage_key(document_id)?;
+        let storage_key = self.lookup_storage_key(document_id).await?;
         storage
             .read_stream(&storage_key)
             .await
@@ -552,32 +569,85 @@ impl DagToolExecutor {
         Some((entry.mime_type.clone(), entry.filename.clone()))
     }
 
-    /// Internal: catalog lookup for `document_id` → `storage_key`.
-    fn lookup_storage_key(&self, document_id: &str) -> Result<String, String> {
-        let catalog = self.attachment_catalog.as_ref().ok_or_else(|| {
-            format!(
-                "attachment '{document_id}' lookup failed: no attachment_catalog wired \
-                 (this run does not have any attachments registered)."
-            )
-        })?;
-        let entry = catalog
-            .iter()
-            .find(|a| a.document_id == document_id)
-            .ok_or_else(|| {
-                format!(
-                    "attachment '{document_id}' not found in catalog \
-                     (catalog size: {}). Verify the LLM passed a document_id \
-                     that came from the catalog block.",
-                    catalog.len()
-                )
-            })?;
-        entry.storage_key.clone().ok_or_else(|| {
-            format!(
-                "attachment '{document_id}' has no storage_key — it likely \
-                 originated from a pre-Plan-A path that did not persist bytes. \
-                 Tell the operator to re-upload."
-            )
-        })
+    /// Internal: resolve `document_id` → `storage_key`.
+    ///
+    /// Resolution order:
+    /// 1. Fast path: start-of-turn snapshot (no DB hit). On a catalog hit,
+    ///    returns immediately (storage_key present → `Ok`; absent → `Err`).
+    /// 2. Live fallback: query the registry (catches mid-turn outputs such as
+    ///    images produced by `image_generation` in the same tool loop). Only
+    ///    attempted when `attachment_registry` and `agent_session_id` are wired.
+    /// 3. Nothing wired → structured error.
+    ///
+    /// Snapshot miss with no registry wired falls back to the catalog-size
+    /// error (preserving the pre-live-fallback message for backward
+    /// compatibility with existing callers that don't wire a registry).
+    async fn lookup_storage_key(&self, document_id: &str) -> Result<String, String> {
+        // 1. Fast path: start-of-turn snapshot (no DB hit).
+        if let Some(catalog) = self.attachment_catalog.as_ref() {
+            if let Some(entry) = catalog.iter().find(|a| a.document_id == document_id) {
+                return entry.storage_key.clone().ok_or_else(|| {
+                    format!(
+                        "attachment '{document_id}' has no storage_key — it likely \
+                         originated from a pre-Plan-A path that did not persist bytes. \
+                         Tell the operator to re-upload."
+                    )
+                });
+            }
+            // Catalog present but doc not found → try live registry before giving up.
+            if let (Some(reg), Some(sid)) =
+                (self.attachment_registry.as_ref(), self.agent_session_id.as_ref())
+            {
+                match reg.lookup_by_document_id(sid, document_id).await {
+                    Ok(Some(row)) => {
+                        let key = row.storage_key.clone().ok_or_else(|| {
+                            format!(
+                                "attachment '{document_id}' found in registry but has no storage_key"
+                            )
+                        })?;
+                        let _ = reg.touch_last_used(sid, document_id).await;
+                        return Ok(key);
+                    }
+                    Ok(None) => {}
+                    Err(e) => return Err(format!("attachment registry lookup failed: {e}")),
+                }
+            }
+            // Neither snapshot nor live registry had the document.
+            return Err(format!(
+                "attachment '{document_id}' not found in catalog \
+                 (catalog size: {}). Verify the LLM passed a document_id \
+                 that came from the catalog block.",
+                catalog.len()
+            ));
+        }
+        // 2. No snapshot at all — try live registry (catches mid-turn outputs).
+        if let (Some(reg), Some(sid)) =
+            (self.attachment_registry.as_ref(), self.agent_session_id.as_ref())
+        {
+            match reg.lookup_by_document_id(sid, document_id).await {
+                Ok(Some(row)) => {
+                    let key = row.storage_key.clone().ok_or_else(|| {
+                        format!(
+                            "attachment '{document_id}' found in registry but has no storage_key"
+                        )
+                    })?;
+                    let _ = reg.touch_last_used(sid, document_id).await;
+                    return Ok(key);
+                }
+                Ok(None) => {
+                    return Err(format!(
+                        "attachment '{document_id}' not found in the snapshot catalog \
+                         nor the live registry for session '{sid}'."
+                    ));
+                }
+                Err(e) => return Err(format!("attachment registry lookup failed: {e}")),
+            }
+        }
+        // 3. Nothing wired.
+        Err(format!(
+            "attachment '{document_id}' lookup failed: no attachment_catalog wired \
+             and no live registry available."
+        ))
     }
 
     /// Recursively scan fixed_config for all "$DYNAMIC" placeholders.
@@ -3763,6 +3833,56 @@ mod attachment_plumbing_tests {
             .await
             .unwrap();
         assert_eq!(new_id, "sk_new_001");
+    }
+
+    #[tokio::test]
+    async fn fetch_attachment_bytes_falls_back_to_live_registry_on_snapshot_miss() {
+        use crate::llm::domain::attachments::attachment_registry::MockAttachmentRegistry;
+        use crate::llm::domain::attachments::AttachmentSource;
+        // Registry returns a row for a doc id that is NOT in the (empty) snapshot.
+        let mut reg = MockAttachmentRegistry::new();
+        reg.expect_lookup_by_document_id()
+            .returning(|_, doc| {
+                Ok(Some(ConversationAttachment {
+                    agent_session_id: "sess-1".to_string(),
+                    document_id: doc.to_string(),
+                    provider: ProviderKind::OpenAi,
+                    provider_file_id: "pf".to_string(),
+                    mime_type: "image/png".to_string(),
+                    filename: "generated.png".to_string(),
+                    size_bytes: Some(512),
+                    label: None,
+                    description: None,
+                    source: AttachmentSource::Inline,
+                    registered_at: chrono::Utc::now(),
+                    refreshed_at: chrono::Utc::now(),
+                    storage_key: Some("sk-live".to_string()),
+                    origin: None,
+                    last_used_at: None,
+                }))
+            });
+        reg.expect_touch_last_used().returning(|_, _| Ok(()));
+        let mut mock_storage = MockOutputStorageRepository::new();
+        mock_storage
+            .expect_read()
+            .withf(|key| key == "sk-live")
+            .returning(|_| {
+                Ok(StoredBytes {
+                    bytes: b"PNG".to_vec(),
+                    mime_type: "image/png".to_string(),
+                    filename: "generated.png".to_string(),
+                })
+            });
+        let executor = DagToolExecutor::new(Arc::new(DummyRegistry), Default::default())
+            .with_agent_session_id(Some("sess-1".to_string()))
+            .with_attachment_storage(Arc::new(mock_storage))
+            .with_attachment_registry(std::sync::Arc::new(reg));
+        // NO with_attachments(...) — snapshot is None, forcing the live path.
+        let bytes = executor
+            .fetch_attachment_bytes("img_generated_mid_turn")
+            .await
+            .unwrap();
+        assert_eq!(bytes.bytes, b"PNG");
     }
 }
 
