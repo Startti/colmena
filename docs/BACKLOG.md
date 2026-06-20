@@ -1471,3 +1471,26 @@ turno corre 20+ queries grandes). Hasta entonces v1 alcanza para el caso común
 - Plan v1.1: [`docs/superpowers/plans/2026-06-19-tool-result-structured-digest-v1-1.md`](superpowers/plans/2026-06-19-tool-result-structured-digest-v1-1.md).
 - Módulo: [`src/libs/colmena/src/llm/application/tool_digest.rs`](src/libs/colmena/src/llm/application/tool_digest.rs) (v1.2) y [`history_compaction.rs`](src/libs/colmena/src/llm/application/history_compaction.rs) (v2).
 - CHANGELOG §40 (v1.1 shipped).
+
+### `recall_history` — evento SSE dedicado para UI — *prioridad baja*
+
+**Qué.** Hoy `recall_history` (la tool con la que el agente recupera el contenido
+verbatim de un mensaje viejo) viaja en el SSE como una tool call **genérica**:
+`llm_tool_call_start` / `llm_tool_call_finish` con `tool_name: "recall_history"`.
+Funciona perfecto en el wire, pero el frontend no tiene cómo distinguirla para
+pintar una UI específica (tipo badge "recuperando contexto/historial").
+
+**Antecedente.** Las tools especiales `load_skill` y `describe_tool` SÍ emiten un
+evento EXTRA dedicado (`skill_loaded` / `tool_described` en
+[`events.rs`](../src/libs/colmena/src/dag_engine/domain/events.rs)) que se dispara
+*junto* al `llm_tool_call_start/finish` para que el frontend les dé UI propia.
+v1.2 propone replicar ese patrón para `recall_history` (p.ej. un evento
+`history_recalled` con `turn`, `total_chars`, `next_offset`).
+
+**Esfuerzo.** Chico: un variant nuevo en `DagExecutionEvent` + emitirlo en el
+dispatch de `recall_history`, y que el frontend lo renderice. Aditivo (el
+`llm_tool_call_*` genérico sigue saliendo) → no rompe nada.
+
+**Cuándo retomar.** Cuando product/diseño quiera mostrar visualmente al usuario
+que el agente recuperó memoria. Mientras tanto, en el SSE ya es visible como tool
+genérica. Sin trigger urgente.
