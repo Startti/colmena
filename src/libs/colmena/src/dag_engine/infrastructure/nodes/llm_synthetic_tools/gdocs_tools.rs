@@ -392,15 +392,13 @@ pub(crate) enum ImageSource {
 }
 
 /// Resolve the XOR of `image_url` / `attachment_id`. Exactly one is required.
-pub(crate) fn insert_image_source(
-    args: &InsertImageAfterTextArgs,
-) -> Result<ImageSource, String> {
+pub(crate) fn insert_image_source(args: &InsertImageAfterTextArgs) -> Result<ImageSource, String> {
     match (&args.image_url, &args.attachment_id) {
         (Some(u), None) => Ok(ImageSource::Url(u.clone())),
         (None, Some(a)) => Ok(ImageSource::Attachment(a.clone())),
-        (Some(_), Some(_)) => Err(
-            "provide exactly one of image_url or attachment_id, not both".into(),
-        ),
+        (Some(_), Some(_)) => {
+            Err("provide exactly one of image_url or attachment_id, not both".into())
+        }
         (None, None) => Err("provide one of image_url or attachment_id".into()),
     }
 }

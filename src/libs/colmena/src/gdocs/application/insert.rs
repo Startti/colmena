@@ -183,7 +183,10 @@ pub async fn run_insert_image_from_bytes(
         ))
     })?;
     let filename = format!("colmena-tmp-img-{}.{ext}", short_token());
-    let file_id = ctx.client.upload_image_to_drive(bytes, mime, &filename).await?;
+    let file_id = ctx
+        .client
+        .upload_image_to_drive(bytes, mime, &filename)
+        .await?;
 
     // From here on, clean up the uploaded file if anything fails.
     if let Err(e) = ctx.client.set_anyone_reader(&file_id).await {
@@ -881,28 +884,49 @@ mod app_tests {
     #[tokio::test]
     async fn insert_image_from_bytes_uploads_makes_public_inserts_then_deletes() {
         let mut rig = TestRig::new();
-        let s = snap("r1", vec![(1, ParagraphKind::Paragraph, "intro anchor texto", 1, 20)]);
-        let s2 = snap("r2", vec![(1, ParagraphKind::Paragraph, "intro anchor texto", 1, 20)]);
-        rig.client.expect_upload_image_to_drive()
+        let s = snap(
+            "r1",
+            vec![(1, ParagraphKind::Paragraph, "intro anchor texto", 1, 20)],
+        );
+        let s2 = snap(
+            "r2",
+            vec![(1, ParagraphKind::Paragraph, "intro anchor texto", 1, 20)],
+        );
+        rig.client
+            .expect_upload_image_to_drive()
             .returning(|_, _, _| Ok("FID9".to_string()));
-        rig.client.expect_set_anyone_reader()
-            .withf(|f| f == "FID9").returning(|_| Ok(()));
+        rig.client
+            .expect_set_anyone_reader()
+            .withf(|f| f == "FID9")
+            .returning(|_| Ok(()));
         expect_get_sequence(&mut rig.client, vec![s, s2]);
         make_batch_update_ok(&mut rig.client, "r2");
-        rig.client.expect_delete_drive_file()
-            .withf(|f| f == "FID9").returning(|_| Ok(()));
+        rig.client
+            .expect_delete_drive_file()
+            .withf(|f| f == "FID9")
+            .returning(|_| Ok(()));
         let ctx = GuardContext {
-            client: &rig.client, cache: &rig.cache, revisions: &rig.revisions,
-            session_id: "s1", sa_email: None,
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
         };
         let (result, warnings) = super::run_insert_image_from_bytes(
-            &ctx, &doc_id(),
+            &ctx,
+            &doc_id(),
             InsertImageAfterTextInput {
-                anchor: "anchor".into(), image_url: String::new(),
-                occurrence: None, width_pt: None, height_pt: None,
+                anchor: "anchor".into(),
+                image_url: String::new(),
+                occurrence: None,
+                width_pt: None,
+                height_pt: None,
             },
-            vec![1, 2, 3], "image/png",
-        ).await.unwrap();
+            vec![1, 2, 3],
+            "image/png",
+        )
+        .await
+        .unwrap();
         assert_eq!(result.changes.len(), 1);
         assert!(warnings.is_empty());
     }
@@ -910,37 +934,88 @@ mod app_tests {
     #[tokio::test]
     async fn insert_image_from_bytes_deletes_temp_file_when_insert_fails() {
         let mut rig = TestRig::new();
-        let s = snap("r1", vec![(1, ParagraphKind::Paragraph, "no match here", 1, 14)]);
-        rig.client.expect_upload_image_to_drive().returning(|_, _, _| Ok("FIDx".into()));
+        let s = snap(
+            "r1",
+            vec![(1, ParagraphKind::Paragraph, "no match here", 1, 14)],
+        );
+        rig.client
+            .expect_upload_image_to_drive()
+            .returning(|_, _, _| Ok("FIDx".into()));
         rig.client.expect_set_anyone_reader().returning(|_| Ok(()));
         expect_get_sequence(&mut rig.client, vec![s]); // anchor not found -> insert errors
-        // MUST clean up the uploaded file:
-        rig.client.expect_delete_drive_file().withf(|f| f == "FIDx").times(1).returning(|_| Ok(()));
-        let ctx = GuardContext { client: &rig.client, cache: &rig.cache, revisions: &rig.revisions, session_id: "s1", sa_email: None };
+                                                       // MUST clean up the uploaded file:
+        rig.client
+            .expect_delete_drive_file()
+            .withf(|f| f == "FIDx")
+            .times(1)
+            .returning(|_| Ok(()));
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
         let err = super::run_insert_image_from_bytes(
-            &ctx, &doc_id(),
-            InsertImageAfterTextInput { anchor: "anchor".into(), image_url: String::new(), occurrence: None, width_pt: None, height_pt: None },
-            vec![1], "image/png",
-        ).await.unwrap_err();
+            &ctx,
+            &doc_id(),
+            InsertImageAfterTextInput {
+                anchor: "anchor".into(),
+                image_url: String::new(),
+                occurrence: None,
+                width_pt: None,
+                height_pt: None,
+            },
+            vec![1],
+            "image/png",
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, DocsError::TextNotFound { .. }));
     }
 
     #[tokio::test]
     async fn insert_image_from_bytes_soft_warns_when_cleanup_fails() {
         let mut rig = TestRig::new();
-        let s = snap("r1", vec![(1, ParagraphKind::Paragraph, "intro anchor texto", 1, 20)]);
-        let s2 = snap("r2", vec![(1, ParagraphKind::Paragraph, "intro anchor texto", 1, 20)]);
-        rig.client.expect_upload_image_to_drive().returning(|_, _, _| Ok("FIDz".into()));
+        let s = snap(
+            "r1",
+            vec![(1, ParagraphKind::Paragraph, "intro anchor texto", 1, 20)],
+        );
+        let s2 = snap(
+            "r2",
+            vec![(1, ParagraphKind::Paragraph, "intro anchor texto", 1, 20)],
+        );
+        rig.client
+            .expect_upload_image_to_drive()
+            .returning(|_, _, _| Ok("FIDz".into()));
         rig.client.expect_set_anyone_reader().returning(|_| Ok(()));
         expect_get_sequence(&mut rig.client, vec![s, s2]);
         make_batch_update_ok(&mut rig.client, "r2");
-        rig.client.expect_delete_drive_file().returning(|_| Err(DocsError::Http("boom".into())));
-        let ctx = GuardContext { client: &rig.client, cache: &rig.cache, revisions: &rig.revisions, session_id: "s1", sa_email: None };
+        rig.client
+            .expect_delete_drive_file()
+            .returning(|_| Err(DocsError::Http("boom".into())));
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
         let (result, warnings) = super::run_insert_image_from_bytes(
-            &ctx, &doc_id(),
-            InsertImageAfterTextInput { anchor: "anchor".into(), image_url: String::new(), occurrence: None, width_pt: None, height_pt: None },
-            vec![1], "image/png",
-        ).await.unwrap();
+            &ctx,
+            &doc_id(),
+            InsertImageAfterTextInput {
+                anchor: "anchor".into(),
+                image_url: String::new(),
+                occurrence: None,
+                width_pt: None,
+                height_pt: None,
+            },
+            vec![1],
+            "image/png",
+        )
+        .await
+        .unwrap();
         assert_eq!(result.changes.len(), 1);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("FIDz"));

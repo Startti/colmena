@@ -1356,10 +1356,16 @@ impl DocsClient for GoogleDocsHttpClient {
             .send_with_retry(|c, t| {
                 c.request(
                     Method::POST,
-                    format!("{}/files?uploadType=multipart&fields=id", self.base_drive_upld),
+                    format!(
+                        "{}/files?uploadType=multipart&fields=id",
+                        self.base_drive_upld
+                    ),
                 )
                 .bearer_auth(t)
-                .header("Content-Type", format!("multipart/related; boundary={boundary}"))
+                .header(
+                    "Content-Type",
+                    format!("multipart/related; boundary={boundary}"),
+                )
                 .body(body.clone())
             })
             .await?;
@@ -1785,10 +1791,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(wiremock::matchers::path_regex(r"/upload/files$"))
             .and(wiremock::matchers::query_param("uploadType", "multipart"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({"id": "drvFID123"})),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "drvFID123"})))
             .mount(&server)
             .await;
         let client = client_for(&server);
@@ -1804,10 +1807,10 @@ mod tests {
     async fn set_anyone_reader_posts_permission() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(wiremock::matchers::path_regex(r"/drive/files/drvFID/permissions$"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({"id": "p1"})),
-            )
+            .and(wiremock::matchers::path_regex(
+                r"/drive/files/drvFID/permissions$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "p1"})))
             .mount(&server)
             .await;
         let client = client_for(&server);

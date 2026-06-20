@@ -354,7 +354,9 @@ async fn image_upload_public_insert_delete_roundtrip() {
     let doc_id = match std::env::var("COLMENA_GDOCS_TEST_DOC_ID") {
         Ok(d) if !d.is_empty() => d,
         _ => {
-            eprintln!("SKIP: set COLMENA_GDOCS_TEST_DOC_ID to a doc shared (Editor) with the agent");
+            eprintln!(
+                "SKIP: set COLMENA_GDOCS_TEST_DOC_ID to a doc shared (Editor) with the agent"
+            );
             return;
         }
     };
